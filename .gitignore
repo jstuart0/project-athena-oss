@@ -50,11 +50,15 @@ Thumbs.db
 *.log
 logs/
 
-# Environment variables (but allow .env.template)
+# Environment variables (but allow examples/templates)
 .env
 .env.local
+.env.secrets
+config.env
 config/env/.env
 !config/env/.env.template
+!.env.secrets.example
+!config.env.example
 
 # Models (large files - store on remote)
 *.pth

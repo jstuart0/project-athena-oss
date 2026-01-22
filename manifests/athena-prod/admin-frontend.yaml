@@ -1,0 +1,55 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: athena-admin-frontend
+  namespace: athena-prod
+  labels:
+    app: athena-admin-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: athena-admin-frontend
+  template:
+    metadata:
+      labels:
+        app: athena-admin-frontend
+    spec:
+      containers:
+      - name: admin-frontend
+        image: YOUR_REGISTRY/athena-admin-frontend:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: athena-admin-frontend
+  namespace: athena-prod
+spec:
+  selector:
+    app: athena-admin-frontend
+  ports:
+  - port: 80
+    targetPort: 80

@@ -1,0 +1,183 @@
+# =============================================================================
+# Cloudflare Tunnels for External Access (OPTIONAL)
+# =============================================================================
+#
+# Deploy this only if you need external access via Cloudflare.
+#
+# Prerequisites:
+#   1. Cloudflare account with domain configured
+#   2. cloudflared CLI installed locally
+#   3. Tunnels created and credentials obtained
+#
+# Setup Steps:
+#   1. Create tunnels:
+#      cloudflared tunnel create athena-prod
+#      cloudflared tunnel create chat-prod
+#
+#   2. Create secrets with credentials:
+#      kubectl -n cloudflare create secret generic athena-tunnel-credentials \
+#        --from-file=credentials.json=$HOME/.cloudflared/<tunnel-id>.json
+#      kubectl -n cloudflare create secret generic chat-tunnel-credentials \
+#        --from-file=credentials.json=$HOME/.cloudflared/<tunnel-id>.json
+#
+#   3. Update TUNNEL_ID values below with your tunnel IDs
+#
+#   4. Create DNS routes:
+#      cloudflared tunnel route dns athena-prod athena.yourdomain.com
+#      cloudflared tunnel route dns chat-prod chat.yourdomain.com
+#
+#   5. Apply this manifest:
+#      kubectl apply -f manifests/athena-prod/optional/cloudflare-tunnels.yaml
+#
+# =============================================================================
+
+---
+# Athena Admin Portal Tunnel
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: athena-tunnel-config
+  namespace: cloudflare
+data:
+  config.yaml: |
+    # UPDATE: Replace with your tunnel ID
+    tunnel: ATHENA_TUNNEL_ID
+    credentials-file: /etc/cloudflared/creds/credentials.json
+    metrics: 0.0.0.0:2000
+    no-autoupdate: true
+
+    ingress:
+      - hostname: athena.xmojo.net  # UPDATE: Your domain
+        service: https://traefik.traefik.svc.cluster.local:443
+        originRequest:
+          noTLSVerify: true
+      - service: http_status:404
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: athena-tunnel
+  namespace: cloudflare
+  labels:
+    app: athena-tunnel
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: athena-tunnel
+  template:
+    metadata:
+      labels:
+        app: athena-tunnel
+    spec:
+      containers:
+      - name: cloudflared
+        image: cloudflare/cloudflared:latest
+        args:
+          - tunnel
+          - --config
+          - /etc/cloudflared/config/config.yaml
+          - run
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: 2000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/cloudflared/config
+          readOnly: true
+        - name: creds
+          mountPath: /etc/cloudflared/creds
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: athena-tunnel-config
+      - name: creds
+        secret:
+          secretName: athena-tunnel-credentials
+---
+# Chat/Jarvis Web Tunnel
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chat-tunnel-config
+  namespace: cloudflare
+data:
+  config.yaml: |
+    # UPDATE: Replace with your tunnel ID
+    tunnel: CHAT_TUNNEL_ID
+    credentials-file: /etc/cloudflared/creds/credentials.json
+    metrics: 0.0.0.0:2000
+    no-autoupdate: true
+
+    ingress:
+      - hostname: chat.xmojo.net  # UPDATE: Your domain
+        service: https://traefik.traefik.svc.cluster.local:443
+        originRequest:
+          noTLSVerify: true
+      - service: http_status:404
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat-tunnel
+  namespace: cloudflare
+  labels:
+    app: chat-tunnel
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: chat-tunnel
+  template:
+    metadata:
+      labels:
+        app: chat-tunnel
+    spec:
+      containers:
+      - name: cloudflared
+        image: cloudflare/cloudflared:latest
+        args:
+          - tunnel
+          - --config
+          - /etc/cloudflared/config/config.yaml
+          - run
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: 2000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/cloudflared/config
+          readOnly: true
+        - name: creds
+          mountPath: /etc/cloudflared/creds
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: chat-tunnel-config
+      - name: creds
+        secret:
+          secretName: chat-tunnel-credentials

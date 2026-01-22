@@ -1,0 +1,150 @@
+# =============================================================================
+# Traefik IngressRoutes for Project Athena
+# =============================================================================
+#
+# This provides internal network access via Traefik ingress controller.
+# Works for:
+#   - Local development (access via LoadBalancer IP or port-forward)
+#   - Internal network access (LAN)
+#   - Behind Cloudflare tunnels (if configured)
+#
+# Configuration:
+#   - Update hostnames to match your domain (search/replace athena.local)
+#   - Update TLS secret name if using different certificate
+#   - For local-only access, add domains to /etc/hosts:
+#       127.0.0.1 athena.local chat.local
+#
+# Access Modes:
+#   1. Local only: kubectl port-forward svc/athena-admin-frontend 8080:80
+#   2. Internal: http://<traefik-lb-ip>/ with Host header
+#   3. External: Configure Cloudflare tunnels (see optional/cloudflare-tunnels.yaml)
+#
+# TLS Configuration:
+#   - For local dev, you can remove the tls: block to use HTTP only
+#   - For production, create a TLS secret or use cert-manager
+#
+# =============================================================================
+
+---
+# StripPrefix middleware for /api routes
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-api-prefix
+  namespace: athena-prod
+spec:
+  stripPrefix:
+    prefixes:
+      - /api
+---
+# Athena Admin Portal (athena.local)
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: athena-https
+  namespace: athena-prod
+  labels:
+    app.kubernetes.io/part-of: project-athena
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # API routes -> Backend (strip /api prefix)
+    - match: Host(`athena.local`) && PathPrefix(`/api`)
+      kind: Rule
+      middlewares:
+        - name: strip-api-prefix
+      services:
+        - name: athena-admin-backend
+          port: 8080
+    # WebSocket routes -> Backend
+    - match: Host(`athena.local`) && PathPrefix(`/ws`)
+      kind: Rule
+      services:
+        - name: athena-admin-backend
+          port: 8080
+    # Auth callback -> Backend
+    - match: Host(`athena.local`) && PathPrefix(`/auth`)
+      kind: Rule
+      services:
+        - name: athena-admin-backend
+          port: 8080
+    # Everything else -> Frontend
+    - match: Host(`athena.local`)
+      kind: Rule
+      services:
+        - name: athena-admin-frontend
+          port: 80
+  tls:
+    secretName: athena-tls
+---
+# HTTP -> HTTPS redirect for Athena
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: athena-http
+  namespace: athena-prod
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`athena.local`)
+      kind: Rule
+      middlewares:
+        - name: https-redirect
+          namespace: default
+      services:
+        - name: athena-admin-frontend
+          port: 80
+---
+# Jarvis Web / Chat Interface (chat.local)
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: chat-https
+  namespace: athena-prod
+  labels:
+    app.kubernetes.io/part-of: project-athena
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # API routes -> Jarvis Web backend
+    - match: Host(`chat.local`) && PathPrefix(`/api`)
+      kind: Rule
+      services:
+        - name: athena-jarvis-web
+          port: 80
+    # WebSocket for real-time voice
+    - match: Host(`chat.local`) && PathPrefix(`/ws`)
+      kind: Rule
+      services:
+        - name: athena-jarvis-web
+          port: 80
+    # Everything else -> Jarvis Web
+    - match: Host(`chat.local`)
+      kind: Rule
+      services:
+        - name: athena-jarvis-web
+          port: 80
+  tls:
+    secretName: athena-tls
+---
+# HTTP -> HTTPS redirect for Chat
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: chat-http
+  namespace: athena-prod
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`chat.local`)
+      kind: Rule
+      middlewares:
+        - name: https-redirect
+          namespace: default
+      services:
+        - name: athena-jarvis-web
+          port: 80

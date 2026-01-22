@@ -1,0 +1,133 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: athena-orchestrator
+  namespace: athena-prod
+  labels:
+    app: athena-orchestrator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: athena-orchestrator
+  template:
+    metadata:
+      labels:
+        app: athena-orchestrator
+    spec:
+      containers:
+      - name: orchestrator
+        image: YOUR_REGISTRY/athena-orchestrator:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8001
+        envFrom:
+        - configMapRef:
+            name: athena-config
+        env:
+        - name: PORT
+          value: "8001"
+        # Override Kubernetes auto-injected REDIS_* vars
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_ENABLED
+          value: "true"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: athena-db-credentials
+              key: DATABASE_URL
+        - name: HA_URL
+          valueFrom:
+            secretKeyRef:
+              name: ha-credentials
+              key: url
+        - name: HA_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ha-credentials
+              key: token
+        # RAG Service URLs
+        - name: RAG_WEATHER_URL
+          value: "http://athena-rag-weather:8010"
+        - name: RAG_AIRPORTS_URL
+          value: "http://athena-rag-airports:8011"
+        - name: RAG_STOCKS_URL
+          value: "http://athena-rag-stocks:8012"
+        - name: RAG_FLIGHTS_URL
+          value: "http://athena-rag-flights:8013"
+        - name: RAG_EVENTS_URL
+          value: "http://athena-rag-events:8014"
+        - name: RAG_STREAMING_URL
+          value: "http://athena-rag-streaming:8015"
+        - name: RAG_NEWS_URL
+          value: "http://athena-rag-news:8016"
+        - name: RAG_SPORTS_URL
+          value: "http://athena-rag-sports:8017"
+        - name: RAG_WEBSEARCH_URL
+          value: "http://athena-rag-websearch:8018"
+        - name: RAG_DINING_URL
+          value: "http://athena-rag-dining:8019"
+        - name: RAG_RECIPES_URL
+          value: "http://athena-rag-recipes:8020"
+        - name: RAG_ONECALL_URL
+          value: "http://athena-rag-onecall:8021"
+        - name: RAG_SEATGEEK_URL
+          value: "http://athena-rag-seatgeek:8024"
+        - name: RAG_TRANSPORTATION_URL
+          value: "http://athena-rag-transportation:8025"
+        - name: RAG_COMMUNITY_URL
+          value: "http://athena-rag-community:8026"
+        - name: RAG_AMTRAK_URL
+          value: "http://athena-rag-amtrak:8027"
+        - name: RAG_TESLA_URL
+          value: "http://athena-rag-tesla:8028"
+        - name: RAG_MEDIA_URL
+          value: "http://athena-rag-media:8029"
+        - name: RAG_DIRECTIONS_URL
+          value: "http://athena-rag-directions:8030"
+        - name: RAG_SITESCRAPER_URL
+          value: "http://athena-rag-sitescraper:8031"
+        - name: RAG_SERPAPI_URL
+          value: "http://athena-rag-serpapi:8032"
+        - name: RAG_PRICECOMPARE_URL
+          value: "http://athena-rag-pricecompare:8033"
+        - name: RAG_BRIGHTDATA_URL
+          value: "http://athena-rag-brightdata:8040"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 30
+          failureThreshold: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: athena-orchestrator
+  namespace: athena-prod
+spec:
+  selector:
+    app: athena-orchestrator
+  ports:
+  - port: 8001
+    targetPort: 8001

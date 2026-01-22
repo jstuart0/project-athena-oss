@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: athena-prod
+  labels:
+    name: athena-prod
+    app.kubernetes.io/part-of: project-athena

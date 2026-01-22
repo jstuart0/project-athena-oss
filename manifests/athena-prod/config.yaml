@@ -1,0 +1,56 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: athena-config
+  namespace: athena-prod
+data:
+  # ==========================================================================
+  # LLM Backend Configuration
+  # ==========================================================================
+  # Choose one of the following options:
+  #
+  # Option 1: In-cluster Ollama (default, for testing)
+  #   OLLAMA_URL: "http://ollama:11434"
+  #
+  # Option 2: External Ollama server
+  #   OLLAMA_URL: "http://<server-ip>:11434"
+  #
+  # Option 3: MLX-LM on Apple Silicon (OpenAI-compatible)
+  #   OLLAMA_URL: "http://<mac-ip>:8080/v1"
+  #
+  # Option 4: OpenAI API
+  #   OLLAMA_URL: "https://api.openai.com/v1"
+  #   (Also set OPENAI_API_KEY in secrets)
+  #
+  # Both Ollama and MLX-LM provide OpenAI-compatible APIs.
+  # ==========================================================================
+  OLLAMA_URL: "http://ollama:11434"
+
+  # Service URLs (internal cluster DNS - usually no need to change)
+  ADMIN_API_URL: "http://athena-admin-backend:8080"
+  GATEWAY_URL: "http://athena-gateway:8000"
+  ORCHESTRATOR_URL: "http://athena-orchestrator:8001"
+  REDIS_URL: "redis://redis:6379/0"
+
+  # ==========================================================================
+  # Domain Configuration
+  # ==========================================================================
+  # Update these to match your domain. Used by services for URLs/redirects.
+  # For local-only deployment, use any domain and add to /etc/hosts:
+  #   127.0.0.1 athena.local chat.local
+  # ==========================================================================
+  ATHENA_DOMAIN: "athena.local"
+  CHAT_DOMAIN: "chat.local"
+  FRONTEND_URL: "https://athena.local"
+
+  # Feature flags
+  DEMO_MODE: "false"
+  MODULE_HOME_ASSISTANT: "true"
+  MODULE_GUEST_MODE: "true"
+  MODULE_NOTIFICATIONS: "true"
+  MODULE_JARVIS_WEB: "true"
+  MODULE_MONITORING: "false"
+
+  # Logging
+  LOG_LEVEL: "INFO"
