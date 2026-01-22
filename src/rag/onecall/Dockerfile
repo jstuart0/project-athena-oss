@@ -1,6 +1,6 @@
-# Auto-generated Dockerfile for flights RAG service
+# Auto-generated Dockerfile for onecall RAG service
 # Build context should be src/ directory:
-#   docker build -f rag/flights/Dockerfile -t athena-rag-flights .
+#   docker build -f rag/onecall/Dockerfile -t athena-rag-onecall .
 
 FROM python:3.11-slim
 
@@ -16,26 +16,26 @@ COPY shared /app/shared
 RUN pip install --no-cache-dir -e /app/shared
 
 # Copy and install service requirements
-COPY rag/flights/requirements.txt /app/requirements.txt
+COPY rag/onecall/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy service code
-COPY rag/flights/main.py /app/
-COPY rag/flights/ /app/rag_service/
+COPY rag/onecall/main.py /app/
+COPY rag/onecall/ /app/rag_service/
 
 # Create non-root user
 RUN useradd -m -u 1000 athena && chown -R athena:athena /app
 USER athena
 
 # Configure service
-ENV PORT=8013
+ENV PORT=8021
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-EXPOSE 8013
+EXPOSE 8021
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8013/health || exit 1
+    CMD curl -f http://localhost:8021/health || exit 1
 
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8013"]
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8021"]

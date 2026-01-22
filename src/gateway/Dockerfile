@@ -1,25 +1,41 @@
+# Gateway Service Dockerfile
+# Build context should be src/ directory:
+#   docker build -f gateway/Dockerfile -t athena-gateway .
+
 FROM python:3.11-slim
 
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy and install shared module first (for layer caching)
+COPY shared /app/shared
+RUN pip install --no-cache-dir -e /app/shared
 
-# Copy application code
-COPY . .
+# Copy and install service requirements
+COPY gateway/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Expose gateway port
+# Copy service code
+COPY gateway/ /app/gateway/
+COPY gateway/main.py /app/
+
+# Create non-root user
+RUN useradd -m -u 1000 athena && chown -R athena:athena /app
+USER athena
+
+# Configure service
+ENV PORT=8000
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
 EXPOSE 8000
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
-# Run gateway service
 CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

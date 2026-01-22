@@ -1,3 +1,4 @@
+import os
 """
 Dashboard API - Consolidated endpoint for Mission Control.
 

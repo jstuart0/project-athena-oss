@@ -1,3 +1,7 @@
+# Admin Backend Dockerfile
+# Build context should be admin/backend/ directory
+# The shared module is copied during build via build-and-push.sh
+
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -10,6 +14,10 @@ RUN apt-get update && apt-get install -y \
     && mv kubectl /usr/local/bin/ \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Copy and install shared module first (for layer caching)
+COPY shared/ /app/shared/
+RUN pip install --no-cache-dir -e /app/shared
 
 # Install dependencies
 COPY requirements.txt .

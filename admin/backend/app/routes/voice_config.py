@@ -7,6 +7,7 @@ Provides endpoints for managing STT (Speech-to-Text) and TTS (Text-to-Speech) co
 - Service host/port configuration
 - Internal endpoints for orchestrator/gateway
 """
+import os
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
