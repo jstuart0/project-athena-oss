@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <linearGradient id="fitnessGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FF2D55"/>
+      <stop offset="50%" style="stop-color:#AF52DE"/>
+      <stop offset="100%" style="stop-color:#5AC8FA"/>
+    </linearGradient>
+  </defs>
+  <circle cx="50" cy="50" r="48" fill="url(#fitnessGrad)"/>
+  <circle cx="50" cy="50" r="30" fill="none" stroke="white" stroke-width="8"/>
+  <circle cx="50" cy="50" r="18" fill="none" stroke="white" stroke-width="6"/>
+  <circle cx="50" cy="50" r="6" fill="white"/>
+</svg>

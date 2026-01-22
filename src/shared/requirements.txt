@@ -1,0 +1,20 @@
+# Project Athena - Shared Dependencies
+# Used by all Athena services
+
+# Core dependencies
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+httpx>=0.24.0
+
+# Redis caching
+redis>=5.0.0
+
+# Logging and monitoring
+structlog>=23.0.0
+prometheus-client>=0.17.0
+
+# Home Assistant
+homeassistant-api>=4.1.0
+
+# Ollama client
+ollama>=0.1.0

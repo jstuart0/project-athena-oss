@@ -1,0 +1,159 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jarvis-web
+  labels:
+    name: jarvis-web
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jarvis-web
+  namespace: jarvis-web
+  labels:
+    app: jarvis-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jarvis-web
+  template:
+    metadata:
+      labels:
+        app: jarvis-web
+    spec:
+      containers:
+      - name: jarvis-web
+        # Replace with your registry or use: docker.io/your-username/jarvis-web:latest
+        image: ${CONTAINER_REGISTRY:-localhost:5000}/jarvis-web:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        # Orchestrator URL (replace with your orchestrator service URL)
+        - name: ORCHESTRATOR_URL
+          value: "${ORCHESTRATOR_URL:-http://athena-orchestrator:8001}"
+        # Admin backend URL
+        - name: ADMIN_BACKEND_URL
+          value: "${ADMIN_BACKEND_URL:-http://athena-admin-backend:8080}"
+        - name: DEFAULT_ROOM
+          value: "${DEFAULT_ROOM:-guest}"
+        # Home Assistant for climate control (optional)
+        - name: HA_URL
+          value: "${HA_URL:-}"
+        - name: HA_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: home-assistant-credentials
+              key: long-lived-token
+              optional: true
+        - name: CLIMATE_ENTITY
+          value: "${CLIMATE_ENTITY:-climate.thermostat}"
+        # Guest-safe temperature limits
+        - name: MIN_TEMP
+          value: "${MIN_TEMP:-65}"
+        - name: MAX_TEMP
+          value: "${MAX_TEMP:-75}"
+        # Voice services (STT/TTS)
+        - name: VOICE_API_URL
+          value: "${VOICE_API_URL:-http://voice-service:10201}"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jarvis-web
+  namespace: jarvis-web
+  labels:
+    app: jarvis-web
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  selector:
+    app: jarvis-web
+
+---
+# IngressRoute with conditional authentication
+# - Local IPs: No authentication required
+# - External IPs: Authentik forward auth required
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: jarvis-web-ingressroute
+  namespace: jarvis-web
+  labels:
+    app: jarvis-web
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # Route 1: Local network access - NO authentication
+    # Higher priority (100) means this route is evaluated first
+    # Only home network (192.168.x.x) bypasses auth - pod networks excluded to require tunnel auth
+    # Replace jarvis.your-domain.com with your actual domain
+    - match: Host(`${JARVIS_DOMAIN:-jarvis.your-domain.com}`) && ClientIP(`192.168.0.0/16`)
+      kind: Rule
+      priority: 100
+      services:
+        - name: jarvis-web
+          port: 80
+
+    # Route 2: External access - Authentik authentication required
+    # Lower priority (10) means this route is evaluated if Route 1 doesn't match
+    - match: Host(`${JARVIS_DOMAIN:-jarvis.your-domain.com}`)
+      kind: Rule
+      priority: 10
+      middlewares:
+        - name: jarvis-forwardauth
+          namespace: jarvis-web
+      services:
+        - name: jarvis-web
+          port: 80
+  tls:
+    secretName: jarvis-web-tls
+
+---
+# HTTP to HTTPS redirect
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: jarvis-web-http-redirect
+  namespace: jarvis-web
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`${JARVIS_DOMAIN:-jarvis.your-domain.com}`)
+      kind: Rule
+      middlewares:
+        - name: jarvis-https-redirect
+          namespace: jarvis-web
+      services:
+        - name: jarvis-web
+          port: 80

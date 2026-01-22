@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  orchestrator:
+    image: athena-orchestrator:latest
+    container_name: athena-orchestrator
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - HA_URL=${HA_URL}
+      - HA_TOKEN=${HA_TOKEN}
+      - OLLAMA_URL=${OLLAMA_URL}
+      - LLM_SERVICE_URL=${LLM_SERVICE_URL}
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - RAG_WEATHER_URL=${RAG_WEATHER_URL}
+      - RAG_AIRPORTS_URL=${RAG_AIRPORTS_URL}
+      - RAG_SPORTS_URL=${RAG_SPORTS_URL}
+      - LOG_LEVEL=INFO
+    networks:
+      - athena-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - ./src/shared:/app/shared:ro
+      - ./src/orchestrator:/app:ro
+
+  gateway:
+    image: athena-gateway:latest
+    container_name: athena-gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ORCHESTRATOR_SERVICE_URL=${ORCHESTRATOR_SERVICE_URL:-http://orchestrator:8001}
+      - LLM_SERVICE_URL=${LLM_SERVICE_URL}
+      - GATEWAY_API_KEY=${GATEWAY_API_KEY}
+      - LOG_LEVEL=INFO
+    networks:
+      - athena-network
+    depends_on:
+      - orchestrator
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - ./src/gateway:/app:ro
+
+networks:
+  athena-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:

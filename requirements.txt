@@ -1,0 +1,65 @@
+# Project Athena - Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core Framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+starlette>=0.27.0
+
+# HTTP & Async
+httpx>=0.25.0
+aiohttp>=3.9.0
+requests>=2.31.0
+
+# Database
+asyncpg>=0.29.0
+sqlalchemy>=2.0.0
+alembic>=1.12.0
+psycopg2-binary>=2.9.0
+
+# Caching
+redis>=5.0.0
+
+# LLM & AI
+langchain>=0.1.0
+langgraph>=0.0.40
+
+# Logging & Monitoring
+structlog>=23.2.0
+prometheus-client>=0.19.0
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+pyyaml>=6.0.0
+python-dotenv>=1.0.0
+
+# Web Scraping & Parsing
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+feedparser>=6.0.0
+icalendar>=5.0.0
+
+# Authentication
+authlib>=1.2.0
+cryptography>=41.0.0
+python-jose[cryptography]>=3.3.0
+
+# Utilities
+python-dateutil>=2.8.0
+pytz>=2023.3
+zoneinfo>=0.2.1;python_version<"3.9"
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+
+# Optional: Voice Processing (uncomment if using voice features)
+# pyaudio>=0.2.14
+# webrtcvad>=2.0.10
+# openai-whisper>=20231117
+# openwakeword>=0.5.0
+# torch>=2.0.0
+# transformers>=4.35.0

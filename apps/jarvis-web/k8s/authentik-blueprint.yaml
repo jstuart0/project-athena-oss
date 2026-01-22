@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blueprint-jarvis-proxy
+  namespace: authentik
+  labels:
+    app.kubernetes.io/managed-by: goauthentik.io
+    goauthentik.io/blueprint: "true"
+data:
+  jarvis-proxy.yaml: |
+    version: 1
+    metadata:
+      name: Jarvis Proxy Configuration
+      labels:
+        blueprints.goauthentik.io/instantiate: "true"
+    entries:
+      # Create the Proxy Provider for Jarvis
+      # NOTE: Replace YOUR_DOMAIN with your actual domain before applying
+      - model: authentik_providers_proxy.proxyprovider
+        id: jarvis-proxy-provider
+        identifiers:
+          name: Jarvis Proxy Provider
+        attrs:
+          name: Jarvis Proxy Provider
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          external_host: https://jarvis.YOUR_DOMAIN.com
+          mode: forward_single
+          access_token_validity: hours=24
+
+      # Create the Application for Jarvis
+      - model: authentik_core.application
+        id: jarvis-app
+        identifiers:
+          slug: jarvis
+        attrs:
+          name: Jarvis Voice Assistant
+          slug: jarvis
+          provider: !KeyOf jarvis-proxy-provider
+          meta_launch_url: https://jarvis.YOUR_DOMAIN.com
+          policy_engine_mode: any
+          open_in_new_tab: true

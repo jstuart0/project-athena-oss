@@ -1,0 +1,8 @@
+fastapi>=0.104.0
+uvicorn>=0.24.0
+httpx>=0.25.0
+structlog>=23.2.0
+trafilatura>=1.6.0
+extruct>=0.16.0
+pandas>=2.0.0
+redis>=5.0.0

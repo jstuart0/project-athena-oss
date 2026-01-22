@@ -1,0 +1,3892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#0f172a">
+    <title>Jarvis - Your AI Assistant</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --accent-glow: rgba(59, 130, 246, 0.3);
+            --success: #22c55e;
+            --error: #ef4444;
+            --border: #334155;
+            --message-user: #3b82f6;
+            --message-assistant: #1e293b;
+            --radius: 16px;
+            --radius-sm: 8px;
+            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            height: 100%;
+            overflow: hidden;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+
+        .app {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            max-width: 800px;
+            margin: 0 auto;
+            background: var(--bg-primary);
+        }
+
+        /* Header */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 20px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .header-title {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, var(--accent), #8b5cf6);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+
+        .header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--text-muted);
+            border-radius: 50%;
+            transition: background 0.3s ease;
+        }
+
+        .status-dot.online {
+            background: var(--success);
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.degraded {
+            background: #f59e0b;
+            animation: pulse 1.5s infinite;
+        }
+
+        .status-dot.offline {
+            background: var(--error);
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Chat Container */
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            scroll-behavior: smooth;
+        }
+
+        /* Welcome Screen */
+        .welcome-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 40px 20px;
+            flex: 1;
+        }
+
+        .welcome-icon {
+            width: 80px;
+            height: 80px;
+            background: linear-gradient(135deg, var(--accent), #8b5cf6);
+            border-radius: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+            margin-bottom: 24px;
+            box-shadow: 0 0 40px var(--accent-glow);
+        }
+
+        .welcome-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .welcome-subtitle {
+            color: var(--text-secondary);
+            margin-bottom: 32px;
+            max-width: 300px;
+        }
+
+        /* Suggestions */
+        .suggestions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: center;
+            max-width: 400px;
+        }
+
+        .suggestion-chip {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 8px 16px;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .suggestion-chip:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border-color: var(--accent);
+        }
+
+        .suggestion-chip:active {
+            transform: scale(0.98);
+        }
+
+        /* Messages */
+        .message {
+            display: flex;
+            gap: 12px;
+            max-width: 85%;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            margin-left: auto;
+            flex-direction: row-reverse;
+        }
+
+        .message-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+
+        .message.assistant .message-avatar {
+            background: linear-gradient(135deg, var(--accent), #8b5cf6);
+        }
+
+        .message.user .message-avatar {
+            background: var(--bg-tertiary);
+        }
+
+        .message-content {
+            padding: 12px 16px;
+            border-radius: var(--radius);
+            font-size: 0.9375rem;
+        }
+
+        .message.assistant .message-content {
+            background: var(--message-assistant);
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.user .message-content {
+            background: var(--message-user);
+            border-bottom-right-radius: 4px;
+        }
+
+        .message-time {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .message-content a {
+            color: #60a5fa;
+            text-decoration: underline;
+            text-decoration-color: rgba(96, 165, 250, 0.4);
+            text-underline-offset: 2px;
+            transition: color 0.15s ease, text-decoration-color 0.15s ease;
+        }
+
+        .message-content a:hover {
+            color: #93c5fd;
+            text-decoration-color: rgba(147, 197, 253, 0.6);
+        }
+
+        .message.user .message-content a {
+            color: #bfdbfe;
+            text-decoration-color: rgba(191, 219, 254, 0.4);
+        }
+
+        .message.user .message-content a:hover {
+            color: #ffffff;
+            text-decoration-color: rgba(255, 255, 255, 0.6);
+        }
+
+        /* Formatted lists */
+        .formatted-list {
+            margin: 8px 0;
+            padding-left: 24px;
+        }
+        .formatted-list li {
+            margin: 4px 0;
+            line-height: 1.5;
+        }
+        .message.assistant .formatted-list {
+            color: #e2e8f0;
+        }
+
+        /* Message headers */
+        .message-h2 {
+            font-size: 1.25em;
+            font-weight: 600;
+            margin: 16px 0 8px 0;
+            color: #f1f5f9;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            padding-bottom: 4px;
+        }
+        .message-h3 {
+            font-size: 1.1em;
+            font-weight: 600;
+            margin: 14px 0 6px 0;
+            color: #e2e8f0;
+        }
+        .message-h4 {
+            font-size: 1em;
+            font-weight: 600;
+            margin: 12px 0 4px 0;
+            color: #cbd5e1;
+        }
+        .message-content .message-h2:first-child,
+        .message-content .message-h3:first-child,
+        .message-content .message-h4:first-child {
+            margin-top: 0;
+        }
+
+        /* Message horizontal rule */
+        .message-hr {
+            border: none;
+            border-top: 1px solid rgba(255,255,255,0.15);
+            margin: 12px 0;
+        }
+
+        /* Message tables */
+        .formatted-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 12px 0;
+            font-size: 0.95em;
+        }
+        .formatted-table th,
+        .formatted-table td {
+            padding: 8px 12px;
+            text-align: left;
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+        .formatted-table th {
+            background: rgba(255,255,255,0.08);
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        .formatted-table td {
+            color: #e2e8f0;
+        }
+        .formatted-table tr:nth-child(even) {
+            background: rgba(255,255,255,0.03);
+        }
+
+        .message.user .message-time {
+            text-align: right;
+        }
+
+        /* Continue Button for Truncated Responses */
+        .continue-btn {
+            display: inline-block;
+            margin-top: 12px;
+            margin-bottom: 8px;
+            padding: 8px 16px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--accent);
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid var(--accent);
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .continue-btn:hover:not(:disabled) {
+            background: var(--accent);
+            color: white;
+            box-shadow: 0 0 12px var(--accent-glow);
+        }
+
+        .continue-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        /* Typing Indicator */
+        .typing-indicator {
+            display: flex;
+            gap: 4px;
+            padding: 16px;
+        }
+
+        .typing-indicator span {
+            width: 8px;
+            height: 8px;
+            background: var(--text-muted);
+            border-radius: 50%;
+            animation: typing 1.4s infinite ease-in-out;
+        }
+
+        .typing-indicator span:nth-child(1) { animation-delay: 0s; }
+        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+        @keyframes typing {
+            0%, 100% { transform: translateY(0); opacity: 0.4; }
+            50% { transform: translateY(-4px); opacity: 1; }
+        }
+
+        /* Thinking message above typing dots */
+        .thinking-message {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+            font-style: italic;
+            opacity: 0;
+            animation: fadeInThinking 0.3s ease forwards;
+        }
+
+        @keyframes fadeInThinking {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .thinking-message.changing {
+            animation: changeThinking 0.4s ease;
+        }
+
+        @keyframes changeThinking {
+            0% { opacity: 1; transform: translateY(0); }
+            40% { opacity: 0; transform: translateY(-5px); }
+            60% { opacity: 0; transform: translateY(5px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Input Area */
+        .input-area {
+            position: relative;
+            padding: 16px 20px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .input-container {
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+        }
+
+        .input-wrapper {
+            flex: 1;
+            position: relative;
+        }
+
+        #message-input {
+            width: 100%;
+            padding: 14px 16px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text-primary);
+            font-size: 1rem;
+            font-family: inherit;
+            resize: none;
+            outline: none;
+            transition: border-color 0.2s ease;
+            max-height: 120px;
+            line-height: 1.5;
+        }
+
+        #message-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        #message-input:focus {
+            border-color: var(--accent);
+        }
+
+        .send-button {
+            width: 48px;
+            height: 48px;
+            background: var(--accent);
+            border: none;
+            border-radius: 50%;
+            color: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+            flex-shrink: 0;
+        }
+
+        .send-button:hover:not(:disabled) {
+            background: var(--accent-hover);
+            transform: scale(1.05);
+        }
+
+        .send-button:active:not(:disabled) {
+            transform: scale(0.95);
+        }
+
+        .send-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .send-button svg {
+            width: 20px;
+            height: 20px;
+        }
+
+        /* Voice Panel Toggle Button (in main input bar) */
+        .voice-panel-toggle {
+            width: 44px;
+            height: 44px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 50%;
+            color: var(--text-secondary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+            flex-shrink: 0;
+        }
+
+        .voice-panel-toggle:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .voice-panel-toggle.active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: white;
+        }
+
+        .voice-panel-toggle:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .voice-panel-toggle svg {
+            width: 20px;
+            height: 20px;
+        }
+
+        /* Voice Panel (slides up) */
+        .voice-panel {
+            position: absolute;
+            bottom: 100%;
+            left: 0;
+            right: 0;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+            padding: 16px 20px 20px;
+            transform: translateY(100%);
+            opacity: 0;
+            visibility: hidden;
+            transition: transform 0.3s ease, opacity 0.3s ease, visibility 0.3s;
+            z-index: 10;
+        }
+
+        .voice-panel.visible {
+            transform: translateY(0);
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .voice-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .voice-panel-title {
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .voice-panel-close {
+            width: 28px;
+            height: 28px;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: all 0.15s;
+        }
+
+        .voice-panel-close:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .voice-panel-content {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 24px;
+        }
+
+        /* Voice status indicator (in panel) */
+        .voice-status {
+            text-align: center;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            min-height: 20px;
+            margin-bottom: 12px;
+        }
+
+        .voice-status.recording {
+            color: var(--error);
+        }
+
+        .voice-status.processing {
+            color: var(--accent);
+        }
+
+        /* Main Voice/Microphone Button (in panel) */
+        .voice-button {
+            width: 72px;
+            height: 72px;
+            background: var(--bg-primary);
+            border: 2px solid var(--border);
+            border-radius: 50%;
+            color: var(--text-primary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+            flex-shrink: 0;
+        }
+
+        .voice-button:hover:not(:disabled) {
+            background: var(--bg-tertiary);
+            border-color: var(--accent);
+            color: var(--accent);
+            transform: scale(1.05);
+        }
+
+        .voice-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .voice-button svg {
+            width: 28px;
+            height: 28px;
+        }
+
+        .voice-button.recording {
+            background: var(--error);
+            border-color: var(--error);
+            color: white;
+            animation: pulse 1.5s ease-in-out infinite;
+            transform: scale(1.05);
+        }
+
+        .voice-button.processing {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: white;
+            cursor: wait;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1.05); opacity: 1; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+        }
+
+        /* Side controls in voice panel */
+        .voice-side-control {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .voice-side-control-label {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+
+        /* Speaker button for TTS toggle */
+        .speaker-button {
+            width: 48px;
+            height: 48px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 50%;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+            flex-shrink: 0;
+        }
+
+        .speaker-button:hover {
+            color: var(--accent);
+            background: var(--bg-tertiary);
+            border-color: var(--accent);
+        }
+
+        .speaker-button.active {
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .speaker-button svg {
+            width: 22px;
+            height: 22px;
+        }
+
+        /* Voice Mode Toggle (LiveKit streaming vs PTT) */
+        .voice-mode-toggle {
+            display: none;
+            width: 48px;
+            height: 48px;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 18px;
+            color: var(--text-muted);
+            transition: all 0.2s ease;
+            flex-shrink: 0;
+        }
+
+        .voice-mode-toggle:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .voice-mode-toggle.streaming {
+            background: rgba(239, 68, 68, 0.15);
+            border-color: var(--error);
+            color: var(--error);
+        }
+
+        .voice-mode-toggle.streaming .mode-icon {
+            animation: pulse-dot 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Hide PTT instructions on mobile for cleaner look */
+        .voice-instructions {
+            text-align: center;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 12px;
+        }
+
+        @media (max-width: 480px) {
+            .voice-panel {
+                padding: 12px 16px 16px;
+            }
+
+            .voice-button {
+                width: 64px;
+                height: 64px;
+            }
+
+            .voice-button svg {
+                width: 24px;
+                height: 24px;
+            }
+
+            .speaker-button,
+            .voice-mode-toggle {
+                width: 44px;
+                height: 44px;
+            }
+
+            .voice-panel-content {
+                gap: 20px;
+            }
+        }
+
+        /* Safe area for iOS */
+        @supports (padding-bottom: env(safe-area-inset-bottom)) {
+            .input-area {
+                padding-bottom: calc(16px + env(safe-area-inset-bottom));
+            }
+        }
+
+        /* Error message */
+        .error-toast {
+            position: fixed;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--error);
+            color: white;
+            padding: 12px 24px;
+            border-radius: var(--radius-sm);
+            font-size: 0.875rem;
+            box-shadow: var(--shadow-lg);
+            animation: slideUp 0.3s ease;
+            z-index: 1000;
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translate(-50%, 20px); }
+            to { opacity: 1; transform: translate(-50%, 0); }
+        }
+
+        /* Scrollbar */
+        .chat-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .chat-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .chat-container::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 3px;
+        }
+
+        .chat-container::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+
+        /* Responsive */
+        @media (max-width: 480px) {
+            .header {
+                padding: 12px 16px;
+            }
+
+            .chat-container {
+                padding: 16px;
+            }
+
+            .input-area {
+                padding: 12px 16px;
+            }
+
+            .message {
+                max-width: 90%;
+            }
+
+            .welcome-screen {
+                padding: 20px;
+            }
+        }
+
+        /* Hide scrollbar on mobile for cleaner look */
+        @media (max-width: 768px) {
+            .chat-container::-webkit-scrollbar {
+                display: none;
+            }
+            .chat-container {
+                -ms-overflow-style: none;
+                scrollbar-width: none;
+            }
+        }
+
+        /* Loading state */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+        }
+
+        .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Temperature Widget */
+        .temp-widget {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+
+        .temp-widget.collapsed {
+            max-height: 0;
+            border-bottom: none;
+        }
+
+        .temp-widget-content {
+            padding: 16px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+
+        .temp-display {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .temp-icon {
+            width: 44px;
+            height: 44px;
+            background: linear-gradient(135deg, #f97316, #ef4444);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+        }
+
+        .temp-icon.cooling {
+            background: linear-gradient(135deg, #3b82f6, #06b6d4);
+        }
+
+        .temp-icon.off {
+            background: var(--bg-tertiary);
+        }
+
+        .temp-info {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .temp-current {
+            font-size: 1.5rem;
+            font-weight: 600;
+            line-height: 1.2;
+        }
+
+        .temp-status {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .temp-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .temp-btn {
+            width: 36px;
+            height: 36px;
+            border: 1px solid var(--border);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            border-radius: 50%;
+            font-size: 1.25rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .temp-btn:hover:not(:disabled) {
+            background: var(--bg-tertiary);
+            border-color: var(--accent);
+        }
+
+        .temp-btn:active:not(:disabled) {
+            transform: scale(0.95);
+        }
+
+        .temp-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .temp-target {
+            font-size: 1.25rem;
+            font-weight: 500;
+            min-width: 50px;
+            text-align: center;
+        }
+
+        .temp-toggle {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 8px;
+            font-size: 1.25rem;
+            margin-left: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .temp-toggle:hover {
+            color: var(--text-primary);
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        @media (max-width: 480px) {
+            .temp-widget-content {
+                padding: 12px 16px;
+                flex-wrap: wrap;
+                gap: 12px;
+            }
+
+            .temp-current {
+                font-size: 1.25rem;
+            }
+        }
+
+        /* Apple TV Widget */
+        .tv-widget {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+
+        .tv-widget.collapsed {
+            max-height: 0;
+            border-bottom: none;
+        }
+
+        .tv-widget-content {
+            padding: 16px 20px;
+        }
+
+        .tv-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .tv-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .tv-icon {
+            width: 44px;
+            height: 44px;
+            background: linear-gradient(135deg, #333, #000);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+        }
+
+        .tv-name {
+            font-weight: 600;
+            font-size: 1rem;
+        }
+
+        .tv-status {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .tv-power-btn {
+            width: 40px;
+            height: 40px;
+            border: 1px solid var(--border);
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .tv-power-btn.on {
+            border-color: var(--success);
+            color: var(--success);
+        }
+
+        .tv-power-btn:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .tv-apps {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .tv-app-btn {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 10px 4px;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .tv-app-btn:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--accent);
+            transform: translateY(-2px);
+        }
+
+        .tv-app-btn:active {
+            transform: scale(0.95);
+        }
+
+        .tv-app-icon {
+            width: 32px;
+            height: 32px;
+            object-fit: contain;
+        }
+
+        .tv-app-name {
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+            text-align: center;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 100%;
+        }
+
+        .tv-remote {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 4px;
+            max-width: 180px;
+            margin: 0 auto;
+        }
+
+        .tv-remote-btn {
+            width: 56px;
+            height: 56px;
+            border: 1px solid var(--border);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            border-radius: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+            transition: all 0.2s ease;
+        }
+
+        .tv-remote-btn.select-btn {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .tv-remote-btn:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .tv-remote-btn.select-btn:hover {
+            background: var(--accent-hover);
+        }
+
+        .tv-remote-btn:active {
+            transform: scale(0.9);
+        }
+
+        .tv-remote-btn.blank {
+            visibility: hidden;
+        }
+
+        .tv-playback {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 12px;
+        }
+
+        .tv-playback-btn {
+            width: 44px;
+            height: 44px;
+            border: 1px solid var(--border);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+            transition: all 0.2s ease;
+        }
+
+        .tv-playback-btn:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .tv-toggle {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 8px;
+            font-size: 1.25rem;
+            margin-left: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .tv-toggle:hover {
+            color: var(--text-primary);
+        }
+
+        /* Find My Location Button */
+        .location-toggle {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 8px;
+            border-radius: 8px;
+            display: none; /* Hidden by default, shown in owner mode */
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        .location-toggle:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .location-toggle.active {
+            color: var(--accent);
+            background: rgba(59, 130, 246, 0.15);
+        }
+
+        .location-toggle.locating {
+            animation: locationPulse 1s infinite;
+        }
+
+        @keyframes locationPulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Location Bar - Sub-header showing current location */
+        .location-bar {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 8px 20px;
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(139, 92, 246, 0.1));
+            border-bottom: 1px solid var(--border);
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            flex-shrink: 0;
+        }
+
+        .location-bar.visible {
+            display: flex;
+        }
+
+        .location-bar-icon {
+            color: var(--accent);
+        }
+
+        .location-bar-text {
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        .location-bar-clear {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            transition: all 0.2s;
+        }
+
+        .location-bar-clear:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .location-bar-edit {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            transition: all 0.2s;
+            margin-left: -4px;
+        }
+
+        .location-bar-edit:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        /* Location Search Input */
+        .location-search-container {
+            display: none;
+            width: 100%;
+            max-width: 400px;
+            position: relative;
+            padding: 0 20px 8px 20px;
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(139, 92, 246, 0.1));
+            border-bottom: 1px solid var(--border);
+        }
+
+        .location-search-container.visible {
+            display: block;
+        }
+
+        .location-search-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .location-search-input {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 0.85rem;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .location-search-input:focus {
+            border-color: var(--accent);
+        }
+
+        .location-search-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .location-search-cancel {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            transition: all 0.2s;
+        }
+
+        .location-search-cancel:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        /* Autocomplete Suggestions */
+        .location-suggestions {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin-top: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            display: none;
+        }
+
+        .location-suggestions.visible {
+            display: block;
+        }
+
+        .location-suggestion {
+            padding: 10px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid var(--border);
+            transition: background 0.15s;
+        }
+
+        .location-suggestion:last-child {
+            border-bottom: none;
+        }
+
+        .location-suggestion:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .location-suggestion-name {
+            font-size: 0.85rem;
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        .location-suggestion-detail {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .location-suggestions-loading {
+            padding: 12px;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+
+        @media (max-width: 400px) {
+            .tv-apps {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+
+        /* TV Selector Dropdown */
+        .tv-selector {
+            margin-bottom: 12px;
+        }
+
+        .tv-selector-dropdown {
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            font-family: inherit;
+            cursor: pointer;
+            outline: none;
+            transition: border-color 0.2s ease;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+            padding-right: 36px;
+        }
+
+        .tv-selector-dropdown:hover {
+            border-color: var(--accent);
+        }
+
+        .tv-selector-dropdown:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        .tv-selector-dropdown option {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            padding: 8px;
+        }
+
+        /* Mode Indicator */
+        .mode-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 16px;
+            font-size: 0.7rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: 1px solid transparent;
+        }
+
+        .mode-badge.owner {
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--success);
+            border-color: rgba(34, 197, 94, 0.3);
+        }
+
+        .mode-badge.guest {
+            background: rgba(59, 130, 246, 0.15);
+            color: var(--accent);
+            border-color: rgba(59, 130, 246, 0.3);
+        }
+
+        .mode-badge:hover {
+            transform: scale(1.05);
+        }
+
+        .mode-badge .mode-icon {
+            font-size: 0.85rem;
+        }
+
+        .mode-badge.override::after {
+            content: '⚡';
+            margin-left: 2px;
+            font-size: 0.65rem;
+        }
+
+        /* Mode Menu Popup */
+        .mode-menu {
+            position: absolute;
+            top: 100%;
+            right: 0;
+            margin-top: 8px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 8px;
+            min-width: 180px;
+            box-shadow: var(--shadow-lg);
+            z-index: 100;
+            display: none;
+        }
+
+        .mode-menu.visible {
+            display: block;
+            animation: fadeIn 0.2s ease;
+        }
+
+        .mode-menu-title {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            padding: 4px 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .mode-menu-option {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: background 0.15s;
+        }
+
+        .mode-menu-option:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .mode-menu-option.active {
+            background: var(--bg-tertiary);
+        }
+
+        .mode-menu-option.active::after {
+            content: '✓';
+            margin-left: auto;
+            color: var(--success);
+        }
+
+        .mode-menu-divider {
+            height: 1px;
+            background: var(--border);
+            margin: 6px 0;
+        }
+
+        .mode-menu-info {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            padding: 6px 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <header class="header">
+            <div class="header-title">
+                <div class="logo">J</div>
+                <h1>Jarvis</h1>
+            </div>
+            <div class="header-right">
+                <!-- Find My Location Button (owner mode only) -->
+                <button class="location-toggle" id="location-toggle" title="Use current location">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"/>
+                        <path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
+                    </svg>
+                </button>
+
+                <!-- Mode Badge -->
+                <div style="position: relative;">
+                    <div class="mode-badge owner" id="mode-badge" title="Click to change mode">
+                        <span class="mode-icon">🏠</span>
+                        <span id="mode-text">Owner</span>
+                    </div>
+                    <div class="mode-menu" id="mode-menu">
+                        <div class="mode-menu-title">Access Mode</div>
+                        <div class="mode-menu-option" data-mode="null" id="mode-auto">
+                            <span>🔄</span> Auto-detect
+                        </div>
+                        <div class="mode-menu-divider"></div>
+                        <div class="mode-menu-option" data-mode="owner" id="mode-owner">
+                            <span>🏠</span> Owner Mode
+                        </div>
+                        <div class="mode-menu-option" data-mode="guest" id="mode-guest">
+                            <span>👋</span> Guest Mode
+                        </div>
+                        <div class="mode-menu-divider"></div>
+                        <div class="mode-menu-info" id="mode-info">No guest booked</div>
+                    </div>
+                </div>
+                <div class="status-indicator" id="status-indicator">
+                    <span class="status-dot" id="status-dot"></span>
+                    <span id="status-text">Connecting...</span>
+                </div>
+                <button class="temp-toggle" id="temp-toggle" title="Temperature Control">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>
+                    </svg>
+                </button>
+                <button class="tv-toggle" id="tv-toggle" title="Apple TV Control">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="7" width="20" height="15" rx="2" ry="2"/>
+                        <polyline points="17 2 12 7 7 2"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- Location Bar (shown when using current location) -->
+        <div class="location-bar" id="location-bar">
+            <span class="location-bar-icon">📍</span>
+            <span>Using location:</span>
+            <span class="location-bar-text" id="location-text">Current location</span>
+            <button class="location-bar-edit" id="location-edit" title="Edit location">✏️ Edit</button>
+            <button class="location-bar-clear" id="location-clear" title="Use home location">✕ Clear</button>
+        </div>
+
+        <!-- Location Search (shown when editing) -->
+        <div class="location-search-container" id="location-search-container">
+            <div class="location-search-wrapper">
+                <input type="text" class="location-search-input" id="location-search-input"
+                       placeholder="Search for an address..." autocomplete="off">
+                <button class="location-search-cancel" id="location-search-cancel">Cancel</button>
+            </div>
+            <div class="location-suggestions" id="location-suggestions"></div>
+        </div>
+
+        <!-- Temperature Widget -->
+        <div class="temp-widget collapsed" id="temp-widget">
+            <div class="temp-widget-content">
+                <div class="temp-display">
+                    <div class="temp-icon" id="temp-icon">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>
+                        </svg>
+                    </div>
+                    <div class="temp-info">
+                        <div class="temp-current" id="temp-current">--°F</div>
+                        <div class="temp-status" id="temp-status">Loading...</div>
+                    </div>
+                </div>
+                <div class="temp-controls">
+                    <button class="temp-btn" id="temp-down" title="Decrease">-</button>
+                    <div class="temp-target" id="temp-target">--°F</div>
+                    <button class="temp-btn" id="temp-up" title="Increase">+</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Apple TV Widget -->
+        <div class="tv-widget collapsed" id="tv-widget">
+            <div class="tv-widget-content">
+                <div class="tv-header">
+                    <div class="tv-info">
+                        <div class="tv-icon">📺</div>
+                        <div>
+                            <div class="tv-name" id="tv-name">Apple TV</div>
+                            <div class="tv-status" id="tv-status">Loading...</div>
+                        </div>
+                    </div>
+                    <button class="tv-power-btn" id="tv-power" title="Power">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+                            <line x1="12" y1="2" x2="12" y2="12"/>
+                        </svg>
+                    </button>
+                </div>
+                <!-- TV Selector -->
+                <div class="tv-selector" id="tv-selector-container" style="display: none;">
+                    <select id="tv-selector" class="tv-selector-dropdown">
+                        <!-- Populated by JavaScript -->
+                    </select>
+                </div>
+                <!-- Quick App Buttons -->
+                <div class="tv-apps" id="tv-apps">
+                    <!-- Populated by JavaScript -->
+                </div>
+                <!-- Remote Control -->
+                <div class="tv-remote">
+                    <button class="tv-remote-btn blank"></button>
+                    <button class="tv-remote-btn" data-cmd="up" title="Up">▲</button>
+                    <button class="tv-remote-btn blank"></button>
+                    <button class="tv-remote-btn" data-cmd="left" title="Left">◀</button>
+                    <button class="tv-remote-btn select-btn" data-cmd="select" title="Select">OK</button>
+                    <button class="tv-remote-btn" data-cmd="right" title="Right">▶</button>
+                    <button class="tv-remote-btn" data-cmd="menu" title="Menu">☰</button>
+                    <button class="tv-remote-btn" data-cmd="down" title="Down">▼</button>
+                    <button class="tv-remote-btn" data-cmd="home" title="Home">⌂</button>
+                </div>
+                <!-- Playback Controls -->
+                <div class="tv-playback">
+                    <button class="tv-playback-btn" data-cmd="play" title="Play">▶</button>
+                    <button class="tv-playback-btn" data-cmd="pause" title="Pause">⏸</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-container" id="chat-container">
+            <div class="welcome-screen" id="welcome-screen">
+                <div class="welcome-icon">J</div>
+                <h2 class="welcome-title" id="welcome-title">Hello!</h2>
+                <p class="welcome-subtitle" id="welcome-subtitle">I'm Jarvis, your AI assistant. How can I help you today?</p>
+                <div class="suggestions" id="suggestions"></div>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <!-- Voice Panel (slides up) -->
+            <div class="voice-panel" id="voice-panel">
+                <div class="voice-panel-header">
+                    <span class="voice-panel-title">Voice Input</span>
+                    <button class="voice-panel-close" id="voice-panel-close" title="Close">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                    </button>
+                </div>
+                <div class="voice-status" id="voice-status">Hold the microphone to speak</div>
+                <div class="voice-panel-content">
+                    <!-- Speaker Toggle -->
+                    <div class="voice-side-control">
+                        <button class="speaker-button active" id="speaker-button" title="Toggle voice responses">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                                <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+                                <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                            </svg>
+                        </button>
+                        <span class="voice-side-control-label">Speaker</span>
+                    </div>
+                    <!-- Main Microphone Button -->
+                    <button class="voice-button" id="voice-button" title="Hold to speak">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                            <line x1="12" y1="19" x2="12" y2="23"></line>
+                            <line x1="8" y1="23" x2="16" y2="23"></line>
+                        </svg>
+                    </button>
+                    <!-- LiveKit Mode Toggle -->
+                    <div class="voice-side-control" id="livekit-control" style="display: none;">
+                        <button class="voice-mode-toggle" id="voice-mode-toggle" title="Toggle voice mode">
+                            <span class="mode-icon">🎙️</span>
+                        </button>
+                        <span class="voice-side-control-label" id="voice-mode-label">PTT</span>
+                    </div>
+                </div>
+                <div class="voice-instructions">Hold microphone button to record</div>
+            </div>
+
+            <!-- Main Input Bar -->
+            <div class="input-container">
+                <div class="input-wrapper">
+                    <textarea
+                        id="message-input"
+                        placeholder="Ask me anything..."
+                        rows="1"
+                        autofocus
+                    ></textarea>
+                </div>
+                <button class="send-button" id="send-button" disabled>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                    </svg>
+                </button>
+                <button class="voice-panel-toggle" id="voice-panel-toggle" title="Voice input">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                        <line x1="12" y1="19" x2="12" y2="23"></line>
+                        <line x1="8" y1="23" x2="16" y2="23"></line>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- LiveKit Client (loaded conditionally) -->
+    <script src="/static/livekit-client.js"></script>
+    <!-- Music Assistant Client for Browser Playback -->
+    <script src="/static/music-assistant-client.js"></script>
+    <!-- Sendspin Client for Real-time Audio Streaming -->
+    <script src="/static/sendspin-client.js"></script>
+    <script src="/static/music-player.js"></script>
+    <script>
+        const API_BASE = window.location.origin;
+        let sessionId = localStorage.getItem('jarvis_session') || null;
+        let isWelcomeVisible = true;
+
+        const chatContainer = document.getElementById('chat-container');
+        const welcomeScreen = document.getElementById('welcome-screen');
+        const welcomeTitle = document.getElementById('welcome-title');
+        const welcomeSubtitle = document.getElementById('welcome-subtitle');
+        const suggestionsContainer = document.getElementById('suggestions');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+
+        // Voice elements
+        const voiceButton = document.getElementById('voice-button');
+        const voiceStatus = document.getElementById('voice-status');
+        const speakerButton = document.getElementById('speaker-button');
+        const voicePanel = document.getElementById('voice-panel');
+        const voicePanelToggle = document.getElementById('voice-panel-toggle');
+        const voicePanelClose = document.getElementById('voice-panel-close');
+        const voiceModeLabel = document.getElementById('voice-mode-label');
+
+        // Voice state
+        let isRecording = false;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let voiceEnabled = localStorage.getItem('jarvis_voice_enabled') !== 'false';
+        let voiceServicesAvailable = false;
+        let isVoicePanelOpen = false;
+
+        // LiveKit state
+        let livekitClient = null;
+        let isLiveKitMode = false;
+        const voiceModeToggle = document.getElementById('voice-mode-toggle');
+        const modeIcon = voiceModeToggle?.querySelector('.mode-icon');
+        const livekitControl = document.getElementById('livekit-control');
+
+        // Mode elements
+        const modeBadge = document.getElementById('mode-badge');
+        const modeMenu = document.getElementById('mode-menu');
+        const modeTextEl = document.getElementById('mode-text');
+        const modeInfo = document.getElementById('mode-info');
+        const modeAuto = document.getElementById('mode-auto');
+        const modeOwner = document.getElementById('mode-owner');
+        const modeGuest = document.getElementById('mode-guest');
+
+        let currentModeState = null;
+
+        // Location override state
+        let currentLocation = null; // { latitude, longitude, address }
+        let locationSearchTimeout = null;
+        const locationToggle = document.getElementById('location-toggle');
+        const locationBar = document.getElementById('location-bar');
+        const locationText = document.getElementById('location-text');
+        const locationClear = document.getElementById('location-clear');
+        const locationEdit = document.getElementById('location-edit');
+        const locationSearchContainer = document.getElementById('location-search-container');
+        const locationSearchInput = document.getElementById('location-search-input');
+        const locationSearchCancel = document.getElementById('location-search-cancel');
+        const locationSuggestions = document.getElementById('location-suggestions');
+
+        // Music Player state for browser playback
+        let musicPlayer = null;
+        let maClient = null;
+        let musicPlayerEnabled = false;
+
+        // Initialize Music Player and MA Client
+        async function initMusicPlayer() {
+            try {
+                // Check if music config is available
+                const configResponse = await fetch(`${API_BASE}/api/music/config`);
+                const config = await configResponse.json();
+
+                if (config.enabled) {
+                    musicPlayerEnabled = true;
+                    console.log('[Music] Browser playback enabled');
+
+                    // Initialize MA client with proxy URL
+                    maClient = new MusicAssistantClient({
+                        serverUrl: config.proxy_ws_url || `${API_BASE.replace('http', 'ws')}/ma/ws`
+                    });
+
+                    // Initialize music player UI
+                    musicPlayer = new MusicPlayer({
+                        containerId: 'music-player-container',
+                        maClient: maClient
+                    });
+                    musicPlayer.init();
+
+                    // Set up MA client callbacks
+                    maClient.onPlayerUpdate = (data) => {
+                        console.log('[Music] Player update:', data);
+                    };
+
+                    maClient.onError = (error) => {
+                        console.error('[Music] MA Client error:', error);
+                    };
+
+                    // Try to connect to MA (async, don't block)
+                    maClient.connect().then(async () => {
+                        console.log('[Music] Connected to Music Assistant');
+                        const playerId = await maClient.initializeBrowserPlayer('Jarvis Web Browser');
+
+                        // Try to connect Sendspin for real-time streaming
+                        // Note: Sendspin connection itself registers the browser player in MA 2.7+
+                        // So we try even if initializeBrowserPlayer returned null
+                        if (musicPlayer.sendspinClient) {
+                            console.log('[Music] Attempting Sendspin connection', playerId ? `for player: ${playerId}` : '(will auto-register)');
+                            try {
+                                await musicPlayer.connectSendspin(playerId);
+                                console.log('[Music] Sendspin streaming enabled');
+                            } catch (sendspinErr) {
+                                console.warn('[Music] Sendspin connection failed, using HTTP fallback:', sendspinErr.message);
+                            }
+                        }
+                    }).catch(err => {
+                        console.warn('[Music] MA connection failed, using fallback:', err.message);
+                    });
+                } else {
+                    console.log('[Music] Browser playback disabled:', config.error || 'not configured');
+                }
+            } catch (error) {
+                console.warn('[Music] Failed to initialize music player:', error);
+            }
+        }
+
+        // Handle browser playback from orchestrator response
+        async function handleBrowserPlayback(browserPlayback) {
+            if (!musicPlayerEnabled || !browserPlayback?.enabled) {
+                console.warn('[Music] Browser playback not available - musicPlayerEnabled:', musicPlayerEnabled, 'browserPlayback:', browserPlayback);
+                throw new Error(`Browser playback not available (enabled: ${musicPlayerEnabled})`);
+            }
+
+            console.log('[Music] Handling browser playback:', browserPlayback);
+
+            // Update status in chat
+            const updateStatus = (msg) => {
+                const statusDiv = document.querySelector('.chat-message.assistant em');
+                if (statusDiv) statusDiv.textContent = msg;
+            };
+
+            try {
+                // Try to reconnect MA client if not connected
+                if (maClient && !maClient.isConnected()) {
+                    updateStatus('🔄 Reconnecting to Music Assistant...');
+                    console.log('[Music] MA client not connected, attempting reconnect...');
+                    try {
+                        await maClient.connect();
+                        console.log('[Music] MA client reconnected successfully');
+                        updateStatus('✅ Connected to Music Assistant');
+                    } catch (reconnectErr) {
+                        console.warn('[Music] MA reconnect failed:', reconnectErr.message);
+                        updateStatus(`❌ MA reconnect failed: ${reconnectErr.message}`);
+                        return;
+                    }
+                }
+
+                // Search for the media via HTTP API (more reliable than WebSocket)
+                updateStatus(`🔍 Searching for "${browserPlayback.media_id}"...`);
+                const searchResponse = await fetch(`${API_BASE}/api/music/search`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        query: browserPlayback.media_id,
+                        media_types: [browserPlayback.media_type || 'artist', 'track'],
+                        limit: 25
+                    })
+                });
+
+                if (!searchResponse.ok) {
+                    const errorText = await searchResponse.text();
+                    updateStatus(`❌ Search failed: ${errorText}`);
+                    return;
+                }
+
+                const results = await searchResponse.json();
+                console.log('[Music] Search results:', results);
+
+                // Helper to get stream URL via proxy
+                const getStreamUrl = (uri) => `${API_BASE}/api/music/stream/${encodeURIComponent(uri)}`;
+
+                // Helper to get album art URL - MA returns images in various formats
+                const getAlbumArt = (track) => {
+                    // Try various MA image locations
+                    if (track.image?.url) return track.image.url;
+                    if (typeof track.image === 'string') return track.image;
+                    if (track.metadata?.images?.[0]?.url) return track.metadata.images[0].url;
+                    if (track.metadata?.image) return track.metadata.image;
+                    if (track.album?.image?.url) return track.album.image.url;
+                    // Spotify images from metadata
+                    if (track.metadata?.album?.images?.[0]?.url) return track.metadata.album.images[0].url;
+                    return null;
+                };
+
+                if (results && results.tracks && results.tracks.length > 0) {
+                    // Play the tracks directly
+                    updateStatus(`▶️ Playing ${results.tracks.length} tracks...`);
+                    console.log('[Music] First track from search:', results.tracks[0]);
+                    console.log('[Music] First track image sources:', {
+                        image: results.tracks[0].image,
+                        metadataImages: results.tracks[0].metadata?.images,
+                        metadataImage: results.tracks[0].metadata?.image,
+                        albumImage: results.tracks[0].album?.image
+                    });
+                    const tracks = results.tracks.slice(0, 10).map(t => ({
+                        name: t.name,
+                        artist: t.artists?.[0]?.name || 'Unknown Artist',
+                        uri: t.uri,
+                        album_art: getAlbumArt(t),
+                        // Duration: MA returns seconds in t.duration, check metadata for ms fallback
+                        // Convert to ms for consistent handling
+                        duration: t.duration ? t.duration * 1000 : (t.metadata?.duration || t.metadata?.duration_ms || 0),
+                        duration_ms: t.duration ? t.duration * 1000 : (t.metadata?.duration_ms || t.metadata?.duration || 0),
+                        // Use Spotify preview URL (30s DRM-free clip) - works without Sendspin
+                        preview_url: t.metadata?.preview,
+                        // Fallback to stream proxy (may not work for DRM content)
+                        stream_url: getStreamUrl(t.uri)
+                    }));
+
+                    // On mobile, show a tap-to-play button instead of auto-playing
+                    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+                    if (isMobile) {
+                        // Create tap-to-play button
+                        const playBtn = document.createElement('button');
+                        playBtn.className = 'tap-to-play-btn';
+                        playBtn.innerHTML = `▶️ Tap to play: ${tracks[0].name}`;
+                        playBtn.style.cssText = 'background: #3b82f6; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; margin-top: 8px; cursor: pointer; width: 100%;';
+                        playBtn.onclick = () => {
+                            musicPlayer.playTracks(tracks, 0);
+                            playBtn.remove();
+                            updateStatus(`🎵 Now playing: ${tracks[0].name}`);
+                        };
+
+                        const statusDiv = document.querySelector('.chat-message.assistant:last-child');
+                        if (statusDiv) {
+                            statusDiv.appendChild(playBtn);
+                        }
+                        updateStatus(`🎵 Found ${tracks.length} tracks - tap button below to play`);
+                    } else {
+                        musicPlayer.playTracks(tracks, 0);
+                        updateStatus(`🎵 Now playing: ${tracks[0].name}`);
+                    }
+                } else if (results && results.artists && results.artists.length > 0) {
+                    // Found artist, search for their tracks via HTTP
+                    updateStatus(`🔍 Found ${results.artists[0].name}, searching for tracks...`);
+                    const artistSearchResponse = await fetch(`${API_BASE}/api/music/search`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            query: results.artists[0].name,
+                            media_types: ['track'],
+                            limit: 25
+                        })
+                    });
+
+                    if (artistSearchResponse.ok) {
+                        const artistResults = await artistSearchResponse.json();
+                        if (artistResults?.tracks?.length > 0) {
+                            const tracks = artistResults.tracks.slice(0, 10).map(t => ({
+                                name: t.name,
+                                artist: t.artists?.[0]?.name || results.artists[0].name,
+                                uri: t.uri,
+                                album_art: getAlbumArt(t),
+                                // Duration: MA returns seconds in t.duration, check metadata for ms fallback
+                                // Convert to ms for consistent handling
+                                duration: t.duration ? t.duration * 1000 : (t.metadata?.duration || t.metadata?.duration_ms || 0),
+                                duration_ms: t.duration ? t.duration * 1000 : (t.metadata?.duration_ms || t.metadata?.duration || 0),
+                                // Use Spotify preview URL (30s DRM-free clip) - works without Sendspin
+                                preview_url: t.metadata?.preview,
+                                // Fallback to stream proxy (may not work for DRM content)
+                                stream_url: getStreamUrl(t.uri)
+                            }));
+
+                            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+                            if (isMobile) {
+                                const playBtn = document.createElement('button');
+                                playBtn.className = 'tap-to-play-btn';
+                                playBtn.innerHTML = `▶️ Tap to play: ${tracks[0].name}`;
+                                playBtn.style.cssText = 'background: #3b82f6; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; margin-top: 8px; cursor: pointer; width: 100%;';
+                                playBtn.onclick = () => {
+                                    musicPlayer.playTracks(tracks, 0);
+                                    playBtn.remove();
+                                    updateStatus(`🎵 Now playing: ${tracks[0].name}`);
+                                };
+                                const statusDiv = document.querySelector('.chat-message.assistant:last-child');
+                                if (statusDiv) statusDiv.appendChild(playBtn);
+                                updateStatus(`🎵 Found ${tracks.length} tracks - tap button below to play`);
+                            } else {
+                                musicPlayer.playTracks(tracks, 0);
+                                updateStatus(`🎵 Now playing: ${tracks[0].name}`);
+                            }
+                        } else {
+                            updateStatus(`❌ No tracks found for ${results.artists[0].name}`);
+                        }
+                    } else {
+                        updateStatus(`❌ Failed to search for artist tracks`);
+                    }
+                } else {
+                    updateStatus(`❌ No results found for "${browserPlayback.media_id}"`);
+                }
+            } catch (error) {
+                console.error('[Music] Browser playback failed:', error);
+                updateStatus(`❌ Error: ${error.message}`);
+            }
+        }
+
+        // Show/hide location button based on mode
+        function updateLocationButtonVisibility() {
+            if (currentModeState && currentModeState.mode === 'owner') {
+                locationToggle.style.display = 'flex';
+            } else {
+                locationToggle.style.display = 'none';
+                // Clear location when switching to guest mode
+                if (currentLocation) {
+                    clearLocationOverride();
+                }
+            }
+        }
+
+        // Toggle location override
+        async function toggleLocation() {
+            if (currentLocation) {
+                clearLocationOverride();
+            } else {
+                await requestLocation();
+            }
+        }
+
+        // Request browser geolocation
+        async function requestLocation() {
+            if (!navigator.geolocation) {
+                showError('Geolocation is not supported by your browser');
+                return;
+            }
+
+            locationToggle.classList.add('locating');
+
+            navigator.geolocation.getCurrentPosition(
+                async (position) => {
+                    const { latitude, longitude } = position.coords;
+
+                    // Reverse geocode to get readable address
+                    let address = `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+                    try {
+                        const geocoded = await reverseGeocode(latitude, longitude);
+                        if (geocoded) {
+                            address = geocoded;
+                        }
+                    } catch (e) {
+                        console.warn('Reverse geocoding failed, using coordinates', e);
+                    }
+
+                    currentLocation = { latitude, longitude, address };
+
+                    locationToggle.classList.remove('locating');
+                    locationToggle.classList.add('active');
+                    locationBar.classList.add('visible');
+                    locationText.textContent = address;
+
+                    console.log('Location set:', currentLocation);
+                },
+                (error) => {
+                    locationToggle.classList.remove('locating');
+                    let message = 'Unable to get your location';
+                    switch (error.code) {
+                        case error.PERMISSION_DENIED:
+                            message = 'Location permission denied';
+                            break;
+                        case error.POSITION_UNAVAILABLE:
+                            message = 'Location unavailable';
+                            break;
+                        case error.TIMEOUT:
+                            message = 'Location request timed out';
+                            break;
+                    }
+                    showError(message);
+                },
+                {
+                    enableHighAccuracy: true,
+                    timeout: 10000,
+                    maximumAge: 300000 // Cache for 5 minutes
+                }
+            );
+        }
+
+        // Reverse geocode coordinates to address
+        async function reverseGeocode(lat, lon) {
+            try {
+                const response = await fetch(`${API_BASE}/api/geocode/reverse?lat=${lat}&lon=${lon}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    return data.address;
+                }
+            } catch (e) {
+                console.warn('Reverse geocode API failed', e);
+            }
+            return null;
+        }
+
+        // Clear location override
+        function clearLocationOverride() {
+            currentLocation = null;
+            locationToggle.classList.remove('active');
+            locationBar.classList.remove('visible');
+            hideLocationSearch();
+            console.log('Location override cleared');
+        }
+
+        // Show location search input
+        function showLocationSearch() {
+            locationSearchContainer.classList.add('visible');
+            locationSearchInput.value = '';
+            locationSearchInput.focus();
+            locationSuggestions.classList.remove('visible');
+        }
+
+        // Hide location search input
+        function hideLocationSearch() {
+            locationSearchContainer.classList.remove('visible');
+            locationSuggestions.classList.remove('visible');
+            locationSearchInput.value = '';
+            if (locationSearchTimeout) {
+                clearTimeout(locationSearchTimeout);
+                locationSearchTimeout = null;
+            }
+        }
+
+        // Search for addresses via backend API
+        async function searchAddresses(query) {
+            if (!query || query.length < 3) {
+                locationSuggestions.classList.remove('visible');
+                return;
+            }
+
+            locationSuggestions.innerHTML = '<div class="location-suggestions-loading">Searching...</div>';
+            locationSuggestions.classList.add('visible');
+
+            try {
+                const response = await fetch(`${API_BASE}/api/geocode/search?q=${encodeURIComponent(query)}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    displaySuggestions(data.results || []);
+                } else {
+                    locationSuggestions.innerHTML = '<div class="location-suggestions-loading">Search failed</div>';
+                }
+            } catch (e) {
+                console.warn('Address search failed', e);
+                locationSuggestions.innerHTML = '<div class="location-suggestions-loading">Search failed</div>';
+            }
+        }
+
+        // Display address suggestions
+        function displaySuggestions(results) {
+            if (results.length === 0) {
+                locationSuggestions.innerHTML = '<div class="location-suggestions-loading">No results found</div>';
+                return;
+            }
+
+            locationSuggestions.innerHTML = results.map((result, index) => `
+                <div class="location-suggestion" data-index="${index}"
+                     data-lat="${result.lat}" data-lon="${result.lon}" data-address="${result.display_name}">
+                    <div class="location-suggestion-name">${result.name || result.display_name.split(',')[0]}</div>
+                    <div class="location-suggestion-detail">${result.display_name}</div>
+                </div>
+            `).join('');
+
+            // Add click handlers to suggestions
+            locationSuggestions.querySelectorAll('.location-suggestion').forEach(el => {
+                el.addEventListener('click', () => selectSuggestion(el));
+            });
+        }
+
+        // Select an address suggestion
+        function selectSuggestion(el) {
+            const lat = parseFloat(el.dataset.lat);
+            const lon = parseFloat(el.dataset.lon);
+            const address = el.dataset.address;
+
+            // Use the short name if available
+            const shortName = el.querySelector('.location-suggestion-name').textContent;
+
+            currentLocation = {
+                latitude: lat,
+                longitude: lon,
+                address: shortName !== address.split(',')[0] ? shortName : address
+            };
+
+            locationToggle.classList.add('active');
+            locationBar.classList.add('visible');
+            locationText.textContent = currentLocation.address;
+            hideLocationSearch();
+
+            console.log('Location set from search:', currentLocation);
+        }
+
+        // Handle search input with debounce
+        function handleSearchInput() {
+            if (locationSearchTimeout) {
+                clearTimeout(locationSearchTimeout);
+            }
+            locationSearchTimeout = setTimeout(() => {
+                searchAddresses(locationSearchInput.value.trim());
+            }, 300); // 300ms debounce
+        }
+
+        // Event listeners for location toggle and clear
+        locationToggle.addEventListener('click', toggleLocation);
+        locationClear.addEventListener('click', clearLocationOverride);
+        locationEdit.addEventListener('click', showLocationSearch);
+        locationSearchCancel.addEventListener('click', hideLocationSearch);
+        locationSearchInput.addEventListener('input', handleSearchInput);
+        locationSearchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                hideLocationSearch();
+            }
+        });
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            await checkHealth();
+            await loadModeState();
+            await checkVoiceHealth();
+            await initializeLiveKit();
+            await initMusicPlayer();  // Initialize browser music playback
+
+            // Listen for music playback errors
+            window.addEventListener('musicPlaybackError', (e) => {
+                const errorMsg = document.createElement('div');
+                errorMsg.className = 'chat-message assistant';
+                errorMsg.innerHTML = `<em>⚠️ Audio playback issue: ${e.detail.error}. Tap the music player to retry.</em>`;
+                chatContainer.appendChild(errorMsg);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            });
+
+            await loadWelcome();
+            setupInputHandlers();
+            setupVoiceHandlers();
+            setupModeHandlers();
+            // Check health every 30 seconds
+            setInterval(checkHealth, 30000);
+            // Check mode every 60 seconds (in case guest status changes)
+            setInterval(loadModeState, 60000);
+        });
+
+        // =============================================================================
+        // LiveKit Integration
+        // =============================================================================
+
+        async function initializeLiveKit() {
+            // Check if LiveKitClient is available (script loaded)
+            if (typeof LiveKitClient === 'undefined') {
+                console.log('[LiveKit] Client not loaded');
+                return;
+            }
+
+            try {
+                livekitClient = new LiveKitClient({
+                    gatewayUrl: API_BASE
+                });
+
+                const available = await livekitClient.checkAvailability();
+                if (!available) {
+                    console.log('[LiveKit] Server not available');
+                    return;
+                }
+
+                console.log('[LiveKit] Available, enabling mode toggle');
+
+                // Show the LiveKit control wrapper (button + label)
+                if (livekitControl) {
+                    livekitControl.style.display = 'flex';
+                }
+                if (voiceModeToggle) {
+                    voiceModeToggle.style.display = 'flex';
+                }
+
+                // Set up LiveKit callbacks
+                livekitClient.onStateChange = (state) => {
+                    console.log('[LiveKit] State:', state);
+                    updateLiveKitStatus(state);
+                };
+
+                livekitClient.onTranscript = (text) => {
+                    console.log('[LiveKit] Transcript:', text);
+                    if (text.trim()) {
+                        messageInput.value = text;
+                    }
+                };
+
+                livekitClient.onResponse = (text) => {
+                    console.log('[LiveKit] Response:', text);
+                    if (text) {
+                        hideWelcome();
+                        addMessage(text, 'assistant');
+                    }
+                };
+
+                livekitClient.onWakeWord = (word) => {
+                    console.log('[LiveKit] Wake word detected:', word);
+                    showNotification(`"${word}" detected`);
+                };
+
+                livekitClient.onError = (error) => {
+                    console.error('[LiveKit] Error:', error);
+                    showError('Voice streaming error: ' + error.message);
+                };
+
+                // Set up mode toggle handler
+                if (voiceModeToggle) {
+                    voiceModeToggle.addEventListener('click', toggleLiveKitMode);
+                }
+
+            } catch (error) {
+                console.error('[LiveKit] Init error:', error);
+            }
+        }
+
+        async function toggleLiveKitMode() {
+            if (!livekitClient) return;
+
+            if (isLiveKitMode) {
+                // Switch to PTT mode
+                try {
+                    await livekitClient.disconnect();
+                } catch (e) {
+                    console.error('[LiveKit] Disconnect error:', e);
+                }
+                isLiveKitMode = false;
+                voiceModeToggle.classList.remove('streaming');
+                if (modeIcon) modeIcon.textContent = '🎙️';
+                if (voiceModeLabel) voiceModeLabel.textContent = 'PTT';
+                voiceButton.style.display = '';
+                setVoiceStatus('Hold the microphone to speak', '');
+            } else {
+                // Switch to streaming mode
+                try {
+                    setVoiceStatus('Connecting...', 'processing');
+                    await livekitClient.connect();
+                    isLiveKitMode = true;
+                    voiceModeToggle.classList.add('streaming');
+                    if (modeIcon) modeIcon.textContent = '🔴';
+                    if (voiceModeLabel) voiceModeLabel.textContent = 'LIVE';
+                    voiceButton.style.display = 'none';
+                    setVoiceStatus('Listening for wake word...', '');
+                } catch (error) {
+                    console.error('[LiveKit] Connection failed:', error);
+                    showError('Failed to start streaming: ' + error.message);
+                    setVoiceStatus('Hold the microphone to speak', '');
+                }
+            }
+        }
+
+        function updateLiveKitStatus(state) {
+            const statusMap = {
+                'disconnected': { text: 'Disconnected', class: '' },
+                'connected': { text: 'Connected', class: 'processing' },
+                'idle': { text: 'Listening for wake word...', class: '' },
+                'listening': { text: 'Hearing you...', class: 'recording' },
+                'processing': { text: 'Processing...', class: 'processing' },
+                'responding': { text: 'Speaking...', class: 'processing' }
+            };
+
+            const status = statusMap[state] || { text: state, class: '' };
+            if (isLiveKitMode) {
+                setVoiceStatus(status.text, status.class);
+            }
+        }
+
+        function showNotification(message) {
+            const notification = document.createElement('div');
+            notification.className = 'error-toast';
+            notification.style.background = 'var(--accent)';
+            notification.textContent = message;
+            document.body.appendChild(notification);
+
+            setTimeout(() => {
+                notification.remove();
+            }, 2000);
+        }
+
+        // =============================================================================
+        // Health Check
+        // =============================================================================
+
+        async function checkHealth() {
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+                const response = await fetch(`${API_BASE}/api/health`, {
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.status === 'healthy') {
+                        setStatus('online', 'Online');
+                    } else if (data.status === 'degraded') {
+                        setStatus('degraded', 'Degraded');
+                    } else {
+                        setStatus('offline', 'Offline');
+                    }
+                } else {
+                    setStatus('offline', 'Offline');
+                }
+            } catch (error) {
+                console.error('Health check failed:', error);
+                setStatus('offline', 'Offline');
+            }
+        }
+
+        function setStatus(state, text) {
+            statusDot.className = 'status-dot ' + state;
+            statusText.textContent = text;
+        }
+
+        // =============================================================================
+        // Mode Management
+        // =============================================================================
+
+        async function loadModeState() {
+            try {
+                const response = await fetch(`${API_BASE}/api/mode`);
+                if (response.ok) {
+                    currentModeState = await response.json();
+                    updateModeUI();
+                }
+            } catch (error) {
+                console.error('Failed to load mode:', error);
+            }
+        }
+
+        function updateModeUI() {
+            if (!currentModeState) return;
+
+            const { mode, is_override, auto_mode, has_guest, guest_name } = currentModeState;
+
+            // Update badge appearance
+            modeBadge.className = `mode-badge ${mode}`;
+            if (is_override) {
+                modeBadge.classList.add('override');
+            }
+
+            // Update badge text and icon
+            const badgeIcon = modeBadge.querySelector('.mode-icon');
+            if (mode === 'owner') {
+                badgeIcon.textContent = '🏠';
+                modeTextEl.textContent = 'Owner';
+            } else {
+                badgeIcon.textContent = '👋';
+                modeTextEl.textContent = 'Guest';
+            }
+
+            // Update menu options
+            modeAuto.classList.toggle('active', !is_override);
+            modeOwner.classList.toggle('active', is_override && mode === 'owner');
+            modeGuest.classList.toggle('active', is_override && mode === 'guest');
+
+            // SECURITY: Hide owner mode option when in guest mode
+            // Guests cannot switch to owner mode
+            if (mode === 'guest') {
+                modeOwner.style.display = 'none';
+                // Also hide auto-detect if it would result in owner mode
+                if (auto_mode === 'owner') {
+                    modeAuto.style.display = 'none';
+                } else {
+                    modeAuto.style.display = '';
+                }
+            } else {
+                modeOwner.style.display = '';
+                modeAuto.style.display = '';
+            }
+
+            // Update info text
+            if (has_guest && guest_name) {
+                modeInfo.textContent = `Guest: ${guest_name}`;
+            } else {
+                modeInfo.textContent = 'No guest booked';
+            }
+
+            // Show what auto mode would be
+            if (!is_override) {
+                modeAuto.querySelector('span').nextSibling.textContent = ` Auto (${auto_mode})`;
+            } else {
+                modeAuto.innerHTML = '<span>🔄</span> Auto-detect';
+            }
+
+            // Update location button visibility based on mode
+            updateLocationButtonVisibility();
+        }
+
+        function setupModeHandlers() {
+            // Toggle menu on badge click
+            modeBadge.addEventListener('click', (e) => {
+                e.stopPropagation();
+                modeMenu.classList.toggle('visible');
+            });
+
+            // Close menu when clicking outside
+            document.addEventListener('click', () => {
+                modeMenu.classList.remove('visible');
+            });
+
+            // Prevent menu clicks from closing it
+            modeMenu.addEventListener('click', (e) => {
+                e.stopPropagation();
+            });
+
+            // Mode option handlers
+            modeAuto.addEventListener('click', () => setMode(null));
+            modeOwner.addEventListener('click', () => setMode('owner'));
+            modeGuest.addEventListener('click', () => setMode('guest'));
+        }
+
+        async function setMode(mode) {
+            try {
+                const response = await fetch(`${API_BASE}/api/mode`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: mode })
+                });
+
+                if (response.ok) {
+                    currentModeState = await response.json();
+                    updateModeUI();
+                    modeMenu.classList.remove('visible');
+
+                    // Show notification
+                    const modeText = currentModeState.mode === 'owner' ? 'Owner' : 'Guest';
+                    const suffix = currentModeState.is_override ? ' (override)' : ' (auto)';
+                    showNotification(`Mode: ${modeText}${suffix}`);
+                } else if (response.status === 403) {
+                    // Guest trying to switch to owner mode
+                    modeMenu.classList.remove('visible');
+                    showError('Cannot switch to owner mode while in guest mode');
+                } else {
+                    showError('Failed to change mode');
+                }
+            } catch (error) {
+                console.error('Failed to set mode:', error);
+                showError('Failed to change mode');
+            }
+        }
+
+        async function loadWelcome() {
+            try {
+                const response = await fetch(`${API_BASE}/api/welcome`);
+                if (response.ok) {
+                    const data = await response.json();
+                    welcomeTitle.textContent = data.greeting;
+                    welcomeSubtitle.textContent = data.subtitle;
+
+                    // Render suggestions
+                    suggestionsContainer.innerHTML = data.suggestions
+                        .slice(0, 6)
+                        .map(s => `<button class="suggestion-chip" onclick="sendSuggestion('${escapeHtml(s)}')">${escapeHtml(s)}</button>`)
+                        .join('');
+                }
+            } catch (error) {
+                console.error('Failed to load welcome:', error);
+            }
+        }
+
+        function setupInputHandlers() {
+            // Auto-resize textarea
+            messageInput.addEventListener('input', () => {
+                messageInput.style.height = 'auto';
+                messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
+                sendButton.disabled = !messageInput.value.trim();
+            });
+
+            // Send on Enter (but not Shift+Enter)
+            messageInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    if (messageInput.value.trim()) {
+                        sendMessage();
+                    }
+                }
+            });
+
+            // Send button click
+            sendButton.addEventListener('click', sendMessage);
+        }
+
+        function sendSuggestion(text) {
+            messageInput.value = text;
+            sendButton.disabled = false;
+            sendMessage();
+        }
+
+        async function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message) return;
+
+            // Start timing for client-side round-trip measurement
+            const clientStartTime = performance.now();
+
+            // Hide welcome screen
+            if (isWelcomeVisible) {
+                welcomeScreen.style.display = 'none';
+                isWelcomeVisible = false;
+            }
+
+            // Clear input
+            messageInput.value = '';
+            messageInput.style.height = 'auto';
+            sendButton.disabled = true;
+
+            // Add user message
+            addMessage(message, 'user');
+
+            // Show typing indicator with context-aware message
+            const typingId = showTyping(message);
+
+            try {
+                const response = await fetch(`${API_BASE}/api/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: sessionId,
+                        interface_type: 'chat',
+                        location: currentLocation ? {
+                            latitude: currentLocation.latitude,
+                            longitude: currentLocation.longitude,
+                            address: currentLocation.address
+                        } : null
+                    })
+                });
+
+                // Calculate client-side round-trip time
+                const clientRoundTrip = (performance.now() - clientStartTime) / 1000;
+
+                // Remove typing indicator
+                removeTyping(typingId);
+
+                if (!response.ok) {
+                    throw new Error('Failed to get response');
+                }
+
+                const data = await response.json();
+
+                // Store session ID
+                if (data.session_id && !sessionId) {
+                    sessionId = data.session_id;
+                    localStorage.setItem('jarvis_session', sessionId);
+                }
+
+                // Add assistant message with metrics (use client-measured round-trip for accuracy)
+                addMessage(data.response, 'assistant', {
+                    processing_time: clientRoundTrip,
+                    tokens: data.tokens,
+                    tokens_per_second: data.tokens_per_second,
+                    tool_exec_time: data.tool_exec_time,
+                    model_used: data.model_used,
+                    was_truncated: data.metadata?.was_truncated || false
+                });
+
+                // Check for browser playback request in response metadata
+                if (data.metadata?.browser_playback?.enabled) {
+                    handleBrowserPlayback(data.metadata.browser_playback);
+                }
+
+                // Auto-trigger browser playback for music responses when play_in_browser is requested
+                // This handles "play X here" commands - triggers browser audio regardless of Sendspin status
+                if (data.metadata?.music_intent) {
+                    const musicIntent = data.metadata.music_intent;
+                    console.log('[Music] Got music_intent:', JSON.stringify(musicIntent));
+                    if (musicIntent.play_in_browser && musicIntent.media_id) {
+                        console.log('[Music] Auto-triggering browser playback for:', musicIntent.media_id);
+                        // Show visual feedback that browser playback is being attempted
+                        const statusMsg = document.createElement('div');
+                        statusMsg.className = 'chat-message assistant';
+                        statusMsg.innerHTML = `<em>🎵 Starting browser playback for ${musicIntent.media_id}...</em>`;
+                        chatContainer.appendChild(statusMsg);
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+
+                        try {
+                            await handleBrowserPlayback({
+                                enabled: true,
+                                media_id: musicIntent.media_id,
+                                media_type: musicIntent.media_type || 'artist'
+                            });
+                        } catch (playErr) {
+                            console.error('[Music] Browser playback error:', playErr);
+                            statusMsg.innerHTML = `<em>❌ Browser playback failed: ${playErr.message}</em>`;
+                        }
+                    }
+                } else {
+                    console.log('[Music] No music_intent in metadata:', data.metadata);
+                }
+
+            } catch (error) {
+                removeTyping(typingId);
+                showError('Sorry, something went wrong. Please try again.');
+                console.error('Chat error:', error);
+            }
+        }
+
+        function isOwnerMode() {
+            // Check if current mode is owner
+            return currentModeState && currentModeState.mode === 'owner';
+        }
+
+        function addMessage(text, type, metrics = null) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+
+            const avatar = type === 'assistant' ? 'J' : '👤';
+            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+            // Build metrics string for owner mode assistant messages
+            let timeDisplay = time;
+            if (type === 'assistant' && metrics && isOwnerMode()) {
+                const parts = [time];
+                if (metrics.processing_time) {
+                    parts.push(`${metrics.processing_time.toFixed(2)}s`);
+                }
+                if (metrics.tool_exec_time) {
+                    parts.push(`tools: ${metrics.tool_exec_time.toFixed(2)}s`);
+                }
+                if (metrics.tokens_per_second) {
+                    parts.push(`${metrics.tokens_per_second.toFixed(1)} tok/s`);
+                }
+                timeDisplay = parts.join(' · ');
+            }
+
+            // Check if response was truncated and show Continue button
+            let continueButton = '';
+            if (type === 'assistant' && metrics && metrics.was_truncated) {
+                continueButton = `
+                    <button class="continue-btn" onclick="handleContinue(this)">
+                        Continue...
+                    </button>
+                `;
+            }
+
+            messageDiv.innerHTML = `
+                <div class="message-avatar">${avatar}</div>
+                <div>
+                    <div class="message-content">${formatMessage(text)}</div>
+                    ${continueButton}
+                    <div class="message-time">${timeDisplay}</div>
+                </div>
+            `;
+
+            chatContainer.appendChild(messageDiv);
+            scrollToBottom();
+        }
+
+        // Handle Continue button click for truncated responses
+        async function handleContinue(button) {
+            // Disable button to prevent double-clicks
+            button.disabled = true;
+            button.textContent = 'Continuing...';
+
+            // Send "please continue" as a follow-up message (don't show to user)
+            const continueQuery = "Please continue where you left off.";
+
+            // Show typing indicator (no user message - seamless continuation)
+            const typingId = showTyping('Continuing the story...');
+            const startTime = Date.now();
+
+            try {
+                const response = await fetch(`${API_BASE}/api/chat`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: continueQuery,
+                        session_id: sessionId,
+                        interface_type: 'chat'
+                    }),
+                });
+
+                const clientRoundTrip = (Date.now() - startTime) / 1000;
+                removeTyping(typingId);
+
+                if (!response.ok) {
+                    throw new Error('Failed to get continuation');
+                }
+
+                const data = await response.json();
+
+                // Remove the Continue button from the previous message
+                button.remove();
+
+                // Add the continuation response
+                addMessage(data.response, 'assistant', {
+                    processing_time: clientRoundTrip,
+                    tokens: data.tokens,
+                    tokens_per_second: data.tokens_per_second,
+                    tool_exec_time: data.tool_exec_time,
+                    model_used: data.model_used,
+                    was_truncated: data.metadata?.was_truncated || false
+                });
+
+            } catch (error) {
+                removeTyping(typingId);
+                button.disabled = false;
+                button.textContent = 'Continue...';
+                showError('Sorry, could not continue. Please try again.');
+                console.error('Continue error:', error);
+            }
+        }
+
+        // =============================================================================
+        // Thinking Messages System
+        // =============================================================================
+
+        const thinkingMessages = {
+            // Casual messages (60% weight)
+            casual: [
+                "Thinking...",
+                "Let me check on that...",
+                "Hmm, one moment...",
+                "Working on it...",
+                "Processing...",
+                "Give me a sec...",
+                "Looking into it..."
+            ],
+            // Quirky/personality messages (25% weight)
+            quirky: [
+                "Consulting the oracle...",
+                "Waking up the neurons...",
+                "Searching the archives...",
+                "Pondering deeply...",
+                "Summoning knowledge...",
+                "Asking the smart folks...",
+                "Running calculations...",
+                "Connecting the dots..."
+            ],
+            // Context-aware patterns (15% weight when matched)
+            contextual: [
+                { patterns: ['tesla', 'car', 'drive', 'battery', 'charge', 'miles'], message: "Checking TeslaMate..." },
+                { patterns: ['weather', 'temperature', 'rain', 'forecast', 'outside'], message: "Looking up the forecast..." },
+                { patterns: ['sport', 'score', 'game', 'play', 'team', 'ravens', 'orioles'], message: "Checking the scores..." },
+                { patterns: ['light', 'lamp', 'switch', 'dim', 'bright', 'turn on', 'turn off'], message: "Talking to your home..." },
+                { patterns: ['time', 'calendar', 'schedule', 'appointment', 'meeting'], message: "Checking the schedule..." },
+                { patterns: ['music', 'song', 'play', 'spotify', 'album'], message: "Cueing up the tunes..." },
+                { patterns: ['news', 'headline', 'article'], message: "Scanning the headlines..." },
+                { patterns: ['stock', 'market', 'price', 'portfolio'], message: "Checking the markets..." },
+                { patterns: ['flight', 'airport', 'plane', 'travel'], message: "Checking flight info..." },
+                { patterns: ['recipe', 'cook', 'food', 'ingredient'], message: "Looking up recipes..." },
+                { patterns: ['direction', 'route', 'navigate', 'drive to', 'how far'], message: "Calculating route..." }
+            ]
+        };
+
+        let thinkingInterval = null;
+        let currentThinkingId = null;
+
+        function getThinkingMessage(query = '') {
+            const queryLower = query.toLowerCase();
+
+            // Check for contextual match first (15% chance if matched)
+            if (query && Math.random() < 0.15) {
+                for (const ctx of thinkingMessages.contextual) {
+                    if (ctx.patterns.some(p => queryLower.includes(p))) {
+                        return ctx.message;
+                    }
+                }
+            }
+
+            // Weighted random between casual (60%) and quirky (25%)
+            // Plus 15% fallback to casual if no contextual match
+            const rand = Math.random();
+            if (rand < 0.70) {
+                // Casual message
+                return thinkingMessages.casual[Math.floor(Math.random() * thinkingMessages.casual.length)];
+            } else {
+                // Quirky message
+                return thinkingMessages.quirky[Math.floor(Math.random() * thinkingMessages.quirky.length)];
+            }
+        }
+
+        function showTyping(query = '') {
+            const initialMessage = getThinkingMessage(query);
+            const typingDiv = document.createElement('div');
+            typingDiv.className = 'message assistant';
+            typingDiv.id = 'typing-' + Date.now();
+            currentThinkingId = typingDiv.id;
+            typingDiv.innerHTML = `
+                <div class="message-avatar">J</div>
+                <div class="message-content">
+                    <div class="thinking-message">${initialMessage}</div>
+                    <div class="typing-indicator">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </div>
+                </div>
+            `;
+            chatContainer.appendChild(typingDiv);
+            scrollToBottom();
+
+            // Rotate messages every 3-5 seconds for longer waits
+            thinkingInterval = setInterval(() => {
+                const thinkingEl = typingDiv.querySelector('.thinking-message');
+                if (thinkingEl) {
+                    thinkingEl.classList.add('changing');
+                    setTimeout(() => {
+                        thinkingEl.textContent = getThinkingMessage(query);
+                        thinkingEl.classList.remove('changing');
+                    }, 200);
+                }
+            }, 3000 + Math.random() * 2000);
+
+            return typingDiv.id;
+        }
+
+        function removeTyping(id) {
+            if (thinkingInterval) {
+                clearInterval(thinkingInterval);
+                thinkingInterval = null;
+            }
+            currentThinkingId = null;
+            const typing = document.getElementById(id);
+            if (typing) typing.remove();
+        }
+
+        function showError(message) {
+            const toast = document.createElement('div');
+            toast.className = 'error-toast';
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 4000);
+        }
+
+        function scrollToBottom() {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function formatMessage(text) {
+            // Store markdown links before escaping, then restore after
+            const links = [];
+            let formatted = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
+                const index = links.length;
+                links.push({ text: linkText, url: url });
+                return `__LINK_PLACEHOLDER_${index}__`;
+            });
+
+            // Now escape HTML for security
+            formatted = escapeHtml(formatted);
+
+            // Restore markdown links as actual HTML links
+            links.forEach((link, index) => {
+                formatted = formatted.replace(
+                    `__LINK_PLACEHOLDER_${index}__`,
+                    `<a href="${link.url}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.text)}</a>`
+                );
+            });
+
+            // Convert plain URLs to clickable links (skip if already in a link)
+            formatted = formatted.replace(/(^|[^"'>])(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+
+            // Basic markdown-like formatting (bold, italic)
+            formatted = formatted
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*(.*?)\*/g, '<em>$1</em>');
+
+            // NORMALIZE: LLM responses often lack newlines - insert them before markdown patterns
+            // This allows line-anchored regex to work properly
+            formatted = formatted
+                // Add newlines around horizontal rules (--- surrounded by spaces or punctuation)
+                .replace(/([.!?])\s*---\s*/g, '$1\n---\n')
+                .replace(/\s+---\s+/g, '\n---\n')
+                // Add newlines before headers (##, ###, ####) when inline
+                .replace(/([.!?:,])\s*(#{2,4}\s+)/g, '$1\n$2')
+                .replace(/\s{2,}(#{2,4}\s+)/g, '\n$1')
+                // Add newlines before emoji section headers (🌤️ Weather, 🍽️ Dining, 🌅 Morning, etc.)
+                .replace(/([.!?])\s+([\u{1F300}-\u{1F9FF}][\u{FE0F}]?\s+[A-Z])/gu, '$1\n\n$2')
+                // Add newlines before location pins 📍 and tips 💡
+                .replace(/([.!?\u2705])\s+(📍)/gu, '$1\n$2')
+                .replace(/([.!?])\s+(💡\s*<em>)/g, '$1\n$2')
+                // Add newlines before numbered items when inline (1. Visit, 2. Stroll, 3. Go)
+                .replace(/([.!?])\s+(\d+\.\s+[A-Z])/g, '$1\n\n$2')
+                .replace(/([.!?])\s+(\d+\.\s+<strong>)/g, '$1\n\n$2')
+                // Add newlines before bullet points when inline (- **Item** or - Item)
+                .replace(/([.!?:;])\s+(-\s+<strong>)/g, '$1\n$2')
+                .replace(/([.!?:;])\s+(-\s+[A-Z])/g, '$1\n$2')
+                .replace(/<\/strong>\s+(-\s+<strong>)/g, '</strong>\n$1')
+                .replace(/<\/strong>\s+(-\s+[A-Z])/g, '</strong>\n$1')
+                // Break long inline label sequences (**Label**: value **Label2**: value2)
+                .replace(/(<\/strong>:[^<]{1,50})\s+(<strong>)/g, '$1\n$2');
+
+            // Convert markdown headers (must be at start of line)
+            formatted = formatted
+                .replace(/^####\s+(.+)$/gm, '<h4 class="message-h4">$1</h4>')
+                .replace(/^###\s+(.+)$/gm, '<h3 class="message-h3">$1</h3>')
+                .replace(/^##\s+(.+)$/gm, '<h2 class="message-h2">$1</h2>');
+
+            // Convert horizontal rules (--- on its own line)
+            formatted = formatted.replace(/^---+$/gm, '<hr class="message-hr">');
+
+            // Handle lists and tables - process line by line
+            const lines = formatted.split('\n');
+            let result = [];
+            let inList = false;
+            let listType = null; // 'ul' or 'ol'
+            let inTable = false;
+            let tableHeaders = [];
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+
+                // Check for markdown table row (starts and ends with |)
+                const tableRowMatch = line.match(/^\|(.+)\|$/);
+                const tableSeparatorMatch = line.match(/^\|[-:\s|]+\|$/);
+
+                if (tableRowMatch) {
+                    // Close any open list
+                    if (inList) {
+                        result.push(`</${listType}>`);
+                        inList = false;
+                        listType = null;
+                    }
+
+                    if (tableSeparatorMatch) {
+                        // Skip separator row (|---|---|)
+                        continue;
+                    }
+
+                    const cells = tableRowMatch[1].split('|').map(c => c.trim());
+
+                    if (!inTable) {
+                        // First row is header
+                        result.push('<table class="formatted-table">');
+                        result.push('<thead><tr>');
+                        cells.forEach(cell => result.push(`<th>${cell}</th>`));
+                        result.push('</tr></thead>');
+                        result.push('<tbody>');
+                        inTable = true;
+                        tableHeaders = cells;
+                    } else {
+                        // Data row
+                        result.push('<tr>');
+                        cells.forEach(cell => result.push(`<td>${cell}</td>`));
+                        result.push('</tr>');
+                    }
+                    continue;
+                }
+
+                // Close table if we're no longer in table rows
+                if (inTable) {
+                    result.push('</tbody></table>');
+                    inTable = false;
+                }
+
+                const bulletMatch = line.match(/^[-*]\s+(.+)$/);
+                const numberedMatch = line.match(/^(\d+)[.)]\s+(.+)$/);
+
+                if (bulletMatch) {
+                    if (!inList || listType !== 'ul') {
+                        if (inList) result.push(`</${listType}>`);
+                        result.push('<ul class="formatted-list">');
+                        inList = true;
+                        listType = 'ul';
+                    }
+                    result.push(`<li>${bulletMatch[1]}</li>`);
+                } else if (numberedMatch) {
+                    if (!inList || listType !== 'ol') {
+                        if (inList) result.push(`</${listType}>`);
+                        result.push('<ol class="formatted-list">');
+                        inList = true;
+                        listType = 'ol';
+                    }
+                    result.push(`<li>${numberedMatch[2]}</li>`);
+                } else {
+                    if (inList) {
+                        result.push(`</${listType}>`);
+                        inList = false;
+                        listType = null;
+                    }
+                    result.push(line);
+                }
+            }
+            if (inList) result.push(`</${listType}>`);
+            if (inTable) result.push('</tbody></table>');
+
+            // Join with <br> for non-list/non-table lines
+            formatted = result.join('\n').replace(/\n(?!<\/?[uo]l|<li|<\/?table|<\/?thead|<\/?tbody|<\/?tr|<\/?th|<\/?td)/g, '<br>');
+            // Clean up extra breaks around lists and tables
+            formatted = formatted.replace(/<br>\s*(<[uo]l|<table)/g, '$1');
+            formatted = formatted.replace(/(<\/[uo]l>|<\/table>)\s*<br>/g, '$1');
+
+            return formatted;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // =============================================================================
+        // Temperature Control
+        // =============================================================================
+
+        const tempWidget = document.getElementById('temp-widget');
+        const tempToggle = document.getElementById('temp-toggle');
+        const tempCurrent = document.getElementById('temp-current');
+        const tempTarget = document.getElementById('temp-target');
+        const tempStatus = document.getElementById('temp-status');
+        const tempIcon = document.getElementById('temp-icon');
+        const tempUp = document.getElementById('temp-up');
+        const tempDown = document.getElementById('temp-down');
+
+        let climateState = null;
+        let targetTemp = 70;
+        let minTemp = 65;
+        let maxTemp = 75;
+        let isSettingTemp = false;
+
+        // Toggle temperature widget
+        tempToggle.addEventListener('click', () => {
+            tempWidget.classList.toggle('collapsed');
+            if (!tempWidget.classList.contains('collapsed')) {
+                loadClimate();
+            }
+        });
+
+        // Temperature controls
+        tempUp.addEventListener('click', () => adjustTemp(1));
+        tempDown.addEventListener('click', () => adjustTemp(-1));
+
+        async function loadClimate() {
+            try {
+                const response = await fetch(`${API_BASE}/api/climate`);
+                if (response.ok) {
+                    climateState = await response.json();
+                    targetTemp = climateState.target_temp;
+                    minTemp = climateState.min_temp;
+                    maxTemp = climateState.max_temp;
+                    updateClimateUI();
+                } else if (response.status === 503) {
+                    tempStatus.textContent = 'Not configured';
+                    tempUp.disabled = true;
+                    tempDown.disabled = true;
+                }
+            } catch (error) {
+                console.error('Failed to load climate:', error);
+                tempStatus.textContent = 'Unavailable';
+            }
+        }
+
+        function updateClimateUI() {
+            if (!climateState) return;
+
+            tempCurrent.textContent = `${Math.round(climateState.current_temp)}°F`;
+            tempTarget.textContent = `${Math.round(targetTemp)}°F`;
+
+            // Update status text
+            const mode = climateState.hvac_mode;
+            const action = climateState.hvac_action;
+            let statusText = mode.charAt(0).toUpperCase() + mode.slice(1);
+            if (action && action !== 'idle' && action !== 'off') {
+                statusText += ` (${action})`;
+            }
+            if (climateState.humidity) {
+                statusText += ` • ${climateState.humidity}% humidity`;
+            }
+            tempStatus.textContent = statusText;
+
+            // Update icon color based on mode
+            tempIcon.classList.remove('cooling', 'off');
+            if (mode === 'cool') {
+                tempIcon.classList.add('cooling');
+            } else if (mode === 'off') {
+                tempIcon.classList.add('off');
+            }
+
+            // Update button states
+            tempUp.disabled = targetTemp >= maxTemp || isSettingTemp;
+            tempDown.disabled = targetTemp <= minTemp || isSettingTemp;
+        }
+
+        async function adjustTemp(delta) {
+            const newTemp = Math.max(minTemp, Math.min(maxTemp, targetTemp + delta));
+            if (newTemp === targetTemp) return;
+
+            targetTemp = newTemp;
+            tempTarget.textContent = `${Math.round(targetTemp)}°F`;
+            tempUp.disabled = targetTemp >= maxTemp;
+            tempDown.disabled = targetTemp <= minTemp;
+
+            // Debounce the API call
+            clearTimeout(window.tempDebounce);
+            window.tempDebounce = setTimeout(() => setTemperature(targetTemp), 500);
+        }
+
+        async function setTemperature(temp) {
+            isSettingTemp = true;
+            updateClimateUI();
+
+            try {
+                const response = await fetch(`${API_BASE}/api/climate/temperature`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ temperature: temp })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    targetTemp = data.temperature;
+                    // Refresh climate state after a short delay
+                    setTimeout(loadClimate, 1000);
+                } else {
+                    showError('Failed to set temperature');
+                    loadClimate(); // Reload to get actual state
+                }
+            } catch (error) {
+                console.error('Failed to set temperature:', error);
+                showError('Failed to set temperature');
+                loadClimate();
+            } finally {
+                isSettingTemp = false;
+                updateClimateUI();
+            }
+        }
+
+        // Refresh climate data periodically when widget is open
+        setInterval(() => {
+            if (!tempWidget.classList.contains('collapsed')) {
+                loadClimate();
+            }
+        }, 30000); // Every 30 seconds
+
+        // =============================================================================
+        // Apple TV Control
+        // =============================================================================
+
+        const tvWidget = document.getElementById('tv-widget');
+        const tvToggle = document.getElementById('tv-toggle');
+        const tvName = document.getElementById('tv-name');
+        const tvStatus = document.getElementById('tv-status');
+        const tvPower = document.getElementById('tv-power');
+        const tvApps = document.getElementById('tv-apps');
+        const tvSelector = document.getElementById('tv-selector');
+        const tvSelectorContainer = document.getElementById('tv-selector-container');
+
+        let allTVs = [];
+        let currentTV = null;
+        let streamingApps = [];
+
+        // Get saved TV selection from localStorage
+        const savedTVId = localStorage.getItem('jarvis_selected_tv');
+
+        // Toggle TV widget
+        tvToggle.addEventListener('click', () => {
+            tvWidget.classList.toggle('collapsed');
+            if (!tvWidget.classList.contains('collapsed')) {
+                loadAppleTVs();
+            }
+        });
+
+        // Power button
+        tvPower.addEventListener('click', async () => {
+            if (!currentTV) return;
+            const action = currentTV.state === 'off' ? 'on' : 'off';
+            try {
+                const response = await fetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/power/${action}`, {
+                    method: 'POST'
+                });
+                if (response.ok) {
+                    setTimeout(loadAppleTVs, 1000);
+                } else {
+                    showError(`Failed to turn ${action} Apple TV`);
+                }
+            } catch (error) {
+                console.error('Power control error:', error);
+                showError('Failed to control Apple TV');
+            }
+        });
+
+        // Remote control buttons
+        document.querySelectorAll('.tv-remote-btn[data-cmd], .tv-playback-btn[data-cmd]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (!currentTV) return;
+                const cmd = btn.dataset.cmd;
+                try {
+                    const response = await fetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/remote`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ command: cmd })
+                    });
+                    if (!response.ok) {
+                        showError('Remote command failed');
+                    }
+                } catch (error) {
+                    console.error('Remote command error:', error);
+                }
+            });
+        });
+
+        async function loadAppleTVs() {
+            try {
+                // Load Apple TVs
+                const tvResponse = await fetch(`${API_BASE}/api/appletv`);
+                if (tvResponse.ok) {
+                    allTVs = await tvResponse.json();
+                    if (allTVs.length > 0) {
+                        // Populate the TV selector dropdown
+                        populateTVSelector();
+
+                        // Select the saved TV or first available
+                        const savedTV = allTVs.find(tv => tv.entity_id === savedTVId);
+                        currentTV = savedTV || allTVs[0];
+
+                        // Update selector value
+                        tvSelector.value = currentTV.entity_id;
+                        localStorage.setItem('jarvis_selected_tv', currentTV.entity_id);
+
+                        // Show selector if multiple TVs
+                        if (allTVs.length > 1) {
+                            tvSelectorContainer.style.display = 'block';
+                        }
+
+                        updateTVUI();
+                    } else {
+                        tvStatus.textContent = 'No Apple TVs found';
+                        tvSelectorContainer.style.display = 'none';
+                    }
+                } else if (tvResponse.status === 503) {
+                    tvStatus.textContent = 'Not configured';
+                }
+
+                // Load streaming apps
+                const appsResponse = await fetch(`${API_BASE}/api/appletv/apps`);
+                if (appsResponse.ok) {
+                    streamingApps = await appsResponse.json();
+                    renderApps();
+                }
+            } catch (error) {
+                console.error('Failed to load Apple TV:', error);
+                tvStatus.textContent = 'Unavailable';
+            }
+        }
+
+        function populateTVSelector() {
+            tvSelector.innerHTML = allTVs.map(tv =>
+                `<option value="${escapeHtml(tv.entity_id)}">${escapeHtml(tv.name)} TV</option>`
+            ).join('');
+        }
+
+        // Handle TV selector change
+        tvSelector.addEventListener('change', () => {
+            const selectedTV = allTVs.find(tv => tv.entity_id === tvSelector.value);
+            if (selectedTV) {
+                currentTV = selectedTV;
+                localStorage.setItem('jarvis_selected_tv', currentTV.entity_id);
+                updateTVUI();
+            }
+        });
+
+        function updateTVUI() {
+            if (!currentTV) return;
+
+            tvName.textContent = currentTV.name + ' TV';
+
+            let statusText = currentTV.state;
+            if (currentTV.app_name && currentTV.state !== 'off') {
+                statusText = currentTV.app_name;
+            }
+            if (currentTV.media_title) {
+                statusText += ` - ${currentTV.media_title}`;
+            }
+            tvStatus.textContent = statusText;
+
+            // Update power button
+            if (currentTV.state !== 'off' && currentTV.state !== 'standby') {
+                tvPower.classList.add('on');
+            } else {
+                tvPower.classList.remove('on');
+            }
+        }
+
+        function renderApps() {
+            tvApps.innerHTML = streamingApps.slice(0, 8).map(app => `
+                <button class="tv-app-btn" onclick="launchApp('${escapeHtml(app.name)}')" title="${escapeHtml(app.name)}">
+                    <img class="tv-app-icon" src="${escapeHtml(app.logo)}" alt="${escapeHtml(app.name)}" onerror="this.style.display='none'">
+                    <span class="tv-app-name">${escapeHtml(app.name)}</span>
+                </button>
+            `).join('');
+        }
+
+        async function launchApp(appName) {
+            if (!currentTV) return;
+            try {
+                const response = await fetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/launch/${encodeURIComponent(appName)}`, {
+                    method: 'POST'
+                });
+                if (response.ok) {
+                    tvStatus.textContent = `Launching ${appName}...`;
+                    setTimeout(loadAppleTVs, 2000);
+                } else {
+                    showError(`Failed to launch ${appName}`);
+                }
+            } catch (error) {
+                console.error('App launch error:', error);
+                showError('Failed to launch app');
+            }
+        }
+
+        // Make launchApp available globally for onclick
+        window.launchApp = launchApp;
+
+        // Refresh TV data periodically when widget is open
+        setInterval(() => {
+            if (!tvWidget.classList.contains('collapsed')) {
+                loadAppleTVs();
+            }
+        }, 10000); // Every 10 seconds
+
+        // =============================================================================
+        // Voice Input/Output
+        // =============================================================================
+
+        async function checkVoiceHealth() {
+            try {
+                const response = await fetch(`${API_BASE}/api/voice/health`);
+                if (response.ok) {
+                    const data = await response.json();
+                    voiceServicesAvailable = data.stt?.status === 'healthy' && data.tts?.status === 'healthy';
+                    voiceButton.disabled = !voiceServicesAvailable;
+                    voicePanelToggle.disabled = !voiceServicesAvailable;
+                    if (!voiceServicesAvailable) {
+                        voiceButton.title = 'Voice services unavailable';
+                        voicePanelToggle.title = 'Voice services unavailable';
+                    } else {
+                        voiceButton.title = 'Hold to speak';
+                        voicePanelToggle.title = 'Voice input';
+                    }
+                } else {
+                    voiceServicesAvailable = false;
+                    voiceButton.disabled = true;
+                    voicePanelToggle.disabled = true;
+                }
+            } catch (error) {
+                console.error('Voice health check failed:', error);
+                voiceServicesAvailable = false;
+                voiceButton.disabled = true;
+                voicePanelToggle.disabled = true;
+            }
+            updateSpeakerButton();
+        }
+
+        function setupVoiceHandlers() {
+            // Voice panel toggle button
+            voicePanelToggle.addEventListener('click', () => {
+                toggleVoicePanel();
+            });
+
+            // Voice panel close button
+            voicePanelClose.addEventListener('click', () => {
+                closeVoicePanel();
+            });
+
+            // Speaker toggle button
+            speakerButton.addEventListener('click', () => {
+                voiceEnabled = !voiceEnabled;
+                localStorage.setItem('jarvis_voice_enabled', voiceEnabled ? 'true' : 'false');
+                updateSpeakerButton();
+            });
+
+            // Voice button - push to talk
+            voiceButton.addEventListener('mousedown', startRecording);
+            voiceButton.addEventListener('mouseup', stopRecording);
+            voiceButton.addEventListener('mouseleave', stopRecording);
+            voiceButton.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                startRecording();
+            });
+            voiceButton.addEventListener('touchend', (e) => {
+                e.preventDefault();
+                stopRecording();
+            });
+
+            updateSpeakerButton();
+        }
+
+        function toggleVoicePanel() {
+            if (isVoicePanelOpen) {
+                closeVoicePanel();
+            } else {
+                openVoicePanel();
+            }
+        }
+
+        function openVoicePanel() {
+            voicePanel.classList.add('visible');
+            voicePanelToggle.classList.add('active');
+            isVoicePanelOpen = true;
+        }
+
+        function closeVoicePanel() {
+            voicePanel.classList.remove('visible');
+            voicePanelToggle.classList.remove('active');
+            isVoicePanelOpen = false;
+        }
+
+        function updateSpeakerButton() {
+            if (voiceEnabled) {
+                speakerButton.classList.add('active');
+                speakerButton.title = 'Voice responses on';
+            } else {
+                speakerButton.classList.remove('active');
+                speakerButton.title = 'Voice responses off';
+            }
+        }
+
+        async function startRecording() {
+            if (!voiceServicesAvailable || isRecording) return;
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                        ? 'audio/webm;codecs=opus'
+                        : 'audio/webm'
+                });
+
+                audioChunks = [];
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        audioChunks.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = handleRecordingComplete;
+
+                // Use timeslice to capture audio in chunks (100ms)
+                // This prevents "captured nothing" on short recordings
+                mediaRecorder.start(100);
+                isRecording = true;
+
+                voiceButton.classList.add('recording');
+                setVoiceStatus('Listening...', 'recording');
+            } catch (error) {
+                console.error('Failed to start recording:', error);
+                showError('Microphone access denied');
+            }
+        }
+
+        function stopRecording() {
+            if (!isRecording || !mediaRecorder) return;
+
+            mediaRecorder.stop();
+            mediaRecorder.stream.getTracks().forEach(track => track.stop());
+            isRecording = false;
+
+            voiceButton.classList.remove('recording');
+            voiceButton.classList.add('processing');
+            setVoiceStatus('Processing...', 'processing');
+        }
+
+        async function handleRecordingComplete() {
+            if (audioChunks.length === 0) {
+                voiceButton.classList.remove('processing');
+                hideVoiceStatus();
+                return;
+            }
+
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+
+            try {
+                // Transcribe audio
+                const formData = new FormData();
+                formData.append('audio', audioBlob, 'recording.webm');
+
+                const response = await fetch(`${API_BASE}/api/voice/transcribe`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error('Transcription failed');
+                }
+
+                const result = await response.json();
+                const transcribedText = result.text?.trim();
+
+                if (transcribedText) {
+                    // Set the transcribed text in the input and send
+                    messageInput.value = transcribedText;
+                    sendButton.disabled = false;
+                    await sendMessageWithVoice(transcribedText);
+                } else {
+                    showError('No speech detected');
+                }
+            } catch (error) {
+                console.error('Transcription error:', error);
+                showError('Failed to transcribe audio');
+            } finally {
+                voiceButton.classList.remove('processing');
+                hideVoiceStatus();
+            }
+        }
+
+        async function sendMessageWithVoice(message) {
+            if (!message) return;
+
+            // Start timing for client-side round-trip measurement
+            const clientStartTime = performance.now();
+
+            // Hide welcome screen
+            if (isWelcomeVisible) {
+                welcomeScreen.style.display = 'none';
+                isWelcomeVisible = false;
+            }
+
+            // Clear input
+            messageInput.value = '';
+            messageInput.style.height = 'auto';
+            sendButton.disabled = true;
+
+            // Add user message
+            addMessage(message, 'user');
+
+            // Show typing indicator with context-aware message
+            const typingId = showTyping(message);
+
+            try {
+                const response = await fetch(`${API_BASE}/api/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: sessionId,
+                        interface_type: 'chat',
+                        location: currentLocation ? {
+                            latitude: currentLocation.latitude,
+                            longitude: currentLocation.longitude,
+                            address: currentLocation.address
+                        } : null
+                    })
+                });
+
+                // Calculate client-side round-trip time
+                const clientRoundTrip = (performance.now() - clientStartTime) / 1000;
+
+                removeTyping(typingId);
+
+                if (!response.ok) {
+                    throw new Error('Failed to get response');
+                }
+
+                const data = await response.json();
+
+                if (data.session_id && !sessionId) {
+                    sessionId = data.session_id;
+                    localStorage.setItem('jarvis_session', sessionId);
+                }
+
+                // Add assistant message with metrics
+                addMessage(data.response, 'assistant', {
+                    processing_time: clientRoundTrip,
+                    tokens: data.tokens,
+                    tokens_per_second: data.tokens_per_second,
+                    tool_exec_time: data.tool_exec_time,
+                    model_used: data.model_used,
+                    was_truncated: data.metadata?.was_truncated || false
+                });
+
+                // Check for browser playback request in response metadata
+                if (data.metadata?.browser_playback?.enabled) {
+                    handleBrowserPlayback(data.metadata.browser_playback);
+                }
+
+                // Speak the response if voice is enabled
+                if (voiceEnabled && voiceServicesAvailable) {
+                    await speakResponse(data.response);
+                }
+
+            } catch (error) {
+                removeTyping(typingId);
+                showError('Sorry, something went wrong. Please try again.');
+                console.error('Chat error:', error);
+            }
+        }
+
+        async function speakResponse(text) {
+            if (!text || !voiceEnabled) return;
+
+            // Strip markdown formatting for cleaner TTS
+            const cleanText = text
+                .replace(/\*\*(.*?)\*\*/g, '$1')
+                .replace(/\*(.*?)\*/g, '$1')
+                .replace(/`(.*?)`/g, '$1')
+                .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+                .replace(/#{1,6}\s/g, '')
+                .trim();
+
+            if (!cleanText) return;
+
+            try {
+                const response = await fetch(`${API_BASE}/api/voice/synthesize`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: cleanText })
+                });
+
+                if (!response.ok) {
+                    throw new Error('TTS failed');
+                }
+
+                const audioBlob = await response.blob();
+                const audioUrl = URL.createObjectURL(audioBlob);
+                const audio = new Audio(audioUrl);
+
+                audio.onended = () => {
+                    URL.revokeObjectURL(audioUrl);
+                };
+
+                await audio.play();
+            } catch (error) {
+                console.error('TTS error:', error);
+                // Don't show error to user - voice is optional
+            }
+        }
+
+        function setVoiceStatus(text, className) {
+            voiceStatus.textContent = text;
+            voiceStatus.className = 'voice-status';
+            if (className) {
+                voiceStatus.classList.add(className);
+            }
+        }
+
+        function hideVoiceStatus() {
+            // Reset to default message
+            setVoiceStatus('Hold the microphone to speak', '');
+        }
+    </script>
+</body>
+</html>

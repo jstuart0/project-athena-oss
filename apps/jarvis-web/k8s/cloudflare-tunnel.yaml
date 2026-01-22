@@ -1,0 +1,91 @@
+---
+# Jarvis Cloudflare Tunnel Configuration
+# This tunnel uses local config (not remote management) for Infrastructure as Code
+#
+# SETUP INSTRUCTIONS:
+# 1. Create tunnel in Cloudflare Zero Trust dashboard:
+#    - Go to https://one.dash.cloudflare.com → Networks → Tunnels
+#    - Click "Create a tunnel" → Select "Cloudflared"
+#    - Name it "jarvis-tunnel"
+#    - Copy the tunnel token OR download credentials.json
+#
+# 2. Create the credentials secret:
+#    kubectl -n cloudflare create secret generic jarvis-tunnel-credentials \
+#      --from-file=credentials.json=/path/to/credentials.json
+#
+# 3. Update the tunnel ID in the ConfigMap below with YOUR tunnel ID
+#
+# 4. Apply this manifest:
+#    kubectl apply -f cloudflare-tunnel.yaml
+#
+# 5. Add DNS CNAME in Cloudflare:
+#    jarvis.your-domain.com → <tunnel-id>.cfargotunnel.com (Proxied)
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jarvis-tunnel-config
+  namespace: cloudflare
+data:
+  config.yaml: |
+    # Replace YOUR_TUNNEL_ID with your actual Cloudflare tunnel ID
+    tunnel: YOUR_TUNNEL_ID
+    credentials-file: /etc/cloudflared/creds/credentials.json
+    metrics: 0.0.0.0:2000
+    no-autoupdate: true
+
+    ingress:
+      # Replace with your actual domain
+      - hostname: jarvis.your-domain.com
+        service: https://traefik.traefik.svc.cluster.local:443
+        originRequest:
+          noTLSVerify: true
+      - service: http_status:404
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jarvis-tunnel
+  namespace: cloudflare
+  labels:
+    app: jarvis-tunnel
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jarvis-tunnel
+  template:
+    metadata:
+      labels:
+        app: jarvis-tunnel
+    spec:
+      containers:
+      - name: cloudflared
+        image: cloudflare/cloudflared:latest
+        args:
+          - tunnel
+          - --config
+          - /etc/cloudflared/config/config.yaml
+          - run
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: 2000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 1
+        volumeMounts:
+        - name: config
+          mountPath: /etc/cloudflared/config
+          readOnly: true
+        - name: creds
+          mountPath: /etc/cloudflared/creds
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: jarvis-tunnel-config
+      - name: creds
+        secret:
+          secretName: jarvis-tunnel-credentials

@@ -1,0 +1,80 @@
+# Project Athena .gitignore
+
+# Thoughts directory - ignore personal notes and searchable hard links
+thoughts/local/
+thoughts/searchable/
+
+# Research iterations (contains live credentials)
+research/jetson-iterations/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+athena-env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment variables (but allow .env.template)
+.env
+.env.local
+config/env/.env
+!config/env/.env.template
+
+# Models (large files - store on remote)
+*.pth
+*.bin
+*.onnx
+models/*
+!models/.gitkeep
+
+# Secrets and credentials
+secrets/
+*.key
+*.pem
+credentials.json
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Kubernetes secrets (if accidentally created)
+*-secret.yaml
+!*-secret.template.yaml
+.aion/
