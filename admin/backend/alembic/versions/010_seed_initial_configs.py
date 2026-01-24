@@ -5,12 +5,13 @@ Revises: 009
 Create Date: 2025-11-17
 
 This migration seeds initial configuration data for:
-- LLM backends (phi3:mini, llama3.1:8b)
+- LLM backends (qwen3:4b - default OSS model)
 - Cross-validation models
 - Hallucination checks
 - Multi-intent configuration
 
 This ensures the admin UI has data to display and edit on first deployment.
+Note: Additional models (llama3.2:3b, phi3:mini) are seeded in migration 050.
 """
 
 from alembic import op
@@ -28,19 +29,18 @@ def upgrade():
     """Seed initial configuration data."""
 
     # ============================================================================
-    # 1. Seed LLM Backends
+    # 1. Seed LLM Backends (minimal - full seeding in migration 050)
     # ============================================================================
+    # Only seed qwen3:4b here as the default OSS model.
+    # Migration 050 adds llama3.2:3b, phi3:mini, and full model configurations.
     op.execute("""
         INSERT INTO llm_backends (model_name, backend_type, endpoint_url, enabled, priority,
-                                 max_tokens, temperature_default, timeout_seconds, description,
-                                 created_at, updated_at, total_requests, total_errors)
+                                 max_tokens, temperature_default, timeout_seconds, keep_alive_seconds,
+                                 description, created_at, updated_at, total_requests, total_errors)
         VALUES
-            ('phi3:mini', 'ollama', 'http://localhost:11434', true, 100,
-             2048, 0.7, 60, 'Phi-3 Mini (Q4) - Fast classification and quick responses',
-             NOW(), NOW(), 0, 0),
-
-            ('llama3.1:8b-q4', 'ollama', 'http://localhost:11434', true, 200,
-             4096, 0.7, 90, 'Llama 3.1 8B (Q4) - Complex reasoning and detailed responses',
+            ('qwen3:4b', 'ollama', 'http://localhost:11434', true, 50,
+             4096, 0.7, 90, -1,
+             'Qwen 3 4B - Default OSS model with good reasoning capabilities',
              NOW(), NOW(), 0, 0)
         ON CONFLICT (model_name) DO NOTHING
     """)
@@ -53,10 +53,10 @@ def upgrade():
                                             use_for_categories, temperature, max_tokens,
                                             timeout_seconds, weight, min_confidence_required, created_at)
         VALUES
-            ('phi3-primary', 'phi3:mini', 'primary', 'http://localhost:11434', true,
+            ('qwen3-primary', 'qwen3:4b', 'primary', 'http://localhost:11434', true,
              ARRAY['home_control', 'weather', 'sports']::text[], 0.1, 200, 30, 1.0, 0.7, NOW()),
 
-            ('llama-validation', 'llama3.1:8b-q4', 'validation', 'http://localhost:11434', true,
+            ('qwen3-validation', 'qwen3:4b', 'validation', 'http://localhost:11434', true,
              ARRAY['home_control']::text[], 0.1, 200, 30, 0.8, 0.6, NOW())
         ON CONFLICT (name) DO NOTHING
     """)
@@ -144,11 +144,12 @@ def upgrade():
     """)
 
     print("✓ Seeded initial configuration data:")
-    print("  - 2 LLM backends (phi3:mini, llama3.1:8b-q4)")
+    print("  - 1 LLM backend (qwen3:4b - default)")
     print("  - 2 Cross-validation models")
     print("  - 4 Hallucination checks")
     print("  - 1 Multi-intent config")
     print("  - 2 Intent chain rules")
+    print("  Note: Additional models seeded in migration 050")
 
 
 def downgrade():
@@ -158,7 +159,7 @@ def downgrade():
     op.execute("DELETE FROM intent_chain_rules WHERE name IN ('goodnight_routine', 'leaving_home')")
     op.execute("DELETE FROM multi_intent_config WHERE id = 1")
     op.execute("DELETE FROM hallucination_checks WHERE name IN ('weather_location_required', 'home_device_validation', 'confidence_threshold', 'cross_model_agreement')")
-    op.execute("DELETE FROM cross_validation_models WHERE name IN ('phi3-primary', 'llama-validation')")
-    op.execute("DELETE FROM llm_backends WHERE model_name IN ('phi3:mini', 'llama3.1:8b-q4')")
+    op.execute("DELETE FROM cross_validation_models WHERE name IN ('qwen3-primary', 'qwen3-validation')")
+    op.execute("DELETE FROM llm_backends WHERE model_name = 'qwen3:4b'")
 
     print("✓ Removed seeded configuration data")

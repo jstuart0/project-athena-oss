@@ -30,7 +30,7 @@ _FALLBACK_MODEL = os.getenv("ATHENA_INTENT_DISCOVERY_MODEL", "qwen3:4b")
 
 
 async def get_intent_discovery_model() -> str:
-    """Get intent discovery model from admin config, with fallback to env var."""
+    """Get intent discovery model from admin config, with fallback."""
     try:
         admin_client = get_admin_client()
         config = await admin_client.get_component_model("intent_discovery")
