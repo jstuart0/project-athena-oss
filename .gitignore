@@ -82,3 +82,6 @@ temp/
 *-secret.yaml
 !*-secret.template.yaml
 .aion/
+
+# Claude Code thoughts directory
+thoughts/
