@@ -316,7 +316,7 @@ async def chat(message: ChatMessage):
         # Get current mode (owner or guest based on booking/override)
         current_mode = await get_current_mode()
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             request_body = {
                 "query": message.message,
                 "mode": current_mode,

@@ -21,10 +21,24 @@ from datetime import datetime
 import structlog
 import httpx
 
+from shared.admin_config import get_admin_client
+
 logger = structlog.get_logger()
 
-# Default model for intent discovery - can be overridden via env var
-INTENT_DISCOVERY_MODEL = os.getenv("ATHENA_INTENT_DISCOVERY_MODEL", "qwen3:4b")
+# Fallback model if database lookup fails
+_FALLBACK_MODEL = os.getenv("ATHENA_INTENT_DISCOVERY_MODEL", "qwen3:4b")
+
+
+async def get_intent_discovery_model() -> str:
+    """Get intent discovery model from admin config, with fallback to env var."""
+    try:
+        admin_client = get_admin_client()
+        config = await admin_client.get_component_model("intent_discovery")
+        if config and config.get("enabled"):
+            return config.get("model_name", _FALLBACK_MODEL)
+    except Exception as e:
+        logger.warning("intent_discovery_model_lookup_failed", error=str(e))
+    return _FALLBACK_MODEL
 
 
 # =============================================================================
@@ -176,8 +190,12 @@ async def generate_novel_intent(
     try:
         prompt = NOVEL_INTENT_PROMPT.format(query=query)
 
+        # Get model from admin config if not provided
+        if not model:
+            model = await get_intent_discovery_model()
+
         result = await llm_router.generate(
-            model=model or INTENT_DISCOVERY_MODEL,
+            model=model,
             prompt=prompt,
             temperature=0.3,
         )

@@ -912,6 +912,11 @@ class LLMRouter:
         # Disable thinking mode for qwen3 models (they output to 'thinking' field by default)
         if "qwen3" in model.lower():
             payload["think"] = False
+            # Prepend /no_think to last user message to prevent extended reasoning
+            for msg in reversed(payload["messages"]):
+                if msg.get("role") == "user":
+                    msg["content"] = "/no_think\n" + msg["content"]
+                    break
             logger.info("ollama_think_disabled", model=model)
 
         try:
@@ -1017,6 +1022,8 @@ class LLMRouter:
         # Disable thinking mode for qwen3 models (they output to 'thinking' field by default)
         if "qwen3" in model.lower():
             payload["think"] = False
+            # Prepend /no_think tag to prompt to prevent extended reasoning output
+            payload["prompt"] = "/no_think\n" + payload["prompt"]
             logger.debug("ollama_generate_think_disabled", model=model)
 
         try:
@@ -1103,6 +1110,8 @@ class LLMRouter:
         # Disable thinking mode for qwen3 models
         if "qwen3" in model.lower():
             payload["think"] = False
+            # Prepend /no_think tag to prompt to prevent extended reasoning output
+            payload["prompt"] = "/no_think\n" + payload["prompt"]
 
         async with httpx.AsyncClient(base_url=endpoint_url, timeout=timeout) as client:
             async with client.stream("POST", "/api/generate", json=payload) as response:
