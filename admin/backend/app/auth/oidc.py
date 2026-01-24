@@ -173,8 +173,19 @@ async def get_authentik_userinfo(access_token: str) -> Dict[str, Any]:
     """
     try:
         async with httpx.AsyncClient() as client:
-            # Authentik userinfo endpoint is shared across all applications
-            userinfo_url = "http://localhost:9000/application/o/userinfo/"
+            # Construct userinfo URL from issuer
+            # OIDC_ISSUER is like: https://auth.example.com/application/o/athena/
+            # Userinfo endpoint is: https://auth.example.com/application/o/userinfo/
+            issuer_base = OIDC_ISSUER.rstrip('/')
+            # Extract base URL (remove application-specific path)
+            if '/application/o/' in issuer_base:
+                base_url = issuer_base.split('/application/o/')[0]
+                userinfo_url = f"{base_url}/application/o/userinfo/"
+            else:
+                # Fallback: try to get from OIDC discovery
+                userinfo_url = f"{issuer_base}/userinfo"
+
+            logger.debug("fetching_userinfo", userinfo_url=userinfo_url)
             response = await client.get(
                 userinfo_url,
                 headers={"Authorization": f"Bearer {access_token}"}

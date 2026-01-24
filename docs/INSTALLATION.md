@@ -8,6 +8,10 @@ This guide covers installing Project Athena from scratch, including all deployme
 2. [Quick Start](#quick-start)
 3. [Architecture Overview](#architecture-overview)
 4. [Configuration](#configuration)
+   - [Required Environment Variables](#required-environment-variables)
+   - [Service Location Configuration](#service-location-configuration)
+   - [Cross-Service Communication](#cross-service-communication)
+   - [LLM Model Configuration](#llm-model-configuration)
 5. [Module Selection](#module-selection)
 6. [Deployment Options](#deployment-options)
    - [Local Development](#local-development)
@@ -195,6 +199,77 @@ GATEWAY_URL=http://compute-server:8000
 SERVICE_HOST=compute-server
 RAG_SERVICE_HOST=compute-server
 ```
+
+### LLM Model Configuration
+
+Project Athena automatically configures a default LLM model for all components on first startup. This provides a working out-of-the-box experience.
+
+#### Default Behavior
+
+On startup, the Admin Backend will:
+1. **Seed the database** with LLM backend configuration and component model assignments
+2. **Auto-pull the model** from Ollama if not already available
+
+#### Configuration Options
+
+```bash
+# Default model for all orchestrator components
+# Recommended: qwen3:4b (best balance of speed and quality)
+# Alternatives: phi3:mini (faster), llama3.2:3b (good alternative)
+ATHENA_DEFAULT_MODEL=qwen3:4b
+
+# Enable/disable automatic database seeding (default: true)
+# Set to false if manually configuring LLM backends via Admin UI
+ATHENA_SEED_DEFAULTS=true
+
+# Enable/disable automatic model downloading (default: true)
+# Set to false if pre-pulling models or using external LLM
+ATHENA_AUTO_PULL_MODELS=true
+```
+
+#### Component Model Assignments
+
+The following components are automatically configured with the default model:
+
+| Component | Description | Default Temperature |
+|-----------|-------------|---------------------|
+| `intent_classifier` | Classifies user queries into categories | 0.3 |
+| `tool_calling_simple` | Selects RAG tools for simple queries | 0.7 |
+| `tool_calling_complex` | Selects RAG tools for complex queries | 0.7 |
+| `tool_calling_super_complex` | Handles highly complex queries | 0.7 |
+| `response_synthesis` | Generates natural language responses | 0.7 |
+| `fact_check_validation` | Validates responses for accuracy | 0.1 |
+| `smart_home_control` | Extracts device commands | 0.1 |
+| `response_validator_primary` | Primary cross-validation model | 0.1 |
+| `response_validator_secondary` | Secondary cross-validation model | 0.1 |
+| `conversation_summarizer` | Compresses conversation history | 0.3 |
+
+#### Manual Configuration
+
+If you prefer to configure models manually:
+
+1. Disable automatic seeding:
+   ```bash
+   ATHENA_SEED_DEFAULTS=false
+   ```
+
+2. Pre-pull your desired models:
+   ```bash
+   ollama pull qwen3:4b
+   ollama pull phi3:mini  # Optional: for cross-validation
+   ```
+
+3. Configure via Admin UI:
+   - Go to Admin UI → LLM → Backends to add LLM backends
+   - Go to Admin UI → LLM → Components to assign models to components
+
+#### Using Different Models per Component
+
+After initial setup, you can customize models per component via the Admin UI:
+
+- **Fast tasks** (intent classification): Use smaller models like `phi3:mini`
+- **Complex tasks** (response synthesis): Use larger models like `qwen3:4b` or `llama3.2:3b`
+- **Validation**: Use different model families for cross-validation accuracy
 
 ---
 
@@ -503,10 +578,15 @@ Environment="OLLAMA_HOST=0.0.0.0:11434"
 # Restart Ollama
 sudo systemctl restart ollama
 
-# Pull required models
-ollama pull phi3:mini
+# Pull required models (qwen3:4b is the default)
 ollama pull qwen3:4b
+
+# Optional: additional models for cross-validation or fallback
+ollama pull phi3:mini
+ollama pull llama3.2:3b
 ```
+
+> **Note:** If `ATHENA_AUTO_PULL_MODELS=true` (default), the Admin Backend will automatically pull the default model on startup. You only need to manually pull models if auto-pull is disabled or you want additional models.
 
 #### Example 3: Full Kubernetes Distribution
 
@@ -661,8 +741,31 @@ curl http://localhost:11434/api/tags
 **Check model is loaded:**
 ```bash
 ollama list
-# If model missing:
-ollama pull phi3:mini
+# If model missing (should auto-pull on startup):
+ollama pull qwen3:4b
+```
+
+**Check LLM backend is configured:**
+```bash
+# Via Admin API (requires authentication)
+curl http://localhost:8080/api/llm-backends
+
+# Or check database directly
+psql -h $ATHENA_DB_HOST -U athena -d athena \
+  -c "SELECT model_name, enabled FROM llm_backends"
+```
+
+**Check component model assignments:**
+```bash
+psql -h $ATHENA_DB_HOST -U athena -d athena \
+  -c "SELECT component_name, model_name FROM component_model_assignments"
+```
+
+**Force re-seed defaults:**
+```bash
+# Restart admin backend with seeding enabled
+ATHENA_SEED_DEFAULTS=true
+# The admin backend will re-seed on next startup
 ```
 
 ### Database Errors

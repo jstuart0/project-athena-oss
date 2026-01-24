@@ -49,11 +49,9 @@ spec:
   entryPoints:
     - websecure
   routes:
-    # API routes -> Backend (strip /api prefix)
-    - match: Host(`athena.local`) && PathPrefix(`/api`)
+    # API routes -> Backend (use /api/ with trailing slash to not match /api-client.js)
+    - match: Host(`athena.local`) && PathPrefix(`/api/`)
       kind: Rule
-      middlewares:
-        - name: strip-api-prefix
       services:
         - name: athena-admin-backend
           port: 8080

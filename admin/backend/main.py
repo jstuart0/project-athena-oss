@@ -22,7 +22,7 @@ from redis.asyncio import Redis
 from sqlalchemy.orm import Session
 import structlog
 
-from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_dev_data
+from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_dev_data, seed_oss_defaults, OSS_DEFAULT_MODEL, OSS_OLLAMA_URL, OSS_AUTO_PULL_MODELS, OSS_SEED_DEFAULTS
 from app.services.calendar_sync import start_background_sync, stop_background_sync
 from app.auth.oidc import (
     oauth,
@@ -230,6 +230,16 @@ async def startup_event():
             except Exception as e:
                 logger.error("database_schema_init_failed", error=str(e))
 
+            # Seed OSS default configuration (LLM backends, component models)
+            if OSS_SEED_DEFAULTS:
+                try:
+                    seed_oss_defaults()
+                    logger.info("oss_defaults_seeded")
+                except Exception as e:
+                    logger.error("oss_defaults_seeding_failed", error=str(e))
+            else:
+                logger.info("oss_defaults_seeding_disabled", reason="ATHENA_SEED_DEFAULTS=false")
+
             # Configure OAuth/OIDC from database
             try:
                 from app.auth.oidc import configure_oauth_client
@@ -240,10 +250,76 @@ async def startup_event():
         else:
             logger.error("database_connection_failed")
 
+    # Check and pull default LLM model if needed (background task)
+    if OSS_AUTO_PULL_MODELS:
+        try:
+            await ensure_default_model()
+        except Exception as e:
+            logger.warning("model_check_failed", error=str(e), model=OSS_DEFAULT_MODEL)
+    else:
+        logger.info("auto_pull_disabled", reason="ATHENA_AUTO_PULL_MODELS=false")
+
     logger.info("athena_admin_ready", dev_mode=DEV_MODE)
 
     # Start background calendar sync task
     start_background_sync()
+
+
+async def ensure_default_model():
+    """
+    Ensure the default LLM model is available in Ollama.
+
+    Checks if the model exists and pulls it if not available.
+    Runs as a background task to avoid blocking startup.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Check if Ollama is reachable
+            try:
+                response = await client.get(f"{OSS_OLLAMA_URL}/api/tags")
+                if response.status_code != 200:
+                    logger.warning("ollama_not_reachable", url=OSS_OLLAMA_URL)
+                    return
+            except Exception as e:
+                logger.warning("ollama_connection_failed", url=OSS_OLLAMA_URL, error=str(e))
+                return
+
+            # Check if model exists
+            models_data = response.json()
+            models = models_data.get("models", [])
+            model_names = [m.get("name", "") for m in models]
+
+            if OSS_DEFAULT_MODEL in model_names:
+                logger.info("default_model_available", model=OSS_DEFAULT_MODEL)
+                return
+
+            # Check if model name without tag exists (e.g., "qwen3:4b" might be stored as "qwen3:4b")
+            model_base = OSS_DEFAULT_MODEL.split(":")[0]
+            matching_models = [m for m in model_names if m.startswith(model_base)]
+            if matching_models:
+                logger.info("default_model_variant_available", model=OSS_DEFAULT_MODEL, found=matching_models[0])
+                return
+
+            # Model not found, attempt to pull it
+            logger.info("pulling_default_model", model=OSS_DEFAULT_MODEL)
+
+            # Use longer timeout for model pull
+            async with httpx.AsyncClient(timeout=600.0) as pull_client:
+                response = await pull_client.post(
+                    f"{OSS_OLLAMA_URL}/api/pull",
+                    json={"name": OSS_DEFAULT_MODEL, "stream": False}
+                )
+
+                if response.status_code == 200:
+                    logger.info("default_model_pulled_successfully", model=OSS_DEFAULT_MODEL)
+                else:
+                    logger.warning("default_model_pull_failed",
+                                 model=OSS_DEFAULT_MODEL,
+                                 status=response.status_code,
+                                 response=response.text[:200])
+
+    except Exception as e:
+        logger.warning("ensure_default_model_error", error=str(e), model=OSS_DEFAULT_MODEL)
 
 
 # Shutdown event: Clean up background tasks
@@ -323,12 +399,15 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
             }
         )
         access_token = token.get('access_token')
+        logger.debug("token_exchange_complete", has_access_token=bool(access_token))
 
         if not access_token:
             raise HTTPException(status_code=400, detail="No access token received")
 
-        # Get user info from Authentik
-        userinfo = await get_authentik_userinfo(access_token)
+        # Get user info from Authentik using authlib's built-in method
+        # This properly handles the userinfo endpoint discovery and auth
+        userinfo = await oauth.authentik.userinfo(token=token)
+        logger.debug("userinfo_received", userinfo_keys=list(userinfo.keys()) if userinfo else None)
 
         # Create or update user in database
         user = get_or_create_user(db, userinfo)

@@ -4,12 +4,16 @@ Orchestrator State Definitions
 Contains the core state classes and enums used throughout the LangGraph state machine.
 """
 
+import os
 import time
 import hashlib
 from typing import Dict, Any, Optional, List, Literal
 from enum import Enum
 
 from pydantic import BaseModel, Field
+
+# Model configuration from environment (defaults to qwen3:4b for portability)
+_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b")
 
 
 class IntentCategory(str, Enum):
@@ -32,11 +36,11 @@ class IntentCategory(str, Enum):
 
 class ModelTier(str, Enum):
     """Model tiers for different query complexities (all preloaded with keep_alive=-1)."""
-    CLASSIFIER = "qwen3:4b"  # Fast classification - matches database config
-    SMALL = "qwen3:4b-instruct-2507-q4_K_M"  # Fast tool calling - matches database config
-    MEDIUM = "qwen3:4b-instruct-2507-q4_K_M"  # Fast for most tasks
-    LARGE = "qwen3:8b"  # Complex queries - matches database config
-    SYNTHESIS = "qwen3:4b-instruct-2507-q4_K_M"  # Response synthesis - matches database config
+    CLASSIFIER = os.getenv("ATHENA_MODEL_CLASSIFIER", _DEFAULT_MODEL)  # Fast classification
+    SMALL = os.getenv("ATHENA_MODEL_SMALL", _DEFAULT_MODEL)  # Fast tool calling
+    MEDIUM = os.getenv("ATHENA_MODEL_MEDIUM", _DEFAULT_MODEL)  # Fast for most tasks
+    LARGE = os.getenv("ATHENA_MODEL_LARGE", _DEFAULT_MODEL)  # Complex queries
+    SYNTHESIS = os.getenv("ATHENA_MODEL_SYNTHESIS", _DEFAULT_MODEL)  # Response synthesis
 
 
 class ConversationContext(BaseModel):

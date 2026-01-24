@@ -65,7 +65,68 @@ class OllamaClient:
         response = await self.client.get("/api/tags")
         response.raise_for_status()
         return response.json()
-    
+
+    async def has_model(self, model: str) -> bool:
+        """Check if a model is available locally"""
+        try:
+            models_data = await self.list_models()
+            models = models_data.get("models", [])
+            # Check exact match or base name match (e.g., "qwen3:4b" matches "qwen3:4b")
+            model_names = [m.get("name", "") for m in models]
+            return model in model_names or any(m.startswith(model.split(":")[0]) for m in model_names)
+        except Exception:
+            return False
+
+    async def pull_model(self, model: str, stream: bool = True) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Pull a model from the Ollama library.
+
+        Args:
+            model: Model name to pull (e.g., "qwen3:4b")
+            stream: Whether to stream progress updates
+
+        Yields:
+            Progress updates as dictionaries with 'status' and optionally 'completed', 'total'
+        """
+        payload = {"name": model, "stream": stream}
+
+        # Use a longer timeout for model pulling (can take several minutes)
+        async with httpx.AsyncClient(base_url=self.url, timeout=600.0) as client:
+            if stream:
+                async with client.stream("POST", "/api/pull", json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if line:
+                            import json
+                            yield json.loads(line)
+            else:
+                response = await client.post("/api/pull", json=payload)
+                response.raise_for_status()
+                yield response.json()
+
+    async def ensure_model(self, model: str) -> bool:
+        """
+        Ensure a model is available, pulling it if necessary.
+
+        Args:
+            model: Model name to ensure is available
+
+        Returns:
+            True if model is available (was present or successfully pulled)
+        """
+        if await self.has_model(model):
+            return True
+
+        try:
+            # Pull the model
+            async for progress in self.pull_model(model):
+                status = progress.get("status", "")
+                if "error" in status.lower():
+                    return False
+            return True
+        except Exception:
+            return False
+
     async def close(self):
         """Close the HTTP client"""
         await self.client.aclose()

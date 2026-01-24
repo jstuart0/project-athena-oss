@@ -88,6 +88,27 @@ spec:
             secretKeyRef:
               name: ha-credentials
               key: token
+        # OIDC Authentication (Authentik)
+        - name: OIDC_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: athena-oidc
+              key: OIDC_CLIENT_ID
+        - name: OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: athena-oidc
+              key: OIDC_CLIENT_SECRET
+        - name: OIDC_ISSUER
+          valueFrom:
+            secretKeyRef:
+              name: athena-oidc
+              key: OIDC_ISSUER
+        - name: OIDC_REDIRECT_URI
+          valueFrom:
+            secretKeyRef:
+              name: athena-oidc
+              key: OIDC_REDIRECT_URI
         resources:
           requests:
             memory: "128Mi"

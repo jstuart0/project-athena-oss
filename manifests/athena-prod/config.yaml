@@ -27,6 +27,25 @@ data:
   # ==========================================================================
   OLLAMA_URL: "http://ollama:11434"
 
+  # ==========================================================================
+  # LLM Model Configuration (OSS Defaults)
+  # ==========================================================================
+  # Default model for all orchestrator components. On first startup:
+  #   1. Database is seeded with LLM backend and component assignments
+  #   2. Model is auto-pulled from Ollama if not already available
+  #
+  # Recommended models (quality vs speed tradeoff):
+  #   - qwen3:4b (default) - Best balance for most tasks
+  #   - phi3:mini          - Faster but less capable
+  #   - llama3.2:3b        - Good alternative
+  #
+  # Set ATHENA_SEED_DEFAULTS to "false" to skip automatic database seeding
+  # Set ATHENA_AUTO_PULL_MODELS to "false" to skip automatic model downloading
+  # ==========================================================================
+  ATHENA_DEFAULT_MODEL: "qwen3:4b"
+  ATHENA_SEED_DEFAULTS: "true"
+  ATHENA_AUTO_PULL_MODELS: "true"
+
   # Service URLs (internal cluster DNS - usually no need to change)
   ADMIN_API_URL: "http://athena-admin-backend:8080"
   GATEWAY_URL: "http://athena-gateway:8000"

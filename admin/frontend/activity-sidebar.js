@@ -156,7 +156,8 @@
 
         try {
             const response = await Athena.api('/api/audit/recent?limit=' + config.maxItems);
-            activities = response || [];
+            // API returns {entries: [...]} - extract the array
+            activities = (response && response.entries) || [];
             render();
         } catch (error) {
             console.error('[AthenaActivity] Refresh failed:', error);

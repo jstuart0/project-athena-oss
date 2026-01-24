@@ -53,16 +53,19 @@ RAG_SERVICE_URL_MAP: Dict[str, str] = {
 # Model Configuration
 # ============================================================================
 
+# Default model for portable deployments (override via ATHENA_DEFAULT_MODEL)
+_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b")
+
 # Fallback model values if database unavailable
 # These can be overridden via environment variables: ATHENA_FALLBACK_MODEL_<COMPONENT_NAME>
 FALLBACK_MODELS: Dict[str, str] = {
-    "intent_classifier": os.getenv("ATHENA_FALLBACK_MODEL_INTENT_CLASSIFIER", "qwen3:4b"),
-    "tool_calling_simple": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_SIMPLE", "qwen3:4b-instruct-2507-q4_K_M"),
-    "tool_calling_complex": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_COMPLEX", "qwen3:4b-instruct-2507-q4_K_M"),
-    "tool_calling_super_complex": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_SUPER_COMPLEX", "qwen3:8b"),
-    "response_synthesis": os.getenv("ATHENA_FALLBACK_MODEL_RESPONSE_SYNTHESIS", "qwen3:4b-instruct-2507-q4_K_M"),
-    "fact_check_validation": os.getenv("ATHENA_FALLBACK_MODEL_FACT_CHECK_VALIDATION", "qwen3:8b"),
-    "conversation_summarizer": os.getenv("ATHENA_FALLBACK_MODEL_CONVERSATION_SUMMARIZER", "qwen3:4b"),
+    "intent_classifier": os.getenv("ATHENA_FALLBACK_MODEL_INTENT_CLASSIFIER", _DEFAULT_MODEL),
+    "tool_calling_simple": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_SIMPLE", _DEFAULT_MODEL),
+    "tool_calling_complex": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_COMPLEX", _DEFAULT_MODEL),
+    "tool_calling_super_complex": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_SUPER_COMPLEX", _DEFAULT_MODEL),
+    "response_synthesis": os.getenv("ATHENA_FALLBACK_MODEL_RESPONSE_SYNTHESIS", _DEFAULT_MODEL),
+    "fact_check_validation": os.getenv("ATHENA_FALLBACK_MODEL_FACT_CHECK_VALIDATION", _DEFAULT_MODEL),
+    "conversation_summarizer": os.getenv("ATHENA_FALLBACK_MODEL_CONVERSATION_SUMMARIZER", _DEFAULT_MODEL),
 }
 
 # ============================================================================

@@ -244,3 +244,99 @@ def seed_dev_data():
 
         db.commit()
         logger.info("dev_mode_seed_data_complete")
+
+
+# OSS default model configuration
+OSS_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b")
+OSS_OLLAMA_URL = os.getenv("OLLAMA_URL") or os.getenv("LLM_SERVICE_URL", "http://localhost:11434")
+OSS_AUTO_PULL_MODELS = os.getenv("ATHENA_AUTO_PULL_MODELS", "true").lower() == "true"
+OSS_SEED_DEFAULTS = os.getenv("ATHENA_SEED_DEFAULTS", "true").lower() == "true"
+
+
+def seed_oss_defaults():
+    """
+    Seed OSS default configuration for LLM backends and component assignments.
+
+    This ensures a working out-of-the-box experience with qwen3:4b as the default model.
+    Called during production startup to ensure configuration exists.
+    """
+    from datetime import datetime
+    from app.models import LLMBackend, ComponentModelAssignment
+
+    with get_db_context() as db:
+        # Check if LLM backend exists for the default model
+        backend = db.query(LLMBackend).filter(LLMBackend.model_name == OSS_DEFAULT_MODEL).first()
+
+        if not backend:
+            # Create default LLM backend
+            backend = LLMBackend(
+                model_name=OSS_DEFAULT_MODEL,
+                backend_type="ollama",
+                endpoint_url=OSS_OLLAMA_URL,
+                enabled=True,
+                priority=50,
+                max_tokens=4096,
+                temperature_default=0.7,
+                timeout_seconds=90,
+                keep_alive_seconds=-1,  # Keep model loaded indefinitely
+                description=f"{OSS_DEFAULT_MODEL} - Default OSS model for all components",
+                total_requests=0,
+                total_errors=0
+            )
+            db.add(backend)
+            logger.info("oss_llm_backend_created", model=OSS_DEFAULT_MODEL)
+
+        # Component model assignments to create/update
+        components = [
+            ("intent_classifier", "Intent Classification", "Classifies user queries into intent categories", "orchestrator", 0.3),
+            ("tool_calling_simple", "Tool Calling (Simple)", "Selects RAG tools for simple queries", "orchestrator", 0.7),
+            ("tool_calling_complex", "Tool Calling (Complex)", "Selects RAG tools for complex queries", "orchestrator", 0.7),
+            ("tool_calling_super_complex", "Tool Calling (Super Complex)", "Selects RAG tools for highly complex queries", "orchestrator", 0.7),
+            ("response_synthesis", "Response Synthesis", "Generates natural language responses from RAG results", "orchestrator", 0.7),
+            ("fact_check_validation", "Fact-Check Validation", "Validates responses for accuracy", "validation", 0.1),
+            ("smart_home_control", "Smart Home Control", "Extracts device commands from natural language", "control", 0.1),
+            ("response_validator_primary", "Response Validator (Primary)", "Primary model for cross-validation", "validation", 0.1),
+            ("response_validator_secondary", "Response Validator (Secondary)", "Secondary model for cross-validation", "validation", 0.1),
+            ("conversation_summarizer", "Conversation Summarizer", "Compresses conversation history", "orchestrator", 0.3),
+        ]
+
+        created_count = 0
+        updated_count = 0
+
+        for comp_name, display_name, description, category, temperature in components:
+            assignment = db.query(ComponentModelAssignment).filter(
+                ComponentModelAssignment.component_name == comp_name
+            ).first()
+
+            if not assignment:
+                # Create new assignment
+                assignment = ComponentModelAssignment(
+                    component_name=comp_name,
+                    display_name=display_name,
+                    description=description,
+                    category=category,
+                    model_name=OSS_DEFAULT_MODEL,
+                    backend_type="ollama",
+                    temperature=temperature,
+                    enabled=True
+                )
+                db.add(assignment)
+                created_count += 1
+            elif assignment.model_name != OSS_DEFAULT_MODEL:
+                # Update existing assignment to use default model if it's using an unavailable model
+                # Only update if model_name looks like an old default (qwen2.5, phi3, llama3.1)
+                old_model = assignment.model_name.lower()
+                if any(m in old_model for m in ["qwen2.5", "phi3:mini", "llama3.1", "llama3.2"]):
+                    assignment.model_name = OSS_DEFAULT_MODEL
+                    assignment.updated_at = datetime.utcnow()
+                    updated_count += 1
+
+        db.commit()
+
+        if created_count > 0 or updated_count > 0:
+            logger.info("oss_component_models_seeded",
+                       model=OSS_DEFAULT_MODEL,
+                       created=created_count,
+                       updated=updated_count)
+        else:
+            logger.debug("oss_component_models_already_configured")

@@ -1014,14 +1014,30 @@ class LLMRouter:
         # -1 = keep forever, 0 = unload immediately, >0 = seconds
         payload["keep_alive"] = keep_alive
 
+        # Disable thinking mode for qwen3 models (they output to 'thinking' field by default)
+        if "qwen3" in model.lower():
+            payload["think"] = False
+            logger.debug("ollama_generate_think_disabled", model=model)
+
         try:
             response = await client.post("/api/generate", json=payload)
 
             response.raise_for_status()
             data = response.json()
 
+            response_text = data.get("response", "")
+
+            # Strip thinking content from qwen3 models
+            # The model may output thinking before </think> token
+            if "qwen3" in model.lower() and "</think>" in response_text:
+                # Extract content after </think> tag
+                parts = response_text.split("</think>", 1)
+                if len(parts) > 1:
+                    response_text = parts[1].strip()
+                    logger.debug("stripped_qwen3_thinking", model=model, original_len=len(data.get("response", "")), stripped_len=len(response_text))
+
             return {
-                "response": data.get("response"),
+                "response": response_text,
                 "backend": "ollama",
                 "model": model,
                 "done": data.get("done", True),
@@ -1083,6 +1099,10 @@ class LLMRouter:
             "options": options,
             "keep_alive": keep_alive
         }
+
+        # Disable thinking mode for qwen3 models
+        if "qwen3" in model.lower():
+            payload["think"] = False
 
         async with httpx.AsyncClient(base_url=endpoint_url, timeout=timeout) as client:
             async with client.stream("POST", "/api/generate", json=payload) as response:

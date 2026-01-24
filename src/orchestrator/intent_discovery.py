@@ -11,6 +11,7 @@ When the classifier has low confidence:
 4. Cluster with existing or create new
 """
 
+import os
 import json
 import hashlib
 import asyncio
@@ -21,6 +22,9 @@ import structlog
 import httpx
 
 logger = structlog.get_logger()
+
+# Default model for intent discovery - can be overridden via env var
+INTENT_DISCOVERY_MODEL = os.getenv("ATHENA_INTENT_DISCOVERY_MODEL", "qwen3:4b")
 
 
 # =============================================================================
@@ -173,7 +177,7 @@ async def generate_novel_intent(
         prompt = NOVEL_INTENT_PROMPT.format(query=query)
 
         result = await llm_router.generate(
-            model=model or "qwen2.5:3b",
+            model=model or INTENT_DISCOVERY_MODEL,
             prompt=prompt,
             temperature=0.3,
         )

@@ -177,7 +177,7 @@ async def get_current_guest() -> Optional[Dict[str, Any]]:
     # Use internal cluster service URL for service-to-service calls
     internal_url = os.getenv(
         "ADMIN_INTERNAL_URL",
-        "http://athena-admin-backend.athena-admin.svc.cluster.local:8080"
+        os.getenv("ADMIN_API_URL", "http://athena-admin-backend:8080")
     )
 
     try:
@@ -1756,7 +1756,7 @@ async def set_freezer_temperature(request: SetApplianceTempRequest):
 # Use internal endpoint for service-to-service calls
 ADMIN_INTERNAL_URL = os.getenv(
     "ADMIN_INTERNAL_URL",
-    "http://athena-admin-backend.athena-admin.svc.cluster.local:8080"
+    os.getenv("ADMIN_API_URL", "http://athena-admin-backend:8080")
 )
 
 

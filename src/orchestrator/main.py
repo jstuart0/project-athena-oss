@@ -1103,27 +1103,30 @@ class IntentCategory(str, Enum):
     GENERAL_INFO = "general_info"  # General knowledge
     UNKNOWN = "unknown"  # Unclear intent
 
+# Default model for portable deployments (override via ATHENA_DEFAULT_MODEL)
+_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b")
+
 # Model tiers (all preloaded with keep_alive=-1)
 class ModelTier(str, Enum):
-    CLASSIFIER = "qwen3:4b"  # Fast classification - matches database config
-    SMALL = "qwen3:4b-instruct-2507-q4_K_M"  # Fast tool calling - matches database config
-    MEDIUM = "qwen3:4b-instruct-2507-q4_K_M"  # Fast for most tasks
-    LARGE = "qwen3:8b"  # Complex queries - matches database config
-    SYNTHESIS = "qwen3:4b-instruct-2507-q4_K_M"  # Response synthesis - matches database config
+    CLASSIFIER = os.getenv("ATHENA_MODEL_CLASSIFIER", _DEFAULT_MODEL)  # Fast classification
+    SMALL = os.getenv("ATHENA_MODEL_SMALL", _DEFAULT_MODEL)  # Fast tool calling
+    MEDIUM = os.getenv("ATHENA_MODEL_MEDIUM", _DEFAULT_MODEL)  # Fast for most tasks
+    LARGE = os.getenv("ATHENA_MODEL_LARGE", _DEFAULT_MODEL)  # Complex queries
+    SYNTHESIS = os.getenv("ATHENA_MODEL_SYNTHESIS", _DEFAULT_MODEL)  # Response synthesis
 
 
 # Fallback model values if database unavailable
 # These can be overridden via environment variables: ATHENA_FALLBACK_MODEL_<COMPONENT_NAME>
 # IMPORTANT: Complex should use a MORE capable model than simple for meaningful escalation
 FALLBACK_MODELS = {
-    "intent_classifier": os.getenv("ATHENA_FALLBACK_MODEL_INTENT_CLASSIFIER", "qwen3:4b"),
-    "tool_calling_simple": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_SIMPLE", "qwen3:4b-instruct-2507-q4_K_M"),
-    "tool_calling_complex": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_COMPLEX", "qwen2.5:14b"),  # UPGRADED from 4b for meaningful escalation
-    "tool_calling_super_complex": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_SUPER_COMPLEX", "qwen2.5:32b"),  # Top tier
-    "response_synthesis": os.getenv("ATHENA_FALLBACK_MODEL_RESPONSE_SYNTHESIS", "qwen3:4b-instruct-2507-q4_K_M"),
-    "response_synthesis_complex": os.getenv("ATHENA_FALLBACK_MODEL_RESPONSE_SYNTHESIS_COMPLEX", "qwen2.5:14b"),  # For complex responses
-    "fact_check_validation": os.getenv("ATHENA_FALLBACK_MODEL_FACT_CHECK_VALIDATION", "qwen3:8b"),
-    "conversation_summarizer": os.getenv("ATHENA_FALLBACK_MODEL_CONVERSATION_SUMMARIZER", "qwen3:4b"),
+    "intent_classifier": os.getenv("ATHENA_FALLBACK_MODEL_INTENT_CLASSIFIER", _DEFAULT_MODEL),
+    "tool_calling_simple": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_SIMPLE", _DEFAULT_MODEL),
+    "tool_calling_complex": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_COMPLEX", _DEFAULT_MODEL),
+    "tool_calling_super_complex": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_SUPER_COMPLEX", _DEFAULT_MODEL),
+    "response_synthesis": os.getenv("ATHENA_FALLBACK_MODEL_RESPONSE_SYNTHESIS", _DEFAULT_MODEL),
+    "response_synthesis_complex": os.getenv("ATHENA_FALLBACK_MODEL_RESPONSE_SYNTHESIS_COMPLEX", _DEFAULT_MODEL),
+    "fact_check_validation": os.getenv("ATHENA_FALLBACK_MODEL_FACT_CHECK_VALIDATION", _DEFAULT_MODEL),
+    "conversation_summarizer": os.getenv("ATHENA_FALLBACK_MODEL_CONVERSATION_SUMMARIZER", _DEFAULT_MODEL),
 }
 
 # Component model cache (performance optimization)
@@ -1302,7 +1305,7 @@ async def get_model_for_component(component_name: str) -> str:
         if config.get("enabled"):
             return config.get("model_name")
 
-    return FALLBACK_MODELS.get(component_name, "qwen3:4b-instruct-2507-q4_K_M")
+    return FALLBACK_MODELS.get(component_name, _DEFAULT_MODEL)
 
 
 async def get_component_config(component_name: str) -> dict:
@@ -1348,7 +1351,7 @@ async def get_component_config(component_name: str) -> dict:
 
     # Return fallback with defaults
     return {
-        "model_name": FALLBACK_MODELS.get(component_name, "qwen3:4b-instruct-2507-q4_K_M"),
+        "model_name": FALLBACK_MODELS.get(component_name, _DEFAULT_MODEL),
         "backend_type": "ollama",
         "temperature": None,
         "max_tokens": None,

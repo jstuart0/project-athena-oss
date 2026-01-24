@@ -11,7 +11,7 @@ from typing import Optional
 from shared.admin_config import get_admin_client
 from shared.logging_config import configure_logging
 
-from .constants import FALLBACK_MODELS
+from .constants import FALLBACK_MODELS, _DEFAULT_MODEL
 
 logger = configure_logging("orchestrator.utils")
 
@@ -107,7 +107,7 @@ async def get_model_for_component(component_name: str) -> str:
         logger.warning(f"Failed to get model for {component_name}: {e}")
 
     # Return fallback
-    return FALLBACK_MODELS.get(component_name, "qwen3:4b-instruct-2507-q4_K_M")
+    return FALLBACK_MODELS.get(component_name, _DEFAULT_MODEL)
 
 
 def get_location_state(city: str) -> Optional[str]:
