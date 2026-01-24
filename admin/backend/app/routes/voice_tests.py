@@ -27,7 +27,7 @@ from wyoming.event import Event
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
-from app.models import User, VoiceTest, VoiceTestFeedback, LLMPerformanceMetric
+from app.models import User, VoiceTest, VoiceTestFeedback, LLMPerformanceMetric, SystemSetting
 
 logger = structlog.get_logger()
 
@@ -39,9 +39,21 @@ WYOMING_STT_PORT = int(os.getenv("WYOMING_STT_PORT", "10300"))
 WYOMING_TTS_HOST = os.getenv("WYOMING_TTS_HOST", "localhost")
 WYOMING_TTS_PORT = int(os.getenv("WYOMING_TTS_PORT", "10200"))
 
-# LLM and service configuration
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+# Other service configuration
 RAG_SERVICE_HOST = os.getenv("RAG_SERVICE_HOST", "localhost")
+
+
+def get_ollama_url(db: Session) -> str:
+    """
+    Get centralized Ollama URL from system_settings.
+
+    The system_settings table is the single source of truth.
+    Falls back to OLLAMA_URL environment variable if not set.
+    """
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
+    if setting and setting.value:
+        return setting.value
+    return os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 
 async def wyoming_transcribe(audio_path: str) -> dict:
@@ -381,9 +393,10 @@ async def test_llm_processing(
         raise HTTPException(status_code=400, detail="Prompt is required")
 
     model = query.model or "phi3:mini"
+    ollama_url = get_ollama_url(db)
 
     try:
-        url = f"{OLLAMA_URL}/api/generate"
+        url = f"{ollama_url}/api/generate"
         payload = {
             "model": model,
             "prompt": query.text,
@@ -564,10 +577,11 @@ async def test_full_pipeline(
     try:
         timings = {}
         results = {}
+        ollama_url = get_ollama_url(db)
 
         # 1. LLM Processing
         start = time.time()
-        llm_url = f"{OLLAMA_URL}/api/generate"
+        llm_url = f"{ollama_url}/api/generate"
         async with aiohttp.ClientSession() as session:
             async with session.post(llm_url, json={
                 "model": "phi3:mini",

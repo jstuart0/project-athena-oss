@@ -15,6 +15,9 @@ from enum import Enum
 from collections import deque
 import structlog
 
+# Import admin_config for centralized Ollama URL
+from shared.admin_config import get_admin_client
+
 logger = structlog.get_logger()
 
 
@@ -114,11 +117,50 @@ class LLMRouter:
         self._pricing_cache: Dict[str, Dict[str, Any]] = {}
         self._pricing_cache_expiry: float = 0
 
+        # Ollama URL cache (fetched from centralized system settings)
+        self._ollama_url_cache: Optional[str] = None
+        self._ollama_url_cache_expiry: float = 0
+
         logger.info(
             "llm_router_initialized",
             metrics_window_size=metrics_window_size,
             persist_metrics=persist_metrics
         )
+
+    async def _get_ollama_url(self) -> str:
+        """
+        Fetch centralized Ollama URL from admin API with caching.
+
+        Uses the admin_config client to fetch the URL from system_settings.
+        Falls back to OLLAMA_URL environment variable if API unavailable.
+
+        Returns:
+            Ollama API URL (e.g., "http://192.168.10.108:11434")
+        """
+        now = time.time()
+
+        # Check cache (60 second TTL)
+        if self._ollama_url_cache and now < self._ollama_url_cache_expiry:
+            return self._ollama_url_cache
+
+        # Fetch from admin_config (which handles API call and its own caching)
+        try:
+            admin_client = get_admin_client()
+            ollama_url = await admin_client.get_ollama_url()
+
+            # Cache the result
+            self._ollama_url_cache = ollama_url
+            self._ollama_url_cache_expiry = now + self._cache_ttl
+
+            return ollama_url
+
+        except Exception as e:
+            logger.warning(
+                "failed_to_get_ollama_url",
+                error=str(e)
+            )
+            # Fallback to environment variable
+            return os.getenv("OLLAMA_URL", "http://localhost:11434")
 
     async def _get_backend_config(self, model: str) -> Dict[str, Any]:
         """
@@ -185,15 +227,16 @@ class LLMRouter:
                     break
 
             if config is None:
-                # No config found - use default Ollama
+                # No config found - use default Ollama with centralized URL
                 logger.warning(
                     "no_backend_config_found",
                     model=model,
                     falling_back="ollama"
                 )
+                ollama_url = await self._get_ollama_url()
                 config = {
                     "backend_type": "ollama",
-                    "endpoint_url": os.getenv("OLLAMA_URL", "http://localhost:11434"),
+                    "endpoint_url": ollama_url,
                     "max_tokens": 2048,
                     "temperature_default": 0.7,
                     "timeout_seconds": 60,
@@ -212,10 +255,11 @@ class LLMRouter:
                 model=model,
                 error=str(e)
             )
-            # Fall back to Ollama on Mac Studio
+            # Fall back to Ollama with centralized URL
+            ollama_url = await self._get_ollama_url()
             return {
                 "backend_type": "ollama",
-                "endpoint_url": os.getenv("OLLAMA_URL", "http://localhost:11434"),
+                "endpoint_url": ollama_url,
                 "max_tokens": 2048,
                 "temperature_default": 0.7,
                 "timeout_seconds": 60,
@@ -366,8 +410,8 @@ class LLMRouter:
                         "mlx_failed_falling_back_to_ollama",
                         error=str(e)
                     )
-                    # Fall back to Ollama on Mac Studio
-                    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+                    # Fall back to Ollama with centralized URL
+                    ollama_url = await self._get_ollama_url()
                     response = await self._generate_ollama(
                         ollama_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options
                     )
@@ -891,7 +935,7 @@ class LLMRouter:
 
         Uses Ollama's native tool calling support (for models like llama3.1:8b).
         """
-        endpoint_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+        endpoint_url = await self._get_ollama_url()
         client = httpx.AsyncClient(base_url=endpoint_url, timeout=60.0)
 
         # Build payload

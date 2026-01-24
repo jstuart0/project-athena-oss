@@ -265,20 +265,19 @@ async def lifespan(app: FastAPI):
         timeout=float(orchestrator_timeout)
     )
 
-    # Load LLM backends from database (with fallback to env var)
+    # Load LLM backends from database (with fallback to centralized system_settings)
     backends = await get_llm_backends()
     if backends:
         # Use first backend as primary Ollama URL
         primary_backend = backends[0]
-        ollama_url = primary_backend.get("endpoint_url", OLLAMA_URL)
+        # Fetch centralized URL for fallback
+        centralized_ollama_url = await admin_client.get_ollama_url()
+        ollama_url = primary_backend.get("endpoint_url") or centralized_ollama_url
         logger.info(f"Using LLM backend from database: {primary_backend.get('model_name')} @ {ollama_url}")
     else:
-        # Fall back to gateway config or env var
-        if gateway_config:
-            ollama_url = gateway_config.get("ollama_fallback_url", OLLAMA_URL)
-        else:
-            ollama_url = OLLAMA_URL
-        logger.info(f"Using fallback Ollama URL: {ollama_url}")
+        # Fall back to centralized system_settings
+        ollama_url = await admin_client.get_ollama_url()
+        logger.info(f"Using centralized Ollama URL from system_settings: {ollama_url}")
 
     ollama_client = OllamaClient(url=ollama_url)
     device_session_mgr = await get_device_session_manager()
@@ -768,18 +767,22 @@ Examples of athena queries:
 Respond with ONLY the category name (athena or general)."""
 
     # Get configuration from database or use defaults
+    # Use centralized Ollama URL from system_settings
+    admin_client = get_admin_client()
+    centralized_ollama_url = await admin_client.get_ollama_url()
+
     if gateway_config:
         intent_model = gateway_config.get("intent_model", "phi3:mini")
         intent_temperature = gateway_config.get("intent_temperature", 0.1)
         intent_max_tokens = gateway_config.get("intent_max_tokens", 10)
         intent_timeout = gateway_config.get("intent_timeout_seconds", 5)
-        ollama_url = gateway_config.get("ollama_fallback_url", OLLAMA_URL)
+        ollama_url = gateway_config.get("ollama_fallback_url") or centralized_ollama_url
     else:
         intent_model = "phi3:mini"
         intent_temperature = 0.1
         intent_max_tokens = 10
         intent_timeout = 5
-        ollama_url = OLLAMA_URL
+        ollama_url = centralized_ollama_url
 
     try:
         async with httpx.AsyncClient(timeout=float(intent_timeout)) as client:
@@ -1801,18 +1804,21 @@ async def get_config():
             "updated_at": gateway_config.get("updated_at")
         }
     else:
+        # Fetch centralized Ollama URL from system_settings
+        admin_client = get_admin_client()
+        centralized_ollama_url = await admin_client.get_ollama_url()
         return {
-            "source": "environment_variables",
+            "source": "fallback",
             "config": {
                 "orchestrator_url": ORCHESTRATOR_URL,
-                "ollama_fallback_url": OLLAMA_URL,
+                "ollama_fallback_url": centralized_ollama_url,
                 "intent_model": "phi3:mini",
                 "intent_temperature": 0.1,
                 "intent_max_tokens": 10,
                 "intent_timeout_seconds": 5,
                 "orchestrator_timeout_seconds": 60,
             },
-            "note": "Database configuration not available, using environment variable fallbacks"
+            "note": "Gateway config not in database, using centralized system_settings for Ollama URL"
         }
 
 

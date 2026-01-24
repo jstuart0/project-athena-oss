@@ -17,12 +17,16 @@ Note: Additional models (llama3.2:3b, phi3:mini) are seeded in migration 050.
 from alembic import op
 import sqlalchemy as sa
 from datetime import datetime
+import os
 
 # revision identifiers, used by Alembic
 revision = '010'
 down_revision = '009'
 branch_labels = None
 depends_on = None
+
+# Get Ollama URL from environment (NOT hardcoded localhost)
+OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
 
 
 def upgrade():
@@ -33,12 +37,13 @@ def upgrade():
     # ============================================================================
     # Only seed qwen3:4b here as the default OSS model.
     # Migration 050 adds llama3.2:3b, phi3:mini, and full model configurations.
-    op.execute("""
+    ollama_url = OLLAMA_URL
+    op.execute(f"""
         INSERT INTO llm_backends (model_name, backend_type, endpoint_url, enabled, priority,
                                  max_tokens, temperature_default, timeout_seconds, keep_alive_seconds,
                                  description, created_at, updated_at, total_requests, total_errors)
         VALUES
-            ('qwen3:4b', 'ollama', 'http://localhost:11434', true, 50,
+            ('qwen3:4b', 'ollama', '{ollama_url}', true, 50,
              4096, 0.7, 90, -1,
              'Qwen 3 4B - Default OSS model with good reasoning capabilities',
              NOW(), NOW(), 0, 0)
@@ -48,15 +53,15 @@ def upgrade():
     # ============================================================================
     # 2. Seed Cross-Validation Models
     # ============================================================================
-    op.execute("""
+    op.execute(f"""
         INSERT INTO cross_validation_models (name, model_id, model_type, endpoint_url, enabled,
                                             use_for_categories, temperature, max_tokens,
                                             timeout_seconds, weight, min_confidence_required, created_at)
         VALUES
-            ('qwen3-primary', 'qwen3:4b', 'primary', 'http://localhost:11434', true,
+            ('qwen3-primary', 'qwen3:4b', 'primary', '{ollama_url}', true,
              ARRAY['home_control', 'weather', 'sports']::text[], 0.1, 200, 30, 1.0, 0.7, NOW()),
 
-            ('qwen3-validation', 'qwen3:4b', 'validation', 'http://localhost:11434', true,
+            ('qwen3-validation', 'qwen3:4b', 'validation', '{ollama_url}', true,
              ARRAY['home_control']::text[], 0.1, 200, 30, 0.8, 0.6, NOW())
         ON CONFLICT (name) DO NOTHING
     """)

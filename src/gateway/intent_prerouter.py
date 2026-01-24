@@ -15,6 +15,8 @@ from typing import Literal, Optional
 import httpx
 import structlog
 
+from shared.admin_config import get_admin_client
+
 logger = structlog.get_logger("gateway.intent_prerouter")
 
 IntentType = Literal["SIMPLE", "HOME", "COMPLEX"]
@@ -29,8 +31,17 @@ Query: "{query}"
 
 Respond with only one word: SIMPLE, HOME, or COMPLEX"""
 
-# Default Ollama URL
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+
+async def _get_ollama_url() -> str:
+    """
+    Get centralized Ollama URL from system_settings.
+    Falls back to OLLAMA_URL environment variable.
+    """
+    try:
+        admin_client = get_admin_client()
+        return await admin_client.get_ollama_url()
+    except Exception:
+        return os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 # Fast model for classification
 CLASSIFICATION_MODEL = "qwen2.5:1.5b"
@@ -53,7 +64,7 @@ async def classify_intent(query: str, ollama_url: Optional[str] = None) -> Inten
     Returns:
         Intent type: "SIMPLE", "HOME", or "COMPLEX"
     """
-    url = ollama_url or OLLAMA_URL
+    url = ollama_url or await _get_ollama_url()
 
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
@@ -106,7 +117,7 @@ async def handle_simple_intent(
     Returns:
         Response text for the simple query
     """
-    url = ollama_url or OLLAMA_URL
+    url = ollama_url or await _get_ollama_url()
 
     prompt = f"""You are Athena, a helpful voice assistant. Give a brief, friendly response.
 Keep your response to 1-2 sentences maximum.

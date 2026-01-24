@@ -641,3 +641,187 @@ async def save_directions_origin_placeholders(
         db.rollback()
         logger.error("failed_to_save_directions_origin_placeholders", error=str(e), user=current_user.username)
         raise HTTPException(status_code=500, detail=f"Failed to save placeholder patterns: {str(e)}")
+
+
+# ============================================================================
+# Ollama URL Settings (Centralized LLM Backend Configuration)
+# ============================================================================
+
+class OllamaUrlSettings(BaseModel):
+    """Ollama URL configuration."""
+    ollama_url: str
+
+
+class OllamaUrlResponse(BaseModel):
+    """Response model for Ollama URL settings."""
+    ollama_url: str
+    is_reachable: bool = False
+    version: Optional[str] = None
+    error: Optional[str] = None
+
+
+@router.get("/ollama-url", response_model=OllamaUrlResponse)
+async def get_ollama_url(
+    db: Session = Depends(get_db)
+):
+    """
+    Get the centralized Ollama URL.
+
+    This is the single source of truth for all LLM services.
+    Public endpoint (no auth) to allow services to fetch the URL.
+
+    Returns:
+        - ollama_url: The configured Ollama API URL
+        - is_reachable: Whether the URL is currently reachable
+        - version: Ollama version if reachable
+    """
+    import httpx
+    import os
+
+    try:
+        # Get from system_settings
+        setting = db.query(SystemSetting).filter(
+            SystemSetting.key == "ollama_url"
+        ).first()
+
+        # Fallback to environment variable if not in DB
+        ollama_url = setting.value if setting else os.getenv("OLLAMA_URL", "http://localhost:11434")
+
+        # Check if Ollama is reachable
+        is_reachable = False
+        version = None
+        error = None
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{ollama_url}/api/version")
+                if response.status_code == 200:
+                    is_reachable = True
+                    data = response.json()
+                    version = data.get("version")
+        except Exception as e:
+            error = str(e)
+
+        return OllamaUrlResponse(
+            ollama_url=ollama_url,
+            is_reachable=is_reachable,
+            version=version,
+            error=error
+        )
+
+    except Exception as e:
+        logger.error("failed_to_get_ollama_url", error=str(e))
+        return OllamaUrlResponse(
+            ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+            is_reachable=False,
+            error=str(e)
+        )
+
+
+@router.post("/ollama-url")
+async def save_ollama_url(
+    settings: OllamaUrlSettings,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Save the centralized Ollama URL.
+
+    This sets the primary Ollama API URL used by all LLM services.
+    Changes take effect immediately for new requests.
+
+    Args:
+        ollama_url: The Ollama API URL (e.g., http://192.168.1.100:11434)
+    """
+    import httpx
+
+    if not current_user.has_permission('write'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    # Validate URL format
+    url = settings.ollama_url.strip().rstrip('/')
+    if not url.startswith(('http://', 'https://')):
+        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
+
+    try:
+        # Test connectivity before saving
+        is_reachable = False
+        version = None
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{url}/api/version")
+                if response.status_code == 200:
+                    is_reachable = True
+                    data = response.json()
+                    version = data.get("version")
+        except Exception as e:
+            logger.warning("ollama_url_not_reachable", url=url, error=str(e))
+
+        # Save to system_settings
+        setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
+        if setting:
+            setting.value = url
+        else:
+            setting = SystemSetting(
+                key="ollama_url",
+                value=url,
+                description="Primary Ollama API URL. All LLM requests use this endpoint unless overridden per-model.",
+                category="llm"
+            )
+            db.add(setting)
+
+        # Also update llm_backends to use this URL (keep them in sync)
+        from app.models import LLMBackend
+        db.query(LLMBackend).filter(LLMBackend.backend_type == 'ollama').update(
+            {"endpoint_url": url},
+            synchronize_session=False
+        )
+
+        db.commit()
+
+        logger.info(
+            "ollama_url_saved",
+            user=current_user.username,
+            url=url,
+            is_reachable=is_reachable
+        )
+
+        return {
+            "status": "success",
+            "message": "Ollama URL saved successfully",
+            "ollama_url": url,
+            "is_reachable": is_reachable,
+            "version": version
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error("failed_to_save_ollama_url", error=str(e), user=current_user.username)
+        raise HTTPException(status_code=500, detail=f"Failed to save Ollama URL: {str(e)}")
+
+
+@router.get("/ollama-url/internal")
+async def get_ollama_url_internal(
+    db: Session = Depends(get_db)
+):
+    """
+    Internal endpoint for services to fetch Ollama URL.
+
+    No authentication required. Returns just the URL string for easy consumption.
+    Used by orchestrator, gateway, and other services.
+    """
+    import os
+
+    try:
+        setting = db.query(SystemSetting).filter(
+            SystemSetting.key == "ollama_url"
+        ).first()
+
+        url = setting.value if setting else os.getenv("OLLAMA_URL", "http://localhost:11434")
+        return {"ollama_url": url}
+
+    except Exception as e:
+        logger.error("failed_to_get_ollama_url_internal", error=str(e))
+        return {"ollama_url": os.getenv("OLLAMA_URL", "http://localhost:11434")}

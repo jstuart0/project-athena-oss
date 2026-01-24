@@ -15,11 +15,24 @@ import structlog
 import httpx
 
 from app.database import get_db
-from app.models import ComponentModelAssignment, User, LLMBackend, CloudLLMProvider, ExternalAPIKey
+from app.models import ComponentModelAssignment, User, LLMBackend, CloudLLMProvider, ExternalAPIKey, SystemSetting
 from app.auth.oidc import get_current_user
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/component-models", tags=["component-models"])
+
+
+def get_ollama_url(db: Session) -> str:
+    """
+    Get centralized Ollama URL from system_settings.
+
+    The system_settings table is the single source of truth.
+    Falls back to OLLAMA_URL environment variable if not set.
+    """
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
+    if setting and setting.value:
+        return setting.value
+    return os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 
 # Pydantic Models
@@ -228,13 +241,8 @@ async def get_available_models(
     models = []
     cloud_models_count = 0
 
-    # Get Ollama endpoint from first enabled backend
-    backend = db.query(LLMBackend).filter(
-        LLMBackend.backend_type == 'ollama',
-        LLMBackend.enabled == True
-    ).first()
-
-    ollama_url = backend.endpoint_url if backend else os.getenv("OLLAMA_URL", "http://localhost:11434")
+    # Use centralized Ollama URL from system_settings
+    ollama_url = get_ollama_url(db)
 
     # Fetch Ollama models
     try:
@@ -388,12 +396,8 @@ async def validate_model_exists(model_name: str, db: Session) -> bool:
             return False
 
     # Check Ollama for local models
-    backend = db.query(LLMBackend).filter(
-        LLMBackend.backend_type == 'ollama',
-        LLMBackend.enabled == True
-    ).first()
-
-    ollama_url = backend.endpoint_url if backend else os.getenv("OLLAMA_URL", "http://localhost:11434")
+    # Use centralized Ollama URL from system_settings
+    ollama_url = get_ollama_url(db)
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:

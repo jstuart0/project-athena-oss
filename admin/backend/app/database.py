@@ -261,9 +261,13 @@ def seed_oss_defaults():
     Called during production startup to ensure configuration exists.
     """
     from datetime import datetime
-    from app.models import LLMBackend, ComponentModelAssignment
+    from app.models import LLMBackend, ComponentModelAssignment, SystemSetting
 
     with get_db_context() as db:
+        # Get centralized Ollama URL from system_settings (set by migration 051)
+        setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
+        ollama_url = setting.value if setting and setting.value else OSS_OLLAMA_URL
+
         # Check if LLM backend exists for the default model
         backend = db.query(LLMBackend).filter(LLMBackend.model_name == OSS_DEFAULT_MODEL).first()
 
@@ -272,7 +276,7 @@ def seed_oss_defaults():
             backend = LLMBackend(
                 model_name=OSS_DEFAULT_MODEL,
                 backend_type="ollama",
-                endpoint_url=OSS_OLLAMA_URL,
+                endpoint_url=ollama_url,
                 enabled=True,
                 priority=50,
                 max_tokens=4096,
@@ -284,7 +288,7 @@ def seed_oss_defaults():
                 total_errors=0
             )
             db.add(backend)
-            logger.info("oss_llm_backend_created", model=OSS_DEFAULT_MODEL)
+            logger.info("oss_llm_backend_created", model=OSS_DEFAULT_MODEL, endpoint_url=ollama_url)
 
         # Component model assignments to create/update
         components = [

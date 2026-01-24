@@ -15,7 +15,7 @@ import httpx
 import asyncio
 
 from app.database import get_db
-from app.models import AthenaService, User, LLMBackend
+from app.models import AthenaService, User, LLMBackend, SystemSetting
 from app.auth.oidc import get_current_user
 import os
 
@@ -24,7 +24,19 @@ router = APIRouter(prefix="/api/service-control", tags=["service-control"])
 
 # Configuration from environment
 CONTROL_AGENT_URL = os.getenv("CONTROL_AGENT_URL", "http://localhost:8099")
-OLLAMA_FALLBACK_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+
+
+def get_ollama_url(db: Session) -> str:
+    """
+    Get centralized Ollama URL from system_settings.
+
+    The system_settings table is the single source of truth.
+    Falls back to OLLAMA_URL environment variable if not set.
+    """
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
+    if setting and setting.value:
+        return setting.value
+    return os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 
 # Pydantic Models
@@ -244,12 +256,8 @@ async def list_ollama_models(
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    backend = db.query(LLMBackend).filter(
-        LLMBackend.backend_type == 'ollama',
-        LLMBackend.enabled == True
-    ).first()
-
-    ollama_url = backend.endpoint_url if backend else OLLAMA_FALLBACK_URL
+    # Use centralized Ollama URL from system_settings
+    ollama_url = get_ollama_url(db)
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -289,12 +297,8 @@ async def load_ollama_model(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    backend = db.query(LLMBackend).filter(
-        LLMBackend.backend_type == 'ollama',
-        LLMBackend.enabled == True
-    ).first()
-
-    ollama_url = backend.endpoint_url if backend else OLLAMA_FALLBACK_URL
+    # Use centralized Ollama URL from system_settings
+    ollama_url = get_ollama_url(db)
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -334,12 +338,8 @@ async def unload_ollama_model(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    backend = db.query(LLMBackend).filter(
-        LLMBackend.backend_type == 'ollama',
-        LLMBackend.enabled == True
-    ).first()
-
-    ollama_url = backend.endpoint_url if backend else OLLAMA_FALLBACK_URL
+    # Use centralized Ollama URL from system_settings
+    ollama_url = get_ollama_url(db)
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:

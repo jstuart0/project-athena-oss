@@ -27,6 +27,9 @@ depends_on = None
 # Get default model from environment, fallback to qwen3:4b for OSS
 DEFAULT_MODEL = os.getenv('ATHENA_DEFAULT_MODEL', 'qwen3:4b')
 
+# Get Ollama URL from environment (NOT hardcoded localhost)
+OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
+
 
 def upgrade():
     """Seed LLM models, configurations, and component assignments."""
@@ -35,29 +38,31 @@ def upgrade():
     # 1. Seed LLM Backends
     # ============================================================================
     # These are the available models that can be used by the system.
-    # endpoint_url uses localhost as placeholder - actual URL comes from OLLAMA_URL env var
-    op.execute("""
+    # endpoint_url comes from OLLAMA_URL environment variable
+    ollama_url = OLLAMA_URL
+    op.execute(f"""
         INSERT INTO llm_backends (
             model_name, backend_type, endpoint_url, enabled, priority,
             max_tokens, temperature_default, timeout_seconds, keep_alive_seconds,
             description, created_at, updated_at, total_requests, total_errors
         )
         VALUES
-            ('qwen3:4b', 'ollama', 'http://localhost:11434', true, 50,
+            ('qwen3:4b', 'ollama', '{ollama_url}', true, 50,
              4096, 0.7, 90, -1,
              'Qwen 3 4B - Default OSS model with good reasoning capabilities',
              NOW(), NOW(), 0, 0),
 
-            ('llama3.2:3b', 'ollama', 'http://localhost:11434', true, 50,
+            ('llama3.2:3b', 'ollama', '{ollama_url}', true, 50,
              4096, 0.7, 90, -1,
              'Llama 3.2 3B - Fast, efficient model for general tasks',
              NOW(), NOW(), 0, 0),
 
-            ('phi3:mini', 'ollama', 'http://localhost:11434', true, 50,
+            ('phi3:mini', 'ollama', '{ollama_url}', true, 50,
              4096, 0.7, 90, -1,
              'Phi-3 Mini - Microsoft small model, good for classification',
              NOW(), NOW(), 0, 0)
         ON CONFLICT (model_name) DO UPDATE SET
+            endpoint_url = EXCLUDED.endpoint_url,
             enabled = EXCLUDED.enabled,
             description = EXCLUDED.description,
             updated_at = NOW()

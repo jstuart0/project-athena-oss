@@ -94,6 +94,10 @@ class AdminConfigClient:
         self._escalation_preset_cache: Optional[Dict[str, Any]] = None
         self._escalation_preset_cache_time: float = 0.0
 
+        # System settings cache (ollama_url, etc.)
+        self._ollama_url_cache: Optional[str] = None
+        self._ollama_url_cache_time: float = 0.0
+
         # Feature flags for safe rollout (local flags, not from DB)
         self._local_feature_flags = {
             "use_database_model_config": True,  # Enabled - models fetched from database
@@ -2024,6 +2028,73 @@ class AdminConfigClient:
             )
 
         return {"monthly_count": 0}
+
+    # =========================================================================
+    # System Settings (Centralized Configuration)
+    # =========================================================================
+
+    async def get_ollama_url(self) -> str:
+        """
+        Fetch centralized Ollama URL from Admin API with caching.
+
+        This is the single source of truth for the Ollama API endpoint.
+        All services should use this method instead of reading OLLAMA_URL directly.
+
+        Returns:
+            Ollama API URL (e.g., "http://192.168.10.108:11434")
+            Falls back to OLLAMA_URL env var if API unavailable
+        """
+        now = time.time()
+
+        # Check cache (60 second TTL)
+        if self._ollama_url_cache and (now - self._ollama_url_cache_time < self._cache_ttl):
+            return self._ollama_url_cache
+
+        # Fetch from API
+        try:
+            url = f"{self.admin_url}/api/settings/ollama-url/internal"
+            response = await self.client.get(url)
+
+            if response.status_code == 200:
+                data = response.json()
+                ollama_url = data.get("ollama_url")
+
+                if ollama_url:
+                    # Cache successful result
+                    self._ollama_url_cache = ollama_url
+                    self._ollama_url_cache_time = now
+
+                    logger.info(
+                        "ollama_url_loaded_from_db",
+                        ollama_url=ollama_url
+                    )
+                    return ollama_url
+            else:
+                logger.warning(
+                    "ollama_url_fetch_failed",
+                    status_code=response.status_code
+                )
+
+        except Exception as e:
+            logger.warning(
+                "ollama_url_fetch_error",
+                error=str(e),
+                admin_url=self.admin_url
+            )
+
+        # Fallback to environment variable
+        fallback_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+        logger.debug(
+            "ollama_url_using_env_fallback",
+            ollama_url=fallback_url
+        )
+        return fallback_url
+
+    def invalidate_ollama_url_cache(self):
+        """Invalidate Ollama URL cache to force refresh on next call."""
+        self._ollama_url_cache = None
+        self._ollama_url_cache_time = 0.0
+        logger.info("ollama_url_cache_invalidated")
 
     async def close(self):
         """Close the HTTP client."""
