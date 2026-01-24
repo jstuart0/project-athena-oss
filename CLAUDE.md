@@ -176,6 +176,7 @@ os-project-athena/
 
 ## Important Notes
 
+- **ALWAYS build with `--platform linux/amd64`** when building from Apple Silicon - the K8s cluster is AMD64 and images will fail with "exec format error" otherwise
 - All services use `imagePullPolicy: Always` during development
 - RAG services without required API keys will start but return errors for queries
 - The orchestrator timeout is 120 seconds to accommodate slower LLM inference

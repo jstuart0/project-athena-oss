@@ -20,7 +20,7 @@ from datetime import datetime
 
 # revision identifiers, used by Alembic
 revision = '050'
-down_revision = '049'
+down_revision = '049_add_post_synthesis_fallback'
 branch_labels = None
 depends_on = None
 
