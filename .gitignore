@@ -85,3 +85,6 @@ temp/
 
 # Claude Code thoughts directory
 thoughts/
+
+# Local Claude instructions (contains environment-specific info)
+CLAUDE.md
