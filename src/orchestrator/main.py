@@ -8922,7 +8922,14 @@ def create_orchestrator_graph() -> StateGraph:
             else:
                 logger.info("Routing to finalize node (no context available)")
                 return "finalize"  # Skip to finalize for unknown intents without context
+        elif state.intent == IntentCategory.GENERAL_INFO:
+            # Route GENERAL_INFO to tool_call - let LLM decide if tools are needed
+            # The LLM can answer directly for: greetings, basic facts, math, creative requests
+            # Or use tools for: current info, real-time data, lookups
+            logger.info("Routing GENERAL_INFO to tool_call (LLM decides if tools needed)")
+            return "tool_call"
         else:
+            # Other intents (weather, sports, etc.) go through retrieve path
             logger.info("Routing to route_info node")
             return "route_info"
 
@@ -10836,8 +10843,13 @@ async def set_follow_me_enabled(enabled: bool):
 # ============================================================================
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint."""
+async def health_check(detailed: bool = False):
+    """
+    Health check endpoint.
+
+    Args:
+        detailed: If True, check all RAG services (slow). Default False for Kubernetes probes.
+    """
     health = {
         "status": "healthy",
         "service": "orchestrator",
@@ -10848,7 +10860,7 @@ async def health_check():
         }
     }
 
-    # Check Home Assistant
+    # Check Home Assistant (optional - won't fail health check)
     try:
         ha_healthy = await ha_client.health_check() if ha_client else False
         health["components"]["home_assistant"] = ha_healthy
@@ -10861,13 +10873,14 @@ async def health_check():
     except:
         health["components"]["llm_router"] = False
 
-    # Check Redis
+    # Check Redis (optional - caching degrades gracefully)
     try:
         health["components"]["redis"] = await cache_client.ping() if cache_client else False
     except:
         health["components"]["redis"] = False
 
     # Add resilience pattern status (circuit breakers, rate limiters)
+    # Note: Open circuits don't make the orchestrator unhealthy - RAG services are optional
     try:
         cb_registry = get_circuit_breaker_registry()
         rl_registry = get_rate_limiter_registry()
@@ -10881,38 +10894,40 @@ async def health_check():
             "rejection_stats": rl_registry.get_rejection_stats()
         }
 
-        # If any circuits are open, service is degraded
+        # Report circuit status but don't fail health check for open circuits
+        # RAG services are optional - orchestrator works without them
+        health["components"]["circuit_breakers"] = True
         if open_circuits:
-            health["components"]["circuit_breakers"] = False
-            logger.warning(f"Open circuits detected: {open_circuits}")
-        else:
-            health["components"]["circuit_breakers"] = True
+            logger.debug(f"Open circuits (RAG services unavailable): {open_circuits}")
 
     except Exception as e:
         logger.error(f"Failed to get resilience status: {e}")
         health["resilience"] = {"error": str(e)}
-        health["components"]["circuit_breakers"] = False
+        health["components"]["circuit_breakers"] = True  # Don't fail on resilience check errors
 
-    # Check RAG services by pinging their health endpoints directly
-    # This is more accurate than database checks as it verifies services are actually running
-    try:
-        for name, url in rag_client._service_urls.items():
-            try:
-                response = await rag_client.get(name, "/health", skip_circuit_breaker=True, skip_rate_limit=True)
-                health["components"][f"rag_{name}"] = response.success
-            except Exception as e:
-                logger.warning(f"RAG service {name} health check failed: {e}")
+    # Only check RAG services if detailed=true (for manual debugging, not k8s probes)
+    # RAG services are optional - checking them all takes too long for health probes
+    if detailed:
+        try:
+            for name, url in rag_client._service_urls.items():
+                try:
+                    response = await rag_client.get(name, "/health", skip_circuit_breaker=True, skip_rate_limit=True)
+                    health["components"][f"rag_{name}"] = response.success
+                except Exception as e:
+                    logger.debug(f"RAG service {name} health check failed: {e}")
+                    health["components"][f"rag_{name}"] = False
+        except Exception as e:
+            logger.error(f"Failed to check RAG services: {e}")
+            for name in rag_client._service_urls.keys():
                 health["components"][f"rag_{name}"] = False
-    except Exception as e:
-        logger.error(f"Failed to check RAG services: {e}")
-        for name in rag_client._service_urls.keys():
-            health["components"][f"rag_{name}"] = False
 
-    # Determine overall health (redis is optional - caching degrades gracefully)
+    # Determine overall health
+    # Only llm_router is critical - orchestrator can work without HA, Redis, or RAG services
     critical_components = ["llm_router"]
     if not all(health["components"].get(c, False) for c in critical_components):
         health["status"] = "unhealthy"
-    elif not all(health["components"].values()):
+    elif not health["components"].get("redis", True):
+        # Redis unavailable is degraded (caching disabled) but not unhealthy
         health["status"] = "degraded"
 
     return health

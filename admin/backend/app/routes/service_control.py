@@ -516,10 +516,12 @@ class OllamaHealthResponse(BaseModel):
     models_loaded: int
     version: Optional[str] = None
     timestamp: str
+    host: Optional[str] = None
 
 
 @router.get("/ollama/health", response_model=OllamaHealthResponse)
 async def get_ollama_health(
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -530,12 +532,17 @@ async def get_ollama_health(
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
+    # Get centralized Ollama URL for display
+    ollama_url = get_ollama_url(db)
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{CONTROL_AGENT_URL}/ollama/health")
 
             if response.status_code == 200:
-                return OllamaHealthResponse(**response.json())
+                data = response.json()
+                data['host'] = ollama_url
+                return OllamaHealthResponse(**data)
             else:
                 raise HTTPException(
                     status_code=response.status_code,
@@ -551,7 +558,8 @@ async def get_ollama_health(
             api_reachable=False,
             models_loaded=0,
             version=None,
-            timestamp=datetime.utcnow().isoformat()
+            timestamp=datetime.utcnow().isoformat(),
+            host=ollama_url
         )
     except Exception as e:
         logger.error("ollama_health_check_failed", error=str(e))
@@ -562,7 +570,8 @@ async def get_ollama_health(
             api_reachable=False,
             models_loaded=0,
             version=None,
-            timestamp=datetime.utcnow().isoformat()
+            timestamp=datetime.utcnow().isoformat(),
+            host=ollama_url
         )
 
 

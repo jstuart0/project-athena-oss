@@ -116,7 +116,7 @@ class ModelConfigResponse(BaseModel):
     ollama_options: Dict[str, Any]
     mlx_options: Dict[str, Any]
     description: Optional[str] = None
-    priority: int
+    priority: Optional[int] = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 

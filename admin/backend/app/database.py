@@ -344,3 +344,257 @@ def seed_oss_defaults():
                        updated=updated_count)
         else:
             logger.debug("oss_component_models_already_configured")
+
+
+def seed_oss_features():
+    """
+    Seed OSS default feature flags for the Athena system.
+
+    This ensures all feature flags exist out-of-the-box for the OSS release.
+    Called during production startup to ensure configuration exists.
+    Uses ON CONFLICT to only insert missing features, preserving existing settings.
+    """
+    from app.models import Feature
+
+    # Define all OSS feature flags
+    # Format: (name, display_name, description, category, enabled, required, priority, config)
+    features = [
+        # Core Processing Features
+        (
+            "intent_classification",
+            "Intent Classification",
+            "Classify user query intent",
+            "processing",
+            True, True, 1, None
+        ),
+        (
+            "multi_intent_detection",
+            "Multi-Intent Detection",
+            "Detect and parse multiple intents in a single query",
+            "processing",
+            True, False, 2, None
+        ),
+        (
+            "conversation_context",
+            "Conversation Context",
+            "Preserve context between queries in a conversation",
+            "processing",
+            True, False, 3, None
+        ),
+        (
+            "automation_system_mode",
+            "Automation System Mode",
+            "Controls which automation system handles sequence commands. 'pattern_matching' uses keyword detection. 'dynamic_agent' uses LLM with tools.",
+            "processing",
+            True, False, 50,
+            {"mode": "pattern_matching", "available_modes": ["pattern_matching", "dynamic_agent"]}
+        ),
+        # Routing Features
+        (
+            "llm_based_routing",
+            "Use LLM for Intent Classification",
+            "Use AI to intelligently classify query intent instead of keyword matching. More accurate but adds 50-200ms latency.",
+            "routing",
+            True, False, 10, None
+        ),
+        (
+            "enable_llm_intent_classification",
+            "LLM Intent Classification",
+            "Use LLM for intent classification in Orchestrator instead of pattern matching. Adds 50-200ms latency but improves accuracy.",
+            "llm",
+            True, False, 10, None
+        ),
+        # RAG Features
+        (
+            "rag_weather",
+            "Weather RAG",
+            "Retrieve live weather data from National Weather Service",
+            "rag",
+            True, False, 10, None
+        ),
+        (
+            "rag_sports",
+            "Sports RAG",
+            "Retrieve sports scores and schedules from ESPN",
+            "rag",
+            True, False, 11, None
+        ),
+        (
+            "rag_airports",
+            "Airports RAG",
+            "Retrieve airport and flight information",
+            "rag",
+            True, False, 12, None
+        ),
+        (
+            "weather_provider",
+            "Weather Provider",
+            "Select weather data provider: standard (free tier, 5-day forecast) or onecall (OneCall 3.0, 8-day forecast with alerts)",
+            "rag",
+            True, False, 10,
+            {"mode": "standard", "available_modes": ["standard", "onecall"]}
+        ),
+        # Optimization Features
+        (
+            "redis_caching",
+            "Redis Caching",
+            "Cache responses in Redis for faster retrieval",
+            "optimization",
+            True, False, 20, None
+        ),
+        (
+            "mlx_backend",
+            "MLX Backend",
+            "Use MLX-optimized backend for LLM inference",
+            "optimization",
+            True, False, 21, None
+        ),
+        (
+            "response_streaming",
+            "Response Streaming",
+            "Stream LLM responses in real-time",
+            "optimization",
+            True, False, 22, None
+        ),
+        (
+            "search_pre_classification",
+            "Search Pre-Classification",
+            "Use embedding similarity to pre-classify obvious search queries without LLM inference. Saves ~1.3s on high-confidence matches.",
+            "optimization",
+            True, False, 50,
+            {"confidence_threshold": 0.85, "fallback_to_llm": True}
+        ),
+        (
+            "status_skip_synthesis",
+            "Skip Status Synthesis",
+            "Skip LLM synthesis for simple status queries (e.g., 'what lights are on'). Returns templated response directly. Saves ~1.5s.",
+            "optimization",
+            True, False, 51,
+            {"enabled_patterns": ["lights.*on", "what.*status", "is.*locked"], "max_entities": 20}
+        ),
+        (
+            "status_bulk_query",
+            "Bulk HA State Query",
+            "Use bulk Home Assistant state query instead of per-entity queries. Reduces HA API calls and saves 1-2s on multi-entity queries.",
+            "optimization",
+            True, False, 52,
+            {"batch_size": 50, "timeout_ms": 5000}
+        ),
+        (
+            "entity_type_filtering",
+            "Entity Type Filtering",
+            "Filter HA entities by type before status queries. Only query relevant entity domains instead of all entities.",
+            "optimization",
+            True, False, 54,
+            {"entity_type_map": {"lights": ["light"], "locks": ["lock"], "doors": ["lock", "binary_sensor.door", "cover.garage"], "fans": ["fan"], "climate": ["climate"], "sensors": ["sensor"]}}
+        ),
+        (
+            "hybrid_memory_search",
+            "Hybrid Memory Search",
+            "Combines keyword matching with semantic vector search for memory retrieval. Improves recall for queries with specific keywords.",
+            "optimization",
+            False, False, 50,
+            {"keyword_weight": 0.3, "semantic_weight": 0.7, "min_keyword_score": 0.5}
+        ),
+        # Integration Features
+        (
+            "home_assistant",
+            "Home Assistant",
+            "Integrate with Home Assistant for device control",
+            "integration",
+            True, False, 30, None
+        ),
+        (
+            "clarification_questions",
+            "Clarification Questions",
+            "Ask clarifying questions for ambiguous queries",
+            "integration",
+            True, False, 31, None
+        ),
+        (
+            "airport_code_lookup",
+            "Airport Code Lookup",
+            "Automatically resolve city names to airport codes before calling flights API. Fixes FlightAware 400 errors from natural language destinations.",
+            "integration",
+            True, False, 53,
+            {"cache_ttl_seconds": 86400, "fallback_airports": {"new york": "JFK", "los angeles": "LAX", "chicago": "ORD", "miami": "MIA", "san francisco": "SFO"}}
+        ),
+        # Voice Features
+        (
+            "ai_follow_ups_enabled",
+            "AI-Initiated Follow-ups",
+            "After responding, Athena asks 'Is there anything else?' after 3 seconds of silence. Allows natural conversation continuation.",
+            "voice",
+            False, False, 50, None
+        ),
+        # Fallback Features
+        (
+            "post_synthesis_fallback",
+            "Post-Synthesis Web Search Fallback",
+            "When LLM synthesis indicates it could not find information, automatically retry with web search. Adds latency but improves answer quality.",
+            "fallback",
+            False, False, 60,
+            {
+                "detection_patterns": ["couldn't find", "could not find", "don't have information", "no information available", "unable to find"],
+                "excluded_intents": ["control", "automation", "scene", "timer", "reminder"],
+                "max_latency_ms": 5000,
+                "log_triggers": True
+            }
+        ),
+    ]
+
+    with get_db_context() as db:
+        created_count = 0
+        for name, display_name, description, category, enabled, required, priority, config in features:
+            # Check if feature already exists
+            existing = db.query(Feature).filter(Feature.name == name).first()
+
+            if not existing:
+                feature = Feature(
+                    name=name,
+                    display_name=display_name,
+                    description=description,
+                    category=category,
+                    enabled=enabled,
+                    required=required,
+                    priority=priority,
+                    config=config
+                )
+                db.add(feature)
+                created_count += 1
+
+        db.commit()
+
+        if created_count > 0:
+            logger.info("oss_features_seeded", created=created_count, total=len(features))
+        else:
+            logger.debug("oss_features_already_configured", total=len(features))
+
+
+def seed_oss_conversation_settings():
+    """
+    Seed OSS default conversation settings.
+
+    Ensures conversation settings exist for the OSS release.
+    Called during production startup to ensure configuration exists.
+    """
+    from app.models import ConversationSettings
+
+    with get_db_context() as db:
+        settings = db.query(ConversationSettings).first()
+        if not settings:
+            settings = ConversationSettings(
+                enabled=True,
+                use_context=True,
+                max_messages=20,
+                timeout_seconds=1800,  # 30 minutes
+                cleanup_interval_seconds=60,
+                session_ttl_seconds=3600,  # 1 hour
+                max_llm_history_messages=10,
+                history_mode='full'
+            )
+            db.add(settings)
+            db.commit()
+            logger.info("oss_conversation_settings_seeded")
+        else:
+            logger.debug("oss_conversation_settings_already_configured")

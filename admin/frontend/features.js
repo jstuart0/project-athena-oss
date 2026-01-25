@@ -250,6 +250,12 @@ const categoryConfig = {
         icon: '🧪',
         description: 'Experimental features in development',
         color: 'yellow'
+    },
+    fallback: {
+        name: 'Fallback Behaviors',
+        icon: '🔄',
+        description: 'Fallback strategies when primary methods fail',
+        color: 'amber'
     }
 };
 
@@ -303,13 +309,24 @@ async function loadMLXApplicability() {
  */
 async function loadFeatures() {
     try {
-        // Use ApiClient if available, fallback to fetch
-        if (typeof ApiClient !== 'undefined') {
-            featuresData = await ApiClient.get('/api/features');
-        } else {
-            const response = await fetch('/api/features', {
-                headers: getAuthHeaders()
-            });
+        // Try authenticated endpoint first, fallback to public endpoint
+        let response;
+        try {
+            if (typeof ApiClient !== 'undefined') {
+                featuresData = await ApiClient.get('/api/features');
+            } else {
+                response = await fetch('/api/features', {
+                    headers: getAuthHeaders()
+                });
+                if (!response.ok) {
+                    throw new Error('Auth failed');
+                }
+                featuresData = await response.json();
+            }
+        } catch (authError) {
+            // Fallback to public endpoint if auth fails
+            console.log('Using public features endpoint');
+            response = await fetch('/api/features/public');
             if (!response.ok) {
                 throw new Error(`Failed to load features: ${response.statusText}`);
             }

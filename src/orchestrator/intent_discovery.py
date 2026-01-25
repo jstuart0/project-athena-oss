@@ -26,7 +26,7 @@ from shared.admin_config import get_admin_client
 logger = structlog.get_logger()
 
 # Fallback model if database lookup fails
-_FALLBACK_MODEL = os.getenv("ATHENA_INTENT_DISCOVERY_MODEL", "qwen3:4b")
+_FALLBACK_MODEL = os.getenv("ATHENA_INTENT_DISCOVERY_MODEL", "llama3.2:3b")
 
 
 async def get_intent_discovery_model() -> str:

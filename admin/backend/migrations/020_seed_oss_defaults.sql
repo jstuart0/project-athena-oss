@@ -158,61 +158,61 @@ BEGIN
 
     -- Balanced preset rules
     IF balanced_id IS NOT NULL THEN
-        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description) VALUES
-            (balanced_id, 'Clarification Request', 'clarification', '{"patterns": ["could you clarify", "what do you mean", "can you specify", "i''m not sure what", "could you be more specific"]}'::jsonb, 'complex', 5, 100, 'LLM asked for clarification'),
-            (balanced_id, 'User Correction', 'user_correction', '{"patterns": ["no,", "no ", "that''s wrong", "that''s not what", "not what I asked", "I meant", "I said"]}'::jsonb, 'complex', 5, 90, 'User corrected the assistant'),
-            (balanced_id, 'User Frustration', 'user_frustration', '{"patterns": ["you''re confused", "that doesn''t make sense", "try again", "not helpful", "this is wrong"]}'::jsonb, 'super_complex', 5, 80, 'User expressed frustration'),
-            (balanced_id, 'Empty Tool Results', 'empty_results', '{"check_empty": true, "check_null": true}'::jsonb, 'complex', 3, 70, 'Tool returned no results'),
-            (balanced_id, 'Tool Failure', 'tool_failure', '{"on_error": true}'::jsonb, 'complex', 3, 60, 'Tool returned an error'),
-            (balanced_id, 'Explicit Upgrade Request', 'explicit_request', '{"patterns": ["think harder", "be more careful", "think about it", "try a better model"]}'::jsonb, 'super_complex', 3, 110, 'User explicitly asked for better response')
+        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description, enabled) VALUES
+            (balanced_id, 'Clarification Request', 'clarification', '{"patterns": ["could you clarify", "what do you mean", "can you specify", "i''m not sure what", "could you be more specific"]}'::jsonb, 'complex', 5, 100, 'LLM asked for clarification', true),
+            (balanced_id, 'User Correction', 'user_correction', '{"patterns": ["no,", "no ", "that''s wrong", "that''s not what", "not what I asked", "I meant", "I said"]}'::jsonb, 'complex', 5, 90, 'User corrected the assistant', true),
+            (balanced_id, 'User Frustration', 'user_frustration', '{"patterns": ["you''re confused", "that doesn''t make sense", "try again", "not helpful", "this is wrong"]}'::jsonb, 'super_complex', 5, 80, 'User expressed frustration', true),
+            (balanced_id, 'Empty Tool Results', 'empty_results', '{"check_empty": true, "check_null": true}'::jsonb, 'complex', 3, 70, 'Tool returned no results', true),
+            (balanced_id, 'Tool Failure', 'tool_failure', '{"on_error": true}'::jsonb, 'complex', 3, 60, 'Tool returned an error', true),
+            (balanced_id, 'Explicit Upgrade Request', 'explicit_request', '{"patterns": ["think harder", "be more careful", "think about it", "try a better model"]}'::jsonb, 'super_complex', 3, 110, 'User explicitly asked for better response', true)
         ON CONFLICT DO NOTHING;
     END IF;
 
     -- Conservative preset rules
     IF conservative_id IS NOT NULL THEN
-        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description) VALUES
-            (conservative_id, 'Any Clarification', 'clarification', '{"patterns": ["could you", "what do you", "can you", "?"], "match_in_response": true}'::jsonb, 'complex', 8, 100, 'Any clarification question in response'),
-            (conservative_id, 'Short Response', 'short_response', '{"max_length": 50}'::jsonb, 'complex', 5, 90, 'Response was very short'),
-            (conservative_id, 'User Says No', 'user_correction', '{"patterns": ["no", "nope", "wrong", "incorrect"]}'::jsonb, 'super_complex', 8, 85, 'User said no or wrong'),
-            (conservative_id, 'Any Frustration Signal', 'user_frustration', '{"patterns": ["confused", "doesn''t", "didn''t", "can''t", "won''t", "not working"]}'::jsonb, 'super_complex', 8, 80, 'Any frustration signal'),
-            (conservative_id, 'Empty Results', 'empty_results', '{"check_empty": true, "check_null": true}'::jsonb, 'super_complex', 5, 70, 'Empty results - escalate to super_complex'),
-            (conservative_id, 'Repeated Query', 'repeated_query', '{"similarity_threshold": 0.8}'::jsonb, 'super_complex', 5, 95, 'User repeated similar query')
+        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description, enabled) VALUES
+            (conservative_id, 'Any Clarification', 'clarification', '{"patterns": ["could you", "what do you", "can you", "?"], "match_in_response": true}'::jsonb, 'complex', 8, 100, 'Any clarification question in response', true),
+            (conservative_id, 'Short Response', 'short_response', '{"max_length": 50}'::jsonb, 'complex', 5, 90, 'Response was very short', true),
+            (conservative_id, 'User Says No', 'user_correction', '{"patterns": ["no", "nope", "wrong", "incorrect"]}'::jsonb, 'super_complex', 8, 85, 'User said no or wrong', true),
+            (conservative_id, 'Any Frustration Signal', 'user_frustration', '{"patterns": ["confused", "doesn''t", "didn''t", "can''t", "won''t", "not working"]}'::jsonb, 'super_complex', 8, 80, 'Any frustration signal', true),
+            (conservative_id, 'Empty Results', 'empty_results', '{"check_empty": true, "check_null": true}'::jsonb, 'super_complex', 5, 70, 'Empty results - escalate to super_complex', true),
+            (conservative_id, 'Repeated Query', 'repeated_query', '{"similarity_threshold": 0.8}'::jsonb, 'super_complex', 5, 95, 'User repeated similar query', true)
         ON CONFLICT DO NOTHING;
     END IF;
 
     -- Efficient preset rules
     IF efficient_id IS NOT NULL THEN
-        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description) VALUES
-            (efficient_id, 'Strong Frustration Only', 'user_frustration', '{"patterns": ["completely wrong", "this is broken", "useless", "terrible"]}'::jsonb, 'complex', 3, 100, 'Only escalate on strong frustration'),
-            (efficient_id, 'Explicit Request', 'explicit_request', '{"patterns": ["use a better model", "think harder", "try harder"]}'::jsonb, 'super_complex', 2, 110, 'User explicitly requested upgrade'),
-            (efficient_id, 'Multiple Tool Failures', 'tool_failure', '{"consecutive_failures": 2}'::jsonb, 'complex', 2, 80, 'Only after 2 consecutive failures')
+        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description, enabled) VALUES
+            (efficient_id, 'Strong Frustration Only', 'user_frustration', '{"patterns": ["completely wrong", "this is broken", "useless", "terrible"]}'::jsonb, 'complex', 3, 100, 'Only escalate on strong frustration', true),
+            (efficient_id, 'Explicit Request', 'explicit_request', '{"patterns": ["use a better model", "think harder", "try harder"]}'::jsonb, 'super_complex', 2, 110, 'User explicitly requested upgrade', true),
+            (efficient_id, 'Multiple Tool Failures', 'tool_failure', '{"consecutive_failures": 2}'::jsonb, 'complex', 2, 80, 'Only after 2 consecutive failures', true)
         ON CONFLICT DO NOTHING;
     END IF;
 
     -- Demo Mode preset rules
     IF demo_id IS NOT NULL THEN
-        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description) VALUES
-            (demo_id, 'Always Escalate', 'always', '{"always": true}'::jsonb, 'super_complex', 999, 1000, 'Always use best model in demo mode')
+        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description, enabled) VALUES
+            (demo_id, 'Always Escalate', 'always', '{"always": true}'::jsonb, 'super_complex', 999, 1000, 'Always use best model in demo mode', true)
         ON CONFLICT DO NOTHING;
     END IF;
 
     -- Late Night preset rules
     IF late_night_id IS NOT NULL THEN
-        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description) VALUES
-            (late_night_id, 'Very Short Query', 'short_query', '{"max_words": 3}'::jsonb, 'complex', 5, 100, 'Short queries at night need more help'),
-            (late_night_id, 'Any Clarification', 'clarification', '{"patterns": ["what", "huh", "?", "clarify"]}'::jsonb, 'complex', 8, 90, 'Be more helpful with clarifications'),
-            (late_night_id, 'Terse Correction', 'user_correction', '{"patterns": ["no", "wrong", "nope", "not that"]}'::jsonb, 'super_complex', 8, 85, 'Terse corrections need best model'),
-            (late_night_id, 'Night Frustration', 'user_frustration', '{"patterns": ["ugh", "come on", "seriously", "whatever"]}'::jsonb, 'super_complex', 10, 80, 'Tired user frustration')
+        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description, enabled) VALUES
+            (late_night_id, 'Very Short Query', 'short_query', '{"max_words": 3}'::jsonb, 'complex', 5, 100, 'Short queries at night need more help', true),
+            (late_night_id, 'Any Clarification', 'clarification', '{"patterns": ["what", "huh", "?", "clarify"]}'::jsonb, 'complex', 8, 90, 'Be more helpful with clarifications', true),
+            (late_night_id, 'Terse Correction', 'user_correction', '{"patterns": ["no", "wrong", "nope", "not that"]}'::jsonb, 'super_complex', 8, 85, 'Terse corrections need best model', true),
+            (late_night_id, 'Night Frustration', 'user_frustration', '{"patterns": ["ugh", "come on", "seriously", "whatever"]}'::jsonb, 'super_complex', 10, 80, 'Tired user frustration', true)
         ON CONFLICT DO NOTHING;
     END IF;
 
     -- Guest Mode preset rules
     IF guest_id IS NOT NULL THEN
-        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description) VALUES
-            (guest_id, 'Any Question in Response', 'clarification', '{"patterns": ["?"]}'::jsonb, 'complex', 5, 100, 'Any question mark in response'),
-            (guest_id, 'Polite Correction', 'user_correction', '{"patterns": ["actually", "I meant", "sorry, I wanted", "I was asking"]}'::jsonb, 'complex', 5, 90, 'Polite guest corrections'),
-            (guest_id, 'Any Frustration', 'user_frustration', '{"patterns": ["not working", "doesn''t understand", "wrong", "can''t"]}'::jsonb, 'super_complex', 5, 80, 'Guest frustration'),
-            (guest_id, 'Unrecognized Entity', 'entity_unknown', '{"check_location": true, "check_names": true}'::jsonb, 'complex', 3, 85, 'Failed to recognize location or name')
+        INSERT INTO escalation_rules (preset_id, rule_name, trigger_type, trigger_patterns, escalation_target, escalation_duration, priority, description, enabled) VALUES
+            (guest_id, 'Any Question in Response', 'clarification', '{"patterns": ["?"]}'::jsonb, 'complex', 5, 100, 'Any question mark in response', true),
+            (guest_id, 'Polite Correction', 'user_correction', '{"patterns": ["actually", "I meant", "sorry, I wanted", "I was asking"]}'::jsonb, 'complex', 5, 90, 'Polite guest corrections', true),
+            (guest_id, 'Any Frustration', 'user_frustration', '{"patterns": ["not working", "doesn''t understand", "wrong", "can''t"]}'::jsonb, 'super_complex', 5, 80, 'Guest frustration', true),
+            (guest_id, 'Unrecognized Entity', 'entity_unknown', '{"check_location": true, "check_names": true}'::jsonb, 'complex', 3, 85, 'Failed to recognize location or name', true)
         ON CONFLICT DO NOTHING;
     END IF;
 END $$;

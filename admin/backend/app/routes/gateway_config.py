@@ -13,7 +13,7 @@ import structlog
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
-from app.models import User, GatewayConfig
+from app.models import User, GatewayConfig, SystemSetting
 
 logger = structlog.get_logger()
 
@@ -74,6 +74,15 @@ class GatewayConfigUpdate(BaseModel):
 # Helper Functions
 # =============================================================================
 
+def get_centralized_ollama_url(db: Session) -> str:
+    """Get the centralized Ollama URL from system_settings."""
+    import os
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
+    if setting and setting.value:
+        return setting.value
+    return os.getenv("OLLAMA_URL", "http://localhost:11434")
+
+
 def ensure_singleton_config(db: Session) -> GatewayConfig:
     """Ensure the singleton gateway config row exists and return it."""
     config = db.query(GatewayConfig).filter(GatewayConfig.id == 1).first()
@@ -85,6 +94,14 @@ def ensure_singleton_config(db: Session) -> GatewayConfig:
         db.refresh(config)
         logger.info("gateway_config_initialized", message="Created default gateway configuration")
     return config
+
+
+def config_to_response(config: GatewayConfig, ollama_url: str) -> dict:
+    """Convert config to response dict, injecting centralized ollama_url."""
+    data = config.to_dict()
+    # Override with centralized Ollama URL from system_settings
+    data["ollama_fallback_url"] = ollama_url
+    return data
 
 
 # =============================================================================
@@ -107,7 +124,8 @@ async def get_gateway_config(
 
     try:
         config = ensure_singleton_config(db)
-        return config.to_dict()
+        ollama_url = get_centralized_ollama_url(db)
+        return config_to_response(config, ollama_url)
 
     except Exception as e:
         logger.error("failed_to_get_gateway_config", error=str(e))
@@ -126,7 +144,8 @@ async def get_gateway_config_public(
     """
     try:
         config = ensure_singleton_config(db)
-        return config.to_dict()
+        ollama_url = get_centralized_ollama_url(db)
+        return config_to_response(config, ollama_url)
 
     except Exception as e:
         logger.error("failed_to_get_gateway_config_public", error=str(e))
@@ -162,6 +181,9 @@ async def update_gateway_config(
             if hasattr(config, field):
                 setattr(config, field, value)
 
+        # Ignore ollama_fallback_url updates - it's managed via system_settings
+        update_data.pop("ollama_fallback_url", None)
+
         db.commit()
         db.refresh(config)
 
@@ -171,7 +193,8 @@ async def update_gateway_config(
             updated_fields=list(update_data.keys())
         )
 
-        return config.to_dict()
+        ollama_url = get_centralized_ollama_url(db)
+        return config_to_response(config, ollama_url)
 
     except HTTPException:
         raise

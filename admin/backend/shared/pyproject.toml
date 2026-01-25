@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "athena-shared"
+version = "1.0.0"
+description = "Shared utilities for Project Athena services"
+requires-python = ">=3.10"
+dependencies = [
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.24.0",
+    "redis>=5.0.0",
+    "structlog>=23.0.0",
+    "prometheus-client>=0.17.0",
+    "homeassistant-api>=4.1.0",
+    "ollama>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.20.0",
+]
+
+[tool.setuptools]
+packages = ["shared"]
+
+[tool.setuptools.package-dir]
+shared = "."

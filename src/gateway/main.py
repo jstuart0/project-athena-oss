@@ -771,18 +771,19 @@ Respond with ONLY the category name (athena or general)."""
     admin_client = get_admin_client()
     centralized_ollama_url = await admin_client.get_ollama_url()
 
+    # Always use centralized Ollama URL from system_settings
+    ollama_url = centralized_ollama_url
+
     if gateway_config:
         intent_model = gateway_config.get("intent_model", "phi3:mini")
         intent_temperature = gateway_config.get("intent_temperature", 0.1)
         intent_max_tokens = gateway_config.get("intent_max_tokens", 10)
         intent_timeout = gateway_config.get("intent_timeout_seconds", 5)
-        ollama_url = gateway_config.get("ollama_fallback_url") or centralized_ollama_url
     else:
         intent_model = "phi3:mini"
         intent_temperature = 0.1
         intent_max_tokens = 10
         intent_timeout = 5
-        ollama_url = centralized_ollama_url
 
     try:
         async with httpx.AsyncClient(timeout=float(intent_timeout)) as client:
@@ -1781,12 +1782,16 @@ async def get_config():
     or indicates that environment variable fallbacks are being used.
     Useful for debugging and verifying configuration changes.
     """
+    # Always fetch centralized Ollama URL from system_settings
+    admin_client = get_admin_client()
+    centralized_ollama_url = await admin_client.get_ollama_url()
+
     if gateway_config:
         return {
             "source": "database",
             "config": {
                 "orchestrator_url": gateway_config.get("orchestrator_url"),
-                "ollama_fallback_url": gateway_config.get("ollama_fallback_url"),
+                "ollama_url": centralized_ollama_url,  # Always from system_settings
                 "intent_model": gateway_config.get("intent_model"),
                 "intent_temperature": gateway_config.get("intent_temperature"),
                 "intent_max_tokens": gateway_config.get("intent_max_tokens"),
@@ -1804,21 +1809,18 @@ async def get_config():
             "updated_at": gateway_config.get("updated_at")
         }
     else:
-        # Fetch centralized Ollama URL from system_settings
-        admin_client = get_admin_client()
-        centralized_ollama_url = await admin_client.get_ollama_url()
         return {
             "source": "fallback",
             "config": {
                 "orchestrator_url": ORCHESTRATOR_URL,
-                "ollama_fallback_url": centralized_ollama_url,
+                "ollama_url": centralized_ollama_url,
                 "intent_model": "phi3:mini",
                 "intent_temperature": 0.1,
                 "intent_max_tokens": 10,
                 "intent_timeout_seconds": 5,
                 "orchestrator_timeout_seconds": 60,
             },
-            "note": "Gateway config not in database, using centralized system_settings for Ollama URL"
+            "note": "Gateway config not in database, using defaults with centralized Ollama URL"
         }
 
 

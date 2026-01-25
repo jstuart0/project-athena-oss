@@ -53,12 +53,12 @@ VALUES ('_default', 'Default Configuration', 'Applied to models without explicit
 ON CONFLICT (model_name) DO NOTHING;
 
 -- Seed data: Pre-configured models with baseline settings
-INSERT INTO model_configurations (model_name, display_name, backend_type, ollama_options) VALUES
-('qwen3:4b', 'Qwen3 4B', 'ollama', '{"num_ctx": 4096, "num_batch": 256}'),
-('qwen3:8b', 'Qwen3 8B', 'ollama', '{"num_ctx": 4096, "num_batch": 256}'),
-('qwen3:14b', 'Qwen3 14B', 'ollama', '{"num_ctx": 4096, "num_batch": 256}'),
-('phi3:mini', 'Phi-3 Mini', 'ollama', '{"num_ctx": 4096, "num_batch": 256}'),
-('llama3.1:8b', 'Llama 3.1 8B', 'ollama', '{"num_ctx": 4096, "num_batch": 256}')
+INSERT INTO model_configurations (model_name, display_name, backend_type, ollama_options, priority) VALUES
+('qwen3:4b', 'Qwen3 4B', 'ollama', '{"num_ctx": 4096, "num_batch": 256}', 50),
+('qwen3:8b', 'Qwen3 8B', 'ollama', '{"num_ctx": 4096, "num_batch": 256}', 50),
+('qwen3:14b', 'Qwen3 14B', 'ollama', '{"num_ctx": 4096, "num_batch": 256}', 50),
+('phi3:mini', 'Phi-3 Mini', 'ollama', '{"num_ctx": 4096, "num_batch": 256}', 50),
+('llama3.1:8b', 'Llama 3.1 8B', 'ollama', '{"num_ctx": 4096, "num_batch": 256}', 50)
 ON CONFLICT (model_name) DO NOTHING;
 
 -- Comment on table

@@ -25,6 +25,9 @@ logger = structlog.get_logger()
 # Project root for service directories
 PROJECT_ROOT = Path.home() / "dev" / "project-athena"
 
+# Ollama URL - configurable via environment variable
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+
 app = FastAPI(
     title="Athena Control Agent",
     description="Service control agent for Project Athena on Mac Studio (Docker + Process)",
@@ -596,7 +599,7 @@ async def ollama_health():
         async with httpx.AsyncClient(timeout=5.0) as client:
             # Check if API is reachable
             try:
-                version_resp = await client.get("http://localhost:11434/api/version")
+                version_resp = await client.get(f"{OLLAMA_URL}/api/version")
                 api_reachable = version_resp.status_code == 200
                 version = version_resp.json().get("version") if api_reachable else None
             except Exception:
@@ -607,7 +610,7 @@ async def ollama_health():
             models_loaded = 0
             if api_reachable:
                 try:
-                    ps_resp = await client.get("http://localhost:11434/api/ps")
+                    ps_resp = await client.get(f"{OLLAMA_URL}/api/ps")
                     if ps_resp.status_code == 200:
                         models_loaded = len(ps_resp.json().get("models", []))
                 except Exception:
@@ -661,7 +664,7 @@ async def start_ollama():
                 await asyncio.sleep(1)
                 try:
                     async with httpx.AsyncClient(timeout=2.0) as client:
-                        resp = await client.get("http://localhost:11434/api/version")
+                        resp = await client.get(f"{OLLAMA_URL}/api/version")
                         if resp.status_code == 200:
                             message = "Ollama started and ready"
                             break

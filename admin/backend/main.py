@@ -22,7 +22,7 @@ from redis.asyncio import Redis
 from sqlalchemy.orm import Session
 import structlog
 
-from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_dev_data, seed_oss_defaults, OSS_DEFAULT_MODEL, OSS_OLLAMA_URL, OSS_AUTO_PULL_MODELS, OSS_SEED_DEFAULTS
+from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_dev_data, seed_oss_defaults, seed_oss_features, seed_oss_conversation_settings, OSS_DEFAULT_MODEL, OSS_OLLAMA_URL, OSS_AUTO_PULL_MODELS, OSS_SEED_DEFAULTS
 from app.services.calendar_sync import start_background_sync, stop_background_sync
 from app.auth.oidc import (
     oauth,
@@ -230,13 +230,25 @@ async def startup_event():
             except Exception as e:
                 logger.error("database_schema_init_failed", error=str(e))
 
-            # Seed OSS default configuration (LLM backends, component models)
+            # Seed OSS default configuration (LLM backends, component models, feature flags)
             if OSS_SEED_DEFAULTS:
                 try:
                     seed_oss_defaults()
                     logger.info("oss_defaults_seeded")
                 except Exception as e:
                     logger.error("oss_defaults_seeding_failed", error=str(e))
+
+                try:
+                    seed_oss_features()
+                    logger.info("oss_features_seeded")
+                except Exception as e:
+                    logger.error("oss_features_seeding_failed", error=str(e))
+
+                try:
+                    seed_oss_conversation_settings()
+                    logger.info("oss_conversation_settings_seeded")
+                except Exception as e:
+                    logger.error("oss_conversation_settings_seeding_failed", error=str(e))
             else:
                 logger.info("oss_defaults_seeding_disabled", reason="ATHENA_SEED_DEFAULTS=false")
 

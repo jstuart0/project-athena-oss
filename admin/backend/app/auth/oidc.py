@@ -174,8 +174,8 @@ async def get_authentik_userinfo(access_token: str) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient() as client:
             # Construct userinfo URL from issuer
-            # OIDC_ISSUER is like: https://auth.example.com/application/o/athena/
-            # Userinfo endpoint is: https://auth.example.com/application/o/userinfo/
+            # OIDC_ISSUER is like: https://auth.xmojo.net/application/o/athena-prod/
+            # Userinfo endpoint is: https://auth.xmojo.net/application/o/userinfo/
             issuer_base = OIDC_ISSUER.rstrip('/')
             # Extract base URL (remove application-specific path)
             if '/application/o/' in issuer_base:
