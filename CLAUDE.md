@@ -74,6 +74,29 @@ Project Athena is an AI-powered smart home assistant with voice interface, RAG (
 | Jarvis Web | 8000 | Voice web interface |
 | Redis | 6379 | Caching |
 | Ollama | 11434 | LLM inference |
+| Control Agent | 8099 | Service control (runs on Mac Studio) |
+
+### Control Agent
+
+The Control Agent runs on the machine where Ollama runs (e.g., Mac Studio with Apple Silicon). It provides HTTP endpoints to manage Ollama and other services.
+
+**Location:** `src/control_agent/` (copy to your Ollama host at `~/dev/control_agent/`)
+
+**Starting the Control Agent:**
+```bash
+ssh <user>@<ollama-host-ip>
+cd ~/dev/control_agent
+nohup python3 -m uvicorn main:app --host 0.0.0.0 --port 8099 > /tmp/control_agent.log 2>&1 &
+```
+
+**Verify it's running:**
+```bash
+curl http://<ollama-host-ip>:8099/health
+curl http://<ollama-host-ip>:8099/ollama/health
+```
+
+**K8s Configuration:**
+The admin-backend needs `CONTROL_AGENT_URL=http://<ollama-host-ip>:8099` environment variable set.
 
 ## Development Commands
 
@@ -177,6 +200,8 @@ os-project-athena/
 ## Important Notes
 
 - **ALWAYS build with `--platform linux/amd64`** when building from Apple Silicon - the K8s cluster is AMD64 and images will fail with "exec format error" otherwise
+- **NEVER break existing functionality** when adding new features. Changes should be additive and backwards-compatible. If a feature like Service Control relies on the Control Agent, new code must work with that pattern, not bypass it
+- **ALWAYS consolidate and expose functionality through the Admin UI** when possible. The Admin UI should be the central management interface for all system operations. When adding new features, health checks, configuration options, or service controls, make sure they are accessible and manageable through the Admin UI rather than requiring command-line access or direct API calls
 - All services use `imagePullPolicy: Always` during development
 - RAG services without required API keys will start but return errors for queries
 - The orchestrator timeout is 120 seconds to accommodate slower LLM inference

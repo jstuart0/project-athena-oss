@@ -20,7 +20,10 @@
             // Health endpoints - these should be accessible publicly
             { id: 'gateway', name: 'Gateway', endpoint: '/health', public: true },
             { id: 'ollama', name: 'Ollama', endpoint: '/api/services/ollama/health', public: false },
-            { id: 'orchestrator', name: 'Orchestrator', endpoint: '/api/services/orchestrator/health', public: false }
+            { id: 'orchestrator', name: 'Orchestrator', endpoint: '/api/services/orchestrator/health', public: false },
+            { id: 'redis', name: 'Redis', endpoint: '/api/services/redis/health', public: false },
+            { id: 'qdrant', name: 'Qdrant', endpoint: '/api/services/qdrant/health', public: false },
+            { id: 'mlx', name: 'MLX', endpoint: '/api/services/mlx/health', public: false, optional: true }
         ],
         pollInterval: 30000, // 30 seconds
         intervalKey: 'status-bar-poll',
@@ -43,15 +46,28 @@
 
                 // Determine status from response
                 let status = 'healthy';
+                let tooltip = service.name;
+
                 if (data) {
-                    if (data.status === 'error' || data.healthy === false) {
+                    if (data.status === 'not_configured') {
+                        // Optional service not configured (e.g., MLX without MLX_URL)
+                        status = 'unknown';
+                        tooltip = `${service.name}: Not configured`;
+                    } else if (data.status === 'offline' || data.status === 'error' || data.healthy === false) {
                         status = 'error';
+                        tooltip = `${service.name}: Offline`;
+                        if (data.error) tooltip += ` (${data.error})`;
                     } else if (data.status === 'degraded' || data.status === 'warning') {
                         status = 'warning';
+                        tooltip = `${service.name}: Degraded`;
+                    } else if (data.status === 'online') {
+                        status = 'healthy';
+                        tooltip = `${service.name}: Online`;
+                        if (data.response_time_ms) tooltip += ` (${data.response_time_ms}ms)`;
                     }
                 }
 
-                this._updateDot(dot, status, service.name);
+                this._updateDot(dot, status, tooltip);
 
             } catch (error) {
                 // Determine status from error

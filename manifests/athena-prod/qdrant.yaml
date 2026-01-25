@@ -1,0 +1,93 @@
+---
+# Qdrant Vector Database for Athena Memory System
+# Provides semantic search capabilities for memory retrieval
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qdrant
+  namespace: athena-prod
+  labels:
+    app: qdrant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qdrant
+  template:
+    metadata:
+      labels:
+        app: qdrant
+    spec:
+      containers:
+      - name: qdrant
+        image: qdrant/qdrant:v1.12.1
+        ports:
+        - name: http
+          containerPort: 6333
+        - name: grpc
+          containerPort: 6334
+        env:
+        - name: QDRANT__SERVICE__HTTP_PORT
+          value: "6333"
+        - name: QDRANT__SERVICE__GRPC_PORT
+          value: "6334"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: qdrant-storage
+          mountPath: /qdrant/storage
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 6333
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 6333
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: qdrant-storage
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+  namespace: athena-prod
+  labels:
+    app: qdrant
+spec:
+  selector:
+    app: qdrant
+  ports:
+  - name: http
+    port: 6333
+    targetPort: 6333
+  - name: grpc
+    port: 6334
+    targetPort: 6334
+---
+# Optional: PersistentVolumeClaim for production use
+# Uncomment and configure based on your storage class
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: qdrant-storage
+#   namespace: athena-prod
+# spec:
+#   accessModes:
+#     - ReadWriteOnce
+#   resources:
+#     requests:
+#       storage: 10Gi
+#   storageClassName: your-storage-class

@@ -177,14 +177,58 @@ def create_audit_log(
 # Quick Health Check Endpoints (for status bar)
 # =============================================================================
 
-SERVICE_HOST = os.getenv("SERVICE_HOST", "localhost")
+# Environment variable fallbacks (used when service not in database)
+ENV_FALLBACKS = {
+    "gateway": os.getenv("GATEWAY_URL", "http://localhost:8000"),
+    "orchestrator": os.getenv("ORCHESTRATOR_URL", "http://localhost:8001"),
+    "ollama": os.getenv("OLLAMA_URL", "http://localhost:11434"),
+    "redis": f"redis://{os.getenv('REDIS_SERVICE_HOST', 'redis')}:{os.getenv('REDIS_SERVICE_PORT', '6379')}",
+    "qdrant": os.getenv("QDRANT_URL", "http://qdrant:6333"),
+    "mlx": os.getenv("MLX_URL", ""),
+}
+
+
+def get_service_url_from_db(db: Session, service_name: str) -> Optional[dict]:
+    """
+    Look up service URL from database.
+    Returns dict with url, protocol, health_endpoint or None if not found.
+    """
+    # Try exact match first, then partial match
+    service = db.query(ServiceRegistry).filter(
+        ServiceRegistry.service_name.ilike(f"%{service_name}%")
+    ).first()
+
+    if service and service.server:
+        return {
+            "url": f"{service.protocol}://{service.server.ip_address}:{service.port}",
+            "protocol": service.protocol,
+            "health_endpoint": service.health_endpoint,
+            "ip": service.server.ip_address,
+            "port": service.port,
+        }
+    return None
+
+
+def get_service_url(db: Session, service_name: str, fallback_key: str = None) -> str:
+    """Get service URL from database, falling back to environment variable."""
+    db_info = get_service_url_from_db(db, service_name)
+    if db_info:
+        return db_info["url"]
+
+    # Fall back to environment variable
+    key = fallback_key or service_name.lower()
+    return ENV_FALLBACKS.get(key, "")
 
 
 @router.get("/gateway/health")
-async def check_gateway_health():
-    """Quick health check for Gateway service."""
+async def check_gateway_health(db: Session = Depends(get_db)):
+    """Quick health check for Gateway service. URL sourced from database."""
     import time
     start = time.time()
+
+    url = get_service_url(db, "gateway")
+    if not url:
+        return {"status": "not_configured", "error": "Gateway not found in database"}
 
     try:
         ssl_context = ssl.create_default_context()
@@ -194,7 +238,7 @@ async def check_gateway_health():
         connector = aiohttp.TCPConnector(ssl=ssl_context)
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(
-                f"http://{SERVICE_HOST}:8000/health",
+                f"{url}/health",
                 timeout=aiohttp.ClientTimeout(total=3)
             ) as resp:
                 elapsed = int((time.time() - start) * 1000)
@@ -219,10 +263,14 @@ async def check_gateway_health():
 
 
 @router.get("/orchestrator/health")
-async def check_orchestrator_health():
-    """Quick health check for Orchestrator service."""
+async def check_orchestrator_health(db: Session = Depends(get_db)):
+    """Quick health check for Orchestrator service. URL sourced from database."""
     import time
     start = time.time()
+
+    url = get_service_url(db, "orchestrator")
+    if not url:
+        return {"status": "not_configured", "error": "Orchestrator not found in database"}
 
     try:
         ssl_context = ssl.create_default_context()
@@ -232,7 +280,7 @@ async def check_orchestrator_health():
         connector = aiohttp.TCPConnector(ssl=ssl_context)
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(
-                f"http://{SERVICE_HOST}:8001/health",
+                f"{url}/health",
                 timeout=aiohttp.ClientTimeout(total=3)
             ) as resp:
                 elapsed = int((time.time() - start) * 1000)
@@ -257,10 +305,14 @@ async def check_orchestrator_health():
 
 
 @router.get("/ollama/health")
-async def check_ollama_health():
-    """Quick health check for Ollama LLM server."""
+async def check_ollama_health(db: Session = Depends(get_db)):
+    """Quick health check for Ollama LLM server. URL sourced from database."""
     import time
     start = time.time()
+
+    url = get_service_url(db, "ollama")
+    if not url:
+        return {"status": "not_configured", "error": "Ollama not found in database"}
 
     try:
         ssl_context = ssl.create_default_context()
@@ -271,7 +323,7 @@ async def check_ollama_health():
         async with aiohttp.ClientSession(connector=connector) as session:
             # Ollama uses /api/tags to check if running
             async with session.get(
-                f"http://{SERVICE_HOST}:11434/api/tags",
+                f"{url}/api/tags",
                 timeout=aiohttp.ClientTimeout(total=3)
             ) as resp:
                 elapsed = int((time.time() - start) * 1000)
@@ -294,6 +346,155 @@ async def check_ollama_health():
         return {"status": "offline", "error": "timeout"}
     except Exception as e:
         logger.error("ollama_health_check_failed", error=str(e))
+        return {"status": "offline", "error": str(e)}
+
+
+@router.get("/redis/health")
+async def check_redis_health(db: Session = Depends(get_db)):
+    """Quick health check for Redis cache server. URL sourced from database."""
+    import time
+    start = time.time()
+
+    # Try database first
+    db_info = get_service_url_from_db(db, "redis")
+    if db_info:
+        redis_host = db_info["ip"]
+        redis_port = db_info["port"]
+    else:
+        # Fall back to environment variables
+        redis_host = os.getenv("REDIS_SERVICE_HOST", os.getenv("REDIS_HOST", "redis"))
+        redis_port = int(os.getenv("REDIS_SERVICE_PORT", "6379"))
+
+    try:
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex((redis_host, redis_port))
+        sock.close()
+        elapsed = int((time.time() - start) * 1000)
+
+        if result == 0:
+            # Try a PING command for deeper health check
+            try:
+                import redis
+                r = redis.Redis(host=redis_host, port=redis_port, socket_timeout=2)
+                pong = r.ping()
+                r.close()
+                if pong:
+                    return {
+                        "status": "online",
+                        "response_time_ms": elapsed,
+                        "ping": "PONG"
+                    }
+            except Exception:
+                # TCP connection worked but Redis command failed
+                return {
+                    "status": "degraded",
+                    "response_time_ms": elapsed,
+                    "error": "TCP connected but PING failed"
+                }
+
+            return {
+                "status": "online",
+                "response_time_ms": elapsed
+            }
+        else:
+            return {"status": "offline", "error": "connection refused"}
+    except Exception as e:
+        logger.error("redis_health_check_failed", error=str(e))
+        return {"status": "offline", "error": str(e)}
+
+
+@router.get("/qdrant/health")
+async def check_qdrant_health(db: Session = Depends(get_db)):
+    """Quick health check for Qdrant vector database. URL sourced from database."""
+    import time
+    start = time.time()
+
+    qdrant_url = get_service_url(db, "qdrant")
+    if not qdrant_url:
+        return {"status": "not_configured", "error": "Qdrant not found in database"}
+
+    try:
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.get(
+                f"{qdrant_url}/healthz",
+                timeout=aiohttp.ClientTimeout(total=3)
+            ) as resp:
+                elapsed = int((time.time() - start) * 1000)
+                if resp.status == 200:
+                    return {
+                        "status": "online",
+                        "response_time_ms": elapsed
+                    }
+                else:
+                    return {
+                        "status": "degraded",
+                        "response_time_ms": elapsed,
+                        "http_status": resp.status
+                    }
+    except asyncio.TimeoutError:
+        return {"status": "offline", "error": "timeout"}
+    except Exception as e:
+        logger.error("qdrant_health_check_failed", error=str(e))
+        return {"status": "offline", "error": str(e)}
+
+
+@router.get("/mlx/health")
+async def check_mlx_health(db: Session = Depends(get_db)):
+    """Quick health check for MLX-LM server on Apple Silicon. URL sourced from database."""
+    import time
+    start = time.time()
+
+    # Try database first, then environment variable
+    mlx_url = get_service_url(db, "mlx")
+
+    if not mlx_url:
+        return {"status": "not_configured", "error": "MLX not found in database or MLX_URL not set"}
+
+    try:
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            # MLX-LM uses OpenAI-compatible API, check /v1/models endpoint
+            async with session.get(
+                f"{mlx_url}/v1/models",
+                timeout=aiohttp.ClientTimeout(total=3)
+            ) as resp:
+                elapsed = int((time.time() - start) * 1000)
+                if resp.status == 200:
+                    try:
+                        data = await resp.json()
+                        models = data.get("data", [])
+                        return {
+                            "status": "online",
+                            "response_time_ms": elapsed,
+                            "models_available": len(models),
+                            "model_names": [m.get("id") for m in models[:3]]
+                        }
+                    except Exception:
+                        return {
+                            "status": "online",
+                            "response_time_ms": elapsed
+                        }
+                else:
+                    return {
+                        "status": "degraded",
+                        "response_time_ms": elapsed,
+                        "http_status": resp.status
+                    }
+    except asyncio.TimeoutError:
+        return {"status": "offline", "error": "timeout"}
+    except Exception as e:
+        logger.error("mlx_health_check_failed", error=str(e))
         return {"status": "offline", "error": str(e)}
 
 

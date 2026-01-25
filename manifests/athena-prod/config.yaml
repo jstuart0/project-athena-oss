@@ -51,6 +51,12 @@ data:
   GATEWAY_URL: "http://athena-gateway:8000"
   ORCHESTRATOR_URL: "http://athena-orchestrator:8001"
   REDIS_URL: "redis://redis:6379/0"
+  QDRANT_URL: "http://qdrant:6333"
+
+  # MLX-LM server (optional - for Apple Silicon acceleration)
+  # Set to your Mac's IP if running MLX-LM server
+  # Leave empty or comment out if not using MLX
+  MLX_URL: ""
 
   # ==========================================================================
   # Domain Configuration
