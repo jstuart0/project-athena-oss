@@ -470,8 +470,17 @@ class RAGValidator:
 
                 # Validate first forecast day structure
                 first_day = forecast[0]
-                required_fields = ["date", "high", "low"]
-                missing_fields = [f for f in required_fields if f not in first_day]
+                # Accept both "high"/"low" and "temp_high"/"temp_low" field names
+                has_high = "high" in first_day or "temp_high" in first_day
+                has_low = "low" in first_day or "temp_low" in first_day
+                has_date = "date" in first_day
+                missing_fields = []
+                if not has_date:
+                    missing_fields.append("date")
+                if not has_high:
+                    missing_fields.append("high/temp_high")
+                if not has_low:
+                    missing_fields.append("low/temp_low")
 
                 if missing_fields:
                     logger.warning(f"Forecast day missing fields {missing_fields}: {first_day}")

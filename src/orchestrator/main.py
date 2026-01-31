@@ -5290,17 +5290,38 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                     rag_client.update_service_url(service_name, service_url)
 
                     # Call weather service with unified RAG client (includes circuit breaker, rate limiting)
-                    # Filter out temporal words that shouldn't be treated as locations
+                    # Filter out temporal words/phrases that shouldn't be treated as locations
                     TEMPORAL_WORDS = {'today', 'tomorrow', 'tonight', 'yesterday', 'now', 'morning',
                                       'afternoon', 'evening', 'night', 'weekend', 'week', 'day', 'hour'}
+                    TEMPORAL_PHRASES = {
+                        'next couple of days', 'next few days', 'next week', 'this week',
+                        'this weekend', 'next weekend', 'coming days', 'few days',
+                        'couple of days', 'couple days', 'rest of the week', 'rest of the day',
+                        'next couple days', 'next several days', 'the week', 'the weekend',
+                    }
                     raw_location = state.entities.get("location", DEFAULT_LOCATION)
-                    # Use default location if extracted location is actually a temporal word
-                    if raw_location and raw_location.lower().strip() in TEMPORAL_WORDS:
-                        logger.info(f"Filtering temporal word '{raw_location}' from location, using default: {DEFAULT_LOCATION}")
+                    raw_lower = raw_location.lower().strip() if raw_location else ""
+                    # Use default location if extracted location is actually a temporal word/phrase
+                    if raw_lower and (raw_lower in TEMPORAL_WORDS or raw_lower in TEMPORAL_PHRASES):
+                        logger.info(f"Filtering temporal expression '{raw_location}' from location, using default: {DEFAULT_LOCATION}")
                         location = DEFAULT_LOCATION
                     else:
                         location = raw_location or DEFAULT_LOCATION
                     time_ref = state.entities.get("time_ref")
+
+                    # Detect temporal intent from query when time_ref is not set by classifier
+                    if not time_ref:
+                        query_lower = state.query.lower()
+                        if any(p in query_lower for p in ['next couple', 'next few', 'next several', 'coming days', 'forecast']):
+                            time_ref = "this_week"
+                        elif 'tomorrow' in query_lower:
+                            time_ref = "tomorrow"
+                        elif 'weekend' in query_lower:
+                            time_ref = "this_weekend"
+                        elif any(p in query_lower for p in ['next week', 'this week', 'rest of the week']):
+                            time_ref = "this_week"
+                        if time_ref:
+                            logger.info(f"Inferred time_ref='{time_ref}' from query")
 
                     # Round 17: Detect far-future weather requests beyond forecast range (7-10 days)
                     # Patterns like "3 weeks", "in 2 weeks", "next month" should acknowledge limitations
@@ -6068,9 +6089,9 @@ Keep your acknowledgment brief - don't dwell on the interruption.
                 interface=state.interface_type
             )
 
-        # Add data attribution
+        # Log data attribution for debugging (not shown to user)
         if state.citations:
-            state.answer += f"\n\n_Source: {', '.join(state.citations)}_"
+            logger.debug(f"Citations: {', '.join(set(state.citations))}")
 
         logger.info(f"Synthesized response using {state.model_tier}")
 
