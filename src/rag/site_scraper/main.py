@@ -159,8 +159,8 @@ async def lifespan(app: FastAPI):
         } if BRAVE_API_KEY else {"Accept": "application/json"}
     )
 
-    # Initialize ContentFetcher
-    content_fetcher = ContentFetcher(timeout=3.0, max_concurrent=2)
+    # Initialize ContentFetcher - increased timeout for browser fallback on JS-rendered sites
+    content_fetcher = ContentFetcher(timeout=5.0, max_concurrent=2)
 
     logger.info("site_scraper_service.startup.complete")
 
@@ -194,12 +194,14 @@ setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    from orchestrator.search_providers.content_fetcher import HAS_PLAYWRIGHT
     return JSONResponse(
         status_code=200,
         content={
             "status": "healthy",
             "service": "site-scraper-rag",
-            "brave_api_configured": bool(BRAVE_API_KEY)
+            "brave_api_configured": bool(BRAVE_API_KEY),
+            "browser_rendering": HAS_PLAYWRIGHT
         }
     )
 
