@@ -844,6 +844,24 @@ tool_call_breakdown = Histogram(
     buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
 )
 
+# Validation and Hallucination Metrics
+validation_counter = Counter(
+    'athena_validation_total',
+    'Total validation outcomes',
+    ['passed', 'reason']  # passed: true/false, reason: too_short, too_long, hallucination, etc.
+)
+hallucination_counter = Counter(
+    'athena_hallucinations_detected_total',
+    'Hallucinations detected by detection layer',
+    ['layer', 'type']  # layer: pattern_detection, llm_fact_check, tool_filter; type: date, time, money, phone, tool_name
+)
+validation_layer_duration = Histogram(
+    'athena_validation_duration_seconds',
+    'Validation node duration in seconds',
+    ['layer'],  # layer: basic, pattern, llm_fact_check
+    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+)
+
 # Global clients
 ha_client: Optional[HomeAssistantClient] = None
 llm_router: Optional[LLMRouter] = None
@@ -6210,12 +6228,16 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
     start = time.time()
 
     # Layer 1: Basic validation
+    basic_start = time.time()
     if not state.answer or len(state.answer) < 10:
         state.validation_passed = False
         state.validation_reason = "Response too short"
         logger.warning(f"Validation failed: {state.validation_reason}")
         validate_duration = time.time() - start
         state.node_timings["validate"] = validate_duration
+        # Track metrics
+        validation_counter.labels(passed="false", reason="too_short").inc()
+        validation_layer_duration.labels(layer="basic").observe(time.time() - basic_start)
         if state.timing_tracker:
             state.timing_tracker.track_substage("graph", "validate", "basic_check", validate_duration)
         return state
@@ -6226,13 +6248,19 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
         logger.warning(f"Validation failed: {state.validation_reason}")
         validate_duration = time.time() - start
         state.node_timings["validate"] = validate_duration
+        # Track metrics
+        validation_counter.labels(passed="false", reason="too_long").inc()
+        validation_layer_duration.labels(layer="basic").observe(time.time() - basic_start)
         if state.timing_tracker:
             state.timing_tracker.track_substage("graph", "validate", "basic_check", validate_duration)
         return state
 
+    validation_layer_duration.labels(layer="basic").observe(time.time() - basic_start)
+
     # Layer 2: Pattern detection for hallucinations
     # Look for specific patterns that indicate fabricated information
     import re
+    pattern_start = time.time()
 
     # Detect specific dates (Month DD, YYYY or MM/DD/YYYY)
     date_patterns = re.findall(r'(\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b|\b\d{1,2}/\d{1,2}/\d{2,4}\b)', state.answer)
@@ -6247,6 +6275,17 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
     phone_patterns = re.findall(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b', state.answer)
 
     has_specific_facts = bool(date_patterns or time_patterns or money_patterns or phone_patterns)
+    validation_layer_duration.labels(layer="pattern").observe(time.time() - pattern_start)
+
+    # Track what patterns were detected (for hallucination analysis)
+    if date_patterns:
+        logger.info(f"Pattern detection: found {len(date_patterns)} date patterns")
+    if time_patterns:
+        logger.info(f"Pattern detection: found {len(time_patterns)} time patterns")
+    if money_patterns:
+        logger.info(f"Pattern detection: found {len(money_patterns)} money patterns")
+    if phone_patterns:
+        logger.info(f"Pattern detection: found {len(phone_patterns)} phone patterns")
 
     # Layer 3: Check if we have data to support specific facts
     has_supporting_data = bool(state.retrieved_data)
@@ -6255,7 +6294,18 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
         logger.warning(f"Response contains specific facts but no supporting data retrieved")
         logger.warning(f"Dates: {date_patterns}, Times: {time_patterns}, Money: {money_patterns}, Phones: {phone_patterns}")
 
+        # Track suspicious patterns found (potential hallucinations without supporting data)
+        if date_patterns:
+            hallucination_counter.labels(layer="pattern_detection", type="date_unsupported").inc(len(date_patterns))
+        if time_patterns:
+            hallucination_counter.labels(layer="pattern_detection", type="time_unsupported").inc(len(time_patterns))
+        if money_patterns:
+            hallucination_counter.labels(layer="pattern_detection", type="money_unsupported").inc(len(money_patterns))
+        if phone_patterns:
+            hallucination_counter.labels(layer="pattern_detection", type="phone_unsupported").inc(len(phone_patterns))
+
         # Layer 4: LLM-based fact checking
+        llm_fact_check_start = time.time()
         try:
             fact_check_prompt = f"""You are a fact-checking assistant. Analyze this response for hallucinations.
 
@@ -6316,30 +6366,45 @@ Respond ONLY with valid JSON:
                         state.validation_details = fact_check_result.get("specific_claims", [])
                         logger.warning(f"Hallucination detected by LLM fact checker: {state.validation_reason}")
                         logger.warning(f"Suspicious claims: {state.validation_details}")
+                        # Track LLM-detected hallucinations
+                        hallucination_counter.labels(layer="llm_fact_check", type="confirmed").inc()
+                        validation_counter.labels(passed="false", reason="hallucination_llm").inc()
                     else:
                         state.validation_passed = True
                         logger.info("Response passed LLM fact checking")
+                        validation_counter.labels(passed="true", reason="llm_verified").inc()
                 else:
                     logger.warning(f"Could not parse fact check response as JSON: {fact_check_response}")
                     # Default to failing validation if we can't parse
                     state.validation_passed = False
                     state.validation_reason = "Could not verify response accuracy"
+                    validation_counter.labels(passed="false", reason="parse_error").inc()
 
             except json.JSONDecodeError as e:
                 logger.warning(f"Failed to parse fact check JSON: {e}")
                 # Default to failing validation if we can't parse
                 state.validation_passed = False
                 state.validation_reason = "Could not verify response accuracy"
+                validation_counter.labels(passed="false", reason="json_error").inc()
+
+            # Track LLM fact check duration
+            validation_layer_duration.labels(layer="llm_fact_check").observe(time.time() - llm_fact_check_start)
 
         except Exception as e:
             logger.error(f"Fact checking error: {e}", exc_info=True)
             # If fact checking fails, be conservative and fail validation
             state.validation_passed = False
             state.validation_reason = f"Validation error: {str(e)}"
+            validation_counter.labels(passed="false", reason="exception").inc()
+            validation_layer_duration.labels(layer="llm_fact_check").observe(time.time() - llm_fact_check_start)
 
     else:
         # No specific facts or we have supporting data
         state.validation_passed = True
+        if has_supporting_data:
+            validation_counter.labels(passed="true", reason="has_supporting_data").inc()
+        else:
+            validation_counter.labels(passed="true", reason="no_specific_facts").inc()
         logger.info("Response passed validation (no specific facts or has supporting data)")
 
     validate_duration = time.time() - start

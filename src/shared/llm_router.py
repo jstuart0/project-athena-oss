@@ -540,10 +540,9 @@ class LLMRouter:
         config = await self._get_backend_config(model)
         keep_alive = config.get("keep_alive_seconds", -1)
 
-        # Auto-detect backend from model config if it's a cloud model
-        # This overrides the caller's backend parameter for cloud models
+        # Auto-detect backend from model config - overrides caller's default
         detected_backend = config.get("backend_type", backend)
-        if detected_backend in ("openai", "anthropic", "google"):
+        if detected_backend in ("openai", "anthropic", "google", "mlx"):
             backend = detected_backend
 
         logger.info(
@@ -593,6 +592,49 @@ class LLMRouter:
                 response = await self._generate_ollama_with_tools(
                     model, messages, tools, temperature, max_tokens, request_id, keep_alive
                 )
+            elif backend == "mlx":
+                if tools:
+                    # MLX with tools: use OpenAI-compatible endpoint via SDK
+                    response = await self._generate_openai_with_tools(
+                        model, messages, tools, temperature, max_tokens, request_id
+                    )
+                else:
+                    # MLX without tools (synthesis): direct httpx to MLX server
+                    backend_config = await self._get_backend_config(model)
+                    endpoint_url = backend_config.get("endpoint_url", os.getenv("MLX_URL", "http://localhost:9000"))
+                    # Ensure message content is strings (not dicts)
+                    clean_messages = []
+                    for m in messages:
+                        content = m.get("content", "")
+                        if isinstance(content, dict):
+                            content = content.get("text", str(content))
+                        elif isinstance(content, list):
+                            content = " ".join(
+                                item.get("text", str(item)) if isinstance(item, dict) else str(item)
+                                for item in content
+                            )
+                        clean_messages.append({"role": m.get("role", "user"), "content": str(content) if content else ""})
+                    async with httpx.AsyncClient(base_url=endpoint_url, timeout=120.0) as client:
+                        payload = {
+                            "model": model,
+                            "messages": clean_messages,
+                            "temperature": temperature or 0.7,
+                            "max_tokens": max_tokens or 500
+                        }
+                        logger.info("mlx_synthesis_request", endpoint=endpoint_url, msg_count=len(clean_messages), model=model)
+                        resp = await client.post("/v1/chat/completions", json=payload)
+                        if resp.status_code != 200:
+                            logger.error("mlx_synthesis_error", status=resp.status_code, body=resp.text[:500], url=str(resp.url))
+                        resp.raise_for_status()
+                        data = resp.json()
+                    choice = data.get("choices", [{}])[0]
+                    msg = choice.get("message", {})
+                    response = {
+                        "backend": "mlx",
+                        "model": model,
+                        "content": msg.get("content", ""),
+                        "finish_reason": choice.get("finish_reason", "stop")
+                    }
             else:
                 raise ValueError(f"Unsupported backend for tool calling: {backend}")
 
@@ -687,6 +729,9 @@ class LLMRouter:
             if tools:
                 request_params["tools"] = tools
                 request_params["tool_choice"] = "auto"
+
+            # Note: Qwen3.5 thinking mode is disabled via template-level fix
+            # (chat_template.jinja has enable_thinking = false hardcoded)
 
             # Call OpenAI
             response = await client.chat.completions.create(**request_params)
@@ -1353,6 +1398,11 @@ class LLMRouter:
             "temperature": temperature,
             "max_tokens": max_tokens
         }
+
+        # For Qwen3.5 models, disable thinking mode via chat_template_kwargs
+        if "qwen3.5" in model.lower() or "Qwen3.5" in model:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+            logger.info("qwen35_thinking_disabled", model=model, payload_keys=list(payload.keys()))
 
         # Merge in additional MLX options from model configuration
         if mlx_options:
