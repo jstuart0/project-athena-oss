@@ -169,6 +169,7 @@
         .main-content {
             height: calc(100vh - 60px);
             overflow-y: auto;
+            transition: margin-left 0.2s ease;
         }
         .sidebar {
             width: 72px;
@@ -176,11 +177,33 @@
             height: calc(100vh - 60px);
             overflow-y: auto;
             overflow-x: hidden;
-            transition: width 0.2s ease;
+            transition: width 0.2s ease, min-width 0.2s ease;
         }
         .sidebar:hover,
         .sidebar.expanded {
             width: 240px;
+        }
+        /* Pinned sidebar stays expanded and pushes content over */
+        .sidebar.pinned {
+            width: 240px !important;
+            min-width: 240px;
+        }
+        .sidebar.pinned .sidebar-item span:not(.sidebar-icon),
+        .sidebar.pinned .sidebar-category-header {
+            opacity: 1;
+        }
+        /* Sidebar toggle button styles */
+        .sidebar-toggle-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .sidebar-toggle-btn.pinned {
+            background-color: rgba(59, 130, 246, 0.1);
+            color: #60a5fa;
+        }
+        .sidebar-toggle-btn.pinned svg {
+            color: #60a5fa;
         }
         .sidebar .sidebar-item span:not(.sidebar-icon) {
             opacity: 0;
@@ -1185,7 +1208,8 @@
                 transition: width 0.3s ease;
             }
 
-            .sidebar.mobile-expanded {
+            .sidebar.mobile-expanded,
+            .sidebar.pinned {
                 width: 240px !important;
             }
 
@@ -1194,7 +1218,8 @@
                 display: none;
             }
 
-            .sidebar.mobile-expanded .sidebar-item span {
+            .sidebar.mobile-expanded .sidebar-item span,
+            .sidebar.pinned .sidebar-item span {
                 display: inline;
             }
 
@@ -1203,7 +1228,8 @@
                 display: none;
             }
 
-            .sidebar.mobile-expanded .sidebar-category-title {
+            .sidebar.mobile-expanded .sidebar-category-title,
+            .sidebar.pinned .sidebar-category-title {
                 display: inline;
             }
 
@@ -1429,6 +1455,10 @@
     <!-- Header -->
     <header class="bg-dark-card border-b border-dark-border h-[60px] flex items-center justify-between px-6 fixed top-0 left-0 right-0 z-50" role="banner" aria-label="Status bar">
         <div class="flex items-center gap-3">
+            <!-- Hamburger Menu Toggle -->
+            <button id="sidebar-toggle" onclick="toggleSidebarPin()" class="sidebar-toggle-btn p-2 rounded-lg hover:bg-dark-bg transition-colors" title="Pin sidebar open">
+                <i data-lucide="menu" class="w-5 h-5 text-gray-400"></i>
+            </button>
             <div class="flex items-center gap-2">
                 <i data-lucide="sparkles" class="w-6 h-6 text-blue-400"></i>
                 <h1 class="text-xl font-bold text-white">Project Athena</h1>

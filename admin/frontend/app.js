@@ -119,6 +119,59 @@ function initializeSidebarCategories() {
             }
         }
     });
+
+    // Initialize sidebar pin state from localStorage
+    initializeSidebarPin();
+}
+
+// ============================================================================
+// Sidebar Pin/Unpin Toggle
+// ============================================================================
+
+function initializeSidebarPin() {
+    const isPinned = localStorage.getItem('sidebar-pinned') === 'true';
+    const sidebar = document.querySelector('.sidebar');
+    const toggleBtn = document.getElementById('sidebar-toggle');
+
+    if (isPinned && sidebar) {
+        sidebar.classList.add('pinned');
+        if (toggleBtn) {
+            toggleBtn.classList.add('pinned');
+            toggleBtn.title = 'Unpin sidebar';
+            // Change icon to panel-left-close when pinned
+            const icon = toggleBtn.querySelector('i');
+            if (icon) {
+                icon.setAttribute('data-lucide', 'panel-left-close');
+                if (typeof lucide !== 'undefined') {
+                    lucide.createIcons();
+                }
+            }
+        }
+    }
+}
+
+function toggleSidebarPin() {
+    const sidebar = document.querySelector('.sidebar');
+    const toggleBtn = document.getElementById('sidebar-toggle');
+
+    if (!sidebar) return;
+
+    const isPinned = sidebar.classList.toggle('pinned');
+    localStorage.setItem('sidebar-pinned', isPinned ? 'true' : 'false');
+
+    if (toggleBtn) {
+        toggleBtn.classList.toggle('pinned', isPinned);
+        toggleBtn.title = isPinned ? 'Unpin sidebar' : 'Pin sidebar open';
+
+        // Change icon based on state
+        const icon = toggleBtn.querySelector('i');
+        if (icon) {
+            icon.setAttribute('data-lucide', isPinned ? 'panel-left-close' : 'menu');
+            if (typeof lucide !== 'undefined') {
+                lucide.createIcons();
+            }
+        }
+    }
 }
 
 // ============================================================================
