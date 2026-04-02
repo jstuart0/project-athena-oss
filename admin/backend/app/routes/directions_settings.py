@@ -23,6 +23,8 @@ async def get_all_settings(
     current_user: dict = Depends(get_current_user)
 ):
     """Get all directions settings."""
+    if not current_user.has_permission('read:directions_settings'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     settings = db.query(DirectionsSettings).order_by(
         DirectionsSettings.category,
         DirectionsSettings.setting_key
@@ -46,6 +48,8 @@ async def get_setting(
     current_user: dict = Depends(get_current_user)
 ):
     """Get a specific setting by key."""
+    if not current_user.has_permission('read:directions_settings'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     setting = db.query(DirectionsSettings).filter(
         DirectionsSettings.setting_key == setting_key
     ).first()
@@ -64,6 +68,8 @@ async def update_setting(
     current_user: dict = Depends(get_current_user)
 ):
     """Update a directions setting."""
+    if not current_user.has_permission('write:directions_settings'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     setting = db.query(DirectionsSettings).filter(
         DirectionsSettings.id == setting_id
     ).first()
@@ -104,6 +110,8 @@ async def reset_to_defaults(
     current_user: dict = Depends(get_current_user)
 ):
     """Reset all settings to defaults."""
+    if not current_user.has_permission('write:directions_settings'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     defaults = {
         'default_travel_mode': 'driving',
         'default_transit_mode': 'train',

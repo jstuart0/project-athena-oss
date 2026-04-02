@@ -13,6 +13,14 @@ const API_BASE = window.location.origin;
 let authToken = null;
 let currentUser = null;
 let currentUserPermissions = null;
+const TAB_PERMISSION_MAP = {
+    'mission-control': 'read:dashboard',
+    'dashboard': 'read:dashboard',
+    'alerts': 'read:alerts',
+    'intent-analytics': 'read:analytics',
+    'performance-metrics': 'read:analytics',
+    'audit': 'view_audit',
+};
 
 // Initialize app
 document.addEventListener('DOMContentLoaded', async () => {
@@ -290,6 +298,38 @@ function isReadOnlyUser() {
     return Boolean(currentUser) && !canWrite();
 }
 
+function hasPermission(permission) {
+    if (!currentUserPermissions) {
+        return false;
+    }
+    return Array.isArray(currentUserPermissions.permissions)
+        ? currentUserPermissions.permissions.includes(permission)
+        : false;
+}
+
+function getAllowedPages() {
+    return Array.isArray(currentUserPermissions?.allowed_pages)
+        ? currentUserPermissions.allowed_pages
+        : [];
+}
+
+function canAccessTab(tabName) {
+    if (!currentUser) {
+        return false;
+    }
+    if (canWrite() || canManageUsers() || currentUserPermissions?.can_manage_secrets) {
+        return true;
+    }
+
+    const allowedPages = getAllowedPages();
+    if (allowedPages.includes('*') || allowedPages.includes(tabName)) {
+        return true;
+    }
+
+    const requiredPermission = TAB_PERMISSION_MAP[tabName];
+    return requiredPermission ? hasPermission(requiredPermission) : false;
+}
+
 function renderReadOnlyBanner(message = 'You can inspect settings, but this account cannot make changes.') {
     return `
         <div class="mt-2 inline-flex items-center gap-2 px-3 py-2 bg-yellow-900/20 border border-yellow-700/40 rounded-lg text-sm text-yellow-200">
@@ -312,6 +352,11 @@ function refreshPermissionSensitiveUI() {
     if (addUserButton) {
         addUserButton.classList.toggle('hidden', !canManageUsers());
     }
+
+    document.querySelectorAll('.sidebar-item[data-route]').forEach(btn => {
+        const route = btn.getAttribute('data-route');
+        btn.classList.toggle('hidden', currentUser ? !canAccessTab(route) : false);
+    });
 }
 
 function updateAuthUI(authenticated) {
@@ -543,6 +588,17 @@ async function apiRequest(endpoint, options = {}) {
 // ============================================================================
 
 function showTab(tabName) {
+    if (currentUser && !canAccessTab(tabName)) {
+        const fallbackTab = canAccessTab('dashboard')
+            ? 'dashboard'
+            : (getAllowedPages()[0] || 'dashboard');
+        showError('You do not have access to that page.');
+        if (fallbackTab !== tabName) {
+            return showTab(fallbackTab);
+        }
+        return;
+    }
+
     // Use AppState for lifecycle management (clears intervals, aborts requests)
     if (typeof AppState !== 'undefined') {
         AppState.setCurrentTab(tabName);

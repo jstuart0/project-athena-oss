@@ -69,7 +69,8 @@ async def list_base_knowledge(
     category: Optional[str] = Query(None, description="Filter by category"),
     applies_to: Optional[str] = Query(None, description="Filter by applies_to (guest/owner/both)"),
     enabled: Optional[bool] = Query(None, description="Filter by enabled status"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     """
     List all base knowledge entries with optional filters.
@@ -77,11 +78,10 @@ async def list_base_knowledge(
     Supports filtering by category, applies_to, and enabled status.
     Returns entries sorted by priority (descending).
 
-    NOTE: This endpoint is public (no authentication required) to allow
-    internal service-to-service calls from orchestrator.
+    Requires read permission for admin access.
     """
-    # No authentication required for base knowledge read access
-    # (allows orchestrator to fetch context for LLM prompts)
+    if not current_user.has_permission('read:base_knowledge'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     try:
         query = db.query(BaseKnowledge)
@@ -112,6 +112,43 @@ async def list_base_knowledge(
         raise HTTPException(status_code=500, detail="Failed to retrieve base knowledge entries")
 
 
+@router.get("/public", response_model=List[BaseKnowledgeResponse])
+async def list_base_knowledge_public(
+    category: Optional[str] = Query(None, description="Filter by category"),
+    applies_to: Optional[str] = Query(None, description="Filter by applies_to (guest/owner/both)"),
+    enabled: Optional[bool] = Query(None, description="Filter by enabled status"),
+    db: Session = Depends(get_db)
+):
+    """
+    Public read-only endpoint for internal service-to-service calls.
+
+    Runtime services use this route so admin UI access can remain authenticated.
+    """
+    try:
+        query = db.query(BaseKnowledge)
+
+        if category:
+            query = query.filter(BaseKnowledge.category == category)
+        if applies_to:
+            query = query.filter(BaseKnowledge.applies_to == applies_to)
+        if enabled is not None:
+            query = query.filter(BaseKnowledge.enabled == enabled)
+
+        query = query.order_by(BaseKnowledge.priority.desc(), BaseKnowledge.created_at)
+        entries = query.all()
+
+        logger.info("base_knowledge_listed_public",
+                   count=len(entries),
+                   category=category,
+                   applies_to=applies_to,
+                   enabled=enabled)
+
+        return [entry.to_dict() for entry in entries]
+    except Exception as e:
+        logger.error("failed_to_list_base_knowledge_public", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to retrieve base knowledge entries")
+
+
 @router.get("/{knowledge_id}", response_model=BaseKnowledgeResponse)
 async def get_base_knowledge(
     knowledge_id: int,
@@ -121,7 +158,7 @@ async def get_base_knowledge(
     """
     Get a specific base knowledge entry by ID.
     """
-    if not current_user.has_permission('read'):
+    if not current_user.has_permission('read:base_knowledge'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     try:
@@ -157,7 +194,7 @@ async def create_base_knowledge(
     Requires write permission.
     Category and key combination must be unique.
     """
-    if not current_user.has_permission('write'):
+    if not current_user.has_permission('write:base_knowledge'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     try:
@@ -218,7 +255,7 @@ async def update_base_knowledge(
     Requires write permission.
     Only provided fields will be updated.
     """
-    if not current_user.has_permission('write'):
+    if not current_user.has_permission('write:base_knowledge'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     try:
@@ -271,7 +308,7 @@ async def delete_base_knowledge(
 
     Requires write permission.
     """
-    if not current_user.has_permission('write'):
+    if not current_user.has_permission('write:base_knowledge'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     try:
@@ -312,7 +349,7 @@ async def bulk_create_base_knowledge(
     Creates multiple entries in a single transaction.
     Skips entries that already exist (by category + key).
     """
-    if not current_user.has_permission('write'):
+    if not current_user.has_permission('write:base_knowledge'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     try:

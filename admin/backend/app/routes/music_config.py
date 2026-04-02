@@ -22,8 +22,8 @@ from app.auth.oidc import get_current_user
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/music-config", tags=["music"])
 
-# Home Assistant configuration for artist search - defaults empty, should be configured
-HA_URL = os.getenv("HA_URL", "")
+# Home Assistant configuration for artist search
+HA_URL = os.getenv("HA_URL", "http://192.168.10.168:8123")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
 
 
@@ -72,6 +72,8 @@ async def get_music_config(
     current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Get music configuration."""
+    if not current_user.has_permission('read:music_config'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     config = get_or_create_config(db)
 
     # Also get the feature flag status
@@ -91,6 +93,8 @@ async def update_music_config(
     current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Update music configuration."""
+    if not current_user.has_permission('write:music_config'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     config = get_or_create_config(db)
 
     # Update fields that were provided
@@ -133,6 +137,8 @@ async def test_music_assistant_connection(
     current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Test connection to Music Assistant."""
+    if not current_user.has_permission('read:music_config'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     config = get_or_create_config(db)
 
     if not config.music_assistant_url:
@@ -186,6 +192,8 @@ async def get_spotify_accounts(
     current_user: dict = Depends(get_current_user)
 ) -> List[Dict[str, str]]:
     """Get configured Spotify accounts."""
+    if not current_user.has_permission('read:music_config'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     config = get_or_create_config(db)
     return config.spotify_accounts or []
 
@@ -197,6 +205,8 @@ async def add_spotify_account(
     current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Add a Spotify account to the pool."""
+    if not current_user.has_permission('write:music_config'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     config = get_or_create_config(db)
 
     accounts = config.spotify_accounts or []
@@ -227,6 +237,8 @@ async def remove_spotify_account(
     current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Remove a Spotify account from the pool."""
+    if not current_user.has_permission('delete:music_config'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     config = get_or_create_config(db)
 
     accounts = config.spotify_accounts or []
@@ -256,6 +268,8 @@ async def get_genres(
     current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Get all genre-to-artist mappings."""
+    if not current_user.has_permission('read:music_config'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     config = get_or_create_config(db)
     return {
         "genres": config.genre_to_artists or {},
@@ -270,6 +284,8 @@ async def update_genre(
     current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Update artists for a genre (or add new genre)."""
+    if not current_user.has_permission('write:music_config'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     config = get_or_create_config(db)
 
     genres = config.genre_to_artists or {}
@@ -291,6 +307,8 @@ async def delete_genre(
     current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Delete a genre."""
+    if not current_user.has_permission('delete:music_config'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     config = get_or_create_config(db)
 
     genres = config.genre_to_artists or {}
@@ -345,7 +363,7 @@ async def get_browser_playback_config(
 
     # Extract WebSocket URL from base URL
     # MA server typically runs WebSocket on same port
-    ma_url = config.music_assistant_url or os.getenv("MUSIC_ASSISTANT_URL", "")
+    ma_url = config.music_assistant_url or "http://192.168.10.168:8095"
     ws_url = ma_url.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
 
     return {
@@ -372,6 +390,8 @@ async def search_artists(
 
     Returns list of matching artists for autocomplete.
     """
+    if not current_user.has_permission('read:music_config'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     if len(q) < 2:
         return []
 

@@ -1,4 +1,3 @@
-import os
 """
 Dashboard API - Consolidated endpoint for Mission Control.
 
@@ -37,16 +36,18 @@ async def get_dashboard_data(
     - Alert summary
     - Service status grid
     """
+    if not current_user.has_permission('read:dashboard'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     now = datetime.utcnow()
 
     # 1. Voice Health - Check actual service health
-    service_host = os.getenv("SERVICE_HOST", "localhost")
+    mac_studio_ip = "192.168.10.167"
     core_services = [
-        {"name": "Gateway", "url": f"http://{service_host}:8000/health", "critical": True},
-        {"name": "Orchestrator", "url": f"http://{service_host}:8001/health", "critical": True},
-        {"name": "Weather RAG", "url": f"http://{service_host}:8010/health", "critical": False},
-        {"name": "Sports RAG", "url": f"http://{service_host}:8017/health", "critical": False},
-        {"name": "Dining RAG", "url": f"http://{service_host}:8019/health", "critical": False},
+        {"name": "Gateway", "url": f"http://{mac_studio_ip}:8000/health", "critical": True},
+        {"name": "Orchestrator", "url": f"http://{mac_studio_ip}:8001/health", "critical": True},
+        {"name": "Weather RAG", "url": f"http://{mac_studio_ip}:8010/health", "critical": False},
+        {"name": "Sports RAG", "url": f"http://{mac_studio_ip}:8017/health", "critical": False},
+        {"name": "Dining RAG", "url": f"http://{mac_studio_ip}:8019/health", "critical": False},
     ]
 
     healthy_count = 0
@@ -224,6 +225,8 @@ async def get_integration_statuses(
 
     Checks: LiveKit, SMS (Twilio), Calendar, Weather API, etc.
     """
+    if not current_user.has_permission('read:dashboard'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     integrations = []
 
     # Define integration providers to check
@@ -277,13 +280,15 @@ async def get_quick_stats(
     Lightweight stats endpoint for quick dashboard refresh.
     Returns only numerical values, no history arrays.
     """
+    if not current_user.has_permission('read:dashboard'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     now = datetime.utcnow()
 
     # Service health - quick check of core services
-    service_host = os.getenv("SERVICE_HOST", "localhost")
+    mac_studio_ip = "192.168.10.167"
     core_services = [
-        f"http://{service_host}:8000/health",  # Gateway
-        f"http://{service_host}:8001/health",  # Orchestrator
+        f"http://{mac_studio_ip}:8000/health",  # Gateway
+        f"http://{mac_studio_ip}:8001/health",  # Orchestrator
     ]
     healthy, total = 0, len(core_services)
     try:

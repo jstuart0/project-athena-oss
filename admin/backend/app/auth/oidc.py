@@ -38,8 +38,8 @@ if DEV_MODE:
 # Default OIDC configuration from environment (fallback)
 DEFAULT_OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID", "")
 DEFAULT_OIDC_CLIENT_SECRET = os.getenv("OIDC_CLIENT_SECRET", "")
-DEFAULT_OIDC_ISSUER = os.getenv("OIDC_ISSUER", "http://localhost:9000/application/o/athena-admin/")
-DEFAULT_OIDC_REDIRECT_URI = os.getenv("OIDC_REDIRECT_URI", "http://localhost:8080/auth/callback")
+DEFAULT_OIDC_ISSUER = os.getenv("OIDC_ISSUER", "https://auth.xmojo.net/application/o/athena-admin/")
+DEFAULT_OIDC_REDIRECT_URI = os.getenv("OIDC_REDIRECT_URI", "https://athena-admin.xmojo.net/auth/callback")
 DEFAULT_OIDC_SCOPES = os.getenv("OIDC_SCOPES", "openid profile email")
 
 # Active OIDC configuration (set during startup)
@@ -75,7 +75,7 @@ def load_oidc_config_from_db() -> Dict[str, str]:
     """
     try:
         # Create database connection
-        database_url = os.getenv("DATABASE_URL", "postgresql://psadmin@localhost:5432/athena_admin")
+        database_url = os.getenv("DATABASE_URL", "postgresql://psadmin@postgres-01.xmojo.net:5432/athena_admin")
         engine = create_engine(database_url)
 
         with engine.connect() as conn:
@@ -173,19 +173,8 @@ async def get_authentik_userinfo(access_token: str) -> Dict[str, Any]:
     """
     try:
         async with httpx.AsyncClient() as client:
-            # Construct userinfo URL from issuer
-            # OIDC_ISSUER is like: https://auth.xmojo.net/application/o/athena-prod/
-            # Userinfo endpoint is: https://auth.xmojo.net/application/o/userinfo/
-            issuer_base = OIDC_ISSUER.rstrip('/')
-            # Extract base URL (remove application-specific path)
-            if '/application/o/' in issuer_base:
-                base_url = issuer_base.split('/application/o/')[0]
-                userinfo_url = f"{base_url}/application/o/userinfo/"
-            else:
-                # Fallback: try to get from OIDC discovery
-                userinfo_url = f"{issuer_base}/userinfo"
-
-            logger.debug("fetching_userinfo", userinfo_url=userinfo_url)
+            # Authentik userinfo endpoint is shared across all applications
+            userinfo_url = "https://auth.xmojo.net/application/o/userinfo/"
             response = await client.get(
                 userinfo_url,
                 headers={"Authorization": f"Bearer {access_token}"}
@@ -264,7 +253,7 @@ def get_or_create_user(db: Session, userinfo: Dict[str, Any]) -> User:
     username = userinfo.get('preferred_username') or email.split('@')[0]
     full_name = userinfo.get('name', '')
 
-    # Check if user exists by bound OIDC subject first
+    # Check if user exists
     user = db.query(User).filter(User.authentik_id == authentik_id).first()
 
     # If not bound yet, try to match a pre-provisioned OIDC user by email or username
@@ -317,6 +306,51 @@ class OptionalHTTPBearer(HTTPBearer):
 
 # Always use optional security to allow API key authentication
 optional_security = OptionalHTTPBearer(auto_error=False)
+
+SCOPED_ROLE_ROUTE_RULES = [
+    ("/api/dashboard", {"GET": "read:dashboard"}),
+    ("/api/alerts", {"GET": "read:alerts", "PATCH": "write:alerts", "POST": "write:alerts", "DELETE": "delete:alerts"}),
+    ("/api/analytics", {"GET": "read:analytics"}),
+    ("/api/base-knowledge", {"GET": "read:base_knowledge", "POST": "write:base_knowledge", "PUT": "write:base_knowledge", "DELETE": "delete:base_knowledge"}),
+    ("/api/directions-settings", {"GET": "read:directions_settings", "PUT": "write:directions_settings", "POST": "write:directions_settings", "DELETE": "delete:directions_settings"}),
+    ("/api/music-config", {"GET": "read:music_config", "PUT": "write:music_config", "POST": "write:music_config", "DELETE": "delete:music_config"}),
+    ("/api/users/me/password", {"POST": "self"}),
+    ("/api/users/me/permissions", {"GET": "self"}),
+]
+
+SCOPED_ROLE_ALWAYS_ALLOWED_PREFIXES = (
+    "/api/auth/",
+)
+
+
+def _enforce_scoped_role_route_access(user: User, request: Optional[Request]) -> None:
+    """
+    Enforce deny-by-default API access for scoped roles like viewer/support.
+
+    Owner/operator continue using broad permission checks at the route level.
+    """
+    if not request or user.role in {"owner", "operator"}:
+        return
+
+    path = request.url.path
+    method = request.method.upper()
+
+    if any(path.startswith(prefix) for prefix in SCOPED_ROLE_ALWAYS_ALLOWED_PREFIXES):
+        return
+
+    for prefix, method_map in SCOPED_ROLE_ROUTE_RULES:
+        if path.startswith(prefix):
+            required_permission = method_map.get(method) or method_map.get("*")
+            if not required_permission:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+            if required_permission == "self":
+                return
+            if user.has_permission(required_permission):
+                return
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+
+    if path.startswith("/api/"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
 
 
 async def get_current_user(
@@ -372,6 +406,7 @@ async def get_current_user(
     if x_api_key:
         user = await _authenticate_api_key(x_api_key, db, request)
         if user:
+            _enforce_scoped_role_route_access(user, request)
             return user
         # If API key was provided but invalid, don't fall through to JWT
         raise HTTPException(
@@ -407,6 +442,8 @@ async def get_current_user(
     # Store auth method in request state for audit logging
     if request:
         request.state.auth_method = "jwt"
+
+    _enforce_scoped_role_route_access(user, request)
 
     return user
 

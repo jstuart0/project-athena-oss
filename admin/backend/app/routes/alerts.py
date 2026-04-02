@@ -208,6 +208,8 @@ async def get_active_alert_count(
     current_user: User = Depends(get_current_user)
 ):
     """Get count of active alerts for the status bar badge."""
+    if not current_user.has_permission('read:alerts'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     active_count = db.query(Alert).filter(
         Alert.status == 'active'
     ).count()
@@ -241,6 +243,8 @@ async def list_alerts(
     current_user: User = Depends(get_current_user)
 ):
     """List alerts with optional filtering."""
+    if not current_user.has_permission('read:alerts'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     query = db.query(Alert)
 
     if status:
@@ -266,6 +270,8 @@ async def get_alert_stats(
     current_user: User = Depends(get_current_user)
 ):
     """Get alert statistics."""
+    if not current_user.has_permission('read:alerts'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     all_alerts = db.query(Alert).all()
 
     stats = {
@@ -292,6 +298,8 @@ async def get_alert(
     current_user: User = Depends(get_current_user)
 ):
     """Get a specific alert by ID."""
+    if not current_user.has_permission('read:alerts'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
 
     if not alert:
@@ -308,6 +316,8 @@ async def update_alert(
     current_user: User = Depends(get_current_user)
 ):
     """Update an alert (acknowledge, resolve, dismiss)."""
+    if not current_user.has_permission('write:alerts'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
 
     if not alert:
@@ -349,6 +359,8 @@ async def delete_alert(
     current_user: User = Depends(get_current_user)
 ):
     """Delete an alert (admin only)."""
+    if not current_user.has_permission('delete:alerts'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
 
     if not alert:
@@ -374,6 +386,8 @@ async def acknowledge_all_alerts(
     current_user: User = Depends(get_current_user)
 ):
     """Acknowledge all active alerts matching the filters."""
+    if not current_user.has_permission('write:alerts'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     query = db.query(Alert).filter(Alert.status == 'active')
 
     if alert_type:

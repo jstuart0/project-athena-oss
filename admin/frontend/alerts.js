@@ -10,6 +10,29 @@
 let alertsDropdownOpen = false;
 let alertsRefreshInterval = null;
 
+function canModifyAlerts() {
+    return typeof hasPermission === 'function' ? hasPermission('write:alerts') : true;
+}
+
+function getAlertActionClasses(enabled) {
+    if (enabled) {
+        return 'text-white rounded text-sm transition-colors';
+    }
+    return 'text-gray-400 rounded text-sm cursor-not-allowed opacity-60';
+}
+
+function updateAlertsPagePermissions() {
+    const button = document.querySelector('button[onclick="acknowledgeAllAlerts()"]');
+    if (!button) return;
+
+    const enabled = canModifyAlerts();
+    button.disabled = !enabled;
+    button.title = enabled ? 'Acknowledge all active alerts' : 'Read-only access: alert actions are disabled for your role.';
+    button.className = enabled
+        ? 'px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm font-medium transition-colors'
+        : 'px-4 py-2 bg-yellow-900/40 text-yellow-200 rounded-lg text-sm font-medium opacity-60 cursor-not-allowed';
+}
+
 function toggleAlertsDropdown() {
     const dropdown = document.getElementById('alerts-dropdown');
     alertsDropdownOpen = !alertsDropdownOpen;
@@ -158,6 +181,8 @@ async function loadAlertsPage() {
         loadAlertsList()
     ]);
 
+    updateAlertsPagePermissions();
+
     // Start auto-refresh using RefreshManager (prevents interval accumulation)
     if (typeof RefreshManager !== 'undefined') {
         RefreshManager.createInterval('alerts-refresh', loadAlertsDropdown, 30000);
@@ -248,6 +273,7 @@ async function loadAlertsList() {
 
 function renderAlertsList(alerts) {
     const container = document.getElementById('alerts-page-container');
+    const canWrite = canModifyAlerts();
 
     if (alerts.length === 0) {
         container.innerHTML = '<div class="p-8 text-center text-gray-500 bg-dark-card border border-dark-border rounded-lg">No alerts found matching your filters.</div>';
@@ -276,19 +302,19 @@ function renderAlertsList(alerts) {
                 </div>
                 <div class="flex gap-2 ml-4">
                     ${alert.status === 'active' ? `
-                        <button onclick="acknowledgeAlert(${alert.id})"
-                            class="px-3 py-1.5 bg-yellow-600 hover:bg-yellow-700 text-white rounded text-sm transition-colors">
+                        <button onclick="acknowledgeAlert(${alert.id})" ${canWrite ? '' : 'disabled title="Read-only access: alert actions are disabled for your role."'}
+                            class="px-3 py-1.5 bg-yellow-600 ${canWrite ? 'hover:bg-yellow-700' : 'opacity-60 cursor-not-allowed'} ${getAlertActionClasses(canWrite)}">
                             Acknowledge
                         </button>
                     ` : ''}
                     ${alert.status !== 'resolved' ? `
-                        <button onclick="resolveAlert(${alert.id})"
-                            class="px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded text-sm transition-colors">
+                        <button onclick="resolveAlert(${alert.id})" ${canWrite ? '' : 'disabled title="Read-only access: alert actions are disabled for your role."'}
+                            class="px-3 py-1.5 bg-green-600 ${canWrite ? 'hover:bg-green-700' : 'opacity-60 cursor-not-allowed'} ${getAlertActionClasses(canWrite)}">
                             Resolve
                         </button>
                     ` : ''}
-                    <button onclick="deleteAlert(${alert.id})"
-                        class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-sm transition-colors">
+                    <button onclick="deleteAlert(${alert.id})" ${canWrite ? '' : 'disabled title="Read-only access: alert actions are disabled for your role."'}
+                        class="px-3 py-1.5 bg-red-600 ${canWrite ? 'hover:bg-red-700' : 'opacity-60 cursor-not-allowed'} ${getAlertActionClasses(canWrite)}">
                         Delete
                     </button>
                 </div>
@@ -300,6 +326,7 @@ function renderAlertsList(alerts) {
 // Use global getAuthHeaders from utils.js which includes Content-Type: application/json
 
 async function acknowledgeAlert(alertId) {
+    if (!canModifyAlerts()) return;
     try {
         const response = await fetch(`${API_BASE}/api/alerts/${alertId}`, {
             method: 'PATCH',
@@ -323,6 +350,7 @@ async function acknowledgeAlert(alertId) {
 }
 
 async function resolveAlert(alertId) {
+    if (!canModifyAlerts()) return;
     const notes = prompt('Resolution notes (optional):');
 
     try {
@@ -351,6 +379,7 @@ async function resolveAlert(alertId) {
 }
 
 async function deleteAlert(alertId) {
+    if (!canModifyAlerts()) return;
     if (!confirm('Are you sure you want to delete this alert?')) return;
 
     try {
@@ -372,6 +401,7 @@ async function deleteAlert(alertId) {
 }
 
 async function acknowledgeAllAlerts() {
+    if (!canModifyAlerts()) return;
     if (!confirm('Acknowledge all active alerts?')) return;
 
     const statusFilter = document.getElementById('alerts-status-filter')?.value || '';

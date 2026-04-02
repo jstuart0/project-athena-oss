@@ -84,15 +84,40 @@ class User(Base):
         Index('idx_users_auth_provider', 'auth_provider'),
     )
 
+    ROLE_PERMISSIONS = {
+        'owner': {'read', 'write', 'delete', 'manage_users', 'manage_secrets', 'view_audit'},
+        'operator': {'read', 'write', 'view_audit'},
+        'viewer': {'read:dashboard', 'read:alerts'},
+        'support': {'read:dashboard', 'read:alerts', 'read:analytics', 'view_audit'},
+    }
+
+    ROLE_ALLOWED_PAGES = {
+        'owner': ['*'],
+        'operator': ['*'],
+        'viewer': ['mission-control', 'dashboard', 'alerts'],
+        'support': ['mission-control', 'dashboard', 'alerts', 'intent-analytics', 'performance-metrics', 'audit'],
+    }
+
+    def get_permissions(self) -> set[str]:
+        """Return the effective permission set for the user's role."""
+        return set(self.ROLE_PERMISSIONS.get(self.role, set()))
+
+    def get_allowed_pages(self) -> list[str]:
+        """Return sidebar/page routes that should be visible for this role."""
+        return list(self.ROLE_ALLOWED_PAGES.get(self.role, []))
+
     def has_permission(self, permission: str) -> bool:
         """Check if user has a specific permission based on their role."""
-        permissions = {
-            'owner': {'read', 'write', 'delete', 'manage_users', 'manage_secrets', 'view_audit'},
-            'operator': {'read', 'write', 'view_audit'},
-            'viewer': {'read'},
-            'support': {'read', 'view_audit'},
-        }
-        return permission in permissions.get(self.role, set())
+        permissions = self.get_permissions()
+        if permission in permissions:
+            return True
+
+        # Owner/operator broad permissions satisfy scoped checks like read:dashboard.
+        if ':' in permission:
+            action, _scope = permission.split(':', 1)
+            return action in permissions
+
+        return False
 
 
 class Policy(Base):
@@ -1605,6 +1630,7 @@ class GuestModeConfig(Base):
 
     # Permission Scopes (JSON arrays)
     guest_allowed_intents = Column(ARRAY(String), default=[])
+    guest_restricted_intents = Column(ARRAY(String), default=['tesla'])  # Intents blocked in guest mode
     guest_restricted_entities = Column(ARRAY(String), default=[])
     guest_allowed_domains = Column(ARRAY(String), default=[])
 
@@ -1642,6 +1668,7 @@ class GuestModeConfig(Base):
             'buffer_before_checkin_hours': self.buffer_before_checkin_hours,
             'buffer_after_checkout_hours': self.buffer_after_checkout_hours,
             'guest_allowed_intents': self.guest_allowed_intents,
+            'guest_restricted_intents': self.guest_restricted_intents,
             'guest_restricted_entities': self.guest_restricted_entities,
             'guest_allowed_domains': self.guest_allowed_domains,
             'max_queries_per_minute_guest': self.max_queries_per_minute_guest,
@@ -1652,6 +1679,139 @@ class GuestModeConfig(Base):
             'created_by': self.creator.username if self.creator else None,
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat(),
+        }
+
+
+class ModeAuditLog(Base):
+    """
+    Audit log for mode changes and permission denials.
+
+    Tracks all mode transitions (guest/owner), override activations,
+    PIN verifications, and permission denials for security auditing.
+    """
+    __tablename__ = 'mode_audit_log'
+
+    id = Column(Integer, primary_key=True)
+
+    # Event timing
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # Event type: mode_change, override_activated, override_expired, pin_verified, pin_failed, permission_denied
+    event_type = Column(String(50), nullable=False)
+
+    # Mode transition
+    previous_mode = Column(String(20), nullable=True)  # guest, owner
+    new_mode = Column(String(20), nullable=True)  # guest, owner
+
+    # Trigger source: calendar, pin_override, manual, timeout
+    trigger_source = Column(String(50), nullable=True)
+
+    # Context
+    voice_device_id = Column(String(100), nullable=True)  # Room/device that triggered
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True)  # Admin user if manual
+    session_id = Column(String(100), nullable=True)  # Voice session ID
+    calendar_event_id = Column(String(200), nullable=True)  # Calendar event reference
+
+    # Override details
+    override_expires_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Permission denial details
+    denied_intent = Column(String(50), nullable=True)  # Intent that was blocked
+    denied_entity = Column(String(200), nullable=True)  # Entity that was blocked
+
+    # Additional context
+    event_metadata = Column(JSONB, nullable=True)  # Use event_metadata instead of metadata (reserved name)
+    ip_address = Column(String(45), nullable=True)  # Client IP for security
+
+    # Relationships
+    user = relationship('User', foreign_keys=[user_id])
+
+    __table_args__ = (
+        Index('idx_mode_audit_log_timestamp', 'timestamp'),
+        Index('idx_mode_audit_log_event_type', 'event_type'),
+        Index('idx_mode_audit_log_voice_device_id', 'voice_device_id'),
+        Index('idx_mode_audit_log_calendar_event_id', 'calendar_event_id'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert audit log entry to dictionary for API responses."""
+        return {
+            'id': self.id,
+            'timestamp': self.timestamp.isoformat() if self.timestamp else None,
+            'event_type': self.event_type,
+            'previous_mode': self.previous_mode,
+            'new_mode': self.new_mode,
+            'trigger_source': self.trigger_source,
+            'voice_device_id': self.voice_device_id,
+            'user': self.user.username if self.user else None,
+            'session_id': self.session_id,
+            'calendar_event_id': self.calendar_event_id,
+            'override_expires_at': self.override_expires_at.isoformat() if self.override_expires_at else None,
+            'denied_intent': self.denied_intent,
+            'denied_entity': self.denied_entity,
+            'metadata': self.event_metadata,
+            'ip_address': self.ip_address,
+        }
+
+
+class GuestModeConfigHistory(Base):
+    """
+    History of guest mode configuration changes for rollback support.
+
+    Tracks all changes to guest mode configuration with full snapshots
+    to enable reverting to previous settings if needed.
+    """
+    __tablename__ = 'guest_mode_config_history'
+
+    id = Column(Integer, primary_key=True)
+    config_id = Column(Integer, ForeignKey('guest_mode_config.id'), nullable=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    changed_by_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    change_type = Column(String(50), nullable=False)  # created, updated, rollback
+    change_description = Column(Text, nullable=True)
+
+    # Full config snapshot at time of change
+    config_snapshot = Column(JSONB, nullable=False)
+
+    # Change tracking
+    changed_fields = Column(ARRAY(String), nullable=True)
+    previous_values = Column(JSONB, nullable=True)
+    new_values = Column(JSONB, nullable=True)
+
+    # Rollback reference
+    rollback_from_id = Column(Integer, ForeignKey('guest_mode_config_history.id'), nullable=True)
+
+    # Audit fields
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(Text, nullable=True)
+
+    # Relationships
+    config = relationship('GuestModeConfig', foreign_keys=[config_id])
+    changed_by = relationship('User', foreign_keys=[changed_by_id])
+    rollback_from = relationship('GuestModeConfigHistory', remote_side=[id])
+
+    __table_args__ = (
+        Index('idx_guest_mode_config_history_timestamp', 'timestamp'),
+        Index('idx_guest_mode_config_history_config_id', 'config_id'),
+        Index('idx_guest_mode_config_history_changed_by_id', 'changed_by_id'),
+        Index('idx_guest_mode_config_history_change_type', 'change_type'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert history entry to dictionary for API responses."""
+        return {
+            'id': self.id,
+            'config_id': self.config_id,
+            'timestamp': self.timestamp.isoformat() if self.timestamp else None,
+            'changed_by': self.changed_by.username if self.changed_by else None,
+            'change_type': self.change_type,
+            'change_description': self.change_description,
+            'config_snapshot': self.config_snapshot,
+            'changed_fields': self.changed_fields,
+            'previous_values': self.previous_values,
+            'new_values': self.new_values,
+            'rollback_from_id': self.rollback_from_id,
+            'ip_address': self.ip_address,
         }
 
 
@@ -2159,6 +2319,10 @@ class ComponentModelAssignment(Base):
     max_tokens = Column(Integer)
     timeout_seconds = Column(Integer)
 
+    # Qwen3-specific: disable thinking mode for faster responses
+    # When True, adds "/no_think" to system prompt to skip chain-of-thought
+    disable_thinking = Column(Boolean, nullable=False, default=False)
+
     # Status
     enabled = Column(Boolean, nullable=False, default=True)
 
@@ -2183,6 +2347,7 @@ class ComponentModelAssignment(Base):
             'temperature': self.temperature,
             'max_tokens': self.max_tokens,
             'timeout_seconds': self.timeout_seconds,
+            'disable_thinking': self.disable_thinking,
             'enabled': self.enabled,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
@@ -2286,8 +2451,8 @@ class GatewayConfig(Base):
     id = Column(Integer, primary_key=True)
 
     # Service URLs
-    orchestrator_url = Column(String(500), nullable=False, default='http://localhost:8001')
-    ollama_fallback_url = Column(String(500), nullable=False, default='http://localhost:11434')
+    orchestrator_url = Column(String(500), nullable=False, default='http://192.168.10.167:8001')
+    ollama_fallback_url = Column(String(500), nullable=False, default='http://192.168.10.167:11434')
 
     # Intent Classification
     intent_model = Column(String(255), nullable=False, default='phi3:mini')
@@ -3805,7 +3970,7 @@ class VoiceServiceConfig(Base):
     service_type = Column(String(10), unique=True, nullable=False)  # 'stt' or 'tts'
 
     # Connection details
-    host = Column(String(100), nullable=False)  # e.g., localhost or server hostname
+    host = Column(String(100), nullable=False)  # 192.168.10.181
     wyoming_port = Column(Integer, nullable=False)  # Wyoming protocol port
     rest_port = Column(Integer)  # REST API port (optional)
 
@@ -3997,7 +4162,7 @@ class MCPSecurity(Base):
     id = Column(Integer, primary_key=True)
 
     # Domain restrictions
-    allowed_domains = Column(JSONB, default=list)  # e.g., ["localhost", "localhost"]
+    allowed_domains = Column(JSONB, default=list)  # e.g., ["localhost", "n8n.xmojo.net"]
     blocked_domains = Column(JSONB, default=list)
 
     # Execution limits

@@ -83,6 +83,8 @@ async def get_intent_analytics(
     Returns:
         Intent analytics with counts and percentages
     """
+    if not current_user.has_permission('read:analytics'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     try:
         # Calculate date range
         cutoff_date = datetime.utcnow() - timedelta(days=days)
@@ -182,6 +184,8 @@ async def get_query_logs(
     Returns:
         List of query log entries
     """
+    if not current_user.has_permission('read:analytics'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     try:
         # Calculate date range
         cutoff_date = datetime.utcnow() - timedelta(days=days)
@@ -251,6 +255,8 @@ async def get_latency_distribution(
 
     Returns histogram-style buckets and counts for the Voice Pipelines chart.
     """
+    if not current_user.has_permission('read:analytics'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     # Parse period to get appropriate time range
     period_map = {
         "1h": timedelta(hours=1),
@@ -320,6 +326,8 @@ async def get_pipeline_stats(
 
     Returns aggregate stats like request count, avg latency, error rate.
     """
+    if not current_user.has_permission('read:analytics'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     period_map = {
         "1h": timedelta(hours=1),
         "6h": timedelta(hours=6),
