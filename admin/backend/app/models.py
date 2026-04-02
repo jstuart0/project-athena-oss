@@ -62,10 +62,12 @@ class User(Base):
     __tablename__ = 'users'
 
     id = Column(Integer, primary_key=True)
-    authentik_id = Column(String(255), unique=True, nullable=False, index=True)
+    authentik_id = Column(String(255), unique=True, nullable=True, index=True)
     username = Column(String(255), unique=True, nullable=False, index=True)
     email = Column(String(255), unique=True, nullable=False)
     full_name = Column(String(255))
+    auth_provider = Column(String(32), nullable=False, default='oidc')
+    password_hash = Column(String(512), nullable=True)
     role = Column(String(32), nullable=False, default='viewer')  # owner, operator, viewer, support
     active = Column(Boolean, default=True, nullable=False)
     last_login = Column(DateTime(timezone=True))
@@ -79,6 +81,7 @@ class User(Base):
     __table_args__ = (
         Index('idx_users_role', 'role'),
         Index('idx_users_active', 'active'),
+        Index('idx_users_auth_provider', 'auth_provider'),
     )
 
     def has_permission(self, permission: str) -> bool:

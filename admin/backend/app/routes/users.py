@@ -3,15 +3,16 @@ User management API routes.
 
 Provides CRUD operations for user accounts and RBAC.
 """
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 import structlog
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, AuditLog
+from app.utils.passwords import hash_password, validate_password_strength
 
 logger = structlog.get_logger()
 
@@ -20,8 +21,31 @@ router = APIRouter(prefix="/api/users", tags=["users"])
 
 class UserUpdate(BaseModel):
     """Request model for updating a user."""
-    role: str = None  # 'owner', 'operator', 'viewer', 'support'
-    active: bool = None
+    role: Optional[str] = None  # 'owner', 'operator', 'viewer', 'support'
+    active: Optional[bool] = None
+    auth_provider: Optional[str] = None
+    password: Optional[str] = None
+
+
+class UserCreate(BaseModel):
+    """Request model for creating a user."""
+    username: str
+    email: EmailStr
+    full_name: Optional[str] = None
+    auth_provider: str = "local"
+    role: str = "viewer"
+    password: Optional[str] = None
+
+
+class PasswordResetRequest(BaseModel):
+    """Request model for resetting a local user's password."""
+    password: str
+
+
+class ChangeMyPasswordRequest(BaseModel):
+    """Request model for a local user changing their own password."""
+    current_password: str
+    new_password: str
 
 
 class UserResponse(BaseModel):
@@ -30,9 +54,10 @@ class UserResponse(BaseModel):
     username: str
     email: str
     full_name: str = None
+    auth_provider: str
     role: str
     active: bool
-    last_login: str = None
+    last_login: Optional[str] = None
     created_at: str
 
     class Config:
@@ -66,6 +91,32 @@ def create_audit_log(
                 resource_id=target_user.id)
 
 
+def _user_to_response(user: User) -> UserResponse:
+    return UserResponse(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        full_name=user.full_name,
+        auth_provider=user.auth_provider,
+        role=user.role,
+        active=user.active,
+        last_login=user.last_login.isoformat() if user.last_login else None,
+        created_at=user.created_at.isoformat()
+    )
+
+
+def _validate_role(role: str):
+    valid_roles = ['owner', 'operator', 'viewer', 'support']
+    if role not in valid_roles:
+        raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}")
+
+
+def _validate_auth_provider(auth_provider: str):
+    valid_auth_providers = ['local', 'oidc']
+    if auth_provider not in valid_auth_providers:
+        raise HTTPException(status_code=400, detail=f"Invalid auth_provider. Must be one of: {', '.join(valid_auth_providers)}")
+
+
 @router.get("", response_model=List[UserResponse])
 async def list_users(
     active_only: bool = False,
@@ -86,19 +137,62 @@ async def list_users(
 
     users = query.order_by(User.username).all()
 
-    return [
-        UserResponse(
-            id=u.id,
-            username=u.username,
-            email=u.email,
-            full_name=u.full_name,
-            role=u.role,
-            active=u.active,
-            last_login=u.last_login.isoformat() if u.last_login else None,
-            created_at=u.created_at.isoformat()
-        )
-        for u in users
-    ]
+    return [_user_to_response(u) for u in users]
+
+
+@router.post("", response_model=UserResponse, status_code=201)
+async def create_user(
+    user_data: UserCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Create a local or OIDC user account."""
+    if not current_user.has_permission('manage_users'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions to manage users")
+
+    _validate_role(user_data.role)
+    _validate_auth_provider(user_data.auth_provider)
+
+    username = user_data.username.strip()
+    full_name = user_data.full_name.strip() if user_data.full_name else None
+
+    if db.query(User).filter(User.username == username).first():
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    if db.query(User).filter(User.email == user_data.email).first():
+        raise HTTPException(status_code=409, detail="Email already exists")
+
+    password_hash = None
+    if user_data.auth_provider == 'local':
+        ok, message = validate_password_strength(user_data.password or "")
+        if not ok:
+            raise HTTPException(status_code=400, detail=message)
+        password_hash = hash_password(user_data.password)
+
+    new_user = User(
+        authentik_id=None,
+        username=username,
+        email=user_data.email,
+        full_name=full_name,
+        auth_provider=user_data.auth_provider,
+        password_hash=password_hash,
+        role=user_data.role,
+        active=True,
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    create_audit_log(
+        db, current_user, 'create', new_user,
+        old_value=None,
+        new_value={'auth_provider': new_user.auth_provider, 'role': new_user.role, 'active': new_user.active},
+        request=request
+    )
+
+    logger.info("user_created_admin", user_id=new_user.id, username=new_user.username, auth_provider=new_user.auth_provider, created_by=current_user.username)
+    return _user_to_response(new_user)
 
 
 @router.get("/roles")
@@ -153,16 +247,7 @@ async def get_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    return UserResponse(
-        id=user.id,
-        username=user.username,
-        email=user.email,
-        full_name=user.full_name,
-        role=user.role,
-        active=user.active,
-        last_login=user.last_login.isoformat() if user.last_login else None,
-        created_at=user.created_at.isoformat()
-    )
+    return _user_to_response(user)
 
 
 @router.put("/{user_id}", response_model=UserResponse)
@@ -197,23 +282,34 @@ async def update_user(
 
     # Update role if provided
     if user_data.role is not None:
-        valid_roles = ['owner', 'operator', 'viewer', 'support']
-        if user_data.role not in valid_roles:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}"
-            )
+        _validate_role(user_data.role)
         user.role = user_data.role
 
     # Update active status if provided
     if user_data.active is not None:
         user.active = user_data.active
 
+    if user_data.auth_provider is not None and user_data.auth_provider != user.auth_provider:
+        _validate_auth_provider(user_data.auth_provider)
+        old_value['auth_provider'] = user.auth_provider
+
+        if user_data.auth_provider == 'local':
+            ok, message = validate_password_strength(user_data.password or "")
+            if not ok:
+                raise HTTPException(status_code=400, detail=message)
+            user.password_hash = hash_password(user_data.password)
+            user.authentik_id = None
+        else:
+            user.password_hash = None
+            user.authentik_id = None
+
+        user.auth_provider = user_data.auth_provider
+
     db.commit()
     db.refresh(user)
 
     # Audit log
-    new_value = {'role': user.role, 'active': user.active}
+    new_value = {'role': user.role, 'active': user.active, 'auth_provider': user.auth_provider}
     create_audit_log(
         db, current_user, 'update', user,
         old_value=old_value, new_value=new_value, request=request
@@ -223,16 +319,7 @@ async def update_user(
                 old_role=old_value['role'], new_role=user.role,
                 modified_by=current_user.username)
 
-    return UserResponse(
-        id=user.id,
-        username=user.username,
-        email=user.email,
-        full_name=user.full_name,
-        role=user.role,
-        active=user.active,
-        last_login=user.last_login.isoformat() if user.last_login else None,
-        created_at=user.created_at.isoformat()
-    )
+    return _user_to_response(user)
 
 
 @router.delete("/{user_id}", status_code=204)
@@ -317,16 +404,83 @@ async def reactivate_user(
     logger.info("user_reactivated", user_id=user.id, username=user.username,
                 reactivated_by=current_user.username)
 
-    return UserResponse(
-        id=user.id,
-        username=user.username,
-        email=user.email,
-        full_name=user.full_name,
-        role=user.role,
-        active=user.active,
-        last_login=user.last_login.isoformat() if user.last_login else None,
-        created_at=user.created_at.isoformat()
+    return _user_to_response(user)
+
+
+@router.post("/me/password", response_model=UserResponse)
+async def change_my_password(
+    payload: ChangeMyPasswordRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Allow a local user to change their own password."""
+    from app.utils.passwords import verify_password
+
+    if current_user.auth_provider != 'local':
+        raise HTTPException(status_code=400, detail="Password changes are only supported for local users")
+
+    if not current_user.password_hash:
+        raise HTTPException(status_code=400, detail="Local user does not have a password set")
+
+    if not verify_password(payload.current_password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    ok, message = validate_password_strength(payload.new_password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=message)
+
+    current_user.password_hash = hash_password(payload.new_password)
+    db.commit()
+    db.refresh(current_user)
+
+    create_audit_log(
+        db, current_user, 'change_password', current_user,
+        old_value=None,
+        new_value={'auth_provider': current_user.auth_provider},
+        request=request
     )
+
+    logger.info("local_user_password_changed", user_id=current_user.id, username=current_user.username)
+    return _user_to_response(current_user)
+
+
+@router.post("/{user_id}/password", response_model=UserResponse)
+async def reset_local_user_password(
+    user_id: int,
+    payload: PasswordResetRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Reset a local user's password."""
+    if not current_user.has_permission('manage_users'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions to manage users")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user.auth_provider != 'local':
+        raise HTTPException(status_code=400, detail="Password reset is only supported for local users")
+
+    ok, message = validate_password_strength(payload.password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=message)
+
+    user.password_hash = hash_password(payload.password)
+    db.commit()
+    db.refresh(user)
+
+    create_audit_log(
+        db, current_user, 'reset_password', user,
+        old_value=None,
+        new_value={'auth_provider': user.auth_provider},
+        request=request
+    )
+
+    logger.info("local_user_password_reset", user_id=user.id, username=user.username, reset_by=current_user.username)
+    return _user_to_response(user)
 
 
 @router.get("/me/permissions")

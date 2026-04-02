@@ -31,6 +31,7 @@ from app.auth.oidc import (
     get_or_create_user,
     get_current_user,
 )
+from app.auth import oidc as oidc_auth
 from app.models import User
 
 # Import API route modules
@@ -44,7 +45,7 @@ from app.routes import (
     voice_config, voice_interfaces, mcp_security, websocket, pipeline_events, tool_proposals,
     site_scraper, performance_presets, voice_automations, alerts, follow_me, model_config,
     model_downloads, ha_pipelines, cloud_providers, cloud_llm_usage, rag_service_bypass,
-    dashboard, integrations, escalation, debug_logs, modules
+    dashboard, integrations, escalation, debug_logs, modules, local_auth
 )
 
 logger = structlog.get_logger()
@@ -192,6 +193,7 @@ app.include_router(integrations.router)
 app.include_router(escalation.router)
 app.include_router(debug_logs.router)
 app.include_router(modules.router)
+app.include_router(local_auth.router)
 
 
 # Startup event: Initialize database and check connections
@@ -363,6 +365,10 @@ async def auth_login(request: Request, db: Session = Depends(get_db)):
 
         # Create or get demo user using the proper function signature
         demo_user = get_or_create_user(db=db, userinfo=demo_userinfo)
+        if demo_user.role != "owner":
+            demo_user.role = "owner"
+            db.commit()
+            db.refresh(demo_user)
 
         # Create demo token with proper data structure
         demo_token = create_access_token(
@@ -468,8 +474,21 @@ async def auth_me(current_user: User = Depends(get_current_user)):
         "username": current_user.username,
         "email": current_user.email,
         "full_name": current_user.full_name,
+        "auth_provider": current_user.auth_provider,
         "role": current_user.role,
         "last_login": current_user.last_login.isoformat() if current_user.last_login else None,
+    }
+
+
+@app.get("/api/auth/methods")
+async def get_auth_methods():
+    """Expose enabled admin authentication methods for the frontend."""
+    demo_mode = os.getenv("DEMO_MODE", "false").lower() == "true" or os.getenv("OIDC_CLIENT_ID") == "demo-mode"
+    oidc_enabled = demo_mode or bool(oidc_auth.OIDC_CLIENT_ID)
+    return {
+        "oidc_enabled": oidc_enabled,
+        "local_enabled": True,
+        "demo_mode": demo_mode,
     }
 
 

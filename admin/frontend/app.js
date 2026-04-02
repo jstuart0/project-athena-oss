@@ -251,12 +251,20 @@ function updateAuthUI(authenticated) {
     const authSection = document.getElementById('auth-section');
 
     if (authenticated && currentUser) {
+        const localPasswordButton = currentUser.auth_provider === 'local'
+            ? `<button onclick="showChangeMyPasswordModal()"
+                class="px-3 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm font-medium transition-colors">
+                Change Password
+            </button>`
+            : '';
+
         authSection.innerHTML = `
             <div class="flex items-center gap-4">
                 <div class="text-right">
                     <div class="text-sm font-medium text-white">${currentUser.full_name || currentUser.username}</div>
-                    <div class="text-xs text-gray-400">Role: ${currentUser.role}</div>
+                    <div class="text-xs text-gray-400">Role: ${currentUser.role} · ${currentUser.auth_provider}</div>
                 </div>
+                ${localPasswordButton}
                 <button onclick="handleAuth()"
                     class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors">
                     Logout
@@ -281,8 +289,11 @@ function handleAuth() {
         localStorage.removeItem('auth_token');
         window.location.href = `${API_BASE}/api/auth/logout`;
     } else {
-        // Login via Authentik OIDC
-        window.location.href = `${API_BASE}/api/auth/login`;
+        if (typeof Auth !== 'undefined') {
+            Auth.login();
+        } else {
+            window.location.href = `${API_BASE}/api/auth/login`;
+        }
     }
 }
 
@@ -1494,6 +1505,7 @@ async function loadUsers() {
                     <thead class="bg-dark-bg">
                         <tr>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase">User</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase">Auth</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase">Role</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase">Last Login</th>
@@ -1508,10 +1520,13 @@ async function loadUsers() {
                                     <div class="text-xs text-gray-400">${user.email}</div>
                                 </td>
                                 <td class="px-6 py-4">
+                                    <span class="px-2 py-1 ${user.auth_provider === 'local' ? 'bg-green-900/30 text-green-400' : 'bg-purple-900/30 text-purple-400'} text-xs rounded">${user.auth_provider}</span>
+                                </td>
+                                <td class="px-6 py-4">
                                     <span class="px-2 py-1 bg-blue-900/30 text-blue-400 text-xs rounded">${user.role}</span>
                                 </td>
                                 <td class="px-6 py-4">
-                                    ${user.is_active ?
+                                    ${user.active ?
                                         '<span class="px-2 py-1 bg-green-900/30 text-green-400 text-xs rounded">Active</span>' :
                                         '<span class="px-2 py-1 bg-red-900/30 text-red-400 text-xs rounded">Inactive</span>'
                                     }
@@ -1525,7 +1540,17 @@ async function loadUsers() {
                                             class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded transition-colors mr-2">
                                             Change Role
                                         </button>
-                                        ${user.is_active ?
+                                        <button onclick="changeUserAuthProvider(${user.id}, '${user.username}', '${user.auth_provider}')"
+                                            class="px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white text-xs rounded transition-colors mr-2">
+                                            Change Login
+                                        </button>
+                                        ${user.auth_provider === 'local' ? `
+                                            <button onclick="resetLocalUserPassword(${user.id}, '${user.username}')"
+                                                class="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white text-xs rounded transition-colors mr-2">
+                                                Reset Password
+                                            </button>
+                                        ` : ''}
+                                        ${user.active ?
                                             `<button onclick="deactivateUser(${user.id}, '${user.username}')"
                                                 class="px-3 py-1 bg-red-600 hover:bg-red-700 text-white text-xs rounded transition-colors">
                                                 Deactivate
@@ -1535,7 +1560,12 @@ async function loadUsers() {
                                                 Reactivate
                                             </button>`
                                         }
-                                    ` : '<span class="text-xs text-gray-500">Current User</span>'}
+                                    ` : `${user.auth_provider === 'local'
+                                            ? `<button onclick="showChangeMyPasswordModal()"
+                                                class="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white text-xs rounded transition-colors">
+                                                Change Password
+                                            </button>`
+                                            : '<span class="text-xs text-gray-500">Current User</span>'}`}
                                 </td>
                             </tr>
                         `).join('')}
@@ -1546,6 +1576,199 @@ async function loadUsers() {
 
     } catch (error) {
         showError(`Failed to load users: ${error.message}`);
+    }
+}
+
+function showCreateLocalUserModal() {
+    const modal = `
+        <div id="create-local-user-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onclick="if(event.target.id==='create-local-user-modal') closeModal('create-local-user-modal')">
+            <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-lg w-full mx-4">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-xl font-semibold text-white">Create User</h3>
+                    <button type="button" onclick="closeModal('create-local-user-modal')" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+                </div>
+                <form onsubmit="createLocalUser(event)" class="space-y-4">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-400 mb-2">Username</label>
+                            <input id="local-user-username" type="text" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-400 mb-2">Login Type</label>
+                            <select id="local-user-auth-provider" onchange="toggleCreateUserPasswordField()" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                                <option value="local">local</option>
+                                <option value="oidc">oidc</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-400 mb-2">Role</label>
+                            <select id="local-user-role" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                                <option value="viewer">viewer</option>
+                                <option value="support">support</option>
+                                <option value="operator">operator</option>
+                                <option value="owner">owner</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-2">Email</label>
+                        <input id="local-user-email" type="email" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-2">Full Name</label>
+                        <input id="local-user-full-name" type="text" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                    </div>
+                    <div id="local-user-password-group">
+                        <label class="block text-sm font-medium text-gray-400 mb-2">Temporary Password</label>
+                        <input id="local-user-password" type="password" minlength="10" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                        <p class="text-xs text-gray-500 mt-1">Required for local users. OIDC users authenticate through your identity provider.</p>
+                    </div>
+                    <div class="flex gap-3 pt-2">
+                        <button type="submit" class="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors">Create User</button>
+                        <button type="button" onclick="closeModal('create-local-user-modal')" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition-colors">Cancel</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+
+    document.getElementById('modals-container').innerHTML = modal;
+    toggleCreateUserPasswordField();
+}
+
+function toggleCreateUserPasswordField() {
+    const provider = document.getElementById('local-user-auth-provider')?.value;
+    const group = document.getElementById('local-user-password-group');
+    const input = document.getElementById('local-user-password');
+    if (!group || !input) return;
+
+    const isLocal = provider === 'local';
+    group.style.display = isLocal ? 'block' : 'none';
+    input.required = isLocal;
+    if (!isLocal) {
+        input.value = '';
+    }
+}
+
+async function createLocalUser(event) {
+    event.preventDefault();
+
+    try {
+        const authProvider = document.getElementById('local-user-auth-provider').value;
+        await apiRequest('/api/users', {
+            method: 'POST',
+            body: JSON.stringify({
+                username: document.getElementById('local-user-username').value.trim(),
+                email: document.getElementById('local-user-email').value.trim(),
+                full_name: document.getElementById('local-user-full-name').value.trim() || null,
+                auth_provider: authProvider,
+                role: document.getElementById('local-user-role').value,
+                password: authProvider === 'local' ? document.getElementById('local-user-password').value : null
+            })
+        });
+
+        closeModal('create-local-user-modal');
+        await loadUsers();
+        showSuccess('User created');
+    } catch (error) {
+        showError(`Failed to create user: ${error.message}`);
+    }
+}
+
+async function resetLocalUserPassword(userId, username) {
+    const password = prompt(`Enter a new password for ${username} (minimum 10 characters):`);
+    if (!password) return;
+
+    try {
+        await apiRequest(`/api/users/${userId}/password`, {
+            method: 'POST',
+            body: JSON.stringify({ password })
+        });
+        showSuccess('Password reset successfully');
+    } catch (error) {
+        showError(`Failed to reset password: ${error.message}`);
+    }
+}
+
+function showChangeMyPasswordModal() {
+    const modal = `
+        <div id="change-my-password-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onclick="if(event.target.id==='change-my-password-modal') closeModal('change-my-password-modal')">
+            <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-md w-full mx-4">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-xl font-semibold text-white">Change Password</h3>
+                    <button type="button" onclick="closeModal('change-my-password-modal')" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+                </div>
+                <form onsubmit="changeMyPassword(event)" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-2">Current Password</label>
+                        <input id="my-current-password" type="password" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-2">New Password</label>
+                        <input id="my-new-password" type="password" minlength="10" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                        <p class="text-xs text-gray-500 mt-1">Minimum 10 characters.</p>
+                    </div>
+                    <div class="flex gap-3 pt-2">
+                        <button type="submit" class="flex-1 px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium transition-colors">Update Password</button>
+                        <button type="button" onclick="closeModal('change-my-password-modal')" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition-colors">Cancel</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+
+    document.getElementById('modals-container').innerHTML = modal;
+}
+
+async function changeMyPassword(event) {
+    event.preventDefault();
+
+    try {
+        await apiRequest('/api/users/me/password', {
+            method: 'POST',
+            body: JSON.stringify({
+                current_password: document.getElementById('my-current-password').value,
+                new_password: document.getElementById('my-new-password').value
+            })
+        });
+
+        closeModal('change-my-password-modal');
+        showSuccess('Password changed successfully');
+    } catch (error) {
+        showError(`Failed to change password: ${error.message}`);
+    }
+}
+
+async function changeUserAuthProvider(userId, username, currentProvider) {
+    const newProvider = prompt(`Enter login type for ${username} (local or oidc):`, currentProvider);
+    if (!newProvider) return;
+
+    const normalizedProvider = newProvider.trim().toLowerCase();
+    if (!['local', 'oidc'].includes(normalizedProvider)) {
+        showError('Invalid login type');
+        return;
+    }
+
+    let password = null;
+    if (normalizedProvider === 'local') {
+        password = prompt(`Enter a temporary password for ${username} (minimum 10 characters):`);
+        if (!password) return;
+    }
+
+    try {
+        await apiRequest(`/api/users/${userId}`, {
+            method: 'PUT',
+            body: JSON.stringify({
+                auth_provider: normalizedProvider,
+                password
+            })
+        });
+        await loadUsers();
+        showSuccess('User login type updated');
+    } catch (error) {
+        showError(`Failed to update login type: ${error.message}`);
     }
 }
 

@@ -264,8 +264,17 @@ def get_or_create_user(db: Session, userinfo: Dict[str, Any]) -> User:
     username = userinfo.get('preferred_username') or email.split('@')[0]
     full_name = userinfo.get('name', '')
 
-    # Check if user exists
+    # Check if user exists by bound OIDC subject first
     user = db.query(User).filter(User.authentik_id == authentik_id).first()
+
+    # If not bound yet, try to match a pre-provisioned OIDC user by email or username
+    if not user:
+        user = db.query(User).filter(
+            User.auth_provider == 'oidc',
+            ((User.email == email) | (User.username == username))
+        ).first()
+        if user:
+            user.authentik_id = authentik_id
 
     if user:
         # Update last login
@@ -282,6 +291,7 @@ def get_or_create_user(db: Session, userinfo: Dict[str, Any]) -> User:
             username=username,
             email=email,
             full_name=full_name,
+            auth_provider='oidc',
             role='viewer',  # Default role
             active=True,
             last_login=datetime.utcnow()
@@ -347,6 +357,7 @@ async def get_current_user(
             username="dev-admin",
             email="dev-admin@localhost",
             full_name="Development Admin",
+            auth_provider="dev",
             role="owner",
             active=True,
             last_login=datetime.utcnow()

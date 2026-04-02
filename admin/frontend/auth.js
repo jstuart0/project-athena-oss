@@ -12,7 +12,28 @@
         return;
     }
 
+    let authMethodsCache = null;
+
     const Auth = {
+        async getMethods(force = false) {
+            if (!force && authMethodsCache) {
+                return authMethodsCache;
+            }
+
+            try {
+                const response = await fetch(`${ApiClient.baseUrl}/api/auth/methods`);
+                if (response.ok) {
+                    authMethodsCache = await response.json();
+                    return authMethodsCache;
+                }
+            } catch (error) {
+                console.warn('[Auth] Failed to load auth methods:', error);
+            }
+
+            authMethodsCache = { oidc_enabled: true, local_enabled: true, demo_mode: false };
+            return authMethodsCache;
+        },
+
         /**
          * Initialize authentication (called once on page load)
          * Returns a Promise that resolves when auth state is determined
@@ -102,7 +123,12 @@
         /**
          * Redirect to login
          */
-        login() {
+        async login() {
+            const methods = await this.getMethods();
+            if (methods.local_enabled) {
+                this.showLoginModal(methods);
+                return;
+            }
             window.location.href = `${ApiClient.baseUrl}/api/auth/login`;
         },
 
@@ -112,6 +138,88 @@
         logout() {
             AppState.setAuthState('unauthenticated');
             window.location.href = `${ApiClient.baseUrl}/api/auth/logout`;
+        },
+
+        showLoginModal(methods = { oidc_enabled: true, local_enabled: true }) {
+            const oidcButton = methods.oidc_enabled ? `
+                <button type="button" onclick="Auth.loginWithOIDC()"
+                    class="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors">
+                    Continue with OIDC
+                </button>
+            ` : '';
+
+            const localForm = methods.local_enabled ? `
+                <form onsubmit="Auth.submitLocalLogin(event)" class="space-y-3">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-2">Username</label>
+                        <input id="local-login-username" type="text" required
+                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-2">Password</label>
+                        <input id="local-login-password" type="password" required
+                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                    </div>
+                    <div id="local-login-error" class="hidden text-sm text-red-400"></div>
+                    <button type="submit"
+                        class="w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors">
+                        Sign in with local account
+                    </button>
+                </form>
+            ` : '';
+
+            const divider = methods.oidc_enabled && methods.local_enabled
+                ? '<div class="text-xs text-gray-500 text-center uppercase tracking-wide">or</div>'
+                : '';
+
+            const modal = `
+                <div id="login-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onclick="if(event.target.id==='login-modal') closeModal('login-modal')">
+                    <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-md w-full mx-4">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-xl font-semibold text-white">Admin Login</h3>
+                            <button type="button" onclick="closeModal('login-modal')" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+                        </div>
+                        <div class="space-y-4">
+                            ${oidcButton}
+                            ${divider}
+                            ${localForm}
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            document.getElementById('modals-container').innerHTML = modal;
+        },
+
+        loginWithOIDC() {
+            window.location.href = `${ApiClient.baseUrl}/api/auth/login`;
+        },
+
+        async submitLocalLogin(event) {
+            event.preventDefault();
+            const username = document.getElementById('local-login-username').value.trim();
+            const password = document.getElementById('local-login-password').value;
+            const errorEl = document.getElementById('local-login-error');
+
+            try {
+                const response = await fetch(`${ApiClient.baseUrl}/api/auth/local-login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Login failed');
+                }
+
+                closeModal('login-modal');
+                AppState.setAuthState('authenticated', data.token, data.user);
+            } catch (error) {
+                errorEl.textContent = error.message;
+                errorEl.classList.remove('hidden');
+            }
         },
 
         /**
@@ -143,7 +251,7 @@
                         <p class="text-gray-400 mb-6">Please login to access this page.</p>
                         <button onclick="Auth.login()"
                             class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors">
-                            Login with Authentik
+                            Login
                         </button>
                     </div>
                 `;

@@ -153,7 +153,23 @@ def init_db():
     """
     logger.info("initializing_database_schema")
     Base.metadata.create_all(bind=engine)
+    _ensure_users_table_compatibility()
     logger.info("database_schema_initialized")
+
+
+def _ensure_users_table_compatibility():
+    """Backfill missing local-auth columns for installs created before this feature."""
+    if DEV_MODE:
+        return
+
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider VARCHAR(32)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(512)"))
+        conn.execute(text("UPDATE users SET auth_provider = 'oidc' WHERE auth_provider IS NULL"))
+        conn.execute(text("ALTER TABLE users ALTER COLUMN auth_provider SET DEFAULT 'oidc'"))
+        conn.execute(text("ALTER TABLE users ALTER COLUMN auth_provider SET NOT NULL"))
+        conn.execute(text("ALTER TABLE users ALTER COLUMN authentik_id DROP NOT NULL"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_auth_provider ON users(auth_provider)"))
 
 
 def check_db_connection() -> bool:
@@ -220,6 +236,7 @@ def seed_dev_data():
                 username="dev-admin",
                 email="dev-admin@localhost",
                 full_name="Development Admin",
+                auth_provider="dev",
                 role="owner",
                 active=True,
                 last_login=datetime.utcnow()

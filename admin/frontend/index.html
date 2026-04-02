@@ -2061,9 +2061,14 @@
             <div id="tab-users" class="tab-content hidden">
                 <div class="flex justify-between items-center mb-6">
                     <h2 class="text-2xl font-semibold text-white">User Management</h2>
-                    <button onclick="loadUsers()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
-                        <i data-lucide="refresh-cw" class="w-4 h-4 inline"></i> Refresh
-                    </button>
+                    <div class="flex gap-2">
+                        <button onclick="showCreateLocalUserModal()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors">
+                            ➕ Add User
+                        </button>
+                        <button onclick="loadUsers()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
+                            <i data-lucide="refresh-cw" class="w-4 h-4 inline"></i> Refresh
+                        </button>
+                    </div>
                 </div>
                 <div id="users-container" class="space-y-4"></div>
             </div>
