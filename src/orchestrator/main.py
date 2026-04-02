@@ -580,13 +580,15 @@ Based on these search results, provide a helpful, accurate answer to the user's 
 
         try:
             # get_model_for_component is defined in this file
-            synthesis_model = await get_model_for_component("response_synthesis")
+            synthesis_config = await get_component_config("response_synthesis")
+            synthesis_model = synthesis_config["model_name"]
             synthesis_start = time.time()
 
             synthesis_result = await llm_router.generate(
                 model=synthesis_model,
                 prompt=synthesis_prompt,
                 temperature=0.7,
+                system_prompt=_component_system_prompt(synthesis_config),
                 request_id=state.request_id,
                 session_id=state.session_id,
                 stage="post_synthesis_fallback"
@@ -1377,6 +1379,13 @@ async def get_component_config(component_name: str) -> dict:
         "disable_thinking": False,
         "enabled": True,
     }
+
+
+def _component_system_prompt(component_config: Optional[dict]) -> Optional[str]:
+    """Return a system prompt that disables reasoning/thinking when configured."""
+    if component_config and component_config.get("disable_thinking"):
+        return "/no_think"
+    return None
 
 
 # =========================================================================
@@ -3645,13 +3654,15 @@ Respond in JSON format:
         full_prompt = f"You are an intent classifier. Respond only with valid JSON.\n\n{classification_prompt}"
 
         # Get model from database or use fallback
-        classifier_model = await get_model_for_component("intent_classifier")
+        classifier_config = await get_component_config("intent_classifier")
+        classifier_model = classifier_config["model_name"]
 
         llm_start = time.time()
         result = await llm_router.generate(
             model=classifier_model,
             prompt=full_prompt,
             temperature=0.3,  # Lower temperature for consistent classification
+            system_prompt=_component_system_prompt(classifier_config),
             request_id=state.request_id,
             session_id=state.session_id,
             user_id=state.mode,
@@ -5827,7 +5838,8 @@ Summary:"""
 
     try:
         # Get summarizer model from database config
-        summarizer_model = await get_model_for_component("conversation_summarizer")
+        summarizer_config = await get_component_config("conversation_summarizer")
+        summarizer_model = summarizer_config["model_name"]
 
         # Use configurable model for summarization
         summarize_start = time.time()
@@ -5835,6 +5847,7 @@ Summary:"""
             model=summarizer_model,
             prompt=prompt,
             temperature=0.3,
+            system_prompt=_component_system_prompt(summarizer_config),
             request_id=request_id,
             stage="summarize"
         )
@@ -5935,10 +5948,11 @@ Respond naturally as a helpful assistant.
 
 INSTRUCTIONS:
 1. For greetings, thanks, farewells, and casual conversation, respond conversationally.
-2. You may answer using your built-in knowledge and the provided assistant context.
-3. Do not claim to have current web data unless it was actually provided in context.
-4. If the user asks for time-sensitive or highly specific current facts that were not provided, say you don't have current information.
-5. Keep the response concise and direct.
+2. If the user asks for the current local time or current date, answer directly using the provided current local time context.
+3. You may answer using your built-in knowledge and the provided assistant context.
+4. Do not claim to have current web data unless it was actually provided in context.
+5. For other time-sensitive or highly specific current facts that were not provided, say you don't have current information.
+6. Keep the response concise and direct.
 
 Response:"""
         else:
@@ -6025,7 +6039,8 @@ Keep your acknowledgment brief - don't dwell on the interruption.
         full_prompt = system_context + history_context + synthesis_prompt
 
         # Get synthesis model from database or use fallback
-        synthesis_model = await get_model_for_component("response_synthesis")
+        synthesis_config = await get_component_config("response_synthesis")
+        synthesis_model = synthesis_config["model_name"]
 
         # Emit LLM generating event for Admin Jarvis monitoring
         llm_start_time = time.time()
@@ -6040,6 +6055,7 @@ Keep your acknowledgment brief - don't dwell on the interruption.
             model=synthesis_model,
             prompt=full_prompt,
             temperature=state.temperature,
+            system_prompt=_component_system_prompt(synthesis_config),
             request_id=state.request_id,
             session_id=state.session_id,
             user_id=state.mode,
@@ -6307,13 +6323,15 @@ Respond ONLY with valid JSON:
             full_fact_check_prompt = f"You are a precise fact-checking assistant. Always respond with valid JSON.\n\n{fact_check_prompt}"
 
             # Get validation model from database or use fallback
-            validation_model = await get_model_for_component("fact_check_validation")
+            validation_config = await get_component_config("fact_check_validation")
+            validation_model = validation_config["model_name"]
 
             validation_start = time.time()
             result = await llm_router.generate(
                 model=validation_model,
                 prompt=full_fact_check_prompt,
                 temperature=0.1,  # Low temperature for consistent checking
+                system_prompt=_component_system_prompt(validation_config),
                 request_id=state.request_id,
                 session_id=state.session_id,
                 user_id=state.mode,
@@ -7937,12 +7955,14 @@ Search Results:
 Provide a helpful answer:"""
 
                             try:
-                                synthesis_model = await get_model_for_component("response_synthesis")
+                                synthesis_config = await get_component_config("response_synthesis")
+                                synthesis_model = synthesis_config["model_name"]
                                 fallback_start = time.time()
                                 synthesis_result = await llm_router.generate(
                                     model=synthesis_model,
                                     prompt=synthesis_prompt,
                                     temperature=0.7,
+                                    system_prompt=_component_system_prompt(synthesis_config),
                                     request_id=state.request_id,
                                     session_id=state.session_id,
                                     stage="fallback_synthesis"
@@ -10324,10 +10344,11 @@ Respond naturally as a helpful assistant.
 
 INSTRUCTIONS:
 1. For greetings, thanks, farewells, and casual conversation, respond conversationally.
-2. You may answer using your built-in knowledge and the provided assistant context.
-3. Do not claim to have current web data unless it was actually provided in context.
-4. If the user asks for time-sensitive or highly specific current facts that were not provided, say you don't have current information.
-5. Keep the response concise and direct.
+2. If the user asks for the current local time or current date, answer directly using the provided current local time context.
+3. You may answer using your built-in knowledge and the provided assistant context.
+4. Do not claim to have current web data unless it was actually provided in context.
+5. For other time-sensitive or highly specific current facts that were not provided, say you don't have current information.
+6. Keep the response concise and direct.
 
 Response:"""
     else:
