@@ -17,44 +17,44 @@ Commercial voice assistants route your voice through cloud servers, add latency,
 ## Architecture
 
 ```
-                         ┌──────────────────────┐
+                         ┌────────────────────-──┐
                          │    Voice Input        │
                          │ (Wyoming / Web / API) │
-                         └──────────┬───────────┘
+                         └──────────┬──────────-─┘
                                     │
-                         ┌──────────▼───────────┐
-                         │      Gateway          │
+                         ┌──────────▼─────---─────┐
+                         │      Gateway           │
                          │  Rate Limiting         │
                          │  Circuit Breaker       │
                          │  OpenAI-Compatible API │
-                         └──────────┬───────────┘
+                         └──────────┬─────────--──┘
                                     │
-              ┌─────────────────────▼─────────────────────┐
+              ┌─────────────────────▼────────────────--─────┐
               │            Orchestrator                     │
               │         (LangGraph State Machine)           │
               │                                             │
-              │  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
-              │  │ Classify  │→│ Retrieve  │→│ Validate  │ │
-              │  └──────────┘  └──────────┘  └──────────┘ │
-              │       │                            │       │
-              │  ┌────▼────┐                  ┌────▼────┐  │
+              │  ┌─────-─────┐ ┌──-────────┐ ┌─-─────────┐  │
+              │  │ Classify  │→│ Retrieve  │→│ Validate  │  │
+              │  └──────────┘  └──────────┘  └─────────-─┘  │
+              │       │                            │        │
+              │  ┌────▼─-───┐                  ┌───▼──-──┐  │
               │  │Complexity│                  │  Anti-  │  │
               │  │Detector  │                  │Halluci- │  │
               │  │(no LLM)  │                  │nation   │  │
-              │  └─────────┘                  └─────────┘  │
-              └──┬──────────────┬────────────────┬─────────┘
+              │  └───-──────┘                  └─────────┘  │
+              └──┬──────────────┬────────────────┬────-─────┘
                  │              │                │
-        ┌────────▼──┐  ┌───────▼──────┐  ┌─────▼──────┐
-        │  LLM      │  │ 23 RAG       │  │  Home      │
-        │  Router   │  │ Services     │  │  Assistant  │
-        │           │  │              │  │  Client     │
-        │ simple →  │  │ Weather      │  │             │
-        │  4B model │  │ Sports       │  │ Lights      │
-        │ complex → │  │ Dining       │  │ Locks       │
-        │  14B model│  │ Flights ...  │  │ Climate     │
-        │ super →   │  │              │  │ Media       │
-        │  32B model│  │              │  │ Scenes      │
-        └───────────┘  └──────────────┘  └─────────────┘
+        ┌────────▼──┐   ┌───────▼──────┐   ┌─────▼──-────┐
+        │  LLM      │   │ 23 RAG       │   │  Home       │
+        │  Router   │   │ Services     │   │  Assistant  │
+        │           │   │              │   │  Client     │
+        │ simple →  │   │ Weather      │   │             │
+        │  4B model │   │ Sports       │   │ Lights      │
+        │ complex → │   │ Dining       │   │ Locks       │
+        │  14B model│   │ Flights ...  │   │ Climate     │
+        │ super →   │   │              │   │ Media       │
+        │  32B model│   │              │   │ Scenes      │
+        └───────────┘   └──────────────┘   └─────────────┘
 ```
 
 ### Request Flow
