@@ -264,7 +264,7 @@ def seed_dev_data():
 
 
 # OSS default model configuration
-OSS_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b")
+OSS_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
 OSS_OLLAMA_URL = os.getenv("OLLAMA_URL") or os.getenv("LLM_SERVICE_URL", "http://localhost:11434")
 OSS_AUTO_PULL_MODELS = os.getenv("ATHENA_AUTO_PULL_MODELS", "true").lower() == "true"
 OSS_SEED_DEFAULTS = os.getenv("ATHENA_SEED_DEFAULTS", "true").lower() == "true"
@@ -332,6 +332,26 @@ def seed_oss_defaults():
             )
             db.add(backend)
             logger.info("oss_llm_backend_created", model=OSS_DEFAULT_MODEL, endpoint_url=ollama_url)
+
+        # Ensure qwen3:8b is available as an alternate larger model.
+        alt_backend = db.query(LLMBackend).filter(LLMBackend.model_name == "qwen3:8b").first()
+        if not alt_backend:
+            alt_backend = LLMBackend(
+                model_name="qwen3:8b",
+                backend_type="ollama",
+                endpoint_url=ollama_url,
+                enabled=True,
+                priority=20,
+                max_tokens=4096,
+                temperature_default=0.7,
+                timeout_seconds=90,
+                keep_alive_seconds=-1,
+                description="Alternate larger OSS model for manual selection",
+                total_requests=0,
+                total_errors=0
+            )
+            db.add(alt_backend)
+            logger.info("oss_llm_backend_created", model="qwen3:8b", endpoint_url=ollama_url)
 
         # Component model assignments to create/update
         components = [

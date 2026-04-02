@@ -5928,6 +5928,19 @@ INSTRUCTIONS:
 
 Your response:"""
             logger.info(f"Using continuation prompt for '{state.query}' with {len(state.conversation_history)} history messages")
+        elif state.intent == IntentCategory.GENERAL_INFO:
+            synthesis_prompt = f"""Question: {state.query}
+
+Respond naturally as a helpful assistant.
+
+INSTRUCTIONS:
+1. For greetings, thanks, farewells, and casual conversation, respond conversationally.
+2. You may answer using your built-in knowledge and the provided assistant context.
+3. Do not claim to have current web data unless it was actually provided in context.
+4. If the user asks for time-sensitive or highly specific current facts that were not provided, say you don't have current information.
+5. Keep the response concise and direct.
+
+Response:"""
         else:
             # No data retrieved - must be explicit about lack of information
             synthesis_prompt = f"""Question: {state.query}
@@ -6235,6 +6248,14 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
     has_specific_facts = bool(date_patterns or time_patterns or money_patterns or phone_patterns)
     validation_layer_duration.labels(layer="pattern").observe(time.time() - pattern_start)
 
+    query_lower = state.query.lower()
+    is_builtin_time_or_date_query = state.intent == IntentCategory.GENERAL_INFO and any(
+        phrase in query_lower for phrase in [
+            "what time", "time is it", "current time", "what's the time", "whats the time",
+            "what date", "today's date", "current date", "what day", "what month", "what year",
+        ]
+    )
+
     # Track what patterns were detected (for hallucination analysis)
     if date_patterns:
         logger.info(f"Pattern detection: found {len(date_patterns)} date patterns")
@@ -6248,7 +6269,7 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
     # Layer 3: Check if we have data to support specific facts
     has_supporting_data = bool(state.retrieved_data)
 
-    if has_specific_facts and not has_supporting_data:
+    if has_specific_facts and not has_supporting_data and not is_builtin_time_or_date_query:
         logger.warning(f"Response contains specific facts but no supporting data retrieved")
         logger.warning(f"Dates: {date_patterns}, Times: {time_patterns}, Money: {money_patterns}, Phones: {phone_patterns}")
 
@@ -8938,6 +8959,10 @@ def create_orchestrator_graph() -> StateGraph:
             logger.info("Routing to tool_call node")
             return "tool_call"
 
+        if state.intent == IntentCategory.GENERAL_INFO:
+            logger.info("Routing GENERAL_INFO to synthesize (no tool call)")
+            return "synthesize"
+
         # OPTIMIZATION: Route Phase 2 services directly to tool_call
         # These services use tool calling, not the retrieve path
         phase2_intents = {
@@ -10292,6 +10317,19 @@ INSTRUCTIONS:
 5. Be helpful and continue the task they originally requested
 
 Your response:"""
+    elif state.intent == IntentCategory.GENERAL_INFO:
+        synthesis_prompt = f"""Question: {state.query}
+
+Respond naturally as a helpful assistant.
+
+INSTRUCTIONS:
+1. For greetings, thanks, farewells, and casual conversation, respond conversationally.
+2. You may answer using your built-in knowledge and the provided assistant context.
+3. Do not claim to have current web data unless it was actually provided in context.
+4. If the user asks for time-sensitive or highly specific current facts that were not provided, say you don't have current information.
+5. Keep the response concise and direct.
+
+Response:"""
     else:
         synthesis_prompt = f"""Question: {state.query}
 

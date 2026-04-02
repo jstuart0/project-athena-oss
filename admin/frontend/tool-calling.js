@@ -63,11 +63,11 @@ function renderToolCallingSettings(settings) {
                 <div class="py-3 border-b border-dark-border">
                     <label class="block text-white font-medium mb-2 flex items-center">Default Model${infoIcon('llm-backend', 'LLM model to use for tool calling decisions. Faster models reduce latency but may be less accurate.')}</label>
                     <div class="text-sm text-gray-400 mb-2">LLM model to use for tool calling decisions</div>
-                    <select id="setting-model" onchange="updateSetting('default_model', this.value)"
+                    <select id="setting-model" onchange="updateSetting('llm_model', this.value)"
                             class="w-64 px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
-                        <option value="gpt-4o-mini" ${settings.default_model === 'gpt-4o-mini' ? 'selected' : ''}>GPT-4o Mini (OpenAI)</option>
-                        <option value="phi3:mini" ${settings.default_model === 'phi3:mini' ? 'selected' : ''}>Phi-3 Mini (Ollama)</option>
-                        <option value="llama3.1:8b" ${settings.default_model === 'llama3.1:8b' ? 'selected' : ''}>Llama 3.1 8B (Ollama)</option>
+                        <option value="gpt-4o-mini" ${settings.llm_model === 'gpt-4o-mini' ? 'selected' : ''}>GPT-4o Mini (OpenAI)</option>
+                        <option value="phi3:mini" ${settings.llm_model === 'phi3:mini' ? 'selected' : ''}>Phi-3 Mini (Ollama)</option>
+                        <option value="llama3.1:8b" ${settings.llm_model === 'llama3.1:8b' ? 'selected' : ''}>Llama 3.1 8B (Ollama)</option>
                     </select>
                 </div>
 
@@ -106,7 +106,7 @@ function renderToolCallingSettings(settings) {
 
 async function updateSetting(key, value) {
     try {
-        const response = await fetch(`${TOOL_CALLING_API_BASE}/settings/1`, {
+        const response = await fetch(`${TOOL_CALLING_API_BASE}/settings`, {
             method: 'PUT',
             headers: {
                 'Content-Type': 'application/json',
