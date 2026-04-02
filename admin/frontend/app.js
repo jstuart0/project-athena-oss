@@ -12,6 +12,7 @@ const API_BASE = window.location.origin;
 // Backward compatibility - these sync with AppState
 let authToken = null;
 let currentUser = null;
+let currentUserPermissions = null;
 
 // Initialize app
 document.addEventListener('DOMContentLoaded', async () => {
@@ -31,7 +32,21 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (type === 'auth') {
                 authToken = data.token;
                 currentUser = data.user;
-                updateAuthUI(data.status === 'authenticated');
+                if (data.status === 'authenticated') {
+                    loadCurrentUserPermissions()
+                        .catch(error => {
+                            console.warn('[Auth] Failed to load permissions:', error);
+                            currentUserPermissions = null;
+                        })
+                        .finally(() => {
+                            updateAuthUI(true);
+                            refreshPermissionSensitiveUI();
+                        });
+                } else {
+                    currentUserPermissions = null;
+                    updateAuthUI(false);
+                    refreshPermissionSensitiveUI();
+                }
             }
         });
 
@@ -229,7 +244,9 @@ async function loadCurrentUser() {
 
         if (response.ok) {
             currentUser = await response.json();
+            await loadCurrentUserPermissions();
             updateAuthUI(true);
+            refreshPermissionSensitiveUI();
 
             // Initialize guest context for multi-guest device identification
             if (typeof initializeGuestContext === 'function') {
@@ -239,11 +256,61 @@ async function loadCurrentUser() {
             // Token invalid
             authToken = null;
             localStorage.removeItem('auth_token');
+            currentUserPermissions = null;
             updateAuthUI(false);
+            refreshPermissionSensitiveUI();
         }
     } catch (error) {
         console.error('Failed to load user:', error);
+        currentUserPermissions = null;
         updateAuthUI(false);
+        refreshPermissionSensitiveUI();
+    }
+}
+
+async function loadCurrentUserPermissions() {
+    if (!authToken) {
+        currentUserPermissions = null;
+        return null;
+    }
+
+    currentUserPermissions = await apiRequest('/api/users/me/permissions');
+    return currentUserPermissions;
+}
+
+function canWrite() {
+    return Boolean(currentUserPermissions?.can_write);
+}
+
+function canManageUsers() {
+    return Boolean(currentUserPermissions?.can_manage_users);
+}
+
+function isReadOnlyUser() {
+    return Boolean(currentUser) && !canWrite();
+}
+
+function renderReadOnlyBanner(message = 'You can inspect settings, but this account cannot make changes.') {
+    return `
+        <div class="mt-2 inline-flex items-center gap-2 px-3 py-2 bg-yellow-900/20 border border-yellow-700/40 rounded-lg text-sm text-yellow-200">
+            <span class="font-semibold">Read-only mode</span>
+            <span class="text-yellow-100/80">${escapeHtml(message)}</span>
+        </div>
+    `;
+}
+
+function refreshPermissionSensitiveUI() {
+    const usersBanner = document.getElementById('users-readonly-banner');
+    const addUserButton = document.getElementById('users-add-button');
+
+    if (usersBanner) {
+        usersBanner.innerHTML = canManageUsers()
+            ? ''
+            : renderReadOnlyBanner('You can view users, but only owners can create or modify accounts.');
+    }
+
+    if (addUserButton) {
+        addUserButton.classList.toggle('hidden', !canManageUsers());
     }
 }
 
@@ -251,6 +318,11 @@ function updateAuthUI(authenticated) {
     const authSection = document.getElementById('auth-section');
 
     if (authenticated && currentUser) {
+        const readOnlyBadge = isReadOnlyUser()
+            ? `<div class="mt-1 inline-flex items-center gap-2 px-2 py-1 bg-yellow-900/20 border border-yellow-700/40 rounded text-[11px] text-yellow-200">
+                <span>Read-only mode</span>
+            </div>`
+            : '';
         const localPasswordButton = currentUser.auth_provider === 'local'
             ? `<button onclick="showChangeMyPasswordModal()"
                 class="px-3 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-sm font-medium transition-colors">
@@ -262,7 +334,8 @@ function updateAuthUI(authenticated) {
             <div class="flex items-center gap-4">
                 <div class="text-right">
                     <div class="text-sm font-medium text-white">${currentUser.full_name || currentUser.username}</div>
-                    <div class="text-xs text-gray-400">Role: ${currentUser.role} · ${currentUser.auth_provider}</div>
+                    <div class="text-xs text-gray-400">Role: ${currentUser.role} · ${currentUser.auth_provider || 'oidc'}</div>
+                    ${readOnlyBadge}
                 </div>
                 ${localPasswordButton}
                 <button onclick="handleAuth()"
@@ -281,13 +354,21 @@ function updateAuthUI(authenticated) {
     }
 }
 
+window.canWrite = canWrite;
+window.canManageUsers = canManageUsers;
+window.isReadOnlyUser = isReadOnlyUser;
+
 function handleAuth() {
     if (authToken) {
         // Logout
         authToken = null;
         currentUser = null;
         localStorage.removeItem('auth_token');
-        window.location.href = `${API_BASE}/api/auth/logout`;
+        if (typeof Auth !== 'undefined') {
+            Auth.logout();
+        } else {
+            window.location.href = `${API_BASE}/api/auth/logout`;
+        }
     } else {
         if (typeof Auth !== 'undefined') {
             Auth.login();
@@ -1431,7 +1512,7 @@ function showCreateDeviceModal() {
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-1">IP Address</label>
-                        <input type="text" name="ip_address" required placeholder="e.g., 192.168.1.x"
+                        <input type="text" name="ip_address" required placeholder="192.168.10.x"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
@@ -1501,8 +1582,21 @@ async function loadUsers() {
 
     try {
         const users = await apiRequest('/api/users');
+        const allowUserManagement = canManageUsers();
 
         const container = document.getElementById('users-container');
+        const usersBanner = document.getElementById('users-readonly-banner');
+        const addUserButton = document.getElementById('users-add-button');
+
+        if (usersBanner) {
+            usersBanner.innerHTML = allowUserManagement
+                ? ''
+                : renderReadOnlyBanner('You can review user accounts, but only owners can create, modify, or deactivate them.');
+        }
+
+        if (addUserButton) {
+            addUserButton.classList.toggle('hidden', !allowUserManagement);
+        }
 
         container.innerHTML = `
             <div class="bg-dark-card border border-dark-border rounded-lg overflow-hidden">
@@ -1525,7 +1619,7 @@ async function loadUsers() {
                                     <div class="text-xs text-gray-400">${user.email}</div>
                                 </td>
                                 <td class="px-6 py-4">
-                                    <span class="px-2 py-1 ${user.auth_provider === 'local' ? 'bg-green-900/30 text-green-400' : 'bg-purple-900/30 text-purple-400'} text-xs rounded">${user.auth_provider}</span>
+                                    <span class="px-2 py-1 ${user.auth_provider === 'local' ? 'bg-green-900/30 text-green-400' : 'bg-purple-900/30 text-purple-400'} text-xs rounded">${user.auth_provider || 'oidc'}</span>
                                 </td>
                                 <td class="px-6 py-4">
                                     <span class="px-2 py-1 bg-blue-900/30 text-blue-400 text-xs rounded">${user.role}</span>
@@ -1540,12 +1634,12 @@ async function loadUsers() {
                                     ${user.last_login ? new Date(user.last_login).toLocaleString() : 'Never'}
                                 </td>
                                 <td class="px-6 py-4 text-right">
-                                    ${currentUser && currentUser.id !== user.id ? `
+                                    ${allowUserManagement && currentUser && currentUser.id !== user.id ? `
                                         <button onclick="updateUserRole(${user.id}, '${user.username}')"
                                             class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded transition-colors mr-2">
                                             Change Role
                                         </button>
-                                        <button onclick="changeUserAuthProvider(${user.id}, '${user.username}', '${user.auth_provider}')"
+                                        <button onclick="changeUserAuthProvider(${user.id}, '${user.username}', '${user.auth_provider || 'oidc'}')"
                                             class="px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white text-xs rounded transition-colors mr-2">
                                             Change Login
                                         </button>
@@ -1565,12 +1659,12 @@ async function loadUsers() {
                                                 Reactivate
                                             </button>`
                                         }
-                                    ` : `${user.auth_provider === 'local'
+                                    ` : `${currentUser && currentUser.id === user.id && user.auth_provider === 'local'
                                             ? `<button onclick="showChangeMyPasswordModal()"
                                                 class="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white text-xs rounded transition-colors">
                                                 Change Password
                                             </button>`
-                                            : '<span class="text-xs text-gray-500">Current User</span>'}`}
+                                            : `<span class="text-xs text-gray-500">${currentUser && currentUser.id === user.id ? 'Current User' : 'View only'}</span>`}`}
                                 </td>
                             </tr>
                         `).join('')}
@@ -1585,6 +1679,11 @@ async function loadUsers() {
 }
 
 function showCreateLocalUserModal() {
+    if (!canManageUsers()) {
+        showError('Only owners can create or modify user accounts.');
+        return;
+    }
+
     const modal = `
         <div id="create-local-user-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onclick="if(event.target.id==='create-local-user-modal') closeModal('create-local-user-modal')">
             <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-lg w-full mx-4">
@@ -1660,6 +1759,11 @@ function toggleCreateUserPasswordField() {
 async function createLocalUser(event) {
     event.preventDefault();
 
+    if (!canManageUsers()) {
+        showError('Only owners can create or modify user accounts.');
+        return;
+    }
+
     try {
         const authProvider = document.getElementById('local-user-auth-provider').value;
         await apiRequest('/api/users', {
@@ -1683,6 +1787,11 @@ async function createLocalUser(event) {
 }
 
 async function resetLocalUserPassword(userId, username) {
+    if (!canManageUsers()) {
+        showError('Only owners can reset another user password.');
+        return;
+    }
+
     const password = prompt(`Enter a new password for ${username} (minimum 10 characters):`);
     if (!password) return;
 
@@ -1747,6 +1856,11 @@ async function changeMyPassword(event) {
 }
 
 async function changeUserAuthProvider(userId, username, currentProvider) {
+    if (!canManageUsers()) {
+        showError('Only owners can change another user login type.');
+        return;
+    }
+
     const newProvider = prompt(`Enter login type for ${username} (local or oidc):`, currentProvider);
     if (!newProvider) return;
 
@@ -1778,6 +1892,11 @@ async function changeUserAuthProvider(userId, username, currentProvider) {
 }
 
 async function updateUserRole(userId, username) {
+    if (!canManageUsers()) {
+        showError('Only owners can change user roles.');
+        return;
+    }
+
     const newRole = prompt(`Enter new role for ${username}:\n\nAvailable roles:\n- owner (full access)\n- operator (read/write)\n- viewer (read only)\n- support (read + audit)`, 'viewer');
 
     if (!newRole) return;
@@ -1801,6 +1920,11 @@ async function updateUserRole(userId, username) {
 }
 
 async function deactivateUser(userId, username) {
+    if (!canManageUsers()) {
+        showError('Only owners can deactivate user accounts.');
+        return;
+    }
+
     if (!confirm(`Deactivate user ${username}? They will not be able to login.`)) {
         return;
     }
@@ -1815,6 +1939,11 @@ async function deactivateUser(userId, username) {
 }
 
 async function reactivateUser(userId, username) {
+    if (!canManageUsers()) {
+        showError('Only owners can reactivate user accounts.');
+        return;
+    }
+
     try {
         await apiRequest(`/api/users/${userId}/reactivate`, { method: 'POST' });
         loadUsers();
@@ -2340,7 +2469,7 @@ function showCreateServerModal() {
 
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-1">IP Address</label>
-                        <input type="text" id="server-ip" placeholder="e.g., 192.168.1.x" required
+                        <input type="text" id="server-ip" placeholder="192.168.10.167" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
                     </div>
 

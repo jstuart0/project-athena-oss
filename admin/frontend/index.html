@@ -1481,18 +1481,6 @@
                     <span class="status-dot unknown"></span>
                     <span class="hidden md:inline">Ollama</span>
                 </div>
-                <div class="status-item" id="status-redis" title="Redis">
-                    <span class="status-dot unknown"></span>
-                    <span class="hidden md:inline">Redis</span>
-                </div>
-                <div class="status-item" id="status-qdrant" title="Qdrant">
-                    <span class="status-dot unknown"></span>
-                    <span class="hidden md:inline">Qdrant</span>
-                </div>
-                <div class="status-item" id="status-mlx" title="MLX">
-                    <span class="status-dot unknown"></span>
-                    <span class="hidden md:inline">MLX</span>
-                </div>
             </div>
         </div>
         <div class="flex items-center gap-4">
@@ -1761,6 +1749,10 @@
                             <i data-lucide="footprints" class="sidebar-icon"></i>
                             <span>Follow-Me Audio</span>
                         </button>
+                        <button onclick="showTab('notifications')" data-route="notifications" class="sidebar-item w-full text-left px-4 py-2 text-sm font-medium text-gray-400 flex items-center gap-3 transition-all">
+                            <i data-lucide="bell" class="sidebar-icon"></i>
+                            <span>Notifications</span>
+                        </button>
                     </div>
                 </div>
 
@@ -1774,6 +1766,10 @@
                         <button onclick="showTab('guest-mode')" data-route="guest-mode" class="sidebar-item w-full text-left px-4 py-2 text-sm font-medium text-gray-400 flex items-center gap-3 transition-all">
                             <i data-lucide="user-check" class="sidebar-icon"></i>
                             <span>Guest Mode</span>
+                        </button>
+                        <button onclick="showTab('mode-audit')" data-route="mode-audit" class="sidebar-item w-full text-left px-4 py-2 text-sm font-medium text-gray-400 flex items-center gap-3 transition-all">
+                            <i data-lucide="shield-check" class="sidebar-icon"></i>
+                            <span>Mode Audit Log</span>
                         </button>
                         <button onclick="showTab('voice-automations')" data-route="voice-automations" class="sidebar-item w-full text-left px-4 py-2 text-sm font-medium text-gray-400 flex items-center gap-3 transition-all">
                             <i data-lucide="mic" class="sidebar-icon"></i>
@@ -2064,12 +2060,15 @@
             <!-- Users Tab -->
             <div id="tab-users" class="tab-content hidden">
                 <div class="flex justify-between items-center mb-6">
-                    <h2 class="text-2xl font-semibold text-white">User Management</h2>
+                    <div>
+                        <h2 class="text-2xl font-semibold text-white">User Management</h2>
+                        <div id="users-readonly-banner"></div>
+                    </div>
                     <div class="flex gap-2">
-                        <button onclick="showCreateLocalUserModal()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors">
+                        <button id="users-add-button" onclick="showCreateLocalUserModal()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors">
                             ➕ Add User
                         </button>
-                        <button onclick="loadUsers()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
+                        <button id="users-refresh-button" onclick="loadUsers()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
                             <i data-lucide="refresh-cw" class="w-4 h-4 inline"></i> Refresh
                         </button>
                     </div>
@@ -2159,7 +2158,7 @@
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                             <div>
                                 <label class="block text-sm font-medium text-gray-400 mb-2">OIDC Provider URL</label>
-                                <input type="text" id="oidc-provider-url" placeholder="https://your-auth-server.com/application/o/athena-admin/"
+                                <input type="text" id="oidc-provider-url" placeholder="https://auth.xmojo.net/application/o/athena-admin/"
                                     class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                             </div>
                             <div>
@@ -2174,7 +2173,7 @@
                             </div>
                             <div>
                                 <label class="block text-sm font-medium text-gray-400 mb-2">Redirect URI</label>
-                                <input type="text" id="oidc-redirect-uri" value="http://localhost:8080/api/auth/callback" readonly
+                                <input type="text" id="oidc-redirect-uri" value="https://athena-admin.xmojo.net/api/auth/callback" readonly
                                     class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-400 cursor-not-allowed">
                             </div>
                         </div>
@@ -2393,6 +2392,22 @@
                     <div class="text-center text-gray-400 py-12">
                         <div class="text-4xl mb-4 animate-pulse">🚶</div>
                         <p>Loading follow-me configuration...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Notifications Tab -->
+            <div id="tab-notifications" class="tab-content hidden">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-2xl font-semibold text-white">Proactive Notifications</h2>
+                    <button onclick="initNotificationsPage()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
+                        <i data-lucide="refresh-cw" class="w-4 h-4 inline"></i> Refresh
+                    </button>
+                </div>
+                <div id="notifications-container">
+                    <div class="text-center text-gray-400 py-12">
+                        <div class="text-4xl mb-4 animate-pulse">🔔</div>
+                        <p>Loading notifications...</p>
                     </div>
                 </div>
             </div>
@@ -3812,6 +3827,151 @@
                     <!-- Dynamic status banner will be inserted here -->
                 </div>
 
+                <!-- Guest Mode Settings Section -->
+                <div class="bg-dark-card border border-dark-border rounded-lg p-6 mb-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-lg font-semibold text-white flex items-center gap-2">
+                            <span class="text-purple-400">⚙️</span>
+                            Guest Mode Settings
+                        </h3>
+                        <div class="flex gap-2">
+                            <button onclick="saveGuestModeSettings()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors">
+                                💾 Save Settings
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="guest-mode-settings-container" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Left Column: General Settings -->
+                        <div class="space-y-4">
+                            <h4 class="text-sm font-medium text-gray-300 border-b border-dark-border pb-2">Buffer Times</h4>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">
+                                    Hours Before Check-in
+                                    <span class="text-gray-500 font-normal">(Guest mode activates early)</span>
+                                </label>
+                                <input type="number" id="buffer-before-checkin" min="0" max="24" value="2"
+                                    class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white text-sm">
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">
+                                    Hours After Check-out
+                                    <span class="text-gray-500 font-normal">(Guest mode stays active)</span>
+                                </label>
+                                <input type="number" id="buffer-after-checkout" min="0" max="24" value="1"
+                                    class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white text-sm">
+                            </div>
+
+                            <h4 class="text-sm font-medium text-gray-300 border-b border-dark-border pb-2 pt-4">Rate Limits</h4>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">
+                                    Guest Queries/Minute
+                                </label>
+                                <input type="number" id="rate-limit-guest" min="1" max="100" value="30"
+                                    class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white text-sm">
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">
+                                    Owner Queries/Minute
+                                </label>
+                                <input type="number" id="rate-limit-owner" min="1" max="500" value="100"
+                                    class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white text-sm">
+                            </div>
+
+                            <h4 class="text-sm font-medium text-gray-300 border-b border-dark-border pb-2 pt-4">Voice PIN Override</h4>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">
+                                    Owner PIN (6 digits)
+                                    <span class="text-gray-500 font-normal">(For voice override in guest mode)</span>
+                                </label>
+                                <input type="password" id="owner-pin" pattern="[0-9]{6}" maxlength="6" placeholder="••••••"
+                                    class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white text-sm">
+                                <p class="text-xs text-gray-500 mt-1">Leave blank to keep current PIN</p>
+                            </div>
+                        </div>
+
+                        <!-- Right Column: Permissions -->
+                        <div class="space-y-4">
+                            <h4 class="text-sm font-medium text-gray-300 border-b border-dark-border pb-2">Guest Permissions</h4>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">
+                                    Restricted Intents
+                                    <span class="text-gray-500 font-normal">(Blocked in guest mode)</span>
+                                </label>
+                                <div id="restricted-intents-checkboxes" class="grid grid-cols-2 gap-2 bg-dark-bg p-3 rounded-lg border border-dark-border">
+                                    <label class="flex items-center gap-2 text-sm">
+                                        <input type="checkbox" id="restrict-tesla" checked class="rounded">
+                                        <span class="text-gray-300">Tesla</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">
+                                    Restricted Entity Patterns
+                                    <span class="text-gray-500 font-normal">(Regex patterns, one per line)</span>
+                                </label>
+                                <textarea id="restricted-entities" rows="3" placeholder=".*tesla.*&#10;.*vehicle.*"
+                                    class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white text-sm font-mono">.*tesla.*
+.*vehicle.*</textarea>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">
+                                    Allowed HA Domains
+                                    <span class="text-gray-500 font-normal">(Guests can control these)</span>
+                                </label>
+                                <div id="allowed-domains-checkboxes" class="grid grid-cols-2 gap-2 bg-dark-bg p-3 rounded-lg border border-dark-border">
+                                    <label class="flex items-center gap-2 text-sm">
+                                        <input type="checkbox" id="allow-light" checked class="rounded">
+                                        <span class="text-gray-300">light</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 text-sm">
+                                        <input type="checkbox" id="allow-switch" checked class="rounded">
+                                        <span class="text-gray-300">switch</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 text-sm">
+                                        <input type="checkbox" id="allow-climate" checked class="rounded">
+                                        <span class="text-gray-300">climate</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 text-sm">
+                                        <input type="checkbox" id="allow-media_player" checked class="rounded">
+                                        <span class="text-gray-300">media_player</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 text-sm">
+                                        <input type="checkbox" id="allow-scene" checked class="rounded">
+                                        <span class="text-gray-300">scene</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 text-sm">
+                                        <input type="checkbox" id="allow-lock" checked class="rounded">
+                                        <span class="text-gray-300">lock</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 text-sm">
+                                        <input type="checkbox" id="allow-cover" checked class="rounded">
+                                        <span class="text-gray-300">cover</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 text-sm">
+                                        <input type="checkbox" id="allow-fan" checked class="rounded">
+                                        <span class="text-gray-300">fan</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="bg-yellow-900/20 border border-yellow-700/50 rounded-lg p-3 mt-4">
+                                <p class="text-yellow-300 text-sm">
+                                    <strong>Note:</strong> Locks are enabled by default for Baltimore property guests who need front/back door access.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Current/Upcoming Guests Section -->
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
                     <!-- Current Guests -->
@@ -3901,6 +4061,90 @@
                                 Next →
                             </button>
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mode Audit Log Tab -->
+            <div id="tab-mode-audit" class="tab-content hidden">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-2xl font-semibold text-white">Mode Audit Log</h2>
+                    <div class="flex gap-2">
+                        <select id="audit-event-filter" onchange="loadModeAuditLog()"
+                            class="px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white text-sm">
+                            <option value="">All Events</option>
+                            <option value="mode_change">Mode Changes</option>
+                            <option value="override_activated">Override Activated</option>
+                            <option value="override_expired">Override Expired</option>
+                            <option value="pin_verified">PIN Verified</option>
+                            <option value="pin_failed">PIN Failed</option>
+                            <option value="permission_denied">Permission Denied</option>
+                        </select>
+                        <select id="audit-device-filter" onchange="loadModeAuditLog()"
+                            class="px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white text-sm">
+                            <option value="">All Devices</option>
+                        </select>
+                        <button onclick="loadModeAuditLog()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
+                            <i data-lucide="refresh-cw" class="w-4 h-4 inline"></i> Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Stats Summary -->
+                <div id="mode-audit-stats" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                    <div class="bg-dark-card border border-dark-border rounded-lg p-4">
+                        <div class="text-sm text-gray-400">Total Events (7d)</div>
+                        <div id="stat-total-events" class="text-2xl font-semibold text-white">-</div>
+                    </div>
+                    <div class="bg-dark-card border border-dark-border rounded-lg p-4">
+                        <div class="text-sm text-gray-400">Mode Changes</div>
+                        <div id="stat-mode-changes" class="text-2xl font-semibold text-blue-400">-</div>
+                    </div>
+                    <div class="bg-dark-card border border-dark-border rounded-lg p-4">
+                        <div class="text-sm text-gray-400">Permission Denials</div>
+                        <div id="stat-denials" class="text-2xl font-semibold text-red-400">-</div>
+                    </div>
+                    <div class="bg-dark-card border border-dark-border rounded-lg p-4">
+                        <div class="text-sm text-gray-400">PIN Failures</div>
+                        <div id="stat-pin-failures" class="text-2xl font-semibold text-yellow-400">-</div>
+                    </div>
+                </div>
+
+                <!-- Audit Log Table -->
+                <div class="bg-dark-card border border-dark-border rounded-lg overflow-hidden">
+                    <table class="w-full text-sm">
+                        <thead class="bg-dark-bg border-b border-dark-border">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-gray-400 font-medium">Timestamp</th>
+                                <th class="px-4 py-3 text-left text-gray-400 font-medium">Event Type</th>
+                                <th class="px-4 py-3 text-left text-gray-400 font-medium">Mode Change</th>
+                                <th class="px-4 py-3 text-left text-gray-400 font-medium">Device</th>
+                                <th class="px-4 py-3 text-left text-gray-400 font-medium">Trigger</th>
+                                <th class="px-4 py-3 text-left text-gray-400 font-medium">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="mode-audit-table-body" class="divide-y divide-dark-border">
+                            <tr>
+                                <td colspan="6" class="px-4 py-8 text-center text-gray-500">
+                                    Loading audit log...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination -->
+                <div class="flex justify-between items-center mt-4">
+                    <div id="mode-audit-count" class="text-sm text-gray-400">Showing 0 entries</div>
+                    <div class="flex gap-2">
+                        <button id="audit-prev-btn" onclick="loadModeAuditLog(modeAuditOffset - modeAuditLimit)"
+                            class="px-3 py-1 bg-dark-bg border border-dark-border rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                            ← Previous
+                        </button>
+                        <button id="audit-next-btn" onclick="loadModeAuditLog(modeAuditOffset + modeAuditLimit)"
+                            class="px-3 py-1 bg-dark-bg border border-dark-border rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed">
+                            Next →
+                        </button>
                     </div>
                 </div>
             </div>
@@ -4664,6 +4908,7 @@
     <script src="/debug-logs.js"></script>
     <script src="/base-knowledge.js"></script>
     <script src="/guest-mode.js"></script>
+    <script src="/mode-audit.js"></script>
     <script src="/sms.js"></script>
     <script src="/llm-components.js"></script>
     <script src="/model-config.js"></script>
@@ -4682,6 +4927,7 @@
     <script src="/room-audio.js"></script>
     <script src="/room-tv.js"></script>
     <script src="/follow-me.js"></script>
+    <script src="/notifications.js?v=20260114"></script>
     <script src="/voice-config.js?v=20260112"></script>
     <script src="/admin-jarvis.js"></script>
     <script src="/site-scraper.js"></script>

@@ -4,6 +4,19 @@ let ossProfilesState = {
     preview: null,
 };
 
+function canEditOSSTuning() {
+    return typeof window.canWrite === 'function' ? window.canWrite() : false;
+}
+
+function renderOSSTuningReadOnlyBanner() {
+    return `
+        <div class="bg-yellow-900/20 border border-yellow-700/40 rounded-xl p-4 text-yellow-100">
+            <div class="font-medium mb-1">Read-only mode</div>
+            <div class="text-sm text-yellow-100/80">You can inspect diagnostics, preview profiles, and export effective config, but profile changes require write access.</div>
+        </div>
+    `;
+}
+
 async function initOSSProfilesPage() {
     const container = document.getElementById('oss-profiles-container');
     if (!container) return;
@@ -45,6 +58,7 @@ function renderOSSProfilesPage() {
 
     container.innerHTML = `
         <div class="space-y-6">
+            ${canEditOSSTuning() ? '' : renderOSSTuningReadOnlyBanner()}
             ${renderOSSProfileSummary(status)}
             ${renderOSSProfileActions(status)}
             ${renderOSSProfileIssues(status)}
@@ -98,6 +112,7 @@ function renderOSSProfileSummary(status) {
     }, 0);
     const runtimeSync = status.runtime_sync || {};
     const runtimeTone = runtimeSync.state === 'pending_reload' ? 'yellow' : 'green';
+    const canEdit = canEditOSSTuning();
 
     return `
         <div class="grid grid-cols-1 lg:grid-cols-5 gap-4">
@@ -126,7 +141,7 @@ function renderOSSProfileSummary(status) {
                 <div class="text-xs uppercase tracking-wide text-gray-500 mb-2 flex items-center gap-2">Runtime Sync ${tooltipBadge('Tells you whether runtime services still need cache invalidation or restart after config changes.')}</div>
                 <div class="text-lg font-semibold text-white mb-2">${statusPill(humanizeState(runtimeSync.state || 'synchronized'), runtimeTone)}</div>
                 <div class="text-sm text-gray-400">${escapeHtml(runtimeSync.required_action || 'No pending action')}</div>
-                ${runtimeSync.state === 'pending_reload' ? `
+                ${canEdit && runtimeSync.state === 'pending_reload' ? `
                     ${actionButton('Retry Sync', 'mt-3 px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium', 'retryOSSRuntimeSync()', 'Re-runs the sync step after a profile change. Use this after you fix a restart or cache issue.')}
                 ` : ''}
             </div>
@@ -136,6 +151,7 @@ function renderOSSProfileSummary(status) {
 
 function renderOSSProfileActions(status) {
     const recommended = status.suggested_profile || 'ollama_qwen_small';
+    const canEdit = canEditOSSTuning();
     return `
         <div class="bg-dark-card border border-dark-border rounded-xl p-6">
             <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
@@ -149,21 +165,26 @@ function renderOSSProfileActions(status) {
                     ${actionButton('Export Effective Config', 'px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', 'downloadOSSEffectiveConfig()', 'Downloads the resolved runtime config with provenance so you can review or share it.')}
                 </div>
             </div>
+            ${canEdit ? '' : `
+                <div class="mb-4 text-sm text-yellow-200 bg-yellow-900/20 border border-yellow-700/40 rounded-lg px-4 py-3">
+                    Mutation actions are hidden for this account. Sign in with a write-capable role to install models or apply profile changes.
+                </div>
+            `}
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
                 <div class="border border-dark-border rounded-lg p-4">
                     <div class="font-medium text-white mb-2 flex items-center gap-2">Fill Missing Only ${tooltipBadge('Safest mode. Only creates missing rows or fills blank values. Existing operator-set values stay untouched.')}</div>
                     <p class="text-sm text-gray-400 mb-4">Safe first-run action. Creates missing rows and fills blank fields without overriding operator-owned values.</p>
-                    ${actionButton('Apply Recommended Defaults', 'w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${recommended}', 'fill_missing_only')`, 'Applies the recommended profile only where values are currently missing.')}
+                    ${canEdit ? actionButton('Apply Recommended Defaults', 'w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${recommended}', 'fill_missing_only')`, 'Applies the recommended profile only where values are currently missing.') : ''}
                 </div>
                 <div class="border border-dark-border rounded-lg p-4">
                     <div class="font-medium text-white mb-2 flex items-center gap-2">Reconcile Profile ${tooltipBadge('Updates only fields still managed by the profile. Detached fields remain under operator control.')}</div>
                     <p class="text-sm text-gray-400 mb-4">Updates fields still owned by the active profile and leaves detached user-managed fields alone.</p>
-                    ${actionButton('Reconcile Managed Fields', 'w-full px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${recommended}', 'reconcile_profile')`, 'Refreshes only profile-owned fields to match the selected profile.')}
+                    ${canEdit ? actionButton('Reconcile Managed Fields', 'w-full px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${recommended}', 'reconcile_profile')`, 'Refreshes only profile-owned fields to match the selected profile.') : ''}
                 </div>
                 <div class="border border-dark-border rounded-lg p-4">
                     <div class="font-medium text-white mb-2 flex items-center gap-2">Overwrite Profile Scope ${tooltipBadge('Most aggressive mode. Reapplies the profile across all managed records, even if they were previously customized.')}</div>
                     <p class="text-sm text-gray-400 mb-4">Force the selected profile back onto every managed backend, model config, assignment, and gateway field.</p>
-                    ${actionButton('Overwrite Managed Scope', 'w-full px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${recommended}', 'overwrite_all')`, 'Forces the selected profile back onto all managed settings in its scope.')}
+                    ${canEdit ? actionButton('Overwrite Managed Scope', 'w-full px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${recommended}', 'overwrite_all')`, 'Forces the selected profile back onto all managed settings in its scope.') : ''}
                 </div>
             </div>
         </div>
@@ -206,6 +227,7 @@ function renderOSSProfileIssues(status) {
 function renderOSSProfileInventory(status) {
     const backends = status.backend_status || [];
     const profiles = status.profiles || [];
+    const canEdit = canEditOSSTuning();
 
     return `
         <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
@@ -236,8 +258,8 @@ function renderOSSProfileInventory(status) {
                             <div class="text-xs text-gray-500 mb-3" title="Healthy means the planner can satisfy the profile cleanly. Fallback means it can serve, but not with the preferred model/backend mix.">Plan status: ${escapeHtml(profile.plan?.aggregated_status || 'unknown')}</div>
                             <div class="flex flex-wrap gap-2">
                                 ${actionButton('Preview', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `previewOSSProfile('${profile.name}', 'fill_missing_only')`, 'Shows the component assignment plan and reload impact for this profile.')}
-                                ${actionButton('Initialize', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${profile.name}', 'fill_missing_only')`, 'Seeds this profile without overwriting existing operator-owned values.')}
-                                ${actionButton('Reconcile', 'px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${profile.name}', 'reconcile_profile')`, 'Updates only fields still managed by this profile.')}
+                                ${canEdit ? actionButton('Initialize', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${profile.name}', 'fill_missing_only')`, 'Seeds this profile without overwriting existing operator-owned values.') : ''}
+                                ${canEdit ? actionButton('Reconcile', 'px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${profile.name}', 'reconcile_profile')`, 'Updates only fields still managed by this profile.') : ''}
                             </div>
                         </div>
                     `).join('')}
@@ -275,7 +297,7 @@ function renderOSSProfileInventory(status) {
                                             </div>
                                             <div class="flex items-center gap-2">
                                                 ${statusPill(model.status, tone)}
-                                                ${backend.supports_install_action && model.installability_state === 'installable' ? `
+                                                ${canEdit && backend.supports_install_action && model.installability_state === 'installable' ? `
                                                     ${actionButton('Install', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `installOSSModel('${model.name}')`, 'Pulls this model onto the backend so the planner can assign it directly.')}
                                                 ` : ''}
                                             </div>
@@ -295,6 +317,7 @@ function renderOSSEffectiveConfig(effective) {
     const rows = effective.components || [];
     const gateway = effective.gateway || {};
     const models = effective.models || [];
+    const canEdit = canEditOSSTuning();
     return `
         <div class="bg-dark-card border border-dark-border rounded-xl p-6">
             <div class="flex items-center justify-between mb-4">
@@ -311,10 +334,12 @@ function renderOSSEffectiveConfig(effective) {
                             <div class="font-medium text-white flex items-center gap-2">Gateway Runtime ${tooltipBadge('These settings control how the gateway performs intent routing before the request reaches the deeper pipeline.')}</div>
                             <div class="text-xs text-gray-500">Intent routing defaults and fallback endpoint.</div>
                         </div>
-                        <div class="flex gap-2">
-                            ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('GatewayConfig', '1')`, 'Restores all profile-managed gateway fields to the active profile defaults.')}
-                            ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('GatewayConfig', '1')`, 'Stops the active profile from managing these gateway fields so you can tune them manually.')}
-                        </div>
+                        ${canEdit ? `
+                            <div class="flex gap-2">
+                                ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('GatewayConfig', '1')`, 'Restores all profile-managed gateway fields to the active profile defaults.')}
+                                ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('GatewayConfig', '1')`, 'Stops the active profile from managing these gateway fields so you can tune them manually.')}
+                            </div>
+                        ` : ''}
                     </div>
                     <div class="space-y-3 text-sm">
                         ${renderGatewayField('Intent model', gateway.intent_model, 'GatewayConfig', '1', 'intent_model')}
@@ -343,10 +368,12 @@ function renderOSSEffectiveConfig(effective) {
                                         <div class="font-medium text-white">${escapeHtml(model.model_name)}</div>
                                         <div class="text-xs text-gray-500">${escapeHtml(model.backend_type || 'unknown backend')} · ${escapeHtml(model.source || 'unset')}</div>
                                     </div>
-                                    <div class="flex gap-2">
-                                        ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('ModelConfiguration', '${escapeHtml(model.identifier)}')`, 'Restores all profile-managed settings for this model configuration row.')}
-                                        ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('ModelConfiguration', '${escapeHtml(model.identifier)}')`, 'Stops the active profile from managing this model configuration row.')}
-                                    </div>
+                                    ${canEdit ? `
+                                        <div class="flex gap-2">
+                                            ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('ModelConfiguration', '${escapeHtml(model.identifier)}')`, 'Restores all profile-managed settings for this model configuration row.')}
+                                            ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('ModelConfiguration', '${escapeHtml(model.identifier)}')`, 'Stops the active profile from managing this model configuration row.')}
+                                        </div>
+                                    ` : ''}
                                 </div>
                                 <div class="grid grid-cols-2 gap-3 text-sm">
                                     <div>
@@ -387,52 +414,64 @@ function renderOSSEffectiveConfig(effective) {
                                 <td>
                                     <div>${escapeHtml(String(row.model_name.value))}</div>
                                     <div class="text-xs text-gray-500">${escapeHtml(row.model_name.source)}</div>
-                                    <div class="mt-2 flex gap-2">
-                                        <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'model_name')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed model assignment for this component.">reset</button>
-                                        <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'model_name')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this field so manual model changes are preserved.">detach</button>
-                                    </div>
+                                    ${canEdit ? `
+                                        <div class="mt-2 flex gap-2">
+                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'model_name')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed model assignment for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'model_name')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this field so manual model changes are preserved.">detach</button>
+                                        </div>
+                                    ` : ''}
                                 </td>
                                 <td>
                                     <div>${escapeHtml(String(row.backend_type.value))}</div>
                                     <div class="text-xs text-gray-500">${escapeHtml(row.backend_type.source)}</div>
-                                    <div class="mt-2 flex gap-2">
-                                        <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'backend_type')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed backend selection for this component.">reset</button>
-                                        <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'backend_type')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this backend field.">detach</button>
-                                    </div>
+                                    ${canEdit ? `
+                                        <div class="mt-2 flex gap-2">
+                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'backend_type')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed backend selection for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'backend_type')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this backend field.">detach</button>
+                                        </div>
+                                    ` : ''}
                                 </td>
                                 <td>
                                     <div>${escapeHtml(String(row.max_tokens.value))}</div>
                                     <div class="text-xs text-gray-500">${escapeHtml(row.max_tokens.source)}</div>
-                                    <div class="mt-2 flex gap-2">
-                                        <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'max_tokens')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed max token setting for this component.">reset</button>
-                                        <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'max_tokens')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this max token field.">detach</button>
-                                    </div>
+                                    ${canEdit ? `
+                                        <div class="mt-2 flex gap-2">
+                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'max_tokens')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed max token setting for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'max_tokens')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this max token field.">detach</button>
+                                        </div>
+                                    ` : ''}
                                 </td>
                                 <td>
                                     <div>${escapeHtml(String(row.temperature.value))}</div>
                                     <div class="text-xs text-gray-500">${escapeHtml(row.temperature.source)}</div>
-                                    <div class="mt-2 flex gap-2">
-                                        <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'temperature')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed temperature for this component.">reset</button>
-                                        <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'temperature')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this temperature field.">detach</button>
-                                    </div>
+                                    ${canEdit ? `
+                                        <div class="mt-2 flex gap-2">
+                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'temperature')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed temperature for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'temperature')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this temperature field.">detach</button>
+                                        </div>
+                                    ` : ''}
                                 </td>
                                 <td>
                                     <div>${escapeHtml(String(row.timeout_seconds.value))}s</div>
                                     <div class="text-xs text-gray-500">${escapeHtml(row.timeout_seconds.source)}</div>
-                                    <div class="mt-2 flex gap-2">
-                                        <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'timeout_seconds')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed timeout for this component.">reset</button>
-                                        <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'timeout_seconds')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this timeout field.">detach</button>
-                                    </div>
+                                    ${canEdit ? `
+                                        <div class="mt-2 flex gap-2">
+                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'timeout_seconds')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed timeout for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'timeout_seconds')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this timeout field.">detach</button>
+                                        </div>
+                                    ` : ''}
                                 </td>
                                 <td>
                                     <div class="text-sm text-white">${escapeHtml(row.planner?.decision_state || 'unknown')}</div>
                                     <div class="text-xs text-gray-500">${escapeHtml(row.planner?.rationale_summary || '')}</div>
                                 </td>
                                 <td>
-                                    <div class="flex flex-col gap-2 min-w-[120px]">
-                                        ${actionButton('Reset Record', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}')`, 'Restores all profile-managed fields for this row.')}
-                                        ${actionButton('Detach Record', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}')`, 'Stops the active profile from managing every field in this row.')}
-                                    </div>
+                                    ${canEdit ? `
+                                        <div class="flex flex-col gap-2 min-w-[120px]">
+                                            ${actionButton('Reset Record', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}')`, 'Restores all profile-managed fields for this row.')}
+                                            ${actionButton('Detach Record', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}')`, 'Stops the active profile from managing every field in this row.')}
+                                        </div>
+                                    ` : '<span class="text-xs text-gray-500">View only</span>'}
                                 </td>
                             </tr>
                         `).join('')}
@@ -444,6 +483,7 @@ function renderOSSEffectiveConfig(effective) {
 }
 
 function renderGatewayField(label, field, recordType, identifier, fieldName) {
+    const canEdit = canEditOSSTuning();
     return `
         <div class="border border-dark-border rounded-lg p-3">
             <div class="flex items-start justify-between gap-3">
@@ -452,16 +492,22 @@ function renderGatewayField(label, field, recordType, identifier, fieldName) {
                     <div class="text-white">${escapeHtml(String(field?.value ?? 'unset'))}</div>
                     <div class="text-xs text-gray-500 mt-1">${escapeHtml(field?.source || 'unset')}</div>
                 </div>
-                <div class="flex gap-2">
-                    ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSField('${recordType}', '${identifier}', '${fieldName}')`, 'Restore the profile-managed value for this gateway field.')}
-                    ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSField('${recordType}', '${identifier}', '${fieldName}')`, 'Stop the profile from managing this gateway field.')}
-                </div>
+                ${canEdit ? `
+                    <div class="flex gap-2">
+                        ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSField('${recordType}', '${identifier}', '${fieldName}')`, 'Restore the profile-managed value for this gateway field.')}
+                        ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSField('${recordType}', '${identifier}', '${fieldName}')`, 'Stop the profile from managing this gateway field.')}
+                    </div>
+                ` : ''}
             </div>
         </div>
     `;
 }
 
 async function applyOSSProfile(profileName, mode) {
+    if (!canEditOSSTuning()) {
+        showError('This account is in read-only mode.');
+        return;
+    }
     const confirmed = mode !== 'overwrite_all' || confirm(`Overwrite all profile-managed values with ${profileName}?`);
     if (!confirmed) return;
 
@@ -481,6 +527,10 @@ async function applyOSSProfile(profileName, mode) {
 }
 
 async function installOSSModel(modelName) {
+    if (!canEditOSSTuning()) {
+        showError('This account is in read-only mode.');
+        return;
+    }
     try {
         showSuccess(`Installing ${modelName}...`);
         await apiRequest('/api/oss-profiles/install-model', {
@@ -515,6 +565,10 @@ async function previewOSSProfile(profileName, mode) {
 }
 
 async function retryOSSRuntimeSync() {
+    if (!canEditOSSTuning()) {
+        showError('This account is in read-only mode.');
+        return;
+    }
     try {
         const result = await apiRequest('/api/oss-profiles/runtime-sync/retry', { method: 'POST' });
         showSuccess(`Runtime sync state: ${result.runtime_sync?.state || 'updated'}`);
@@ -525,6 +579,10 @@ async function retryOSSRuntimeSync() {
 }
 
 async function resetOSSField(recordType, identifier, fieldName) {
+    if (!canEditOSSTuning()) {
+        showError('This account is in read-only mode.');
+        return;
+    }
     try {
         const result = await apiRequest('/api/oss-profiles/fields/reset', {
             method: 'POST',
@@ -541,6 +599,10 @@ async function resetOSSField(recordType, identifier, fieldName) {
 }
 
 async function detachOSSField(recordType, identifier, fieldName) {
+    if (!canEditOSSTuning()) {
+        showError('This account is in read-only mode.');
+        return;
+    }
     const confirmed = confirm(`Detach ${recordType}:${identifier}.${fieldName} from profile management?`);
     if (!confirmed) return;
     try {
@@ -559,6 +621,10 @@ async function detachOSSField(recordType, identifier, fieldName) {
 }
 
 async function resetOSSRecord(recordType, identifier) {
+    if (!canEditOSSTuning()) {
+        showError('This account is in read-only mode.');
+        return;
+    }
     try {
         const result = await apiRequest('/api/oss-profiles/records/reset', {
             method: 'POST',
@@ -572,6 +638,10 @@ async function resetOSSRecord(recordType, identifier) {
 }
 
 async function detachOSSRecord(recordType, identifier) {
+    if (!canEditOSSTuning()) {
+        showError('This account is in read-only mode.');
+        return;
+    }
     const confirmed = confirm(`Detach all profile-managed fields for ${recordType}:${identifier}?`);
     if (!confirmed) return;
     try {
