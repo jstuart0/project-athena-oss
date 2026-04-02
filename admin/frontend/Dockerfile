@@ -70,6 +70,7 @@ COPY cloud-providers.js /usr/share/nginx/html/
 COPY service-bypass.js /usr/share/nginx/html/
 COPY escalation.js /usr/share/nginx/html/
 COPY debug-logs.js /usr/share/nginx/html/
+COPY oss-profiles.js /usr/share/nginx/html/
 
 # Fix permissions
 RUN chmod 644 /usr/share/nginx/html/*.js /usr/share/nginx/html/*.html

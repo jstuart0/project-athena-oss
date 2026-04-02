@@ -648,6 +648,11 @@ function showTab(tabName) {
                 initSystemConfigPage();
             }
             break;
+        case 'oss-profiles':
+            if (typeof initOSSProfilesPage === 'function') {
+                initOSSProfilesPage();
+            }
+            break;
         case 'presets':
             if (typeof initPresetsPage === 'function') {
                 initPresetsPage();

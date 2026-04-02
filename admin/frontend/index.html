@@ -1611,6 +1611,10 @@
                             <i data-lucide="settings" class="sidebar-icon"></i>
                             <span>System Config</span>
                         </button>
+                        <button onclick="showTab('oss-profiles')" data-route="oss-profiles" class="sidebar-item w-full text-left px-4 py-2 text-sm font-medium text-gray-400 flex items-center gap-3 transition-all">
+                            <i data-lucide="sliders-horizontal" class="sidebar-icon"></i>
+                            <span>OSS Tuning</span>
+                        </button>
                         <button onclick="showTab('presets')" data-route="presets" class="sidebar-item w-full text-left px-4 py-2 text-sm font-medium text-gray-400 flex items-center gap-3 transition-all">
                             <i data-lucide="zap" class="sidebar-icon"></i>
                             <span>Presets</span>
@@ -3106,6 +3110,22 @@
                     <div class="text-center text-gray-400 py-12">
                         <div class="text-4xl mb-4">⚙️</div>
                         <p>Loading system configuration...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- OSS Tuning Tab -->
+            <div id="tab-oss-profiles" class="tab-content hidden">
+                <div class="flex justify-between items-center mb-6">
+                    <div>
+                        <h2 class="text-2xl font-semibold text-white">OSS Tuning</h2>
+                        <p class="text-sm text-gray-400">Diagnose backend readiness, apply recommended defaults, and inspect effective runtime config.</p>
+                    </div>
+                </div>
+                <div id="oss-profiles-container">
+                    <div class="text-center text-gray-400 py-12">
+                        <div class="text-4xl mb-4">🧭</div>
+                        <p>Loading OSS tuning controls...</p>
                     </div>
                 </div>
             </div>
@@ -4666,6 +4686,7 @@
     <script src="/admin-jarvis.js"></script>
     <script src="/site-scraper.js"></script>
     <script src="/system-config.js"></script>
+    <script src="/oss-profiles.js"></script>
     <script src="/presets.js"></script>
     <script src="/voice-automations.js"></script>
     <script src="/alerts.js?v=20260112"></script>
