@@ -2806,7 +2806,7 @@
                     processing_time: clientRoundTrip,
                     tokens: data.tokens,
                     tokens_per_second: data.tokens_per_second,
-                    tool_exec_time: data.tool_exec_time,
+                    pipeline_time: data.pipeline_time || data.tool_exec_time,
                     model_used: data.model_used,
                     was_truncated: data.metadata?.was_truncated || false
                 });
@@ -2871,8 +2871,8 @@
                 if (metrics.processing_time) {
                     parts.push(`${metrics.processing_time.toFixed(2)}s`);
                 }
-                if (metrics.tool_exec_time) {
-                    parts.push(`tools: ${metrics.tool_exec_time.toFixed(2)}s`);
+                if (metrics.pipeline_time) {
+                    parts.push(`pipeline: ${metrics.pipeline_time.toFixed(2)}s`);
                 }
                 if (metrics.tokens_per_second) {
                     parts.push(`${metrics.tokens_per_second.toFixed(1)} tok/s`);
@@ -2946,7 +2946,7 @@
                     processing_time: clientRoundTrip,
                     tokens: data.tokens,
                     tokens_per_second: data.tokens_per_second,
-                    tool_exec_time: data.tool_exec_time,
+                    pipeline_time: data.pipeline_time || data.tool_exec_time,
                     model_used: data.model_used,
                     was_truncated: data.metadata?.was_truncated || false
                 });
@@ -3813,7 +3813,7 @@
                     processing_time: clientRoundTrip,
                     tokens: data.tokens,
                     tokens_per_second: data.tokens_per_second,
-                    tool_exec_time: data.tool_exec_time,
+                    pipeline_time: data.pipeline_time || data.tool_exec_time,
                     model_used: data.model_used,
                     was_truncated: data.metadata?.was_truncated || false
                 });

@@ -136,6 +136,7 @@ class ChatResponse(BaseModel):
     tokens: Optional[int] = None
     tokens_per_second: Optional[float] = None
     tool_exec_time: Optional[float] = None
+    pipeline_time: Optional[float] = None
     model_used: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None  # Pass-through for browser_playback, etc.
 
@@ -396,6 +397,7 @@ async def chat(message: ChatMessage):
                 tokens=orchestrator_metadata.get("tokens"),
                 tokens_per_second=orchestrator_metadata.get("tokens_per_second"),
                 tool_exec_time=orchestrator_metadata.get("tool_exec_time"),
+                pipeline_time=orchestrator_metadata.get("tool_exec_time"),
                 model_used=orchestrator_metadata.get("model_used"),
                 metadata=pass_through_metadata  # Always include (contains was_truncated)
             )
