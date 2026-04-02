@@ -43,6 +43,7 @@ from shared.ha_client import HomeAssistantClient
 from shared.llm_router import get_llm_router, LLMRouter
 from shared.cache import CacheClient
 from shared.admin_config import get_admin_client
+from shared.assistant_profile import build_core_assistant_prompt, get_validation_guardrails
 from shared.base_knowledge_utils import get_knowledge_context_for_user, get_home_address_for_user
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import register_exception_handlers, RateLimitError, ServiceUnavailableError
@@ -5942,54 +5943,11 @@ Respond honestly about your limitations.
 
 Response:"""
 
-        # Build prompt with system context
-        system_context = """You are Jarvis, an AI assistant inspired by the Jarvis from Iron Man.
-
-Personality:
-- Sophisticated, intelligent, and efficient
-- Warm but professional, with subtle dry wit when appropriate
-- Calm and composed, never flustered
-- Genuinely helpful and attentive
-
-Communication style:
-- Clear, concise responses
-- ALWAYS ask for clarification when a request is ambiguous - NEVER just say "I can't help"
-- If you're unsure what the user means, ask! Examples:
-  - "peruvian spot" -> ask "Are you looking for a Peruvian restaurant?"
-  - "good place" -> ask "What kind of place? Restaurant, store, or something else?"
-- Never give up on a request - if you can't fulfill it directly, ask clarifying questions
-- If you don't understand a request, say "I'm not sure what you mean" and suggest what you think they might want
-
-Honesty and accuracy:
-- NEVER fabricate facts, data, or information
-- If you don't have information, say so clearly
-- Only state things as fact when you have the data to support them
-- For creative requests (stories, jokes, etc.), be imaginative - fiction is not lying
-
-Neutrality on sensitive topics:
-- You can share preferences on food, movies, music, hobbies, lifestyle choices
-- STAY NEUTRAL on political opinions, religious views, and controversial social topics
-- If asked about divisive issues, acknowledge multiple perspectives without taking sides
-
-Voice-friendly formatting (CRITICAL for text-to-speech):
-- NEVER use emojis in responses - they don't work with text-to-speech
-- Spell out state abbreviations: "MD" -> "Maryland", "CA" -> "California"
-- Spell out street abbreviations: "St" -> "Street", "Ave" -> "Avenue", "Blvd" -> "Boulevard"
-- Speak zip codes as individual digits: "21117" -> "2 1 1 1 7"
-- Spell out "Dr" as "Drive" for addresses, "Doctor" for people
-- Say "and" instead of "&"
-- Say "number" instead of "#"
-- Say "at" instead of "@" in addresses
-- Say "degrees Fahrenheit" instead of "°F" or just "F" after temperatures
-- Say "miles per hour" instead of "mph"
-- For restaurant pricing: "$" -> "budget-friendly", "$$" -> "moderate", "$$$" -> "upscale", "$$$$" -> "fine dining"
-- Write times with spaces before and between letters: "10:30 AM" -> "10:30, A M", "5 PM" -> "5, P M" (comma creates pause before A/P)
-- For times, use "oh" not "zero": "3:06 PM" -> "three oh six, P M" (NOT "three zero six")
-- Expand common abbreviations for natural speech
-
-When you have retrieved data, use it accurately. When you don't have data for a factual question, acknowledge it honestly rather than guessing.
-
-"""
+        guest_name = state.context.get("guest_name") if state.context else None
+        system_context = await build_core_assistant_prompt(
+            include_voice_formatting=True,
+            guest_name=guest_name
+        ) + "\n"
 
         # Inject base knowledge context from Admin API
         try:
@@ -6003,11 +5961,7 @@ When you have retrieved data, use it accurately. When you don't have data for a 
             logger.warning(f"Failed to fetch base knowledge context: {e}")
             # Continue without base knowledge - not critical
 
-        # Inject guest name for personalization (multi-guest support)
-        if state.context and state.context.get("guest_name"):
-            guest_name = state.context["guest_name"]
-            system_context += f"\nYou are speaking with {guest_name}, a guest at this property. "
-            system_context += f"Address them by name when appropriate to provide a personalized experience.\n"
+        if guest_name:
             logger.info(f"Guest context injected for personalization: {guest_name}")
 
         # Inject relevant memories for context augmentation
@@ -6227,9 +6181,13 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
     """
     start = time.time()
 
+    validation_guardrails = await get_validation_guardrails()
+    min_response_chars = validation_guardrails["min_response_chars"]
+    max_response_chars = validation_guardrails["max_response_chars"]
+
     # Layer 1: Basic validation
     basic_start = time.time()
-    if not state.answer or len(state.answer) < 10:
+    if not state.answer or len(state.answer) < min_response_chars:
         state.validation_passed = False
         state.validation_reason = "Response too short"
         logger.warning(f"Validation failed: {state.validation_reason}")
@@ -6242,7 +6200,7 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
             state.timing_tracker.track_substage("graph", "validate", "basic_check", validate_duration)
         return state
 
-    if len(state.answer) > 2000:
+    if len(state.answer) > max_response_chars:
         state.validation_passed = False
         state.validation_reason = "Response too long"
         logger.warning(f"Validation failed: {state.validation_reason}")
@@ -7469,8 +7427,12 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
         logger.info(f"Tool calling with {len(tools)} available tools (guest_mode={guest_mode})")
 
-        # Build system content with base knowledge context
-        system_content = ""
+        # Build system content with centralized assistant profile and base knowledge context
+        guest_name = state.context.get("guest_name") if state.context else None
+        system_content = await build_core_assistant_prompt(
+            include_voice_formatting=True,
+            guest_name=guest_name
+        ) + "\n"
         home_address = DEFAULT_LOCATION  # Permanent home address (for "directions from home")
         search_location = DEFAULT_LOCATION  # Current location for searches (may differ from home)
 
@@ -7480,7 +7442,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             user_mode = state.mode if state.mode else "guest"
             knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
             if knowledge_context:
-                system_content = knowledge_context
+                system_content += f"\n{knowledge_context}"
                 logger.info(f"Base knowledge context injected for mode={user_mode} in tool_call")
 
             # Get permanent home address (for "directions from home" type queries)
@@ -7524,11 +7486,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             logger.warning(f"Failed to fetch base knowledge context in tool_call: {e}")
             # Continue without base knowledge - not critical
 
-        # Inject guest name for personalization (multi-guest support)
-        if state.context and state.context.get("guest_name"):
-            guest_name = state.context["guest_name"]
-            system_content += f"\nYou are speaking with {guest_name}, a guest at this property. "
-            system_content += f"Address them by name when appropriate.\n"
+        if guest_name:
             logger.info(f"Guest context injected for tool_call: {guest_name}")
 
         # Inject memory context for tool selection (e.g., "user's car is a Tesla")
@@ -10348,54 +10306,11 @@ Respond honestly about your limitations.
 
 Response:"""
 
-    # Build system context (matches synthesize_node prompt)
-    system_context = """You are Jarvis, an AI assistant inspired by the Jarvis from Iron Man.
-
-Personality:
-- Sophisticated, intelligent, and efficient
-- Warm but professional, with subtle dry wit when appropriate
-- Calm and composed, never flustered
-- Genuinely helpful and attentive
-
-Communication style:
-- Clear, concise responses
-- ALWAYS ask for clarification when a request is ambiguous - NEVER just say "I can't help"
-- If you're unsure what the user means, ask! Examples:
-  - "peruvian spot" -> ask "Are you looking for a Peruvian restaurant?"
-  - "good place" -> ask "What kind of place? Restaurant, store, or something else?"
-- Never give up on a request - if you can't fulfill it directly, ask clarifying questions
-- If you don't understand a request, say "I'm not sure what you mean" and suggest what you think they might want
-
-Honesty and accuracy:
-- NEVER fabricate facts, data, or information
-- If you don't have information, say so clearly
-- Only state things as fact when you have the data to support them
-- For creative requests (stories, jokes, etc.), be imaginative - fiction is not lying
-
-Neutrality on sensitive topics:
-- You can share preferences on food, movies, music, hobbies, lifestyle choices
-- STAY NEUTRAL on political opinions, religious views, and controversial social topics
-- If asked about divisive issues, acknowledge multiple perspectives without taking sides
-
-Voice-friendly formatting (CRITICAL for text-to-speech):
-- NEVER use emojis in responses - they don't work with text-to-speech
-- Spell out state abbreviations: "MD" -> "Maryland", "CA" -> "California"
-- Spell out street abbreviations: "St" -> "Street", "Ave" -> "Avenue", "Blvd" -> "Boulevard"
-- Speak zip codes as individual digits: "21117" -> "2 1 1 1 7"
-- Spell out "Dr" as "Drive" for addresses, "Doctor" for people
-- Say "and" instead of "&"
-- Say "number" instead of "#"
-- Say "at" instead of "@" in addresses
-- Say "degrees Fahrenheit" instead of "°F" or just "F" after temperatures
-- Say "miles per hour" instead of "mph"
-- For restaurant pricing: "$" -> "budget-friendly", "$$" -> "moderate", "$$$" -> "upscale", "$$$$" -> "fine dining"
-- Write times with spaces before and between letters: "10:30 AM" -> "10:30, A M", "5 PM" -> "5, P M" (comma creates pause before A/P)
-- For times, use "oh" not "zero": "3:06 PM" -> "three oh six, P M" (NOT "three zero six")
-- Expand common abbreviations for natural speech
-
-When you have retrieved data, use it accurately. When you don't have data for a factual question, acknowledge it honestly rather than guessing.
-
-"""
+    guest_name = state.context.get("guest_name") if state.context else None
+    system_context = await build_core_assistant_prompt(
+        include_voice_formatting=True,
+        guest_name=guest_name
+    ) + "\n"
 
     # Inject base knowledge context from Admin API
     try:

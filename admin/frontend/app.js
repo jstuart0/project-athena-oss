@@ -1777,7 +1777,76 @@ function showError(message) {
 // ============================================================================
 
 async function loadSettings() {
-    await Promise.all([loadServers(), loadServices()]);
+    await Promise.all([loadOIDCSettings(), loadAssistantProfileSettings(), loadServers(), loadServices()]);
+}
+
+async function loadAssistantProfileSettings() {
+    try {
+        const config = await apiRequest('/api/settings/assistant-profile');
+
+        document.getElementById('assistant-name').value = config.assistant_name || '';
+        document.getElementById('assistant-project-name').value = config.project_name || '';
+        document.getElementById('assistant-identity').value = config.identity || '';
+        document.getElementById('assistant-persona-traits').value = (config.persona_traits || []).join('\n');
+        document.getElementById('assistant-communication-style').value = (config.communication_style || []).join('\n');
+        document.getElementById('assistant-accuracy-guardrails').value = (config.guardrails?.accuracy || []).join('\n');
+        document.getElementById('assistant-ambiguity-examples').value = (config.guardrails?.ambiguity_examples || []).join('\n');
+        document.getElementById('assistant-sensitive-topic-policy').value = (config.guardrails?.sensitive_topic_policy || []).join('\n');
+        document.getElementById('assistant-voice-formatting').value = (config.guardrails?.voice_formatting || []).join('\n');
+        document.getElementById('assistant-simple-tone').value = config.guardrails?.simple_response?.tone || 'brief and friendly';
+        document.getElementById('assistant-simple-max-sentences').value = config.guardrails?.simple_response?.max_sentences ?? 2;
+        document.getElementById('assistant-min-response-chars').value = config.guardrails?.validation?.min_response_chars ?? 10;
+        document.getElementById('assistant-max-response-chars').value = config.guardrails?.validation?.max_response_chars ?? 2000;
+        document.getElementById('assistant-profile-status').textContent = 'Assistant profile loaded';
+        document.getElementById('assistant-profile-status').className = 'text-sm text-green-400';
+    } catch (error) {
+        console.error('Failed to load assistant profile settings:', error);
+        const status = document.getElementById('assistant-profile-status');
+        if (status) {
+            status.textContent = 'Failed to load assistant profile';
+            status.className = 'text-sm text-red-400';
+        }
+    }
+}
+
+async function saveAssistantProfileSettings() {
+    try {
+        const payload = {
+            assistant_name: document.getElementById('assistant-name').value.trim(),
+            project_name: document.getElementById('assistant-project-name').value.trim(),
+            identity: document.getElementById('assistant-identity').value.trim(),
+            persona_traits: document.getElementById('assistant-persona-traits').value.split('\n').map(s => s.trim()).filter(Boolean),
+            communication_style: document.getElementById('assistant-communication-style').value.split('\n').map(s => s.trim()).filter(Boolean),
+            guardrails: {
+                accuracy: document.getElementById('assistant-accuracy-guardrails').value.split('\n').map(s => s.trim()).filter(Boolean),
+                ambiguity_examples: document.getElementById('assistant-ambiguity-examples').value.split('\n').map(s => s.trim()).filter(Boolean),
+                sensitive_topic_policy: document.getElementById('assistant-sensitive-topic-policy').value.split('\n').map(s => s.trim()).filter(Boolean),
+                voice_formatting: document.getElementById('assistant-voice-formatting').value.split('\n').map(s => s.trim()).filter(Boolean),
+                simple_response: {
+                    tone: document.getElementById('assistant-simple-tone').value.trim(),
+                    max_sentences: parseInt(document.getElementById('assistant-simple-max-sentences').value, 10)
+                },
+                validation: {
+                    min_response_chars: parseInt(document.getElementById('assistant-min-response-chars').value, 10),
+                    max_response_chars: parseInt(document.getElementById('assistant-max-response-chars').value, 10)
+                }
+            }
+        };
+
+        await apiRequest('/api/settings/assistant-profile', {
+            method: 'POST',
+            body: JSON.stringify(payload)
+        });
+
+        document.getElementById('assistant-profile-status').textContent = 'Assistant profile saved successfully';
+        document.getElementById('assistant-profile-status').className = 'text-sm text-green-400';
+        showSuccess('Assistant profile saved successfully');
+    } catch (error) {
+        console.error('Failed to save assistant profile settings:', error);
+        document.getElementById('assistant-profile-status').textContent = `Failed to save assistant profile: ${error.message}`;
+        document.getElementById('assistant-profile-status').className = 'text-sm text-red-400';
+        showError(`Failed to save assistant profile: ${error.message}`);
+    }
 }
 
 async function loadServers() {

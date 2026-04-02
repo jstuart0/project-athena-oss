@@ -1,14 +1,15 @@
 """
 Settings management API routes.
 
-Provides endpoints for managing application settings including OIDC configuration.
-Settings are stored as encrypted secrets in the database.
+Provides endpoints for managing application settings including OIDC configuration
+and Athena assistant profile / guardrails. Settings are stored in the database.
 """
-from typing import Optional
+from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import structlog
+import json
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
@@ -18,6 +19,60 @@ from app.utils.encryption import encrypt_value, decrypt_value
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+ASSISTANT_PROFILE_SETTING_KEY = "assistant_profile_config"
+
+DEFAULT_ASSISTANT_PROFILE_CONFIG: Dict[str, Any] = {
+    "assistant_name": "Jarvis",
+    "project_name": "Athena",
+    "identity": "an AI assistant inspired by the Jarvis from Iron Man",
+    "persona_traits": [
+        "Sophisticated, intelligent, and efficient",
+        "Warm but professional, with subtle dry wit when appropriate",
+        "Calm and composed, never flustered",
+        "Genuinely helpful and attentive",
+    ],
+    "communication_style": [
+        "Clear, concise responses",
+        "Always ask for clarification when a request is ambiguous",
+        "If you're unsure what the user means, ask a targeted follow-up question",
+        "Never give up on a request; if you cannot fulfill it directly, ask clarifying questions or explain the constraint clearly",
+    ],
+    "guardrails": {
+        "accuracy": [
+            "Never fabricate facts, data, or information",
+            "If you do not have information, say so clearly",
+            "Only state things as fact when you have the data to support them",
+            "For creative requests, fiction is allowed when the user is clearly asking for creativity",
+        ],
+        "ambiguity_examples": [
+            "\"peruvian spot\" -> ask \"Are you looking for a Peruvian restaurant?\"",
+            "\"good place\" -> ask \"What kind of place? Restaurant, store, or something else?\"",
+        ],
+        "sensitive_topic_policy": [
+            "You can share preferences on food, movies, music, hobbies, and lifestyle choices",
+            "Stay neutral on political opinions, religious views, and controversial social topics",
+            "If asked about divisive issues, acknowledge multiple perspectives without taking sides",
+        ],
+        "voice_formatting": [
+            "Never use emojis in responses",
+            "Spell out state abbreviations for speech",
+            "Spell out street abbreviations for speech",
+            "Speak zip codes as individual digits",
+            "Say and instead of ampersand",
+            "Say number instead of hash",
+            "Expand common abbreviations for natural speech",
+        ],
+        "simple_response": {
+            "max_sentences": 2,
+            "tone": "brief and friendly",
+        },
+        "validation": {
+            "min_response_chars": 10,
+            "max_response_chars": 2000,
+        },
+    },
+}
 
 
 class OIDCSettings(BaseModel):
@@ -33,6 +88,94 @@ class OIDCSettingsResponse(BaseModel):
     provider_url: str
     client_id: str
     redirect_uri: str
+
+
+class AssistantProfileConfig(BaseModel):
+    assistant_name: str
+    project_name: str
+    identity: str
+    persona_traits: List[str]
+    communication_style: List[str]
+    guardrails: Dict[str, Any]
+
+
+def _get_system_setting(db: Session, key: str) -> Optional[SystemSetting]:
+    return db.query(SystemSetting).filter(SystemSetting.key == key).first()
+
+
+def _get_assistant_profile_config(db: Session) -> Dict[str, Any]:
+    setting = _get_system_setting(db, ASSISTANT_PROFILE_SETTING_KEY)
+    if not setting:
+        return DEFAULT_ASSISTANT_PROFILE_CONFIG
+
+    try:
+        parsed = json.loads(setting.value)
+        if isinstance(parsed, dict):
+            merged = DEFAULT_ASSISTANT_PROFILE_CONFIG.copy()
+            merged.update({k: v for k, v in parsed.items() if k != "guardrails"})
+            merged_guardrails = DEFAULT_ASSISTANT_PROFILE_CONFIG["guardrails"].copy()
+            merged_guardrails.update(parsed.get("guardrails", {}))
+            merged["guardrails"] = merged_guardrails
+            return merged
+    except json.JSONDecodeError:
+        logger.warning("assistant_profile_parse_failed")
+
+    return DEFAULT_ASSISTANT_PROFILE_CONFIG
+
+
+@router.get("/assistant-profile/public", response_model=AssistantProfileConfig)
+async def get_assistant_profile_public(db: Session = Depends(get_db)):
+    """Public endpoint for Athena runtime services to fetch assistant profile settings."""
+    return AssistantProfileConfig(**_get_assistant_profile_config(db))
+
+
+@router.get("/assistant-profile", response_model=AssistantProfileConfig)
+async def get_assistant_profile(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get assistant profile and guardrail configuration."""
+    if not current_user.has_permission('read'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    return AssistantProfileConfig(**_get_assistant_profile_config(db))
+
+
+@router.post("/assistant-profile")
+async def save_assistant_profile(
+    config: AssistantProfileConfig,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Save assistant profile and guardrail configuration."""
+    if not current_user.has_permission('write'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    try:
+        payload = config.model_dump()
+        setting = _get_system_setting(db, ASSISTANT_PROFILE_SETTING_KEY)
+        serialized = json.dumps(payload)
+
+        if setting:
+            setting.value = serialized
+            setting.description = "Centralized Athena assistant profile and guardrail configuration"
+            setting.category = "assistant"
+        else:
+            setting = SystemSetting(
+                key=ASSISTANT_PROFILE_SETTING_KEY,
+                value=serialized,
+                description="Centralized Athena assistant profile and guardrail configuration",
+                category="assistant"
+            )
+            db.add(setting)
+
+        db.commit()
+        logger.info("assistant_profile_saved", user=current_user.username)
+        return {"status": "success", "message": "Assistant profile saved successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error("assistant_profile_save_failed", error=str(e), user=current_user.username)
+        raise HTTPException(status_code=500, detail=f"Failed to save assistant profile: {str(e)}")
 
 
 @router.get("/oidc", response_model=OIDCSettingsResponse)

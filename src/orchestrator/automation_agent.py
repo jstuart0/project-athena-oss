@@ -19,6 +19,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 import structlog
 
+from shared.assistant_profile import build_automation_system_prompt
+
 logger = structlog.get_logger()
 
 
@@ -376,7 +378,7 @@ class AutomationAgent:
         guest_name = context.get("guest_name")
 
         # Build system prompt with context
-        system_prompt = self._build_system_prompt(mode, room, guest_name)
+        system_prompt = await self._build_system_prompt(mode, room, guest_name)
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -448,87 +450,12 @@ class AutomationAgent:
         logger.warning(f"AutomationAgent hit max iterations ({max_iterations})")
         return "I had trouble completing that request. Please try again with a simpler command."
 
-    def _build_system_prompt(self, mode: str, room: str, guest_name: Optional[str]) -> str:
+    async def _build_system_prompt(self, mode: str, room: str, guest_name: Optional[str]) -> str:
         """Build system prompt with context."""
         current_time = datetime.now().strftime("%H:%M")
         current_date = datetime.now().strftime("%A, %B %d")
-
-        prompt = f"""You are Jarvis, a smart home assistant. You help control devices and create automations.
-
-Current Context:
-- Time: {current_time}
-- Date: {current_date}
-- Room: {room}
-- Mode: {mode}{"" if mode == "owner" else f" (Guest: {guest_name})"}
-
-Your Tools:
-1. ha_service - Execute immediate actions (lights, climate, locks, etc.)
-2. wait - Pause between actions for sequences
-3. create_automation - Create triggered automations (time, motion, state changes, sun events)
-4. list_automations - Show existing automations
-5. delete_automation - Remove an automation
-6. get_entity_state - Check current state of devices
-7. notify - Alert user via TTS, mobile push, or flashing lights (target: tts/mobile/flash/flash_all/all)
-8. done - Complete the task with a spoken response
-
-Guidelines:
-- For immediate actions like "turn on the lights", use ha_service then done
-- For sequences like "turn on, wait 5 seconds, turn off", chain ha_service + wait + ha_service + done
-- For scheduled actions like "at 6pm turn on lights", use create_automation with time trigger then done
-- For motion-triggered like "when motion in kitchen turn on lights", use create_automation with motion trigger
-- For alerts like "let me know when X is full", use create_automation with state_change trigger and notify action
-- For compound triggers, use create_automation with triggers array + conditions
-- Always end with done() to speak a response to the user
-- Keep responses brief and natural - they will be spoken aloud
-- Use the current room ({room}) if no room is specified
-- Resolve room names to entity IDs using the pattern: light.{{room}}, switch.{{room}}, etc.
-
-Trigger Types:
-- time: Fixed time (e.g., "18:00" for 6pm)
-- motion: Motion sensor activated (entity_id: binary_sensor.{{room}}_motion)
-- state_change: Any entity state change (specify entity_id and to_state)
-- numeric_state: Sensor crosses threshold (entity_id + above/below value)
-- sunset/sunrise: Sun events with optional offset
-- time_pattern: Recurring intervals (hours: "/2" for every 2 hours, minutes: "/30" for every 30 min)
-- device: Button press or switch toggle (entity_id + event_type: pressed/double_pressed/long_pressed)
-
-Time Pattern Examples:
-- Every 30 minutes: time_pattern with minutes: "/30"
-- Every 2 hours: time_pattern with hours: "/2"
-- On the hour: time_pattern with minutes: "0"
-
-Device Trigger Examples:
-- When button pressed: device with entity_id: button.office_button, event_type: pressed
-- When doorbell rings: device with entity_id: binary_sensor.doorbell, event_type: pressed
-- Double press: device with entity_id: button.bedroom, event_type: double_pressed
-
-Compound Trigger Examples:
-- Motion AND after 6pm: Use motion trigger + time_range condition (after: "18:00")
-- Motion OR sunset: Use triggers array with both types
-
-Common Entity Patterns:
-- Lights: light.office, light.kitchen, light.beta, light.alpha, light.living_room
-- Switches: switch.office_fan, switch.porch
-- Climate: climate.main, climate.bedroom
-- Locks: lock.front_door, lock.back_door
-- Covers: cover.garage, cover.blinds
-- Motion: binary_sensor.kitchen_motion, binary_sensor.office_motion, binary_sensor.living_room_motion
-- Doors: binary_sensor.front_door, binary_sensor.back_door, binary_sensor.garage_door
-- Buttons: button.office_button, binary_sensor.doorbell, button.bedroom_switch
-- Temperature: sensor.living_room_temperature, sensor.office_temperature, sensor.outdoor_temperature
-
-Color Reference (hue values for hs_color):
-- Red: [0, 100]
-- Orange: [30, 100]
-- Yellow: [60, 100]
-- Green: [120, 100]
-- Cyan: [180, 100]
-- Blue: [240, 100]
-- Purple: [280, 100]
-- Pink: [330, 100]
-- White: [0, 0] (with high brightness)
-"""
-        return prompt
+        prompt = await build_automation_system_prompt(mode, room, guest_name)
+        return f"{prompt}\nCurrent Time:\n- Time: {current_time}\n- Date: {current_date}"
 
     async def _call_llm_with_tools(self, messages: List[Dict], model: str) -> Dict:
         """Call LLM with tool definitions."""

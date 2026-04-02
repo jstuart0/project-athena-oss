@@ -80,6 +80,10 @@ class AdminConfigClient:
         self._gateway_config_cache: Optional[Dict[str, Any]] = None
         self._gateway_config_cache_time: float = 0.0
 
+        # Assistant profile cache
+        self._assistant_profile_cache: Optional[Dict[str, Any]] = None
+        self._assistant_profile_cache_time: float = 0.0
+
         # Voice config cache
         self._voice_config_stt_cache: Optional[Dict[str, Any]] = None
         self._voice_config_stt_cache_time: float = 0.0
@@ -1039,6 +1043,46 @@ class AdminConfigClient:
         except Exception as e:
             logger.warning("all_component_models_fetch_error", error=str(e))
             return []
+
+    async def get_assistant_profile(self) -> Optional[Dict[str, Any]]:
+        """
+        Fetch centralized assistant profile and guardrails with caching.
+
+        Returns:
+            Assistant profile config dict, or None if unavailable.
+        """
+        if not self.admin_url:
+            return None
+
+        now = time.time()
+        if self._assistant_profile_cache and (now - self._assistant_profile_cache_time < self._cache_ttl):
+            return self._assistant_profile_cache
+
+        try:
+            url = f"{self.admin_url}/api/settings/assistant-profile/public"
+            response = await self.client.get(url)
+
+            if response.status_code == 200:
+                config = response.json()
+                self._assistant_profile_cache = config
+                self._assistant_profile_cache_time = now
+                logger.debug("assistant_profile_loaded")
+                return config
+
+            logger.warning(
+                "assistant_profile_fetch_failed",
+                status_code=response.status_code
+            )
+            return None
+        except Exception as e:
+            logger.warning("assistant_profile_fetch_error", error=str(e))
+            return None
+
+    def invalidate_assistant_profile_cache(self):
+        """Invalidate assistant profile cache."""
+        self._assistant_profile_cache = None
+        self._assistant_profile_cache_time = 0.0
+        logger.info("assistant_profile_cache_invalidated")
 
     async def record_tool_metric(
         self,

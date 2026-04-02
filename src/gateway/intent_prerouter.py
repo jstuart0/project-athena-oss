@@ -15,6 +15,8 @@ from typing import Literal, Optional
 import httpx
 import structlog
 
+from shared.assistant_profile import build_simple_intent_prompt
+
 from shared.admin_config import get_admin_client
 
 logger = structlog.get_logger("gateway.intent_prerouter")
@@ -119,11 +121,7 @@ async def handle_simple_intent(
     """
     url = ollama_url or await _get_ollama_url()
 
-    prompt = f"""You are Athena, a helpful voice assistant. Give a brief, friendly response.
-Keep your response to 1-2 sentences maximum.
-
-User: {query}
-Athena:"""
+    prompt = await build_simple_intent_prompt(query)
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
