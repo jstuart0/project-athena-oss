@@ -221,7 +221,7 @@ async def list_configs_public(
     return [ModelConfigResponse(**config.to_dict()) for config in configs]
 
 
-@router.get("/public/{model_name}", response_model=ModelConfigResponse)
+@router.get("/public/{model_name:path}", response_model=ModelConfigResponse)
 async def get_config_public(
     model_name: str,
     db: Session = Depends(get_db)

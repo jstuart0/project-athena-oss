@@ -5878,6 +5878,69 @@ Summary:"""
         return ""
 
 
+def _normalized_general_info_query(query: str) -> str:
+    """Lowercase query with punctuation removed for low-latency fast-path matching."""
+    return re.sub(r"[^a-z0-9\s]", "", (query or "").lower()).strip()
+
+
+def _direct_general_info_response(query: str) -> Optional[str]:
+    """Return deterministic responses for trivial chat and local time/date requests."""
+    normalized = _normalized_general_info_query(query)
+    if not normalized:
+        return None
+
+    direct_responses = {
+        "hello": "Hello. How can I help?",
+        "hi": "Hi. How can I help?",
+        "hey": "Hey. How can I help?",
+        "good morning": "Good morning. How can I help?",
+        "good afternoon": "Good afternoon. How can I help?",
+        "good evening": "Good evening. How can I help?",
+        "how are you": "I'm doing well. How can I help?",
+        "hows it going": "I'm here and ready to help.",
+        "thanks": "You're welcome.",
+        "thank you": "You're welcome.",
+        "bye": "Good night.",
+        "goodbye": "Goodbye.",
+        "see you": "See you later.",
+    }
+    if normalized in direct_responses:
+        return direct_responses[normalized]
+
+    if normalized in {
+        "what time is it",
+        "whats the time",
+        "what is the time",
+        "current time",
+        "tell me the time",
+    }:
+        try:
+            from zoneinfo import ZoneInfo
+            from datetime import datetime, timezone as tz
+            local_now = datetime.now(tz.utc).astimezone(ZoneInfo("America/New_York"))
+            return f"It's {local_now.strftime('%-I:%M %p')}."
+        except Exception:
+            return None
+
+    if normalized in {
+        "what date is it",
+        "whats the date",
+        "what is todays date",
+        "whats todays date",
+        "current date",
+        "what day is it",
+    }:
+        try:
+            from zoneinfo import ZoneInfo
+            from datetime import datetime, timezone as tz
+            local_now = datetime.now(tz.utc).astimezone(ZoneInfo("America/New_York"))
+            return f"Today is {local_now.strftime('%A, %B %-d, %Y')}."
+        except Exception:
+            return None
+
+    return None
+
+
 async def synthesize_node(state: OrchestratorState) -> OrchestratorState:
     """
     Generate natural language response using LLM with retrieved data and conversation history.
@@ -5897,6 +5960,20 @@ async def synthesize_node(state: OrchestratorState) -> OrchestratorState:
         return state
 
     try:
+        if state.intent == IntentCategory.GENERAL_INFO and not state.retrieved_data:
+            direct_response = _direct_general_info_response(state.query)
+            if direct_response:
+                duration = time.time() - start
+                state.answer = direct_response
+                state.skip_synthesis = True
+                state.llm_tokens = 0
+                state.llm_tokens_per_second = 0.0
+                state.node_timings["synthesize"] = duration
+                if state.timing_tracker:
+                    state.timing_tracker.track_substage("graph", "synthesize", "direct_fast_path", duration)
+                logger.info("synthesis_skipped", reason="direct_general_info_fast_path", query=state.query[:40])
+                return state
+
         # Check if this is a continuation response (user answering a question from Athena)
         ref_info = state.context_ref_info or {}
         is_continuation = ref_info.get("is_continuation", False)
@@ -5948,11 +6025,12 @@ Respond naturally as a helpful assistant.
 
 INSTRUCTIONS:
 1. For greetings, thanks, farewells, and casual conversation, respond conversationally.
-2. If the user asks for the current local time or current date, answer directly using the provided current local time context.
-3. You may answer using your built-in knowledge and the provided assistant context.
-4. Do not claim to have current web data unless it was actually provided in context.
-5. For other time-sensitive or highly specific current facts that were not provided, say you don't have current information.
-6. Keep the response concise and direct.
+2. Do not mention the current local time or date unless the user explicitly asked for it.
+3. If the user asks for the current local time or current date, answer directly using the provided current local time context.
+4. You may answer using your built-in knowledge and the provided assistant context.
+5. Do not claim to have current web data unless it was actually provided in context.
+6. For other time-sensitive or highly specific current facts that were not provided, say you don't have current information.
+7. Keep the response concise and direct.
 
 Response:"""
         else:
@@ -6265,12 +6343,40 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
     validation_layer_duration.labels(layer="pattern").observe(time.time() - pattern_start)
 
     query_lower = state.query.lower()
+    is_low_risk_chitchat = state.intent == IntentCategory.GENERAL_INFO and any(
+        phrase in query_lower for phrase in [
+            "hello", "hi", "hey", "good morning", "good afternoon", "good evening",
+            "thanks", "thank you", "bye", "goodbye", "see you", "how are you",
+            "tell me about yourself", "who are you"
+        ]
+    )
     is_builtin_time_or_date_query = state.intent == IntentCategory.GENERAL_INFO and any(
         phrase in query_lower for phrase in [
             "what time", "time is it", "current time", "what's the time", "whats the time",
             "what date", "today's date", "current date", "what day", "what month", "what year",
         ]
     )
+
+    if is_low_risk_chitchat:
+        state.validation_passed = True
+        state.validation_reason = None
+        state.node_timings["validate"] = time.time() - start
+        validation_counter.labels(passed="true", reason="low_risk_chitchat").inc()
+        validation_layer_duration.labels(layer="pattern").observe(time.time() - pattern_start)
+        if state.timing_tracker:
+            state.timing_tracker.track_substage("graph", "validate", "low_risk_bypass", time.time() - start)
+        logger.info("Validation bypassed for low-risk chitchat")
+        return state
+
+    if is_builtin_time_or_date_query:
+        state.validation_passed = True
+        state.validation_reason = None
+        state.node_timings["validate"] = time.time() - start
+        validation_counter.labels(passed="true", reason="builtin_time_or_date").inc()
+        if state.timing_tracker:
+            state.timing_tracker.track_substage("graph", "validate", "builtin_time_or_date_bypass", time.time() - start)
+        logger.info("Validation bypassed for built-in time/date query")
+        return state
 
     # Track what patterns were detected (for hallucination analysis)
     if date_patterns:
@@ -9320,36 +9426,39 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # Retrieve relevant memories from Qdrant for context augmentation
         memory_context = ""
         async with timing_tracker.track_async("pre_graph", "memory_retrieval"):
-            try:
-                logger.info("memory_retrieval_starting", query_preview=request.query[:50], mode=current_mode)
-                memory_manager = await get_memory_manager()
-                guest_session_id = None
-                if guest_info:
-                    # Try to get guest session ID from active session
-                    active_session = await memory_manager.get_active_guest_session()
-                    if active_session:
-                        guest_session_id = active_session.get("id")
+            if _direct_general_info_response(request.query):
+                logger.info("memory_retrieval_skipped", reason="direct_general_info_fast_path", query_preview=request.query[:50])
+            else:
+                try:
+                    logger.info("memory_retrieval_starting", query_preview=request.query[:50], mode=current_mode)
+                    memory_manager = await get_memory_manager()
+                    guest_session_id = None
+                    if guest_info:
+                        # Try to get guest session ID from active session
+                        active_session = await memory_manager.get_active_guest_session()
+                        if active_session:
+                            guest_session_id = active_session.get("id")
 
-                memories = await memory_manager.get_relevant_memories(
-                    query=request.query,
-                    mode=current_mode,
-                    guest_session_id=guest_session_id,
-                    limit=3
-                )
-                logger.info("memory_retrieval_completed", found_count=len(memories) if memories else 0)
-
-                if memories:
-                    memory_context = memory_manager.format_memory_context(memories)
-                    logger.info(
-                        "memories_retrieved_for_context",
-                        count=len(memories),
+                    memories = await memory_manager.get_relevant_memories(
+                        query=request.query,
                         mode=current_mode,
-                        memory_preview=memory_context[:100] if memory_context else ""
+                        guest_session_id=guest_session_id,
+                        limit=3
                     )
-                else:
-                    logger.info("memory_retrieval_empty", mode=current_mode)
-            except Exception as e:
-                logger.warning("memory_retrieval_skipped", error=str(e), error_type=type(e).__name__)
+                    logger.info("memory_retrieval_completed", found_count=len(memories) if memories else 0)
+
+                    if memories:
+                        memory_context = memory_manager.format_memory_context(memories)
+                        logger.info(
+                            "memories_retrieved_for_context",
+                            count=len(memories),
+                            mode=current_mode,
+                            memory_preview=memory_context[:100] if memory_context else ""
+                        )
+                    else:
+                        logger.info("memory_retrieval_empty", mode=current_mode)
+                except Exception as e:
+                    logger.warning("memory_retrieval_skipped", error=str(e), error_type=type(e).__name__)
 
         # Build context with guest info (if identified via device fingerprint)
         query_context = dict(request.context) if request.context else {}
@@ -10344,11 +10453,12 @@ Respond naturally as a helpful assistant.
 
 INSTRUCTIONS:
 1. For greetings, thanks, farewells, and casual conversation, respond conversationally.
-2. If the user asks for the current local time or current date, answer directly using the provided current local time context.
-3. You may answer using your built-in knowledge and the provided assistant context.
-4. Do not claim to have current web data unless it was actually provided in context.
-5. For other time-sensitive or highly specific current facts that were not provided, say you don't have current information.
-6. Keep the response concise and direct.
+2. Do not mention the current local time or date unless the user explicitly asked for it.
+3. If the user asks for the current local time or current date, answer directly using the provided current local time context.
+4. You may answer using your built-in knowledge and the provided assistant context.
+5. Do not claim to have current web data unless it was actually provided in context.
+6. For other time-sensitive or highly specific current facts that were not provided, say you don't have current information.
+7. Keep the response concise and direct.
 
 Response:"""
     else:
