@@ -268,6 +268,32 @@ OSS_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b")
 OSS_OLLAMA_URL = os.getenv("OLLAMA_URL") or os.getenv("LLM_SERVICE_URL", "http://localhost:11434")
 OSS_AUTO_PULL_MODELS = os.getenv("ATHENA_AUTO_PULL_MODELS", "true").lower() == "true"
 OSS_SEED_DEFAULTS = os.getenv("ATHENA_SEED_DEFAULTS", "true").lower() == "true"
+OSS_SERVICE_REGISTRY = [
+    ("weather", "Weather Service", "http://athena-rag-weather:8010", 600, True),
+    ("airports", "Airports Service", "http://athena-rag-airports:8011", 120, True),
+    ("stocks", "Stock Market Service", "http://athena-rag-stocks:8012", 300, True),
+    ("flights", "Flights Service", "http://athena-rag-flights:8013", 300, True),
+    ("events", "Events Service", "http://athena-rag-events:8014", 300, True),
+    ("streaming", "Streaming Service", "http://athena-rag-streaming:8015", 300, True),
+    ("news", "News Service", "http://athena-rag-news:8016", 300, True),
+    ("sports", "Sports Service", "http://athena-rag-sports:8017", 300, True),
+    ("websearch", "Web Search Service", "http://athena-rag-websearch:8018", 300, True),
+    ("dining", "Dining Service", "http://athena-rag-dining:8019", 300, True),
+    ("recipes", "Recipe Service", "http://athena-rag-recipes:8020", 300, True),
+    ("onecall", "OneCall Service", "http://athena-rag-onecall:8021", 300, True),
+    ("mode", "Mode Service", "http://athena-mode-service:8022", 60, True),
+    ("seatgeek", "SeatGeek Service", "http://athena-rag-seatgeek:8024", 300, True),
+    ("transportation", "Transportation Service", "http://athena-rag-transportation:8025", 300, True),
+    ("community", "Community Service", "http://athena-rag-community:8026", 300, True),
+    ("amtrak", "Amtrak Service", "http://athena-rag-amtrak:8027", 300, True),
+    ("tesla", "Tesla Service", "http://athena-rag-tesla:8028", 300, False),
+    ("media", "Media Service", "http://athena-rag-media:8029", 300, True),
+    ("directions", "Directions Service", "http://athena-rag-directions:8030", 300, True),
+    ("sitescraper", "Site Scraper Service", "http://athena-rag-sitescraper:8031", 300, True),
+    ("serpapi", "SerpAPI Service", "http://athena-rag-serpapi:8032", 300, True),
+    ("pricecompare", "Price Compare Service", "http://athena-rag-pricecompare:8033", 300, True),
+    ("brightdata", "Bright Data Service", "http://athena-rag-brightdata:8040", 300, True),
+]
 
 
 def seed_oss_defaults():
@@ -615,3 +641,78 @@ def seed_oss_conversation_settings():
             logger.info("oss_conversation_settings_seeded")
         else:
             logger.debug("oss_conversation_settings_already_configured")
+
+
+def seed_oss_service_registry():
+    """
+    Seed OSS default service registry entries for cluster-local RAG services.
+
+    Ensures the admin service registry works on fresh installs without manual SQL.
+    """
+    with get_db_context() as db:
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS rag_services (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(50) UNIQUE NOT NULL,
+                display_name VARCHAR(100),
+                service_type VARCHAR(50),
+                endpoint_url TEXT,
+                api_key_encrypted TEXT,
+                headers JSONB,
+                query_template TEXT,
+                response_parser TEXT,
+                cache_ttl INTEGER DEFAULT 300,
+                timeout INTEGER DEFAULT 5000,
+                rate_limit INTEGER DEFAULT 100,
+                enabled BOOLEAN DEFAULT true,
+                health_check_url TEXT,
+                last_health_check TIMESTAMP,
+                health_status VARCHAR(20),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+
+        created_count = 0
+        updated_count = 0
+        for name, display_name, endpoint_url, cache_ttl, enabled in OSS_SERVICE_REGISTRY:
+            result = db.execute(text("""
+                INSERT INTO rag_services (
+                    name, display_name, service_type, endpoint_url, headers,
+                    cache_ttl, timeout, rate_limit, enabled, updated_at
+                ) VALUES (
+                    :name, :display_name, 'api', :endpoint_url,
+                    CAST(:headers AS jsonb), :cache_ttl, 5000, 100, :enabled, NOW()
+                )
+                ON CONFLICT (name) DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    service_type = EXCLUDED.service_type,
+                    endpoint_url = EXCLUDED.endpoint_url,
+                    headers = EXCLUDED.headers,
+                    cache_ttl = EXCLUDED.cache_ttl,
+                    timeout = EXCLUDED.timeout,
+                    rate_limit = EXCLUDED.rate_limit,
+                    enabled = EXCLUDED.enabled,
+                    updated_at = NOW()
+                RETURNING (xmax = 0) AS inserted
+            """), {
+                "name": name,
+                "display_name": display_name,
+                "endpoint_url": endpoint_url,
+                "headers": '{"Content-Type":"application/json"}',
+                "cache_ttl": cache_ttl,
+                "enabled": enabled,
+            })
+            inserted = result.scalar()
+            if inserted:
+                created_count += 1
+            else:
+                updated_count += 1
+
+        db.commit()
+        logger.info(
+            "oss_service_registry_seeded",
+            created=created_count,
+            updated=updated_count,
+            total=len(OSS_SERVICE_REGISTRY),
+        )

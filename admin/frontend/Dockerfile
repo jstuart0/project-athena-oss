@@ -6,7 +6,7 @@ COPY index.html /usr/share/nginx/html/
 # Phase 0: Core State & API Infrastructure (MUST be first)
 COPY state.js /usr/share/nginx/html/
 COPY api-client.js /usr/share/nginx/html/
-COPY auth.js /usr/share/nginx/html/
+COPY auth.js /usr/share/nginx/html/admin-auth.js
 COPY refresh-manager.js /usr/share/nginx/html/
 
 # Phase 1-7: UI Components

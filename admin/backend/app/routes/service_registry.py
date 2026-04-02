@@ -11,6 +11,32 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/service-registry", tags=["service-registry"])
 
+
+async def ensure_rag_services_table(conn: asyncpg.Connection) -> None:
+    """Create the service-registry table when a fresh Athena DB has not been migrated yet."""
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS rag_services (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(50) UNIQUE NOT NULL,
+            display_name VARCHAR(100),
+            service_type VARCHAR(50),
+            endpoint_url TEXT,
+            api_key_encrypted TEXT,
+            headers JSONB,
+            query_template TEXT,
+            response_parser TEXT,
+            cache_ttl INTEGER DEFAULT 300,
+            timeout INTEGER DEFAULT 5000,
+            rate_limit INTEGER DEFAULT 100,
+            enabled BOOLEAN DEFAULT true,
+            health_check_url TEXT,
+            last_health_check TIMESTAMP,
+            health_status VARCHAR(20),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
 async def get_db_connection():
     """Get connection to the Athena database."""
     password = os.getenv('ATHENA_DB_PASSWORD')
@@ -30,6 +56,8 @@ async def get_all_services() -> Dict[str, Any]:
     conn = await get_db_connection()
 
     try:
+        await ensure_rag_services_table(conn)
+
         # Fetch all services from the registry
         rows = await conn.fetch("""
             SELECT
@@ -124,6 +152,8 @@ async def get_service(service_name: str) -> Dict[str, Any]:
     conn = await get_db_connection()
 
     try:
+        await ensure_rag_services_table(conn)
+
         row = await conn.fetchrow("""
             SELECT
                 name,
@@ -205,6 +235,8 @@ async def get_service_url(service_name: str) -> Dict[str, Any]:
     conn = await get_db_connection()
 
     try:
+        await ensure_rag_services_table(conn)
+
         row = await conn.fetchrow("""
             SELECT endpoint_url, enabled
             FROM rag_services

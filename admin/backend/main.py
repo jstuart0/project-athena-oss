@@ -22,7 +22,7 @@ from redis.asyncio import Redis
 from sqlalchemy.orm import Session
 import structlog
 
-from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_dev_data, seed_oss_defaults, seed_oss_features, seed_oss_conversation_settings, OSS_DEFAULT_MODEL, OSS_OLLAMA_URL, OSS_AUTO_PULL_MODELS, OSS_SEED_DEFAULTS
+from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_dev_data, seed_oss_defaults, seed_oss_features, seed_oss_conversation_settings, seed_oss_service_registry, OSS_DEFAULT_MODEL, OSS_OLLAMA_URL, OSS_AUTO_PULL_MODELS, OSS_SEED_DEFAULTS
 from app.services.calendar_sync import start_background_sync, stop_background_sync
 from app.auth.oidc import (
     oauth,
@@ -251,6 +251,12 @@ async def startup_event():
                     logger.info("oss_conversation_settings_seeded")
                 except Exception as e:
                     logger.error("oss_conversation_settings_seeding_failed", error=str(e))
+
+                try:
+                    seed_oss_service_registry()
+                    logger.info("oss_service_registry_seeded")
+                except Exception as e:
+                    logger.error("oss_service_registry_seeding_failed", error=str(e))
             else:
                 logger.info("oss_defaults_seeding_disabled", reason="ATHENA_SEED_DEFAULTS=false")
 
