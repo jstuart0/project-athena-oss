@@ -7804,7 +7804,9 @@ If the user is asking to repeat, search again, or modify the previous request, u
         # CONTINUATION HANDLING: For "continue" requests, reconstruct the conversation
         # with the previous response so the LLM can continue naturally
         continue_patterns = ["continue where you left off", "please continue", "keep going",
-                            "continue the story", "what happens next", "go on"]
+                            "continue the story", "what happens next", "go on",
+                            "tell me again", "say that again", "repeat that", "can you repeat",
+                            "say it again", "one more time", "repeat that please"]
         is_continue_query = any(p in query_lower for p in continue_patterns)
 
         if is_continue_query and state.prev_context:
@@ -10110,7 +10112,8 @@ async def process_query_stream(request: QueryRequest):
                 request_id=request_id,
                 start_time=start_time,
                 context=query_context,
-                temperature=request.temperature
+                temperature=request.temperature,
+                interface_type=request.interface_type,
             )
 
             # Stage 2: Execute orchestrator workflow (for intent + RAG)
