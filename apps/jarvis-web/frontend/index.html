@@ -3790,7 +3790,7 @@
             const typingId = showTyping(message);
 
             try {
-                const response = await fetch(`${API_BASE}/api/chat`, {
+                const response = await fetch(`${API_BASE}/api/chat/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -3805,40 +3805,83 @@
                     })
                 });
 
-                // Calculate client-side round-trip time
-                const clientRoundTrip = (performance.now() - clientStartTime) / 1000;
-
-                removeTyping(typingId);
-
                 if (!response.ok) {
                     throw new Error('Failed to get response');
                 }
 
-                const data = await response.json();
+                // Remove typing indicator and create assistant bubble for streaming
+                removeTyping(typingId);
+                const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'message assistant';
+                messageDiv.innerHTML = `
+                    <div class="message-avatar">J</div>
+                    <div>
+                        <div class="message-content"></div>
+                        <div class="message-time">${time}</div>
+                    </div>
+                `;
+                chatContainer.appendChild(messageDiv);
+                scrollToBottom();
 
-                if (data.session_id && !sessionId) {
-                    sessionId = data.session_id;
-                    localStorage.setItem('jarvis_session', sessionId);
+                const contentEl = messageDiv.querySelector('.message-content');
+                const timeEl = messageDiv.querySelector('.message-time');
+                let fullText = '';
+                let completeEvent = null;
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let sseBuffer = '';
+
+                outer: while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    sseBuffer += decoder.decode(value, { stream: true });
+
+                    const parts = sseBuffer.split('\n\n');
+                    sseBuffer = parts.pop();
+
+                    for (const part of parts) {
+                        if (!part.startsWith('data: ')) continue;
+                        const payload = part.slice(6).trim();
+                        if (!payload || payload === '[DONE]') break outer;
+
+                        try {
+                            const event = JSON.parse(payload);
+                            if (event.stage === 'answer_chunk') {
+                                fullText += event.content;
+                                contentEl.textContent = fullText;
+                                scrollToBottom();
+                            } else if (event.stage === 'complete') {
+                                completeEvent = event;
+                            } else if (event.stage === 'error') {
+                                contentEl.textContent = 'Sorry, something went wrong. Please try again.';
+                                break outer;
+                            }
+                        } catch (e) { /* ignore individual parse errors */ }
+                    }
                 }
 
-                // Add assistant message with metrics
-                addMessage(data.response, 'assistant', {
-                    processing_time: clientRoundTrip,
-                    tokens: data.tokens,
-                    tokens_per_second: data.tokens_per_second,
-                    pipeline_time: data.pipeline_time || data.tool_exec_time,
-                    model_used: data.model_used,
-                    was_truncated: data.metadata?.was_truncated || false
-                });
+                // Re-render with markdown formatting once streaming is complete
+                if (fullText) {
+                    contentEl.innerHTML = formatMessage(fullText);
+                }
 
-                // Check for browser playback request in response metadata
-                if (data.metadata?.browser_playback?.enabled) {
-                    handleBrowserPlayback(data.metadata.browser_playback);
+                // Update metrics for owner mode
+                if (completeEvent && isOwnerMode()) {
+                    const clientRoundTrip = (performance.now() - clientStartTime) / 1000;
+                    const tps = (completeEvent.tokens && completeEvent.processing_time)
+                        ? completeEvent.tokens / completeEvent.processing_time : null;
+                    const metricParts = [time];
+                    if (clientRoundTrip) metricParts.push(`${clientRoundTrip.toFixed(2)}s`);
+                    if (completeEvent.tool_exec_time) metricParts.push(`pipeline: ${completeEvent.tool_exec_time.toFixed(2)}s`);
+                    if (tps) metricParts.push(`${tps.toFixed(1)} tok/s`);
+                    timeEl.textContent = metricParts.join(' · ');
                 }
 
                 // Speak the response if voice is enabled
-                if (voiceEnabled && voiceServicesAvailable) {
-                    await speakResponse(data.response);
+                if (voiceEnabled && voiceServicesAvailable && fullText) {
+                    await speakResponse(fullText);
                 }
 
             } catch (error) {
