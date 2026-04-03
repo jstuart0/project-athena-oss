@@ -8432,14 +8432,18 @@ Provide a helpful answer:"""
         logger.info(f"Using {synthesis_model} for synthesis (tool selection used {llm_model})")
 
         # Determine max tokens based on query type
-        synthesis_max_tokens = 800  # Default for regular queries (increased from 500 to prevent truncation)
+        interface_type = getattr(state, 'interface_type', 'voice')
+        if interface_type == 'chat':
+            synthesis_max_tokens = 1500  # Chat widget: allow full responses without cutoff
+        else:
+            synthesis_max_tokens = 800  # Default for regular queries (increased from 500 to prevent truncation)
 
         # For story/narrative queries (web interface), allow longer responses
         # Voice interface will handle this differently via interface_type
         story_patterns = ["tell me a story", "long story", "tell me a long", "write a story",
                          "make up a story", "create a story", "story about", "once upon"]
         is_story_query = any(p in query_lower for p in story_patterns)
-        if is_story_query and getattr(state, 'interface_type', 'voice') != 'voice':
+        if is_story_query and interface_type != 'voice':
             synthesis_max_tokens = 2000  # Allow longer stories for text/web interface
             logger.info("Story query detected on non-voice interface, using extended max_tokens=2000")
 
