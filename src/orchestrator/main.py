@@ -8434,7 +8434,7 @@ Provide a helpful answer:"""
         # Determine max tokens based on query type
         interface_type = getattr(state, 'interface_type', 'voice')
         if interface_type == 'chat':
-            synthesis_max_tokens = 1500  # Chat widget: allow full responses without cutoff
+            synthesis_max_tokens = 3000  # Chat widget: allow full responses without cutoff
         else:
             synthesis_max_tokens = 800  # Default for regular queries (increased from 500 to prevent truncation)
 
