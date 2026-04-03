@@ -10157,9 +10157,18 @@ async def process_query_stream(request: QueryRequest):
                 yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': token})}\n\n"
                 await asyncio.sleep(CHUNK_DELAY)
 
-            # Update session with the streamed response
-            session.add_message(role="user", content=request.query, metadata={"streaming": True})
-            session.add_message(role="assistant", content=full_answer)
+            # Persist session to Redis so context carries across requests and pods
+            await session_manager.add_message(
+                session_id=session.session_id,
+                role="user",
+                content=request.query,
+                metadata={"streaming": True}
+            )
+            await session_manager.add_message(
+                session_id=session.session_id,
+                role="assistant",
+                content=full_answer
+            )
 
             # Final completion event
             processing_time = time.time() - start_time
@@ -10280,9 +10289,18 @@ async def process_query_stream_v2(request: QueryRequest):
             processing_time = time.time() - start_time
             yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': len(sentences), 'full_response': answer, 'intent': intent_str, 'processing_time': processing_time})}\n\n"
 
-            # Update session
-            session.add_message(role="user", content=request.query, metadata={"streaming": True})
-            session.add_message(role="assistant", content=answer)
+            # Persist session to Redis so context carries across requests and pods
+            await session_manager.add_message(
+                session_id=session.session_id,
+                role="user",
+                content=request.query,
+                metadata={"streaming": True}
+            )
+            await session_manager.add_message(
+                session_id=session.session_id,
+                role="assistant",
+                content=answer
+            )
 
             logger.info(
                 "stream_v2_complete",
