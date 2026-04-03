@@ -329,3 +329,13 @@ Built with:
 - [FastAPI](https://fastapi.tiangolo.com/) — API framework
 - [Wyoming Protocol](https://github.com/rhasspy/wyoming) — Voice assistant protocol
 - [LiveKit](https://livekit.io/) — WebRTC voice streaming
+
+---
+
+## Did it work?
+
+If Athena is running on your hardware, let us know:
+
+- **It worked?** Give the repo a star — it helps others find the project
+- **Something broke?** [Open an issue](https://github.com/jstuart0/project-athena-oss/issues) — we want to fix it
+- **Have ideas?** [Start a discussion](https://github.com/jstuart0/project-athena-oss/discussions)
