@@ -38,6 +38,7 @@ SERVICE_NAME = "sports-rag"
 
 # Environment variables / defaults
 ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
 NEWS_GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")  # Optional key if provided via admin
 THESPORTSDB_API_KEY = os.getenv("THESPORTSDB_API_KEY", "3")  # Free tier key
 THESPORTSDB_BASE_URL = os.getenv(
@@ -114,7 +115,8 @@ async def get_api_key_config(service_name: str) -> Optional[Dict[str, Any]]:
     try:
         response = await http_client.get(
             f"{ADMIN_API_URL}/api/external-api-keys/public/{service_name}/key",
-            timeout=5.0
+            headers={"X-Service-Key": SERVICE_API_KEY},
+            timeout=5.0,
         )
         response.raise_for_status()
         data = response.json()

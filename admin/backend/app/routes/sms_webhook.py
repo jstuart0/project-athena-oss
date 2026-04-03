@@ -8,10 +8,13 @@ with guests.
 
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import parse_qs
 import httpx
+import os
 import structlog
-from fastapi import APIRouter, Form, Response, Depends, Request
+from fastapi import APIRouter, Form, HTTPException, Response, Depends, Request
 from sqlalchemy.orm import Session
+from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
 
 from ..database import get_db
@@ -21,10 +24,38 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/sms/webhook", tags=["SMS Webhook"])
 
-import os
-
 # Orchestrator URL for processing queries
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
+
+# Twilio auth token for signature validation.
+# If unset, validation is skipped with a warning (allows local dev without Twilio config).
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+
+
+async def validate_twilio_signature(request: Request) -> None:
+    """
+    FastAPI dependency that validates the X-Twilio-Signature header.
+
+    Protects SMS webhook endpoints from spoofed requests.
+    Skips validation if TWILIO_AUTH_TOKEN is not configured (dev/non-SMS deployments).
+    """
+    if not TWILIO_AUTH_TOKEN:
+        logger.warning("twilio_auth_token_not_configured_skipping_validation")
+        return
+
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if not signature:
+        logger.warning("twilio_signature_header_missing", url=str(request.url))
+        raise HTTPException(status_code=403, detail="Missing Twilio signature")
+
+    # Read and cache body — Starlette caches request._body so Form(...) parsing still works
+    body = await request.body()
+    params = {k: v[0] for k, v in parse_qs(body.decode()).items()}
+
+    validator = RequestValidator(TWILIO_AUTH_TOKEN)
+    if not validator.validate(str(request.url), params, signature):
+        logger.warning("twilio_signature_invalid", url=str(request.url))
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
 
 @router.post("/incoming")
@@ -36,6 +67,7 @@ async def handle_incoming_sms(
     To: str = Form(None),
     NumMedia: str = Form("0"),
     db: Session = Depends(get_db),
+    _: None = Depends(validate_twilio_signature),
 ):
     """
     Handle incoming SMS from Twilio webhook.
@@ -173,12 +205,14 @@ async def handle_incoming_sms(
 
 @router.post("/status")
 async def handle_status_callback(
+    request: Request,
     MessageSid: str = Form(...),
     MessageStatus: str = Form(...),
     To: str = Form(None),
     ErrorCode: str = Form(None),
     ErrorMessage: str = Form(None),
     db: Session = Depends(get_db),
+    _: None = Depends(validate_twilio_signature),
 ):
     """
     Handle SMS delivery status callbacks from Twilio.

@@ -101,18 +101,6 @@ async def list_services(
     return [ServiceResponse(**s.to_dict()) for s in services]
 
 
-@router.get("/public", response_model=List[ServiceResponse])
-async def list_services_public(
-    db: Session = Depends(get_db)
-):
-    """
-    List services (public endpoint for service discovery).
-    No authentication required.
-    """
-    services = db.query(AthenaService).filter(AthenaService.enabled == True).all()
-    return [ServiceResponse(**s.to_dict()) for s in services]
-
-
 @router.post("/refresh-status")
 async def refresh_all_service_status(
     background_tasks: BackgroundTasks,

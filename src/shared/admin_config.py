@@ -38,7 +38,10 @@ class AdminConfigClient:
         )
         # Reduced timeout from 10s to 3s - config/room calls should be fast
         # Critical paths like music playback compound multiple API calls
-        self.client = httpx.AsyncClient(timeout=3.0)
+        self.client = httpx.AsyncClient(
+            timeout=3.0,
+            headers={"X-Service-Key": self.api_key},
+        )
 
         # Routing configuration cache (60-second TTL)
         self._cache_ttl = 60
@@ -113,7 +116,7 @@ class AdminConfigClient:
         """
         try:
             url = f"{self.admin_url}/api/secrets/service/{service_name}"
-            headers = {"X-API-Key": self.api_key}
+            headers = {"X-Service-Key": self.api_key}
 
             response = await self.client.get(url, headers=headers)
 
@@ -462,7 +465,8 @@ class AdminConfigClient:
         """
         try:
             url = f"{self.admin_url}/api/external-api-keys/public/{service_name}/key"
-            response = await self.client.get(url)
+            headers = {"X-Service-Key": self.api_key}
+            response = await self.client.get(url, headers=headers)
 
             if response.status_code == 404:
                 logger.debug(

@@ -51,6 +51,7 @@ LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
 
 # Admin API for fetching credentials
 ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
 
 
 async def fetch_livekit_credentials() -> Dict[str, str]:
@@ -62,7 +63,8 @@ async def fetch_livekit_credentials() -> Dict[str, str]:
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
             response = await client.get(
-                f"{ADMIN_API_URL}/api/external-api-keys/public/livekit/credentials"
+                f"{ADMIN_API_URL}/api/external-api-keys/public/livekit/credentials",
+                headers={"X-Service-Key": SERVICE_API_KEY},
             )
             if response.status_code == 200:
                 data = response.json()

@@ -22,14 +22,21 @@ Endpoints:
 - /api/internal/config/validation-scenarios - Validation test scenarios (athena)
 """
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 import asyncpg
 import os
 import structlog
 
+from app.utils.service_auth import verify_service_api_key
+
 logger = structlog.get_logger()
 
-router = APIRouter(prefix="/api/internal", tags=["internal"], include_in_schema=False)
+router = APIRouter(
+    prefix="/api/internal",
+    tags=["internal"],
+    include_in_schema=False,
+    dependencies=[Depends(verify_service_api_key)],
+)
 
 
 async def get_athena_db_connection():

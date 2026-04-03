@@ -379,8 +379,10 @@ async def get_current_user(
     Raises:
         HTTPException: If authentication fails
     """
-    # DEV_MODE: Return mock admin user without authentication (UNCHANGED)
-    if DEV_MODE:
+    # DEV_MODE: Bypass authentication only when no explicit auth credentials are supplied.
+    # If an X-API-Key header IS present (even as an empty string), validate it normally
+    # even in DEV_MODE so that API key tests work correctly and accidental invalid keys fail.
+    if DEV_MODE and x_api_key is None:
         dev_user = db.query(User).filter(User.username == "dev-admin").first()
         if dev_user:
             logger.debug("dev_mode_auth_bypass", user="dev-admin")
@@ -402,7 +404,7 @@ async def get_current_user(
         logger.info("dev_mode_user_created", user="dev-admin")
         return dev_user
 
-    # NEW: Try API Key authentication first
+    # Try API Key authentication first (works in both DEV_MODE and production)
     if x_api_key:
         user = await _authenticate_api_key(x_api_key, db, request)
         if user:
@@ -489,24 +491,30 @@ async def _authenticate_api_key(
         logger.warning("api_key_invalid_format", key_prefix=api_key[:8] if api_key else "empty")
         return None  # Let caller decide to fall through or reject
 
-    # Extract prefix for efficient lookup
+    # Extract prefix for efficient index lookup (multiple keys may share same prefix
+    # when created within the same second — key_hash is the uniqueness gate)
     key_prefix = extract_key_prefix(api_key)
 
-    # Lookup by prefix (uses index)
-    key_record = db.query(UserAPIKey).filter(
+    key_candidates = db.query(UserAPIKey).filter(
         UserAPIKey.key_prefix == key_prefix
-    ).first()
+    ).all()
 
-    if not key_record:
+    if not key_candidates:
         logger.warning("api_key_not_found", key_prefix=key_prefix)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key"
         )
 
-    # Verify hash (constant-time comparison)
-    if not verify_api_key(api_key, key_record.key_hash):
-        logger.warning("api_key_hash_mismatch", key_id=key_record.id)
+    # Find the candidate whose hash matches (constant-time comparison per candidate)
+    key_record = None
+    for candidate in key_candidates:
+        if verify_api_key(api_key, candidate.key_hash):
+            key_record = candidate
+            break
+
+    if not key_record:
+        logger.warning("api_key_hash_mismatch", key_prefix=key_prefix)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key"

@@ -69,6 +69,10 @@ data:
   CHAT_DOMAIN: "chat.local"
   FRONTEND_URL: "https://athena.local"
 
+  # CORS allowed origins for the admin backend (comma-separated)
+  # Override with your actual domain in production, e.g. https://athena.example.com
+  CORS_ALLOWED_ORIGINS: "http://localhost:8080"
+
   # Feature flags
   DEMO_MODE: "false"
   MODULE_HOME_ASSISTANT: "true"

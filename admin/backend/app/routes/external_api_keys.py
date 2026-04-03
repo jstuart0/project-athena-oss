@@ -16,6 +16,7 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, ExternalAPIKey
 from app.utils.encryption import encrypt_value, decrypt_value
+from app.utils.service_auth import verify_service_api_key
 
 logger = structlog.get_logger()
 
@@ -305,7 +306,8 @@ async def delete_external_api_key(
 @router.get("/public/{service_name}/key", include_in_schema=False)
 async def get_api_key_for_service(
     service_name: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _verified: bool = Depends(verify_service_api_key),
 ):
     """
     Public (service-to-service) endpoint to fetch decrypted API key.
@@ -338,7 +340,8 @@ async def get_api_key_for_service(
 @router.get("/public/{service_name}/credentials", include_in_schema=False)
 async def get_credentials_for_service(
     service_name: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _verified: bool = Depends(verify_service_api_key),
 ):
     """
     Public (service-to-service) endpoint to fetch all decrypted credentials.

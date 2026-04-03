@@ -35,6 +35,11 @@ spec:
             configMapKeyRef:
               name: athena-config
               key: OLLAMA_URL
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         resources:
           requests:
             memory: "128Mi"

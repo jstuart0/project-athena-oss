@@ -288,7 +288,7 @@ class UserAPIKey(Base):
     name = Column(String(255), nullable=False)  # User-defined label
 
     # Key identification and verification
-    key_prefix = Column(String(16), nullable=False, unique=True, index=True)  # First 16 chars for lookup
+    key_prefix = Column(String(16), nullable=False, index=True)  # First 16 chars for lookup (not unique — keys created in the same second share a prefix; key_hash is the uniqueness gate)
     key_hash = Column(String(64), nullable=False, unique=True)  # SHA-256 hash (64 hex chars)
 
     # Scoped permissions (subset of user permissions)

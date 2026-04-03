@@ -220,10 +220,8 @@ class TestRevokeApiKey:
         )
         key_id = create_response.json()['id']
 
-        client.delete(
-            f'/api/user-api-keys/{key_id}',
-            json={'reason': 'No longer needed'}
-        )
+        # httpx 0.25.x delete() doesn't accept json= kwarg; use request() instead
+        client.request('DELETE', f'/api/user-api-keys/{key_id}', json={'reason': 'No longer needed'})
         # Reason stored in database (can check via get if exposed)
 
     def test_revoke_nonexistent_404(self, client):

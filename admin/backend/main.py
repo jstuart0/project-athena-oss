@@ -117,13 +117,17 @@ app.add_middleware(
     lifetime=3600,  # 1 hour session timeout
     cookie_name="athena_session",
     cookie_same_site="lax",
-    cookie_https_only=False,  # Set True in production with HTTPS
+    cookie_https_only=not DEV_MODE,  # True in production (HTTPS required), False in dev
 )
 
-# Enable CORS for frontend
+# CORS — restrict to explicitly configured origins in production.
+# Set CORS_ALLOWED_ORIGINS to a comma-separated list (e.g. "https://admin.example.com").
+# Defaults to localhost only so that the wildcard is never silently active in production.
+_cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+CORS_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()] or ["http://localhost:8080"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure properly in production
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -222,6 +226,22 @@ async def startup_event():
         logger.info("dev_mode_oidc_skipped", message="OIDC not configured in DEV_MODE")
 
     else:
+        # Production: Reject insecure default secrets at startup.
+        # This prevents silent deployment with known-public placeholder values.
+        _INSECURE_DEFAULTS = {
+            "SESSION_SECRET_KEY": "dev-secret-change-in-production",
+            "JWT_SECRET": "dev-secret-change-in-production",
+            "SERVICE_API_KEY": "dev-service-key-change-in-production",
+        }
+        for _var, _bad in _INSECURE_DEFAULTS.items():
+            _val = os.getenv(_var, "")
+            if not _val or _val == _bad:
+                logger.critical("insecure_default_secret_detected", var=_var)
+                raise SystemExit(
+                    f"FATAL: {_var} must be set to a strong random secret in production. "
+                    f"Set DEV_MODE=true to run without secrets (development only)."
+                )
+
         # Production: Check PostgreSQL connection
         if check_db_connection():
             logger.info("database_connection_healthy")
@@ -550,7 +570,7 @@ async def health_check():
 
 @app.get("/status", response_model=SystemStatus)
 @app.get("/api/status", response_model=SystemStatus)
-async def get_system_status():
+async def get_system_status(current_user: User = Depends(get_current_user)):
     """Get status of all Athena services."""
     service_statuses = []
 
@@ -717,48 +737,6 @@ async def get_system_status():
         overall_health=overall_health,
         services=service_statuses
     )
-
-
-@app.get("/services")
-async def list_services():
-    """List all configured services."""
-    return {
-        "services": [
-            {"name": name, "port": port, "url": f"http://{MAC_STUDIO_IP}:{port}"}
-            for name, port in SERVICE_PORTS.items()
-        ]
-    }
-
-
-@app.post("/test-query")
-async def test_query(query: str = "what is 2+2?"):
-    """Test a query against the orchestrator."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        try:
-            response = await client.post(
-                f"http://{MAC_STUDIO_IP}:8001/v1/chat/completions",
-                json={"messages": [{"role": "user", "content": query}]}
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    "success": True,
-                    "response": data["choices"][0]["message"]["content"],
-                    "metadata": data.get("athena_metadata", {})
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": f"HTTP {response.status_code}",
-                    "details": response.text
-                }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
 
 
 # Mount static files for frontend (must be LAST, after all API routes)

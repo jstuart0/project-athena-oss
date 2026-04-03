@@ -128,6 +128,7 @@ ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_SERVICE_URL", "http://localhost:8001"
 OLLAMA_URL = os.getenv("LLM_SERVICE_URL") or os.getenv("OLLAMA_URL", "http://localhost:11434")
 API_KEY = os.getenv("GATEWAY_API_KEY", "dummy-key")  # Optional for Phase 1
 ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
 
 # Feature flag cache - per-flag caching with TTL
 # Structure: {flag_name: (timestamp, value)}
@@ -2421,7 +2422,8 @@ async def get_music_config(request: Request):
         # Fetch MA config from admin API
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
-                f"{ADMIN_API_URL}/api/external-api-keys/public/music-assistant/credentials"
+                f"{ADMIN_API_URL}/api/external-api-keys/public/music-assistant/credentials",
+                headers={"X-Service-Key": SERVICE_API_KEY},
             )
 
             if response.status_code == 200:
@@ -2680,7 +2682,8 @@ async def _fetch_ma_auth_token() -> str | None:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
-                f"{ADMIN_API_URL}/api/external-api-keys/public/music-assistant/credentials"
+                f"{ADMIN_API_URL}/api/external-api-keys/public/music-assistant/credentials",
+                headers={"X-Service-Key": SERVICE_API_KEY},
             )
             if response.status_code == 200:
                 config = response.json()

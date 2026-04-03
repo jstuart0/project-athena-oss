@@ -45,10 +45,9 @@ class TestCompleteApiKeyWorkflow:
         assert detail_response.json()['request_count'] >= 1
         assert detail_response.json()['last_used_at'] is not None
 
-        # 5. Revoke key
-        revoke_response = client.delete(
-            f'/api/user-api-keys/{key_id}',
-            json={'reason': 'Testing complete'}
+        # 5. Revoke key (httpx 0.25.x delete() doesn't accept json= kwarg; use request())
+        revoke_response = client.request(
+            'DELETE', f'/api/user-api-keys/{key_id}', json={'reason': 'Testing complete'}
         )
         assert revoke_response.status_code == 204
 

@@ -32,6 +32,7 @@ setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 OVERSEERR_URL = os.getenv("OVERSEERR_URL", "http://localhost:5055")
 OVERSEERR_API_KEY = os.getenv("OVERSEERR_API_KEY", "")
 ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
 
 # HTTP client
 http_client: Optional[httpx.AsyncClient] = None
@@ -65,7 +66,8 @@ async def startup():
     if not OVERSEERR_API_KEY:
         try:
             resp = await http_client.get(
-                f"{ADMIN_API_URL}/api/external-api-keys/public/overseerr/key"
+                f"{ADMIN_API_URL}/api/external-api-keys/public/overseerr/key",
+                headers={"X-Service-Key": SERVICE_API_KEY},
             )
             if resp.status_code == 200:
                 data = resp.json()

@@ -109,6 +109,17 @@ spec:
             secretKeyRef:
               name: athena-oidc
               key: OIDC_REDIRECT_URI
+        # Service-to-service authentication
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
+        - name: CORS_ALLOWED_ORIGINS
+          valueFrom:
+            configMapKeyRef:
+              name: athena-config
+              key: CORS_ALLOWED_ORIGINS
         resources:
           requests:
             memory: "128Mi"

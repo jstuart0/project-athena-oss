@@ -281,6 +281,7 @@ class SelfBuildingToolsManager:
         self.n8n_url = n8n_url or os.getenv("N8N_URL", "http://localhost:5678")
         self.n8n_api_key = n8n_api_key or os.getenv("N8N_API_KEY", "")
         self.admin_url = admin_url or os.getenv("ADMIN_API_URL", "http://localhost:8080")
+        self._service_api_key = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
 
         self._proposals: Dict[str, ToolProposal] = {}
         self._enabled = False
@@ -296,7 +297,10 @@ class SelfBuildingToolsManager:
 
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(f"{self.admin_url}/api/external-api-keys/public/n8n/key")
+                response = await client.get(
+                    f"{self.admin_url}/api/external-api-keys/public/n8n/key",
+                    headers={"X-Service-Key": self._service_api_key},
+                )
                 if response.status_code == 200:
                     data = response.json()
                     self.n8n_api_key = data.get('api_key', '')

@@ -40,6 +40,11 @@ spec:
             secretKeyRef:
               name: athena-db-credentials
               key: DATABASE_URL
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: HA_URL
           valueFrom:
             secretKeyRef:
