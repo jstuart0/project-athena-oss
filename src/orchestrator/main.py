@@ -1595,6 +1595,7 @@ class OrchestratorState(BaseModel):
     # Retrieved data
     retrieved_data: Dict[str, Any] = Field(default_factory=dict)
     data_source: Optional[str] = None
+    base_knowledge_populated: bool = Field(False, description="True when base knowledge was successfully injected into the system prompt")
 
     # Response
     answer: Optional[str] = None
@@ -6061,6 +6062,7 @@ Response:"""
             knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
             if knowledge_context:
                 system_context += knowledge_context
+                state.base_knowledge_populated = True
                 logger.info(f"Base knowledge context injected for mode={user_mode}")
         except Exception as e:
             logger.warning(f"Failed to fetch base knowledge context: {e}")
@@ -6388,8 +6390,11 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
     if phone_patterns:
         logger.info(f"Pattern detection: found {len(phone_patterns)} phone patterns")
 
-    # Layer 3: Check if we have data to support specific facts
-    has_supporting_data = bool(state.retrieved_data)
+    # Layer 3: Check if we have data to support specific facts.
+    # Base knowledge injected into the system prompt is authoritative — it counts as
+    # supporting data. The LLM fact-checker has no visibility into the system prompt, so
+    # without this flag it would wrongly flag dates from base knowledge as hallucinations.
+    has_supporting_data = bool(state.retrieved_data) or state.base_knowledge_populated
 
     if has_specific_facts and not has_supporting_data and not is_builtin_time_or_date_query:
         logger.warning(f"Response contains specific facts but no supporting data retrieved")
@@ -7588,6 +7593,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
             if knowledge_context:
                 system_content += f"\n{knowledge_context}"
+                state.base_knowledge_populated = True
                 logger.info(f"Base knowledge context injected for mode={user_mode} in tool_call")
 
             # Get permanent home address (for "directions from home" type queries)
@@ -10107,79 +10113,52 @@ async def process_query_stream(request: QueryRequest):
             yield f"data: {json.dumps({'stage': 'processing', 'message': 'Searching for information...'})}\n\n"
 
             tool_start_time = time.time()
-            final_state = await orchestrator_graph.ainvoke(initial_state)
+            final_state_raw = await orchestrator_graph.ainvoke(initial_state)
             tool_exec_time = time.time() - tool_start_time
 
+            # ainvoke returns a dict; rebuild as OrchestratorState for attribute access downstream
+            if isinstance(final_state_raw, dict):
+                final_state = OrchestratorState.model_validate(
+                    {k: v for k, v in final_state_raw.items() if k in OrchestratorState.model_fields}
+                )
+            else:
+                final_state = final_state_raw
+
             # Check if tool calling was used
-            if final_state.get("tool_results"):
-                tool_names = list(final_state["tool_results"].keys())
+            tool_results = final_state_raw.get("tool_results") if isinstance(final_state_raw, dict) else getattr(final_state, "tool_results", None)
+            if tool_results:
+                tool_names = list(tool_results.keys())
                 tool_message = f"Found results using {', '.join(tool_names)}"
                 yield f"data: {json.dumps({'stage': 'found', 'message': tool_message})}\n\n"
 
-            # Stage 3: TRUE STREAMING - Stream from LLM as tokens are generated
+            # Stage 3: Stream the answer already synthesized by the orchestrator graph.
+            # The graph ran full synthesis via generate_node/synthesize_node, so final_state.answer
+            # is already correct. Stream it in small chunks with a delay so the client sees
+            # progressive rendering rather than one instant blob.
             yield f"data: {json.dumps({'stage': 'answering', 'message': 'Generating response...'})}\n\n"
             llm_start_time = time.time()
 
-            # Build synthesis prompt and stream directly from Ollama
-            full_prompt, synthesis_model = await build_synthesis_prompt_for_streaming(final_state)
+            full_answer = final_state.answer or ""
 
-            logger.info(
-                "true_streaming_started",
-                request_id=request_id,
-                model=synthesis_model,
-                has_rag_data=bool(final_state.get("retrieved_data"))
-            )
-
-            # Stream tokens directly from Ollama
-            full_answer = ""
+            # ~20ms per 4-char chunk ≈ 200 chars/second — fast but visibly progressive
+            CHUNK_SIZE = 4
+            CHUNK_DELAY = 0.018  # seconds
             token_count = 0
-            async for chunk in llm_router.generate_stream(
-                model=synthesis_model,
-                prompt=full_prompt,
-                temperature=request.temperature or 0.7,
-                max_tokens=2048
-            ):
-                token = chunk.get("token", "")
-                if token:
-                    token_count += 1
-                    full_answer += token
-                    yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': token})}\n\n"
-
-                # Check if done
-                if chunk.get("done", False):
-                    break
+            for i in range(0, len(full_answer), CHUNK_SIZE):
+                token = full_answer[i:i + CHUNK_SIZE]
+                token_count += 1
+                yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': token})}\n\n"
+                await asyncio.sleep(CHUNK_DELAY)
 
             # Update session with the streamed response
             session.add_message(role="user", content=request.query, metadata={"streaming": True})
             session.add_message(role="assistant", content=full_answer)
 
-            # Final completion event with timing breakdown
+            # Final completion event
             processing_time = time.time() - start_time
             llm_time = time.time() - llm_start_time
-            tokens_per_second = token_count / llm_time if llm_time > 0 else 0
 
-            logger.info(
-                "true_streaming_complete",
-                request_id=request_id,
-                tokens=token_count,
-                duration_ms=int(processing_time * 1000),
-                tool_exec_ms=int(tool_exec_time * 1000),
-                llm_time_ms=int(llm_time * 1000),
-                tokens_per_second=round(tokens_per_second, 1),
-                response_length=len(full_answer)
-            )
-
-            # Record streaming synthesis LLM call for metrics
-            from shared.metrics import LLM_CALL_DURATION, LLM_TOKENS_GENERATED
-            LLM_CALL_DURATION.labels(
-                stage="stream_synthesis",
-                model=synthesis_model,
-                call_type="streaming"
-            ).observe(llm_time)
-            if token_count > 0:
-                LLM_TOKENS_GENERATED.labels(stage="stream_synthesis", model=synthesis_model).inc(token_count)
-
-            yield f"data: {json.dumps({'stage': 'complete', 'processing_time': processing_time, 'tool_exec_time': tool_exec_time, 'llm_time': llm_time, 'tokens': token_count, 'tokens_per_second': tokens_per_second})}\n\n"
+            yield f"data: {json.dumps({'stage': 'complete', 'processing_time': processing_time, 'tool_exec_time': tool_exec_time, 'llm_time': llm_time, 'tokens': token_count})}\n\n"
 
         except Exception as e:
             logger.error(f"Streaming error: {e}", exc_info=True)
@@ -10488,6 +10467,7 @@ Response:"""
         knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
         if knowledge_context:
             system_context += knowledge_context
+            state.base_knowledge_populated = True
     except Exception as e:
         logger.warning(f"Failed to fetch base knowledge context for streaming: {e}")
 

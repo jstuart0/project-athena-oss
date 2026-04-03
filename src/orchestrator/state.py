@@ -90,6 +90,7 @@ class OrchestratorState(BaseModel):
     # Retrieved data
     retrieved_data: Dict[str, Any] = Field(default_factory=dict)
     data_source: Optional[str] = None
+    base_knowledge_populated: bool = Field(False, description="True when base knowledge was successfully injected into the system prompt")
 
     # Response
     answer: Optional[str] = None
