@@ -2844,6 +2844,8 @@
                 // Re-render with markdown formatting once streaming is complete
                 if (fullText) {
                     contentEl.innerHTML = formatMessage(fullText);
+                } else {
+                    contentEl.textContent = "I'm not sure how to help with that. Could you rephrase your question?";
                 }
 
                 // Update metrics for owner mode
@@ -3865,6 +3867,8 @@
                 // Re-render with markdown formatting once streaming is complete
                 if (fullText) {
                     contentEl.innerHTML = formatMessage(fullText);
+                } else {
+                    contentEl.textContent = "I'm not sure how to help with that. Could you rephrase your question?";
                 }
 
                 // Update metrics for owner mode

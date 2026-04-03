@@ -8746,6 +8746,16 @@ async def finalize_node(state: OrchestratorState) -> OrchestratorState:
         else:
             state.answer = "I'm not confident in my response. Could you please rephrase your question?"
 
+    # Safety net: never return an empty answer
+    if not state.answer:
+        logger.warning(
+            "finalize_node_empty_answer_fallback",
+            intent=state.intent.value if state.intent else None,
+            error=state.error,
+            request_id=state.request_id
+        )
+        state.answer = "I'm not sure how to help with that. Could you rephrase your question?"
+
     # Calculate total processing time
     total_time = time.time() - state.start_time
     logger.info(
@@ -10147,15 +10157,13 @@ async def process_query_stream(request: QueryRequest):
 
             full_answer = final_state.answer or ""
 
-            # ~20ms per 4-char chunk ≈ 200 chars/second — fast but visibly progressive
-            CHUNK_SIZE = 4
-            CHUNK_DELAY = 0.018  # seconds
+            # Stream in word-sized chunks with no artificial delay — speed matches LLM inference
+            CHUNK_SIZE = 20
             token_count = 0
             for i in range(0, len(full_answer), CHUNK_SIZE):
                 token = full_answer[i:i + CHUNK_SIZE]
                 token_count += 1
                 yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': token})}\n\n"
-                await asyncio.sleep(CHUNK_DELAY)
 
             # Persist session to Redis so context carries across requests and pods
             await session_manager.add_message(
