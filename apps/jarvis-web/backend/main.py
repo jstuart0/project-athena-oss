@@ -445,7 +445,8 @@ async def chat_stream(message: ChatMessage):
                 "query": message.message,
                 "mode": current_mode,
                 "room": DEFAULT_ROOM,
-                "session_id": session_id
+                "session_id": session_id,
+                "interface_type": message.interface_type or "chat"
             }
 
             # Build context with guest info and location override
@@ -471,7 +472,7 @@ async def chat_stream(message: ChatMessage):
                     json=request_body
                 ) as response:
                     async for chunk in response.aiter_text():
-                        yield f"data: {chunk}\n\n"
+                        yield chunk  # orchestrator already formats as SSE (data: {...}\n\n)
         except Exception as e:
             logger.error("stream_error", error=str(e))
             yield f'data: {{"error": "Stream failed"}}\n\n'
