@@ -10126,61 +10126,125 @@ async def process_query_stream(request: QueryRequest):
                 interface_type=request.interface_type,
             )
 
-            # Stage 2: Execute orchestrator workflow (for intent + RAG)
+            # Stage 2: RAG collection — classify + retrieve, stopping before LLM synthesis
             yield f"data: {json.dumps({'stage': 'processing', 'message': 'Searching for information...'})}\n\n"
 
             tool_start_time = time.time()
-            final_state_raw = await orchestrator_graph.ainvoke(initial_state)
+            state = await run_orchestrator_for_streaming(initial_state)
             tool_exec_time = time.time() - tool_start_time
 
-            # ainvoke returns a dict; rebuild as OrchestratorState for attribute access downstream
-            if isinstance(final_state_raw, dict):
-                final_state = OrchestratorState.model_validate(
-                    {k: v for k, v in final_state_raw.items() if k in OrchestratorState.model_fields}
-                )
-            else:
-                final_state = final_state_raw
+            if state.retrieved_data:
+                tool_names = list(state.retrieved_data.keys())
+                yield f"data: {json.dumps({'stage': 'found', 'message': 'Found results using ' + ', '.join(tool_names)})}\n\n"
 
-            # Check if tool calling was used
-            tool_results = final_state_raw.get("tool_results") if isinstance(final_state_raw, dict) else getattr(final_state, "tool_results", None)
-            if tool_results:
-                tool_names = list(tool_results.keys())
-                tool_message = f"Found results using {', '.join(tool_names)}"
-                yield f"data: {json.dumps({'stage': 'found', 'message': tool_message})}\n\n"
-
-            # Stage 3: Stream the answer already synthesized by the orchestrator graph.
-            # The graph ran full synthesis via generate_node/synthesize_node, so final_state.answer
-            # is already correct. Stream it in small chunks with a delay so the client sees
-            # progressive rendering rather than one instant blob.
+            # Stage 3: Token-level streaming synthesis
             yield f"data: {json.dumps({'stage': 'answering', 'message': 'Generating response...'})}\n\n"
             llm_start_time = time.time()
 
-            full_answer = final_state.answer or ""
-
-            # Stream in word-sized chunks with no artificial delay — speed matches LLM inference
-            CHUNK_SIZE = 20
+            full_answer = ""
             token_count = 0
-            for i in range(0, len(full_answer), CHUNK_SIZE):
-                token = full_answer[i:i + CHUNK_SIZE]
-                token_count += 1
-                yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': token})}\n\n"
+            stream_completed = False
 
-            # Persist session to Redis so context carries across requests and pods
-            await session_manager.add_message(
-                session_id=session.session_id,
-                role="user",
-                content=request.query,
-                metadata={"streaming": True}
-            )
-            await session_manager.add_message(
-                session_id=session.session_id,
-                role="assistant",
-                content=full_answer
-            )
+            if state.answer:
+                # Pre-computed answer: control/music/TV/SMS handlers, or tool_call_node synthesis.
+                # tool_call_node does multi-step LLM internally — can't stream those tokens yet.
+                full_answer = state.answer
+                CHUNK_SIZE = 20
+                for i in range(0, len(full_answer), CHUNK_SIZE):
+                    chunk = full_answer[i:i + CHUNK_SIZE]
+                    token_count += 1
+                    yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': chunk})}\n\n"
+                stream_completed = True
+            else:
+                # Real token streaming: build synthesis prompt, stream tokens from Ollama.
+                # build_synthesis_prompt_for_streaming() returns the FULL assembled prompt:
+                # system_context + history_context + synthesis_prompt — do NOT prepend again.
+                full_prompt, synthesis_model = await build_synthesis_prompt_for_streaming(state)
+
+                # Use per-intent max_tokens from component config, same as synthesize_node.
+                synthesis_config = await get_component_config("response_synthesis")
+                max_tokens = (synthesis_config or {}).get("max_tokens") or 2048
+
+                logger.info(
+                    "streaming_llm_started",
+                    request_id=request_id,
+                    model=synthesis_model,
+                    has_rag_data=bool(state.retrieved_data),
+                    max_tokens=max_tokens,
+                )
+
+                response_tokens = []
+                try:
+                    async for chunk in llm_router.generate_stream(
+                        model=synthesis_model,
+                        prompt=full_prompt,
+                        temperature=request.temperature or 0.7,
+                        max_tokens=max_tokens
+                    ):
+                        token = chunk.get("token", "")
+                        if token:
+                            token_count += 1
+                            response_tokens.append(token)
+                            yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': token})}\n\n"
+                        if chunk.get("done", False):
+                            stream_completed = True
+                            break
+                except asyncio.CancelledError:
+                    logger.warning("streaming_cancelled", request_id=request_id, tokens_emitted=token_count)
+                    raise
+                except Exception as e:
+                    logger.error("streaming_error", request_id=request_id, tokens_emitted=token_count, error=str(e))
+
+                full_answer = "".join(response_tokens)
+                if not full_answer:
+                    full_answer = "I'm not sure how to help with that. Could you rephrase your question?"
+                    yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': full_answer})}\n\n"
+                    stream_completed = True
+
+            llm_time = time.time() - llm_start_time
+
+            # Session persistence — partial-stream policy:
+            #   stream_completed=True  → persist user + assistant messages (normal)
+            #   stream_completed=False → persist user only; log if partial tokens emitted
+            if stream_completed:
+                await session_manager.add_message(
+                    session_id=session.session_id,
+                    role="user",
+                    content=request.query,
+                    metadata={"streaming": True}
+                )
+                await session_manager.add_message(
+                    session_id=session.session_id,
+                    role="assistant",
+                    content=full_answer
+                )
+            else:
+                await session_manager.add_message(
+                    session_id=session.session_id,
+                    role="user",
+                    content=request.query,
+                    metadata={"streaming": True}
+                )
+                if token_count > 0:
+                    logger.warning(
+                        "partial_stream_not_persisted",
+                        request_id=request_id,
+                        tokens_emitted=token_count
+                    )
 
             # Final completion event
             processing_time = time.time() - start_time
-            llm_time = time.time() - llm_start_time
+            tokens_per_second = token_count / llm_time if llm_time > 0 else 0
+
+            logger.info(
+                "streaming_llm_complete",
+                request_id=request_id,
+                tokens=token_count,
+                duration_ms=int(processing_time * 1000),
+                tool_exec_ms=int(tool_exec_time * 1000),
+                llm_time_ms=int(llm_time * 1000),
+                tokens_per_second=round(tokens_per_second, 1),
+            )
 
             yield f"data: {json.dumps({'stage': 'complete', 'processing_time': processing_time, 'tool_exec_time': tool_exec_time, 'llm_time': llm_time, 'tokens': token_count})}\n\n"
 
