@@ -968,3 +968,136 @@ async def get_ollama_url_internal(
     except Exception as e:
         logger.error("failed_to_get_ollama_url_internal", error=str(e))
         return {"ollama_url": os.getenv("OLLAMA_URL", "http://localhost:11434")}
+
+
+# ============================================================================
+# Privacy / Analytics Mode
+# ============================================================================
+
+class PrivacySettings(BaseModel):
+    """Privacy category settings."""
+    analytics_mode_enabled: bool = False
+
+
+class PrivacySettingsResponse(BaseModel):
+    """Response model for privacy settings."""
+    analytics_mode_enabled: bool
+    description: str
+
+
+@router.get("/privacy", response_model=PrivacySettingsResponse)
+async def get_privacy_settings(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get privacy settings including the analytics mode toggle.
+    Requires read permission.
+    """
+    if not current_user.has_permission('read'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    try:
+        setting = db.query(SystemSetting).filter(
+            SystemSetting.key == "analytics_mode_enabled"
+        ).first()
+
+        enabled = False
+        if setting:
+            enabled = setting.value.lower() in ("true", "1", "yes")
+
+        description = (
+            "Analytics mode is enabled. All conversations are persisted to the database."
+            if enabled
+            else "Analytics mode is disabled. No conversation content is persisted."
+        )
+
+        return PrivacySettingsResponse(analytics_mode_enabled=enabled, description=description)
+
+    except Exception as e:
+        logger.error("failed_to_get_privacy_settings", error=str(e))
+        return PrivacySettingsResponse(
+            analytics_mode_enabled=False,
+            description="Analytics mode is disabled (error reading setting)."
+        )
+
+
+@router.post("/privacy")
+async def save_privacy_settings(
+    settings: PrivacySettings,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Save privacy settings — enables or disables analytics mode.
+
+    When analytics_mode_enabled is True, the orchestrator begins persisting
+    conversation transcripts to the database. Changes take effect within ~60
+    seconds (orchestrator polls with a 60-second TTL cache).
+
+    Requires write permission.
+    """
+    if not current_user.has_permission('write'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    try:
+        value = str(settings.analytics_mode_enabled).lower()
+        setting = db.query(SystemSetting).filter(
+            SystemSetting.key == "analytics_mode_enabled"
+        ).first()
+
+        if setting:
+            setting.value = value
+        else:
+            setting = SystemSetting(
+                key="analytics_mode_enabled",
+                value=value,
+                description=(
+                    "When enabled, all conversations are persisted to the database for "
+                    "review and quality evaluation. Best-effort capture: turns in-flight "
+                    "at service restart may not be recorded."
+                ),
+                category="privacy"
+            )
+            db.add(setting)
+
+        db.commit()
+
+        logger.info("analytics_mode_toggled", user=current_user.username,
+                    enabled=settings.analytics_mode_enabled)
+
+        return {
+            "status": "success",
+            "message": (
+                f"Analytics mode {'enabled' if settings.analytics_mode_enabled else 'disabled'}. "
+                "Changes take effect within ~60 seconds."
+            )
+        }
+
+    except Exception as e:
+        db.rollback()
+        logger.error("failed_to_save_privacy_settings", error=str(e),
+                     user=current_user.username)
+        raise HTTPException(status_code=500, detail=f"Failed to save privacy settings: {str(e)}")
+
+
+@router.get("/privacy/public")
+async def get_analytics_mode_public(db: Session = Depends(get_db)):
+    """
+    Public endpoint for the orchestrator to fetch the analytics_mode_enabled flag.
+    No authentication required — read-only, no sensitive data.
+    """
+    try:
+        setting = db.query(SystemSetting).filter(
+            SystemSetting.key == "analytics_mode_enabled"
+        ).first()
+
+        enabled = False
+        if setting:
+            enabled = setting.value.lower() in ("true", "1", "yes")
+
+        return {"analytics_mode_enabled": enabled}
+
+    except Exception as e:
+        logger.error("failed_to_get_analytics_mode_public", error=str(e))
+        return {"analytics_mode_enabled": False}

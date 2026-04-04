@@ -9984,6 +9984,30 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         except Exception as cache_err:
             logger.warning("semantic_cache_store_failed", error=str(cache_err))
 
+        # ANALYTICS CAPTURE: Fire-and-forget conversation turn recording
+        _debug_source = _get_analytics_source()
+        _capture_source = await _should_capture_analytics(_debug_source)
+        if _capture_source:
+            asyncio.create_task(_record_conversation_turn(
+                session_id=session.session_id,
+                request_id=final_state.get("request_id"),
+                query=request.query,
+                response=answer,
+                intent=intent_str if intent_str != "unknown" else None,
+                confidence=final_state.get("confidence"),
+                model_used=final_state.get("model_used"),
+                rag_tools_used=final_state.get("tools_used"),
+                response_time_ms=total_time_ms,
+                tokens_generated=final_state.get("llm_tokens"),
+                tokens_per_second=final_state.get("llm_tokens_per_second"),
+                validation_passed=final_state.get("validation_passed"),
+                error_message=None,
+                room=request.room,
+                user_mode=current_mode,
+                interface_type=request.interface_type,
+                source=_capture_source,
+            ))
+
         return response
 
     except Exception as e:
@@ -10510,6 +10534,175 @@ def _strip_hallucinated_continuation(text: str) -> str:
     if match:
         return text[:match.start()].rstrip()
     return text
+
+
+# ============================================================================
+# Analytics DB — fire-and-forget conversation capture
+# ============================================================================
+
+# Optional asyncpg pool for writing conversation turns to the analytics DB
+try:
+    import asyncpg
+    _ASYNCPG_AVAILABLE = True
+except ImportError:
+    _ASYNCPG_AVAILABLE = False
+
+_analytics_pool = None  # asyncpg connection pool, created lazily
+
+
+async def _get_analytics_pool():
+    """Return (or lazily create) the asyncpg connection pool for analytics writes."""
+    global _analytics_pool
+    if not _ASYNCPG_AVAILABLE:
+        return None
+    if _analytics_pool is not None:
+        return _analytics_pool
+
+    host = os.getenv("ATHENA_DB_HOST", "")
+    port = os.getenv("ATHENA_DB_PORT", "5432")
+    name = os.getenv("ATHENA_DB_NAME", "")
+    user = os.getenv("ATHENA_DB_USER", "")
+    password = os.getenv("ATHENA_DB_PASSWORD", "")
+
+    if not (host and name and user):
+        logger.warning("analytics_db_not_configured", reason="ATHENA_DB_* env vars not set")
+        return None
+
+    try:
+        dsn = f"postgresql://{user}:{password}@{host}:{port}/{name}"
+        _analytics_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, command_timeout=10)
+        logger.info("analytics_db_pool_created", host=host, db=name)
+    except Exception as e:
+        logger.warning("analytics_db_pool_failed", error=str(e))
+        _analytics_pool = None
+
+    return _analytics_pool
+
+
+# 60-second TTL cache for the analytics_mode_enabled flag
+_analytics_mode_cache: Optional[bool] = None
+_analytics_mode_cache_time: float = 0.0
+_ANALYTICS_MODE_CACHE_TTL: float = 60.0
+
+
+async def _get_analytics_mode_enabled() -> bool:
+    """Fetch analytics_mode_enabled from admin API with 60s TTL cache."""
+    global _analytics_mode_cache, _analytics_mode_cache_time
+
+    now = time.time()
+    if _analytics_mode_cache is not None and now - _analytics_mode_cache_time < _ANALYTICS_MODE_CACHE_TTL:
+        return _analytics_mode_cache
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{ADMIN_API_URL}/api/settings/privacy/public")
+            if resp.status_code == 200:
+                data = resp.json()
+                enabled = bool(data.get("analytics_mode_enabled", False))
+                _analytics_mode_cache = enabled
+                _analytics_mode_cache_time = now
+                return enabled
+    except Exception as e:
+        logger.debug("analytics_mode_fetch_failed", error=str(e))
+
+    return False
+
+
+def _get_analytics_source() -> Optional[str]:
+    """Return 'debug' if ATHENA_DEBUG_MODE is set, else None."""
+    if os.getenv("ATHENA_DEBUG_MODE", "false").lower() == "true":
+        return "debug"
+    return None
+
+
+async def _should_capture_analytics(debug_source: Optional[str]) -> Optional[str]:
+    """Return source string for capture, or None to skip."""
+    if debug_source == "debug":
+        return "debug"
+    if await _get_analytics_mode_enabled():
+        return "analytics"
+    return None
+
+
+async def _record_conversation_turn(
+    session_id: str,
+    request_id: Optional[str],
+    query: str,
+    response: str,
+    intent: Optional[str],
+    confidence: Optional[float],
+    model_used: Optional[str],
+    rag_tools_used: Optional[list],
+    response_time_ms: Optional[int],
+    tokens_generated: Optional[int],
+    tokens_per_second: Optional[float],
+    validation_passed: Optional[bool],
+    error_message: Optional[str],
+    room: Optional[str],
+    user_mode: Optional[str],
+    interface_type: Optional[str],
+    source: str,
+) -> None:
+    """
+    Write a conversation turn to the analytics database.
+    Fire-and-forget via asyncio.create_task(). Non-blocking, non-fatal.
+    """
+    pool = await _get_analytics_pool()
+    if pool is None:
+        logger.warning("analytics_write_skipped", reason="no_pool", session_id=session_id[:8])
+        return
+
+    try:
+        async with pool.acquire() as conn:
+            conv_row = await conn.fetchrow(
+                """
+                INSERT INTO conversations
+                    (session_id, room, user_mode, interface_type, started_at, ended_at, turn_count)
+                VALUES ($1, $2, $3, $4, NOW(), NOW(), 1)
+                ON CONFLICT (session_id) DO UPDATE
+                    SET ended_at   = NOW(),
+                        turn_count = conversations.turn_count + 1,
+                        total_tokens = COALESCE(conversations.total_tokens, 0) + COALESCE($5, 0)
+                RETURNING id, turn_count
+                """,
+                session_id, room, user_mode, interface_type, tokens_generated
+            )
+
+            import uuid as _uuid
+            await conn.execute(
+                """
+                INSERT INTO conversation_turns (
+                    id, conversation_id, turn_number, request_id,
+                    query_text, response_text, intent, confidence,
+                    model_used, rag_tools_used, response_time_ms,
+                    tokens_generated, tokens_per_second,
+                    validation_passed, error_message, source, created_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
+                """,
+                str(_uuid.uuid4()),
+                str(conv_row["id"]),
+                conv_row["turn_count"],
+                request_id,
+                query,
+                response,
+                intent,
+                confidence,
+                model_used,
+                json.dumps(rag_tools_used) if rag_tools_used else None,
+                response_time_ms,
+                tokens_generated,
+                tokens_per_second,
+                validation_passed,
+                error_message,
+                source,
+            )
+
+    except Exception as e:
+        logger.warning(
+            "analytics_write_failed",
+            error=str(e),
+            session_id=session_id[:8] if session_id else "unknown",
+        )
 
 
 # ============================================================================

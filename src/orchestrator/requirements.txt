@@ -31,3 +31,4 @@ trafilatura>=1.12.0  # Fast content extraction
 extruct>=0.18.0      # JSON-LD and structured data extraction
 pandas>=2.2.0        # Table extraction
 lxml>=5.1.0          # HTML parsing (fast)
+asyncpg>=0.29.0

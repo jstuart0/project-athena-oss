@@ -2190,7 +2190,65 @@ function showError(message) {
 // ============================================================================
 
 async function loadSettings() {
-    await Promise.all([loadOIDCSettings(), loadAssistantProfileSettings(), loadServers(), loadServices()]);
+    await Promise.all([loadOIDCSettings(), loadAssistantProfileSettings(), loadServers(), loadServices(), loadAnalyticsModeToggle()]);
+}
+
+async function loadAnalyticsModeToggle() {
+    try {
+        const API_BASE = window.location.origin;
+        const token = authToken || localStorage.getItem('auth_token');
+        const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+        const resp = await fetch(`${API_BASE}/api/settings/privacy`, { headers });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const enabled = !!data.analytics_mode_enabled;
+        const toggle = document.getElementById('analytics-mode-toggle');
+        const label = document.getElementById('analytics-mode-label');
+        const status = document.getElementById('analytics-mode-status');
+        if (toggle) toggle.checked = enabled;
+        if (label) label.textContent = enabled ? 'On' : 'Off';
+        if (status) status.textContent = enabled
+            ? 'Analytics mode is active — conversation turns are being captured.'
+            : 'Analytics mode is off — no data is being captured.';
+    } catch (e) {
+        console.warn('[Analytics] Failed to load analytics mode setting:', e);
+    }
+}
+
+async function saveAnalyticsMode(enabled) {
+    try {
+        const API_BASE = window.location.origin;
+        const token = authToken || localStorage.getItem('auth_token');
+        const headers = {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        };
+        const resp = await fetch(`${API_BASE}/api/settings/privacy`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ analytics_mode_enabled: enabled }),
+        });
+        const label = document.getElementById('analytics-mode-label');
+        const status = document.getElementById('analytics-mode-status');
+        if (resp.ok) {
+            if (label) label.textContent = enabled ? 'On' : 'Off';
+            if (status) status.textContent = enabled
+                ? 'Analytics mode is active — conversation turns are being captured.'
+                : 'Analytics mode is off — no data is being captured.';
+            if (typeof showSuccess === 'function') {
+                showSuccess(`Analytics mode ${enabled ? 'enabled' : 'disabled'}.`);
+            }
+        } else {
+            if (typeof showError === 'function') {
+                showError('Failed to save analytics mode setting.');
+            }
+            const toggle = document.getElementById('analytics-mode-toggle');
+            if (toggle) toggle.checked = !enabled;
+            if (label) label.textContent = !enabled ? 'On' : 'Off';
+        }
+    } catch (e) {
+        console.warn('[Analytics] Failed to save analytics mode:', e);
+    }
 }
 
 async function loadAssistantProfileSettings() {

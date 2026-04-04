@@ -11,7 +11,7 @@ DEV_MODE Support:
 """
 import os
 from contextlib import contextmanager
-from typing import Generator
+from typing import Generator, Optional
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -745,3 +745,81 @@ def seed_oss_service_registry():
             updated=updated_count,
             total=len(OSS_SERVICE_REGISTRY),
         )
+
+
+# ---------------------------------------------------------------------------
+# Analytics database (read from the orchestrator's 'athena' database)
+# ---------------------------------------------------------------------------
+# The orchestrator writes conversation rows to the analytics DB.
+# The admin backend reads those rows for the Conversations page.
+# Connection is optional — gracefully disabled when env vars are absent.
+
+_analytics_engine = None
+
+
+def _build_analytics_url() -> Optional[str]:
+    """Build the analytics database URL from ATHENA_DB_* env vars."""
+    host = os.getenv("ATHENA_DB_HOST", "")
+    port = os.getenv("ATHENA_DB_PORT", "5432")
+    name = os.getenv("ATHENA_DB_NAME", "")
+    user = os.getenv("ATHENA_DB_USER", "")
+    password = os.getenv("ATHENA_DB_PASSWORD", "")
+
+    if not (host and name and user):
+        return None
+
+    if password:
+        return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+    return f"postgresql://{user}@{host}:{port}/{name}"
+
+
+def _get_analytics_engine():
+    """Return a lazily-created SQLAlchemy engine for the analytics DB."""
+    global _analytics_engine
+    if _analytics_engine is None and not DEV_MODE:
+        url = _build_analytics_url()
+        if url:
+            try:
+                _analytics_engine = create_engine(
+                    url,
+                    poolclass=QueuePool,
+                    pool_size=2,
+                    max_overflow=5,
+                    pool_recycle=POOL_RECYCLE,
+                    pool_pre_ping=True,
+                    connect_args={"client_encoding": "utf8"},
+                )
+                logger.info("analytics_db_engine_created")
+            except Exception as e:
+                logger.warning("analytics_db_engine_failed", error=str(e))
+    return _analytics_engine
+
+
+def get_analytics_db() -> Generator[Session, None, None]:
+    """
+    FastAPI dependency for the analytics database session.
+
+    Raises HTTPException 503 if the analytics database is not configured.
+    Set ATHENA_DB_HOST, ATHENA_DB_NAME, ATHENA_DB_USER, ATHENA_DB_PASSWORD,
+    and ATHENA_DB_PORT environment variables to enable.
+    """
+    from fastapi import HTTPException
+
+    engine_instance = _get_analytics_engine()
+    if engine_instance is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Analytics database not configured. Set ATHENA_DB_* environment variables."
+        )
+
+    session_factory = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=engine_instance,
+        expire_on_commit=False,
+    )
+    db = session_factory()
+    try:
+        yield db
+    finally:
+        db.close()

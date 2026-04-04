@@ -1805,6 +1805,10 @@
                             <i data-lucide="bar-chart-3" class="sidebar-icon"></i>
                             <span>Tool Metrics</span>
                         </button>
+                        <button onclick="showTab('conversations')" data-route="conversations" class="sidebar-item w-full text-left px-4 py-2 text-sm font-medium text-gray-400 flex items-center gap-3 transition-all">
+                            <i data-lucide="messages-square" class="sidebar-icon"></i>
+                            <span>Conversations</span>
+                        </button>
                     </div>
                 </div>
 
@@ -2295,6 +2299,25 @@
                         </button>
                     </div>
                     <div id="services-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+                </div>
+
+                <!-- Privacy Section -->
+                <div class="mb-8">
+                    <h3 class="text-lg font-semibold text-white mb-4">Privacy &amp; Analytics</h3>
+                    <div class="bg-dark-card rounded-lg p-6">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-white font-medium">Analytics Mode</p>
+                                <p class="text-sm text-gray-400 mt-1">When enabled, all conversations are persisted to the database for review and quality evaluation.</p>
+                                <div id="analytics-mode-status" class="mt-2 text-xs text-gray-500"></div>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer ml-4">
+                                <input type="checkbox" id="analytics-mode-toggle" class="sr-only peer" onchange="saveAnalyticsMode(this.checked)">
+                                <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                            <span id="analytics-mode-label" class="text-xs text-gray-500 ml-2">Off</span>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -4609,6 +4632,11 @@
                     <div class="text-center text-gray-400 py-8">Loading gateway settings...</div>
                 </div>
             </div>
+
+            <!-- Conversations Tab (Analytics Mode viewer) -->
+            <div id="tab-conversations" class="tab-content hidden">
+                <div id="conversations-container"></div>
+            </div>
         </main>
     </div>
 
@@ -4936,5 +4964,6 @@
     <script src="/presets.js"></script>
     <script src="/voice-automations.js"></script>
     <script src="/alerts.js?v=20260112"></script>
+    <script src="/conversations.js"></script>
 </body>
 </html>

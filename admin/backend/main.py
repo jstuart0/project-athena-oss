@@ -45,7 +45,8 @@ from app.routes import (
     voice_config, voice_interfaces, mcp_security, websocket, pipeline_events, tool_proposals,
     site_scraper, performance_presets, voice_automations, alerts, follow_me, model_config,
     model_downloads, ha_pipelines, cloud_providers, cloud_llm_usage, rag_service_bypass,
-    dashboard, integrations, escalation, debug_logs, modules, local_auth, oss_profiles
+    dashboard, integrations, escalation, debug_logs, modules, local_auth, oss_profiles,
+    conversations
 )
 
 logger = structlog.get_logger()
@@ -199,6 +200,7 @@ app.include_router(debug_logs.router)
 app.include_router(modules.router)
 app.include_router(local_auth.router)
 app.include_router(oss_profiles.router)
+app.include_router(conversations.router)
 
 
 # Startup event: Initialize database and check connections
