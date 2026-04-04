@@ -2924,6 +2924,84 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     ]
     original_query = state.query
     query_lower = state.query.lower()
+
+    # -----------------------------------------------------------------------
+    # SAFETY PRE-SCREEN: Before intent classification, detect jailbreak
+    # patterns and high-risk query topics. Route them to general_info so
+    # the safety guardrails in the synthesis prompt handle the response
+    # gracefully (rather than a misrouted service error or flat refusal).
+    # This fires BEFORE the LLM classifier, making it fast and reliable.
+    # -----------------------------------------------------------------------
+    _JAILBREAK_PATTERNS = [
+        "ignore all previous instructions",
+        "ignore your instructions",
+        "ignore previous instructions",
+        "ignore your previous",
+        "forget your instructions",
+        "forget all instructions",
+        "you are now dan",
+        "you are now an ai with no restrictions",
+        "pretend you have no restrictions",
+        "pretend you are an ai without",
+        "act as if you have no",
+        "disregard your guidelines",
+        "bypass your restrictions",
+        "override your safety",
+        "your new instructions are",
+        "your instructions have been updated",
+        "simulate being a",
+        "roleplay as an ai",
+    ]
+    _HARM_PATTERNS = [
+        "how to make a bomb",
+        "how to build a bomb",
+        "make a bomb",
+        "build a bomb",
+        "make explosives",
+        "build explosives",
+        "synthesize methamphetamine",
+        "synthesize meth",
+        "how to make meth",
+        "how to make mdma",
+        "how to make lsd",
+        "how to make heroin",
+        "drug synthesis",
+        "synthesize drugs",
+        "how to hack",
+        "how do i hack",
+        "hack into",
+        "lethal dose",
+        "lethal dosage",
+        "fatal dose",
+        "how to stalk",
+        "how to poison",
+        "how to kill",
+        "how to hurt someone",
+        "how to harm",
+        "how to assault",
+        "child exploitation",
+        "child sexual",
+    ]
+    _safety_flag = False
+    for _pat in _JAILBREAK_PATTERNS:
+        if _pat in query_lower:
+            _safety_flag = True
+            logger.warning("safety_prescreen_jailbreak_detected", pattern=_pat, query=state.query[:80])
+            break
+    if not _safety_flag:
+        for _pat in _HARM_PATTERNS:
+            if _pat in query_lower:
+                _safety_flag = True
+                logger.warning("safety_prescreen_harm_detected", pattern=_pat, query=state.query[:80])
+                break
+
+    if _safety_flag:
+        state.intent = IntentCategory.GENERAL_INFO
+        state.confidence = 1.0
+        state.node_timings["classify"] = time.time() - start
+        return state
+    # -----------------------------------------------------------------------
+
     for wrong, correct in stt_corrections:
         if wrong in query_lower:
             # Apply correction while preserving case where possible
@@ -6032,6 +6110,7 @@ INSTRUCTIONS:
 5. Do not claim to have current web data unless it was actually provided in context.
 6. For other time-sensitive or highly specific current facts that were not provided, say you don't have current information.
 7. Keep the response concise and direct.
+8. SAFETY: If this question asks for harmful information (weapon/drug synthesis, lethal doses, hacking, self-harm methods, etc.), follow the safety guardrails in your system instructions. Decline clearly but helpfully — acknowledge the underlying concern and redirect to a legitimate resource. Do NOT simply say "I can't help with that." Offer something constructive.
 
 Response:"""
         else:
@@ -10770,6 +10849,7 @@ INSTRUCTIONS:
 5. Do not claim to have current web data unless it was actually provided in context.
 6. For other time-sensitive or highly specific current facts that were not provided, say you don't have current information.
 7. Keep the response concise and direct.
+8. SAFETY: If this question asks for harmful information (weapon/drug synthesis, lethal doses, hacking, self-harm methods, etc.), follow the safety guardrails in your system instructions. Decline clearly but helpfully — acknowledge the underlying concern and redirect to a legitimate resource. Do NOT simply say "I can't help with that." Offer something constructive.
 
 Response:"""
     else:
