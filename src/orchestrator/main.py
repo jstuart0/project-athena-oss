@@ -3218,37 +3218,82 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
             logger.info(f"DEBUG strong_intent check: query='{state.query}', prev_intent={prev_context.intent}, result={strong_intent}")
             if strong_intent["should_override_context"]:
                 detected_intent_str = strong_intent["detected_intent"]
-                logger.info(
-                    f"Strong intent detected: '{state.query}' has {detected_intent_str} "
-                    f"indicators {strong_intent['matching_keywords']} - NOT continuing {prev_context.intent} context"
+
+                # Check if the query is actually referencing conversation history
+                # rather than making a fresh lookup. Queries like "what city was that
+                # restaurant I mentioned in?" contain "restaurant" (dining indicator)
+                # but are really asking about conversation context, not requesting
+                # a restaurant search.
+                _conv_ref_phrases = [
+                    # Explicit back-references
+                    "i mentioned", "i said", "i told you", "i was talking about",
+                    "we discussed", "we talked about", "you said",
+                    "that restaurant", "that place", "the one i",
+                    "the wings i", "the food i",
+                    "remind me", "what was the", "what city",
+                    "tell me more about the", "tell me about the",
+                    "the younger one", "the older one", "the other one",
+                    # Personal statements (sharing facts, not making a lookup)
+                    "my favorite", "i love their", "i like their",
+                    "i usually go to", "i always go to",
+                ]
+                # Check for conversation context — either explicit history/summary on the
+                # state, or the existence of a previous context from Redis (which means
+                # there IS prior conversation even if the summarizer returned empty).
+                has_conv_context = bool(
+                    state.conversation_history
+                    or state.history_summary
+                    or prev_context  # prev_context was fetched above from Redis
                 )
-                # Map detected intent string to IntentCategory and use it directly
-                # This ensures queries like "find supercharger" route to DINING, not GENERAL_INFO
-                intent_map = {
-                    "dining": IntentCategory.DINING,
-                    "weather": IntentCategory.WEATHER,
-                    "sports": IntentCategory.SPORTS,
-                    "control": IntentCategory.CONTROL,
-                    "news": IntentCategory.NEWS,
-                    "directions": IntentCategory.DIRECTIONS,
-                    "general": IntentCategory.GENERAL_INFO,
-                    "flights": IntentCategory.FLIGHTS,
-                    "streaming": IntentCategory.STREAMING,
-                    "events": IntentCategory.EVENTS,
-                    "stocks": IntentCategory.STOCKS,
-                    "recipes": IntentCategory.RECIPES,
-                    "notification_pref": IntentCategory.NOTIFICATION_PREF,
-                }
-                if detected_intent_str in intent_map:
-                    state.intent = intent_map[detected_intent_str]
-                    state.confidence = 0.90  # Strong indicators = high confidence
-                    state.complexity = determine_complexity(state.query, detected_intent_str)
+                matched_phrases = [p for p in _conv_ref_phrases if p in query_lower]
+                is_conv_reference = has_conv_context and len(matched_phrases) > 0
+                logger.info(
+                    f"Conv reference check: has_context={has_conv_context}, "
+                    f"matched={matched_phrases}, is_ref={is_conv_reference}, "
+                    f"history_len={len(state.conversation_history)}, "
+                    f"summary_len={len(state.history_summary) if state.history_summary else 0}, "
+                    f"has_prev_context={prev_context is not None}"
+                )
+
+                if is_conv_reference:
                     logger.info(
-                        f"Fast path: strong intent override - routing '{state.query[:50]}...' "
-                        f"to {state.intent} (from {detected_intent_str} indicators)"
+                        f"Strong intent {detected_intent_str} overridden by conversation reference "
+                        f"in '{state.query[:50]}' - routing to GENERAL_INFO to use history"
                     )
-                    state.node_timings["classify"] = time.time() - start
-                    return state
+                    # Don't override to the detected intent; fall through to
+                    # context continuation which will route to GENERAL_INFO
+                else:
+                    logger.info(
+                        f"Strong intent detected: '{state.query}' has {detected_intent_str} "
+                        f"indicators {strong_intent['matching_keywords']} - NOT continuing {prev_context.intent} context"
+                    )
+                    # Map detected intent string to IntentCategory and use it directly
+                    # This ensures queries like "find supercharger" route to DINING, not GENERAL_INFO
+                    intent_map = {
+                        "dining": IntentCategory.DINING,
+                        "weather": IntentCategory.WEATHER,
+                        "sports": IntentCategory.SPORTS,
+                        "control": IntentCategory.CONTROL,
+                        "news": IntentCategory.NEWS,
+                        "directions": IntentCategory.DIRECTIONS,
+                        "general": IntentCategory.GENERAL_INFO,
+                        "flights": IntentCategory.FLIGHTS,
+                        "streaming": IntentCategory.STREAMING,
+                        "events": IntentCategory.EVENTS,
+                        "stocks": IntentCategory.STOCKS,
+                        "recipes": IntentCategory.RECIPES,
+                        "notification_pref": IntentCategory.NOTIFICATION_PREF,
+                    }
+                    if detected_intent_str in intent_map:
+                        state.intent = intent_map[detected_intent_str]
+                        state.confidence = 0.90  # Strong indicators = high confidence
+                        state.complexity = determine_complexity(state.query, detected_intent_str)
+                        logger.info(
+                            f"Fast path: strong intent override - routing '{state.query[:50]}...' "
+                            f"to {state.intent} (from {detected_intent_str} indicators)"
+                        )
+                        state.node_timings["classify"] = time.time() - start
+                        return state
                 # If detected intent not in map, fall through to normal classification
             elif ref_info.get("is_meta_inquiry"):
                 # Meta-inquiries about system state/errors should NOT continue previous context
@@ -5866,6 +5911,21 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
         logger.error(f"Retrieval error: {e}", exc_info=True)
         state.error = f"Retrieval failed: {str(e)}"
 
+    # If RAG retrieval returned no data but we have conversation context,
+    # re-route to GENERAL_INFO so the synthesis prompt uses conversation history
+    # instead of the restrictive "no information" path. This handles cases like
+    # "what city was that restaurant in?" being classified as dining but having
+    # no RAG data — the answer is in the conversation history.
+    if (not state.retrieved_data
+            and state.intent != IntentCategory.GENERAL_INFO
+            and (state.conversation_history or state.history_summary)):
+        logger.info(
+            "retrieve_reroute_to_general_info",
+            original_intent=state.intent.value if state.intent else None,
+            reason="no_rag_data_with_conversation_context"
+        )
+        state.intent = IntentCategory.GENERAL_INFO
+
     retrieve_duration = time.time() - start
     state.node_timings["retrieve"] = retrieve_duration
 
@@ -5879,39 +5939,56 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
 async def summarize_conversation_history(
     history: List[Dict[str, str]],
     current_query: str,
-    request_id: str = None
+    request_id: str = None,
+    previous_summary: str = ""
 ) -> str:
     """
     Summarize conversation history into a brief context statement.
 
-    Uses a fast model (qwen3:4b) to compress multiple messages into
-    1-2 sentences of relevant context.
+    Uses a rolling accumulation strategy: if a previous summary exists,
+    it is included so that facts from earlier turns are preserved even
+    after they fall out of the message history window.
 
     Args:
         history: List of previous messages [{"role": "user/assistant", "content": "..."}]
         current_query: The current user query (for relevance)
         request_id: Optional request ID for logging
+        previous_summary: Optional previous summary to accumulate facts from
 
     Returns:
-        A brief summary string (e.g., "User previously asked about Italian restaurants near home.")
+        A brief summary string (e.g., "Previous context: User is Sarah, a software engineer...")
     """
     if not history:
-        return ""
+        return previous_summary or ""
 
-    # Format history for summarization
+    # Format history for summarization — use all available history, not just last 6
     history_text = "\n".join([
-        f"{msg['role'].capitalize()}: {msg['content'][:200]}"  # Truncate long messages
-        for msg in history[-6:]  # Only use last 6 messages max
+        f"{msg['role'].capitalize()}: {msg['content'][:300]}"
+        for msg in history[-12:]  # Use up to last 12 messages for better coverage
     ])
 
-    prompt = f"""Summarize this conversation in ONE sentence that captures the key context relevant to the new query.
+    # If we have a previous summary, include it so facts accumulate across turns
+    prior_context_section = ""
+    if previous_summary:
+        # Strip the "Previous context: " prefix if present
+        clean_prev = previous_summary.replace("Previous context: ", "", 1)
+        prior_context_section = f"""
+Previously known facts about the user (MUST be preserved in your summary):
+{clean_prev}
 
-Previous conversation:
+"""
+
+    prompt = f"""Extract ALL user facts and context from this conversation. Preserve every detail the user stated about themselves.
+{prior_context_section}Recent conversation:
 {history_text}
 
-New query: "{current_query}"
+Write a concise summary (2-5 sentences) that captures:
+1. ALL facts the user stated about themselves (name, location, occupation, pets, family, preferences, etc.) — include facts from the "previously known" section above
+2. Key topics discussed and any decisions or corrections made (corrections override old facts)
+3. Any context relevant to this new query: "{current_query}"
 
-Write a brief summary (1 sentence) of what the user was discussing. Focus on facts, preferences, or context that might be relevant to the new query. If nothing is relevant, respond with "No relevant prior context."
+IMPORTANT: Never drop user-stated facts even if they seem unrelated to the new query. The user expects you to remember everything they told you. If a user corrected a fact (e.g., "actually Mochi is 4 now"), use the corrected value.
+If there is no meaningful context, respond with "No relevant prior context."
 
 Summary:"""
 
@@ -5946,7 +6023,7 @@ Summary:"""
         summary = result.get("response", "").strip()
 
         # Validate summary isn't too long or empty
-        if summary and len(summary) < 500 and "No relevant prior context" not in summary:
+        if summary and len(summary) < 1000 and "No relevant prior context" not in summary:
             logger.info(f"History summarized: {len(history)} messages -> {len(summary)} chars")
             return f"Previous context: {summary}"
 
@@ -6114,8 +6191,29 @@ INSTRUCTIONS:
 
 Response:"""
         else:
-            # No data retrieved - must be explicit about lack of information
-            synthesis_prompt = f"""Question: {state.query}
+            # No RAG data retrieved — use conversation context and general knowledge
+            # If conversation history is available, the user may be referencing prior
+            # discussion (e.g., "what city was that restaurant in?"). Allow the LLM to
+            # use conversation history to answer, while still being honest about lacking
+            # external data.
+            has_conversation_context = bool(state.conversation_history or state.history_summary)
+            if has_conversation_context:
+                synthesis_prompt = f"""Question: {state.query}
+
+Respond naturally as a helpful assistant using the conversation history and your built-in knowledge.
+
+INSTRUCTIONS:
+1. Use the previous conversation context to understand references like "the younger one", "that restaurant", "my project", etc.
+2. If the user is referring to something they mentioned earlier, answer based on what they told you.
+3. You may answer using your built-in knowledge and the provided assistant context.
+4. Do not claim to have current web data unless it was actually provided in context.
+5. For time-sensitive or highly specific current facts that were not provided, say you don't have current information.
+6. Keep the response concise and direct.
+7. SAFETY: If this question asks for harmful information, follow the safety guardrails in your system instructions.
+
+Response:"""
+            else:
+                synthesis_prompt = f"""Question: {state.query}
 
 CRITICAL: You do NOT have access to current or specific information to answer this question.
 
@@ -6181,13 +6279,15 @@ Keep your acknowledgment brief - don't dwell on the interruption.
         # Format conversation history for LLM context
         history_context = ""
         if state.history_summary:
-            # Use summarized history (faster)
-            history_context = f"{state.history_summary}\n\n"
+            history_context = f"""
+CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", pronouns, etc.):
+{state.history_summary}
+
+"""
             logger.info("Using summarized history context")
         elif state.conversation_history:
-            # Use full history
             logger.info(f"Including {len(state.conversation_history)} previous messages in context")
-            history_context = "Previous conversation:\n"
+            history_context = "CONVERSATION CONTEXT (use this to resolve references like \"my\", \"the\", \"that\", pronouns, etc.):\n"
             for msg in state.conversation_history:
                 role = msg["role"].capitalize()
                 content = msg["content"]
@@ -6195,6 +6295,7 @@ Keep your acknowledgment brief - don't dwell on the interruption.
             history_context += "\n"
 
         # Combine system context, history, and synthesis prompt
+        # Place history right before the synthesis prompt so it's closest to the question
         full_prompt = system_context + history_context + synthesis_prompt
 
         # Get synthesis model from database or use fallback
@@ -9202,6 +9303,34 @@ def create_orchestrator_graph() -> StateGraph:
         }
 
         if state.intent in phase2_intents:
+            # If the query references conversation context rather than being a fresh
+            # lookup, route to synthesize so the LLM can answer from history.
+            # This prevents dead-end responses when the query is referential
+            # (e.g., "what city was that restaurant in?" or "tell me more about the wings
+            # I mentioned") — the answer is in conversation history, not in a RAG service.
+            has_context = bool(state.conversation_history or state.history_summary)
+            if has_context:
+                query_lower = state.query.lower()
+                _referential_patterns = [
+                    "i mentioned", "i said", "i told you", "i was talking about",
+                    "we discussed", "we talked about", "you said",
+                    "that restaurant", "that place", "the one i",
+                    "the wings i", "the food i", "my favorite",
+                    "remind me", "what was", "what city", "what was the",
+                    "tell me more about the", "tell me about the",
+                    "the younger one", "the older one", "the other one",
+                    "how old is the", "how old are my",
+                ]
+                is_referential = any(pat in query_lower for pat in _referential_patterns)
+                # Also check context_ref_info from the detector
+                ref_info = state.context_ref_info or {}
+                if is_referential or ref_info.get("has_context_ref", False):
+                    logger.info(
+                        f"Phase 2 intent {state.intent.value} has context reference - routing to synthesize",
+                        original_intent=state.intent.value
+                    )
+                    state.intent = IntentCategory.GENERAL_INFO
+                    return "synthesize"
             logger.info(f"Routing {state.intent.value} to tool_call node (Phase 2 service)")
             return "tool_call"
 
@@ -9509,17 +9638,23 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                                 await update_session_summary(session.session_id, history_summary)
                                 logger.info(f"History mode: summarized - computed and cached ({len(raw_history)} messages)")
                     else:
-                        # Original behavior - compute fresh summary
+                        # Compute fresh summary, accumulating from previous summary
                         max_history = conv_settings.get("max_llm_history_messages", 10)
                         raw_history = session.get_llm_history(max_history)
 
                         if raw_history:
+                            # Get previous summary to accumulate facts across turns
+                            prev_summary = await get_session_summary(session.session_id) or ""
                             history_summary = await summarize_conversation_history(
                                 raw_history,
                                 request.query,
-                                request_id=hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8]
+                                request_id=hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8],
+                                previous_summary=prev_summary
                             )
-                            logger.info(f"History mode: summarized - compressed {len(raw_history)} messages")
+                            # Store updated summary for next turn
+                            if history_summary:
+                                await update_session_summary(session.session_id, history_summary)
+                            logger.info(f"History mode: summarized - compressed {len(raw_history)} messages (accumulated)")
 
                 else:  # "full" mode (default)
                     # Full history - current behavior
@@ -10196,12 +10331,16 @@ async def process_query_stream(request: QueryRequest):
                         max_history = conv_settings.get("max_llm_history_messages", 10)
                         raw_history = session.get_llm_history(max_history)
                         if raw_history:
+                            prev_summary = await get_session_summary(session.session_id) or ""
                             history_summary = await summarize_conversation_history(
                                 raw_history,
                                 request.query,
-                                request_id=hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8]
+                                request_id=hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8],
+                                previous_summary=prev_summary
                             )
-                            logger.info(f"History mode: summarized - compressed {len(raw_history)} messages")
+                            if history_summary:
+                                await update_session_summary(session.session_id, history_summary)
+                            logger.info(f"History mode: summarized - compressed {len(raw_history)} messages (accumulated)")
                 else:  # "full" mode
                     max_history = conv_settings.get("max_llm_history_messages", 10)
                     conversation_history = session.get_llm_history(max_history)
@@ -10853,7 +10992,25 @@ INSTRUCTIONS:
 
 Response:"""
     else:
-        synthesis_prompt = f"""Question: {state.query}
+        # No RAG data retrieved — use conversation context and general knowledge
+        has_conversation_context = bool(state.conversation_history or state.history_summary)
+        if has_conversation_context:
+            synthesis_prompt = f"""Question: {state.query}
+
+Respond naturally as a helpful assistant using the conversation history and your built-in knowledge.
+
+INSTRUCTIONS:
+1. Use the previous conversation context to understand references like "the younger one", "that restaurant", "my project", etc.
+2. If the user is referring to something they mentioned earlier, answer based on what they told you.
+3. You may answer using your built-in knowledge and the provided assistant context.
+4. Do not claim to have current web data unless it was actually provided in context.
+5. For time-sensitive or highly specific current facts that were not provided, say you don't have current information.
+6. Keep the response concise and direct.
+7. SAFETY: If this question asks for harmful information, follow the safety guardrails in your system instructions.
+
+Response:"""
+        else:
+            synthesis_prompt = f"""Question: {state.query}
 
 CRITICAL: You do NOT have access to current or specific information to answer this question.
 
@@ -10896,9 +11053,13 @@ Response:"""
     # Format conversation history
     history_context = ""
     if state.history_summary:
-        history_context = f"{state.history_summary}\n\n"
+        history_context = f"""
+CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", pronouns, etc.):
+{state.history_summary}
+
+"""
     elif state.conversation_history:
-        history_context = "Previous conversation:\n"
+        history_context = "CONVERSATION CONTEXT (use this to resolve references like \"my\", \"the\", \"that\", pronouns, etc.):\n"
         for msg in state.conversation_history:
             role = msg["role"].capitalize()
             content = msg["content"]
@@ -11047,11 +11208,15 @@ async def chat_completions(request: OpenAIChatRequest):
                             max_history = conv_settings.get("max_llm_history_messages", 10)
                             raw_history = session.get_llm_history(max_history)
                             if raw_history:
+                                prev_summary = await get_session_summary(session.session_id) or ""
                                 history_summary = await summarize_conversation_history(
                                     raw_history,
                                     user_message,
-                                    request_id=hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8]
+                                    request_id=hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8],
+                                    previous_summary=prev_summary
                                 )
+                                if history_summary:
+                                    await update_session_summary(session.session_id, history_summary)
                     else:  # "full" mode
                         max_history = conv_settings.get("max_llm_history_messages", 10)
                         conversation_history = session.get_llm_history(max_history)
