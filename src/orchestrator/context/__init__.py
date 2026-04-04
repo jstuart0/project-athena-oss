@@ -4,7 +4,9 @@ from .detector import (
     detect_context_reference,
     detect_strong_intent,
     detect_location_correction,
+    is_conversational_reference,
     CONTEXT_REF_PATTERNS,
+    CONVERSATIONAL_REFERENCE_PHRASES,
     ROOM_INDICATORS,
 )
 from .storage import (
@@ -18,7 +20,9 @@ __all__ = [
     "detect_context_reference",
     "detect_strong_intent",
     "detect_location_correction",
+    "is_conversational_reference",
     "CONTEXT_REF_PATTERNS",
+    "CONVERSATIONAL_REFERENCE_PHRASES",
     "ROOM_INDICATORS",
     # Storage
     "get_conversation_context",

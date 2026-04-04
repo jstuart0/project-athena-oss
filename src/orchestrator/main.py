@@ -110,6 +110,7 @@ from orchestrator.context import (
     detect_context_reference,
     detect_strong_intent,
     detect_location_correction,
+    is_conversational_reference,
     CONTEXT_REF_PATTERNS,
     ROOM_INDICATORS,
 )
@@ -1602,6 +1603,7 @@ class OrchestratorState(BaseModel):
     citations: List[str] = Field(default_factory=list)
     skip_synthesis: bool = Field(False, description="Skip LLM synthesis (used by status query optimization)")
     was_truncated: bool = Field(False, description="Whether response was truncated due to token limit")
+    is_fallback: bool = Field(False, description="Whether response is a fallback/error (should not be cached)")
 
     # Validation
     validation_passed: bool = True
@@ -3220,42 +3222,15 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 detected_intent_str = strong_intent["detected_intent"]
 
                 # Check if the query is actually referencing conversation history
-                # rather than making a fresh lookup. Queries like "what city was that
-                # restaurant I mentioned in?" contain "restaurant" (dining indicator)
-                # but are really asking about conversation context, not requesting
-                # a restaurant search.
-                _conv_ref_phrases = [
-                    # Explicit back-references
-                    "i mentioned", "i said", "i told you", "i was talking about",
-                    "we discussed", "we talked about", "you said",
-                    "that restaurant", "that place", "the one i",
-                    "the wings i", "the food i",
-                    "remind me", "what was the", "what city",
-                    "tell me more about the", "tell me about the",
-                    "the younger one", "the older one", "the other one",
-                    # Personal statements (sharing facts, not making a lookup)
-                    "my favorite", "i love their", "i like their",
-                    "i usually go to", "i always go to",
-                ]
-                # Check for conversation context — either explicit history/summary on the
-                # state, or the existence of a previous context from Redis (which means
-                # there IS prior conversation even if the summarizer returned empty).
+                # rather than making a fresh lookup.
                 has_conv_context = bool(
                     state.conversation_history
                     or state.history_summary
-                    or prev_context  # prev_context was fetched above from Redis
+                    or prev_context
                 )
-                matched_phrases = [p for p in _conv_ref_phrases if p in query_lower]
-                is_conv_reference = has_conv_context and len(matched_phrases) > 0
-                logger.info(
-                    f"Conv reference check: has_context={has_conv_context}, "
-                    f"matched={matched_phrases}, is_ref={is_conv_reference}, "
-                    f"history_len={len(state.conversation_history)}, "
-                    f"summary_len={len(state.history_summary) if state.history_summary else 0}, "
-                    f"has_prev_context={prev_context is not None}"
-                )
+                is_conv_ref = is_conversational_reference(query_lower, has_conv_context)
 
-                if is_conv_reference:
+                if is_conv_ref:
                     logger.info(
                         f"Strong intent {detected_intent_str} overridden by conversation reference "
                         f"in '{state.query[:50]}' - routing to GENERAL_INFO to use history"
@@ -5961,7 +5936,26 @@ async def summarize_conversation_history(
     if not history:
         return previous_summary or ""
 
-    # Format history for summarization — use all available history, not just last 6
+    # SHORT HISTORY PATH (1-2 messages):
+    # Skip the LLM entirely. Small models struggle to "summarize" when there's
+    # barely anything to compress — they often respond with "no relevant context"
+    # or hallucinate filler. For 1-2 messages, the raw user content IS the best
+    # summary. At 3+ messages the LLM adds value by compressing and extracting
+    # patterns across turns.
+    if len(history) <= 2:
+        user_messages = [m["content"] for m in history if m["role"] == "user"]
+        if user_messages:
+            raw_context = " ".join(msg[:300] for msg in user_messages)
+            if previous_summary:
+                clean_prev = previous_summary.replace("Previous context: ", "", 1)
+                result = f"Previous context: {clean_prev} {raw_context}"
+            else:
+                result = f"Previous context: {raw_context}"
+            logger.info(f"Short history path: {len(history)} messages -> {len(result)} chars (no LLM)")
+            return result
+
+    # LONG HISTORY PATH (3+ messages): Use LLM summarizer
+    # Format history for summarization — use all available history
     history_text = "\n".join([
         f"{msg['role'].capitalize()}: {msg['content'][:300]}"
         for msg in history[-12:]  # Use up to last 12 messages for better coverage
@@ -5988,7 +5982,7 @@ Write a concise summary (2-5 sentences) that captures:
 3. Any context relevant to this new query: "{current_query}"
 
 IMPORTANT: Never drop user-stated facts even if they seem unrelated to the new query. The user expects you to remember everything they told you. If a user corrected a fact (e.g., "actually Mochi is 4 now"), use the corrected value.
-If there is no meaningful context, respond with "No relevant prior context."
+You MUST produce a summary. Every user message contains information worth preserving for conversation continuity.
 
 Summary:"""
 
@@ -6252,6 +6246,19 @@ Response:"""
         if state.memory_context:
             system_context += state.memory_context
             logger.info("Memory context injected into LLM prompt")
+
+        # When conversation history exists, instruct the LLM to distinguish
+        # between the assistant owner's profile and the current conversation partner
+        if state.conversation_history or state.history_summary:
+            system_context += """
+IMPORTANT: The CONTEXT INFORMATION above describes this assistant's owner and
+environment. The CONVERSATION CONTEXT below contains facts stated by the CURRENT
+USER in this session. When the user asks about themselves ("my name", "my cats",
+"my project", etc.), answer from the conversation context. When they ask about
+the assistant's owner or environment, answer from the context information above.
+Do not conflate the two — the current user may not be the owner.
+
+"""
 
         # Barge-in: If user interrupted previous response, acknowledge naturally
         if state.interruption_context:
@@ -8935,6 +8942,7 @@ async def finalize_node(state: OrchestratorState) -> OrchestratorState:
             request_id=state.request_id
         )
         state.answer = "I'm not sure how to help with that. Could you rephrase your question?"
+        state.is_fallback = True
 
     # Strip any hallucinated role-continuation text (e.g. "\nUser:", "\nHuman:")
     state.answer = _strip_hallucinated_continuation(state.answer)
@@ -9310,19 +9318,7 @@ def create_orchestrator_graph() -> StateGraph:
             # I mentioned") — the answer is in conversation history, not in a RAG service.
             has_context = bool(state.conversation_history or state.history_summary)
             if has_context:
-                query_lower = state.query.lower()
-                _referential_patterns = [
-                    "i mentioned", "i said", "i told you", "i was talking about",
-                    "we discussed", "we talked about", "you said",
-                    "that restaurant", "that place", "the one i",
-                    "the wings i", "the food i", "my favorite",
-                    "remind me", "what was", "what city", "what was the",
-                    "tell me more about the", "tell me about the",
-                    "the younger one", "the older one", "the other one",
-                    "how old is the", "how old are my",
-                ]
-                is_referential = any(pat in query_lower for pat in _referential_patterns)
-                # Also check context_ref_info from the detector
+                is_referential = is_conversational_reference(state.query, has_context)
                 ref_info = state.context_ref_info or {}
                 if is_referential or ref_info.get("has_context_ref", False):
                     logger.info(
@@ -9803,6 +9799,24 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                             cached_response = None
                             break
 
+            # Bypass cache when query references conversation context
+            if cached_response:
+                has_session_context = bool(session and len(session.messages) > 0)
+                ref_info = detect_context_reference(request.query)
+                is_conv_ref = is_conversational_reference(request.query, has_session_context)
+
+                if has_session_context and (
+                    ref_info.get("has_context_ref")
+                    or ref_info.get("is_continuation")
+                    or is_conv_ref
+                ):
+                    logger.info(
+                        "semantic_cache_bypassed_for_context",
+                        query=request.query[:50],
+                        bypass_reason="context_reference" if is_conv_ref else "continuation"
+                    )
+                    cached_response = None
+
             if cached_response:
                 # Cache hit - return cached response immediately
                 logger.info(
@@ -10180,23 +10194,37 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         )
 
         # SEMANTIC QUERY CACHING: Store successful response for future cache hits
-        # Cache asynchronously (fire-and-forget) to avoid adding latency
-        # Include location_override in cache key for location-sensitive queries
-        try:
-            # Convert response to dict for caching
-            response_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
-            cache_location_override = query_context.get("location_override") if query_context else None
-            asyncio.create_task(
-                cache_response(
-                    query=request.query,
-                    response=response_dict,
-                    room=request.room,
-                    mode=current_mode,
-                    location_override=cache_location_override
+        # Only cache responses that actually succeeded — not fallbacks or errors
+        should_cache = (
+            response.answer
+            and not final_state.get("is_fallback", False)
+            and final_state.get("validation_passed", True)
+            and response.confidence >= 0.3
+            and response.intent != "unknown"
+        )
+        if should_cache:
+            try:
+                response_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
+                cache_location_override = query_context.get("location_override") if query_context else None
+                asyncio.create_task(
+                    cache_response(
+                        query=request.query,
+                        response=response_dict,
+                        room=request.room,
+                        mode=current_mode,
+                        location_override=cache_location_override
+                    )
                 )
+            except Exception as cache_err:
+                logger.warning("semantic_cache_store_failed", error=str(cache_err))
+        else:
+            logger.info(
+                "semantic_cache_write_skipped",
+                is_fallback=final_state.get("is_fallback", False),
+                validation_passed=final_state.get("validation_passed", True),
+                confidence=response.confidence,
+                intent=response.intent
             )
-        except Exception as cache_err:
-            logger.warning("semantic_cache_store_failed", error=str(cache_err))
 
         # ANALYTICS CAPTURE: Fire-and-forget conversation turn recording
         _debug_source = _get_analytics_source()
@@ -11049,6 +11077,18 @@ Response:"""
     # Inject relevant memories
     if state.memory_context:
         system_context += state.memory_context
+
+    # Distinguish owner profile from current conversation partner
+    if state.conversation_history or state.history_summary:
+        system_context += """
+IMPORTANT: The CONTEXT INFORMATION above describes this assistant's owner and
+environment. The CONVERSATION CONTEXT below contains facts stated by the CURRENT
+USER in this session. When the user asks about themselves ("my name", "my cats",
+"my project", etc.), answer from the conversation context. When they ask about
+the assistant's owner or environment, answer from the context information above.
+Do not conflate the two — the current user may not be the owner.
+
+"""
 
     # Format conversation history
     history_context = ""

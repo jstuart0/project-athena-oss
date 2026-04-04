@@ -314,8 +314,8 @@ async def chat(message: ChatMessage):
         )
 
     try:
-        # Get current mode (owner or guest based on booking/override)
-        current_mode = await get_current_mode()
+        # Web chat uses "chat" mode for anonymous visitors
+        current_mode = "chat"
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             request_body = {
@@ -436,8 +436,10 @@ async def chat_stream(message: ChatMessage):
         context["guest_id"] = guest.get("id")
         context["guest_name"] = guest.get("guest_name")
 
-    # Get current mode before entering generator
-    current_mode = await get_current_mode()
+    # Web chat uses "chat" mode for anonymous visitors.
+    # The voice assistant sends "owner" mode separately.
+    # This scopes base knowledge injection to public-facing context only.
+    current_mode = "chat"
 
     async def generate():
         try:

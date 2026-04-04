@@ -24,7 +24,7 @@ class BaseKnowledgeCreate(BaseModel):
     category: str  # 'property', 'location', 'user', 'temporal', 'general'
     key: str
     value: str
-    applies_to: str = 'both'  # 'guest', 'owner', 'both'
+    applies_to: str = 'both'  # 'guest', 'owner', 'both', 'chat'
     priority: int = 0
     extra_metadata: Optional[dict] = None
     enabled: bool = True

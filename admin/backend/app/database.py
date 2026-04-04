@@ -672,6 +672,53 @@ def seed_oss_conversation_settings():
             logger.debug("oss_conversation_settings_already_configured")
 
 
+def seed_oss_base_knowledge():
+    """
+    Seed minimal base knowledge entries so the assistant has an identity out of the box.
+
+    These are applies_to="both" entries (injected for all modes including chat).
+    Operators add owner-specific, guest-specific, or chat-specific entries on top.
+    """
+    from app.models import BaseKnowledge
+
+    SEED_ENTRIES = [
+        {
+            "category": "general",
+            "key": "assistant_name",
+            "value": "I am Athena, an AI assistant.",
+            "applies_to": "both",
+            "priority": 100,
+            "description": "Assistant identity — injected for all modes",
+        },
+        {
+            "category": "general",
+            "key": "assistant_personality",
+            "value": "I am helpful, concise, and honest. I focus on practical answers and avoid speculation.",
+            "applies_to": "both",
+            "priority": 90,
+            "description": "Assistant personality — injected for all modes",
+        },
+    ]
+
+    with get_db_context() as db:
+        existing = db.query(BaseKnowledge).filter(
+            BaseKnowledge.key.in_([e["key"] for e in SEED_ENTRIES])
+        ).all()
+        existing_keys = {e.key for e in existing}
+
+        created = 0
+        for entry in SEED_ENTRIES:
+            if entry["key"] not in existing_keys:
+                db.add(BaseKnowledge(**entry))
+                created += 1
+
+        if created:
+            db.commit()
+            logger.info("oss_base_knowledge_seeded", created=created)
+        else:
+            logger.debug("oss_base_knowledge_already_configured")
+
+
 def seed_oss_service_registry():
     """
     Seed OSS default service registry entries for cluster-local RAG services.

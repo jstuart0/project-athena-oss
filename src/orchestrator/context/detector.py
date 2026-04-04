@@ -428,6 +428,52 @@ def detect_context_reference(query: str) -> Dict[str, Any]:
     return result
 
 
+# ============================================================================
+# Conversational reference detection — shared utility
+# ============================================================================
+
+# Single source of truth for phrases indicating the user is referencing
+# prior conversation rather than making a fresh data lookup.
+CONVERSATIONAL_REFERENCE_PHRASES = [
+    # Explicit back-references
+    "i mentioned", "i said", "i told you", "i was talking about",
+    "we discussed", "we talked about", "you said",
+    # Demonstrative references to prior entities
+    "that restaurant", "that place", "the one i",
+    "the wings i", "the food i",
+    # Request for recall
+    "remind me", "what was the", "what city",
+    "tell me more about the", "tell me about the",
+    # Relative references
+    "the younger one", "the older one", "the other one",
+    # Personal statements (sharing facts, not making a lookup)
+    "my favorite", "i love their", "i like their",
+    "i usually go to", "i always go to",
+]
+
+
+def is_conversational_reference(query: str, has_context: bool) -> bool:
+    """
+    Check if a query references prior conversation rather than requesting
+    a fresh data lookup.
+
+    Used by classify_node, route_after_classify, and the semantic cache
+    bypass to avoid routing referential queries to RAG services or
+    returning stale cached responses.
+
+    Args:
+        query: The user's query text
+        has_context: Whether the session has prior conversation context
+
+    Returns:
+        True if the query contains conversational reference patterns
+    """
+    if not has_context:
+        return False
+    query_lower = query.lower()
+    return any(p in query_lower for p in CONVERSATIONAL_REFERENCE_PHRASES)
+
+
 # Location correction patterns
 # These indicate user wants to change the assumed location
 LOCATION_CORRECTION_PATTERNS = [
