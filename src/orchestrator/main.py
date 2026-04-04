@@ -8756,6 +8756,9 @@ async def finalize_node(state: OrchestratorState) -> OrchestratorState:
         )
         state.answer = "I'm not sure how to help with that. Could you rephrase your question?"
 
+    # Strip any hallucinated role-continuation text (e.g. "\nUser:", "\nHuman:")
+    state.answer = _strip_hallucinated_continuation(state.answer)
+
     # Calculate total processing time
     total_time = time.time() - state.start_time
     logger.info(
@@ -10148,7 +10151,7 @@ async def process_query_stream(request: QueryRequest):
             if state.answer:
                 # Pre-computed answer: control/music/TV/SMS handlers, or tool_call_node synthesis.
                 # tool_call_node does multi-step LLM internally — can't stream those tokens yet.
-                full_answer = state.answer
+                full_answer = _strip_hallucinated_continuation(state.answer)
                 CHUNK_SIZE = 20
                 for i in range(0, len(full_answer), CHUNK_SIZE):
                     chunk = full_answer[i:i + CHUNK_SIZE]
@@ -10183,6 +10186,16 @@ async def process_query_stream(request: QueryRequest):
                     ):
                         token = chunk.get("token", "")
                         if token:
+                            # Early-terminate before emitting if the LLM is hallucinating the
+                            # next user turn (e.g. "\nUser: ..." continuation after its response).
+                            if _CONTINUATION_PATTERN.search("".join(response_tokens) + token):
+                                logger.warning(
+                                    "streaming_continuation_detected",
+                                    request_id=request_id,
+                                    tokens_emitted=token_count,
+                                )
+                                stream_completed = True
+                                break
                             token_count += 1
                             response_tokens.append(token)
                             yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': token})}\n\n"
@@ -10195,7 +10208,7 @@ async def process_query_stream(request: QueryRequest):
                 except Exception as e:
                     logger.error("streaming_error", request_id=request_id, tokens_emitted=token_count, error=str(e))
 
-                full_answer = "".join(response_tokens)
+                full_answer = _strip_hallucinated_continuation("".join(response_tokens))
                 if not full_answer:
                     full_answer = "I'm not sure how to help with that. Could you rephrase your question?"
                     yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': full_answer})}\n\n"
@@ -10468,6 +10481,35 @@ async def list_models():
                 }
             ]
         }
+
+
+# ============================================================================
+# LLM Response Post-Processing Utilities
+# ============================================================================
+
+# Matches hallucinated role-continuation lines like "\nUser: ", "\nHuman: ", etc.
+# These appear when synthesis prompts end with "Response:" and no stop tokens are
+# configured, causing the LLM to generate the next conversation turn itself.
+_CONTINUATION_PATTERN = re.compile(
+    r'\n\s*(User|Human|Jarvis|Assistant)\s*:',
+    re.IGNORECASE
+)
+
+
+def _strip_hallucinated_continuation(text: str) -> str:
+    """
+    Strip LLM-hallucinated role-continuation text from a response.
+
+    Truncates at the first line that looks like a new role turn (e.g. "\\nUser:",
+    "\\nHuman:", "\\nAssistant:", "\\nJarvis:"). These occur when the LLM starts
+    generating the next conversation turn instead of stopping after its response.
+    """
+    if not text:
+        return text
+    match = _CONTINUATION_PATTERN.search(text)
+    if match:
+        return text[:match.start()].rstrip()
+    return text
 
 
 # ============================================================================
