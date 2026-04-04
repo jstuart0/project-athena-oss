@@ -1,5 +1,9 @@
 # Plan: Analytics Mode — Conversation Logging & Evaluation
 
+**Status: SA review complete — all findings resolved or explicitly accepted**
+
+---
+
 ## Context
 
 Athena is privacy-first by design. By default, conversations live only in Redis with a 1-hour TTL
@@ -18,8 +22,12 @@ effect that happens after the response is returned.
 - `query_logs` table in the `athena` PostgreSQL database — schema exists, **0 rows**, nothing
   writes to it, superseded by this plan.
 - `ATHENA_DEBUG_MODE=true` env var — writes structured logs to disk files. Was active on Mac Studio
-  on 2026-01-10 only. Captures some query text but inconsistently, not in a queryable form.
+  on 2026-01-10 only. Captures some query text inconsistently, not in a queryable form.
 - Redis sessions: `session_id` per conversation, 1-hour TTL, used for context only.
+- `system_settings` table and `SystemSetting` model already exist in the admin backend.
+  `/api/settings` routes already exist.
+- `ConversationAnalytics` model already exists — low-cardinality event telemetry (session
+  creation, follow-up detection), not transcript storage. Separate purpose; no conflict.
 
 ### Motivation
 
@@ -36,23 +44,155 @@ effect that happens after the response is returned.
 1. **Default is privacy-first.** Analytics mode is off by default. Zero behavioral change when off.
 2. **Additive only.** The analytics write is a non-blocking, non-fatal side effect. If it fails,
    the request still succeeds and a warning is logged.
-3. **Source-labeled.** Every recorded entry carries a `source` field indicating why it was
-   captured, enabling operators to distinguish data from different recording modes.
-4. **Unified storage.** Both the new analytics mode and the existing debug mode write to the same
-   schema and are visible in the same UI — just labeled differently.
+3. **Best-effort capture, explicitly documented.** Analytics data is not a durable ledger. Process
+   crash, pod restart, or OOM kill between response and write completion will lose that turn. This
+   is an accepted trade-off (see SA Finding 3).
+4. **Source-labeled at the turn level.** Every turn row carries a `source` field indicating why it
+   was captured. Source lives on turns only, not on conversation rows (see SA Finding 4).
+5. **Explicit RBAC.** Reading conversations requires `read:conversations` scope. Submitting
+   evaluations requires `write:conversation_evaluations`. Enabling/disabling analytics requires
+   `write:settings` (see SA Finding 6).
+6. **Both repos get the full feature.** OSS has admin backend and frontend; both repos receive
+   all changes (see SA Finding 5).
 
 ---
 
-## Source Labels
+## SA Review Findings & Resolutions
 
-| Value | Trigger | Meaning |
-|-------|---------|---------|
-| `analytics` | Admin UI toggle is on | Analytics mode explicitly enabled by operator |
-| `debug` | `ATHENA_DEBUG_MODE=true` on the service | Debug mode enabled at service level |
+### Finding 1 (HIGH — resolved): Privacy model under-specified
 
-Both sources write identical data. The label exists so operators know which mode produced each
-record. In a production deployment with analytics mode on and debug mode off, all rows will have
-`source=analytics`. In a dev/testing environment, rows may have `source=debug`.
+**Problem:** The initial draft stored raw `query_text` and `response_text` without defining PII
+handling, retention, encryption expectations, access control, or consent messaging.
+
+**Resolution:** See the explicit Privacy Policy section below. Summary:
+- No automatic PII redaction in v1 (operator responsibility, documented)
+- Retention: no automatic expiry in v1; a configurable retention window is future work (documented)
+- Encryption-at-rest: relies on database-level encryption; no application-layer encryption added
+- Access: `read:conversations` scope required; conversations are not exposed to viewer or guest roles
+- Consent: analytics mode toggle in admin UI includes explicit description of what is stored
+
+### Finding 2 (HIGH — resolved): system_settings and /api/settings already exist
+
+**Problem:** The initial draft described creating a `system_settings` table and generic settings
+routes that already exist.
+
+**Resolution:** The plan now says:
+- Add a single row to the existing `system_settings` table (`key='analytics_mode_enabled'`)
+- Add the analytics toggle to the existing settings API — extend routes, not create new ones
+- The `SystemSetting` SQLAlchemy model and `/api/settings` router already exist in the admin
+  backend at `admin/backend/app/models.py:2420` and `admin/backend/app/routes/settings.py:21`
+
+### Finding 3 (MEDIUM — accepted): Fire-and-forget is best-effort only
+
+**Problem:** `asyncio.create_task()` after response return loses the turn on crash or restart.
+Operators may assume completeness.
+
+**Resolution:** Explicitly accepted as the right trade-off for this feature:
+- Analytics mode is for trend analysis and quality review, not financial or audit compliance
+- Loss rate in practice is very low (only in-flight tasks on shutdown/crash)
+- A queue-backed durable capture would add significant infrastructure complexity for marginal gain
+- The admin UI and feature description will explicitly state: "Analytics capture is best-effort.
+  Turns in-flight at the time of a service restart may not be recorded."
+
+### Finding 4 (MEDIUM — resolved): Source ambiguity at conversation level
+
+**Problem:** If a session starts in debug mode and analytics mode is later enabled (or vice versa),
+the `conversations` table could only represent one source cleanly.
+
+**Resolution:** `source` is stored **on turn rows only**, not on conversation rows. This is the
+correct model because turns are the atomic unit of capture, and each turn is captured by exactly
+one mode. The `conversations` row has no `source` column. If a query is ever needed for
+"conversations that have at least one debug-mode turn," it can be answered via a join on turns.
+
+### Finding 5 (MEDIUM — resolved): OSS/private repo boundary was incorrect
+
+**Problem:** The initial draft said "OSS gets orchestrator changes only; admin stays private-repo."
+The OSS repo has `admin/backend/` and `admin/frontend/` directories.
+
+**Resolution:** Both repos receive the full feature. All files changed are in both repos.
+
+### Finding 6 (HIGH — resolved): Authorization boundaries not defined
+
+**Problem:** Conversations store raw user text. "Admin auth required" is not sufficient — RBAC
+scope must be explicit.
+
+**Resolution:** New scopes required by this feature:
+- `read:conversations` — read conversation list, turn detail, evaluation data
+- `write:conversation_evaluations` — submit ratings and notes on turns
+- `write:settings` — already exists; used to toggle analytics_mode_enabled
+
+These scopes must be added to the `UserAPIKey` scope definitions in the admin backend. The
+conversations API must enforce `read:conversations` on all GET endpoints and
+`write:conversation_evaluations` on the evaluation POST endpoint. Viewer and guest roles do not
+receive these scopes.
+
+### Finding 7 (LOW — resolved): ConversationAnalytics reconciliation
+
+**Problem:** `ConversationAnalytics` already exists in the admin backend. Without a decision,
+dashboards and analytics APIs will diverge.
+
+**Resolution:** Keep both; they serve different purposes and do not overlap:
+- `ConversationAnalytics` (existing): low-cardinality event telemetry — session creation,
+  follow-up detection, clarification triggers. Recorded unconditionally regardless of analytics
+  mode. Not conversation content.
+- `conversations` + `conversation_turns` (new): full transcript storage, captured only when
+  analytics or debug mode is active. Used for conversation review and quality evaluation.
+
+No migration or consolidation needed. The admin UI should keep any existing ConversationAnalytics
+views separate from the new Conversations transcript view.
+
+### Finding 8 (MEDIUM — resolved): evaluated_by as free-text is weak for auditability
+
+**Problem:** A plain string username is not durable if usernames or auth providers change.
+
+**Resolution:** `turn_evaluations` uses both:
+- `evaluated_by_user_id` (INTEGER) — FK to the admin user record; durable across username changes
+- `evaluated_by_username` (VARCHAR) — denormalized at write time for display without joins
+
+### Finding 9 (LOW — resolved): Migration should assert query_logs is empty before drop
+
+**Problem:** Assuming 0 rows without a runtime check is brittle in stale environments.
+
+**Resolution:** The Alembic migration (`031_add_analytics_mode_tables.py`) asserts row count
+before dropping. If `query_logs` has rows, the migration raises an exception with a clear message
+rather than silently dropping data.
+
+---
+
+## Privacy Policy (explicit)
+
+This section must be included in the admin UI feature description and referenced in any
+operator-facing documentation.
+
+**What is stored when analytics mode is on:**
+- Full query text as typed or spoken by the user
+- Full response text generated by Athena
+- Metadata: intent, model used, latency, RAG tools, session ID, room, user mode, timestamp
+
+**What is NOT stored:**
+- IP addresses
+- Browser fingerprints or user agents
+- Any data beyond what the orchestrator already processes
+
+**PII handling:**
+- Athena does not perform automatic PII redaction. If users may submit personal information
+  (names, addresses, health data, etc.), the operator is responsible for either:
+  a) not enabling analytics mode for those interaction types, or
+  b) implementing redaction at the application layer before enabling
+- This is a v1 limitation; prompt-level or post-processing redaction is future work
+
+**Retention:**
+- No automatic expiry in v1. Rows persist until manually deleted.
+- Future work: configurable retention window (e.g. 90 days) with a scheduled purge job
+
+**Encryption:**
+- Relies on database-level encryption. No application-layer encryption is added by this feature.
+- Operators are responsible for ensuring their PostgreSQL deployment meets their encryption
+  requirements (e.g. encrypted storage, TLS in transit)
+
+**Access control:**
+- Only admin users with `read:conversations` scope can read transcript data
+- Viewer and guest roles cannot access conversation records
 
 ---
 
@@ -61,8 +201,8 @@ record. In a production deployment with analytics mode on and debug mode off, al
 ### New Tables (in `athena` database)
 
 #### `conversations`
-One row per unique session. Created on the first turn of a new session, updated on each
-subsequent turn.
+One row per unique session. Created on the first turn, updated each subsequent turn.
+No `source` column — source is on turns only.
 
 ```sql
 CREATE TABLE conversations (
@@ -71,145 +211,141 @@ CREATE TABLE conversations (
     room            VARCHAR(100),
     user_mode       VARCHAR(20),
     interface_type  VARCHAR(20),
-    source          VARCHAR(20) NOT NULL,          -- 'analytics' | 'debug'
     started_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-    ended_at        TIMESTAMP,                     -- updated on each turn; approximates last activity
+    ended_at        TIMESTAMP,
     turn_count      INTEGER NOT NULL DEFAULT 0,
     total_tokens    INTEGER,
     created_at      TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_conversations_session   ON conversations(session_id);
-CREATE INDEX idx_conversations_started   ON conversations(started_at DESC);
-CREATE INDEX idx_conversations_room      ON conversations(room);
-CREATE INDEX idx_conversations_source    ON conversations(source);
+CREATE INDEX idx_conversations_session  ON conversations(session_id);
+CREATE INDEX idx_conversations_started  ON conversations(started_at DESC);
+CREATE INDEX idx_conversations_room     ON conversations(room);
 ```
 
 #### `conversation_turns`
-One row per Q&A exchange. `turn_number` is the 1-based sequence within the conversation.
+One row per Q&A exchange. `source` lives here — not on `conversations`.
 
 ```sql
 CREATE TABLE conversation_turns (
-    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    conversation_id   UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    turn_number       INTEGER NOT NULL,
-    request_id        VARCHAR(100),               -- orchestrator request_id for log correlation
-    query_text        TEXT NOT NULL,
-    response_text     TEXT,
-    intent            VARCHAR(100),
-    confidence        NUMERIC(4,3),
-    model_used        VARCHAR(100),
-    rag_tools_used    JSONB,                       -- list of tool names that fired, e.g. ["weather","sports"]
-    response_time_ms  INTEGER,
-    tokens_generated  INTEGER,
-    tokens_per_second NUMERIC(8,2),
-    validation_passed BOOLEAN,
-    error_message     TEXT,
-    source            VARCHAR(20) NOT NULL,        -- 'analytics' | 'debug'
-    created_at        TIMESTAMP NOT NULL DEFAULT NOW()
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id       UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    turn_number           INTEGER NOT NULL,
+    request_id            VARCHAR(100),
+    query_text            TEXT NOT NULL,
+    response_text         TEXT,
+    intent                VARCHAR(100),
+    confidence            NUMERIC(4,3),
+    model_used            VARCHAR(100),
+    rag_tools_used        JSONB,
+    response_time_ms      INTEGER,
+    tokens_generated      INTEGER,
+    tokens_per_second     NUMERIC(8,2),
+    validation_passed     BOOLEAN,
+    error_message         TEXT,
+    source                VARCHAR(20) NOT NULL,   -- 'analytics' | 'debug'
+    created_at            TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_turns_conversation  ON conversation_turns(conversation_id);
-CREATE INDEX idx_turns_created       ON conversation_turns(created_at DESC);
-CREATE INDEX idx_turns_intent        ON conversation_turns(intent);
-CREATE INDEX idx_turns_source        ON conversation_turns(source);
+CREATE INDEX idx_turns_conversation ON conversation_turns(conversation_id);
+CREATE INDEX idx_turns_created      ON conversation_turns(created_at DESC);
+CREATE INDEX idx_turns_intent       ON conversation_turns(intent);
+CREATE INDEX idx_turns_source       ON conversation_turns(source);
 CREATE UNIQUE INDEX idx_turns_conv_number ON conversation_turns(conversation_id, turn_number);
 ```
 
 #### `turn_evaluations`
-One row per human evaluation of a turn. A turn may be evaluated multiple times (e.g. by
-different reviewers), but typically one evaluation per turn is expected.
+`evaluated_by_user_id` is durable; `evaluated_by_username` is denormalized at write time.
 
 ```sql
 CREATE TABLE turn_evaluations (
-    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    turn_id       UUID NOT NULL REFERENCES conversation_turns(id) ON DELETE CASCADE,
-    rating        SMALLINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
-    notes         TEXT,
-    evaluated_by  VARCHAR(100),                    -- admin username
-    created_at    TIMESTAMP NOT NULL DEFAULT NOW()
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    turn_id                 UUID NOT NULL REFERENCES conversation_turns(id) ON DELETE CASCADE,
+    rating                  SMALLINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+    notes                   TEXT,
+    evaluated_by_user_id    INTEGER,              -- FK to admin user; durable
+    evaluated_by_username   VARCHAR(100),         -- denormalized at write time for display
+    created_at              TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_evaluations_turn     ON turn_evaluations(turn_id);
-CREATE INDEX idx_evaluations_rating   ON turn_evaluations(rating);
-CREATE INDEX idx_evaluations_created  ON turn_evaluations(created_at DESC);
+CREATE INDEX idx_evaluations_turn    ON turn_evaluations(turn_id);
+CREATE INDEX idx_evaluations_rating  ON turn_evaluations(rating);
+CREATE INDEX idx_evaluations_created ON turn_evaluations(created_at DESC);
 ```
 
-### Migration
+### Migration (`031_add_analytics_mode_tables.py`)
 
-1. Apply the three `CREATE TABLE` statements above via a new Alembic migration
-   (`031_add_analytics_mode_tables.py`).
-2. Drop `query_logs` in the same migration — the table has 0 rows and is superseded.
-3. The migration is safe to run on a live system (no existing data affected).
+```python
+def upgrade():
+    # Assert query_logs is empty before dropping
+    result = op.get_bind().execute(text("SELECT COUNT(*) FROM query_logs"))
+    count = result.scalar()
+    if count > 0:
+        raise Exception(
+            f"query_logs has {count} rows — cannot drop. Migrate data manually first."
+        )
+
+    # Create new tables
+    op.create_table('conversations', ...)
+    op.create_table('conversation_turns', ...)
+    op.create_table('turn_evaluations', ...)
+
+    # Drop superseded table
+    op.drop_table('query_logs')
+
+    # Add analytics_mode_enabled to existing system_settings
+    op.execute("""
+        INSERT INTO system_settings (key, value, description, category)
+        VALUES (
+            'analytics_mode_enabled',
+            'false',
+            'When enabled, all conversations are persisted to the database for review and quality evaluation. Best-effort capture: turns in-flight at service restart may not be recorded.',
+            'privacy'
+        )
+        ON CONFLICT (key) DO NOTHING
+    """)
+```
 
 ---
 
 ## Feature Flag
 
-The analytics mode toggle is stored as a system-wide feature flag in the admin backend.
+**Use the existing `system_settings` table and `SystemSetting` model.**
 
-**Option A (recommended):** Add a `system_settings` table to the admin backend database
-(`athena_admin`) if it doesn't already exist, with a row for `analytics_mode_enabled`.
-
-```sql
--- In athena_admin database
-CREATE TABLE IF NOT EXISTS system_settings (
-    key         VARCHAR(100) PRIMARY KEY,
-    value       TEXT NOT NULL,
-    description TEXT,
-    updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-INSERT INTO system_settings (key, value, description)
-VALUES ('analytics_mode_enabled', 'false', 'When true, all conversations are persisted to the database for review and quality evaluation.')
-ON CONFLICT (key) DO NOTHING;
-```
-
-**Option B:** Reuse the existing component config mechanism (`get_component_config("analytics")`).
-This requires less new infrastructure but mixes operational config with feature flags.
-
-Recommendation: Option A. The `system_settings` table is a clean, general-purpose home for
-admin-controlled toggles and will be reused by future features (e.g. the privacy mode discussed
-in a prior session).
-
-**Admin backend API:**
-- `GET /api/settings` — returns all system settings
-- `PATCH /api/settings/{key}` — updates a setting (admin auth required)
+- Key: `analytics_mode_enabled`, value: `'true'` | `'false'`, category: `'privacy'`
+- Inserted by migration (see above); no schema changes needed to admin backend
+- Existing `/api/settings` routes extended to expose this key in the `privacy` category
+- `write:settings` scope required to update (already enforced by existing route guards)
 
 **Orchestrator reads the flag:**
-- Fetched at startup and cached with a 60-second TTL (same pattern as component config)
-- If the fetch fails, default to `false` (safe — no data loss, just no analytics)
-- Re-checked periodically so toggling the admin UI takes effect within ~60 seconds without restart
+- Fetched at startup and cached with 60-second TTL (same pattern as component config)
+- On fetch failure: default to `false` (safe — no data loss, just no analytics)
+- No restart required; toggle takes effect within ~60 seconds
 
 ---
 
 ## Orchestrator Changes
 
-### Where writes happen
-
-Both the `/query` endpoint (non-streaming) and `/query/stream` endpoint need a write hook.
-The hook fires **after the response has been returned to the client**, as a non-blocking
-`asyncio.create_task()`.
-
-### Should-record logic
+### Source determination
 
 ```python
-async def _should_record_analytics() -> bool:
-    """Returns True if this request should be written to the analytics DB."""
-    # Debug mode: always record (controlled at service level)
-    if os.getenv("ATHENA_DEBUG_MODE", "false").lower() == "true":
-        return True
-    # Analytics mode: check admin flag (cached, 60s TTL)
-    config = await get_analytics_config()
-    return config.get("enabled", False)
-
-def _get_analytics_source() -> str:
+def _get_analytics_source() -> Optional[str]:
+    """Returns the capture source label, or None if no capture should happen."""
     if os.getenv("ATHENA_DEBUG_MODE", "false").lower() == "true":
         return "debug"
-    return "analytics"
+    # analytics_mode_enabled checked via cached config
+    return None  # caller checks analytics config separately
+
+async def _should_record_analytics(source: Optional[str]) -> bool:
+    if source == "debug":
+        return True
+    config = await get_cached_system_setting("analytics_mode_enabled")
+    return config == "true"
 ```
 
 ### The write function
+
+Non-blocking, non-fatal, fire-and-forget via `asyncio.create_task()`. Loss on crash is accepted.
 
 ```python
 async def _record_conversation_turn(
@@ -231,27 +367,19 @@ async def _record_conversation_turn(
     interface_type: Optional[str],
     source: str,
 ) -> None:
-    """
-    Upsert the conversation row and insert a new turn row.
-    Non-fatal: logs warning on failure, never raises.
-    """
     try:
         async with get_analytics_db_connection() as conn:
-            # Upsert conversation (create if new session, update turn_count + ended_at if existing)
             conv_row = await conn.fetchrow("""
-                INSERT INTO conversations (session_id, room, user_mode, interface_type, source, started_at, ended_at, turn_count)
-                VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), 1)
+                INSERT INTO conversations
+                    (session_id, room, user_mode, interface_type, started_at, ended_at, turn_count)
+                VALUES ($1, $2, $3, $4, NOW(), NOW(), 1)
                 ON CONFLICT (session_id) DO UPDATE
-                    SET ended_at = NOW(),
+                    SET ended_at   = NOW(),
                         turn_count = conversations.turn_count + 1,
-                        total_tokens = COALESCE(conversations.total_tokens, 0) + COALESCE($6, 0)
+                        total_tokens = COALESCE(conversations.total_tokens, 0) + COALESCE($5, 0)
                 RETURNING id, turn_count
-            """, session_id, room, user_mode, interface_type, source, tokens_generated)
+            """, session_id, room, user_mode, interface_type, tokens_generated)
 
-            conversation_id = conv_row["id"]
-            turn_number = conv_row["turn_count"]
-
-            # Insert turn
             await conn.execute("""
                 INSERT INTO conversation_turns (
                     conversation_id, turn_number, request_id,
@@ -260,210 +388,199 @@ async def _record_conversation_turn(
                     tokens_generated, tokens_per_second,
                     validation_passed, error_message, source
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-            """, conversation_id, turn_number, request_id,
+            """, conv_row["id"], conv_row["turn_count"], request_id,
                 query, response, intent, confidence,
                 model_used, json.dumps(rag_tools_used) if rag_tools_used else None,
                 response_time_ms, tokens_generated, tokens_per_second,
                 validation_passed, error_message, source)
 
     except Exception as e:
-        logger.warning("analytics_write_failed", error=str(e), session_id=session_id, request_id=request_id)
+        logger.warning("analytics_write_failed",
+                       error=str(e), session_id=session_id, request_id=request_id)
 ```
 
-### Integration points in main.py
+### Hook points in main.py
 
-At the end of the `/query` handler (after `session_manager.add_message`):
+At the end of `/query` and `/query/stream` handlers, after session persistence, before response:
+
 ```python
-if await _should_record_analytics():
+source = _get_analytics_source()
+if await _should_record_analytics(source):
     asyncio.create_task(_record_conversation_turn(
         session_id=session.session_id,
-        request_id=request_id,
-        query=request.query,
-        response=state.answer,
-        intent=state.intent.value if state.intent else None,
-        confidence=state.confidence,
-        model_used=...,          # from state or llm_router
-        rag_tools_used=list(state.retrieved_data.keys()) if state.retrieved_data else [],
-        response_time_ms=int(processing_time * 1000),
-        tokens_generated=...,
-        tokens_per_second=...,
-        validation_passed=state.validation_passed,
-        error_message=state.error,
-        room=request.room,
-        user_mode=request.mode,
-        interface_type=request.interface_type,
-        source=_get_analytics_source(),
+        source=source or "analytics",
+        # ... all other fields from state / computed values
     ))
 ```
 
-Same pattern at the end of the `/query/stream` handler, using the values already computed
-(`full_answer`, `token_count`, `tokens_per_second`, `llm_time`, etc.).
-
-### Database connection
-
-Use `asyncpg` (already available in the Python environment). Connection pool initialized at
-startup alongside the existing Redis/Qdrant connections. Target the `athena` database on
-`postgres-01.xmojo.net`.
+**Streaming path note:** Only write when `stream_completed=True`. Partial streams (client
+disconnect) are not recorded — consistent with session persistence policy from GAP 7 of the
+real-streaming plan.
 
 ---
 
 ## Admin Backend Changes
 
-### New API endpoints (in `admin/backend/app/routes/`)
+### RBAC — new scopes (add to existing scope definitions)
 
-**Settings:**
-- `GET /api/settings` — list all system settings (key, value, description, updated_at)
-- `PATCH /api/settings/{key}` — update a setting value (requires `write:settings` scope)
+```python
+# In admin/backend/app/utils/api_keys.py or wherever scopes are defined
+"read:conversations"            # read conversation list, turns, evaluations
+"write:conversation_evaluations"  # submit ratings and notes
+# write:settings already exists
+```
+
+### Extend existing settings route
+
+In `admin/backend/app/routes/settings.py` — add a `GET /api/settings/privacy` endpoint (or
+expose the `privacy` category through the existing generic settings API) so the analytics mode
+toggle is accessible from the frontend without new infrastructure.
+
+### New conversations route (`admin/backend/app/routes/conversations.py`)
 
 **Conversations:**
-- `GET /api/conversations` — paginated list with filters:
-  - `?page=1&per_page=25`
-  - `?source=analytics|debug`
-  - `?room=office`
-  - `?user_mode=owner|guest`
-  - `?from=2026-04-01&to=2026-04-04`
-  - Returns: id, session_id, room, user_mode, interface_type, source, started_at, ended_at,
-    turn_count, first_query (preview)
-- `GET /api/conversations/{id}` — full conversation with all turns and any evaluations
-- `GET /api/conversations/stats` — summary stats: total conversations, total turns, avg turns
-  per conversation, breakdown by source/room/intent
+- `GET /api/conversations` — paginated list; requires `read:conversations`
+  - Filters: `source`, `room`, `user_mode`, `from`, `to`, `intent`, `page`, `per_page`
+  - Returns: id, session_id, room, user_mode, interface_type, started_at, ended_at,
+    turn_count, first_query (first 120 chars of turn 1 query_text)
+- `GET /api/conversations/{id}` — full thread with all turns and evaluations; requires
+  `read:conversations`
+- `GET /api/conversations/stats` — aggregate stats; requires `read:conversations`
+  - total conversations, total turns, avg turns/conversation, breakdown by source/intent/room
 
 **Evaluations:**
-- `POST /api/conversations/turns/{turn_id}/evaluate` — create or update evaluation
+- `POST /api/conversations/turns/{turn_id}/evaluate` — requires `write:conversation_evaluations`
   - Body: `{ "rating": 1-5, "notes": "optional" }`
-- `GET /api/conversations/turns/{turn_id}/evaluations` — list evaluations for a turn
+  - Upserts (one evaluation per admin user per turn)
+  - Records `evaluated_by_user_id` from JWT, denormalizes `evaluated_by_username` at write time
 
 ---
 
 ## Admin Frontend Changes
 
-### New "Conversations" page (`/conversations`)
+### New "Conversations" page
 
-**List view:**
-```
-┌────────────────────────────────────────────────────────────────────┐
-│ Conversations                          [Filter ▼]  [Source: All ▼] │
-├────────────────────────────────────────────────────────────────────┤
-│ Apr 4 2026 10:32 AM  │ office  │ owner  │ analytics │ 4 turns │ 3m │
-│ "What's the weather like tomo..."                                   │
-├────────────────────────────────────────────────────────────────────┤
-│ Apr 4 2026 9:15 AM   │ web     │ guest  │ analytics │ 2 turns │ 1m │
-│ "Tell me about Jay's background..."                                 │
-└────────────────────────────────────────────────────────────────────┘
-```
+**List view** — sortable, filterable by source label, date range, room, intent:
 
-**Detail view (click a conversation):**
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Conversation — office — Apr 4, 2026 10:32 AM               │
-│ 4 turns · 3m 12s · analytics                               │
-├─────────────────────────────────────────────────────────────┤
-│ Turn 1                                      WEATHER · 0.94  │
-│ Q: What's the weather like tomorrow?                        │
-│ A: Tomorrow in Baltimore looks mostly cloudy with a high... │
-│ ⏱ 1.2s · 87 tokens · llama3.1:8b · [weather]             │
-│ [★★★★★] [Add note...]                      [Evaluate]      │
-├─────────────────────────────────────────────────────────────┤
-│ Turn 2                                      GENERAL · 0.81  │
-│ Q: What about the weekend?                                  │
-│ A: This weekend is looking better — Saturday should be...  │
-│ ⏱ 0.9s · 64 tokens · llama3.1:8b · [weather]             │
-│ [★★★☆☆] Note: "Follow-up handled correctly"   ✓ Evaluated  │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ Conversations                     [Source ▼] [Room ▼] [Date ▼]  │
+│ Best-effort capture — turns in-flight at restart may be missing  │
+├──────────────────────────────────────────────────────────────────┤
+│ Apr 4 10:32 AM · office · owner · analytics · 4 turns · 3m 12s  │
+│ "What's the weather like tomo..."                                 │
+├──────────────────────────────────────────────────────────────────┤
+│ Apr 4 09:15 AM · web · guest · analytics · 2 turns · 1m 04s     │
+│ "Tell me about Jay's background..."                              │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### Settings page addition
+**Detail view:**
 
-Add to the existing Settings/Features section:
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ ← Conversations   office · Apr 4 2026 10:32 AM · analytics      │
+│ 4 turns · 3m 12s                                                 │
+├──────────────────────────────────────────────────────────────────┤
+│ Turn 1                                         WEATHER · 0.94   │
+│ Q: What's the weather like tomorrow?                             │
+│ A: Tomorrow in Baltimore looks mostly cloudy with a high...      │
+│ ⏱ 1.2s · 87 tok · 72 tok/s · llama3.1:8b · [weather]          │
+│ ★★★★☆  "Good but didn't mention wind"     ✓ Evaluated           │
+├──────────────────────────────────────────────────────────────────┤
+│ Turn 2                                         WEATHER · 0.81   │
+│ Q: What about the weekend?                                       │
+│ A: This weekend is looking better — Saturday should be...        │
+│ ⏱ 0.9s · 64 tok · 71 tok/s · llama3.1:8b · [weather]          │
+│ [ Rate: ★☆☆☆☆ ★★☆☆☆ ★★★☆☆ ★★★★☆ ★★★★★ ] [Notes...] [Save]   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Settings page — analytics toggle
+
+Add to the existing Settings page under a "Privacy" section:
 
 ```
 Analytics Mode
-─────────────────────────────────────────────────────
-When enabled, all conversations are persisted to the
-database. Use the Conversations screen to review and
-evaluate responses.
+──────────────────────────────────────────────────────────────────
+When enabled, all conversations are persisted to the database.
+Use the Conversations screen to review responses and submit ratings.
 
-Default: Off. Turning this on does not change how
-Athena responds — it only adds logging.
+Privacy note: Full query and response text is stored. No automatic
+PII redaction. Analytics capture is best-effort — turns in-flight
+at service restart may not be recorded.
 
-[  OFF  ●────────]   Saved automatically
+Default: Off. Changing this does not affect how Athena responds.
+
+[  OFF  ●────────]   Changes take effect within ~60 seconds.
 ```
 
 ---
 
 ## Files Changed
 
-| Repo | File | Change |
-|------|------|--------|
-| Both | `src/orchestrator/main.py` | Add `_should_record_analytics()`, `_get_analytics_source()`, `_record_conversation_turn()`, asyncpg pool init, hook into `/query` and `/query/stream` |
-| Both | `src/orchestrator/requirements.txt` | Ensure `asyncpg` is listed |
-| Private | `admin/backend/app/routes/conversations.py` | New — conversations + evaluations endpoints |
-| Private | `admin/backend/app/routes/settings.py` | New (or extend existing) — system settings endpoints |
-| Private | `admin/backend/app/models.py` | Add Conversation, ConversationTurn, TurnEvaluation models |
-| Private | `admin/backend/alembic/versions/031_add_analytics_mode_tables.py` | Migration: create 3 new tables, drop query_logs |
-| Private | `admin/frontend/conversations.js` | New — conversations list + detail page |
-| Private | `admin/frontend/settings.js` | Add analytics mode toggle |
-
-OSS repo receives the orchestrator changes only. Admin backend/frontend are private-repo-only.
+| File | Change | Both repos? |
+|------|--------|-------------|
+| `src/orchestrator/main.py` | Analytics write hook, `_record_conversation_turn`, `_should_record_analytics`, asyncpg pool | Yes |
+| `src/orchestrator/requirements.txt` | Ensure `asyncpg` listed | Yes |
+| `admin/backend/app/routes/conversations.py` | New — conversations + evaluations endpoints | Yes |
+| `admin/backend/app/routes/settings.py` | Extend to expose `privacy` category settings | Yes |
+| `admin/backend/app/models.py` | Add `Conversation`, `ConversationTurn`, `TurnEvaluation` models | Yes |
+| `admin/backend/app/utils/api_keys.py` | Add `read:conversations`, `write:conversation_evaluations` scopes | Yes |
+| `admin/backend/alembic/versions/031_add_analytics_mode_tables.py` | New migration | Yes |
+| `admin/frontend/conversations.js` | New — conversations list + detail + evaluation UI | Yes |
+| `admin/frontend/settings.js` | Add analytics mode toggle under Privacy section | Yes |
 
 ---
 
 ## Rollout Order
 
-1. **Run migration** (`031_add_analytics_mode_tables.py`) — creates tables, drops `query_logs`
-2. **Deploy admin backend** — settings API + conversations API, analytics mode defaults to `false`
+1. **Run migration** — creates 3 tables, asserts `query_logs` is empty, drops it, inserts
+   `analytics_mode_enabled=false` row in `system_settings`
+2. **Deploy admin backend** — conversations API + evaluation API + updated settings API;
+   `analytics_mode_enabled` defaults to `false` so no data flows yet
 3. **Deploy orchestrator** — write hook present but no-ops while flag is `false`
-4. **Deploy admin frontend** — Conversations page + toggle visible
-5. **Enable analytics mode** via admin UI → rows start appearing in Conversations page
+4. **Deploy admin frontend** — Conversations page + analytics toggle visible
+5. **Enable analytics mode** in admin UI → rows begin appearing in Conversations page
 
-Steps 1–4 are zero-risk (nothing new fires while flag is off). Step 5 is the activation.
+Steps 1–4 are zero-risk. Step 5 is the activation decision.
 
 ---
 
 ## Known Limitations & Future Work
 
-### Not in scope for this change
-- **Per-room or per-user-mode analytics override** — global toggle only. Room-level control is
-  future work.
-- **Data export** — CSV/JSON export of conversations for external analysis. Future work.
-- **Conversation search** — full-text search across query/response content. Future work (requires
-  pg_trgm or a search index).
-- **Streaming turn content in debug mode** — ATHENA_DEBUG_MODE currently writes logs to disk
-  files. This plan adds DB writes alongside that, but does not remove the file logging behavior.
-- **Retention policy** — no automatic cleanup of old analytics rows. Future work: a configurable
-  retention window (e.g. keep 90 days) with a scheduled purge job.
-- **Evaluation aggregation** — the Conversations UI shows per-turn ratings but no rollup views
-  (e.g. "average rating by intent" dashboard). Future work after sufficient data is collected.
-
-### Known gap: partial streams
-The streaming path already has a `stream_completed` flag. When `stream_completed=False`
-(client disconnected mid-stream), the user message is persisted to Redis but the assistant
-response is not (see streaming plan GAP 7). The analytics write should follow the same policy:
-only write a turn row when `stream_completed=True`. Partial turns are not recorded.
-
-### Known gap: voice path
-The `/ha/conversation` (Home Assistant voice) path and `/v1/chat/completions` (gateway) path
-do not go through `/query` or `/query/stream` directly — they proxy through. Analytics writes
-for those paths require the same hook to be added wherever those endpoints finalize their
-response. Deferred to a follow-up.
+- **Best-effort capture:** Turns in-flight at process crash or restart are lost. Documented
+  in the UI. A queue-backed durable capture path is future work.
+- **No PII redaction:** Operator responsibility in v1. Application-layer redaction is future work.
+- **No retention policy:** Rows persist indefinitely. Configurable retention window is future work.
+- **Voice path not covered:** `/ha/conversation` and `/v1/chat/completions` (gateway) paths
+  bypass `/query` and `/query/stream`. Analytics writes for those paths are deferred.
+- **No full-text search:** Searching across query/response content requires `pg_trgm` or an
+  external search index. Future work.
+- **No data export:** CSV/JSON export for external analysis is future work.
+- **Per-room or per-mode overrides:** Global toggle only in v1. Room-level control is future work.
+- **Evaluation aggregation views:** Per-turn ratings are stored but no rollup dashboards exist
+  (e.g. "average rating by intent"). Future work once sufficient data is collected.
 
 ---
 
 ## Verification
 
-1. **Analytics off (default):** Send 10 queries. Confirm `SELECT COUNT(*) FROM conversations` = 0.
-2. **Toggle on:** Enable in admin UI. Send 5 queries. Confirm 1 conversation row and 5 turn rows.
-3. **Multi-session:** Open two browser tabs simultaneously. Send queries from each. Confirm two
-   separate conversation rows in the DB, each with correct turn sequences.
-4. **Debug mode:** Restart orchestrator with `ATHENA_DEBUG_MODE=true`. Send queries. Confirm
-   rows appear with `source=debug` regardless of admin toggle state.
-5. **Write failure resilience:** Temporarily break DB connectivity. Send a query. Confirm response
-   still returned to client within normal latency. Confirm `analytics_write_failed` log warning.
-6. **Admin UI list:** Conversations appear in reverse-chronological order. Filters work.
-7. **Admin UI detail:** Full Q&A thread renders correctly. Metadata (intent, model, latency,
-   RAG tools) is populated for each turn.
-8. **Evaluation:** Submit a rating on a turn. Confirm row in `turn_evaluations`. Reload page —
-   evaluation persists and renders correctly.
-9. **Partial stream:** Disconnect browser mid-stream. Confirm no turn row written for that exchange.
-10. **Toggle off:** Disable analytics mode. Send queries. Confirm no new rows written. Existing
-    rows remain.
+1. **Analytics off (default):** Send 10 queries. Confirm `SELECT COUNT(*) FROM conversations = 0`.
+2. **Toggle on:** Enable in admin UI. Send 5 queries. Confirm 1 conversation row, 5 turn rows,
+   `source='analytics'` on all turns.
+3. **Multi-session:** Two browser tabs simultaneously. Send queries from each. Confirm two
+   separate `conversations` rows, each with correct sequential `turn_number`.
+4. **Debug mode:** Restart orchestrator with `ATHENA_DEBUG_MODE=true`, analytics toggle off.
+   Send queries. Confirm rows appear with `source='debug'`.
+5. **Both active:** Both debug mode and analytics toggle on. Confirm `source='debug'` wins
+   (debug mode takes precedence in source determination).
+6. **Write failure resilience:** Break DB connectivity. Send a query. Confirm response returns
+   within normal latency. Confirm `analytics_write_failed` warning in logs. No exception to client.
+7. **Partial stream:** Disconnect browser mid-stream. Confirm no `conversation_turns` row written.
+8. **RBAC:** Request `GET /api/conversations` with a token missing `read:conversations`. Confirm 403.
+9. **Evaluation:** Submit rating on a turn. Confirm row in `turn_evaluations` with correct
+   `evaluated_by_user_id` and `evaluated_by_username`. Reload — evaluation persists.
+10. **Toggle off:** Disable analytics mode. Send queries. Confirm no new rows. Existing rows remain.
+11. **Migration guard:** Run migration against a DB where `query_logs` has rows. Confirm migration
+    raises an exception rather than silently dropping data.
