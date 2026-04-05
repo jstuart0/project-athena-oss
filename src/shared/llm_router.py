@@ -721,6 +721,7 @@ class LLMRouter:
 
         # If api_key is provided, this is a cloud call - use standard OpenAI endpoint
         # Otherwise, check for local Ollama-compatible endpoint
+        _is_local = not api_key  # Track before api_key is overwritten below
         if api_key:
             # Cloud OpenAI call - no base_url needed
             client = openai.AsyncOpenAI(api_key=api_key)
@@ -753,7 +754,8 @@ class LLMRouter:
 
             # For local qwen3 models (no api_key = llamacpp/local), disable thinking
             # via extra_body to prevent chain-of-thought leaking into responses.
-            if not api_key and "qwen3" in model.lower():
+            # Use _is_local flag since api_key was overwritten to "sk-local" above.
+            if _is_local and "qwen3" in model.lower():
                 request_params["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
                 logger.info("qwen3_thinking_disabled_via_extra_body", model=model)
 
