@@ -58,50 +58,66 @@ def build_knowledge_context(knowledge_entries: List[Dict[str, Any]]) -> str:
     if not knowledge_entries:
         return ""
 
-    context_lines = ["CONTEXT INFORMATION:"]
+    # Separate instruction entries from regular context entries
+    instruction_entries = [e for e in knowledge_entries if e.get("category") == "instruction"]
+    context_entries = [e for e in knowledge_entries if e.get("category") != "instruction"]
 
-    for entry in knowledge_entries:
-        # Get value and resolve any dynamic placeholders
-        value = entry.get("value", "")
-        resolved_value = resolve_dynamic_value(value)
+    context_lines = []
 
-        # Format based on category
-        category = entry.get("category", "general")
+    # Behavioral instructions go FIRST, prominently separated
+    if instruction_entries:
+        context_lines.append("BEHAVIORAL INSTRUCTIONS:")
+        for entry in instruction_entries:
+            value = entry.get("value", "")
+            resolved_value = resolve_dynamic_value(value)
+            context_lines.append(f"  {resolved_value}")
+        context_lines.append("")
 
-        if category == "property":
-            context_lines.append(f"• Property: {resolved_value}")
-        elif category == "location":
-            key = entry.get("key", "")
-            if "default" in key:
-                context_lines.append(f"• Default Location: {resolved_value}")
+    # Regular context information follows
+    if context_entries:
+        context_lines.append("CONTEXT INFORMATION:")
+        for entry in context_entries:
+            # Get value and resolve any dynamic placeholders
+            value = entry.get("value", "")
+            resolved_value = resolve_dynamic_value(value)
+
+            # Format based on category
+            category = entry.get("category", "general")
+
+            if category == "property":
+                context_lines.append(f"• Property: {resolved_value}")
+            elif category == "location":
+                key = entry.get("key", "")
+                if "default" in key:
+                    context_lines.append(f"• Default Location: {resolved_value}")
+                else:
+                    context_lines.append(f"• Location: {resolved_value}")
+            elif category in ("user", "owner"):
+                # User/owner context is crucial - make it prominent
+                key = entry.get("key", "")
+                if key in ("owner_name", "guest_name", "name"):
+                    context_lines.append(f"• The user's name is: {resolved_value}")
+                else:
+                    context_lines.append(f"• User Context: {resolved_value}")
+            elif category == "temporal":
+                key = entry.get("key", "")
+                if "date" in key:
+                    context_lines.append(f"• Current Date: {resolved_value}")
+                elif "time" in key:
+                    context_lines.append(f"• Current Time: {resolved_value}")
+                else:
+                    context_lines.append(f"• {resolved_value}")
+            elif category == "general":
+                key = entry.get("key", "")
+                if "assistant_name" in key:
+                    context_lines.append(f"• Your Name: {resolved_value}")
+                elif "location_context" in key:
+                    context_lines.append(f"• {resolved_value}")
+                else:
+                    context_lines.append(f"• {resolved_value}")
             else:
-                context_lines.append(f"• Location: {resolved_value}")
-        elif category in ("user", "owner"):
-            # User/owner context is crucial - make it prominent
-            key = entry.get("key", "")
-            if key in ("owner_name", "guest_name", "name"):
-                context_lines.append(f"• The user's name is: {resolved_value}")
-            else:
-                context_lines.append(f"• User Context: {resolved_value}")
-        elif category == "temporal":
-            key = entry.get("key", "")
-            if "date" in key:
-                context_lines.append(f"• Current Date: {resolved_value}")
-            elif "time" in key:
-                context_lines.append(f"• Current Time: {resolved_value}")
-            else:
+                # Generic formatting for unknown categories
                 context_lines.append(f"• {resolved_value}")
-        elif category == "general":
-            key = entry.get("key", "")
-            if "assistant_name" in key:
-                context_lines.append(f"• Your Name: {resolved_value}")
-            elif "location_context" in key:
-                context_lines.append(f"• {resolved_value}")
-            else:
-                context_lines.append(f"• {resolved_value}")
-        else:
-            # Generic formatting for unknown categories
-            context_lines.append(f"• {resolved_value}")
 
     # Join with newlines and add trailing newline
     context = "\n".join(context_lines)
@@ -110,6 +126,8 @@ def build_knowledge_context(knowledge_entries: List[Dict[str, Any]]) -> str:
     logger.info(
         "base_knowledge_context_built",
         entry_count=len(knowledge_entries),
+        instruction_count=len(instruction_entries),
+        context_entry_count=len(context_entries),
         context_length=len(context)
     )
 
