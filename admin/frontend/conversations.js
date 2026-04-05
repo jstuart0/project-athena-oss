@@ -35,6 +35,34 @@ async function initConversationsPage() {
     const container = document.getElementById('tab-conversations');
     if (!container) return;
 
+    // Check analytics mode — conversations only work when analytics is enabled
+    const convContainer = document.getElementById('conversations-container');
+    try {
+        const modeResp = await fetch('/api/settings/analytics-mode/public');
+        if (modeResp.ok) {
+            const modeData = await modeResp.json();
+            if (!modeData.analytics_mode_enabled) {
+                if (convContainer) {
+                    convContainer.innerHTML = `
+                        <div class="text-center py-16 text-gray-400">
+                            <i data-lucide="bar-chart-2" class="w-12 h-12 mx-auto mb-4 opacity-30"></i>
+                            <p class="text-lg font-medium text-gray-300">Analytics Mode is Off</p>
+                            <p class="text-sm mt-2 max-w-sm mx-auto">
+                                Conversation capture is disabled. Enable analytics mode in
+                                <button onclick="showTab('settings')" class="text-blue-400 hover:text-blue-300 underline">Settings → Privacy</button>
+                                to start recording conversations.
+                            </p>
+                        </div>
+                    `;
+                    if (typeof lucide !== 'undefined') lucide.createIcons();
+                }
+                return;
+            }
+        }
+    } catch (_) {
+        // If we can't check, proceed normally — let the list load and show empty state if needed
+    }
+
     // Check for hash sub-route: #conversations/UUID
     const hash = window.location.hash;
     const detailMatch = hash.match(/^#conversations\/([^/]+)$/);
@@ -139,6 +167,9 @@ function renderListView(listData, statsData) {
             <select id="conv-filter-source" onchange="convApplyFilter()"
                 class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white">
                 <option value="">All sources</option>
+                <option value="chatbot" ${convState.filters.source === 'chatbot' ? 'selected' : ''}>Chatbot</option>
+                <option value="jarvis" ${convState.filters.source === 'jarvis' ? 'selected' : ''}>Jarvis</option>
+                <option value="voice" ${convState.filters.source === 'voice' ? 'selected' : ''}>Voice</option>
                 <option value="analytics" ${convState.filters.source === 'analytics' ? 'selected' : ''}>Analytics</option>
                 <option value="debug" ${convState.filters.source === 'debug' ? 'selected' : ''}>Debug</option>
             </select>

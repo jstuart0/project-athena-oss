@@ -850,6 +850,11 @@ function showTab(tabName) {
                 initDebugLogs();
             }
             break;
+        case 'conversations':
+            if (typeof initConversationsPage === 'function') {
+                initConversationsPage();
+            }
+            break;
     }
 
     // Check for dynamically registered tab callbacks (from tool-calling.js, base-knowledge.js, etc.)
