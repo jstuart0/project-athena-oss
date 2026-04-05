@@ -40,7 +40,7 @@ class AdminConfigClient:
         # Critical paths like music playback compound multiple API calls
         self.client = httpx.AsyncClient(
             timeout=3.0,
-            headers={"X-Service-Key": self.api_key},
+            headers={"X-API-Key": self.api_key},
         )
 
         # Routing configuration cache (60-second TTL)

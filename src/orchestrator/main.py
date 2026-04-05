@@ -8071,6 +8071,11 @@ If the user is asking to repeat, search again, or modify the previous request, u
 
         # Select model AND backend based on query complexity
         complexity = state.complexity or "simple"
+        # Chat interface is a rich showcase context — upgrade simple queries to complex
+        # so the better model handles behavioral instructions and profile synthesis
+        if getattr(state, "interface_type", "voice") == "chat" and complexity == "simple":
+            complexity = "complex"
+            logger.info(f"chat_interface_complexity_upgrade: simple -> complex for query: {state.query[:50]}")
         if complexity == "simple":
             component_config = await get_component_config("tool_calling_simple")
             llm_model = component_config["model_name"]
