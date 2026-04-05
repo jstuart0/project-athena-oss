@@ -76,10 +76,10 @@ def build_knowledge_context(knowledge_entries: List[Dict[str, Any]]) -> str:
                 context_lines.append(f"• Default Location: {resolved_value}")
             else:
                 context_lines.append(f"• Location: {resolved_value}")
-        elif category == "user":
-            # User context is crucial - make it prominent
+        elif category in ("user", "owner"):
+            # User/owner context is crucial - make it prominent
             key = entry.get("key", "")
-            if key in ("owner_name", "guest_name"):
+            if key in ("owner_name", "guest_name", "name"):
                 context_lines.append(f"• The user's name is: {resolved_value}")
             else:
                 context_lines.append(f"• User Context: {resolved_value}")

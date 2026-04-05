@@ -8,6 +8,7 @@ fallback.
 Open Source Compatible - No vendor lock-in.
 """
 import os
+import re as _re
 import httpx
 import time
 from typing import Dict, Any, Optional, List
@@ -19,6 +20,26 @@ import structlog
 from shared.admin_config import get_admin_client
 
 logger = structlog.get_logger()
+
+_THINK_TAG_PATTERN = _re.compile(r"<think>.*?</think>", _re.DOTALL | _re.IGNORECASE)
+
+
+def _strip_think_tags(text: str) -> str:
+    """
+    Remove <think>...</think> blocks from LLM output.
+
+    Qwen3/Qwen3.5 models in thinking mode emit a <think> block before their
+    final answer. When thinking is not disabled at the API level these tags
+    leak into the content field.  Strip them here as a defense-in-depth
+    measure so callers always receive clean text.
+    """
+    if not text or "<think>" not in text.lower():
+        return text
+    cleaned = _THINK_TAG_PATTERN.sub("", text).strip()
+    if not cleaned and "</think>" in text.lower():
+        parts = text.split("</think>")
+        cleaned = parts[-1].strip()
+    return cleaned
 
 
 class BackendType(str, Enum):
@@ -730,8 +751,11 @@ class LLMRouter:
                 request_params["tools"] = tools
                 request_params["tool_choice"] = "auto"
 
-            # Note: Qwen3.5 thinking mode is disabled via template-level fix
-            # (chat_template.jinja has enable_thinking = false hardcoded)
+            # For local qwen3 models (no api_key = llamacpp/local), disable thinking
+            # via extra_body to prevent chain-of-thought leaking into responses.
+            if not api_key and "qwen3" in model.lower():
+                request_params["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+                logger.info("qwen3_thinking_disabled_via_extra_body", model=model)
 
             # Call OpenAI
             response = await client.chat.completions.create(**request_params)
@@ -766,8 +790,8 @@ class LLMRouter:
                     request_id=request_id
                 )
             else:
-                # No tool calls, return message content
-                result["content"] = message.content
+                # No tool calls, return message content (strip any leaked think tags)
+                result["content"] = _strip_think_tags(message.content or "")
 
             return result
 
@@ -1738,7 +1762,7 @@ class LLMRouter:
             usage = response.usage
 
             return {
-                "response": choice.message.content,
+                "response": _strip_think_tags(choice.message.content or ""),
                 "backend": "openai",
                 "model": model,
                 "done": True,

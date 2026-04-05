@@ -6221,9 +6221,24 @@ Respond honestly about your limitations.
 Response:"""
 
         guest_name = state.context.get("guest_name") if state.context else None
+
+        # Resolve owner_name from base knowledge for owner-mode requests
+        owner_name = None
+        if state.mode == "owner":
+            try:
+                _admin_client = get_admin_client()
+                _bk_entries = await _admin_client.get_base_knowledge(applies_to="owner", enabled_only=True)
+                for _entry in (_bk_entries or []):
+                    if _entry.get("category") in ("owner", "user") and _entry.get("key") in ("owner_name", "name"):
+                        owner_name = _entry.get("value", "").strip() or None
+                        break
+            except Exception:
+                pass
+
         system_context = await build_core_assistant_prompt(
             include_voice_formatting=True,
-            guest_name=guest_name
+            guest_name=guest_name,
+            owner_name=owner_name,
         ) + "\n"
 
         # Inject base knowledge context from Admin API
@@ -7766,9 +7781,40 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
         # Build system content with centralized assistant profile and base knowledge context
         guest_name = state.context.get("guest_name") if state.context else None
+
+        # Resolve owner_name from base knowledge for owner-mode requests
+        _tool_owner_name = None
+        _tool_user_mode = state.mode if state.mode else "guest"
+        if _tool_user_mode == "owner":
+            try:
+                _ow_admin = get_admin_client()
+                _ow_entries = await _ow_admin.get_base_knowledge(applies_to="owner", enabled_only=True)
+                for _ow_entry in (_ow_entries or []):
+                    if _ow_entry.get("category") in ("owner", "user") and _ow_entry.get("key") in ("owner_name", "name"):
+                        _tool_owner_name = _ow_entry.get("value", "").strip() or None
+                        break
+            except Exception:
+                pass
+
+        # Owner identity fast-path: answer "what is my name" deterministically
+        if _tool_owner_name and _tool_user_mode == "owner":
+            _ql = state.query.lower().strip("?. ")
+            _identity_patterns = [
+                "what is my name", "what's my name", "whats my name",
+                "who am i", "do you know my name", "do you know who i am",
+                "what do you call me", "what do people call me",
+            ]
+            if any(_ql == p or _ql.startswith(p) for p in _identity_patterns):
+                state.answer = f"Your name is {_tool_owner_name}."
+                state.skip_synthesis = True
+                state.node_timings["tool_call"] = time.time() - start
+                logger.info("owner_identity_fast_path", name=_tool_owner_name)
+                return state
+
         system_content = await build_core_assistant_prompt(
             include_voice_formatting=True,
-            guest_name=guest_name
+            guest_name=guest_name,
+            owner_name=_tool_owner_name,
         ) + "\n"
         home_address = DEFAULT_LOCATION  # Permanent home address (for "directions from home")
         search_location = DEFAULT_LOCATION  # Current location for searches (may differ from home)
@@ -7776,7 +7822,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
         # Inject base knowledge context from Admin API
         try:
             admin_client = get_admin_client()
-            user_mode = state.mode if state.mode else "guest"
+            user_mode = _tool_user_mode
             knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
             if knowledge_context:
                 system_content += f"\n{knowledge_context}"
@@ -10773,12 +10819,29 @@ def _strip_hallucinated_continuation(text: str) -> str:
     Truncates at the first line that looks like a new role turn (e.g. "\\nUser:",
     "\\nHuman:", "\\nAssistant:", "\\nJarvis:"). These occur when the LLM starts
     generating the next conversation turn instead of stopping after its response.
+
+    Also detects paragraph-level repetition (e.g. thinking-mode leak that causes
+    the model to repeat the same block multiple times) and truncates before the
+    first repeated paragraph.
     """
     if not text:
         return text
     match = _CONTINUATION_PATTERN.search(text)
     if match:
-        return text[:match.start()].rstrip()
+        text = text[:match.start()].rstrip()
+
+    # Paragraph-level repetition detector: if the same paragraph (first 120 chars)
+    # appears more than once, truncate before the second occurrence.
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if len(paragraphs) >= 3:
+        seen: Dict[str, int] = {}
+        for i, para in enumerate(paragraphs):
+            key = para[:120]
+            if key in seen:
+                text = "\n\n".join(paragraphs[:i]).rstrip()
+                break
+            seen[key] = i
+
     return text
 
 
@@ -11052,9 +11115,24 @@ Respond honestly about your limitations.
 Response:"""
 
     guest_name = state.context.get("guest_name") if state.context else None
+
+    # Resolve owner_name from base knowledge for owner-mode requests
+    _stream_owner_name = None
+    if state.mode == "owner":
+        try:
+            _s_admin = get_admin_client()
+            _s_entries = await _s_admin.get_base_knowledge(applies_to="owner", enabled_only=True)
+            for _s_entry in (_s_entries or []):
+                if _s_entry.get("category") in ("owner", "user") and _s_entry.get("key") in ("owner_name", "name"):
+                    _stream_owner_name = _s_entry.get("value", "").strip() or None
+                    break
+        except Exception:
+            pass
+
     system_context = await build_core_assistant_prompt(
         include_voice_formatting=True,
-        guest_name=guest_name
+        guest_name=guest_name,
+        owner_name=_stream_owner_name,
     ) + "\n"
 
     # Inject base knowledge context from Admin API
@@ -11068,8 +11146,8 @@ Response:"""
     except Exception as e:
         logger.warning(f"Failed to fetch base knowledge context for streaming: {e}")
 
-    # Inject guest name for personalization
-    if state.context and state.context.get("guest_name"):
+    # Inject guest name for personalization (owner_name already handled by build_core_assistant_prompt)
+    if not _stream_owner_name and state.context and state.context.get("guest_name"):
         guest_name = state.context["guest_name"]
         system_context += f"\nYou are speaking with {guest_name}, a guest at this property. "
         system_context += f"Address them by name when appropriate to provide a personalized experience.\n"

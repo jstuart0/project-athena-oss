@@ -874,7 +874,7 @@ class AdminConfigClient:
         else:
             # Fetch from API
             try:
-                url = f"{self.admin_url}/api/base-knowledge/public"
+                url = f"{self.admin_url}/api/base-knowledge"
                 if enabled_only:
                     url += "?enabled=true"
 

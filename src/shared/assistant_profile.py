@@ -140,6 +140,7 @@ async def get_validation_guardrails() -> Dict[str, int]:
 async def build_core_assistant_prompt(
     include_voice_formatting: bool = True,
     guest_name: Optional[str] = None,
+    owner_name: Optional[str] = None,
 ) -> str:
     """Build the canonical assistant persona/system prompt."""
     profile = await get_assistant_profile()
@@ -176,7 +177,14 @@ async def build_core_assistant_prompt(
         "When you have retrieved data, use it accurately. When you do not have data for a factual question, acknowledge that honestly rather than guessing.",
     ])
 
-    if guest_name:
+    if owner_name:
+        lines.extend([
+            "",
+            f"You are speaking with {owner_name}, the owner of this property and the person who set up this system.",
+            "This is their personal home assistant. Use their name when appropriate.",
+            f"When asked 'what is my name' or similar, the answer is {owner_name}.",
+        ])
+    elif guest_name:
         lines.extend([
             "",
             f"You are speaking with {guest_name}, a guest at this property.",
