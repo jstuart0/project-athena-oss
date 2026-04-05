@@ -8,7 +8,6 @@ fallback.
 Open Source Compatible - No vendor lock-in.
 """
 import os
-import re as _re
 import httpx
 import time
 from typing import Dict, Any, Optional, List
@@ -16,10 +15,9 @@ from enum import Enum
 from collections import deque
 import structlog
 
-# Import admin_config for centralized Ollama URL
-from shared.admin_config import get_admin_client
-
 logger = structlog.get_logger()
+
+import re as _re
 
 _THINK_TAG_PATTERN = _re.compile(r"<think>.*?</think>", _re.DOTALL | _re.IGNORECASE)
 
@@ -35,7 +33,10 @@ def _strip_think_tags(text: str) -> str:
     """
     if not text or "<think>" not in text.lower():
         return text
+    # Remove complete <think>...</think> blocks
     cleaned = _THINK_TAG_PATTERN.sub("", text).strip()
+    # If the entire response was inside <think> (no closing tag or all thinking),
+    # fall back to everything after the last </think> if present
     if not cleaned and "</think>" in text.lower():
         parts = text.split("</think>")
         cleaned = parts[-1].strip()
@@ -87,7 +88,7 @@ class LLMRouter:
     Routes LLM requests to configured backends.
 
     Usage:
-        router = LLMRouter(admin_url="http://localhost:8080")
+        router = LLMRouter(admin_url="https://athena-admin.xmojo.net")
         response = await router.generate(
             model="phi3:mini",
             prompt="Hello world",
@@ -113,7 +114,7 @@ class LLMRouter:
         """
         self.admin_url = admin_url or os.getenv(
             "ADMIN_API_URL",
-            "http://localhost:8080"
+            "https://athena-admin.xmojo.net"
         )
         self._admin_url_base = self.admin_url
         self.client = httpx.AsyncClient(timeout=120.0)
@@ -138,50 +139,11 @@ class LLMRouter:
         self._pricing_cache: Dict[str, Dict[str, Any]] = {}
         self._pricing_cache_expiry: float = 0
 
-        # Ollama URL cache (fetched from centralized system settings)
-        self._ollama_url_cache: Optional[str] = None
-        self._ollama_url_cache_expiry: float = 0
-
         logger.info(
             "llm_router_initialized",
             metrics_window_size=metrics_window_size,
             persist_metrics=persist_metrics
         )
-
-    async def _get_ollama_url(self) -> str:
-        """
-        Fetch centralized Ollama URL from admin API with caching.
-
-        Uses the admin_config client to fetch the URL from system_settings.
-        Falls back to OLLAMA_URL environment variable if API unavailable.
-
-        Returns:
-            Ollama API URL (e.g., "http://192.168.10.108:11434")
-        """
-        now = time.time()
-
-        # Check cache (60 second TTL)
-        if self._ollama_url_cache and now < self._ollama_url_cache_expiry:
-            return self._ollama_url_cache
-
-        # Fetch from admin_config (which handles API call and its own caching)
-        try:
-            admin_client = get_admin_client()
-            ollama_url = await admin_client.get_ollama_url()
-
-            # Cache the result
-            self._ollama_url_cache = ollama_url
-            self._ollama_url_cache_expiry = now + self._cache_ttl
-
-            return ollama_url
-
-        except Exception as e:
-            logger.warning(
-                "failed_to_get_ollama_url",
-                error=str(e)
-            )
-            # Fallback to environment variable
-            return os.getenv("OLLAMA_URL", "http://localhost:11434")
 
     async def _get_backend_config(self, model: str) -> Dict[str, Any]:
         """
@@ -248,16 +210,15 @@ class LLMRouter:
                     break
 
             if config is None:
-                # No config found - use default Ollama with centralized URL
+                # No config found - use default Ollama
                 logger.warning(
                     "no_backend_config_found",
                     model=model,
                     falling_back="ollama"
                 )
-                ollama_url = await self._get_ollama_url()
                 config = {
                     "backend_type": "ollama",
-                    "endpoint_url": ollama_url,
+                    "endpoint_url": os.getenv("OLLAMA_URL", "http://localhost:11434"),
                     "max_tokens": 2048,
                     "temperature_default": 0.7,
                     "timeout_seconds": 60,
@@ -276,11 +237,10 @@ class LLMRouter:
                 model=model,
                 error=str(e)
             )
-            # Fall back to Ollama with centralized URL
-            ollama_url = await self._get_ollama_url()
+            # Fall back to Ollama on Mac Studio
             return {
                 "backend_type": "ollama",
-                "endpoint_url": ollama_url,
+                "endpoint_url": os.getenv("OLLAMA_URL", "http://localhost:11434"),
                 "max_tokens": 2048,
                 "temperature_default": 0.7,
                 "timeout_seconds": 60,
@@ -371,6 +331,7 @@ class LLMRouter:
         user_id: Optional[str] = None,
         zone: Optional[str] = None,
         intent: Optional[str] = None,
+        system_prompt: Optional[str] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -424,22 +385,25 @@ class LLMRouter:
                 # Try MLX first, fall back to Ollama
                 try:
                     response = await self._generate_mlx(
-                        endpoint_url, model, prompt, temperature, max_tokens, timeout, mlx_options
+                        endpoint_url, model, prompt, temperature, max_tokens, timeout, mlx_options,
+                        system_prompt=system_prompt
                     )
                 except Exception as e:
                     logger.warning(
                         "mlx_failed_falling_back_to_ollama",
                         error=str(e)
                     )
-                    # Fall back to Ollama with centralized URL
-                    ollama_url = await self._get_ollama_url()
+                    # Fall back to Ollama on Mac Studio
+                    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
                     response = await self._generate_ollama(
-                        ollama_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options
+                        ollama_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options,
+                        system_prompt=system_prompt
                     )
 
             elif backend_type == BackendType.MLX or backend_type == "mlx":
                 response = await self._generate_mlx(
-                    endpoint_url, model, prompt, temperature, max_tokens, timeout, mlx_options
+                    endpoint_url, model, prompt, temperature, max_tokens, timeout, mlx_options,
+                    system_prompt=system_prompt
                 )
 
             elif backend_type == BackendType.OPENAI or backend_type == "openai":
@@ -451,7 +415,7 @@ class LLMRouter:
                 model_id = config.get("model_id", model.split("/")[-1] if "/" in model else model)
                 response = await self._generate_openai(
                     creds["api_key"], model_id, prompt, temperature, max_tokens,
-                    system_prompt=None, request_id=request_id
+                    system_prompt=system_prompt, request_id=request_id
                 )
 
             elif backend_type == BackendType.ANTHROPIC or backend_type == "anthropic":
@@ -462,7 +426,7 @@ class LLMRouter:
                 model_id = config.get("model_id", model.split("/")[-1] if "/" in model else model)
                 response = await self._generate_anthropic(
                     creds["api_key"], model_id, prompt, temperature, max_tokens,
-                    system_prompt=None, request_id=request_id
+                    system_prompt=system_prompt, request_id=request_id
                 )
 
             elif backend_type == BackendType.GOOGLE or backend_type == "google":
@@ -473,12 +437,13 @@ class LLMRouter:
                 model_id = config.get("model_id", model.split("/")[-1] if "/" in model else model)
                 response = await self._generate_google(
                     creds["api_key"], model_id, prompt, temperature, max_tokens,
-                    system_prompt=None, request_id=request_id
+                    system_prompt=system_prompt, request_id=request_id
                 )
 
             else:  # OLLAMA (default)
                 response = await self._generate_ollama(
-                    endpoint_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options
+                    endpoint_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options,
+                    system_prompt=system_prompt
                 )
 
             return response
@@ -539,6 +504,7 @@ class LLMRouter:
         max_tokens: Optional[int] = None,
         backend: str = "openai",
         request_id: Optional[str] = None,
+        disable_thinking: bool = False,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -589,7 +555,8 @@ class LLMRouter:
                         api_key = creds["api_key"]
                         model_id = config.get("model_id", model.split("/")[-1])
                 response = await self._generate_openai_with_tools(
-                    model_id, messages, tools, temperature, max_tokens, request_id, api_key=api_key
+                    model_id, messages, tools, temperature, max_tokens, request_id,
+                    api_key=api_key, disable_thinking=disable_thinking
                 )
             elif backend == "anthropic":
                 # Anthropic tool calling via their API
@@ -617,12 +584,13 @@ class LLMRouter:
                 if tools:
                     # MLX with tools: use OpenAI-compatible endpoint via SDK
                     response = await self._generate_openai_with_tools(
-                        model, messages, tools, temperature, max_tokens, request_id
+                        model, messages, tools, temperature, max_tokens, request_id,
+                        disable_thinking=disable_thinking
                     )
                 else:
                     # MLX without tools (synthesis): direct httpx to MLX server
                     backend_config = await self._get_backend_config(model)
-                    endpoint_url = backend_config.get("endpoint_url", os.getenv("MLX_URL", "http://localhost:9000"))
+                    endpoint_url = backend_config.get("endpoint_url", "http://localhost:9000")
                     # Ensure message content is strings (not dicts)
                     clean_messages = []
                     for m in messages:
@@ -710,7 +678,8 @@ class LLMRouter:
         temperature: Optional[float],
         max_tokens: Optional[int],
         request_id: Optional[str],
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        disable_thinking: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate using OpenAI API with tool calling.
@@ -752,14 +721,13 @@ class LLMRouter:
                 request_params["tools"] = tools
                 request_params["tool_choice"] = "auto"
 
-            # For local qwen3 models (no api_key = llamacpp/local), disable thinking
-            # via extra_body to prevent chain-of-thought leaking into responses.
-            # Use _is_local flag since api_key was overwritten to "sk-local" above.
-            if _is_local and "qwen3" in model.lower():
+            # Disable thinking mode when requested by component config (admin UI "No Think" toggle).
+            # Uses extra_body for llamacpp/openai-compatible local servers.
+            if _is_local and disable_thinking:
                 request_params["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
                 logger.info("qwen3_thinking_disabled_via_extra_body", model=model)
 
-            # Call OpenAI
+            # Call OpenAI / OpenAI-compatible (llamacpp) API
             response = await client.chat.completions.create(**request_params)
 
             # Extract response
@@ -792,7 +760,7 @@ class LLMRouter:
                     request_id=request_id
                 )
             else:
-                # No tool calls, return message content (strip any leaked think tags)
+                # No tool calls — strip any leaked <think>…</think> content before returning
                 result["content"] = _strip_think_tags(message.content or "")
 
             return result
@@ -1006,7 +974,7 @@ class LLMRouter:
 
         Uses Ollama's native tool calling support (for models like llama3.1:8b).
         """
-        endpoint_url = await self._get_ollama_url()
+        endpoint_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
         client = httpx.AsyncClient(base_url=endpoint_url, timeout=60.0)
 
         # Build payload
@@ -1027,11 +995,6 @@ class LLMRouter:
         # Disable thinking mode for qwen3 models (they output to 'thinking' field by default)
         if "qwen3" in model.lower():
             payload["think"] = False
-            # Prepend /no_think to last user message to prevent extended reasoning
-            for msg in reversed(payload["messages"]):
-                if msg.get("role") == "user":
-                    msg["content"] = "/no_think\n" + msg["content"]
-                    break
             logger.info("ollama_think_disabled", model=model)
 
         try:
@@ -1087,7 +1050,8 @@ class LLMRouter:
         max_tokens: int,
         timeout: int,
         keep_alive: int = -1,
-        ollama_options: Optional[Dict[str, Any]] = None
+        ollama_options: Optional[Dict[str, Any]] = None,
+        system_prompt: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Generate using Ollama backend.
@@ -1101,8 +1065,13 @@ class LLMRouter:
             timeout: Request timeout
             keep_alive: How long to keep model loaded (-1=forever)
             ollama_options: Additional Ollama options (num_ctx, num_batch, mirostat, etc.)
+            system_prompt: Optional system prompt (e.g., "/no_think" for Qwen3)
         """
         client = httpx.AsyncClient(base_url=endpoint_url, timeout=timeout)
+
+        # Prepend system prompt if provided (e.g., "/no_think" for Qwen3 models)
+        if system_prompt:
+            prompt = f"{system_prompt}\n\n{prompt}"
 
         # Build base options
         options = {
@@ -1134,32 +1103,14 @@ class LLMRouter:
         # -1 = keep forever, 0 = unload immediately, >0 = seconds
         payload["keep_alive"] = keep_alive
 
-        # Disable thinking mode for qwen3 models (they output to 'thinking' field by default)
-        if "qwen3" in model.lower():
-            payload["think"] = False
-            # Prepend /no_think tag to prompt to prevent extended reasoning output
-            payload["prompt"] = "/no_think\n" + payload["prompt"]
-            logger.debug("ollama_generate_think_disabled", model=model)
-
         try:
             response = await client.post("/api/generate", json=payload)
 
             response.raise_for_status()
             data = response.json()
 
-            response_text = data.get("response", "")
-
-            # Strip thinking content from qwen3 models
-            # The model may output thinking before </think> token
-            if "qwen3" in model.lower() and "</think>" in response_text:
-                # Extract content after </think> tag
-                parts = response_text.split("</think>", 1)
-                if len(parts) > 1:
-                    response_text = parts[1].strip()
-                    logger.debug("stripped_qwen3_thinking", model=model, original_len=len(data.get("response", "")), stripped_len=len(response_text))
-
             return {
-                "response": response_text,
+                "response": data.get("response"),
                 "backend": "ollama",
                 "model": model,
                 "done": data.get("done", True),
@@ -1221,12 +1172,6 @@ class LLMRouter:
             "options": options,
             "keep_alive": keep_alive
         }
-
-        # Disable thinking mode for qwen3 models
-        if "qwen3" in model.lower():
-            payload["think"] = False
-            # Prepend /no_think tag to prompt to prevent extended reasoning output
-            payload["prompt"] = "/no_think\n" + payload["prompt"]
 
         async with httpx.AsyncClient(base_url=endpoint_url, timeout=timeout) as client:
             async with client.stream("POST", "/api/generate", json=payload) as response:
@@ -1401,26 +1346,34 @@ class LLMRouter:
         temperature: float,
         max_tokens: int,
         timeout: int,
-        mlx_options: Optional[Dict[str, Any]] = None
+        mlx_options: Optional[Dict[str, Any]] = None,
+        system_prompt: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Generate using MLX backend.
+        Generate using MLX backend with chat completions API.
 
         Args:
-            endpoint_url: MLX server URL
-            model: Model name
+            endpoint_url: MLX server URL (e.g., http://localhost:9000)
+            model: Model name (can be any string - MLX uses the loaded model)
             prompt: Input prompt
             temperature: Generation temperature
             max_tokens: Max tokens to generate
             timeout: Request timeout
             mlx_options: Additional MLX options (max_kv_size, quantization, etc.)
+            system_prompt: Optional system prompt (e.g., "/no_think" for Qwen3)
         """
         client = httpx.AsyncClient(base_url=endpoint_url, timeout=timeout)
 
-        # Build request payload
+        # Build messages array - include system prompt if provided
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        # Build request payload using chat completions format
         payload = {
             "model": model,
-            "prompt": prompt,
+            "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens
         }
@@ -1442,16 +1395,17 @@ class LLMRouter:
             )
 
         try:
-            # MLX server uses OpenAI-compatible API
-            response = await client.post("/v1/completions", json=payload)
+            # MLX server uses OpenAI-compatible chat completions API
+            response = await client.post("/v1/chat/completions", json=payload)
 
             response.raise_for_status()
             data = response.json()
 
             choice = data["choices"][0]
+            content = choice.get("message", {}).get("content", "")
 
             return {
-                "response": choice["text"],
+                "response": content,
                 "backend": "mlx",
                 "model": model,
                 "done": True,

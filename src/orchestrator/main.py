@@ -8101,7 +8101,8 @@ If the user is asking to repeat, search again, or modify the previous request, u
             request_id=state.request_id,
             session_id=state.session_id,
             intent=state.intent.value if state.intent else None,
-            stage="tool_selection"
+            stage="tool_selection",
+            disable_thinking=component_config.get("disable_thinking", False),
         )
         llm_call_duration = time.time() - llm_call_start
         timing_breakdown["llm_tool_selection"] = llm_call_duration
@@ -8663,7 +8664,8 @@ Provide a helpful answer:"""
 
         # HYBRID APPROACH: Use quantized 14b for synthesis (quality matters)
         # Tool selection uses 7b (fast), synthesis uses quantized 14b (quality)
-        synthesis_model = await get_model_for_component("response_synthesis")
+        synthesis_config = await get_component_config("response_synthesis")
+        synthesis_model = synthesis_config["model_name"]
         logger.info(f"Using {synthesis_model} for synthesis (tool selection used {llm_model})")
 
         # Determine max tokens based on query type
@@ -8764,7 +8766,8 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
             request_id=state.request_id,
             session_id=state.session_id,
             intent=state.intent.value if state.intent else None,
-            stage="tool_synthesis"
+            stage="tool_synthesis",
+            disable_thinking=synthesis_config.get("disable_thinking", False),
         )
         synthesis_duration = time.time() - synthesis_start_time
         timing_breakdown["response_synthesis"] = synthesis_duration
