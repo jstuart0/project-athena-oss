@@ -9521,6 +9521,7 @@ class QueryRequest(BaseModel):
     device_id: Optional[str] = Field(None, description="Device fingerprint for multi-guest user identification")
     location: Optional[str] = Field(None, description="User's current location (from browser geolocation or device)")
     interruption_context: Optional[Dict[str, Any]] = Field(None, description="Context when user interrupted previous response (previous_query, interrupted_response, audio_position_ms)")
+    source: Optional[str] = Field(None, description="Interface origin for analytics: 'chatbot', 'jarvis', 'voice', 'ha', etc.")
 
 class QueryResponse(BaseModel):
     """Response model for query endpoint."""
@@ -10284,6 +10285,9 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         _debug_source = _get_analytics_source()
         _capture_source = await _should_capture_analytics(_debug_source)
         if _capture_source:
+            # Use request.source if provided (e.g., "chatbot", "jarvis", "voice", "ha");
+            # fall back to the analytics capture mode ("analytics" / "debug")
+            _turn_source = request.source or _capture_source
             asyncio.create_task(_record_conversation_turn(
                 session_id=session.session_id,
                 request_id=final_state.get("request_id"),
@@ -10301,7 +10305,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 room=request.room,
                 user_mode=current_mode,
                 interface_type=request.interface_type,
-                source=_capture_source,
+                source=_turn_source,
             ))
 
         return response

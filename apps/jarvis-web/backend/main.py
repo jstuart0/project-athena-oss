@@ -126,6 +126,7 @@ class ChatMessage(BaseModel):
     session_id: Optional[str] = None
     interface_type: Optional[str] = "chat"  # chat, text, or voice
     location: Optional[LocationOverride] = None
+    source: Optional[str] = None  # analytics origin: "chatbot", "jarvis", "voice", etc.
 
 
 class ChatResponse(BaseModel):
@@ -314,8 +315,8 @@ async def chat(message: ChatMessage):
         )
 
     try:
-        # Web chat uses "chat" mode for anonymous visitors
-        current_mode = "chat"
+        # Auto-detect from admin: "owner" normally, "guest" when a guest booking is active
+        current_mode = await get_current_mode()
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             request_body = {
@@ -323,7 +324,8 @@ async def chat(message: ChatMessage):
                 "mode": current_mode,
                 "room": DEFAULT_ROOM,
                 "session_id": session_id,
-                "interface_type": message.interface_type or "chat"  # chat/text prevents TTS normalization
+                "interface_type": message.interface_type or "chat",  # chat/text prevents TTS normalization
+                "source": message.source or "jarvis",  # forward caller's source or default to "jarvis"
             }
 
             # Build context with guest info and location override
@@ -436,10 +438,8 @@ async def chat_stream(message: ChatMessage):
         context["guest_id"] = guest.get("id")
         context["guest_name"] = guest.get("guest_name")
 
-    # Web chat uses "chat" mode for anonymous visitors.
-    # The voice assistant sends "owner" mode separately.
-    # This scopes base knowledge injection to public-facing context only.
-    current_mode = "chat"
+    # Use DEFAULT_CHAT_MODE env var (default: "owner" for showcase deployments)
+    current_mode = DEFAULT_CHAT_MODE
 
     async def generate():
         try:
@@ -448,7 +448,8 @@ async def chat_stream(message: ChatMessage):
                 "mode": current_mode,
                 "room": DEFAULT_ROOM,
                 "session_id": session_id,
-                "interface_type": message.interface_type or "chat"
+                "interface_type": message.interface_type or "chat",
+                "source": message.source or "jarvis",  # forward caller's source or default to "jarvis"
             }
 
             # Build context with guest info and location override

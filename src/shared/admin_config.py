@@ -872,9 +872,9 @@ class AdminConfigClient:
         if self._base_knowledge_cache and (time.time() - self._base_knowledge_cache_time < self._cache_ttl):
             knowledge = self._base_knowledge_cache
         else:
-            # Fetch from API
+            # Fetch from API (use public endpoint - no auth required)
             try:
-                url = f"{self.admin_url}/api/base-knowledge"
+                url = f"{self.admin_url}/api/base-knowledge/public"
                 if enabled_only:
                     url += "?enabled=true"
 

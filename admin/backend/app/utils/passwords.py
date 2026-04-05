@@ -31,13 +31,21 @@ def hash_password(password: str, iterations: int = DEFAULT_ITERATIONS) -> str:
 
 def verify_password(password: str, stored_hash: str) -> bool:
     try:
-        algorithm, iterations_str, salt_hex, digest_hex = stored_hash.split("$", 3)
+        algorithm, iterations_str, salt_encoded, digest_encoded = stored_hash.split("$", 3)
         if algorithm != "pbkdf2_sha256":
             return False
 
         iterations = int(iterations_str)
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(digest_hex)
+
+        # Support both hex encoding (current) and base64 encoding (legacy)
+        import base64
+        try:
+            salt = bytes.fromhex(salt_encoded)
+            expected = bytes.fromhex(digest_encoded)
+        except ValueError:
+            salt = base64.b64decode(salt_encoded)
+            expected = base64.b64decode(digest_encoded)
+
         actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
         return hmac.compare_digest(actual, expected)
     except Exception:
