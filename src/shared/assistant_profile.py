@@ -141,6 +141,7 @@ async def build_core_assistant_prompt(
     include_voice_formatting: bool = True,
     guest_name: Optional[str] = None,
     owner_name: Optional[str] = None,
+    interface_type: Optional[str] = None,
 ) -> str:
     """Build the canonical assistant persona/system prompt."""
     profile = await get_assistant_profile()
@@ -168,7 +169,17 @@ async def build_core_assistant_prompt(
     lines.extend(["", "Neutrality on sensitive topics:"])
     lines.extend(f"- {item}" for item in guardrails["sensitive_topic_policy"])
 
-    if include_voice_formatting:
+    if interface_type == "chat":
+        lines.extend([
+            "",
+            "Chat formatting — always follow these rules:",
+            "- Use **bold** to highlight key names, places, titles, numbers, and important facts",
+            "- Use *italics* for supporting context, clarifications, or subtle emphasis",
+            "- Use bullet lists for multiple items, steps, or options",
+            "- Keep responses concise but complete — no padding or filler phrases",
+            "- Do not use emojis",
+        ])
+    elif include_voice_formatting:
         lines.extend(["", "Voice-friendly formatting:"])
         lines.extend(f"- {item}" for item in guardrails["voice_formatting"])
 

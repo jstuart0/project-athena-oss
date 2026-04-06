@@ -6240,9 +6240,10 @@ Response:"""
                 pass
 
         system_context = await build_core_assistant_prompt(
-            include_voice_formatting=True,
+            include_voice_formatting=state.interface_type != "chat",
             guest_name=guest_name,
             owner_name=owner_name,
+            interface_type=state.interface_type,
         ) + "\n"
 
         # Inject base knowledge context from Admin API
@@ -11185,9 +11186,10 @@ Response:"""
             pass
 
     system_context = await build_core_assistant_prompt(
-        include_voice_formatting=True,
+        include_voice_formatting=state.interface_type != "chat",
         guest_name=guest_name,
         owner_name=_stream_owner_name,
+        interface_type=state.interface_type,
     ) + "\n"
 
     # Inject base knowledge context from Admin API
