@@ -1,13 +1,14 @@
 # Project Athena
 
-A privacy-focused, fully local AI assistant with a built-in chat interface, voice control, 23 RAG services, smart home integration, and a LangGraph-powered orchestrator — all running on your own hardware.
+A privacy-focused AI assistant with a built-in chat interface, voice control, 23 RAG services, smart home integration, and a LangGraph-powered orchestrator. Run it fully local, fully cloud, or anywhere in between.
 
 ## Why Athena?
 
-Commercial AI assistants route your data through cloud servers, add latency, and require subscriptions. Project Athena processes everything locally: your data never leaves your network, responses stream in 2-5 seconds, and there are zero recurring costs.
+Commercial AI assistants route your data through cloud servers, add latency, and require subscriptions. Project Athena gives you full control over where your data goes and which models you use. Run everything locally for maximum privacy, use cloud APIs for maximum capability, or mix and match per pipeline stage to optimize for cost, speed, and quality.
 
 **What makes it different:**
-- **100% local processing** — all LLM inference, speech processing, and data retrieval runs on your hardware
+- **No backend lock-in** — use local models (Ollama, MLX), cloud APIs (OpenAI, Anthropic, any OpenAI-compatible endpoint), or a mix — per pipeline stage, your call
+- **Local-first by default** — can run 100% on your hardware with zero cloud dependencies, but cloud is always an option
 - **Built-in chat interface** — Jarvis Web provides streaming text chat, push-to-talk voice, and smart home widgets from any browser
 - **LangGraph state machine** — an 11,000+ line orchestrator with intent classification, complexity-aware model routing, and multi-intent query decomposition
 - **23 RAG services** — specialized microservices for weather, sports, dining, flights, directions, news, stocks, recipes, and more
@@ -100,11 +101,11 @@ Best for: Home Assistant integration, custom applications, automation scripts.
   │  Router    │   │  Services     │   │  Assistant      │
   │            │   │               │   │  Client         │
   │ simple →   │   │ Weather       │   │                 │
-  │  4B model  │   │ Sports        │   │ Lights          │
+  │  local 4B  │   │ Sports        │   │ Lights          │
   │ complex →  │   │ Dining        │   │ Locks           │
-  │  14B model │   │ Flights ...   │   │ Climate         │
-  │ super →    │   │               │   │ Media           │
-  │  32B model │   │               │   │ Scenes          │
+  │  local 14B │   │ Flights ...   │   │ Climate         │
+  │  or cloud  │   │               │   │ Media           │
+  │  API       │   │               │   │ Scenes          │
   └────────────┘   └───────────────┘   └─────────────────┘
 ```
 
@@ -453,6 +454,7 @@ The optional admin backend provides a web UI for runtime configuration without c
 |----------|-----------|
 | **Deterministic preprocessing before LLM** | 6 regex/pattern layers handle 80%+ of queries without LLM calls, cutting latency significantly |
 | **Complexity-based model routing** | Simple queries (time, lights) use a fast 4B model; complex queries escalate to 14B/32B — no wasted compute |
+| **No backend lock-in** | Each pipeline stage (classifier, synthesizer, validator) can target a different backend — local Ollama for simple queries, cloud API for complex ones, or all-local / all-cloud if you prefer |
 | **Separate validation model** | A dedicated smaller model fact-checks the response model's output against source data |
 | **Microservice RAG** | Each data domain has different caching, rate limits, and failure modes — monolithic RAG would be fragile |
 | **OpenAI-compatible gateway** | Drop-in compatibility with Home Assistant and any OpenAI client library |
@@ -461,17 +463,23 @@ The optional admin backend provides a web UI for runtime configuration without c
 
 ## Hardware Requirements
 
-**Minimum (chat-only):**
+**Minimum (chat-only, local models):**
 - 16GB RAM, 4-core CPU
 - Ollama with a 3-4B parameter model
 - Works on Mac Mini, small Linux server, or NUC
 - No voice hardware required
+
+**Minimum (chat-only, cloud models):**
+- Any machine that can run Python and PostgreSQL
+- An API key for OpenAI, Anthropic, or any OpenAI-compatible provider
+- No GPU or large RAM required — LLM inference happens remotely
 
 **Recommended (full experience):**
 - Apple Silicon Mac with 32-64GB unified memory (for local LLM inference)
 - Dedicated machine for vector DB and Redis cache
 - 10GbE network for low-latency inter-service communication
 - Wyoming-compatible voice devices for hands-free operation
+- Mix local and cloud models per pipeline stage to optimize cost vs. latency
 
 ## Contributing
 
