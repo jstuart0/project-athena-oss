@@ -84,6 +84,10 @@ class ConversationTurnOut(BaseModel):
     error_message: Optional[str]
     source: str
     created_at: Optional[datetime]
+    complexity: Optional[str] = None
+    is_fallback: Optional[bool] = None
+    base_knowledge_populated: Optional[bool] = None
+    node_timings_ms: Optional[Any] = None
     evaluations: List[Dict[str, Any]] = []
 
     class Config:
@@ -267,7 +271,13 @@ async def list_conversations(
                     FROM conversation_turns t
                     WHERE t.conversation_id = c.id AND t.turn_number = 1
                     LIMIT 1
-                ) AS first_query
+                ) AS first_query,
+                (
+                    SELECT t.source
+                    FROM conversation_turns t
+                    WHERE t.conversation_id = c.id AND t.turn_number = 1
+                    LIMIT 1
+                ) AS source
             FROM conversations c
             {where_sql}
             ORDER BY c.started_at DESC
@@ -288,6 +298,7 @@ async def list_conversations(
                 "turn_count": row[7],
                 "total_tokens": row[8],
                 "first_query": row[9],
+                "source": row[10],
             })
 
         return {
@@ -333,7 +344,8 @@ async def get_conversation(
                 SELECT id, turn_number, request_id, query_text, response_text,
                        intent, confidence, model_used, rag_tools_used,
                        response_time_ms, tokens_generated, tokens_per_second,
-                       validation_passed, error_message, source, created_at
+                       validation_passed, error_message, source, created_at,
+                       complexity, is_fallback, base_knowledge_populated, node_timings_ms
                 FROM conversation_turns
                 WHERE conversation_id = :cid
                 ORDER BY turn_number ASC
@@ -382,6 +394,10 @@ async def get_conversation(
                 "error_message": tr[13],
                 "source": tr[14],
                 "created_at": tr[15].isoformat() if tr[15] else None,
+                "complexity": tr[16],
+                "is_fallback": tr[17],
+                "base_knowledge_populated": tr[18],
+                "node_timings_ms": tr[19],
                 "evaluations": evaluations,
             })
 

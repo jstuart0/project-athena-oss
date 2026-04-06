@@ -438,8 +438,7 @@ async def chat_stream(message: ChatMessage):
         context["guest_id"] = guest.get("id")
         context["guest_name"] = guest.get("guest_name")
 
-    # Use DEFAULT_CHAT_MODE env var (default: "owner" for showcase deployments)
-    current_mode = DEFAULT_CHAT_MODE
+    current_mode = await get_current_mode()
 
     async def generate():
         try:

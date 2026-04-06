@@ -1592,6 +1592,7 @@ class OrchestratorState(BaseModel):
     # Model selection
     model_tier: Optional[ModelTier] = None
     model_component: Optional[str] = None  # Component name for model lookup
+    model_used: Optional[str] = None  # Actual model name used for synthesis (e.g. mlx path or ollama tag)
 
     # Retrieved data
     retrieved_data: Dict[str, Any] = Field(default_factory=dict)
@@ -6323,6 +6324,7 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
         # Get synthesis model from database or use fallback
         synthesis_config = await get_component_config("response_synthesis")
         synthesis_model = synthesis_config["model_name"]
+        state.model_used = synthesis_model  # persist for analytics
 
         # Emit LLM generating event for Admin Jarvis monitoring
         llm_start_time = time.time()
@@ -9916,6 +9918,30 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     "tool_exec_time": 0  # No tool execution for cached responses
                 }
 
+                # Record analytics even for cache hits so conversations appear in admin UI
+                _capture_source = "analytics" if _analytics_mode_enabled else "debug"
+                _turn_source = request.source or _capture_source
+                if _analytics_mode_enabled or _debug_mode:
+                    asyncio.create_task(_record_conversation_turn(
+                        session_id=session.session_id,
+                        request_id=None,
+                        query=request.query,
+                        response=response_data.get("answer", ""),
+                        intent=response_data.get("intent"),
+                        confidence=response_data.get("confidence"),
+                        model_used=None,
+                        rag_tools_used=response_data.get("tools_used"),
+                        response_time_ms=0,
+                        tokens_generated=0,
+                        tokens_per_second=0.0,
+                        validation_passed=True,
+                        error_message=None,
+                        room=request.room,
+                        user_mode=request.mode,
+                        interface_type=request.interface_type,
+                        source=_turn_source,
+                    ))
+
                 return QueryResponse(**response_data)
 
         # Check for tool creation intent BEFORE running the state machine
@@ -10301,11 +10327,15 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 tokens_generated=final_state.get("llm_tokens"),
                 tokens_per_second=final_state.get("llm_tokens_per_second"),
                 validation_passed=final_state.get("validation_passed"),
-                error_message=None,
+                error_message=final_state.get("error"),
                 room=request.room,
                 user_mode=current_mode,
                 interface_type=request.interface_type,
                 source=_turn_source,
+                complexity=final_state.get("complexity"),
+                is_fallback=final_state.get("is_fallback", False),
+                base_knowledge_populated=final_state.get("base_knowledge_populated", False),
+                node_timings_ms=final_state.get("node_timings"),
             ))
 
         return response
@@ -10963,6 +10993,10 @@ async def _record_conversation_turn(
     user_mode: Optional[str],
     interface_type: Optional[str],
     source: str,
+    complexity: Optional[str] = None,
+    is_fallback: bool = False,
+    base_knowledge_populated: bool = False,
+    node_timings_ms: Optional[dict] = None,
 ) -> None:
     """
     Write a conversation turn to the analytics database.
@@ -10997,8 +11031,10 @@ async def _record_conversation_turn(
                     query_text, response_text, intent, confidence,
                     model_used, rag_tools_used, response_time_ms,
                     tokens_generated, tokens_per_second,
-                    validation_passed, error_message, source, created_at
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
+                    validation_passed, error_message, source,
+                    complexity, is_fallback, base_knowledge_populated, node_timings_ms,
+                    created_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
                 """,
                 str(_uuid.uuid4()),
                 str(conv_row["id"]),
@@ -11016,6 +11052,10 @@ async def _record_conversation_turn(
                 validation_passed,
                 error_message,
                 source,
+                complexity,
+                is_fallback,
+                base_knowledge_populated,
+                json.dumps(node_timings_ms) if node_timings_ms else None,
             )
 
     except Exception as e:
@@ -11259,8 +11299,8 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
         state = await tool_call_node(state)
         return state
 
-    if state.intent == IntentCategory.UNKNOWN:
-        # Unknown intent - let LLM handle with context
+    if state.intent in (IntentCategory.UNKNOWN, IntentCategory.GENERAL_INFO):
+        # Unknown or general info — skip retrieval; synthesize from base knowledge
         return state
 
     # For info intents, run the info routing and retrieval

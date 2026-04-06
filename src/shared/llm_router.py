@@ -1320,8 +1320,21 @@ class LLMRouter:
                 "prompt_eval_count": result.get("input_tokens", 0)
             }
 
+        elif backend_type == BackendType.MLX:
+            # MLX supports OpenAI-compatible SSE streaming
+            async for chunk in self._generate_mlx_stream(
+                endpoint_url=endpoint_url,
+                model=model,
+                prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                mlx_options=model_config.get("mlx_options", {})
+            ):
+                yield chunk
+
         else:
-            # For MLX and others, fall back to non-streaming and yield all at once
+            # Unknown backend — fall back to non-streaming and yield all at once
             result = await self._generate_mlx(
                 endpoint_url=endpoint_url,
                 model=model,
@@ -1335,8 +1348,70 @@ class LLMRouter:
                 "token": result.get("response", ""),
                 "done": True,
                 "model": model,
-                "backend": "mlx"
+                "backend": "unknown"
             }
+
+    async def _generate_mlx_stream(
+        self,
+        endpoint_url: str,
+        model: str,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        timeout: int,
+        mlx_options: Optional[Dict[str, Any]] = None,
+        system_prompt: Optional[str] = None
+    ):
+        """
+        Stream tokens from MLX backend using OpenAI-compatible SSE streaming.
+
+        Yields dicts with 'token' and 'done' keys matching the Ollama streaming format.
+        """
+        import json as _json
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+
+        if "qwen3.5" in model.lower() or "Qwen3.5" in model:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+        if mlx_options:
+            for key, value in mlx_options.items():
+                if value is not None and key != "stream":
+                    payload[key] = value
+
+        try:
+            async with httpx.AsyncClient(base_url=endpoint_url, timeout=timeout) as client:
+                async with client.stream("POST", "/v1/chat/completions", json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        payload_str = line[6:].strip()
+                        if payload_str == "[DONE]":
+                            yield {"token": "", "done": True, "model": model, "backend": "mlx"}
+                            return
+                        try:
+                            chunk = _json.loads(payload_str)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            token = delta.get("content", "")
+                            if token:
+                                yield {"token": token, "done": False, "model": model, "backend": "mlx"}
+                        except (ValueError, IndexError, KeyError):
+                            continue
+        except Exception as e:
+            logger.error("mlx_stream_error", error=str(e))
+            raise
 
     async def _generate_mlx(
         self,

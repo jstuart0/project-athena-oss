@@ -395,8 +395,20 @@ function renderTurnCard(turn) {
         turn.tokens_generated && `${turn.tokens_generated} tok`,
         turn.tokens_per_second && `${Math.round(turn.tokens_per_second)} tok/s`,
         turn.model_used && turn.model_used,
+        turn.complexity && `complexity:${turn.complexity}`,
+        turn.is_fallback && `⚠ fallback`,
+        turn.base_knowledge_populated && `base_kb`,
         Array.isArray(turn.rag_tools_used) && turn.rag_tools_used.length && `[${turn.rag_tools_used.join(', ')}]`,
     ].filter(Boolean).join(' · ');
+
+    const timingsSection = turn.node_timings_ms && Object.keys(turn.node_timings_ms).length ? `
+        <details class="mt-2">
+            <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-400">Node timings</summary>
+            <div class="mt-1 text-xs font-mono text-gray-400 pl-2 space-y-0.5">
+                ${Object.entries(turn.node_timings_ms).map(([k, v]) => `<div>${escapeHtml(k)}: ${v}ms</div>`).join('')}
+            </div>
+        </details>
+    ` : '';
 
     const evalSection = `
         <div class="mt-4 pt-4 border-t border-gray-800">
@@ -454,6 +466,7 @@ function renderTurnCard(turn) {
             ` : ''}
 
             ${metaLine ? `<div class="text-xs text-gray-500 font-mono">${metaLine}</div>` : ''}
+            ${timingsSection}
 
             ${evalSection}
         </div>
