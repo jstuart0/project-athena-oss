@@ -1,74 +1,125 @@
 # Project Athena
 
-A privacy-focused, fully local AI voice assistant with 23 RAG services, smart home control, and a LangGraph-powered orchestrator — all running on your own hardware.
+A privacy-focused, fully local AI assistant with a built-in chat interface, voice control, 23 RAG services, smart home integration, and a LangGraph-powered orchestrator — all running on your own hardware.
 
 ## Why Athena?
 
-Commercial voice assistants route your voice through cloud servers, add latency, and require subscriptions. Project Athena processes everything locally: your voice data never leaves your network, responses arrive in 2-5 seconds, and there are zero recurring costs.
+Commercial AI assistants route your data through cloud servers, add latency, and require subscriptions. Project Athena processes everything locally: your data never leaves your network, responses stream in 2-5 seconds, and there are zero recurring costs.
 
 **What makes it different:**
 - **100% local processing** — all LLM inference, speech processing, and data retrieval runs on your hardware
+- **Built-in chat interface** — Jarvis Web provides streaming text chat, push-to-talk voice, and smart home widgets from any browser
 - **LangGraph state machine** — an 11,000+ line orchestrator with intent classification, complexity-aware model routing, and multi-intent query decomposition
 - **23 RAG services** — specialized microservices for weather, sports, dining, flights, directions, news, stocks, recipes, and more
 - **Anti-hallucination pipeline** — 4-layer validation checks LLM responses against source data before delivery
 - **Smart home control** — deep Home Assistant integration with 70+ command patterns for lights, locks, thermostats, and more
-- **OpenAI-compatible API** — works with Home Assistant's Extended OpenAI Conversation integration out of the box
+- **OpenAI-compatible API** — works with Home Assistant, custom apps, or any OpenAI client library
+
+## Interfaces
+
+Athena supports three ways to interact, all backed by the same orchestrator and RAG pipeline:
+
+### Chat Interface (Jarvis Web)
+
+A standalone web application with streaming text chat, push-to-talk voice, and smart home widgets. No wake word or voice hardware needed — type a question or hold a button to speak.
+
+- **Text chat** with real-time streaming responses and markdown rendering
+- **Push-to-talk voice** — hold a button to speak, release to send (requires STT/TTS service)
+- **LiveKit WebRTC** — optional always-on voice streaming for hands-free browser interaction
+- **Smart home widgets** — climate control, media playback, sensor readings directly in the interface
+- **Owner/Guest mode** — automatic access scoping based on guest bookings
+- **Music integration** — search and play music directly in the browser
+
+Best for: desktop and mobile access, chatbot deployments, development and testing, guest-facing kiosks.
+
+### Voice Assistant
+
+Wake-word-activated voice control through dedicated hardware. Say "Hey Jarvis" and ask your question — the system automatically routes to the right model based on query complexity.
+
+- **Wyoming protocol** integration for hardware voice devices
+- **Wake word detection** — "Hey Jarvis" activates listening
+- **Continued conversation** — after responding, keeps listening for follow-up questions
+- **Multi-zone coverage** — independent voice devices per room
+- **TTS normalization** — converts abbreviations, addresses, and numbers to natural speech
+
+Best for: hands-free operation, whole-home coverage, smart home control.
+
+### API
+
+OpenAI-compatible REST endpoints for building custom integrations, connecting to Home Assistant, or building your own frontend.
+
+```bash
+# OpenAI-compatible endpoint (works with any OpenAI client library)
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "athena", "messages": [{"role": "user", "content": "What is the weather?"}]}'
+
+# Direct orchestrator endpoint with streaming
+curl -X POST http://localhost:8001/query/stream \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the weather?", "mode": "owner", "interface_type": "chat"}'
+```
+
+Best for: Home Assistant integration, custom applications, automation scripts.
 
 ## Architecture
 
 ```
-                         ┌────────────────────-──┐
-                         │    Voice Input        │
-                         │ (Wyoming / Web / API) │
-                         └──────────┬──────────-─┘
+                     ┌──────────────────────────────┐
+                     │          Interfaces           │
+                     │                               │
+                     │  Jarvis Web  (text / voice)   │
+                     │  Wyoming     (voice hardware) │
+                     │  API         (programmatic)   │
+                     └──────────────┬────────────────┘
                                     │
-                         ┌──────────▼─────---─────┐
-                         │      Gateway           │
-                         │  Rate Limiting         │
-                         │  Circuit Breaker       │
-                         │  OpenAI-Compatible API │
-                         └──────────┬─────────--──┘
+                     ┌──────────────▼────────────────┐
+                     │           Gateway              │
+                     │    Rate Limiting               │
+                     │    Circuit Breaker             │
+                     │    OpenAI-Compatible API       │
+                     └──────────────┬────────────────┘
                                     │
-              ┌─────────────────────▼────────────────--─────┐
-              │            Orchestrator                     │
-              │         (LangGraph State Machine)           │
-              │                                             │
-              │  ┌─────-─────┐ ┌──-────────┐ ┌─-─────────┐  │
-              │  │ Classify  │→│ Retrieve  │→│ Validate  │  │
-              │  └──────────┘  └──────────┘  └─────────-─┘  │
-              │       │                            │        │
-              │  ┌────▼─-───┐                  ┌───▼──-──┐  │
-              │  │Complexity│                  │  Anti-  │  │
-              │  │Detector  │                  │Halluci- │  │
-              │  │(no LLM)  │                  │nation   │  │
-              │  └───-──────┘                  └─────────┘  │
-              └──┬──────────────┬────────────────┬────-─────┘
-                 │              │                │
-        ┌────────▼──┐   ┌───────▼──────┐   ┌─────▼──-────┐
-        │  LLM      │   │ 23 RAG       │   │  Home       │
-        │  Router   │   │ Services     │   │  Assistant  │
-        │           │   │              │   │  Client     │
-        │ simple →  │   │ Weather      │   │             │
-        │  4B model │   │ Sports       │   │ Lights      │
-        │ complex → │   │ Dining       │   │ Locks       │
-        │  14B model│   │ Flights ...  │   │ Climate     │
-        │ super →   │   │              │   │ Media       │
-        │  32B model│   │              │   │ Scenes      │
-        └───────────┘   └──────────────┘   └─────────────┘
+        ┌───────────────────────────▼──────────────────────────┐
+        │                  Orchestrator                         │
+        │             (LangGraph State Machine)                 │
+        │                                                       │
+        │  ┌────────────┐  ┌────────────┐  ┌────────────────┐  │
+        │  │  Classify   │→│  Retrieve  │→│    Validate     │  │
+        │  └────────────┘  └────────────┘  └────────────────┘  │
+        │       │                                │              │
+        │  ┌────▼───────┐                  ┌─────▼──────────┐  │
+        │  │ Complexity  │                 │    Anti-        │  │
+        │  │ Detector    │                 │  Hallucination  │  │
+        │  │ (no LLM)    │                 │    Pipeline     │  │
+        │  └─────────────┘                 └────────────────┘  │
+        └──┬───────────────┬─────────────────┬─────────────────┘
+           │               │                 │
+  ┌────────▼───┐   ┌───────▼───────┐   ┌─────▼───────────┐
+  │  LLM       │   │  23 RAG       │   │  Home           │
+  │  Router    │   │  Services     │   │  Assistant      │
+  │            │   │               │   │  Client         │
+  │ simple →   │   │ Weather       │   │                 │
+  │  4B model  │   │ Sports        │   │ Lights          │
+  │ complex →  │   │ Dining        │   │ Locks           │
+  │  14B model │   │ Flights ...   │   │ Climate         │
+  │ super →    │   │               │   │ Media           │
+  │  32B model │   │               │   │ Scenes          │
+  └────────────┘   └───────────────┘   └─────────────────┘
 ```
 
 ### Request Flow
 
-1. Wake word ("Hey Jarvis") triggers voice capture via Wyoming protocol
-2. Speech-to-text transcribes audio locally
+1. User sends a query via Jarvis Web, voice device, or API call
+2. Speech-to-text transcribes audio locally (voice interfaces only)
 3. **Gateway** applies rate limiting, circuit breaking, and routes to orchestrator
 4. **Orchestrator** runs 6-layer deterministic preprocessing (STT error correction, slang normalization, false memory detection, emotional context, pattern classification) before any LLM call
 5. **Complexity detector** scores the query (regex-only, no LLM) and selects the appropriate model tier
 6. **RAG services** fetch real-time data from external APIs
 7. **LLM synthesizes** a natural response using retrieved data
 8. **Validation pipeline** checks for hallucinated facts against source data
-9. **TTS normalizer** converts abbreviations, addresses, and numbers to natural speech
-10. Audio streams back to the originating room's speaker
+9. Response streams back to the interface — text for chat, speech-normalized audio for voice
+10. Voice interfaces continue listening for follow-up questions
 
 ## RAG Services
 
@@ -108,54 +159,88 @@ Deep Home Assistant integration (4,500+ lines) with:
 - Redis (optional, for session caching)
 - Home Assistant (optional, for smart home control)
 
-### Installation
+### Chat-Only Setup
+
+The fastest path to a working Athena instance — text chat with full RAG capabilities, no voice hardware required.
 
 ```bash
 git clone https://github.com/jstuart0/project-athena-oss.git
 cd project-athena-oss
 
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
 # Configure environment
 cp .env.example .env
-# Edit .env with your configuration (see docs/CONFIGURATION.md)
+# Edit .env — set required values:
+#   ATHENA_DB_PASSWORD, ADMIN_API_URL, ENCRYPTION_KEY,
+#   ENCRYPTION_SALT, SESSION_SECRET_KEY, JWT_SECRET
+
+# Disable modules you don't need:
+#   MODULE_HOME_ASSISTANT=false   # skip if no Home Assistant
+#   MODULE_JARVIS_WEB=true        # enable the chat interface
 ```
 
-### Running Services
+**Option A: Docker Compose**
+
+```bash
+docker compose up -d
+```
+
+**Option B: Manual**
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# Terminal 1: Admin backend
+cd admin/backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8080
+
+# Terminal 2: Orchestrator
+cd src/orchestrator && python -m uvicorn main:app --host 0.0.0.0 --port 8001
+
+# Terminal 3: Gateway
+cd src/gateway && python -m uvicorn main:app --host 0.0.0.0 --port 8000
+
+# Terminal 4: Jarvis Web interface
+cd apps/jarvis-web/backend && pip install -r requirements.txt
+python -m uvicorn main:app --host 0.0.0.0 --port 3001
+```
+
+Open `http://localhost:3001` to start chatting. Add RAG services (weather, sports, dining, etc.) as needed — each runs independently on its own port.
+
+### Full Setup (Voice + Chat + RAG)
+
+```bash
+git clone https://github.com/jstuart0/project-athena-oss.git
+cd project-athena-oss
+
+cp .env.example .env
+# Edit .env with your full configuration (see docs/CONFIGURATION.md)
+```
 
 **Option 1: Docker Compose (recommended)**
 
 ```bash
-# Configure environment
-cp .env.example .env
-# Edit .env with required values
-
 docker compose up -d
 ```
 
 **Option 2: Manual**
 
 ```bash
-# Start the gateway (OpenAI-compatible API layer)
-cd src/gateway
-python -m uvicorn main:app --host 0.0.0.0 --port 8000
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
-# Start the orchestrator
-cd src/orchestrator
-python -m uvicorn main:app --host 0.0.0.0 --port 8001
+# Start core services
+cd src/gateway && python -m uvicorn main:app --host 0.0.0.0 --port 8000
+cd src/orchestrator && python -m uvicorn main:app --host 0.0.0.0 --port 8001
 
 # Start RAG services as needed
-cd src/rag/weather
-python -m uvicorn main:app --host 0.0.0.0 --port 8010
+cd src/rag/weather && python -m uvicorn main:app --host 0.0.0.0 --port 8010
 ```
 
 **Option 3: Kubernetes**
 
 Manifests are provided in `manifests/athena-prod/` for full cluster deployment.
 
-See [docs/INSTALLATION.md](docs/INSTALLATION.md) for detailed setup instructions.
+See [docs/INSTALLATION.md](docs/INSTALLATION.md) for detailed setup instructions including voice device configuration.
 
 ### Configuration
 
@@ -175,19 +260,84 @@ HA_URL=http://your-home-assistant:8123
 HA_TOKEN=your-long-lived-access-token
 
 # Module toggles
-MODULE_WEATHER=true
-MODULE_SPORTS=true
 MODULE_HOME_ASSISTANT=true
+MODULE_JARVIS_WEB=true
+MODULE_GUEST_MODE=false
 ```
 
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all options and [docs/MODULES.md](docs/MODULES.md) for the module reference.
+
+## Jarvis Web Interface
+
+Jarvis Web is a standalone web application that provides chat and voice access to the full Athena pipeline. It runs as a FastAPI backend serving a single-page frontend.
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| **Text Chat** | Streaming responses via SSE with markdown rendering |
+| **Push-to-Talk** | Hold-to-record voice input, transcribed locally via STT |
+| **LiveKit Streaming** | Optional always-on WebRTC voice (requires LiveKit server) |
+| **Smart Home Widgets** | Climate, media, and sensor controls embedded in the interface |
+| **Guest Mode** | Automatic access scoping based on guest bookings |
+| **Music Playback** | Search and stream music directly in the browser |
+
+### How It Works
+
+```
+Browser → Jarvis Web Backend → Orchestrator → LLM + RAG Services
+                              ↘ Home Assistant (for widgets)
+```
+
+The backend proxies chat requests to the Orchestrator and smart home requests to Home Assistant. All LLM processing happens server-side — the browser renders streamed responses.
+
+### Deployment
+
+**Local development:**
+
+```bash
+cd apps/jarvis-web/backend
+pip install -r requirements.txt
+python -m uvicorn main:app --host 0.0.0.0 --port 3001
+```
+
+**Docker:**
+
+```bash
+cd apps/jarvis-web
+docker build -t jarvis-web .
+docker run -p 3001:8000 \
+  -e ORCHESTRATOR_URL=http://host.docker.internal:8001 \
+  -e GATEWAY_URL=http://host.docker.internal:8000 \
+  jarvis-web
+```
+
+**Kubernetes:**
+
+```bash
+kubectl apply -f apps/jarvis-web/k8s/deployment.yaml
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCHESTRATOR_URL` | `http://localhost:8001` | Orchestrator endpoint |
+| `GATEWAY_URL` | `http://localhost:8000` | Gateway endpoint (for LiveKit proxy) |
+| `ADMIN_BACKEND_URL` | `http://localhost:8080` | Admin API (for guest mode) |
+| `HA_URL` | — | Home Assistant URL (for smart home widgets) |
+| `HA_TOKEN` | — | Home Assistant long-lived access token |
+| `VOICE_API_URL` | — | STT/TTS endpoint (for push-to-talk voice) |
+| `DEFAULT_ROOM` | `guest` | Room name sent to orchestrator |
+
+Text chat works with just `ORCHESTRATOR_URL`. Voice features require `VOICE_API_URL`. Smart home widgets require `HA_URL` and `HA_TOKEN`.
 
 ## API Usage
 
 ### Gateway (OpenAI-Compatible)
 
 ```bash
-# Works with any OpenAI-compatible client or Home Assistant
+# Works with any OpenAI-compatible client, Home Assistant, or custom apps
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -199,12 +349,23 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 ### Orchestrator (Direct)
 
 ```bash
+# Text chat — use interface_type "chat" for detailed responses
 curl -X POST http://localhost:8001/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "Turn on the living room lights and check the weather",
     "mode": "owner",
     "room": "office",
+    "interface_type": "chat"
+  }'
+
+# Voice — use interface_type "voice" for TTS-normalized responses
+curl -X POST http://localhost:8001/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What time is the Orioles game?",
+    "mode": "owner",
+    "room": "kitchen",
     "interface_type": "voice"
   }'
 ```
@@ -255,7 +416,10 @@ project-athena/
 │   │   └── app/routes/      # 62 route modules
 │   └── frontend/            # Admin web UI (58 JS modules)
 ├── apps/
-│   └── jarvis-web/          # Push-to-talk web interface
+│   └── jarvis-web/          # Chat interface with text, voice, and smart home widgets
+│       ├── backend/         # FastAPI proxy to orchestrator and Home Assistant
+│       ├── frontend/        # Single-page app (HTML + JS)
+│       └── k8s/             # Kubernetes deployment manifests
 ├── manifests/
 │   └── athena-prod/         # Kubernetes deployment manifests
 ├── scripts/                 # Build, deploy, and setup automation
@@ -293,18 +457,21 @@ The optional admin backend provides a web UI for runtime configuration without c
 | **Microservice RAG** | Each data domain has different caching, rate limits, and failure modes — monolithic RAG would be fragile |
 | **OpenAI-compatible gateway** | Drop-in compatibility with Home Assistant and any OpenAI client library |
 | **Environment-variable configuration** | Zero hardcoded values — fully configurable for any deployment |
+| **Standalone chat interface** | Jarvis Web runs independently — use it without voice hardware, Wyoming devices, or Home Assistant |
 
 ## Hardware Requirements
 
-**Minimum (basic functionality):**
+**Minimum (chat-only):**
 - 16GB RAM, 4-core CPU
 - Ollama with a 3-4B parameter model
 - Works on Mac Mini, small Linux server, or NUC
+- No voice hardware required
 
 **Recommended (full experience):**
 - Apple Silicon Mac with 32-64GB unified memory (for local LLM inference)
 - Dedicated machine for vector DB and Redis cache
 - 10GbE network for low-latency inter-service communication
+- Wyoming-compatible voice devices for hands-free operation
 
 ## Contributing
 
