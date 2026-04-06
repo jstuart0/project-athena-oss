@@ -1098,8 +1098,6 @@ MODE_SERVICE_URL = os.getenv("MODE_SERVICE_URL", "http://localhost:8022")
 # Notifications service (for proactive notification preferences)
 NOTIFICATIONS_SERVICE_URL = os.getenv("NOTIFICATIONS_SERVICE_URL", "http://localhost:8050")
 
-# LLM
-OLLAMA_URL = os.getenv("LLM_SERVICE_URL", "http://localhost:11434")
 
 # Intent categories
 class IntentCategory(str, Enum):
@@ -1760,16 +1758,21 @@ async def lifespan(app: FastAPI):
             ha_token = ha_config["token"]
             logger.info("ha_config_from_admin", url=ha_url)
         else:
-            # Fallback to environment variables
-            ha_url = os.getenv("HA_URL", "http://localhost:8123")
-            ha_token = os.getenv("HA_TOKEN", "")
-            logger.info("ha_config_from_env", url=ha_url)
+            # Fallback to environment variables — HA must be configured in admin panel
+            ha_url = os.getenv("HA_URL")
+            ha_token = os.getenv("HA_TOKEN")
+            if ha_url:
+                logger.info("ha_config_from_env", url=ha_url)
+            else:
+                logger.warning("ha_config_missing", reason="Not configured in admin and HA_URL env var not set")
     except Exception as e:
         logger.warning("ha_config_fetch_failed", error=str(e))
-        # Fallback to environment variables
-        ha_url = os.getenv("HA_URL", "http://localhost:8123")
-        ha_token = os.getenv("HA_TOKEN", "")
-        logger.info("ha_config_from_env_fallback", url=ha_url)
+        ha_url = os.getenv("HA_URL")
+        ha_token = os.getenv("HA_TOKEN")
+        if ha_url:
+            logger.info("ha_config_from_env_fallback", url=ha_url)
+        else:
+            logger.warning("ha_config_missing", reason="Admin unreachable and HA_URL env var not set")
 
     # Initialize clients
     ha_client = HomeAssistantClient(url=ha_url, token=ha_token) if ha_token else None
@@ -7379,7 +7382,7 @@ async def execute_tools_parallel(
                     try:
                         arguments = await resolve_flight_parameters(
                             arguments,
-                            airports_service_url="http://localhost:8011",
+                            airports_service_url=AIRPORTS_SERVICE_URL,
                             feature_enabled=True
                         )
                         logger.info("airport_lookup_applied", arguments=arguments)
