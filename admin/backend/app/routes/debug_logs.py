@@ -3,6 +3,9 @@ Debug logs API - Proxies requests to Control Agent.
 
 The orchestrator logs are stored on the service host.
 This route proxies requests to the Control Agent which has filesystem access.
+
+If CONTROL_AGENT_URL is not set or the agent is unreachable, all endpoints
+degrade gracefully (200 with empty/unavailable responses) rather than 503.
 """
 import os
 import httpx
@@ -12,8 +15,10 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/debug-logs", tags=["debug-logs"])
 
-# Control Agent URL - configurable via environment
-CONTROL_AGENT_URL = os.getenv("CONTROL_AGENT_URL", "http://localhost:8099")
+# Control Agent URL - configurable via environment variable.
+# Set CONTROL_AGENT_URL to enable this feature. If unset, all endpoints
+# return a graceful "unavailable" response.
+CONTROL_AGENT_URL = os.getenv("CONTROL_AGENT_URL", "")
 
 
 class LogEntry(BaseModel):
@@ -49,14 +54,38 @@ class DebugStatusResponse(BaseModel):
     file_count: int
     total_size_mb: float
     recent_files: List[str]
+    available: bool = True
+    unavailable_reason: Optional[str] = None
 
 
-async def proxy_to_control_agent(path: str, params: dict = None) -> dict:
-    """Proxy request to Control Agent on Mac Studio."""
+def _unavailable_status(reason: str) -> DebugStatusResponse:
+    return DebugStatusResponse(
+        debug_mode=False,
+        log_directory="",
+        directory_exists=False,
+        file_count=0,
+        total_size_mb=0.0,
+        recent_files=[],
+        available=False,
+        unavailable_reason=reason,
+    )
+
+
+async def proxy_to_control_agent(path: str, params: dict = None) -> Optional[dict]:
+    """
+    Proxy request to the Control Agent.
+
+    Returns the parsed JSON response on success.
+    Returns None if the Control Agent is not configured or unreachable.
+    Raises HTTPException for application-level errors (404, 5xx from agent).
+    """
+    if not CONTROL_AGENT_URL:
+        return None
+
     url = f"{CONTROL_AGENT_URL}{path}"
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(url, params=params)
 
             if response.status_code == 404:
@@ -69,21 +98,21 @@ async def proxy_to_control_agent(path: str, params: dict = None) -> dict:
 
             return response.json()
     except httpx.ConnectError:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Control Agent not reachable at {CONTROL_AGENT_URL}. Is the Control Agent running?"
-        )
+        return None
     except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="Control Agent request timed out"
-        )
+        return None
 
 
 @router.get("/status", response_model=DebugStatusResponse)
 async def get_debug_status():
     """Check if debug mode is enabled and get log directory info."""
+    if not CONTROL_AGENT_URL:
+        return _unavailable_status("CONTROL_AGENT_URL is not configured")
+
     data = await proxy_to_control_agent("/debug-logs/status")
+    if data is None:
+        return _unavailable_status(f"Control Agent not reachable at {CONTROL_AGENT_URL}")
+
     return DebugStatusResponse(**data)
 
 
@@ -93,6 +122,8 @@ async def list_log_files(
 ):
     """List available log files."""
     data = await proxy_to_control_agent("/debug-logs/files", {"days": days})
+    if data is None:
+        return []
     return [LogFile(**f) for f in data]
 
 
@@ -107,21 +138,18 @@ async def search_logs(
     offset: int = Query(0, ge=0, description="Offset for pagination")
 ):
     """Search log files with optional filters."""
-    params = {
+    data = await proxy_to_control_agent("/debug-logs/search", {
         "hours": hours,
         "limit": limit,
-        "offset": offset
-    }
-    if query:
-        params["query"] = query
-    if file:
-        params["file"] = file
-    if service:
-        params["service"] = service
-    if level:
-        params["level"] = level
+        "offset": offset,
+        **({"query": query} if query else {}),
+        **({"file": file} if file else {}),
+        **({"service": service} if service else {}),
+        **({"level": level} if level else {}),
+    })
+    if data is None:
+        return LogSearchResult(total_lines=0, returned_lines=0, entries=[], file="")
 
-    data = await proxy_to_control_agent("/debug-logs/search", params)
     return LogSearchResult(
         total_lines=data["total_lines"],
         returned_lines=data["returned_lines"],
@@ -137,6 +165,9 @@ async def tail_log(
 ):
     """Get the last N lines of a log file."""
     data = await proxy_to_control_agent(f"/debug-logs/tail/{filename}", {"lines": lines})
+    if data is None:
+        return LogSearchResult(total_lines=0, returned_lines=0, entries=[], file=filename)
+
     return LogSearchResult(
         total_lines=data["total_lines"],
         returned_lines=data["returned_lines"],

@@ -1,18 +1,23 @@
 """
 Control Agent for Project Athena
 
-Lightweight service that provides HTTP endpoints to control Docker containers
-and Python process services.
+Lightweight service running on Mac Studio (192.168.10.167:8099) that provides
+HTTP endpoints to control Docker containers and Python process services.
 
 This agent enables the admin backend to manage Athena services remotely.
 Supports both Docker containers AND bare Python/uvicorn processes.
+
+Includes a background watchdog that monitors all services every 60 seconds
+and auto-restarts any that have crashed.
 """
 
 import asyncio
 import subprocess
 import os
 import signal
-from typing import Optional, Dict
+import time
+from contextlib import asynccontextmanager
+from typing import Optional, Dict, List, Set
 from datetime import datetime
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
@@ -25,13 +30,138 @@ logger = structlog.get_logger()
 # Project root for service directories
 PROJECT_ROOT = Path.home() / "dev" / "project-athena"
 
-# Ollama URL - configurable via environment variable
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+
+# =============================================================================
+# WATCHDOG CONFIGURATION
+# =============================================================================
+
+# Services that should NOT be auto-restarted (known broken, need manual fix)
+WATCHDOG_EXCLUDE: Set[int] = {
+    8028,  # tesla - needs TeslaMate DB + TCP proxy setup
+    8029,  # media - PYTHONPATH issue needs manual fix
+}
+
+# Watchdog state
+watchdog_enabled = True
+watchdog_interval = 60  # seconds between checks
+watchdog_task: Optional[asyncio.Task] = None
+watchdog_stats = {
+    "checks": 0,
+    "restarts": 0,
+    "last_check": None,
+    "last_restart": None,
+    "restart_log": [],  # Last 50 restart events
+}
+MAX_RESTART_LOG = 50
+
+# Cooldown: don't restart the same service more than once per 5 minutes
+# Prevents restart loops for services that crash immediately on startup
+RESTART_COOLDOWN = 300  # seconds
+last_restart_time: Dict[int, float] = {}
+
+
+async def watchdog_loop():
+    """Background loop that checks all services and restarts crashed ones."""
+    global watchdog_stats, last_restart_time
+
+    logger.info("watchdog_started", interval=watchdog_interval)
+
+    while True:
+        try:
+            await asyncio.sleep(watchdog_interval)
+
+            if not watchdog_enabled:
+                continue
+
+            watchdog_stats["checks"] += 1
+            watchdog_stats["last_check"] = datetime.utcnow().isoformat()
+            now = time.time()
+
+            for port, config in PROCESS_SERVICES.items():
+                if port in WATCHDOG_EXCLUDE:
+                    continue
+
+                pid = await get_pid_by_port(port)
+                if pid is not None:
+                    continue  # Service is running, all good
+
+                # Service is down - check cooldown
+                last_time = last_restart_time.get(port, 0)
+                if now - last_time < RESTART_COOLDOWN:
+                    remaining = int(RESTART_COOLDOWN - (now - last_time))
+                    logger.debug(
+                        "watchdog_cooldown",
+                        service=config["name"],
+                        port=port,
+                        remaining_seconds=remaining,
+                    )
+                    continue
+
+                # Restart the service
+                logger.warning(
+                    "watchdog_restarting",
+                    service=config["name"],
+                    port=port,
+                )
+                success, message = await start_process_by_port(port)
+                last_restart_time[port] = now
+
+                event = {
+                    "time": datetime.utcnow().isoformat(),
+                    "service": config["name"],
+                    "port": port,
+                    "success": success,
+                    "message": message,
+                }
+                watchdog_stats["restart_log"].append(event)
+                if len(watchdog_stats["restart_log"]) > MAX_RESTART_LOG:
+                    watchdog_stats["restart_log"] = watchdog_stats["restart_log"][-MAX_RESTART_LOG:]
+
+                if success:
+                    watchdog_stats["restarts"] += 1
+                    watchdog_stats["last_restart"] = datetime.utcnow().isoformat()
+                    logger.info(
+                        "watchdog_restart_success",
+                        service=config["name"],
+                        port=port,
+                        message=message,
+                    )
+                else:
+                    logger.error(
+                        "watchdog_restart_failed",
+                        service=config["name"],
+                        port=port,
+                        message=message,
+                    )
+
+        except asyncio.CancelledError:
+            logger.info("watchdog_stopped")
+            return
+        except Exception as e:
+            logger.error("watchdog_error", error=str(e))
+            await asyncio.sleep(10)  # Brief pause on unexpected errors
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """Start watchdog on startup, stop on shutdown."""
+    global watchdog_task
+    watchdog_task = asyncio.create_task(watchdog_loop())
+    logger.info("watchdog_scheduled", interval=watchdog_interval)
+    yield
+    if watchdog_task:
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except asyncio.CancelledError:
+            pass
+
 
 app = FastAPI(
     title="Athena Control Agent",
-    description="Service control agent for Project Athena on Mac Studio (Docker + Process)",
-    version="2.0.0"
+    description="Service control agent for Project Athena on Mac Studio (Docker + Process + Watchdog)",
+    version="3.0.0",
+    lifespan=lifespan,
 )
 
 # CORS for admin frontend access
@@ -153,10 +283,30 @@ PROCESS_SERVICES: Dict[int, Dict] = {
         "dir": "src/rag/recipes",
         "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8020"],
     },
-    8023: {
+    8021: {
+        "name": "onecall-rag",
+        "dir": "src/rag/onecall",
+        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8021"],
+    },
+    8022: {
         "name": "mode-service",
         "dir": "src/mode_service",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8023"],
+        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8022"],
+    },
+    8024: {
+        "name": "seatgeek-events-rag",
+        "dir": "src/rag/seatgeek_events",
+        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8024"],
+    },
+    8025: {
+        "name": "transportation-rag",
+        "dir": "src/rag/transportation",
+        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8025"],
+    },
+    8026: {
+        "name": "community-events-rag",
+        "dir": "src/rag/community_events",
+        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8026"],
     },
     8027: {
         "name": "amtrak-rag",
@@ -183,6 +333,21 @@ PROCESS_SERVICES: Dict[int, Dict] = {
         "dir": "src/rag/price_compare",
         "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8033"],
     },
+    8028: {
+        "name": "tesla-rag",
+        "dir": "src/rag/tesla",
+        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8028"],
+    },
+    8029: {
+        "name": "media-rag",
+        "dir": "src/rag/media",
+        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8029"],
+    },
+    8040: {
+        "name": "brightdata-rag",
+        "dir": "src/rag/brightdata",
+        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8040"],
+    },
 }
 
 
@@ -194,9 +359,9 @@ def is_port_allowed(port: int) -> bool:
 async def get_pid_by_port(port: int) -> Optional[int]:
     """Find the PID of process LISTENING on a port (not client connections)."""
     try:
-        # Use lsof with TCP state filter to only get LISTEN sockets
+        # Use full path to lsof (/usr/sbin/) since launchd PATH may not include it
         process = await asyncio.create_subprocess_exec(
-            "lsof", "-iTCP:" + str(port), "-sTCP:LISTEN", "-t",
+            "/usr/sbin/lsof", "-iTCP:" + str(port), "-sTCP:LISTEN", "-t",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -267,7 +432,17 @@ async def start_process_by_port(port: int) -> tuple[bool, str]:
         cmd_parts = config["cmd"].copy()
         if cmd_parts[0] == "python":
             cmd_parts[0] = str(python_path)
-        cmd_str = f"cd {working_dir} && " + " ".join(cmd_parts)
+
+        # Redirect output to log files (append, preserves history)
+        service_name = config["name"]
+        log_file = Path("/tmp") / f"{service_name}.log"
+        cmd_str = f"cd {working_dir} && " + " ".join(cmd_parts) + f" >> {log_file} 2>&1"
+
+        # Add restart marker to log
+        with open(log_file, "a") as f:
+            f.write(f"\n{'=' * 40}\n")
+            f.write(f"=== WATCHDOG RESTART: {datetime.utcnow().isoformat()} ===\n")
+            f.write(f"{'=' * 40}\n")
 
         process = await asyncio.create_subprocess_shell(
             cmd_str,
@@ -313,7 +488,7 @@ ALLOWED_CONTAINERS = {
     "athena-streaming",
     "athena-dining",
     "athena-websearch",
-    # Infrastructure services
+    # Infrastructure (on Mac mini 192.168.10.181)
     "qdrant",
     "redis",
 }
@@ -599,7 +774,7 @@ async def ollama_health():
         async with httpx.AsyncClient(timeout=5.0) as client:
             # Check if API is reachable
             try:
-                version_resp = await client.get(f"{OLLAMA_URL}/api/version")
+                version_resp = await client.get("http://localhost:11434/api/version")
                 api_reachable = version_resp.status_code == 200
                 version = version_resp.json().get("version") if api_reachable else None
             except Exception:
@@ -610,7 +785,7 @@ async def ollama_health():
             models_loaded = 0
             if api_reachable:
                 try:
-                    ps_resp = await client.get(f"{OLLAMA_URL}/api/ps")
+                    ps_resp = await client.get("http://localhost:11434/api/ps")
                     if ps_resp.status_code == 200:
                         models_loaded = len(ps_resp.json().get("models", []))
                 except Exception:
@@ -664,7 +839,7 @@ async def start_ollama():
                 await asyncio.sleep(1)
                 try:
                     async with httpx.AsyncClient(timeout=2.0) as client:
-                        resp = await client.get(f"{OLLAMA_URL}/api/version")
+                        resp = await client.get("http://localhost:11434/api/version")
                         if resp.status_code == 200:
                             message = "Ollama started and ready"
                             break
@@ -1102,8 +1277,20 @@ import re
 import json
 from datetime import timedelta
 
-# Log directory on Mac Studio
-LOG_DIR = Path.home() / "dev" / "project-athena" / "logs" / "debug"
+# Primary structured debug log directory (written when ATHENA_DEBUG_MODE=true)
+LOG_DIR = Path(os.getenv("ATHENA_DEBUG_LOG_DIR", str(Path.home() / "dev" / "project-athena" / "logs" / "debug")))
+
+# Service runtime log directory — always written by uvicorn services (e.g. /tmp/orchestrator.log)
+SERVICE_LOG_DIR = Path(os.getenv("ATHENA_SERVICE_LOG_DIR", "/tmp"))
+
+# Known Athena service log file prefixes in SERVICE_LOG_DIR
+ATHENA_SERVICE_LOG_PREFIXES = {
+    "orchestrator", "gateway", "weather", "airports", "stocks", "flights",
+    "events", "streaming", "news", "sports", "websearch", "dining", "recipes",
+    "onecall", "mode", "seatgeek", "transportation", "community", "amtrak",
+    "tesla", "media", "directions", "site_scraper", "serpapi", "price_compare",
+    "brightdata", "control_agent", "notifications",
+}
 
 
 class LogEntry(BaseModel):
@@ -1178,59 +1365,109 @@ def parse_log_line(line: str, line_number: int) -> LogEntry:
         )
 
 
+def _service_log_files(days: int = None, hours: int = None, service_filter: str = None) -> TypingList[Path]:
+    """List Athena service runtime logs from SERVICE_LOG_DIR (/tmp/*.log)."""
+    if not SERVICE_LOG_DIR.exists():
+        return []
+
+    cutoff = None
+    if hours is not None:
+        cutoff = datetime.now() - timedelta(hours=hours)
+    elif days is not None:
+        cutoff = datetime.now() - timedelta(days=days)
+
+    files = []
+    for f in SERVICE_LOG_DIR.glob("*.log"):
+        stem = f.stem.lower()
+        # Only include known Athena service logs
+        if not any(stem == prefix or stem.startswith(prefix + "-") or stem.startswith(prefix + "_")
+                   for prefix in ATHENA_SERVICE_LOG_PREFIXES):
+            continue
+        if service_filter and service_filter.lower() not in stem:
+            continue
+        try:
+            if cutoff is None or datetime.fromtimestamp(f.stat().st_mtime) >= cutoff:
+                files.append(f)
+        except Exception:
+            continue
+
+    return sorted(files, key=lambda x: x.stat().st_mtime, reverse=True)
+
+
 @app.get("/debug-logs/status", response_model=DebugStatusResponse)
 async def debug_logs_status():
     """Check debug mode and log directory status."""
-    import os
     debug_mode = os.getenv("ATHENA_DEBUG_MODE", "false").lower() == "true"
 
     log_files = []
     total_size = 0
 
+    # Count both debug logs and service runtime logs
     if LOG_DIR.exists():
         for f in LOG_DIR.glob("*.log"):
             total_size += f.stat().st_size
             log_files.append(f.name)
 
+    service_logs = _service_log_files()
+    for f in service_logs:
+        total_size += f.stat().st_size
+        if f.name not in log_files:
+            log_files.append(f.name)
+
+    recent = sorted(log_files, reverse=True)[:10]
     return DebugStatusResponse(
         debug_mode=debug_mode,
         log_directory=str(LOG_DIR),
-        directory_exists=LOG_DIR.exists(),
+        directory_exists=LOG_DIR.exists() or SERVICE_LOG_DIR.exists(),
         file_count=len(log_files),
         total_size_mb=round(total_size / (1024 * 1024), 2),
-        recent_files=sorted(log_files, reverse=True)[:10]
+        recent_files=recent
     )
 
 
 @app.get("/debug-logs/files", response_model=TypingList[LogFile])
 async def list_log_files(days: int = 7):
-    """List available log files."""
-    if not LOG_DIR.exists():
-        return []
-
+    """List available log files — includes both debug logs and service runtime logs."""
     cutoff = datetime.now() - timedelta(days=days)
     files = []
 
-    for f in LOG_DIR.glob("*.log"):
+    # 1. Structured debug logs from LOG_DIR
+    if LOG_DIR.exists():
+        for f in LOG_DIR.glob("*.log"):
+            try:
+                stat = f.stat()
+                modified = datetime.fromtimestamp(stat.st_mtime)
+                if modified < cutoff:
+                    continue
+                name_parts = f.stem.rsplit('_', 1)
+                service_name = name_parts[0] if len(name_parts) > 1 else "unknown"
+                date_str = name_parts[1] if len(name_parts) > 1 else "unknown"
+                files.append(LogFile(
+                    name=f.name,
+                    path=str(f),
+                    size=stat.st_size,
+                    modified=modified.isoformat(),
+                    service=service_name,
+                    date=date_str,
+                ))
+            except Exception:
+                continue
+
+    # 2. Service runtime logs from SERVICE_LOG_DIR (/tmp) — always present
+    seen_names = {f.name for f in files}
+    for f in _service_log_files(days=days):
+        if f.name in seen_names:
+            continue
         try:
             stat = f.stat()
             modified = datetime.fromtimestamp(stat.st_mtime)
-
-            if modified < cutoff:
-                continue
-
-            # Parse filename: service_YYYY-MM-DD.log
-            name_parts = f.stem.rsplit('_', 1)
-            service = name_parts[0] if len(name_parts) > 1 else "unknown"
-            date = name_parts[1] if len(name_parts) > 1 else "unknown"
-
             files.append(LogFile(
                 name=f.name,
                 path=str(f),
                 size=stat.st_size,
                 modified=modified.isoformat(),
-                service=service,
-                date=date
+                service=f.stem,
+                date=modified.strftime("%Y-%m-%d"),
             ))
         except Exception:
             continue
@@ -1248,31 +1485,39 @@ async def search_logs(
     limit: int = 500,
     offset: int = 0
 ):
-    """Search log files with optional filters."""
-    if not LOG_DIR.exists():
-        raise HTTPException(status_code=404, detail="Log directory not found")
-
+    """Search log files with optional filters. Covers both debug logs and service runtime logs."""
     entries = []
     total_lines = 0
-    target_file = None
 
     # Determine which files to search
     if file:
+        # Could be in LOG_DIR or SERVICE_LOG_DIR
         target_file = LOG_DIR / file
+        if not target_file.exists():
+            target_file = SERVICE_LOG_DIR / file
         if not target_file.exists():
             raise HTTPException(status_code=404, detail=f"Log file not found: {file}")
         files_to_search = [target_file]
     else:
         cutoff = datetime.now() - timedelta(hours=hours)
         files_to_search = []
-        for f in LOG_DIR.glob("*.log"):
-            if service and service not in f.stem:
-                continue
-            try:
-                if datetime.fromtimestamp(f.stat().st_mtime) >= cutoff:
-                    files_to_search.append(f)
-            except:
-                continue
+
+        # Debug log files
+        if LOG_DIR.exists():
+            for f in LOG_DIR.glob("*.log"):
+                if service and service not in f.stem:
+                    continue
+                try:
+                    if datetime.fromtimestamp(f.stat().st_mtime) >= cutoff:
+                        files_to_search.append(f)
+                except Exception:
+                    continue
+
+        # Service runtime log files
+        for f in _service_log_files(hours=hours, service_filter=service):
+            if f not in files_to_search:
+                files_to_search.append(f)
+
         files_to_search = sorted(files_to_search, key=lambda x: x.stat().st_mtime, reverse=True)
 
     # Compile search pattern
@@ -1354,6 +1599,66 @@ async def tail_log(filename: str, lines: int = 100):
         entries=entries,
         file=filename
     )
+
+
+# =============================================================================
+# WATCHDOG ENDPOINTS
+# =============================================================================
+
+
+@app.get("/watchdog/status")
+async def watchdog_status():
+    """Get watchdog status and recent restart history."""
+    return {
+        "enabled": watchdog_enabled,
+        "interval_seconds": watchdog_interval,
+        "excluded_ports": sorted(WATCHDOG_EXCLUDE),
+        "excluded_services": [
+            PROCESS_SERVICES[p]["name"] for p in sorted(WATCHDOG_EXCLUDE) if p in PROCESS_SERVICES
+        ],
+        "cooldown_seconds": RESTART_COOLDOWN,
+        "stats": watchdog_stats,
+    }
+
+
+@app.post("/watchdog/enable")
+async def enable_watchdog():
+    """Enable the watchdog."""
+    global watchdog_enabled
+    watchdog_enabled = True
+    logger.info("watchdog_enabled_via_api")
+    return {"enabled": True, "message": "Watchdog enabled"}
+
+
+@app.post("/watchdog/disable")
+async def disable_watchdog():
+    """Disable the watchdog (services won't be auto-restarted)."""
+    global watchdog_enabled
+    watchdog_enabled = False
+    logger.info("watchdog_disabled_via_api")
+    return {"enabled": False, "message": "Watchdog disabled - services will NOT be auto-restarted"}
+
+
+@app.post("/watchdog/exclude/{port}")
+async def exclude_from_watchdog(port: int):
+    """Exclude a service port from watchdog auto-restart."""
+    if port not in PROCESS_SERVICES:
+        raise HTTPException(status_code=404, detail=f"Unknown service port {port}")
+    WATCHDOG_EXCLUDE.add(port)
+    name = PROCESS_SERVICES[port]["name"]
+    logger.info("watchdog_exclude_added", service=name, port=port)
+    return {"message": f"Excluded {name} (port {port}) from watchdog"}
+
+
+@app.post("/watchdog/include/{port}")
+async def include_in_watchdog(port: int):
+    """Re-include a previously excluded service in watchdog monitoring."""
+    if port not in PROCESS_SERVICES:
+        raise HTTPException(status_code=404, detail=f"Unknown service port {port}")
+    WATCHDOG_EXCLUDE.discard(port)
+    name = PROCESS_SERVICES[port]["name"]
+    logger.info("watchdog_exclude_removed", service=name, port=port)
+    return {"message": f"Included {name} (port {port}) in watchdog monitoring"}
 
 
 if __name__ == "__main__":

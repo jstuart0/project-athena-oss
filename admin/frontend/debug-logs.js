@@ -19,8 +19,9 @@ let debugLogsState = {
 async function initDebugLogs() {
     console.log('Initializing debug logs...');
 
-    // Check debug mode status first
-    await checkDebugStatus();
+    // Check debug mode status first — if unavailable, show banner and stop
+    const available = await checkDebugStatus();
+    if (!available) return;
 
     // Load available log files
     await loadLogFiles();
@@ -32,9 +33,35 @@ async function initDebugLogs() {
 async function checkDebugStatus() {
     try {
         const response = await fetch('/api/debug-logs/status');
-        if (!response.ok) throw new Error('Failed to check debug status');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
         const status = await response.json();
+
+        // Feature not available in this deployment (Control Agent unreachable or unconfigured)
+        if (status.available === false) {
+            const statusBadge = document.getElementById('debug-mode-status');
+            if (statusBadge) {
+                statusBadge.className = 'px-3 py-1 bg-gray-600/20 text-gray-400 rounded-full text-sm';
+                statusBadge.innerHTML = '<i data-lucide="minus-circle" class="w-4 h-4 inline mr-2"></i>Not Available';
+                if (typeof lucide !== 'undefined') lucide.createIcons();
+            }
+            const statsEl = document.getElementById('debug-stats');
+            if (statsEl) {
+                statsEl.innerHTML = `<span class="text-gray-500">${status.unavailable_reason || 'Control Agent not configured for this deployment'}</span>`;
+            }
+            const fileList = document.getElementById('log-file-list');
+            if (fileList) {
+                fileList.innerHTML = `
+                    <div class="text-center py-8 text-gray-500">
+                        <i data-lucide="server-off" class="w-8 h-8 mx-auto mb-3 opacity-50"></i>
+                        <p class="font-medium">Debug logs unavailable</p>
+                        <p class="text-sm mt-2">${status.unavailable_reason || 'Set CONTROL_AGENT_URL to enable this feature'}</p>
+                    </div>
+                `;
+                if (typeof lucide !== 'undefined') lucide.createIcons();
+            }
+            return false;
+        }
 
         const statusBadge = document.getElementById('debug-mode-status');
         if (statusBadge) {
@@ -61,8 +88,10 @@ async function checkDebugStatus() {
                 <span class="text-gray-200 ml-1">${status.total_size_mb} MB</span>
             `;
         }
+        return true;
     } catch (error) {
         console.error('Error checking debug status:', error);
+        return false;
     }
 }
 
