@@ -1488,6 +1488,7 @@ async def search_logs(
     """Search log files with optional filters. Covers both debug logs and service runtime logs."""
     entries = []
     total_lines = 0
+    target_file = None
 
     # Determine which files to search
     if file:
@@ -1575,7 +1576,8 @@ async def search_logs(
 async def tail_log(filename: str, lines: int = 100):
     """Get the last N lines of a log file."""
     log_file = LOG_DIR / filename
-
+    if not log_file.exists():
+        log_file = SERVICE_LOG_DIR / filename
     if not log_file.exists():
         raise HTTPException(status_code=404, detail=f"Log file not found: {filename}")
 
