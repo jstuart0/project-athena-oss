@@ -4,6 +4,7 @@ Dashboard API - Consolidated endpoint for Mission Control.
 Aggregates data from multiple sources in a single request to reduce
 browser polling overhead and provide time-series for sparklines.
 """
+import os
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,6 +20,13 @@ import httpx
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+# Service URLs — configurable via env vars.
+# GATEWAY_URL and ORCHESTRATOR_URL are set by k8s deployments to cluster services.
+# RAG_HOST points to the machine running the RAG microservices.
+_GATEWAY_BASE = os.getenv("GATEWAY_URL", "http://localhost:8000").rstrip("/")
+_ORCHESTRATOR_BASE = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001").rstrip("/")
+_RAG_HOST = os.getenv("RAG_HOST", "http://localhost").rstrip("/")
 
 
 @router.get("")
@@ -41,13 +49,12 @@ async def get_dashboard_data(
     now = datetime.utcnow()
 
     # 1. Voice Health - Check actual service health
-    mac_studio_ip = "192.168.10.167"
     core_services = [
-        {"name": "Gateway", "url": f"http://{mac_studio_ip}:8000/health", "critical": True},
-        {"name": "Orchestrator", "url": f"http://{mac_studio_ip}:8001/health", "critical": True},
-        {"name": "Weather RAG", "url": f"http://{mac_studio_ip}:8010/health", "critical": False},
-        {"name": "Sports RAG", "url": f"http://{mac_studio_ip}:8017/health", "critical": False},
-        {"name": "Dining RAG", "url": f"http://{mac_studio_ip}:8019/health", "critical": False},
+        {"name": "Gateway", "url": f"{_GATEWAY_BASE}/health", "critical": True},
+        {"name": "Orchestrator", "url": f"{_ORCHESTRATOR_BASE}/health", "critical": True},
+        {"name": "Weather RAG", "url": f"{_RAG_HOST}:8010/health", "critical": False},
+        {"name": "Sports RAG", "url": f"{_RAG_HOST}:8017/health", "critical": False},
+        {"name": "Dining RAG", "url": f"{_RAG_HOST}:8019/health", "critical": False},
     ]
 
     healthy_count = 0
@@ -285,10 +292,9 @@ async def get_quick_stats(
     now = datetime.utcnow()
 
     # Service health - quick check of core services
-    mac_studio_ip = "192.168.10.167"
     core_services = [
-        f"http://{mac_studio_ip}:8000/health",  # Gateway
-        f"http://{mac_studio_ip}:8001/health",  # Orchestrator
+        f"{_GATEWAY_BASE}/health",      # Gateway
+        f"{_ORCHESTRATOR_BASE}/health", # Orchestrator
     ]
     healthy, total = 0, len(core_services)
     try:
