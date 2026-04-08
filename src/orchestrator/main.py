@@ -9923,6 +9923,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 }
 
                 # Record analytics even for cache hits so conversations appear in admin UI
+                _analytics_mode_enabled = await _get_analytics_mode_enabled()
+                _debug_mode = os.getenv("ATHENA_DEBUG_MODE", "false").lower() == "true"
                 _capture_source = "analytics" if _analytics_mode_enabled else "debug"
                 _turn_source = request.source or _capture_source
                 if _analytics_mode_enabled or _debug_mode:
