@@ -364,6 +364,91 @@
             text-align: right;
         }
 
+        /* Session Restore Banner */
+        .restore-banner {
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 16px;
+            background: rgba(59, 130, 246, 0.12);
+            border-bottom: 1px solid rgba(59, 130, 246, 0.3);
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            flex-shrink: 0;
+        }
+
+        .restore-banner.visible {
+            display: flex;
+        }
+
+        .restore-banner-text {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .restore-banner-icon {
+            font-size: 1rem;
+        }
+
+        .restore-banner-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .restore-banner-btn {
+            padding: 4px 12px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            border-radius: 12px;
+            border: none;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .restore-banner-btn.primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .restore-banner-btn.primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .restore-banner-btn.secondary {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+
+        .restore-banner-btn.secondary:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        /* Historical message styling */
+        .message.historical {
+            opacity: 0.6;
+        }
+
+        /* Session separator */
+        .session-separator {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 0;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+
+        .session-separator::before,
+        .session-separator::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--border);
+        }
+
         /* Continue Button for Truncated Responses */
         .continue-btn {
             display: inline-block;
@@ -1759,6 +1844,17 @@
             </div>
         </div>
 
+        <div class="restore-banner" id="restore-banner">
+            <div class="restore-banner-text">
+                <span class="restore-banner-icon">🕐</span>
+                <span id="restore-banner-label">Your previous conversation has been restored.</span>
+            </div>
+            <div class="restore-banner-actions">
+                <button class="restore-banner-btn secondary" onclick="startFreshSession()">Start fresh</button>
+                <button class="restore-banner-btn primary" onclick="dismissRestoreBanner()">Got it</button>
+            </div>
+        </div>
+
         <div class="chat-container" id="chat-container">
             <div class="welcome-screen" id="welcome-screen">
                 <div class="welcome-icon">J</div>
@@ -2385,6 +2481,7 @@
                 chatContainer.scrollTop = chatContainer.scrollHeight;
             });
 
+            await checkForRestoredSession();
             await loadWelcome();
             setupInputHandlers();
             setupVoiceHandlers();
@@ -2743,6 +2840,67 @@
             sendMessage();
         }
 
+        // =============================================================================
+        // Session Restore
+        // =============================================================================
+
+        async function checkForRestoredSession() {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 3000);
+            try {
+                const resp = await fetch('/api/session/restore', { signal: controller.signal });
+                clearTimeout(timeout);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                if (data.restored && data.messages && data.messages.length > 0) {
+                    welcomeScreen.style.display = 'none';
+                    isWelcomeVisible = false;
+                    data.messages.forEach(msg => {
+                        addMessage(msg.content, msg.role, null, { historical: true });
+                    });
+                    addSessionSeparator();
+                    if (data.show_banner) {
+                        showRestoreBanner(data.exchange_count);
+                    }
+                }
+            } catch (e) {
+                clearTimeout(timeout);
+                console.debug('[Session] Restore check failed or timed out:', e.message);
+            }
+        }
+
+        function showRestoreBanner(exchangeCount) {
+            const banner = document.getElementById('restore-banner');
+            const label = document.getElementById('restore-banner-label');
+            const noun = exchangeCount === 1 ? 'exchange' : 'exchanges';
+            label.textContent = `Restored ${exchangeCount} previous ${noun} from your last session.`;
+            banner.classList.add('visible');
+        }
+
+        function dismissRestoreBanner() {
+            document.getElementById('restore-banner').classList.remove('visible');
+        }
+
+        async function startFreshSession() {
+            dismissRestoreBanner();
+            try {
+                await fetch('/api/session/current', { method: 'DELETE' });
+            } catch (e) {
+                console.debug('[Session] Clear session failed:', e.message);
+            }
+            chatContainer.innerHTML = '';
+            welcomeScreen.style.display = '';
+            isWelcomeVisible = true;
+            chatContainer.appendChild(welcomeScreen);
+        }
+
+        function addSessionSeparator() {
+            const sep = document.createElement('div');
+            sep.className = 'session-separator';
+            sep.textContent = 'Previous session';
+            chatContainer.appendChild(sep);
+        }
+
         async function sendMessage() {
             const message = messageInput.value.trim();
             if (!message) return;
@@ -2872,9 +3030,9 @@
             return currentModeState && currentModeState.mode === 'owner';
         }
 
-        function addMessage(text, type, metrics = null) {
+        function addMessage(text, type, metrics = null, options = {}) {
             const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${type}`;
+            messageDiv.className = `message ${type}${options.historical ? ' historical' : ''}`;
 
             const avatar = type === 'assistant' ? 'J' : '👤';
             const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });

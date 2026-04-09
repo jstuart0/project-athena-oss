@@ -9528,6 +9528,7 @@ class QueryRequest(BaseModel):
     location: Optional[str] = Field(None, description="User's current location (from browser geolocation or device)")
     interruption_context: Optional[Dict[str, Any]] = Field(None, description="Context when user interrupted previous response (previous_query, interrupted_response, audio_position_ms)")
     source: Optional[str] = Field(None, description="Interface origin for analytics: 'chatbot', 'jarvis', 'voice', 'ha', etc.")
+    chat_history: Optional[List[Dict[str, str]]] = Field(None, description="Prior conversation turns to inject when no live session exists (role/content pairs)")
 
 class QueryResponse(BaseModel):
     """Response model for query endpoint."""
@@ -9718,6 +9719,15 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     max_history = conv_settings.get("max_llm_history_messages", 10)
                     conversation_history = session.get_llm_history(max_history)
                     logger.info(f"History mode: full - loaded {len(conversation_history)} previous messages")
+
+        # Inject persistent chat history when no live session was found
+        if request.chat_history and not conversation_history:
+            conversation_history = [
+                {"role": m["role"], "content": m["content"]}
+                for m in request.chat_history
+                if m.get("role") in ("user", "assistant") and m.get("content")
+            ]
+            logger.info(f"chat_history_injected", turns=len(conversation_history), source="persistent_sessions")
 
         # Retrieve relevant memories from Qdrant for context augmentation
         memory_context = ""
@@ -10467,6 +10477,15 @@ async def process_query_stream(request: QueryRequest):
                     max_history = conv_settings.get("max_llm_history_messages", 10)
                     conversation_history = session.get_llm_history(max_history)
                     logger.info(f"History mode: full - loaded {len(conversation_history)} previous messages")
+
+            # Inject persistent chat history when no live session was found
+            if request.chat_history and not conversation_history:
+                conversation_history = [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in request.chat_history
+                    if m.get("role") in ("user", "assistant") and m.get("content")
+                ]
+                logger.info(f"chat_history_injected", turns=len(conversation_history), source="persistent_sessions")
 
             # Build context with guest info (if identified via device fingerprint)
             query_context = dict(request.context) if request.context else {}

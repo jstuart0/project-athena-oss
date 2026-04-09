@@ -13,16 +13,20 @@ Mode Logic:
 """
 import os
 import uuid
+import json
+import time
 import httpx
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 import structlog
 import asyncio
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
+from sqlalchemy import text
 
 # Configure logging
 structlog.configure(
@@ -38,6 +42,13 @@ ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8000")
 ADMIN_BACKEND_URL = os.getenv("ADMIN_BACKEND_URL", "https://athena-admin.xmojo.net")
 DEFAULT_ROOM = os.getenv("DEFAULT_ROOM", "guest")
+
+# Persistent session DB config
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+FEATURE_CACHE_TTL = int(os.getenv("FEATURE_CACHE_TTL", "60"))
+DB_POOL_MIN = int(os.getenv("DB_POOL_MIN", "1"))
+DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "5"))
+DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "2000"))
 
 # =============================================================================
 # Mode Management (Owner vs Guest)
@@ -109,8 +120,256 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup():
+    global _engine, _db_available
+    if not _SA_URL:
+        logger.info("persistent_sessions_db_skipped", reason="DATABASE_URL_not_set")
+        return
+    try:
+        _engine = create_async_engine(
+            _SA_URL,
+            pool_size=DB_POOL_MIN,
+            max_overflow=DB_POOL_MAX - DB_POOL_MIN,
+            pool_timeout=5,
+            connect_args={"command_timeout": DB_STATEMENT_TIMEOUT_MS / 1000},
+        )
+        async with _engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        _db_available = True
+        host = DATABASE_URL.split("@")[-1].split("/")[0] if "@" in DATABASE_URL else "configured"
+        logger.info("persistent_sessions_db_connected", host=host)
+        asyncio.create_task(periodic_cleanup())
+    except Exception as e:
+        _db_available = False
+        logger.warning("persistent_sessions_db_unavailable", error=str(e),
+                       impact="feature will run in ephemeral mode")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    global _engine, _db_available
+    if _engine:
+        await _engine.dispose()
+    _db_available = False
+
+
 # In-memory session store (for simple deployment)
 sessions: Dict[str, Dict[str, Any]] = {}
+
+# =============================================================================
+# Persistent Session — DB Engine and Feature Cache
+# =============================================================================
+
+_SA_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1) if DATABASE_URL else ""
+_engine: Optional[AsyncEngine] = None
+_db_available: bool = False
+_feature_cache: Dict[str, Any] = {}
+_feature_cache_time: float = 0.0
+
+
+async def get_engine() -> Optional[AsyncEngine]:
+    """Return the SQLAlchemy async engine, or None if DB is unavailable."""
+    if not _SA_URL or not _db_available:
+        return None
+    return _engine
+
+
+async def _safe_db_exec(coro_fn):
+    """
+    Execute an async callable that receives an AsyncConnection.
+    Returns the callable's result, or None on any error.
+    Marks DB unavailable on connection-level failures.
+    """
+    global _db_available
+    engine = await get_engine()
+    if not engine:
+        return None
+    try:
+        async with engine.connect() as conn:
+            result = await asyncio.wait_for(
+                coro_fn(conn), timeout=DB_STATEMENT_TIMEOUT_MS / 1000
+            )
+            await conn.commit()
+            return result
+    except asyncio.TimeoutError:
+        logger.warning("persistent_sessions_db_timeout")
+        return None
+    except Exception as e:
+        err = str(e).lower()
+        if any(k in err for k in ("connection", "pool", "closed", "broken", "refused")):
+            _db_available = False
+            logger.warning("persistent_sessions_db_connection_lost", error=str(e))
+        else:
+            logger.warning("persistent_sessions_db_error", error=str(e))
+        return None
+
+
+async def get_persistent_sessions_config() -> Optional[Dict[str, Any]]:
+    """
+    Return the persistent_chat_sessions feature config from admin, or None if
+    the feature is disabled, DATABASE_URL is unset, or the admin is unreachable.
+    Cached for FEATURE_CACHE_TTL seconds.
+    """
+    global _feature_cache, _feature_cache_time
+
+    if not DATABASE_URL:
+        return None
+
+    now = time.time()
+    if now - _feature_cache_time < FEATURE_CACHE_TTL and _feature_cache:
+        feature = _feature_cache.get("persistent_chat_sessions")
+        if not feature or not feature.get("enabled"):
+            return None
+        return feature.get("config", {})
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{ADMIN_BACKEND_URL}/api/features/public")
+            resp.raise_for_status()
+            _feature_cache = {f["name"]: f for f in resp.json()}
+            _feature_cache_time = now
+    except Exception as e:
+        logger.warning("feature_cache_fetch_failed", error=str(e))
+
+    feature = _feature_cache.get("persistent_chat_sessions")
+    if not feature or not feature.get("enabled"):
+        return None
+    return feature.get("config", {})
+
+
+# =============================================================================
+# Session Functions (three-table model)
+# =============================================================================
+
+async def get_or_create_identity(cookie_id: str, ttl_days: int) -> Optional[str]:
+    """
+    Atomically upsert a web_browser_identities row.
+    Returns identity UUID string, or None on DB failure.
+    """
+    expires_at = datetime.utcnow() + timedelta(days=ttl_days)
+    new_id = str(uuid.uuid4())
+
+    async def _upsert(conn):
+        row = (await conn.execute(
+            text("""
+                INSERT INTO web_browser_identities (id, cookie_id, expires_at)
+                VALUES (:new_id, :cid, :exp)
+                ON CONFLICT (cookie_id) DO UPDATE
+                    SET last_seen_at = NOW(), expires_at = EXCLUDED.expires_at
+                RETURNING id
+            """),
+            {"new_id": new_id, "cid": cookie_id, "exp": expires_at}
+        )).fetchone()
+        return str(row[0]) if row else None
+
+    return await _safe_db_exec(_upsert)
+
+
+async def get_or_create_active_thread(identity_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Return the active (ended_at IS NULL) thread for this identity, or create one.
+    Returns dict with id, turn_count, current_orch_session_id, is_new.
+    """
+    async def _find_or_create(conn):
+        row = (await conn.execute(
+            text("SELECT id, turn_count, current_orch_session_id "
+                 "FROM web_chat_threads "
+                 "WHERE identity_id = :iid AND ended_at IS NULL "
+                 "ORDER BY started_at DESC LIMIT 1"),
+            {"iid": identity_id}
+        )).fetchone()
+        if row:
+            return {"id": str(row[0]), "turn_count": row[1],
+                    "current_orch_session_id": row[2], "is_new": False}
+        new_id = str(uuid.uuid4())
+        await conn.execute(
+            text("INSERT INTO web_chat_threads (id, identity_id) VALUES (:id, :iid)"),
+            {"id": new_id, "iid": identity_id}
+        )
+        return {"id": new_id, "turn_count": 0, "current_orch_session_id": None, "is_new": True}
+
+    return await _safe_db_exec(_find_or_create)
+
+
+async def load_chat_history(thread_id: str, max_turns: int) -> List[Dict[str, str]]:
+    """
+    Load the last max_turns completed exchanges, returned chronologically.
+    Excludes exchanges with NULL assistant_content (interrupted streams).
+    """
+    async def _load(conn):
+        rows = (await conn.execute(
+            text("SELECT user_content, assistant_content FROM web_chat_exchanges "
+                 "WHERE thread_id = :tid AND assistant_content IS NOT NULL "
+                 "ORDER BY turn_number DESC LIMIT :lim"),
+            {"tid": thread_id, "lim": max_turns}
+        )).fetchall()
+        if not rows:
+            return []
+        messages = []
+        for row in reversed(rows):
+            messages.append({"role": "user", "content": row[0]})
+            messages.append({"role": "assistant", "content": row[1]})
+        return messages
+
+    return await _safe_db_exec(_load) or []
+
+
+async def save_exchange(
+    thread_id: str, turn_number: int,
+    user_content: str, assistant_content: Optional[str],
+    orch_session_id: str
+):
+    """
+    Persist a Q&A exchange. assistant_content=None for interrupted streams.
+    turn_count is only incremented when assistant_content is present.
+    """
+    async def _save(conn):
+        await conn.execute(
+            text("INSERT INTO web_chat_exchanges "
+                 "(id, thread_id, turn_number, user_content, assistant_content) "
+                 "VALUES (:id, :tid, :turn, :user, :asst) "
+                 "ON CONFLICT (thread_id, turn_number) DO UPDATE "
+                 "SET assistant_content = EXCLUDED.assistant_content"),
+            {"id": str(uuid.uuid4()), "tid": thread_id, "turn": turn_number,
+             "user": user_content, "asst": assistant_content}
+        )
+        if assistant_content is not None:
+            await conn.execute(
+                text("UPDATE web_chat_threads "
+                     "SET turn_count = turn_count + 1, last_active_at = NOW(), "
+                     "current_orch_session_id = :sid WHERE id = :id"),
+                {"sid": orch_session_id, "id": thread_id}
+            )
+        else:
+            await conn.execute(
+                text("UPDATE web_chat_threads "
+                     "SET last_active_at = NOW(), current_orch_session_id = :sid "
+                     "WHERE id = :id"),
+                {"sid": orch_session_id, "id": thread_id}
+            )
+
+    await _safe_db_exec(_save)
+
+
+async def cleanup_expired_sessions():
+    """Delete expired identity rows; CASCADE removes all threads and exchanges."""
+    async def _cleanup(conn):
+        result = await conn.execute(
+            text("DELETE FROM web_browser_identities WHERE expires_at < NOW()")
+        )
+        return result.rowcount
+
+    deleted = await _safe_db_exec(_cleanup) or 0
+    if deleted > 0:
+        logger.info("expired_identities_cleaned", deleted=deleted)
+
+
+async def periodic_cleanup():
+    """Run cleanup_expired_sessions once every 24 hours."""
+    while True:
+        await asyncio.sleep(86400)
+        await cleanup_expired_sessions()
 
 
 class LocationOverride(BaseModel):
@@ -418,9 +677,93 @@ async def chat(message: ChatMessage):
         )
 
 
+@app.get("/api/session/restore")
+async def restore_session(request: Request, response: Response):
+    """
+    Called on page load to check if the user has a previous session to restore.
+    Sets or refreshes the jarvis_uid cookie whenever the feature is enabled.
+    """
+    config = await get_persistent_sessions_config()
+    if not config:
+        return {"restored": False, "reason": "feature_disabled"}
+
+    cookie_name = config.get("cookie_name", "jarvis_uid")
+    ttl_days = config.get("session_ttl_days", 90)
+    cookie_id = request.cookies.get(cookie_name)
+
+    if not cookie_id:
+        cookie_id = str(uuid.uuid4())
+
+    response.set_cookie(
+        key=cookie_name,
+        value=cookie_id,
+        max_age=ttl_days * 86400,
+        httponly=True,
+        samesite="lax",
+        secure=config.get("cookie_secure", True),
+        domain=config.get("cookie_domain") or None
+    )
+
+    if await get_engine() is None:
+        return {"restored": False, "reason": "db_unavailable"}
+
+    identity_id = await get_or_create_identity(cookie_id, ttl_days)
+    if not identity_id:
+        return {"restored": False, "reason": "db_error"}
+
+    thread = await get_or_create_active_thread(identity_id)
+    if not thread or thread["is_new"] or thread["turn_count"] == 0:
+        return {"restored": False, "reason": "no_history"}
+
+    max_turns = config.get("max_restored_turns", 20)
+    messages = await load_chat_history(thread["id"], max_turns)
+
+    return {
+        "restored": True,
+        "thread_id": thread["id"],
+        "exchange_count": thread["turn_count"],
+        "messages": messages,
+        "show_banner": config.get("show_restore_banner", True)
+    }
+
+
+@app.delete("/api/session/current")
+async def clear_session(request: Request):
+    """
+    Soft-close the current thread (Start Fresh).
+    Sets ended_at = NOW() on the active thread — identity and exchange history
+    are preserved until TTL cleanup.
+    """
+    config = await get_persistent_sessions_config()
+    if not config:
+        return {"cleared": False}
+
+    cookie_name = config.get("cookie_name", "jarvis_uid")
+    cookie_id = request.cookies.get(cookie_name)
+    if not cookie_id:
+        return {"cleared": False, "reason": "no_cookie"}
+
+    if await get_engine() is None:
+        return {"cleared": False, "reason": "db_unavailable"}
+
+    identity_id = await get_or_create_identity(cookie_id, config.get("session_ttl_days", 90))
+    if not identity_id:
+        return {"cleared": False, "reason": "db_error"}
+
+    async def _close_thread(conn):
+        await conn.execute(
+            text("UPDATE web_chat_threads SET ended_at = NOW() "
+                 "WHERE identity_id = :iid AND ended_at IS NULL"),
+            {"iid": identity_id}
+        )
+
+    await _safe_db_exec(_close_thread)
+    return {"cleared": True}
+
+
 @app.post("/api/chat/stream")
-async def chat_stream(message: ChatMessage):
-    """Stream a response from Athena (if supported)"""
+async def chat_stream(message: ChatMessage, request: Request):
+    """Stream a response from Athena with optional session persistence."""
     session_id = message.session_id or str(uuid.uuid4())
 
     if session_id not in sessions:
@@ -428,7 +771,6 @@ async def chat_stream(message: ChatMessage):
             "created": datetime.now().isoformat(),
             "message_count": 0
         }
-
     sessions[session_id]["message_count"] += 1
 
     # Fetch current guest information for context
@@ -440,24 +782,56 @@ async def chat_stream(message: ChatMessage):
 
     current_mode = await get_current_mode()
 
+    # --- Persistent session setup ---
+    config = await get_persistent_sessions_config()
+    thread = None
+    thread_id = None
+    chat_history_msgs: List[Dict[str, str]] = []
+    inject_history = False
+    cookie_id = None
+    orch_session_id = session_id
+
+    if config:
+        cookie_name = config.get("cookie_name", "jarvis_uid")
+        cookie_id = request.cookies.get(cookie_name)
+        if not cookie_id:
+            cookie_id = str(uuid.uuid4())
+
+        ttl_days = config.get("session_ttl_days", 90)
+        identity_id = await get_or_create_identity(cookie_id, ttl_days)
+        if identity_id:
+            thread = await get_or_create_active_thread(identity_id)
+
+        if thread:
+            thread_id = thread["id"]
+            live_session = thread["current_orch_session_id"]
+            if (not message.session_id or message.session_id != live_session) \
+                    and thread["turn_count"] > 0:
+                max_turns = config.get("max_restored_turns", 20)
+                chat_history_msgs = await load_chat_history(thread_id, max_turns)
+                inject_history = True
+                orch_session_id = str(uuid.uuid4())
+
     async def generate():
+        buffer = []
+        stream_completed = False
+
         try:
             request_body = {
                 "query": message.message,
                 "mode": current_mode,
                 "room": DEFAULT_ROOM,
-                "session_id": session_id,
+                "session_id": orch_session_id,
                 "interface_type": message.interface_type or "chat",
-                "source": message.source or "jarvis",  # forward caller's source or default to "jarvis"
+                "source": message.source or "jarvis",
+                "chat_history": chat_history_msgs if inject_history else None,
             }
 
-            # Build context with guest info and location override
             if context:
                 request_body["context"] = context
             else:
                 request_body["context"] = {}
 
-            # Add location override to context if provided
             if message.location:
                 request_body["context"]["location_override"] = {
                     "latitude": message.location.latitude,
@@ -465,7 +839,10 @@ async def chat_stream(message: ChatMessage):
                     "address": message.location.address
                 }
 
-            logger.info("chat_stream_request", mode=current_mode, query_preview=message.message[:50])
+            logger.info("chat_stream_request", mode=current_mode,
+                       query_preview=message.message[:50],
+                       inject_history=inject_history,
+                       history_turns=len(chat_history_msgs) // 2)
 
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream(
@@ -474,21 +851,63 @@ async def chat_stream(message: ChatMessage):
                     json=request_body
                 ) as response:
                     async for chunk in response.aiter_text():
-                        yield chunk  # orchestrator already formats as SSE (data: {...}\n\n)
+                        if thread_id:
+                            if '"answer_chunk"' in chunk:
+                                for line in chunk.split('\n'):
+                                    if line.startswith('data: '):
+                                        payload = line[6:].strip()
+                                        if payload and payload != '[DONE]':
+                                            try:
+                                                ev = json.loads(payload)
+                                                if ev.get('stage') == 'answer_chunk':
+                                                    ct = ev.get('content', '')
+                                                    if ct:
+                                                        buffer.append(ct)
+                                            except Exception:
+                                                pass
+                            if '"stage": "complete"' in chunk or '"stage":"complete"' in chunk:
+                                stream_completed = True
+                        yield chunk
         except Exception as e:
             logger.error("stream_error", error=str(e))
             yield f'data: {{"error": "Stream failed"}}\n\n'
+        finally:
+            if thread_id:
+                assistant_text = "".join(buffer) if stream_completed else None
+                turn_number = (thread["turn_count"] if thread else 0) + 1
+                await save_exchange(
+                    thread_id=thread_id,
+                    turn_number=turn_number,
+                    user_content=message.message,
+                    assistant_content=assistant_text,
+                    orch_session_id=orch_session_id,
+                )
 
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(
+    streaming_resp = StreamingResponse(
         generate(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         }
     )
+
+    if config and cookie_id:
+        ttl_days = config.get("session_ttl_days", 90)
+        streaming_resp.set_cookie(
+            key=config.get("cookie_name", "jarvis_uid"),
+            value=cookie_id,
+            max_age=ttl_days * 86400,
+            httponly=True,
+            samesite="lax",
+            secure=config.get("cookie_secure", True),
+            domain=config.get("cookie_domain") or None
+        )
+
+    return streaming_resp
 
 
 @app.get("/api/health")

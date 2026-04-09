@@ -186,6 +186,14 @@ const featureMetadata = {
         cons: ['TTS latency', 'Audio quality varies'],
         latencyImpact: 'medium',
         latencyMs: '+200-500ms'
+    },
+    'persistent_chat_sessions': {
+        icon: '🕐',
+        pros: ['Users can continue where they left off', 'No login required', 'Transparent session restoration'],
+        cons: ['Requires PostgreSQL DATABASE_URL', 'Cookie storage (privacy consideration)', 'Adds DB writes per chat turn'],
+        latencyImpact: 'low',
+        latencyMs: '+10-30ms',
+        hasConfigEditor: true
     }
 };
 
@@ -758,8 +766,103 @@ function renderFeatureCard(feature) {
                 </div>
             </details>
             ` : ''}
+
+            ${meta.hasConfigEditor ? renderPersistentSessionsConfig(feature) : ''}
         </div>
     `;
+}
+
+/**
+ * Render config editor for persistent_chat_sessions
+ */
+function renderPersistentSessionsConfig(feature) {
+    const cfg = feature.config || {};
+    return `
+        <details class="group mt-3">
+            <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-400 flex items-center gap-1">
+                <span class="group-open:rotate-90 transition-transform">▶</span>
+                Configure
+            </summary>
+            <div class="mt-3 space-y-3 border-t border-dark-border pt-3">
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="text-xs text-gray-400 block mb-1">Session TTL (days)</label>
+                        <input type="number" min="1" max="365"
+                               id="pcs-ttl-${feature.id}"
+                               value="${cfg.session_ttl_days ?? 90}"
+                               class="w-full bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm text-white">
+                    </div>
+                    <div>
+                        <label class="text-xs text-gray-400 block mb-1">Max restored turns</label>
+                        <input type="number" min="1" max="100"
+                               id="pcs-turns-${feature.id}"
+                               value="${cfg.max_restored_turns ?? 20}"
+                               class="w-full bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm text-white">
+                    </div>
+                </div>
+                <div>
+                    <label class="text-xs text-gray-400 block mb-1">Cookie name</label>
+                    <input type="text"
+                           id="pcs-cookie-${feature.id}"
+                           value="${cfg.cookie_name ?? 'jarvis_uid'}"
+                           class="w-full bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm text-white">
+                </div>
+                <div class="flex items-center gap-4">
+                    <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+                        <input type="checkbox" id="pcs-secure-${feature.id}"
+                               ${cfg.cookie_secure !== false ? 'checked' : ''}>
+                        Secure cookie (HTTPS only)
+                    </label>
+                    <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+                        <input type="checkbox" id="pcs-banner-${feature.id}"
+                               ${cfg.show_restore_banner !== false ? 'checked' : ''}>
+                        Show restore banner
+                    </label>
+                </div>
+                <button onclick="savePersistentSessionsConfig(${feature.id})"
+                        class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded transition-colors">
+                    Save configuration
+                </button>
+            </div>
+        </details>
+    `;
+}
+
+async function savePersistentSessionsConfig(featureId) {
+    try {
+        const ttl = parseInt(document.getElementById(`pcs-ttl-${featureId}`)?.value) || 90;
+        const turns = parseInt(document.getElementById(`pcs-turns-${featureId}`)?.value) || 20;
+        const cookieName = document.getElementById(`pcs-cookie-${featureId}`)?.value || 'jarvis_uid';
+        const secure = document.getElementById(`pcs-secure-${featureId}`)?.checked ?? true;
+        const banner = document.getElementById(`pcs-banner-${featureId}`)?.checked ?? true;
+
+        const response = await fetch(`/api/features/${featureId}/config`, {
+            method: 'PUT',
+            headers: {
+                ...getAuthHeaders(),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                session_ttl_days: ttl,
+                max_restored_turns: turns,
+                cookie_name: cookieName,
+                cookie_domain: null,
+                cookie_secure: secure,
+                show_restore_banner: banner
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to save config');
+        }
+
+        safeShowToast('Session config saved', 'success');
+        await loadFeatures();
+    } catch (error) {
+        console.error('Failed to save persistent sessions config:', error);
+        safeShowToast(error.message, 'error');
+    }
 }
 
 /**
