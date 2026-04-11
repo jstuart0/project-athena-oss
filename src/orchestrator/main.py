@@ -11033,22 +11033,21 @@ async def _record_conversation_turn(
         return
 
     try:
+        import uuid as _uuid
         async with pool.acquire() as conn:
             conv_row = await conn.fetchrow(
                 """
                 INSERT INTO conversations
-                    (session_id, room, user_mode, interface_type, started_at, ended_at, turn_count)
-                VALUES ($1, $2, $3, $4, NOW(), NOW(), 1)
+                    (id, session_id, room, user_mode, interface_type, started_at, ended_at, turn_count)
+                VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), 1)
                 ON CONFLICT (session_id) DO UPDATE
                     SET ended_at   = NOW(),
                         turn_count = conversations.turn_count + 1,
-                        total_tokens = COALESCE(conversations.total_tokens, 0) + COALESCE($5, 0)
+                        total_tokens = COALESCE(conversations.total_tokens, 0) + COALESCE($6, 0)
                 RETURNING id, turn_count
                 """,
-                session_id, room, user_mode, interface_type, tokens_generated
+                str(_uuid.uuid4()), session_id, room, user_mode, interface_type, tokens_generated
             )
-
-            import uuid as _uuid
             await conn.execute(
                 """
                 INSERT INTO conversation_turns (
