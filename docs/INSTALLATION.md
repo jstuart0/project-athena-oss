@@ -54,8 +54,8 @@ This guide covers installing Project Athena from scratch, including all deployme
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/your-org/project-athena.git
-cd project-athena
+git clone https://github.com/jstuart0/project-athena-oss.git
+cd project-athena-oss
 ```
 
 ### 2. Copy and Configure Environment
@@ -436,41 +436,32 @@ kubectl -n athena create secret generic athena-encryption \
 
 ```bash
 # Apply core manifests
-kubectl apply -f k8s/core/
+kubectl apply -f manifests/athena-prod/
 
-# This deploys:
-# - PostgreSQL StatefulSet
-# - Redis Deployment
+# This deploys core services including:
 # - Admin Backend Deployment + Service
+# - Admin Frontend Deployment + Service
 # - Gateway Deployment + Service
 # - Orchestrator Deployment + Service
+# - Redis Deployment
+# - Ollama Deployment
+# - Qdrant Deployment
 ```
 
 #### Deploy Optional Modules
 
 ```bash
-# Home Assistant integration
-kubectl apply -f k8s/modules/home-assistant/
-
-# Guest Mode
-kubectl apply -f k8s/modules/guest-mode/
-
-# Notifications
-kubectl apply -f k8s/modules/notifications/
-
 # Jarvis Web
-kubectl apply -f apps/jarvis-web/k8s/
+kubectl apply -f manifests/athena-prod/jarvis-web.yaml
 ```
+
+> **Note:** Additional modules (Home Assistant, Guest Mode, Notifications) are configured via Docker Compose profiles or environment variables. See [Module Configuration Guide](./MODULES.md) for details.
 
 #### Deploy RAG Services
 
 ```bash
 # Deploy all RAG services
-kubectl apply -f k8s/rag/
-
-# Or deploy individually
-kubectl apply -f k8s/rag/weather/
-kubectl apply -f k8s/rag/news/
+kubectl apply -f manifests/athena-prod/rag-services.yaml
 ```
 
 #### Configure Ingress
@@ -819,5 +810,5 @@ curl http://compute-server:8001/health
 
 ## Support
 
-- GitHub Issues: [project-athena/issues](https://github.com/your-org/project-athena/issues)
-- Documentation: [project-athena/docs](https://github.com/your-org/project-athena/docs)
+- GitHub Issues: [project-athena-oss/issues](https://github.com/jstuart0/project-athena-oss/issues)
+- Documentation: [project-athena-oss/docs](https://github.com/jstuart0/project-athena-oss/docs)
