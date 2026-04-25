@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-Audit .env.example / config.env.example against os.getenv(...) usage in code.
+Audit env example files against os.getenv / os.environ usage in code.
 
-Scans `src/`, `admin/`, and `apps/` for every `os.getenv('NAME', ...)` call
-that passes a string-literal variable name, then cross-references the
-project's `.env.example` (and `config.env.example` — this repo uses both)
-to surface drift:
+Scans `src/`, `admin/`, and `apps/` for every reference to an environment
+variable whose name is a string literal:
+
+* `os.getenv('NAME', ...)`
+* `os.environ.get('NAME', ...)`
+* `os.environ['NAME']` (subscript)
+
+Cross-references against `.env.example`, `config.env.example`, and
+`.env.secrets.example` (this repo uses all three) to surface drift:
 
 * `missing` — variable is read at runtime but not declared in any example
   file. Users won't know to set it until something fails.
@@ -17,14 +22,12 @@ Exits non-zero if either list is non-empty so CI can catch regressions.
 Usage:
     python3 scripts/check-env-example.py
 
-Only string-literal arguments are tracked; `os.getenv(var_name)` (non-string)
-is skipped silently because we can't resolve the name statically. This
-matches the issue #12 implementation hint.
+Only string-literal names are tracked; `os.getenv(var_name)` (non-string)
+is skipped silently because we can't resolve the name statically.
 """
 from __future__ import annotations
 
 import ast
-import os
 import re
 import sys
 from pathlib import Path
@@ -32,7 +35,22 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_ROOTS = ("src", "admin", "apps")
-ENV_EXAMPLE_FILES = (".env.example", "config.env.example")
+ENV_EXAMPLE_FILES = (".env.example", "config.env.example", ".env.secrets.example")
+
+
+def _is_os_environ(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "environ"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "os"
+    )
+
+
+def _string_literal(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
 
 
 def collect_getenv_names(root: Path) -> set[str]:
@@ -43,10 +61,21 @@ def collect_getenv_names(root: Path) -> set[str]:
         except (SyntaxError, UnicodeDecodeError):
             continue
         for node in ast.walk(tree):
+            # os.environ["NAME"] subscript reads (and writes — we can't
+            # distinguish reliably without dataflow, but a name in the
+            # subscript indicates the var is referenced either way).
+            if isinstance(node, ast.Subscript) and _is_os_environ(node.value):
+                key = node.slice
+                # Py3.9+: subscript.slice is the expression directly.
+                literal = _string_literal(key)
+                if literal is not None:
+                    names.add(literal)
+                continue
+
             if not isinstance(node, ast.Call) or not node.args:
                 continue
             func = node.func
-            # os.getenv(...) or environ.get(...) — both accept a name arg.
+            # os.getenv(...) or os.environ.get(...) — both accept a name arg.
             match_os_getenv = (
                 isinstance(func, ast.Attribute)
                 and func.attr == "getenv"
@@ -56,16 +85,13 @@ def collect_getenv_names(root: Path) -> set[str]:
             match_environ_get = (
                 isinstance(func, ast.Attribute)
                 and func.attr == "get"
-                and isinstance(func.value, ast.Attribute)
-                and func.value.attr == "environ"
-                and isinstance(func.value.value, ast.Name)
-                and func.value.value.id == "os"
+                and _is_os_environ(func.value)
             )
             if not (match_os_getenv or match_environ_get):
                 continue
-            first = node.args[0]
-            if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                names.add(first.value)
+            literal = _string_literal(node.args[0])
+            if literal is not None:
+                names.add(literal)
     return names
 
 
