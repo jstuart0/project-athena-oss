@@ -10,8 +10,11 @@ DEV_MODE Support:
     without requiring network access to the production database.
 """
 import os
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'src'))
 from contextlib import contextmanager
 from typing import Generator, Optional
+from shared.config import get_config
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -265,7 +268,11 @@ def seed_dev_data():
 
 # OSS default model configuration
 OSS_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
-OSS_OLLAMA_URL = os.getenv("OLLAMA_URL") or os.getenv("LLM_SERVICE_URL", "http://localhost:11434")
+# OSS_OLLAMA_URL preserved as module-level constant for compatibility with
+# admin/backend/main.py:25 import (`from app.database import ... OSS_OLLAMA_URL`)
+# and main.py:350, 352, 355, 380 reads.  Resolution is now centralized via
+# get_config().llm_endpoint with the dominant LLM_SERVICE_URL > OLLAMA_URL precedence.
+OSS_OLLAMA_URL = get_config().llm_endpoint
 OSS_AUTO_PULL_MODELS = os.getenv("ATHENA_AUTO_PULL_MODELS", "true").lower() == "true"
 OSS_SEED_DEFAULTS = os.getenv("ATHENA_SEED_DEFAULTS", "true").lower() == "true"
 OSS_SERVICE_REGISTRY = [

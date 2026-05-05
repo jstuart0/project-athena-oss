@@ -15,6 +15,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **LLM endpoint precedence** (`admin-backend`): when both `OLLAMA_URL` and
+  `LLM_SERVICE_URL` are set, `LLM_SERVICE_URL` now wins at the database
+  seeder (matches the dominant precedence used by orchestrator + gateway).
+  Previously `OLLAMA_URL` won at `admin/backend/app/database.py:268` (the seed
+  path) while the rest of the codebase used `LLM_SERVICE_URL`-first. Operators
+  using both env vars should verify the seeded `system_settings.ollama_url` row
+  after deploy. Run:
+  `kubectl -n athena-prod exec -it deploy/athena-admin-backend -- psql $DATABASE_URL -c "SELECT key, value FROM system_settings WHERE key='ollama_url';"`
+  See Campaign 4 plan, Phase 2a-ii.
+
 - **Qdrant**: PersistentVolumeClaim is now the default storage backend (was `emptyDir`, which silently lost all conversation memory on every pod restart). Deployers must replace `YOUR_STORAGE_CLASS` in `manifests/athena-prod/qdrant.yaml` with their cluster's StorageClass before applying. Existing `emptyDir`-based deployments will lose their current Qdrant data on the next apply — see `docs/INSTALLATION.md` for migration notes. (audit follow-up: otto:3, ATHENA-8)
 
 ---
