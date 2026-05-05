@@ -11662,20 +11662,23 @@ async def health_check(detailed: bool = False):
     try:
         ha_healthy = await ha_client.health_check() if ha_client else False
         health["components"]["home_assistant"] = ha_healthy
-    except:
+    except Exception as e:
         health["components"]["home_assistant"] = False
+        logger.warning("health_check: home_assistant probe failed", exc_info=e)
 
     # Check LLM Router (supports Ollama, MLX, etc.)
     try:
         health["components"]["llm_router"] = llm_router is not None
-    except:
+    except Exception as e:
         health["components"]["llm_router"] = False
+        logger.warning("health_check: llm_router probe failed", exc_info=e)
 
     # Check Redis (optional - caching degrades gracefully)
     try:
         health["components"]["redis"] = await cache_client.ping() if cache_client else False
-    except:
+    except Exception as e:
         health["components"]["redis"] = False
+        logger.warning("health_check: redis probe failed", exc_info=e)
 
     # Add resilience pattern status (circuit breakers, rate limiters)
     # Note: Open circuits don't make the orchestrator unhealthy - RAG services are optional
@@ -11844,24 +11847,27 @@ async def readiness_probe():
         components["llm_router"] = _runtime.get_llm_router() is not None
         if not components["llm_router"]:
             ready = False
-    except:
+    except Exception as e:
         components["llm_router"] = False
         ready = False
+        logger.warning("readiness_probe: llm_router probe failed", exc_info=e)
 
     # Check Home Assistant (optional - degraded if down)
     try:
         _ha = _runtime.get_ha_client()
         ha_healthy = await _ha.health_check() if _ha else False
         components["home_assistant"] = ha_healthy
-    except:
+    except Exception as e:
         components["home_assistant"] = False
+        logger.warning("readiness_probe: home_assistant probe failed", exc_info=e)
 
     # Check Redis (optional)
     try:
         _cache = _runtime.get_cache_client()
         components["redis"] = await _cache.ping() if _cache else False
-    except:
+    except Exception as e:
         components["redis"] = False
+        logger.warning("readiness_probe: redis probe failed", exc_info=e)
 
     status_code = 200 if ready else 503
     return Response(
