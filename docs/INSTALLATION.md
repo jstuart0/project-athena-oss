@@ -23,6 +23,23 @@ This guide covers installing Project Athena from scratch, including all deployme
 
 ---
 
+## Deployment Prerequisites Checklist
+
+Before running `deploy.sh` or `kubectl apply`, confirm each item:
+
+- [ ] **Storage class** — a default storage class exists in your cluster (`kubectl get storageclass`)
+- [ ] **OIDC provider** — you have an OIDC provider (Authentik, Keycloak, Google, etc.) and have registered the redirect URI
+- [ ] **Secrets configured** — `create-secrets.sh` has been run and the required secrets exist in the target namespace: `athena-db-credentials`, `athena-encryption`, `athena-oidc`
+- [ ] **`SERVICE_API_KEY` set** — the shared service-to-service key is in your secrets/env; it must be the same value across all services
+- [ ] **`ALLOWED_CALLBACK_HOSTS` set** — if using the Control Agent for model downloads, this is non-empty
+- [ ] **Manifest placeholders substituted** — manifests in `manifests/athena-prod/` contain `YOUR_REGISTRY` and similar placeholders; substitute them before applying
+- [ ] **Container images built and pushed** — run `scripts/build-and-push.sh` to build all images for `linux/amd64` and push to your registry
+- [ ] **HA token reviewed** — if upgrading from a deployment that used the Jetson edge module, revoke the Home Assistant token that was in git history at commit `794096b`
+
+The `deploy.sh` script enforces items 3 through 5 automatically: it will abort with an actionable error if the namespace or required secrets are missing.
+
+---
+
 ## Prerequisites
 
 ### Hardware Requirements
@@ -152,6 +169,30 @@ ENCRYPTION_KEY=your-32-char-base64-key
 ENCRYPTION_SALT=your-16-char-base64-salt
 SESSION_SECRET_KEY=your-32-char-base64-key
 JWT_SECRET=your-32-char-base64-key
+
+# Service-to-service authentication (REQUIRED in production)
+# All internal services send this as the X-Service-Key header.
+# Generate: openssl rand -base64 32
+SERVICE_API_KEY=your-service-key
+
+# OIDC / SSO (REQUIRED in production for admin UI login)
+# The admin backend hard-fails at startup if OIDC_ISSUER is empty or
+# set to a placeholder value when ENVIRONMENT != development.
+OIDC_ISSUER=https://auth.example.com/application/o/athena-admin/
+OIDC_CLIENT_ID=your-oidc-client-id
+OIDC_CLIENT_SECRET=your-oidc-client-secret
+OIDC_REDIRECT_URI=https://athena.example.com/auth/callback
+
+# Control Agent callback allowlist (REQUIRED if using model downloads via Control Agent)
+# Comma-separated hostnames. Empty = fail-closed (all callbacks rejected).
+# Local dev: ALLOWED_CALLBACK_HOSTS=localhost
+# Kubernetes in-cluster: ALLOWED_CALLBACK_HOSTS=athena-admin-backend.athena-prod.svc.cluster.local
+ALLOWED_CALLBACK_HOSTS=
+
+# Location defaults (OPTIONAL — leave blank for no default)
+DEFAULT_CITY=
+DEFAULT_STATE=
+DEFAULT_TIMEZONE=UTC
 ```
 
 ### Service Location Configuration
@@ -403,11 +444,18 @@ docker compose build --no-cache
 
 #### Namespace Setup
 
+Use the provided `create-secrets.sh` script, which is idempotent: running it multiple times against a cluster that already has the secrets will skip any secret that already has all required keys rather than rotating them.
+
 ```bash
-# Create namespace
+# Populate config.env or .env.secrets with your values, then:
+./scripts/create-secrets.sh
+```
+
+To create secrets manually:
+
+```bash
 kubectl create namespace athena-prod
 
-# Create secrets
 kubectl -n athena-prod create secret generic athena-db-credentials \
   --from-literal=password=your-db-password
 
@@ -416,9 +464,22 @@ kubectl -n athena-prod create secret generic athena-encryption \
   --from-literal=encryption-salt=your-salt \
   --from-literal=session-secret=your-session-secret \
   --from-literal=jwt-secret=your-jwt-secret
+
+kubectl -n athena-prod create secret generic athena-oidc \
+  --from-literal=oidc-client-id=your-client-id \
+  --from-literal=oidc-client-secret=your-client-secret \
+  --from-literal=oidc-issuer=https://auth.example.com/application/o/athena-admin/
 ```
 
 #### Deploy Core Services
+
+`deploy.sh` runs a pre-flight check before applying manifests. It verifies that the `athena-prod` namespace exists and that the required secrets (`athena-db-credentials`, `athena-encryption`, `athena-oidc`) are present. If any are missing it aborts with an error pointing you to `create-secrets.sh`. To deploy:
+
+```bash
+./scripts/deploy.sh
+```
+
+Or apply manifests directly (no pre-flight):
 
 ```bash
 # Apply core manifests

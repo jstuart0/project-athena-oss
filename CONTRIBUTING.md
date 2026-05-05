@@ -82,9 +82,18 @@ By participating in this project, you agree to maintain a respectful and inclusi
    ```
 
 3. **Run tests**
+
+   The test suite uses `pytest.ini` to register an `integration` marker. By default, running `pytest` executes only unit tests (tests not marked `integration`):
+
    ```bash
+   # Unit tests only (default — no live services required)
    pytest tests/
+
+   # Include integration tests (require live PostgreSQL, Redis, and running services)
+   pytest -m integration tests/
    ```
+
+   Mark tests that require live services with `@pytest.mark.integration`. New tests should be unit tests unless they genuinely require external state.
 
 ## Code Style
 

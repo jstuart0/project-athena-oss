@@ -16,6 +16,24 @@ Commercial AI assistants route your data through cloud servers, add latency, and
 - **Smart home control** — deep Home Assistant integration with 70+ command patterns for lights, locks, thermostats, and more
 - **OpenAI-compatible API** — works with Home Assistant, custom apps, or any OpenAI client library
 
+## Security & OSS-First
+
+Project Athena is designed for any deployment, not just the maintainer's setup. A few properties to be aware of before deploying:
+
+**No secrets in code.** As of the 2026-05-06 audit (ATHENA-2, commits `9f4c40e`–`5830a71`), deployment-specific values — domain names, location defaults, and credentials — have been removed from source. All configurable values come from environment variables. See `.env.example` for the full list.
+
+**Required vars in production.** Several variables that previously had silent defaults now hard-fail at startup in production mode:
+- `SERVICE_API_KEY` — shared secret for service-to-service auth
+- `OIDC_ISSUER` — OIDC provider issuer URL (startup aborts if empty or placeholder)
+- `OIDC_CLIENT_ID` — must not be the literal string `demo-mode`
+- `ALLOWED_CALLBACK_HOSTS` — allowlist for Control Agent callback URLs (fail-closed when empty)
+
+**Start from `.env.example`.** Copy it, fill in the REQUIRED section, and review the RECOMMENDED section before your first deployment. The file is the canonical reference for deployers.
+
+**One action required for upgraders:** if you had a previous deployment that used the Jetson edge module, revoke the Home Assistant long-lived access token that was hardcoded in `src/jetson/` — it appears in git history at commit `794096b`. See `CHANGELOG.md` for details.
+
+---
+
 ## Interfaces
 
 Athena supports three ways to interact, all backed by the same orchestrator and RAG pipeline:
@@ -257,20 +275,35 @@ See [docs/INSTALLATION.md](docs/INSTALLATION.md) for detailed setup instructions
 
 ### Configuration
 
-All configuration is via environment variables with sensible defaults:
+All configuration is via environment variables. Copy `.env.example` to `.env` and fill in the REQUIRED section before starting services.
 
 ```bash
-# Required
+# REQUIRED — services fail fast if missing
 ATHENA_DB_PASSWORD=your-db-password
 ADMIN_API_URL=http://localhost:8080
 ENCRYPTION_KEY=your-encryption-key
+ENCRYPTION_SALT=your-encryption-salt
 SESSION_SECRET_KEY=your-session-key
 JWT_SECRET=your-jwt-secret
+SERVICE_API_KEY=your-service-to-service-key  # required in production
+
+# REQUIRED in production — admin backend hard-fails at startup without these
+OIDC_ISSUER=https://auth.example.com/application/o/athena-admin/
+OIDC_CLIENT_ID=your-oidc-client-id
+OIDC_REDIRECT_URI=https://athena.example.com/auth/callback
+
+# REQUIRED if using the Control Agent (model downloads)
+ALLOWED_CALLBACK_HOSTS=localhost  # comma-separated; empty = fail-closed
 
 # Recommended
 OLLAMA_URL=http://localhost:11434
 HA_URL=http://your-home-assistant:8123
 HA_TOKEN=your-long-lived-access-token
+
+# Location defaults for RAG queries (leave blank if not needed)
+DEFAULT_CITY=
+DEFAULT_STATE=
+DEFAULT_TIMEZONE=UTC
 
 # Module toggles
 MODULE_HOME_ASSISTANT=true

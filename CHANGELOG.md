@@ -9,18 +9,72 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.2.0] - 2026-05-06 — Comprehensive OSS Audit Remediation
+
+> **Audit document:** `thoughts/shared/audits/2026-05-05-audit-athena-oss-comprehensive.md`
+> **Plan:** `thoughts/shared/plans/2026-05-05-audit-athena-oss-comprehensive.md`
+> **Ticket:** ATHENA-2
+> **Commits:** `9f4c40e` → `5830a71` (13 commits)
+
+This release bundles all changes from the comprehensive OSS audit conducted 2026-05-05.
+All changes are additive or hardening — no features were removed.
+
 ### Added
-- `CHANGELOG.md` — this file, tracking changes from the public OSS baseline forward
-- `apps/chat-embed/` — CORS-relay proxy for embedding Athena-backed chat on external websites (documented in README and build scripts)
+
+- `CHANGELOG.md` — this file, tracking changes from the OSS baseline forward ([ATHENA-2](https://plane.xmojo.net))
+- `apps/chat-embed/` — CORS-relay proxy for embedding Athena-backed chat on external websites; documented in README and build scripts
 - GitHub issue and pull request templates (`.github/`)
+- `pytest.ini` — `integration` marker registered; default run (`pytest`) skips live-service tests; `pytest -m integration` selects them
+- `scripts/check-env-example.py` — audits `.env.example` for drift against env vars referenced in source code
 
 ### Changed
-- README updated to document Chat Embed interface alongside Jarvis Web and API
-- `scripts/build-and-push.sh` includes `athena-chat-embed` in the `ADMIN_SERVICES` build array
-- `.env.example` curated: removed stale keys, corrected drift between documented and actual environment variables
+
+- **Admin backend startup validation hardened** — in production (non-dev) mode the process now hard-fails at startup if `OIDC_ISSUER` is empty, missing, or matches the `CONFIGURE_ME` placeholder; if `OIDC_CLIENT_ID` is the literal string `demo-mode`; or if `SERVICE_API_KEY` is unset. Previously these conditions were silently ignored.
+- **Service-to-service auth enforced end-to-end** — `SERVICE_API_KEY` is now required and wired through all service boundaries (admin backend, orchestrator, gateway, RAG services). Previously some paths accepted unauthenticated internal calls.
+- **Alembic migrations parameterized** — 6 migrations that previously embedded deployment-specific values via Python f-strings now read those values from environment variables at migration time. `alembic upgrade head` is safe to run against any deployment without code edits.
+- **Control Agent input hardening** — path-traversal and SSRF guards added; callback URLs are rejected unless the hostname matches `ALLOWED_CALLBACK_HOSTS` (fail-closed by default when the variable is empty).
+- **`scripts/create-secrets.sh` is now idempotent** — re-running the script on a cluster where secrets already exist skips rotation rather than overwriting keys.
+- **`scripts/deploy.sh` pre-flight check** — the deploy script now verifies the target namespace and required secrets (`athena-db-credentials`, `athena-encryption`, `athena-oidc`) exist before running `kubectl apply`. Missing secrets abort with an actionable error.
+- **Orchestrator Kubernetes manifest** — memory limit raised from 512Mi to 2Gi; CPU limit raised from 250m to 2000m; `startupProbe` added with 420-second grace period for slow LLM initialization.
+- **nginx security headers** — admin frontend nginx config now emits `Content-Security-Policy`, `Strict-Transport-Security`, `X-Frame-Options`, `X-Content-Type-Options`, and `Referrer-Policy`. CSP allows existing CDN dependencies (Bootstrap, cdnjs).
+- **README** — Chat Embed interface documented; build scripts updated.
+- **`.env.example` curated** — stale keys removed; drift between documented and actual environment variables corrected.
 
 ### Fixed
+
 - `docs/INSTALLATION.md` — broken cross-references repaired
+- Hardcoded `xmojo.net` domain references removed from admin OIDC configuration panel — all OIDC fields now derive from environment variables
+- Hardcoded location defaults (`Baltimore`, MD timezone) removed from RAG services — `DEFAULT_CITY`, `DEFAULT_STATE`, and `DEFAULT_TIMEZONE` are now required from the environment or left blank
+- Hardcoded HA JWT removed from `src/jetson/` — **token revocation in Home Assistant is a required manual step** (the token appears in git history at commit `794096b`; see audit doc for details)
+- Alembic JSONB cast error in Phase 4 migrations corrected (codex r2, `5830a71`)
+- RAG `SERVICE_API_KEY` wiring fixed — keys were read but not forwarded in some service paths
+- `CONTROL_AGENT_URL` handling corrected — fallback behavior on missing var now logs a warning instead of raising
+
+### Security
+
+- Deployment-specific secrets and domains removed from source code across 18+ files
+- Admin backend endpoints that previously accepted requests without authentication now require a valid session or service key
+- nginx CSP, HSTS, `X-Frame-Options`, `X-Content-Type-Options`, and `Referrer-Policy` headers added to admin frontend
+- Control Agent hardened against path traversal and SSRF via callback URL allowlist (`ALLOWED_CALLBACK_HOSTS`)
+- **Action required on upgrade:** revoke the Home Assistant long-lived access token that was hardcoded in `src/jetson/` — it is present in git history at commit `794096b` even though the code reference was removed in `be251ef`
+
+### New environment variables
+
+The following variables were added to `.env.example` and are required or recommended for production deployments:
+
+| Variable | Required | Description |
+|---|---|---|
+| `SERVICE_API_KEY` | Yes (production) | Shared secret for service-to-service auth |
+| `OIDC_ISSUER` | Yes (production) | OIDC provider issuer URL; startup fails if unset |
+| `OIDC_REDIRECT_URI` | Yes (with OIDC) | Callback URL registered with your OIDC provider |
+| `OIDC_CLIENT_ID` | Yes (with OIDC) | Must not be the literal string `demo-mode` in production |
+| `ALLOWED_CALLBACK_HOSTS` | Yes (with Control Agent) | Allowlist of hostnames for HuggingFace download-progress callbacks |
+| `DEFAULT_CITY` | No | Default city for location-aware RAG queries (blank = no default) |
+| `DEFAULT_STATE` | No | Default state/region for location-aware RAG queries |
+| `DEFAULT_TIMEZONE` | No | Timezone for time-aware queries (e.g., `America/New_York`); defaults to `UTC` |
+| `OIDC_USERINFO_URL` | No | Manual override for OIDC userinfo endpoint; auto-derived from discovery if unset |
 
 ---
 
@@ -77,5 +131,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-[Unreleased]: https://github.com/jstuart0/project-athena-oss/compare/7f5387b...HEAD
+[Unreleased]: https://github.com/jstuart0/project-athena-oss/compare/5830a71...HEAD
+[0.2.0]: https://github.com/jstuart0/project-athena-oss/compare/7f5387b...5830a71
 [0.1.0]: https://github.com/jstuart0/project-athena-oss/commit/7f5387b
