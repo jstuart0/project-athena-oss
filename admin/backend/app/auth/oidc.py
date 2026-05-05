@@ -12,6 +12,8 @@ DEV_MODE Support:
     is automatically returned for all authenticated endpoints.
 """
 import os
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
@@ -28,6 +30,7 @@ from app.database import get_db, DEV_MODE
 from app.models import User, Secret, UserAPIKey
 from app.utils.encryption import decrypt_value
 from app.utils.api_keys import verify_api_key, extract_key_prefix, is_valid_key_format
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -75,7 +78,7 @@ def load_oidc_config_from_db() -> Dict[str, str]:
     """
     try:
         # Create database connection
-        database_url = os.getenv("DATABASE_URL", "")
+        database_url = get_config().database_url
         if not database_url:
             logger.info("oidc_config_db_skipped_no_database_url")
             return {}

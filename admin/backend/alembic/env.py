@@ -28,6 +28,10 @@ target_metadata = Base.metadata
 # Override sqlalchemy.url from environment variable if present
 # Note: We don't use config.set_main_option() here to avoid ConfigParser
 # interpolation issues with special characters like % in the password
+# TODO(Campaign 4, Decision 8): DATABASE_URL deferred from AthenaConfig migration.
+# Alembic runs in an isolated subprocess; importing shared.config here risks sys.path
+# errors during `alembic upgrade head`. Migrate when alembic is invoked in-process
+# or when a per-script shim is added. See Phase 2c of the config rebuild plan.
 database_url = os.getenv(
     "DATABASE_URL",
     config.get_main_option("sqlalchemy.url")

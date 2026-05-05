@@ -34,7 +34,7 @@ if DEV_MODE:
     DATABASE_URL = "sqlite:///:memory:"
     logger.info("dev_mode_enabled", database="sqlite_in_memory")
 else:
-    DATABASE_URL = os.getenv("DATABASE_URL")
+    DATABASE_URL = get_config().database_url
     if not DATABASE_URL:
         raise ValueError(
             "DATABASE_URL environment variable is required. "

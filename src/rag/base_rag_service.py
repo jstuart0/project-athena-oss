@@ -34,7 +34,7 @@ class BaseRAGService:
         """Initialize the RAG service"""
         # Connect to database
         import urllib.parse
-        db_url = os.getenv('DATABASE_URL')
+        db_url = get_config().database_url
         if not db_url:
             # Build connection URL from environment variables (no hardcoded defaults)
             db_password = os.getenv('ATHENA_DB_PASSWORD')
