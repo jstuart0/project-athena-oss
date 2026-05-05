@@ -143,6 +143,9 @@ from orchestrator.self_building_tools import (
     generate_tool_from_request
 )
 
+# Runtime context accessor — dual-write during Phase 1.2→Phase 4 transition
+from orchestrator.nodes import _runtime
+
 # Event system imports for real-time pipeline monitoring
 try:
     from shared.events import (
@@ -837,45 +840,15 @@ async def handle_tool_creation_request(
             "success": False
         }
 
-# Metrics
-request_counter = Counter(
-    'orchestrator_requests_total',
-    'Total requests to orchestrator',
-    ['intent', 'status']
-)
-request_duration = Histogram(
-    'orchestrator_request_duration_seconds',
-    'Request duration in seconds',
-    ['intent']
-)
-node_duration = Histogram(
-    'orchestrator_node_duration_seconds',
-    'Node execution duration in seconds',
-    ['node']
-)
-tool_call_breakdown = Histogram(
-    'athena_tool_call_phase_seconds',
-    'Tool call node phase breakdown in seconds',
-    ['phase'],
-    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
-)
-
-# Validation and Hallucination Metrics
-validation_counter = Counter(
-    'athena_validation_total',
-    'Total validation outcomes',
-    ['passed', 'reason']  # passed: true/false, reason: too_short, too_long, hallucination, etc.
-)
-hallucination_counter = Counter(
-    'athena_hallucinations_detected_total',
-    'Hallucinations detected by detection layer',
-    ['layer', 'type']  # layer: pattern_detection, llm_fact_check, tool_filter; type: date, time, money, phone, tool_name
-)
-validation_layer_duration = Histogram(
-    'athena_validation_duration_seconds',
-    'Validation node duration in seconds',
-    ['layer'],  # layer: basic, pattern, llm_fact_check
-    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+# Metrics — declarations moved to orchestrator.metrics (Phase 1.2)
+from orchestrator.metrics import (
+    request_counter,
+    request_duration,
+    node_duration,
+    tool_call_breakdown,
+    validation_counter,
+    hallucination_counter,
+    validation_layer_duration,
 )
 
 # Global clients
@@ -884,6 +857,8 @@ llm_router: Optional[LLMRouter] = None
 cache_client: Optional[CacheClient] = None
 session_manager: Optional[SessionManager] = None
 rag_client: Optional[Any] = None  # Unified RAG client with circuit breakers
+parallel_search_engine: Optional[Any] = None  # Parallel search (bob C2 — explicit slot)
+result_fusion: Optional[Any] = None  # Result fusion (bob C2 — explicit slot)
 mode_client: Optional[httpx.AsyncClient] = None  # Phase 2: Guest mode integration
 entity_manager: Optional[HAEntityManager] = None
 smart_controller: Optional[SmartHomeController] = None
@@ -1072,29 +1047,24 @@ def merge_with_context(
 
     return merged
 
-# Configuration
-# Phase 1 RAG Services
-WEATHER_SERVICE_URL = os.getenv("RAG_WEATHER_URL", "http://localhost:8010")
-ONECALL_SERVICE_URL = os.getenv("RAG_ONECALL_URL", "http://localhost:8021")
-AIRPORTS_SERVICE_URL = os.getenv("RAG_AIRPORTS_URL", "http://localhost:8011")
-FLIGHTS_SERVICE_URL = os.getenv("RAG_FLIGHTS_URL", "http://localhost:8012")
-
-# Phase 2 RAG Services
-EVENTS_SERVICE_URL = os.getenv("RAG_EVENTS_URL", "http://localhost:8013")
-STREAMING_SERVICE_URL = os.getenv("RAG_STREAMING_URL", "http://localhost:8014")
-NEWS_SERVICE_URL = os.getenv("RAG_NEWS_URL", "http://localhost:8015")
-STOCKS_SERVICE_URL = os.getenv("RAG_STOCKS_URL", "http://localhost:8016")
-SPORTS_SERVICE_URL = os.getenv("RAG_SPORTS_URL", "http://localhost:8017")
-WEBSEARCH_SERVICE_URL = os.getenv("RAG_WEBSEARCH_URL", "http://localhost:8018")
-DINING_SERVICE_URL = os.getenv("RAG_DINING_URL", "http://localhost:8019")
-RECIPES_SERVICE_URL = os.getenv("RAG_RECIPES_URL", "http://localhost:8020")
-DIRECTIONS_SERVICE_URL = os.getenv("RAG_DIRECTIONS_URL", "http://localhost:8030")
-
-# Phase 2: Mode service
-MODE_SERVICE_URL = os.getenv("MODE_SERVICE_URL", "http://localhost:8022")
-
-# Notifications service (for proactive notification preferences)
-NOTIFICATIONS_SERVICE_URL = os.getenv("NOTIFICATIONS_SERVICE_URL", "http://localhost:8050")
+# URL constants — declarations moved to orchestrator.urls (Phase 1.2)
+from orchestrator.urls import (
+    WEATHER_SERVICE_URL,
+    ONECALL_SERVICE_URL,
+    AIRPORTS_SERVICE_URL,
+    FLIGHTS_SERVICE_URL,
+    EVENTS_SERVICE_URL,
+    STREAMING_SERVICE_URL,
+    NEWS_SERVICE_URL,
+    STOCKS_SERVICE_URL,
+    SPORTS_SERVICE_URL,
+    WEBSEARCH_SERVICE_URL,
+    DINING_SERVICE_URL,
+    RECIPES_SERVICE_URL,
+    DIRECTIONS_SERVICE_URL,
+    MODE_SERVICE_URL,
+    NOTIFICATIONS_SERVICE_URL,
+)
 
 
 # IntentCategory and ModelTier now imported from orchestrator.state
@@ -1661,16 +1631,19 @@ async def lifespan(app: FastAPI):
 
     # Initialize clients
     ha_client = HomeAssistantClient(url=ha_url, token=ha_token) if ha_token else None
+    _runtime.set_ha_client(ha_client)  # dual-write (Phase 1.2)
     if not ha_client:
         logger.warning("ha_client_not_initialized", reason="No token available")
 
     # Initialize LLM router with database-driven backend configuration
     llm_router = get_llm_router()
+    _runtime.set_llm_router(llm_router)  # dual-write (Phase 1.2)
     logger.info(f"LLM Router initialized with admin API: {llm_router.admin_url}")
 
     # Initialize entity manager for dynamic HA entity discovery
     if ha_token:
         entity_manager = HAEntityManager(ha_url=ha_url, ha_token=ha_token)
+        _runtime.set_entity_manager(entity_manager)  # dual-write (Phase 1.2)
         try:
             await entity_manager.refresh_entities()
             logger.info("Entity manager initialized with HA entities cached")
@@ -1679,24 +1652,29 @@ async def lifespan(app: FastAPI):
 
         # Initialize smart home controller with LLM intent extraction
         smart_controller = SmartHomeController(entity_manager, llm_router)
+        _runtime.set_smart_controller(smart_controller)  # dual-write (Phase 1.2)
         logger.info("Smart home controller initialized")
 
         # Initialize sequence executor for multi-step commands with delays
         sequence_executor = SequenceExecutor(smart_controller, ha_client)
+        _runtime.set_sequence_executor(sequence_executor)  # dual-write (Phase 1.2)
         logger.info("Sequence executor initialized for multi-step commands")
 
         # Initialize automation agent for dynamic automation handling
         admin_client = get_admin_client()
         automation_agent = AutomationAgent(ha_client, llm_router, admin_client, entity_manager)
+        _runtime.set_automation_agent(automation_agent)  # dual-write (Phase 1.2)
         logger.info("Automation agent initialized for dynamic automation handling")
 
         # Initialize music handler for Music Assistant integration
         admin_client = get_admin_client()
         music_handler = get_music_handler(ha_client, admin_client)
+        _runtime.set_music_handler(music_handler)  # dual-write (Phase 1.2)
         logger.info("Music handler initialized for Music Assistant playback")
 
         # Initialize TV handler for Apple TV control
         tv_handler = get_tv_handler(ha_client, admin_client)
+        _runtime.set_tv_handler(tv_handler)  # dual-write (Phase 1.2)
         logger.info("TV handler initialized for Apple TV control")
 
         # Initialize follow-me audio service (fully configurable via admin)
@@ -1729,6 +1707,7 @@ async def lifespan(app: FastAPI):
                         room_motion_mapping=room_motion_mapping,
                         config=follow_me_cfg
                     )
+                    _runtime.set_follow_me_service(follow_me_service)  # dual-write (Phase 1.2)
                     logger.info(
                         "follow_me_initialized",
                         mode=follow_me_cfg.mode.value,
@@ -1744,13 +1723,16 @@ async def lifespan(app: FastAPI):
         logger.warning("entity_manager_not_initialized", reason="No HA token available")
 
     cache_client = CacheClient()
+    _runtime.set_cache_client(cache_client)  # dual-write (Phase 1.2)
 
     # Initialize session manager
     session_manager = await get_session_manager()
+    _runtime.set_session_manager(session_manager)  # dual-write (Phase 1.2)
     logger.info("Session manager initialized")
 
     # Initialize parallel search engine
     parallel_search_engine = await ParallelSearchEngine.from_environment()
+    _runtime.set_parallel_search_engine(parallel_search_engine)  # dual-write (Phase 1.2)
     logger.info("Parallel search engine initialized")
 
     # Initialize result fusion
@@ -1758,15 +1740,18 @@ async def lifespan(app: FastAPI):
         similarity_threshold=0.7,
         min_confidence=0.5
     )
+    _runtime.set_result_fusion(result_fusion)  # dual-write (Phase 1.2)
     logger.info("Result fusion initialized")
 
     # Phase 2: Initialize mode service client for guest mode
     mode_client = httpx.AsyncClient(base_url=MODE_SERVICE_URL, timeout=10.0)
+    _runtime.set_mode_client(mode_client)  # dual-write (Phase 1.2)
     logger.info(f"Mode service client initialized: {MODE_SERVICE_URL}")
 
     # Initialize unified RAG client with resilience patterns (circuit breaker, rate limiting)
     # Fetches service URLs from admin backend registry, falls back to hardcoded constants
     rag_client = await initialize_rag_client()
+    _runtime.set_rag_client(rag_client)  # dual-write (Phase 1.2)
     logger.info(
         f"Unified RAG client initialized with {len(rag_client._service_urls)} services",
         extra={"from_registry": rag_client.urls_loaded_from_registry}
@@ -1774,6 +1759,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize intent classifier for multi-intent detection
     intent_classifier = IntentClassifier()
+    _runtime.set_intent_classifier(intent_classifier)  # dual-write (Phase 1.2)
     logger.info("Intent classifier initialized for multi-intent detection")
 
     # Check service health via unified RAG client
@@ -1797,26 +1783,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Mode service not available: {e}")
 
+    # Post-init readiness assertion (R2-M2) — logged only; does not raise to avoid
+    # pod restart loops on transient init failures. /health/ready reflects the state.
+    if not _runtime.is_ready():
+        logger.error(
+            "runtime_context_not_fully_initialized",
+            extra={"missing": _runtime.missing_required()}
+        )
+    else:
+        logger.info("runtime_context_ready", extra={"singletons": len(_runtime._REQUIRED_SINGLETONS)})
+
     yield
 
-    # Shutdown
+    # Shutdown — _runtime.close_all() is the sole shutdown path (R2-H1 Pattern A).
+    # Atomic replacement of the 8 explicit if-close lines; avoids double-close window.
+    # admin_client is a per-call client (not a runtime singleton) — closed explicitly.
     logger.info("Shutting down Orchestrator service")
     if admin_client:
         await admin_client.close()
-    if ha_client:
-        await ha_client.close()
-    if llm_router:
-        await llm_router.close()
-    if cache_client:
-        await cache_client.close()
-    if session_manager:
-        await session_manager.close()
-    if parallel_search_engine:
-        await parallel_search_engine.close_all()
-    if mode_client:
-        await mode_client.aclose()
-    if rag_client:
-        await rag_client.close()
+    await _runtime.close_all()
 
 app = FastAPI(
     title="Athena Orchestrator",
@@ -11850,12 +11835,13 @@ async def readiness_probe():
     Returns healthy if the service is ready to accept traffic.
     K8s will remove from load balancer if this fails.
     """
-    ready = True
+    # Critical readiness gate: all required singletons must be initialized (Phase 1.2)
+    ready = _runtime.is_ready()
     components = {}
 
-    # Check LLM Router (critical)
+    # Check LLM Router (critical — also reflected in _runtime.is_ready())
     try:
-        components["llm_router"] = llm_router is not None
+        components["llm_router"] = _runtime.get_llm_router() is not None
         if not components["llm_router"]:
             ready = False
     except:
@@ -11864,14 +11850,16 @@ async def readiness_probe():
 
     # Check Home Assistant (optional - degraded if down)
     try:
-        ha_healthy = await ha_client.health_check() if ha_client else False
+        _ha = _runtime.get_ha_client()
+        ha_healthy = await _ha.health_check() if _ha else False
         components["home_assistant"] = ha_healthy
     except:
         components["home_assistant"] = False
 
     # Check Redis (optional)
     try:
-        components["redis"] = await cache_client.ping() if cache_client else False
+        _cache = _runtime.get_cache_client()
+        components["redis"] = await _cache.ping() if _cache else False
     except:
         components["redis"] = False
 
