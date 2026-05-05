@@ -17,6 +17,51 @@ Complete reference for all configuration options in Project Athena.
 
 ---
 
+## Centralized Configuration via AthenaConfig
+
+`AthenaConfig` (`src/shared/config.py`) is the canonical pydantic-settings `BaseSettings` object for Athena. It centralizes 11 high-leverage env vars migrated in Campaign 4 (ATHENA-7). The remaining ~220 env vars in the codebase continue to use direct `os.getenv` and are migrated per-PR — see `CONTRIBUTING.md` for the extension pattern.
+
+### Reading config in code
+
+```python
+from shared.config import get_config
+
+config = get_config()
+config.ollama_url      # OLLAMA_URL
+config.redis_url       # REDIS_URL
+config.database_url    # DATABASE_URL
+```
+
+`get_config()` is an `lru_cache`-backed factory — `AthenaConfig` is instantiated exactly once per process. Tests reset it via `_clear_cache_for_tests()`.
+
+### Centralized env vars
+
+| Env var | AthenaConfig field | Default |
+|---|---|---|
+| `OLLAMA_URL` | `ollama_url` | `http://localhost:11434` |
+| `LLM_SERVICE_URL` | `llm_service_url` | `""` |
+| `REDIS_URL` | `redis_url` | `redis://redis:6379/0` (in-cluster DNS; local-dev: set to `redis://localhost:6379`) |
+| `DATABASE_URL` | `database_url` | `""` |
+| `SERVICE_API_KEY` | `service_api_key` | `""` |
+| `DEFAULT_TIMEZONE` | `default_timezone` | `UTC` |
+| `DEFAULT_CITY` | `default_city` | `""` |
+| `OIDC_ISSUER` | `oidc_issuer` | `""` |
+| `OIDC_CLIENT_ID` | `oidc_client_id` | `""` |
+| `DEMO_MODE` | `demo_mode` | `false` |
+| `DEV_MODE` | `dev_mode` | `false` |
+
+There is also a `llm_endpoint` computed property that returns `LLM_SERVICE_URL or OLLAMA_URL` — the dominant precedence used by the orchestrator and gateway.
+
+### admin_url — not env-loadable
+
+`config.admin_url` is a `@computed_field` that delegates to `get_admin_url()` (Campaign 3, `src/shared/admin_url.py`). Setting an `ADMIN_URL` env var has no effect. See the `ADMIN_API_URL` resolution order in [Required Settings](#required-settings).
+
+### Extending AthenaConfig
+
+See `CONTRIBUTING.md` — Configuration Guidelines — for the step-by-step pattern to add a new field.
+
+---
+
 ## Configuration Methods
 
 Configuration can be set via (in priority order):

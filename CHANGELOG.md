@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `thoughts/shared/plans/2026-05-06-deliver-config-py-rebuild.md`
+> **Ticket:** [ATHENA-7](https://plane.xmojo.net)
+> **Commits:** `aaa989d`
+
+### Added
+
+- `AthenaConfig` (`src/shared/config.py`) — canonical pydantic-settings `BaseSettings` object centralizing 11 env vars: `OLLAMA_URL`, `LLM_SERVICE_URL`, `REDIS_URL`, `DATABASE_URL`, `SERVICE_API_KEY`, `DEFAULT_TIMEZONE`, `DEFAULT_CITY`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `DEMO_MODE`, `DEV_MODE`. Read via `get_config()`. `admin_url` is a computed field that delegates to Campaign 3's `get_admin_url()` and is not env-loadable via `ADMIN_URL`. (#ATHENA-7)
+- `pydantic-settings>=2.1.0,<3.0` dependency (required by `AthenaConfig`).
+- `CONTRIBUTING.md` Configuration Guidelines section updated to recommend the `AthenaConfig` extension pattern for new env vars.
+
 ### Removed
 
 - **`admin/frontend/router.js`**: deleted (~200 lines of dead navigation code that paralleled the live `showTab()` system; no callers besides one in `command-palette.js`, now updated). (audit follow-up: dexter:7, ATHENA-9)
@@ -24,6 +34,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after deploy. Run:
   `kubectl -n athena-prod exec -it deploy/athena-admin-backend -- psql $DATABASE_URL -c "SELECT key, value FROM system_settings WHERE key='ollama_url';"`
   See Campaign 4 plan, Phase 2a-ii.
+
+- **`REDIS_URL` default** changed from `redis://localhost:6379` (mixed across call sites) to `redis://redis:6379/0` (in-cluster DNS shortname, consistent with `manifests/athena-prod/config.yaml`). Production deployments are unaffected — the manifest sets `REDIS_URL` explicitly. Local-dev users should add `REDIS_URL=redis://localhost:6379` to their `.env` file — see `.env.example`. (#ATHENA-7)
 
 - **Qdrant**: PersistentVolumeClaim is now the default storage backend (was `emptyDir`, which silently lost all conversation memory on every pod restart). Deployers must replace `YOUR_STORAGE_CLASS` in `manifests/athena-prod/qdrant.yaml` with their cluster's StorageClass before applying. Existing `emptyDir`-based deployments will lose their current Qdrant data on the next apply — see `docs/INSTALLATION.md` for migration notes. (audit follow-up: otto:3, ATHENA-8)
 
