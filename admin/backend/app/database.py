@@ -27,7 +27,7 @@ from app.models import Base
 logger = structlog.get_logger()
 
 # Check for DEV_MODE
-DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
+DEV_MODE = get_config().dev_mode
 
 # Database configuration from environment
 if DEV_MODE:

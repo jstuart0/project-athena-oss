@@ -12,6 +12,8 @@ DEV_MODE Compatibility:
 import hashlib
 import hmac
 import os
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'src'))
 import secrets
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -22,9 +24,10 @@ from sqlalchemy import (
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from shared.config import get_config
 
 # Check for DEV_MODE to use compatible types
-DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
+DEV_MODE = get_config().dev_mode
 
 if DEV_MODE:
     # SQLite-compatible types
