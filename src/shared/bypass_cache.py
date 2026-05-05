@@ -37,7 +37,7 @@ async def get_bypass_config(
         admin_url: Admin backend URL
         api_key: SERVICE_API_KEY value for X-Service-Key authentication.
                  Required after Phase 5 — the /public/*/config endpoint is
-                 gated by verify_service_api_key. Pass os.getenv("SERVICE_API_KEY", "").
+                 gated by verify_service_api_key. Pass get_config().service_api_key.
 
     Returns:
         Bypass configuration dict or None if not configured
@@ -112,7 +112,7 @@ async def refresh_all_bypass_configs(
         admin_url: Admin backend URL
         services: List of service names to pre-fetch
         api_key: SERVICE_API_KEY value for X-Service-Key authentication.
-                 Pass os.getenv("SERVICE_API_KEY", "").
+                 Pass get_config().service_api_key.
     """
     logger.info("bypass_cache_warmup_starting", service_count=len(services))
 

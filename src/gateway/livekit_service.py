@@ -48,6 +48,7 @@ logger = structlog.get_logger()
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 # Configuration - defaults, will be overridden by admin API
 LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
@@ -56,7 +57,7 @@ LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
 
 # Admin API for fetching credentials
 ADMIN_API_URL = get_admin_url()
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+SERVICE_API_KEY = get_config().service_api_key
 
 
 async def fetch_livekit_credentials() -> Dict[str, str]:

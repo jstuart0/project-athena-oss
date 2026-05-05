@@ -15,6 +15,7 @@ import httpx
 from shared.metrics import setup_metrics_endpoint
 from shared.logging_config import configure_logging
 from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 logger = configure_logging("media-rag")
 
@@ -34,7 +35,7 @@ setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 OVERSEERR_URL = os.getenv("OVERSEERR_URL", "http://localhost:5055")
 OVERSEERR_API_KEY = os.getenv("OVERSEERR_API_KEY", "")
 ADMIN_API_URL = get_admin_url()
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+SERVICE_API_KEY = get_config().service_api_key
 
 # HTTP client
 http_client: Optional[httpx.AsyncClient] = None

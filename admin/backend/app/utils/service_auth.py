@@ -14,13 +14,16 @@ Configuration:
 """
 import hmac
 import os
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 
 from fastapi import Header, HTTPException, status
 import structlog
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+SERVICE_API_KEY = get_config().service_api_key
 
 
 def verify_service_api_key(x_service_key: str = Header(..., alias="X-Service-Key")) -> bool:

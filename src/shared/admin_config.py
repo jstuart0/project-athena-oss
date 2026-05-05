@@ -4,12 +4,12 @@ Admin Configuration Client
 Allows services to fetch configuration and secrets from the admin API.
 Uses service-to-service authentication with API key.
 """
-import os
 import time
 import httpx
 from typing import Optional, Dict, Any, List
 import structlog
 from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -35,7 +35,7 @@ class AdminConfigClient:
                 "admin_url_unconfigured",
                 message="ADMIN_URL is empty; service-to-admin callbacks will fail.",
             )
-        self.api_key = api_key or os.getenv("SERVICE_API_KEY", "")
+        self.api_key = api_key or get_config().service_api_key
         if not self.api_key:
             logger.warning(
                 "service_api_key_empty",

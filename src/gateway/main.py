@@ -131,7 +131,7 @@ ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_SERVICE_URL", "http://localhost:8001"
 OLLAMA_URL = get_config().llm_endpoint
 API_KEY = os.getenv("GATEWAY_API_KEY", "dummy-key")  # Optional for Phase 1
 ADMIN_API_URL = get_admin_url()
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+SERVICE_API_KEY = get_config().service_api_key
 
 # Feature flag cache - per-flag caching with TTL
 # Structure: {flag_name: (timestamp, value)}

@@ -40,7 +40,7 @@ SERVICE_NAME = "sports-rag"
 
 # Environment variables / defaults
 ADMIN_API_URL = get_admin_url()
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+SERVICE_API_KEY = get_config().service_api_key
 NEWS_GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")  # Optional key if provided via admin
 THESPORTSDB_API_KEY = os.getenv("THESPORTSDB_API_KEY", "3")  # Free tier key
 THESPORTSDB_BASE_URL = os.getenv(

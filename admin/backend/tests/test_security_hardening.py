@@ -105,13 +105,16 @@ class TestVerifyServiceApiKey:
             "verify_service_api_key must use hmac.compare_digest to prevent timing attacks"
         )
 
-    def test_reads_from_env_var(self):
-        """SERVICE_API_KEY module variable should come from os.getenv."""
+    def test_reads_from_config(self):
+        """SERVICE_API_KEY module variable should come from get_config().service_api_key."""
         import inspect
         import app.utils.service_auth as sa
 
         source = inspect.getsource(sa)
-        assert 'os.getenv("SERVICE_API_KEY"' in source or "os.getenv('SERVICE_API_KEY'" in source
+        assert "get_config().service_api_key" in source, (
+            "SERVICE_API_KEY must be sourced from get_config().service_api_key "
+            "(AthenaConfig Phase 2d migration) — os.getenv is no longer acceptable here"
+        )
 
     def test_empty_secret_returns_503(self):
         """When SERVICE_API_KEY is empty-string (set but blank), verify_service_api_key returns 503.

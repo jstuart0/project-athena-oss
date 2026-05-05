@@ -47,6 +47,7 @@ from shared.assistant_profile import build_core_assistant_prompt, get_validation
 from shared.base_knowledge_utils import get_knowledge_context_for_user, get_home_address_for_user
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import register_exception_handlers, RateLimitError, ServiceUnavailableError
+from shared.config import get_config
 from shared.service_registry import get_service_url as registry_get_service_url
 from shared.metrics import record_tool_execution, get_metrics_text, record_timing_metrics
 
@@ -175,7 +176,7 @@ if not EVENTS_AVAILABLE:
     logger.warning("Event system not available - Admin Jarvis monitoring disabled")
 
 # Service API key for service-to-service auth (admin backend internal endpoints)
-_SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+_SERVICE_API_KEY = get_config().service_api_key
 if not _SERVICE_API_KEY:
     logger.warning(
         "SERVICE_API_KEY_empty",
