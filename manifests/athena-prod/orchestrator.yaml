@@ -103,12 +103,25 @@ spec:
         - name: RAG_BRIGHTDATA_URL
           value: "http://athena-rag-brightdata:8040"
         resources:
+          # Tunable: adjust based on observed usage via `kubectl top pods -n athena-prod`.
+          # The orchestrator holds the LLM response in memory; 512Mi request and 2Gi limit
+          # accommodates qwen3:4b context windows on a production-class cluster.
           requests:
-            memory: "256Mi"
-            cpu: "100m"
-          limits:
             memory: "512Mi"
-            cpu: "500m"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        startupProbe:
+          # Grants up to 420s (120 + 30*10) for the orchestrator to complete its
+          # startup (DB migration, model warm-up). Liveness takes over afterwards.
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 120
+          periodSeconds: 10
+          timeoutSeconds: 30
+          failureThreshold: 30
         livenessProbe:
           httpGet:
             path: /health

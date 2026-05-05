@@ -116,6 +116,18 @@ build_images() {
 deploy_manifests() {
     log_phase "Deploying to Kubernetes"
 
+    # Pre-flight: verify required secrets exist before applying any manifests.
+    # Run ./scripts/create-secrets.sh first if any are missing.
+    log_info "Verifying required secrets exist..."
+    for secret in athena-db-credentials athena-encryption athena-oidc; do
+        if ! kubectl -n "$NAMESPACE" get secret "$secret" &>/dev/null; then
+            log_error "Required secret '$secret' not found in namespace $NAMESPACE."
+            log_error "Run: ./scripts/create-secrets.sh"
+            exit 1
+        fi
+    done
+    log_info "All required secrets present."
+
     # Apply in order
     log_info "Creating namespace..."
     kubectl apply -f "$PROJECT_ROOT/manifests/athena-prod/namespace.yaml"

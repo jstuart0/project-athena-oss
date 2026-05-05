@@ -81,5 +81,11 @@ data:
   MODULE_JARVIS_WEB: "true"
   MODULE_MONITORING: "false"
 
+  # Control Agent — optional service that manages Ollama and other host-level
+  # processes (runs on the same host as Ollama, outside the cluster).
+  # Leave empty if you are not using the Control Agent.
+  # Example: http://192.168.1.100:8099
+  CONTROL_AGENT_URL: ""
+
   # Logging
   LOG_LEVEL: "INFO"

@@ -2,9 +2,16 @@
 """
 Generate Kubernetes manifests for all RAG services.
 Run: python3 scripts/generate-rag-manifests.py > manifests/athena-prod/rag-services.yaml
+
+Environment variables:
+  REGISTRY  Container registry prefix (default: YOUR_REGISTRY).
+            Example: REGISTRY=registry.example.com:5000 python3 scripts/generate-rag-manifests.py
+  TAG       Image tag (default: latest).
+            Example: TAG=v1.2.3 python3 scripts/generate-rag-manifests.py
 """
 
 import datetime
+import os
 
 # Service definitions: (name, port, api_key_env or None)
 SERVICES = [
@@ -32,6 +39,10 @@ SERVICES = [
     ("pricecompare", 8033, None),
     ("brightdata", 8040, "BRIGHTDATA_API_KEY"),
 ]
+
+REGISTRY = os.environ.get("REGISTRY", "YOUR_REGISTRY")
+TAG = os.environ.get("TAG", "latest")
+
 
 def generate_deployment(name, port, api_key):
     api_key_env = ""
@@ -64,7 +75,7 @@ spec:
     spec:
       containers:
       - name: rag-{name}
-        image: 192.168.10.222:30500/athena-rag-{name}:latest
+        image: {REGISTRY}/athena-rag-{name}:{TAG}
         imagePullPolicy: Always
         ports:
         - containerPort: {port}
@@ -117,8 +128,11 @@ def main():
     print(f"# Auto-generated RAG Services Manifests")
     print(f"# Generated: {datetime.datetime.now().isoformat()}")
     print(f"# Total services: {len(SERVICES)}")
+    print(f"# Registry: {REGISTRY}  (set REGISTRY env var to override)")
+    print(f"# Tag: {TAG}  (set TAG env var to override)")
     print("#")
-    print("# To regenerate: python3 scripts/generate-rag-manifests.py > manifests/athena-prod/rag-services.yaml")
+    print("# To regenerate:")
+    print("#   REGISTRY=your.registry.example.com python3 scripts/generate-rag-manifests.py > manifests/athena-prod/rag-services.yaml")
 
     for name, port, api_key in SERVICES:
         print(generate_deployment(name, port, api_key))

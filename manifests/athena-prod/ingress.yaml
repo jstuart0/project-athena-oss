@@ -26,6 +26,18 @@
 # =============================================================================
 
 ---
+# HTTP -> HTTPS redirect middleware
+# Referenced by the athena-http and chat-http IngressRoutes below.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: https-redirect
+  namespace: athena-prod
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
 # StripPrefix middleware for /api routes
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -90,7 +102,7 @@ spec:
       kind: Rule
       middlewares:
         - name: https-redirect
-          namespace: default
+          namespace: athena-prod
       services:
         - name: athena-admin-frontend
           port: 80
@@ -142,7 +154,7 @@ spec:
       kind: Rule
       middlewares:
         - name: https-redirect
-          namespace: default
+          namespace: athena-prod
       services:
         - name: athena-jarvis-web
           port: 80
