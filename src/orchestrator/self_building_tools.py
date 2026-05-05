@@ -281,7 +281,7 @@ class SelfBuildingToolsManager:
         self.n8n_url = n8n_url or os.getenv("N8N_URL", "http://localhost:5678")
         self.n8n_api_key = n8n_api_key or os.getenv("N8N_API_KEY", "")
         self.admin_url = admin_url or os.getenv("ADMIN_API_URL", "http://localhost:8080")
-        self._service_api_key = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
+        self._service_api_key = os.getenv("SERVICE_API_KEY", "")
 
         self._proposals: Dict[str, ToolProposal] = {}
         self._enabled = False

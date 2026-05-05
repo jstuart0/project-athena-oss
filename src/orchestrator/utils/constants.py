@@ -72,9 +72,11 @@ FALLBACK_MODELS: Dict[str, str] = {
 # Location Configuration
 # ============================================================================
 
-DEFAULT_CITY = "Baltimore"
-DEFAULT_STATE = "MD"
-DEFAULT_LOCATION = f"{DEFAULT_CITY}, {DEFAULT_STATE}"
+DEFAULT_CITY = os.getenv("DEFAULT_CITY", "")
+DEFAULT_STATE = os.getenv("DEFAULT_STATE", "")
+DEFAULT_LOCATION = ", ".join(p for p in (DEFAULT_CITY, DEFAULT_STATE) if p)
+# OSS-First: empty default; set DEFAULT_TIMEZONE in env for local time awareness.
+DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")
 
 # City to state mapping (used in multiple places)
 CITY_STATE_MAP: Dict[str, str] = {

@@ -2451,8 +2451,9 @@ class GatewayConfig(Base):
     id = Column(Integer, primary_key=True)
 
     # Service URLs
-    orchestrator_url = Column(String(500), nullable=False, default='http://192.168.10.167:8001')
-    ollama_fallback_url = Column(String(500), nullable=False, default='http://192.168.10.167:11434')
+    # OSS-First: empty default; configure via Admin UI or env-driven seed migration.
+    orchestrator_url = Column(String(500), nullable=False, default='')
+    ollama_fallback_url = Column(String(500), nullable=False, default='')
 
     # Intent Classification
     intent_model = Column(String(255), nullable=False, default='phi3:mini')

@@ -32,7 +32,7 @@ setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 OVERSEERR_URL = os.getenv("OVERSEERR_URL", "http://localhost:5055")
 OVERSEERR_API_KEY = os.getenv("OVERSEERR_API_KEY", "")
 ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 
 # HTTP client
 http_client: Optional[httpx.AsyncClient] = None

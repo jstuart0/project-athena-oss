@@ -128,7 +128,7 @@ ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_SERVICE_URL", "http://localhost:8001"
 OLLAMA_URL = os.getenv("LLM_SERVICE_URL") or os.getenv("OLLAMA_URL", "http://localhost:11434")
 API_KEY = os.getenv("GATEWAY_API_KEY", "dummy-key")  # Optional for Phase 1
 ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 
 # Feature flag cache - per-flag caching with TTL
 # Structure: {flag_name: (timestamp, value)}
@@ -254,7 +254,11 @@ async def lifespan(app: FastAPI):
             orchestrator_timeout=gateway_config.get("orchestrator_timeout_seconds")
         )
         # Use config values with env var fallbacks
-        orchestrator_url = gateway_config.get("orchestrator_url", ORCHESTRATOR_URL)
+        # Use `or` fallback so an empty-string DB value also resolves to env var.
+        # dict.get(key, default) only fires when the key is missing, not when the
+        # value is empty — after bob:1 changes the column default to '', fresh rows
+        # would produce '' here without this form.
+        orchestrator_url = gateway_config.get("orchestrator_url") or ORCHESTRATOR_URL
         orchestrator_timeout = gateway_config.get("orchestrator_timeout_seconds", 60)
     else:
         logger.warning("Gateway config not available from database, using environment variables")
@@ -1788,16 +1792,24 @@ async def get_config():
     centralized_ollama_url = await admin_client.get_ollama_url()
 
     if gateway_config:
+        # Compute the resolved value using the same `or` fallback as startup so
+        # operators can distinguish "what's stored in DB" from "what's in use".
+        _orchestrator_url_raw = gateway_config.get("orchestrator_url") or ""
+        _orchestrator_url_resolved = _orchestrator_url_raw or ORCHESTRATOR_URL
+        _timeout_raw = gateway_config.get("orchestrator_timeout_seconds")
+        _timeout_resolved = _timeout_raw if _timeout_raw is not None else 60
         return {
             "source": "database",
             "config": {
-                "orchestrator_url": gateway_config.get("orchestrator_url"),
+                "orchestrator_url": _orchestrator_url_raw,
+                "orchestrator_url_resolved": _orchestrator_url_resolved,
                 "ollama_url": centralized_ollama_url,  # Always from system_settings
                 "intent_model": gateway_config.get("intent_model"),
                 "intent_temperature": gateway_config.get("intent_temperature"),
                 "intent_max_tokens": gateway_config.get("intent_max_tokens"),
                 "intent_timeout_seconds": gateway_config.get("intent_timeout_seconds"),
-                "orchestrator_timeout_seconds": gateway_config.get("orchestrator_timeout_seconds"),
+                "orchestrator_timeout_seconds": _timeout_raw,
+                "orchestrator_timeout_seconds_resolved": _timeout_resolved,
                 "session_timeout_seconds": gateway_config.get("session_timeout_seconds"),
                 "session_max_age_seconds": gateway_config.get("session_max_age_seconds"),
                 "cache_ttl_seconds": gateway_config.get("cache_ttl_seconds"),
@@ -1813,13 +1825,15 @@ async def get_config():
         return {
             "source": "fallback",
             "config": {
-                "orchestrator_url": ORCHESTRATOR_URL,
+                "orchestrator_url": "",
+                "orchestrator_url_resolved": ORCHESTRATOR_URL,
                 "ollama_url": centralized_ollama_url,
                 "intent_model": "phi3:mini",
                 "intent_temperature": 0.1,
                 "intent_max_tokens": 10,
                 "intent_timeout_seconds": 5,
                 "orchestrator_timeout_seconds": 60,
+                "orchestrator_timeout_seconds_resolved": 60,
             },
             "note": "Gateway config not in database, using defaults with centralized Ollama URL"
         }

@@ -4,11 +4,17 @@ Base Knowledge Utilities
 Provides functions to format and inject base knowledge context into LLM prompts.
 Handles dynamic placeholders like {dynamic:current_date} and {dynamic:current_time}.
 """
+import os
 from datetime import datetime
 from typing import List, Dict, Any
 import structlog
 
 logger = structlog.get_logger()
+
+# OSS-First: resolved at import time from env vars (empty if unconfigured).
+_DEFAULT_CITY = os.getenv("DEFAULT_CITY", "")
+_DEFAULT_STATE = os.getenv("DEFAULT_STATE", "")
+_DEFAULT_LOCATION = ", ".join(p for p in (_DEFAULT_CITY, _DEFAULT_STATE) if p)
 
 
 def resolve_dynamic_value(value: str) -> str:
@@ -145,10 +151,10 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
         knowledge_entries: List of knowledge entries from Admin API
 
     Returns:
-        The home address string, or "Baltimore, MD" as fallback
+        The home address string, or the DEFAULT_LOCATION env var as fallback (empty if unconfigured).
     """
     if not knowledge_entries:
-        return "Baltimore, MD"
+        return _DEFAULT_LOCATION
 
     # Look for property address entry
     for entry in knowledge_entries:
@@ -177,7 +183,7 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
             return value
 
     logger.warning("no_home_address_found_using_fallback")
-    return "Baltimore, MD"
+    return _DEFAULT_LOCATION
 
 
 async def get_home_address_for_user(admin_client, user_mode: str = "guest") -> str:
@@ -201,7 +207,7 @@ async def get_home_address_for_user(admin_client, user_mode: str = "guest") -> s
 
         if not knowledge_entries:
             logger.info("no_base_knowledge_for_home_address", user_mode=user_mode)
-            return "Baltimore, MD"
+            return _DEFAULT_LOCATION
 
         return extract_home_address(knowledge_entries)
 
@@ -211,7 +217,7 @@ async def get_home_address_for_user(admin_client, user_mode: str = "guest") -> s
             user_mode=user_mode,
             error=str(e)
         )
-        return "Baltimore, MD"
+        return _DEFAULT_LOCATION
 
 
 async def get_knowledge_context_for_user(admin_client, user_mode: str = "guest") -> str:

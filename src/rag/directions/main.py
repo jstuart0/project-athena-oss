@@ -209,8 +209,10 @@ def get_default_origin() -> str:
     if "city" in BASE_KNOWLEDGE and "state" in BASE_KNOWLEDGE:
         return f"{BASE_KNOWLEDGE['city']}, {BASE_KNOWLEDGE['state']}"
 
-    # Fallback
-    return "Baltimore, MD"
+    # Fallback: use env-configured default location (empty string if unconfigured).
+    _city = os.getenv("DEFAULT_CITY", "")
+    _state = os.getenv("DEFAULT_STATE", "")
+    return ", ".join(p for p in (_city, _state) if p)
 
 
 def generate_google_maps_url(

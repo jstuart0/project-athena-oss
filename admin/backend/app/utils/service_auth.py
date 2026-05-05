@@ -20,7 +20,7 @@ import structlog
 
 logger = structlog.get_logger()
 
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 
 
 def verify_service_api_key(x_service_key: str = Header(..., alias="X-Service-Key")) -> bool:
@@ -31,8 +31,17 @@ def verify_service_api_key(x_service_key: str = Header(..., alias="X-Service-Key
     Uses constant-time comparison to prevent timing attacks.
 
     Raises:
+        HTTPException 503: If SERVICE_API_KEY is not configured (fail-closed).
         HTTPException 401: If the key is missing or does not match.
     """
+    # Fail-closed: never compare against an empty secret.
+    # hmac.compare_digest("", "") returns True, which would allow any caller
+    # sending an empty X-Service-Key header to bypass auth entirely.
+    if not SERVICE_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service authentication not configured",
+        )
     if not hmac.compare_digest(x_service_key, SERVICE_API_KEY):
         logger.warning("service_api_key_invalid", key_prefix=x_service_key[:8] if x_service_key else "empty")
         raise HTTPException(

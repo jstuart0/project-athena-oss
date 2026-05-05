@@ -40,7 +40,7 @@ logger = structlog.get_logger()
 # Configuration from environment
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8000")
-ADMIN_BACKEND_URL = os.getenv("ADMIN_BACKEND_URL", "https://athena-admin.xmojo.net")
+ADMIN_BACKEND_URL = os.getenv("ADMIN_BACKEND_URL", "http://localhost:8080")
 DEFAULT_ROOM = os.getenv("DEFAULT_ROOM", "guest")
 
 # Persistent session DB config
@@ -94,7 +94,7 @@ class SetModeRequest(BaseModel):
     mode: Optional[str] = None  # "owner", "guest", or None (auto)
 
 # Home Assistant configuration
-HA_URL = os.getenv("HA_URL", "https://ha.xmojo.net")
+HA_URL = os.getenv("HA_URL", "")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
 
 # Voice services configuration (Mac mini STT/TTS)
@@ -466,8 +466,8 @@ async def get_current_guest() -> Optional[Dict[str, Any]]:
 import random
 from zoneinfo import ZoneInfo
 
-# Baltimore timezone
-LOCAL_TZ = ZoneInfo("America/New_York")
+# Configurable local timezone — set DEFAULT_TIMEZONE in env (default: UTC).
+LOCAL_TZ = ZoneInfo(os.getenv("DEFAULT_TIMEZONE", "UTC"))
 
 def get_time_based_greeting() -> str:
     """Get appropriate greeting based on time of day (in local timezone)"""

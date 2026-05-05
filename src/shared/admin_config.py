@@ -28,14 +28,13 @@ class AdminConfigClient:
             admin_url: Admin API URL (defaults to ADMIN_API_URL env var)
             api_key: Service API key (defaults to SERVICE_API_KEY env var)
         """
-        self.admin_url = admin_url or os.getenv(
-            "ADMIN_API_URL",
-            "https://athena-admin.xmojo.net"  # Production Admin API
-        )
-        self.api_key = api_key or os.getenv(
-            "SERVICE_API_KEY",
-            "dev-service-key-change-in-production"
-        )
+        self.admin_url = admin_url or os.getenv("ADMIN_API_URL", "")
+        if not self.admin_url:
+            logger.warning(
+                "admin_url_unconfigured",
+                message="ADMIN_URL is empty; service-to-admin callbacks will fail.",
+            )
+        self.api_key = api_key or os.getenv("SERVICE_API_KEY", "")
         # Reduced timeout from 10s to 3s - config/room calls should be fast
         # Critical paths like music playback compound multiple API calls
         self.client = httpx.AsyncClient(

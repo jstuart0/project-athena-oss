@@ -88,7 +88,7 @@ class LLMRouter:
     Routes LLM requests to configured backends.
 
     Usage:
-        router = LLMRouter(admin_url="https://athena-admin.xmojo.net")
+        router = LLMRouter(admin_url="http://localhost:8080")
         response = await router.generate(
             model="phi3:mini",
             prompt="Hello world",
@@ -112,10 +112,7 @@ class LLMRouter:
             metrics_window_size: Number of recent requests to track for metrics
             persist_metrics: Whether to persist metrics to database via Admin API
         """
-        self.admin_url = admin_url or os.getenv(
-            "ADMIN_API_URL",
-            "https://athena-admin.xmojo.net"
-        )
+        self.admin_url = admin_url or os.getenv("ADMIN_API_URL", "")
         self._admin_url_base = self.admin_url
         self.client = httpx.AsyncClient(timeout=120.0)
         self._backend_cache: Dict[str, Dict[str, Any]] = {}

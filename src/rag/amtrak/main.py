@@ -45,8 +45,10 @@ DATA_DIR = Path(__file__).parent / "data"
 GTFS_DIR = DATA_DIR / "gtfs"
 GTFS_URL = "https://content.amtrak.com/content/gtfs/GTFS.zip"
 
-# Timezone
-EASTERN = ZoneInfo("America/New_York")
+# Timezone — configurable via DEFAULT_TIMEZONE env var (default: UTC).
+# Set DEFAULT_TIMEZONE=America/New_York (or your local zone) in .env.
+DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")
+EASTERN = ZoneInfo(DEFAULT_TIMEZONE)
 
 # Default origin (Baltimore Penn Station)
 DEFAULT_ORIGIN = "BAL"
@@ -153,7 +155,7 @@ def load_gtfs():
         for row in reader:
             _gtfs_cache['stops'][row['stop_id']] = {
                 'name': row['stop_name'],
-                'timezone': row.get('stop_timezone', 'America/New_York'),
+                'timezone': row.get('stop_timezone', DEFAULT_TIMEZONE),
                 'lat': float(row['stop_lat']) if row.get('stop_lat') else None,
                 'lon': float(row['stop_lon']) if row.get('stop_lon') else None
             }

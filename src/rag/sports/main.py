@@ -38,7 +38,7 @@ SERVICE_NAME = "sports-rag"
 
 # Environment variables / defaults
 ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 NEWS_GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")  # Optional key if provided via admin
 THESPORTSDB_API_KEY = os.getenv("THESPORTSDB_API_KEY", "3")  # Free tier key
 THESPORTSDB_BASE_URL = os.getenv(
@@ -47,6 +47,8 @@ THESPORTSDB_BASE_URL = os.getenv(
 )
 API_FOOTBALL_KEY_DEFAULT = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_BASE_URL_DEFAULT = os.getenv("API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io")
+# OSS-First: configurable timezone; set DEFAULT_TIMEZONE in env (default: UTC).
+DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8017"))
 
@@ -930,7 +932,7 @@ async def get_next_events_api(team_id: str) -> List[Dict[str, Any]]:
 
     if provider == "espn" and sport:
         # Use Eastern timezone for date display (most US sports)
-        eastern = ZoneInfo("America/New_York")
+        eastern = ZoneInfo(DEFAULT_TIMEZONE)
         now_eastern = datetime.now(eastern)
         today_eastern = now_eastern.date()
 
@@ -1102,7 +1104,7 @@ async def get_last_events_api(team_id: str) -> List[Dict[str, Any]]:
 
     if provider == "espn" and sport:
         # Use US Eastern timezone for date comparisons (most US sports)
-        eastern = ZoneInfo("America/New_York")
+        eastern = ZoneInfo(DEFAULT_TIMEZONE)
         now_eastern = datetime.now(eastern)
         today_eastern = now_eastern.date()
 
@@ -1437,7 +1439,7 @@ async def get_live_scores(
         data = response.json()
 
         games = []
-        eastern = ZoneInfo("America/New_York")
+        eastern = ZoneInfo(DEFAULT_TIMEZONE)
 
         for event in data.get("events", []):
             competitions = event.get("competitions", [{}])

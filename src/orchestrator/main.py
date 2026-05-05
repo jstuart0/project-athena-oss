@@ -114,7 +114,7 @@ from orchestrator.context import (
     CONTEXT_REF_PATTERNS,
     ROOM_INDICATORS,
 )
-from orchestrator.utils.constants import DEFAULT_LOCATION, DEFAULT_CITY, CITY_STATE_MAP
+from orchestrator.utils.constants import DEFAULT_LOCATION, DEFAULT_CITY, CITY_STATE_MAP, DEFAULT_TIMEZONE
 
 # SMS integration imports
 from sms.content_detector import detect_textable_content, extract_sms_content
@@ -6071,7 +6071,7 @@ def _direct_general_info_response(query: str) -> Optional[str]:
         try:
             from zoneinfo import ZoneInfo
             from datetime import datetime, timezone as tz
-            local_now = datetime.now(tz.utc).astimezone(ZoneInfo("America/New_York"))
+            local_now = datetime.now(tz.utc).astimezone(ZoneInfo(DEFAULT_TIMEZONE))
             return f"It's {local_now.strftime('%-I:%M %p')}."
         except Exception:
             return None
@@ -6087,7 +6087,7 @@ def _direct_general_info_response(query: str) -> Optional[str]:
         try:
             from zoneinfo import ZoneInfo
             from datetime import datetime, timezone as tz
-            local_now = datetime.now(tz.utc).astimezone(ZoneInfo("America/New_York"))
+            local_now = datetime.now(tz.utc).astimezone(ZoneInfo(DEFAULT_TIMEZONE))
             return f"Today is {local_now.strftime('%A, %B %-d, %Y')}."
         except Exception:
             return None

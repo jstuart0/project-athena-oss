@@ -51,7 +51,7 @@ LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
 
 # Admin API for fetching credentials
 ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 
 
 async def fetch_livekit_credentials() -> Dict[str, str]:
