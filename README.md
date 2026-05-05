@@ -45,6 +45,17 @@ Wake-word-activated voice control through dedicated hardware. Say "Hey Jarvis" a
 
 Best for: hands-free operation, whole-home coverage, smart home control.
 
+### Chat Embed
+
+A lightweight CORS-relay proxy that lets any website embed an Athena-backed chatbot without browser CORS errors. It does NOT render UI itself — it sits between your website's own chat widget and the jarvis-web `/api/chat` endpoint, and fetches the assistant profile and persona from the admin backend at startup so embedders don't need direct access to the admin API.
+
+- **CORS relay** — exposes `/api/chat` and `/api/chat/stream` with configurable `CORS_ORIGINS` so any origin can embed the chatbot
+- **Rate limiting** — per-IP sliding-window rate limiting (`RATE_LIMIT_RPM`, default 30 req/min)
+- **Profile endpoint** — `/api/profile` returns the assistant name and identity fetched from the admin backend, letting your widget display the correct persona
+- **Source tagging** — marks all relayed requests with a `SOURCE_TAG` for analytics attribution
+
+Best for: embedding Athena on external websites, kiosks, or third-party apps without exposing your core infrastructure.
+
 ### API
 
 OpenAI-compatible REST endpoints for building custom integrations, connecting to Home Assistant, or building your own frontend.
@@ -70,6 +81,7 @@ Best for: Home Assistant integration, custom applications, automation scripts.
                      │          Interfaces           │
                      │                               │
                      │  Jarvis Web  (text / voice)   │
+                     │  Chat Embed  (website widget) │
                      │  Wyoming     (voice hardware) │
                      │  API         (programmatic)   │
                      └──────────────┬────────────────┘
@@ -417,10 +429,11 @@ project-athena/
 │   │   └── app/routes/      # 62 route modules
 │   └── frontend/            # Admin web UI (58 JS modules)
 ├── apps/
-│   └── jarvis-web/          # Chat interface with text, voice, and smart home widgets
-│       ├── backend/         # FastAPI proxy to orchestrator and Home Assistant
-│       ├── frontend/        # Single-page app (HTML + JS)
-│       └── k8s/             # Kubernetes deployment manifests
+│   ├── jarvis-web/          # Chat interface with text, voice, and smart home widgets
+│   │   ├── backend/         # FastAPI proxy to orchestrator and Home Assistant
+│   │   ├── frontend/        # Single-page app (HTML + JS)
+│   │   └── k8s/             # Kubernetes deployment manifests
+│   └── chat-embed/          # CORS-relay proxy for embedding Athena chat on external sites
 ├── manifests/
 │   └── athena-prod/         # Kubernetes deployment manifests
 ├── scripts/                 # Build, deploy, and setup automation

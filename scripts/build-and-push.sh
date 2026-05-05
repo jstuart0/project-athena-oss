@@ -102,6 +102,7 @@ ADMIN_SERVICES=(
     "athena-admin-backend:$PROJECT_ROOT/admin/backend"
     "athena-admin-frontend:$PROJECT_ROOT/admin/frontend"
     "athena-jarvis-web:$PROJECT_ROOT/apps/jarvis-web"
+    "athena-chat-embed:$PROJECT_ROOT/apps/chat-embed"
 )
 
 # Core services that need src/ context (have shared module dependency)
