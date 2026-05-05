@@ -12,8 +12,6 @@ DEV_MODE Compatibility:
 import hashlib
 import hmac
 import os
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'src'))
 import secrets
 from datetime import datetime
 from typing import Dict, Any, Optional

@@ -11,8 +11,6 @@ Handles:
 import asyncio
 import time
 import os
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 from typing import Set, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 import jwt

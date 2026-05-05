@@ -12,8 +12,6 @@ DEV_MODE Support:
     is automatically returned for all authenticated endpoints.
 """
 import os
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 

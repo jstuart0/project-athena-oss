@@ -14,8 +14,6 @@ Configuration:
 """
 import hmac
 import os
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 
 from fastapi import Header, HTTPException, status
 import structlog

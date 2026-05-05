@@ -6,8 +6,6 @@ Uses Control Agent pattern for secure service management.
 """
 
 import os
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 from datetime import datetime
 from typing import List, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks

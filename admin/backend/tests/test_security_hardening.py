@@ -177,8 +177,6 @@ def app_client():
         finally:
             db.close()
 
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from main import app
 
     app.dependency_overrides[get_db] = override_get_db

@@ -5,8 +5,6 @@ Provides endpoints for managing application settings including OIDC configuratio
 and Athena assistant profile / guardrails. Settings are stored in the database.
 """
 import os
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session

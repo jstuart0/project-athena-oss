@@ -4,8 +4,6 @@ Service registry API routes.
 Provides CRUD operations for service management and health monitoring.
 """
 import os
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session

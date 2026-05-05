@@ -5,8 +5,6 @@ Manages which LLM model is assigned to each system component.
 Enables hot-swapping of models without service restart via cache TTL.
 """
 import os
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException

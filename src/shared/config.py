@@ -109,7 +109,7 @@ class AthenaConfig(BaseSettings):
         """LLM endpoint with dominant precedence: LLM_SERVICE_URL > OLLAMA_URL > default.
 
         Use this at sites that previously had the paired expression
-        ``os.getenv("LLM_SERVICE_URL") or os.getenv("OLLAMA_URL", default)``.
+        ``LLM_SERVICE_URL or OLLAMA_URL`` (with OLLAMA_URL as the fallback).
 
         Sites that previously read only ``OLLAMA_URL`` (e.g. ``ollama_client.py``)
         should use ``ollama_url`` directly — they never consulted ``LLM_SERVICE_URL``
@@ -144,7 +144,7 @@ class AthenaConfig(BaseSettings):
     # NOTE: runtime mutation of the OIDC module-level globals (oidc.py:48)
     # via configure_oauth_client() is unchanged.  These fields capture the
     # env-var values at service startup (the same slot that was previously
-    # module-level os.getenv("OIDC_ISSUER", "")).
+    # a module-level direct env read for OIDC_ISSUER).
     oidc_issuer: str = Field(default="")
     oidc_client_id: str = Field(default="")
 

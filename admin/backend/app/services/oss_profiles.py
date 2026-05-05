@@ -7,8 +7,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple

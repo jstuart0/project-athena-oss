@@ -10,8 +10,6 @@ DEV_MODE Support:
     without requiring network access to the production database.
 """
 import os
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'src'))
 from contextlib import contextmanager
 from typing import Generator, Optional
 from shared.config import get_config

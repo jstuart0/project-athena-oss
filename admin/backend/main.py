@@ -6,8 +6,6 @@ Deploys to thor Kubernetes cluster.
 """
 
 import os
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src'))
 import httpx
 import socket
 import subprocess

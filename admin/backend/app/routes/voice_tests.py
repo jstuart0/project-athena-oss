@@ -25,8 +25,7 @@ from wyoming.tts import Synthesize
 from wyoming.audio import AudioStart, AudioChunk, AudioStop, wav_to_chunks
 from wyoming.event import Event
 
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
+
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
