@@ -48,7 +48,7 @@ GTFS_URL = "https://content.amtrak.com/content/gtfs/GTFS.zip"
 
 # Timezone — configurable via DEFAULT_TIMEZONE env var (default: UTC).
 # Set DEFAULT_TIMEZONE=America/New_York (or your local zone) in .env.
-DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")
+DEFAULT_TIMEZONE = get_config().default_timezone
 EASTERN = ZoneInfo(DEFAULT_TIMEZONE)
 
 # Default origin (Baltimore Penn Station)

@@ -212,7 +212,7 @@ def get_default_origin() -> str:
         return f"{BASE_KNOWLEDGE['city']}, {BASE_KNOWLEDGE['state']}"
 
     # Fallback: use env-configured default location (empty string if unconfigured).
-    _city = os.getenv("DEFAULT_CITY", "")
+    _city = get_config().default_city
     _state = os.getenv("DEFAULT_STATE", "")
     return ", ".join(p for p in (_city, _state) if p)
 

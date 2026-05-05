@@ -8,11 +8,12 @@ import os
 from datetime import datetime
 from typing import List, Dict, Any
 import structlog
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
 # OSS-First: resolved at import time from env vars (empty if unconfigured).
-_DEFAULT_CITY = os.getenv("DEFAULT_CITY", "")
+_DEFAULT_CITY = get_config().default_city
 _DEFAULT_STATE = os.getenv("DEFAULT_STATE", "")
 _DEFAULT_LOCATION = ", ".join(p for p in (_DEFAULT_CITY, _DEFAULT_STATE) if p)
 

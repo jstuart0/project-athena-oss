@@ -50,7 +50,7 @@ THESPORTSDB_BASE_URL = os.getenv(
 API_FOOTBALL_KEY_DEFAULT = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_BASE_URL_DEFAULT = os.getenv("API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io")
 # OSS-First: configurable timezone; set DEFAULT_TIMEZONE in env (default: UTC).
-DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")
+DEFAULT_TIMEZONE = get_config().default_timezone
 REDIS_URL = get_config().redis_url
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8017"))
 
