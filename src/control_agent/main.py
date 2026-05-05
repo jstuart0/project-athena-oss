@@ -146,6 +146,19 @@ async def watchdog_loop():
 async def lifespan(app):
     """Start watchdog on startup, stop on shutdown."""
     global watchdog_task
+
+    # SSRF guard: warn loudly if no callback allowlist is configured.
+    if not os.getenv("ALLOWED_CALLBACK_HOSTS", "").strip():
+        logger.critical(
+            "allowed_callback_hosts_empty",
+            message=(
+                "ALLOWED_CALLBACK_HOSTS is empty — HuggingFace model downloads will fail. "
+                "Set this env var to your admin-backend hostname "
+                "(e.g., 'athena-admin-backend.athena-prod.svc.cluster.local') "
+                "before using model downloads."
+            ),
+        )
+
     watchdog_task = asyncio.create_task(watchdog_loop())
     logger.info("watchdog_scheduled", interval=watchdog_interval)
     yield
@@ -1155,6 +1168,29 @@ async def hf_repo_files(repo_id: str, format_filter: Optional[str] = None):
 @app.post("/huggingface/download", response_model=HFDownloadStatus)
 async def hf_download(request: HFDownloadRequest):
     """Start downloading a model file from Hugging Face."""
+    # SSRF guard (xander:7): validate callback_url before handing it to the
+    # download task.  The download itself proceeds regardless; only the callback
+    # is gated — this prevents SSRF while not breaking the download flow for
+    # callers who omit the callback.
+    if request.callback_url:
+        from url_validator import validate_callback_url
+        _allowed = [
+            h.strip()
+            for h in os.getenv("ALLOWED_CALLBACK_HOSTS", "").split(",")
+            if h.strip()
+        ]
+        _valid, _reason = validate_callback_url(request.callback_url, _allowed)
+        if not _valid:
+            logger.warning(
+                "ssrf_callback_rejected",
+                callback_url=request.callback_url,
+                reason=_reason,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"callback_url rejected: {_reason}",
+            )
+
     try:
         from huggingface import start_download, get_download_status
 
@@ -1492,10 +1528,30 @@ async def search_logs(
 
     # Determine which files to search
     if file:
-        # Could be in LOG_DIR or SERVICE_LOG_DIR
-        target_file = LOG_DIR / file
+        # Path-traversal guard (xander:8): resolve the candidate path and confirm
+        # it stays within one of the two allowed log directories BEFORE we check
+        # existence or attempt any fallback.  str-prefix comparison is used for
+        # portability with Python 3.8 (Path.is_relative_to was added in 3.9).
+        log_dir_resolved = LOG_DIR.resolve()
+        service_log_dir_resolved = SERVICE_LOG_DIR.resolve()
+        candidate = (LOG_DIR / file).resolve()
+        _in_log_dir = str(candidate).startswith(str(log_dir_resolved) + os.sep) or candidate == log_dir_resolved
+        _in_svc_dir = str(candidate).startswith(str(service_log_dir_resolved) + os.sep) or candidate == service_log_dir_resolved
+        if not (_in_log_dir or _in_svc_dir):
+            # Try the alternate directory before rejecting.
+            candidate2 = (SERVICE_LOG_DIR / file).resolve()
+            _in_log_dir2 = str(candidate2).startswith(str(log_dir_resolved) + os.sep) or candidate2 == log_dir_resolved
+            _in_svc_dir2 = str(candidate2).startswith(str(service_log_dir_resolved) + os.sep) or candidate2 == service_log_dir_resolved
+            if not (_in_log_dir2 or _in_svc_dir2):
+                raise HTTPException(status_code=400, detail="Invalid log file path")
+            candidate = candidate2
+        target_file = candidate
+        # Could be in LOG_DIR or SERVICE_LOG_DIR (existence fallback kept for display)
         if not target_file.exists():
-            target_file = SERVICE_LOG_DIR / file
+            # Try the other root if the resolved candidate doesn't exist yet.
+            alt = (SERVICE_LOG_DIR / file).resolve()
+            if alt.exists():
+                target_file = alt
         if not target_file.exists():
             raise HTTPException(status_code=404, detail=f"Log file not found: {file}")
         files_to_search = [target_file]
@@ -1575,9 +1631,24 @@ async def search_logs(
 @app.get("/debug-logs/tail/{filename}", response_model=LogSearchResult)
 async def tail_log(filename: str, lines: int = 100):
     """Get the last N lines of a log file."""
-    log_file = LOG_DIR / filename
+    # Path-traversal guard (xander:8): reject before existence/fallback check.
+    log_dir_resolved = LOG_DIR.resolve()
+    service_log_dir_resolved = SERVICE_LOG_DIR.resolve()
+    candidate = (LOG_DIR / filename).resolve()
+    _in_log_dir = str(candidate).startswith(str(log_dir_resolved) + os.sep) or candidate == log_dir_resolved
+    _in_svc_dir = str(candidate).startswith(str(service_log_dir_resolved) + os.sep) or candidate == service_log_dir_resolved
+    if not (_in_log_dir or _in_svc_dir):
+        candidate2 = (SERVICE_LOG_DIR / filename).resolve()
+        _in_log_dir2 = str(candidate2).startswith(str(log_dir_resolved) + os.sep) or candidate2 == log_dir_resolved
+        _in_svc_dir2 = str(candidate2).startswith(str(service_log_dir_resolved) + os.sep) or candidate2 == service_log_dir_resolved
+        if not (_in_log_dir2 or _in_svc_dir2):
+            raise HTTPException(status_code=400, detail="Invalid log file path")
+        candidate = candidate2
+    log_file = candidate
     if not log_file.exists():
-        log_file = SERVICE_LOG_DIR / filename
+        alt = SERVICE_LOG_DIR / filename
+        if alt.exists():
+            log_file = alt
     if not log_file.exists():
         raise HTTPException(status_code=404, detail=f"Log file not found: {filename}")
 
