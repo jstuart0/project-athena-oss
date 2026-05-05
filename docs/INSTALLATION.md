@@ -81,12 +81,11 @@ ADMIN_API_URL=http://localhost:8080
 ### 3. Start with Docker Compose
 
 ```bash
-# Minimal deployment (core services only)
+# Start the core services (orchestrator + gateway)
 docker compose up -d
-
-# Or with specific modules
-docker compose --profile home-assistant --profile weather up -d
 ```
+
+> **Note:** The `docker-compose.yml` is a minimal 2-service file (orchestrator + gateway). For a full local setup including PostgreSQL, Redis, and the admin backend, run those services manually per step 4 below, or see `docs/CONFIGURATION.md` and `CONTRIBUTING.md` for guidance.
 
 ### 4. Access the Admin UI
 
@@ -347,7 +346,10 @@ source venv/bin/activate  # or `venv\Scripts\activate` on Windows
 pip install -r requirements.txt
 
 # 2. Start infrastructure (PostgreSQL, Redis)
-docker compose up -d postgres redis
+# Run PostgreSQL and Redis locally or via separate containers.
+# The project docker-compose.yml contains only the orchestrator and gateway services;
+# start PostgreSQL and Redis independently (e.g., via Homebrew, system packages, or
+# docker run) and set ATHENA_DB_HOST / REDIS_HOST in your .env accordingly.
 
 # 3. Run database migrations
 cd admin/backend
@@ -377,22 +379,6 @@ cd src/rag/weather && uvicorn main:app --host 0.0.0.0 --port 8010
 docker compose up -d
 ```
 
-#### With Module Profiles
-
-```bash
-# Core + Home Assistant module
-docker compose --profile home-assistant up -d
-
-# Core + All RAG services
-docker compose --profile rag-all up -d
-
-# Full deployment
-docker compose --profile full up -d
-
-# Custom selection
-docker compose --profile home-assistant --profile weather --profile news up -d
-```
-
 #### Building Images
 
 ```bash
@@ -419,13 +405,13 @@ docker compose build --no-cache
 
 ```bash
 # Create namespace
-kubectl create namespace athena
+kubectl create namespace athena-prod
 
 # Create secrets
-kubectl -n athena create secret generic athena-db-credentials \
+kubectl -n athena-prod create secret generic athena-db-credentials \
   --from-literal=password=your-db-password
 
-kubectl -n athena create secret generic athena-encryption \
+kubectl -n athena-prod create secret generic athena-encryption \
   --from-literal=encryption-key=your-encryption-key \
   --from-literal=encryption-salt=your-salt \
   --from-literal=session-secret=your-session-secret \
@@ -455,7 +441,7 @@ kubectl apply -f manifests/athena-prod/
 kubectl apply -f manifests/athena-prod/jarvis-web.yaml
 ```
 
-> **Note:** Additional modules (Home Assistant, Guest Mode, Notifications) are configured via Docker Compose profiles or environment variables. See [Module Configuration Guide](./MODULES.md) for details.
+> **Note:** Additional modules (Home Assistant, Guest Mode, Notifications) are configured via environment variables. See [Module Configuration Guide](./MODULES.md) for details.
 
 #### Deploy RAG Services
 
@@ -473,7 +459,7 @@ apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
   name: athena-ingress
-  namespace: athena
+  namespace: athena-prod
 spec:
   entryPoints:
     - websecure
@@ -587,22 +573,22 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: athena-config
-  namespace: athena
+  namespace: athena-prod
 data:
   # Admin Backend location
-  ADMIN_API_URL: "http://athena-admin-backend.athena.svc.cluster.local:8080"
+  ADMIN_API_URL: "http://athena-admin-backend.athena-prod.svc.cluster.local:8080"
 
   # Gateway/Orchestrator on compute nodes
-  GATEWAY_URL: "http://athena-gateway.athena.svc.cluster.local:8000"
-  ORCHESTRATOR_URL: "http://athena-orchestrator.athena.svc.cluster.local:8001"
+  GATEWAY_URL: "http://athena-gateway.athena-prod.svc.cluster.local:8000"
+  ORCHESTRATOR_URL: "http://athena-orchestrator.athena-prod.svc.cluster.local:8001"
 
   # Ollama on GPU-enabled nodes
   OLLAMA_URL: "http://ollama.gpu-workloads.svc.cluster.local:11434"
 
   # Infrastructure services
-  ATHENA_DB_HOST: "postgres.athena.svc.cluster.local"
-  REDIS_HOST: "redis.athena.svc.cluster.local"
-  QDRANT_HOST: "qdrant.athena.svc.cluster.local"
+  ATHENA_DB_HOST: "postgres.athena-prod.svc.cluster.local"
+  REDIS_HOST: "redis.athena-prod.svc.cluster.local"
+  QDRANT_HOST: "qdrant.athena-prod.svc.cluster.local"
 ```
 
 ### Service Discovery Patterns
@@ -630,7 +616,7 @@ services:
 
 env:
   - name: ORCHESTRATOR_URL
-    value: "http://athena-orchestrator.athena.svc.cluster.local:8001"
+    value: "http://athena-orchestrator.athena-prod.svc.cluster.local:8001"
 ```
 
 ---
@@ -706,7 +692,7 @@ psql -h $ATHENA_DB_HOST -U athena -d athena -c "SELECT 1"
 docker compose logs -f orchestrator
 
 # Kubernetes
-kubectl -n athena logs -f deployment/athena-orchestrator
+kubectl -n athena-prod logs -f deployment/athena-orchestrator
 ```
 
 ### Module Not Working
@@ -803,8 +789,8 @@ curl http://compute-server:8001/health
 
 - [Module Configuration Guide](./MODULES.md) - Detailed module setup
 - [Configuration Reference](./CONFIGURATION.md) - All environment variables
-- [API Documentation](./API.md) - REST API reference
-- [Development Guide](./DEVELOPMENT.md) - Contributing to Athena
+- REST API reference — visit `http://localhost:8080/docs` (FastAPI Swagger UI) after starting the admin backend
+- [Contributing to Athena](../CONTRIBUTING.md) - Development setup and contribution guidelines
 
 ---
 

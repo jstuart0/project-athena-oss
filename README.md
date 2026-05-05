@@ -154,7 +154,7 @@ Deep Home Assistant integration (4,500+ lines) with:
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - PostgreSQL database
 - Ollama (or any OpenAI-compatible LLM API)
 - Redis (optional, for session caching)
@@ -192,7 +192,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # Terminal 1: Admin backend
-cd admin/backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8080
+cd admin/backend && python -m uvicorn main:app --host 0.0.0.0 --port 8080
 
 # Terminal 2: Orchestrator
 cd src/orchestrator && python -m uvicorn main:app --host 0.0.0.0 --port 8001
@@ -458,7 +458,7 @@ The optional admin backend provides a web UI for runtime configuration without c
 | **Separate validation model** | A dedicated smaller model fact-checks the response model's output against source data |
 | **Microservice RAG** | Each data domain has different caching, rate limits, and failure modes — monolithic RAG would be fragile |
 | **OpenAI-compatible gateway** | Drop-in compatibility with Home Assistant and any OpenAI client library |
-| **Environment-variable configuration** | Zero hardcoded values — fully configurable for any deployment |
+| **Environment-variable configuration** | Environment-variable driven — configuration is centralized by convention; a small number of deployment-specific defaults are being removed as part of ongoing OSS cleanup |
 | **Standalone chat interface** | Jarvis Web runs independently — use it without voice hardware, Wyoming devices, or Home Assistant |
 
 ## Hardware Requirements

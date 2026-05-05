@@ -8,8 +8,7 @@ TheSportsDB (https://www.thesportsdb.com/api.php)
 
 ## Focus Teams
 
-- Baltimore Ravens (NFL)
-- Baltimore Orioles (MLB)
+Configured via the admin panel. Examples shown here are illustrative only — replace with the teams relevant to your location and preferences.
 
 ## Cache TTL
 

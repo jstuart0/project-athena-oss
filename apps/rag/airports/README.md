@@ -8,7 +8,7 @@ FlightAware AeroAPI
 
 ## Monitored Airports
 
-PHL, BWI, EWR, LGA, JFK, IAD, DCA
+Configured via the admin panel. Examples shown here are illustrative only — replace with the airport codes relevant to your location.
 
 ## Cache TTL
 

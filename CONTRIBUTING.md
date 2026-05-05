@@ -88,7 +88,7 @@ By participating in this project, you agree to maintain a respectful and inclusi
 
 ## Code Style
 
-- Use Python 3.10+ features
+- Use Python 3.11+ features
 - Follow PEP 8 guidelines
 - Use type hints where practical
 - Keep functions focused and well-documented
@@ -98,9 +98,9 @@ By participating in this project, you agree to maintain a respectful and inclusi
 When contributing code that requires configuration:
 
 - **Never hardcode** IP addresses, hostnames, passwords, or API keys
-- Use the `shared/config.py` module for all configuration
-- Add new environment variables to `.env.example` with clear documentation
-- Use sensible defaults that work for local development
+- Read configuration via `os.getenv("VAR_NAME")` (or `src/shared/config.py` for values already centralized there); prefer `os.getenv` directly for new code — not all services import `config.py`
+- Add every new environment variable to `.env.example` with a clear inline comment describing its purpose and an example value; this is the canonical reference for deployers
+- Use sensible defaults that work for local development, and emit a log warning when a required variable is missing rather than failing silently or falling back to a hardcoded value
 
 ## Module Development
 
