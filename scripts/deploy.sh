@@ -119,6 +119,10 @@ deploy_manifests() {
     # Pre-flight: verify required secrets exist before applying any manifests.
     # Run ./scripts/create-secrets.sh first if any are missing.
     log_info "Verifying required secrets exist..."
+    if ! kubectl get namespace "$NAMESPACE" &>/dev/null; then
+        log_error "Namespace '$NAMESPACE' does not exist. Run: ./scripts/create-secrets.sh first."
+        exit 1
+    fi
     for secret in athena-db-credentials athena-encryption athena-oidc; do
         if ! kubectl -n "$NAMESPACE" get secret "$secret" &>/dev/null; then
             log_error "Required secret '$secret' not found in namespace $NAMESPACE."

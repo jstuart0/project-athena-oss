@@ -246,7 +246,7 @@
             if (container) {
                 container.innerHTML = `
                     <div class="flex flex-col items-center justify-center py-16">
-                        <div class="text-6xl mb-4">🔐</div>
+                        <i data-lucide="lock" class="w-12 h-12 mb-4 text-gray-400"></i>
                         <h2 class="text-xl font-semibold text-white mb-2">Authentication Required</h2>
                         <p class="text-gray-400 mb-6">Please login to access this page.</p>
                         <button onclick="Auth.login()"
@@ -255,6 +255,7 @@
                         </button>
                     </div>
                 `;
+                if (typeof lucide !== 'undefined') lucide.createIcons();
             }
         },
 

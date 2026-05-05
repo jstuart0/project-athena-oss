@@ -29,11 +29,12 @@ async function loadSystemConfig() {
     container.innerHTML = `
         <div class="text-center text-gray-400 py-12">
             <div class="animate-pulse">
-                <div class="text-4xl mb-4">⚙️</div>
+                <i data-lucide="settings-2" class="w-10 h-10 mx-auto mb-4"></i>
                 <p>Loading system configuration...</p>
             </div>
         </div>
     `;
+    if (typeof lucide !== 'undefined') lucide.createIcons();
 
     try {
         // Load all data in parallel
@@ -50,7 +51,7 @@ async function loadSystemConfig() {
         console.error('Failed to load system configuration:', error);
         container.innerHTML = `
             <div class="text-center text-red-400 py-12">
-                <div class="text-4xl mb-4">⚠️</div>
+                <i data-lucide="alert-triangle" class="w-10 h-10 mx-auto mb-4"></i>
                 <p>Failed to load configuration</p>
                 <p class="text-sm text-gray-500 mt-2">${error.message}</p>
                 <button onclick="loadSystemConfig()" class="mt-4 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm">
@@ -58,6 +59,7 @@ async function loadSystemConfig() {
                 </button>
             </div>
         `;
+        if (typeof lucide !== 'undefined') lucide.createIcons();
     }
 }
 
