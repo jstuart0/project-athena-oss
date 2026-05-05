@@ -9,9 +9,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-# Set test environment before importing app
+# Set test environment before importing app.
+# ORDER MATTERS: these must be set before any app module is imported so that
+# module-level constants (e.g. SERVICE_API_KEY in service_auth.py post-Phase-2d)
+# capture the correct values at import time.
 os.environ["DEV_MODE"] = "true"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+os.environ.setdefault("SERVICE_API_KEY", "test-service-key-for-conftest")
 
 from app.database import Base, get_db
 from app.models import User, UserAPIKey
