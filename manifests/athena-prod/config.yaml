@@ -83,9 +83,10 @@ data:
 
   # Control Agent — optional service that manages Ollama and other host-level
   # processes (runs on the same host as Ollama, outside the cluster).
-  # Leave empty if you are not using the Control Agent.
-  # Example: http://192.168.1.100:8099
-  CONTROL_AGENT_URL: ""
+  # Set this to the URL of your Control Agent if deployed, e.g.:
+  #   CONTROL_AGENT_URL: "http://192.168.1.100:8099"
+  # When unset, services fall back to http://localhost:8099.
+  # Do NOT set this to an empty string — unset the key entirely to use the default.
 
   # Logging
   LOG_LEVEL: "INFO"

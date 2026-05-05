@@ -45,9 +45,16 @@ TAG = os.environ.get("TAG", "latest")
 
 
 def generate_deployment(name, port, api_key):
-    api_key_env = ""
+    # Always inject SERVICE_API_KEY so RAG services can call the admin backend
+    # (required for /api/internal/* and /api/external-api-keys/public/* endpoints)
+    api_key_env = """        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY"""
     if api_key:
-        api_key_env = f"""        - name: {api_key}
+        api_key_env += f"""
+        - name: {api_key}
           valueFrom:
             secretKeyRef:
               name: athena-api-keys

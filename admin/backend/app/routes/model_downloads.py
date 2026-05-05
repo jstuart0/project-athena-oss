@@ -598,13 +598,15 @@ async def update_download_progress(
     download_id: int,
     request: ProgressUpdateRequest,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_service_api_key)
 ):
     """
     Update download progress (called by Control Agent).
 
-    Requires X-Service-Key header for service-to-service authentication.
-    The Control Agent must be configured with SERVICE_API_KEY to call this endpoint.
+    NOTE: Auth on this endpoint is intentionally deferred.
+    The Control Agent runs out-of-cluster (on the Ollama host) and distributing
+    SERVICE_API_KEY to external hosts was descoped (see xander:2 deferred items).
+    When xander:2 is addressed, add Depends(verify_service_api_key) and inject
+    SERVICE_API_KEY into the Control Agent environment.
     """
     download = db.query(ModelDownload).filter(ModelDownload.id == download_id).first()
     if not download:

@@ -127,7 +127,7 @@ def upgrade() -> None:
     op.get_bind().execute(
         sa.text("""
             INSERT INTO music_config (genre_to_artists, genre_seed_selection_mode, default_volume)
-            VALUES (:genre_json::jsonb, 'random', 0.5)
+            VALUES (CAST(:genre_json AS jsonb), 'random', 0.5)
         """),
         {"genre_json": genre_json},
     )

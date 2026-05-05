@@ -17,16 +17,11 @@ import structlog
 
 logger = structlog.get_logger()
 
-# Service API key — sent as X-Service-Key header on progress callbacks so the
-# admin backend's verify_service_api_key dependency accepts the request.
-# Must match SERVICE_API_KEY configured in the admin backend.
-_SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
-if not _SERVICE_API_KEY:
-    logger.warning(
-        "service_api_key_empty",
-        message="SERVICE_API_KEY is not set; progress callbacks to the admin backend "
-                "will be rejected with 503. Set SERVICE_API_KEY in the Control Agent environment.",
-    )
+# NOTE: SERVICE_API_KEY auth on the progress-callback endpoint is deferred.
+# The progress endpoint (/internal/{id}/progress) intentionally does not require
+# X-Service-Key while the Control Agent runs out-of-cluster. When xander:2 is
+# addressed (secret distribution to the Ollama host), add SERVICE_API_KEY here
+# and re-enable Depends(verify_service_api_key) on the progress route.
 
 # Download directory on Mac Studio
 MODELS_DIR = Path.home() / "dev" / "project-athena" / "models" / "downloads"
@@ -517,22 +512,10 @@ async def send_progress_callback(
     """Send progress callback to admin backend."""
     import httpx
 
-    # The admin backend's progress endpoint requires X-Service-Key auth.
-    # If SERVICE_API_KEY is empty the endpoint will return 503 — log and skip
-    # rather than sending an unauthenticated request that will be rejected anyway.
-    if not _SERVICE_API_KEY:
-        logger.warning(
-            "progress_callback_skipped_no_key",
-            download_id=download_id,
-            message="SERVICE_API_KEY is empty; skipping progress callback",
-        )
-        return
-
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{callback_url}/internal/{download_id}/progress",
-                headers={"X-Service-Key": _SERVICE_API_KEY},
                 json={
                     "status": status,
                     "progress_percent": progress_percent,

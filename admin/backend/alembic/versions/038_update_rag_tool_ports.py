@@ -104,7 +104,7 @@ def upgrade() -> None:
                     (tool_name, display_name, description, category, service_url, enabled, guest_mode_allowed, function_schema, source)
                 VALUES
                     (:tool_name, :display_name, :description, :category,
-                     :service_url, true, :guest_mode, :schema::jsonb, 'static')
+                     :service_url, true, :guest_mode, CAST(:schema AS jsonb), 'static')
                 ON CONFLICT (tool_name)
                 DO UPDATE SET
                     service_url = EXCLUDED.service_url,

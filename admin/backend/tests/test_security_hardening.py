@@ -113,6 +113,35 @@ class TestVerifyServiceApiKey:
         source = inspect.getsource(sa)
         assert 'os.getenv("SERVICE_API_KEY"' in source or "os.getenv('SERVICE_API_KEY'" in source
 
+    def test_empty_secret_returns_503(self):
+        """When SERVICE_API_KEY is empty-string (set but blank), verify_service_api_key returns 503.
+
+        os.getenv returns "" (not None) when the key is set to an empty string in the
+        environment (e.g. CONTROL_AGENT_URL: "" in a ConfigMap). This must be treated
+        the same as unset — fail-closed with 503, not 401 — to prevent hmac.compare_digest
+        accepting "" == "" and granting access to any caller sending an empty header.
+        """
+        import app.utils.service_auth as sa
+        from fastapi.testclient import TestClient
+        from fastapi import FastAPI, Depends
+
+        original = sa.SERVICE_API_KEY
+        try:
+            sa.SERVICE_API_KEY = ""  # Simulate env var set to empty string
+            mini = FastAPI()
+
+            @mini.get("/ping")
+            def ping(_: bool = Depends(sa.verify_service_api_key)):
+                return {"ok": True}
+
+            with TestClient(mini, raise_server_exceptions=False) as c:
+                r = c.get("/ping", headers={"X-Service-Key": ""})
+            assert r.status_code == 503, (
+                f"Empty SERVICE_API_KEY must return 503 (fail-closed), got {r.status_code}"
+            )
+        finally:
+            sa.SERVICE_API_KEY = original
+
 
 # -------------------------------------------------------------------
 # Integration tests — full app with TestClient
@@ -422,27 +451,27 @@ class TestRagBypassPublicEndpointsProtected:
         assert r.status_code == 401
 
 
-class TestModelDownloadProgressProtected:
-    """Model download progress callback must require X-Service-Key (codex r1 High 6)."""
+class TestModelDownloadProgressOpen:
+    """
+    Model download progress callback is intentionally open (no service key required).
 
-    def test_progress_callback_without_key_returns_422(self, app_client):
-        """/api/model-downloads/internal/{id}/progress requires X-Service-Key."""
+    Auth on this endpoint is deferred because the Control Agent runs out-of-cluster
+    on the Ollama host and distributing SERVICE_API_KEY there was descoped (xander:2).
+    When xander:2 is resolved, this class should be replaced with
+    TestModelDownloadProgressProtected (422/401 assertions).
+    """
+
+    def test_progress_callback_without_key_not_rejected_by_auth(self, app_client):
+        """/api/model-downloads/internal/{id}/progress must NOT return 422/401 for missing key."""
         r = app_client.post(
             "/api/model-downloads/internal/1/progress",
             json={"status": "downloading", "progress_percent": 50},
         )
-        assert r.status_code == 422, (
-            f"Expected 422 (missing required service header) for progress callback, got {r.status_code}"
+        # 404 (download not found in test DB) or 200 is acceptable; 422/401 is not
+        assert r.status_code not in (422, 401), (
+            f"Progress callback endpoint must not require X-Service-Key (auth deferred, xander:2); "
+            f"got {r.status_code}"
         )
-
-    def test_progress_callback_wrong_key_returns_401(self, app_client):
-        """Wrong X-Service-Key on progress callback → 401."""
-        r = app_client.post(
-            "/api/model-downloads/internal/1/progress",
-            json={"status": "downloading", "progress_percent": 50},
-            headers={"X-Service-Key": "bad-key"},
-        )
-        assert r.status_code == 401
 
 
 class TestServiceToggleProtected:
