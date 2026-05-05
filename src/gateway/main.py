@@ -30,6 +30,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.logging_config import configure_logging
 from shared.ollama_client import OllamaClient
 from shared.admin_config import get_admin_client
+from shared.admin_url import get_admin_url
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import (
     register_exception_handlers,
@@ -128,7 +129,7 @@ global_rate_limiter: Optional[TokenBucketRateLimiter] = None
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_SERVICE_URL", "http://localhost:8001")
 OLLAMA_URL = os.getenv("LLM_SERVICE_URL") or os.getenv("OLLAMA_URL", "http://localhost:11434")
 API_KEY = os.getenv("GATEWAY_API_KEY", "dummy-key")  # Optional for Phase 1
-ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+ADMIN_API_URL = get_admin_url()
 SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 
 # Feature flag cache - per-flag caching with TTL
@@ -1962,7 +1963,7 @@ async def list_models():
     """List available models (OpenAI-compatible) - returns actual available LLM backends."""
     try:
         # Fetch available backends from admin API
-        admin_url = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+        admin_url = get_admin_url()
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{admin_url}/api/llm-backends/public")
             response.raise_for_status()

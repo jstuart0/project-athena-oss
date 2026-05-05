@@ -44,13 +44,18 @@ except ImportError:
 
 logger = structlog.get_logger()
 
+# Add to Python path for shared imports
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from shared.admin_url import get_admin_url
+
 # Configuration - defaults, will be overridden by admin API
 LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
 LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
 
 # Admin API for fetching credentials
-ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+ADMIN_API_URL = get_admin_url()
 SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 
 

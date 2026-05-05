@@ -85,11 +85,16 @@ except ImportError:
     logger.warning("Voice config not available")
 
 
+# Add to Python path for shared imports
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from shared.admin_url import get_admin_url
+
 # Configuration
 DEFAULT_STT_URL = os.getenv("STT_URL", "http://localhost:10301")
 DEFAULT_TTS_URL = os.getenv("TTS_URL", "http://localhost:10201")
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
-ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+ADMIN_API_URL = get_admin_url()
 
 # AI-initiated follow-up settings (Phase 2)
 FOLLOW_UP_DELAY_SECONDS = 3.0  # Wait 3 seconds after TTS before follow-up
