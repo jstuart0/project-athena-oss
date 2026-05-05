@@ -71,6 +71,38 @@ build_push() {
     fi
 }
 
+# Function to build and push with an explicit Dockerfile path.
+# Used for services whose build context differs from the Dockerfile location —
+# e.g. jarvis-web needs repo-root context to access src/shared/admin_url.py while
+# its Dockerfile remains at apps/jarvis-web/Dockerfile.
+#
+# Args: $1 = image_name, $2 = build_context, $3 = dockerfile path relative to context
+build_push_with_dockerfile() {
+    local name=$1
+    local context=$2
+    local dockerfile_relpath=$3
+    local dockerfile_abspath="${context}/${dockerfile_relpath}"
+
+    if [ ! -f "$dockerfile_abspath" ]; then
+        log_warn "Dockerfile not found: $dockerfile_abspath - SKIPPING"
+        return 1
+    fi
+
+    log_info "Building $name from $context (Dockerfile: $dockerfile_relpath)..."
+    if docker build --platform linux/amd64 \
+        -t "$REGISTRY/$name:$TAG" \
+        -f "$dockerfile_abspath" \
+        "$context"; then
+        log_info "Pushing $name..."
+        docker push "$REGISTRY/$name:$TAG"
+        log_info "$name built and pushed successfully"
+        return 0
+    else
+        log_error "Failed to build $name"
+        return 1
+    fi
+}
+
 # Function to build services that need src/ context (gateway, orchestrator, mode_service, RAG)
 build_push_src() {
     local name=$1
@@ -101,7 +133,7 @@ build_push_src() {
 ADMIN_SERVICES=(
     "athena-admin-backend:$PROJECT_ROOT/admin/backend"
     "athena-admin-frontend:$PROJECT_ROOT/admin/frontend"
-    "athena-jarvis-web:$PROJECT_ROOT/apps/jarvis-web"
+    "athena-jarvis-web:$PROJECT_ROOT:apps/jarvis-web/Dockerfile"
     "athena-chat-embed:$PROJECT_ROOT/apps/chat-embed"
 )
 
@@ -145,9 +177,13 @@ if [ -n "$1" ]; then
 
     # Check admin services
     for service_def in "${ADMIN_SERVICES[@]}"; do
-        IFS=':' read -r name context <<< "$service_def"
+        IFS=':' read -r name context dockerfile_relpath <<< "$service_def"
         if [ "$1" == "$name" ] || [ "$1" == "${name#athena-}" ]; then
-            build_push "$name" "$context"
+            if [ -n "$dockerfile_relpath" ]; then
+                build_push_with_dockerfile "$name" "$context" "$dockerfile_relpath"
+            else
+                build_push "$name" "$context"
+            fi
             found=true
             break
         fi
@@ -215,14 +251,27 @@ SKIPPED=0
 # Build admin services
 log_info "=== Building Admin Services ==="
 for service_def in "${ADMIN_SERVICES[@]}"; do
-    IFS=':' read -r name context <<< "$service_def"
-    if build_push "$name" "$context"; then
-        ((SUCCESSFUL++))
-    else
-        if [ -f "$context/Dockerfile" ]; then
-            ((FAILED++))
+    IFS=':' read -r name context dockerfile_relpath <<< "$service_def"
+    if [ -n "$dockerfile_relpath" ]; then
+        dockerfile_abspath="${context}/${dockerfile_relpath}"
+        if build_push_with_dockerfile "$name" "$context" "$dockerfile_relpath"; then
+            ((SUCCESSFUL++))
         else
-            ((SKIPPED++))
+            if [ -f "$dockerfile_abspath" ]; then
+                ((FAILED++))
+            else
+                ((SKIPPED++))
+            fi
+        fi
+    else
+        if build_push "$name" "$context"; then
+            ((SUCCESSFUL++))
+        else
+            if [ -f "$context/Dockerfile" ]; then
+                ((FAILED++))
+            else
+                ((SKIPPED++))
+            fi
         fi
     fi
     echo ""
