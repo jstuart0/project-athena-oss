@@ -173,6 +173,16 @@ logger = configure_logging("orchestrator")
 if not EVENTS_AVAILABLE:
     logger.warning("Event system not available - Admin Jarvis monitoring disabled")
 
+# Service API key for service-to-service auth (admin backend internal endpoints)
+_SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+if not _SERVICE_API_KEY:
+    logger.warning(
+        "SERVICE_API_KEY_empty",
+        message="SERVICE_API_KEY is not set; calls to authenticated admin endpoints "
+                "(bypass config, service usage) will receive 503. "
+                "Set SERVICE_API_KEY in the orchestrator environment.",
+    )
+
 
 # =============================================================================
 # Feature Flag Helper
@@ -1965,9 +1975,13 @@ async def check_service_bypass(intent: str) -> Optional[Dict[str, Any]]:
         Bypass configuration dict if enabled, None otherwise
     """
     try:
+        headers = {}
+        if _SERVICE_API_KEY:
+            headers["X-Service-Key"] = _SERVICE_API_KEY
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
-                f"{ADMIN_URL}/api/rag-service-bypass/public/{intent}/config"
+                f"{ADMIN_API_URL}/api/rag-service-bypass/public/{intent}/config",
+                headers=headers
             )
             if response.status_code == 200:
                 config = response.json()

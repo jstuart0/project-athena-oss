@@ -17,6 +17,7 @@ import httpx
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, Feature, LLMPerformanceMetric
+from app.utils.service_auth import verify_service_api_key
 
 import os
 
@@ -269,7 +270,7 @@ async def toggle_feature(
 async def service_toggle_feature(
     feature_id: int,
     db: Session = Depends(get_db),
-    api_key: str = Header(None, alias="X-API-Key")
+    _: bool = Depends(verify_service_api_key)
 ):
     """
     Service-to-service toggle feature endpoint.
@@ -278,18 +279,11 @@ async def service_toggle_feature(
     instead of OIDC. Useful for testing and automation.
 
     Headers:
-    - X-API-Key: Service API key
+    - X-Service-Key: Service API key (constant-time verified)
 
     Cannot toggle required features (they must always be enabled).
     Automatically notifies Gateway and Orchestrator to invalidate caches.
     """
-    import os
-
-    # Verify service API key
-    expected_key = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
-    if not api_key or api_key != expected_key:
-        logger.warning("service_toggle_feature_unauthorized", provided_key=bool(api_key))
-        raise HTTPException(status_code=403, detail="Invalid or missing API key")
 
     feature = db.query(Feature).filter(Feature.id == feature_id).first()
     if not feature:

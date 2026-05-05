@@ -244,20 +244,27 @@ async def startup_event():
                     f"Set DEV_MODE=true to run without secrets (development only)."
                 )
 
+        # OIDC_CLIENT_ID=demo-mode is a development escape valve; reject in production.
+        # It activates the demo auth bypass in oidc.py and must never run against real data.
+        if os.getenv("OIDC_CLIENT_ID", "").strip() == "demo-mode":
+            logger.critical("demo_mode_oidc_in_production")
+            raise SystemExit(
+                "FATAL: OIDC_CLIENT_ID=demo-mode activates the demo auth bypass and "
+                "must not be used in production. Set OIDC_CLIENT_ID to your IdP's client ID "
+                "or set DEV_MODE=true for development."
+            )
+
         # OIDC issuer hard-fail: empty or CONFIGURE_ME-style placeholder is unsafe
         # in production because it silently routes auth to no IdP (or the wrong one).
-        # Escape valves: DEV_MODE=true (handled above) or OIDC_CLIENT_ID=demo-mode
-        # (development/demo path; tightened in Phase 5 to reject demo-mode in prod).
+        # Escape valve: DEV_MODE=true (handled above). The demo-mode escape valve was
+        # closed above (xander:13) — reaching this block means OIDC_CLIENT_ID != "demo-mode".
         _oidc_issuer = os.getenv("OIDC_ISSUER", "").strip()
-        _oidc_client_id = os.getenv("OIDC_CLIENT_ID", "").strip()
-        _is_demo_mode = _oidc_client_id == "demo-mode"
-        if not _is_demo_mode:
-            if not _oidc_issuer or _oidc_issuer.startswith("CONFIGURE_ME"):
-                logger.critical("oidc_issuer_not_configured")
-                raise SystemExit(
-                    "FATAL: OIDC_ISSUER must be set in production. "
-                    "Set DEV_MODE=true or OIDC_CLIENT_ID=demo-mode for development."
-                )
+        if not _oidc_issuer or _oidc_issuer.startswith("CONFIGURE_ME"):
+            logger.critical("oidc_issuer_not_configured")
+            raise SystemExit(
+                "FATAL: OIDC_ISSUER must be set in production. "
+                "Set DEV_MODE=true for development."
+            )
 
         # Production: Check PostgreSQL connection
         if check_db_connection():

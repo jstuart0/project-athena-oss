@@ -18,6 +18,7 @@ from app.models import ModelDownload, User, ExternalAPIKey, Alert
 from app.auth.oidc import get_current_user
 from app.utils.encryption import decrypt_value
 from app.routes.websocket import broadcast_model_download_event
+from app.utils.service_auth import verify_service_api_key
 
 
 def create_download_alert(
@@ -596,12 +597,14 @@ class ProgressUpdateRequest(BaseModel):
 async def update_download_progress(
     download_id: int,
     request: ProgressUpdateRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_service_api_key)
 ):
     """
     Update download progress (called by Control Agent).
 
-    This is an internal endpoint - no user auth required since it comes from trusted Control Agent.
+    Requires X-Service-Key header for service-to-service authentication.
+    The Control Agent must be configured with SERVICE_API_KEY to call this endpoint.
     """
     download = db.query(ModelDownload).filter(ModelDownload.id == download_id).first()
     if not download:

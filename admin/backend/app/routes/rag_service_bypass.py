@@ -14,6 +14,7 @@ import structlog
 from ..database import get_db
 from ..models import RAGServiceBypass
 from ..auth.oidc import get_current_user
+from ..utils.service_auth import verify_service_api_key
 
 logger = structlog.get_logger(__name__)
 
@@ -171,17 +172,17 @@ async def delete_bypass_config(
     }
 
 
-# Public endpoint for orchestrator to check bypass status
+# Internal endpoint for orchestrator to check bypass status (requires X-Service-Key)
 @router.get("/public/{service_name}/config")
 async def get_public_bypass_config(
     service_name: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_service_api_key)
 ) -> dict:
     """
-    Public endpoint for orchestrator to get bypass configuration.
+    Orchestrator endpoint to get bypass configuration for a service.
 
-    This endpoint does not require authentication and is meant to be called
-    by the orchestrator service to check if a service should be bypassed.
+    Requires X-Service-Key header for service-to-service authentication.
     Only returns configuration if bypass is enabled.
     """
     config = db.query(RAGServiceBypass).filter(
@@ -204,13 +205,14 @@ async def get_public_bypass_config(
 
 @router.get("/public/enabled")
 async def get_enabled_bypasses(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_service_api_key)
 ) -> List[str]:
     """
     Get list of services with bypass enabled.
 
-    Public endpoint for orchestrator to quickly check which services
-    have bypass enabled without fetching full configurations.
+    Requires X-Service-Key header for service-to-service authentication.
+    Used by orchestrator to quickly check which services have bypass enabled.
     """
     configs = db.query(RAGServiceBypass.service_name).filter(
         RAGServiceBypass.bypass_enabled == True

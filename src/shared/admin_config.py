@@ -35,6 +35,12 @@ class AdminConfigClient:
                 message="ADMIN_URL is empty; service-to-admin callbacks will fail.",
             )
         self.api_key = api_key or os.getenv("SERVICE_API_KEY", "")
+        if not self.api_key:
+            logger.warning(
+                "service_api_key_empty",
+                message="SERVICE_API_KEY is not set; calls to authenticated admin endpoints "
+                        "will receive 503. Set SERVICE_API_KEY in the service environment.",
+            )
         # Reduced timeout from 10s to 3s - config/room calls should be fast
         # Critical paths like music playback compound multiple API calls
         self.client = httpx.AsyncClient(
@@ -2002,7 +2008,7 @@ class AdminConfigClient:
         """
         try:
             url = f"{self.admin_url}/api/internal/service-usage/{service_name}"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
 
             if response.status_code == 200:
                 return response.json()
@@ -2037,7 +2043,9 @@ class AdminConfigClient:
         """
         try:
             url = f"{self.admin_url}/api/internal/service-usage/{service_name}/increment"
-            response = await self.client.post(url, params={"count": count})
+            response = await self.client.post(
+                url, params={"count": count}, headers={"X-Service-Key": self.api_key}
+            )
 
             if response.status_code == 200:
                 result = response.json()

@@ -21,7 +21,11 @@ _cache_timestamps: Dict[str, datetime] = {}
 CACHE_TTL_SECONDS = 300  # 5 minutes
 
 
-async def get_bypass_config(service_name: str, admin_url: str) -> Optional[Dict[str, Any]]:
+async def get_bypass_config(
+    service_name: str,
+    admin_url: str,
+    api_key: str = ""
+) -> Optional[Dict[str, Any]]:
     """
     Get bypass config with local caching.
 
@@ -31,6 +35,9 @@ async def get_bypass_config(service_name: str, admin_url: str) -> Optional[Dict[
     Args:
         service_name: Name of the RAG service
         admin_url: Admin backend URL
+        api_key: SERVICE_API_KEY value for X-Service-Key authentication.
+                 Required after Phase 5 — the /public/*/config endpoint is
+                 gated by verify_service_api_key. Pass os.getenv("SERVICE_API_KEY", "").
 
     Returns:
         Bypass configuration dict or None if not configured
@@ -54,9 +61,13 @@ async def get_bypass_config(service_name: str, admin_url: str) -> Optional[Dict[
 
     # Try to fetch from admin backend
     try:
+        headers = {}
+        if api_key:
+            headers["X-Service-Key"] = api_key
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
-                f"{admin_url}/api/rag-service-bypass/public/{service_name}/config"
+                f"{admin_url}/api/rag-service-bypass/public/{service_name}/config",
+                headers=headers
             )
             if response.status_code == 200:
                 config = response.json()
@@ -87,7 +98,11 @@ async def get_bypass_config(service_name: str, admin_url: str) -> Optional[Dict[
     return None
 
 
-async def refresh_all_bypass_configs(admin_url: str, services: List[str]) -> None:
+async def refresh_all_bypass_configs(
+    admin_url: str,
+    services: List[str],
+    api_key: str = ""
+) -> None:
     """
     Pre-fetch all bypass configs on startup.
 
@@ -96,12 +111,14 @@ async def refresh_all_bypass_configs(admin_url: str, services: List[str]) -> Non
     Args:
         admin_url: Admin backend URL
         services: List of service names to pre-fetch
+        api_key: SERVICE_API_KEY value for X-Service-Key authentication.
+                 Pass os.getenv("SERVICE_API_KEY", "").
     """
     logger.info("bypass_cache_warmup_starting", service_count=len(services))
 
     for service in services:
         try:
-            await get_bypass_config(service, admin_url)
+            await get_bypass_config(service, admin_url, api_key=api_key)
         except Exception as e:
             logger.warning(
                 "bypass_cache_warmup_failed",

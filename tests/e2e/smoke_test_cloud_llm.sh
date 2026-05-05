@@ -3,6 +3,10 @@
 # Run after deployment to verify basic functionality
 #
 # Open Source Compatible - Uses standard curl and bash.
+#
+# Required env vars:
+#   SERVICE_API_KEY  — service-to-service key for authenticated admin endpoints.
+#                      Must match the value configured in the admin backend.
 
 set -e
 
@@ -52,9 +56,11 @@ else
     echo "SKIPPED (requires auth)"
 fi
 
-# Test 5: Service bypass endpoint
+# Test 5: Service bypass endpoint (requires SERVICE_API_KEY)
 echo -n "5. Service Bypass API... "
-BYPASS=$(curl -sf "${ADMIN_URL}/api/rag-service-bypass/public/recipes/config" 2>/dev/null || echo "error")
+BYPASS=$(curl -sf \
+    -H "X-Service-Key: ${SERVICE_API_KEY:-}" \
+    "${ADMIN_URL}/api/rag-service-bypass/public/recipes/config" 2>/dev/null || echo "error")
 if [[ "$BYPASS" != "error" ]]; then
     echo "OK"
 else

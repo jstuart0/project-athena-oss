@@ -19,6 +19,9 @@ import pytest
 # Set test environment BEFORE importing anything from the app
 os.environ["DEV_MODE"] = "true"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+# SERVICE_API_KEY must be non-empty so verify_service_api_key can evaluate wrong-key → 401.
+# Without this the fail-closed guard returns 503 before comparing the key.
+os.environ.setdefault("SERVICE_API_KEY", "test-service-key-for-hardening-tests")
 
 # -------------------------------------------------------------------
 # Unit tests — service_auth utility (no DB or app needed)
@@ -148,9 +151,17 @@ def app_client():
 
     app.dependency_overrides[get_db] = override_get_db
 
+    # Patch module-level SERVICE_API_KEY so verify_service_api_key can compare keys.
+    # The variable is captured at import time; patching here ensures wrong-key tests
+    # get 401 (key mismatch) rather than 503 (empty-secret fail-closed guard).
+    import app.utils.service_auth as _service_auth
+    _original_key = _service_auth.SERVICE_API_KEY
+    _service_auth.SERVICE_API_KEY = "test-service-key-for-hardening-tests"
+
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client
 
+    _service_auth.SERVICE_API_KEY = _original_key
     app.dependency_overrides.clear()
 
 
@@ -374,6 +385,130 @@ class TestStartupSecretValidation:
         )
         assert else_pos < fatal_pos, (
             "FATAL secret validation must appear inside the production (non-DEV_MODE) else branch"
+        )
+
+
+class TestRagBypassPublicEndpointsProtected:
+    """RAG bypass public routes must require X-Service-Key (xander:11)."""
+
+    def test_bypass_config_without_key_returns_422(self, app_client):
+        """/api/rag-service-bypass/public/{name}/config requires X-Service-Key."""
+        r = app_client.get("/api/rag-service-bypass/public/weather/config")
+        assert r.status_code == 422, (
+            f"Expected 422 (missing required service header) for bypass config, got {r.status_code}"
+        )
+
+    def test_bypass_config_wrong_key_returns_401(self, app_client):
+        """Wrong X-Service-Key on bypass config route → 401."""
+        r = app_client.get(
+            "/api/rag-service-bypass/public/weather/config",
+            headers={"X-Service-Key": "bad-key"},
+        )
+        assert r.status_code == 401
+
+    def test_bypass_enabled_without_key_returns_422(self, app_client):
+        """/api/rag-service-bypass/public/enabled requires X-Service-Key."""
+        r = app_client.get("/api/rag-service-bypass/public/enabled")
+        assert r.status_code == 422, (
+            f"Expected 422 (missing required service header) for bypass enabled, got {r.status_code}"
+        )
+
+    def test_bypass_enabled_wrong_key_returns_401(self, app_client):
+        """Wrong X-Service-Key on bypass enabled route → 401."""
+        r = app_client.get(
+            "/api/rag-service-bypass/public/enabled",
+            headers={"X-Service-Key": "bad-key"},
+        )
+        assert r.status_code == 401
+
+
+class TestModelDownloadProgressProtected:
+    """Model download progress callback must require X-Service-Key (codex r1 High 6)."""
+
+    def test_progress_callback_without_key_returns_422(self, app_client):
+        """/api/model-downloads/internal/{id}/progress requires X-Service-Key."""
+        r = app_client.post(
+            "/api/model-downloads/internal/1/progress",
+            json={"status": "downloading", "progress_percent": 50},
+        )
+        assert r.status_code == 422, (
+            f"Expected 422 (missing required service header) for progress callback, got {r.status_code}"
+        )
+
+    def test_progress_callback_wrong_key_returns_401(self, app_client):
+        """Wrong X-Service-Key on progress callback → 401."""
+        r = app_client.post(
+            "/api/model-downloads/internal/1/progress",
+            json={"status": "downloading", "progress_percent": 50},
+            headers={"X-Service-Key": "bad-key"},
+        )
+        assert r.status_code == 401
+
+
+class TestServiceToggleProtected:
+    """Service toggle endpoint must use verify_service_api_key, not inline check (librarian:5)."""
+
+    def test_service_toggle_without_key_returns_422(self, app_client):
+        """/api/features/service/{id}/toggle requires X-Service-Key."""
+        r = app_client.put("/api/features/service/1/toggle")
+        assert r.status_code == 422, (
+            f"Expected 422 (missing required service header) for service toggle, got {r.status_code}"
+        )
+
+    def test_service_toggle_wrong_key_returns_401(self, app_client):
+        """Wrong X-Service-Key on service toggle → 401."""
+        r = app_client.put(
+            "/api/features/service/1/toggle",
+            headers={"X-Service-Key": "bad-key"},
+        )
+        assert r.status_code == 401
+
+    def test_service_toggle_no_longer_accepts_x_api_key(self, app_client):
+        """X-API-Key header must no longer be accepted on the service toggle endpoint.
+
+        The old inline check used X-API-Key; the new dependency uses X-Service-Key.
+        Sending X-API-Key (without X-Service-Key) must return 422, not 401/200.
+        """
+        r = app_client.put(
+            "/api/features/service/1/toggle",
+            headers={"X-API-Key": "some-key"},
+        )
+        assert r.status_code == 422, (
+            f"Expected 422 (X-API-Key no longer accepted), got {r.status_code}"
+        )
+
+
+class TestDemoModeRejectedInProduction:
+    """OIDC_CLIENT_ID=demo-mode must be rejected in production startup (xander:13)."""
+
+    def test_demo_mode_check_present_in_startup(self):
+        """main.py must contain the demo-mode production rejection block."""
+        main_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"
+        )
+        with open(main_path) as f:
+            source = f.read()
+
+        assert "demo-mode" in source, (
+            "main.py must contain the OIDC_CLIENT_ID=demo-mode rejection check"
+        )
+        assert "demo auth bypass" in source, (
+            "main.py rejection message must explain why demo-mode is rejected in production"
+        )
+
+    def test_demo_mode_check_after_insecure_defaults(self):
+        """demo-mode check must appear after the _INSECURE_DEFAULTS loop."""
+        main_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"
+        )
+        with open(main_path) as f:
+            source = f.read()
+
+        insecure_pos = source.find("_INSECURE_DEFAULTS")
+        demo_pos = source.find("demo-mode")
+        assert insecure_pos != -1 and demo_pos != -1
+        assert insecure_pos < demo_pos, (
+            "demo-mode check must appear after the _INSECURE_DEFAULTS loop in main.py"
         )
 
 

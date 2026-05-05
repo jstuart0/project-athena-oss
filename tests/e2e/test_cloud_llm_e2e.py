@@ -122,10 +122,16 @@ class TestCrossPhaseIntegration:
 
     @pytest.mark.asyncio
     async def test_bypass_config_public_endpoint(self):
-        """Test bypass config public endpoint for orchestrator."""
+        """Test bypass config public endpoint for orchestrator.
+
+        Requires SERVICE_API_KEY env var — the endpoint is service-key gated.
+        In CI or local integration runs, set SERVICE_API_KEY to the configured value.
+        """
+        service_api_key = os.getenv("SERVICE_API_KEY", "")
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                f"{ADMIN_URL}/api/rag-service-bypass/public/recipes/config"
+                f"{ADMIN_URL}/api/rag-service-bypass/public/recipes/config",
+                headers={"X-Service-Key": service_api_key} if service_api_key else {}
             )
             assert response.status_code == 200
             data = response.json()
