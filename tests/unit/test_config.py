@@ -357,3 +357,23 @@ class TestLazyFactory:
         assert second.ollama_url == "http://second:11434"
 
         assert first is not second
+
+    def test_24_demo_mode_lazy(self, monkeypatch):
+        """Round-1 M6: DEMO_MODE is read lazily at first get_config() call.
+
+        After setting DEMO_MODE=true and clearing the cache, get_config().demo_mode
+        returns True.  Without a cache clear, subsequent calls return the cached
+        value (True) even after the env var changes.  After a second cache clear,
+        the fresh instance reflects the updated env var.
+        """
+        _clear_all(monkeypatch)
+        monkeypatch.setenv("DEMO_MODE", "true")
+        _clear_cache_for_tests()
+        assert get_config().demo_mode is True
+
+        monkeypatch.setenv("DEMO_MODE", "false")
+        # Without cache clear, value should still be True (cached).
+        assert get_config().demo_mode is True
+
+        _clear_cache_for_tests()
+        assert get_config().demo_mode is False

@@ -39,9 +39,9 @@ if DEV_MODE:
     logger.info("oidc_dev_mode_enabled", message="Authentication will be bypassed")
 
 # Default OIDC configuration from environment (fallback)
-DEFAULT_OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID", "")
+DEFAULT_OIDC_CLIENT_ID = get_config().oidc_client_id
 DEFAULT_OIDC_CLIENT_SECRET = os.getenv("OIDC_CLIENT_SECRET", "")
-DEFAULT_OIDC_ISSUER = os.getenv("OIDC_ISSUER", "")
+DEFAULT_OIDC_ISSUER = get_config().oidc_issuer
 DEFAULT_OIDC_REDIRECT_URI = os.getenv("OIDC_REDIRECT_URI", "")
 DEFAULT_OIDC_SCOPES = os.getenv("OIDC_SCOPES", "openid profile email")
 

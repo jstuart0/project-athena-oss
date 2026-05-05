@@ -249,7 +249,7 @@ async def startup_event():
 
         # OIDC_CLIENT_ID=demo-mode is a development escape valve; reject in production.
         # It activates the demo auth bypass in oidc.py and must never run against real data.
-        if os.getenv("OIDC_CLIENT_ID", "").strip() == "demo-mode":
+        if get_config().oidc_client_id == "demo-mode":
             logger.critical("demo_mode_oidc_in_production")
             raise SystemExit(
                 "FATAL: OIDC_CLIENT_ID=demo-mode activates the demo auth bypass and "
@@ -261,7 +261,7 @@ async def startup_event():
         # in production because it silently routes auth to no IdP (or the wrong one).
         # Escape valve: DEV_MODE=true (handled above). The demo-mode escape valve was
         # closed above (xander:13) — reaching this block means OIDC_CLIENT_ID != "demo-mode".
-        _oidc_issuer = os.getenv("OIDC_ISSUER", "").strip()
+        _oidc_issuer = get_config().oidc_issuer
         if not _oidc_issuer or _oidc_issuer.startswith("CONFIGURE_ME"):
             logger.critical("oidc_issuer_not_configured")
             raise SystemExit(
@@ -413,7 +413,7 @@ async def auth_login(request: Request, db: Session = Depends(get_db)):
     await load_session(request)
 
     # Demo mode bypass for development/testing
-    if os.getenv("DEMO_MODE", "false").lower() == "true" or os.getenv("OIDC_CLIENT_ID") == "demo-mode":
+    if get_config().demo_mode or get_config().oidc_client_id == "demo-mode":
         # Create demo userinfo dictionary
         demo_userinfo = {
             "sub": "demo-admin",
@@ -543,7 +543,7 @@ async def auth_me(current_user: User = Depends(get_current_user)):
 @app.get("/api/auth/methods")
 async def get_auth_methods():
     """Expose enabled admin authentication methods for the frontend."""
-    demo_mode = os.getenv("DEMO_MODE", "false").lower() == "true" or os.getenv("OIDC_CLIENT_ID") == "demo-mode"
+    demo_mode = get_config().demo_mode or get_config().oidc_client_id == "demo-mode"
     oidc_enabled = demo_mode or bool(oidc_auth.OIDC_CLIENT_ID)
     return {
         "oidc_enabled": oidc_enabled,
