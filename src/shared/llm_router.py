@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional, List
 from enum import Enum
 from collections import deque
 import structlog
+from shared.admin_url import get_admin_url
 
 logger = structlog.get_logger()
 
@@ -112,7 +113,7 @@ class LLMRouter:
             metrics_window_size: Number of recent requests to track for metrics
             persist_metrics: Whether to persist metrics to database via Admin API
         """
-        self.admin_url = admin_url or os.getenv("ADMIN_API_URL", "")
+        self.admin_url = admin_url or get_admin_url()
         self._admin_url_base = self.admin_url
         self.client = httpx.AsyncClient(timeout=120.0)
         self._backend_cache: Dict[str, Dict[str, Any]] = {}

@@ -10,6 +10,7 @@ import sys
 import logging
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
+from shared.admin_url import get_admin_url
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class AthenaConfig:
     db_password: str = field(default_factory=lambda: os.environ.get("ATHENA_DB_PASSWORD", ""))
 
     # Admin API URL - REQUIRED for service coordination
-    admin_api_url: str = field(default_factory=lambda: os.environ.get("ADMIN_API_URL", ""))
+    admin_api_url: str = field(default_factory=get_admin_url)
 
     # Security keys - REQUIRED, no weak defaults
     encryption_key: str = field(default_factory=lambda: os.environ.get("ENCRYPTION_KEY", ""))

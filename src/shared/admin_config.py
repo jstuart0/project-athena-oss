@@ -9,6 +9,7 @@ import time
 import httpx
 from typing import Optional, Dict, Any, List
 import structlog
+from shared.admin_url import get_admin_url
 
 logger = structlog.get_logger()
 
@@ -28,7 +29,7 @@ class AdminConfigClient:
             admin_url: Admin API URL (defaults to ADMIN_API_URL env var)
             api_key: Service API key (defaults to SERVICE_API_KEY env var)
         """
-        self.admin_url = admin_url or os.getenv("ADMIN_API_URL", "")
+        self.admin_url = admin_url or get_admin_url()
         if not self.admin_url:
             logger.warning(
                 "admin_url_unconfigured",

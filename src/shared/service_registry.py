@@ -12,24 +12,12 @@ import time
 import httpx
 from typing import Optional, Dict
 import structlog
+from shared.admin_url import get_admin_url
 
 logger = structlog.get_logger()
 
 # Admin API configuration
-# Priority: ADMIN_API_URL env var > ADMIN_BACKEND_URL env var > auto-detect
-_default_admin_url = "http://athena-admin-backend.athena-admin.svc.cluster.local:8080"
-
-# Auto-detect environment based on hostname
-import socket
-_hostname = socket.gethostname().lower()
-if 'mac-studio' in _hostname or 'jays-mac' in _hostname or os.getenv("LOCAL_DEV", "false").lower() == "true":
-    # Local development uses localhost
-    _default_admin_url = "http://localhost:8080"
-
-ADMIN_API_URL = os.getenv(
-    "ADMIN_API_URL",
-    os.getenv("ADMIN_BACKEND_URL", _default_admin_url)
-)
+ADMIN_API_URL = get_admin_url()
 
 # Cache for service URLs (30 second TTL to avoid excessive API calls)
 _url_cache: Dict[str, str] = {}

@@ -11,11 +11,12 @@ import redis.asyncio as redis
 from typing import Optional, Any
 from functools import wraps
 import logging
+from shared.admin_url import get_admin_url
 
 logger = logging.getLogger(__name__)
 
 # Admin backend URL for fetching configuration
-ADMIN_BACKEND_URL = os.getenv("ADMIN_BACKEND_URL", "http://localhost:8080")
+ADMIN_BACKEND_URL = get_admin_url()
 
 # Cached Redis URL (fetched once from admin backend)
 _cached_redis_url: Optional[str] = None
