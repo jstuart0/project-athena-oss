@@ -145,6 +145,7 @@ from orchestrator.self_building_tools import (
 
 # Runtime context accessor — dual-write during Phase 1.2→Phase 4 transition
 from orchestrator.nodes import _runtime
+from orchestrator.nodes import route_info_node
 
 # Event system imports for real-time pipeline monitoring
 try:
@@ -5078,38 +5079,6 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
         state.timing_tracker.track_sync("graph", "route_tv", route_tv_duration)
     return state
 
-
-async def route_info_node(state: OrchestratorState) -> OrchestratorState:
-    """
-    Select appropriate model tier for information queries.
-    Uses complexity determined by classify_node's feature-based detection.
-    """
-    start = time.time()
-
-    # Use complexity from classification (feature-based detection)
-    # This properly routes complex queries to more capable models
-    if state.complexity == "super_complex":
-        state.model_tier = ModelTier.LARGE
-        state.model_component = "tool_calling_super_complex"
-    elif state.complexity == "complex":
-        state.model_tier = ModelTier.MEDIUM
-        state.model_component = "tool_calling_complex"
-    else:  # simple
-        state.model_tier = ModelTier.SMALL
-        state.model_component = "tool_calling_simple"
-
-    # Log model selection decision
-    logger.info(
-        f"Model selection: complexity={state.complexity} -> "
-        f"tier={state.model_tier.value}, component={state.model_component}"
-    )
-
-    route_info_duration = time.time() - start
-    state.node_timings["route_info"] = route_info_duration
-    # Track node time to Prometheus
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "route_info", route_info_duration)
-    return state
 
 async def _fallback_to_web_search(state: OrchestratorState, rag_service: str, error_msg: str):
     """

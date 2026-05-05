@@ -1,1 +1,5 @@
-# TODO: extract pipeline node functions from src/orchestrator/main.py here. See audit bob:3 (deferred refactor).
+"""Pipeline node implementations extracted from orchestrator.main."""
+
+from .route_info import route_info_node
+
+__all__ = ["route_info_node"]
