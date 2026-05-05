@@ -96,7 +96,10 @@ def get_admin_url() -> str:
         logger.info("admin_url_resolved", extra={"source": "in_cluster_default", "url": url})
         return url
 
-    # Priority 6 — unresolvable; return empty string so callers fail loudly
+    # Priority 6 — unresolvable; return empty string so callers fail loudly.
+    # Emit admin_url_resolved first (consistent logging contract across all 6
+    # paths), then a WARNING so operators know misconfiguration occurred.
+    logger.info("admin_url_resolved", extra={"source": "empty", "url": ""})
     logger.warning(
         "admin_url_not_configured: ADMIN_API_URL is not set and the process is "
         "not running inside Kubernetes.  Admin-backend calls will fail.  "

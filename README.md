@@ -350,8 +350,8 @@ python -m uvicorn main:app --host 0.0.0.0 --port 3001
 **Docker:**
 
 ```bash
-cd apps/jarvis-web
-docker build -t jarvis-web .
+# Build context is repo root (Dockerfile copies src/shared/admin_url.py)
+docker build -f apps/jarvis-web/Dockerfile -t jarvis-web .
 docker run -p 3001:8000 \
   -e ORCHESTRATOR_URL=http://host.docker.internal:8001 \
   -e GATEWAY_URL=http://host.docker.internal:8000 \

@@ -57,26 +57,49 @@ def _reset_cache():
 # ---------------------------------------------------------------------------
 
 
+def _resolved_record(caplog):
+    """Return the single admin_url_resolved INFO log record, or None."""
+    return next(
+        (r for r in caplog.records if "admin_url_resolved" in r.message),
+        None,
+    )
+
+
 class TestPriorityOrder:
     """Env-var priority and fallback chain."""
 
-    def test_01_admin_api_url_wins(self, monkeypatch):
-        """Case 1: ADMIN_API_URL set → returns its value."""
+    def test_01_admin_api_url_wins(self, monkeypatch, caplog):
+        """Case 1: ADMIN_API_URL set → returns its value; source=ADMIN_API_URL."""
         _clear_all(monkeypatch)
         monkeypatch.setenv("ADMIN_API_URL", "http://admin-api:9000")
-        assert get_admin_url() == "http://admin-api:9000"
+        with caplog.at_level(logging.INFO, logger="shared.admin_url"):
+            result = get_admin_url()
+        assert result == "http://admin-api:9000"
+        rec = _resolved_record(caplog)
+        assert rec is not None, "Expected admin_url_resolved INFO log"
+        assert rec.source == "ADMIN_API_URL"
 
-    def test_02_admin_backend_url_when_api_unset(self, monkeypatch):
-        """Case 2: ADMIN_BACKEND_URL set, ADMIN_API_URL absent → returns BACKEND."""
+    def test_02_admin_backend_url_when_api_unset(self, monkeypatch, caplog):
+        """Case 2: ADMIN_BACKEND_URL set, ADMIN_API_URL absent → returns BACKEND; source=ADMIN_BACKEND_URL."""
         _clear_all(monkeypatch)
         monkeypatch.setenv("ADMIN_BACKEND_URL", "http://admin-backend:8080")
-        assert get_admin_url() == "http://admin-backend:8080"
+        with caplog.at_level(logging.INFO, logger="shared.admin_url"):
+            result = get_admin_url()
+        assert result == "http://admin-backend:8080"
+        rec = _resolved_record(caplog)
+        assert rec is not None, "Expected admin_url_resolved INFO log"
+        assert rec.source == "ADMIN_BACKEND_URL"
 
-    def test_03_admin_internal_url_when_others_unset(self, monkeypatch):
-        """Case 3: ADMIN_INTERNAL_URL set, others absent → returns INTERNAL."""
+    def test_03_admin_internal_url_when_others_unset(self, monkeypatch, caplog):
+        """Case 3: ADMIN_INTERNAL_URL set, others absent → returns INTERNAL; source=ADMIN_INTERNAL_URL."""
         _clear_all(monkeypatch)
         monkeypatch.setenv("ADMIN_INTERNAL_URL", "http://admin-internal:8080")
-        assert get_admin_url() == "http://admin-internal:8080"
+        with caplog.at_level(logging.INFO, logger="shared.admin_url"):
+            result = get_admin_url()
+        assert result == "http://admin-internal:8080"
+        rec = _resolved_record(caplog)
+        assert rec is not None, "Expected admin_url_resolved INFO log"
+        assert rec.source == "ADMIN_INTERNAL_URL"
 
     def test_04_api_beats_backend_and_internal(self, monkeypatch):
         """Case 4: All three URL vars set → ADMIN_API_URL wins."""
@@ -113,11 +136,16 @@ class TestNormalisation:
 class TestLocalDevEscapeHatch:
     """LOCAL_DEV=true behaviour."""
 
-    def test_08_local_dev_no_admin_env(self, monkeypatch):
-        """Case 8: LOCAL_DEV=true, all admin/K8s vars absent → http://localhost:8080."""
+    def test_08_local_dev_no_admin_env(self, monkeypatch, caplog):
+        """Case 8: LOCAL_DEV=true, all admin/K8s vars absent → http://localhost:8080; source=local_dev."""
         _clear_all(monkeypatch)
         monkeypatch.setenv("LOCAL_DEV", "true")
-        assert get_admin_url() == "http://localhost:8080"
+        with caplog.at_level(logging.INFO, logger="shared.admin_url"):
+            result = get_admin_url()
+        assert result == "http://localhost:8080"
+        rec = _resolved_record(caplog)
+        assert rec is not None, "Expected admin_url_resolved INFO log"
+        assert rec.source == "local_dev"
 
     def test_09_admin_api_url_beats_local_dev(self, monkeypatch):
         """Case 9: LOCAL_DEV=true AND ADMIN_API_URL set → ADMIN_API_URL wins."""
@@ -137,28 +165,42 @@ class TestLocalDevEscapeHatch:
 class TestKubernetesInCluster:
     """In-cluster auto-detection."""
 
-    def test_11_kubernetes_service_host_triggers_in_cluster(self, monkeypatch):
-        """Case 11: KUBERNETES_SERVICE_HOST set, no admin/dev vars → short-form K8s URL."""
+    def test_11_kubernetes_service_host_triggers_in_cluster(self, monkeypatch, caplog):
+        """Case 11: KUBERNETES_SERVICE_HOST set, no admin/dev vars → short-form K8s URL; source=in_cluster_default."""
         _clear_all(monkeypatch)
         monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
-        assert get_admin_url() == "http://athena-admin-backend:8080"
+        with caplog.at_level(logging.INFO, logger="shared.admin_url"):
+            result = get_admin_url()
+        assert result == "http://athena-admin-backend:8080"
+        rec = _resolved_record(caplog)
+        assert rec is not None, "Expected admin_url_resolved INFO log"
+        assert rec.source == "in_cluster_default"
 
-    def test_12_in_cluster_true_triggers_in_cluster(self, monkeypatch):
-        """Case 12: IN_CLUSTER=true, no admin/dev vars → short-form K8s URL."""
+    def test_12_in_cluster_true_triggers_in_cluster(self, monkeypatch, caplog):
+        """Case 12: IN_CLUSTER=true, no admin/dev vars → short-form K8s URL; source=in_cluster_default."""
         _clear_all(monkeypatch)
         monkeypatch.setenv("IN_CLUSTER", "true")
-        assert get_admin_url() == "http://athena-admin-backend:8080"
+        with caplog.at_level(logging.INFO, logger="shared.admin_url"):
+            result = get_admin_url()
+        assert result == "http://athena-admin-backend:8080"
+        rec = _resolved_record(caplog)
+        assert rec is not None, "Expected admin_url_resolved INFO log"
+        assert rec.source == "in_cluster_default"
 
 
 class TestEmptyFallback:
     """Unresolvable configuration."""
 
     def test_13_all_empty_returns_empty_and_warns(self, monkeypatch, caplog):
-        """Case 13: All vars unset → returns '' and emits admin_url_not_configured warning."""
+        """Case 13: All vars unset → returns '' and emits admin_url_resolved(source=empty) + admin_url_not_configured warning."""
         _clear_all(monkeypatch)
-        with caplog.at_level(logging.WARNING, logger="shared.admin_url"):
+        with caplog.at_level(logging.INFO, logger="shared.admin_url"):
             result = get_admin_url()
         assert result == ""
+        # Both the resolved log (source=empty) and the warning must be present.
+        rec = _resolved_record(caplog)
+        assert rec is not None, "Expected admin_url_resolved INFO log even for empty path"
+        assert rec.source == "empty"
         assert any("admin_url_not_configured" in r.message for r in caplog.records)
 
 
