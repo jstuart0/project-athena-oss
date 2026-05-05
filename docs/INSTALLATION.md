@@ -475,6 +475,17 @@ kubectl -n athena-prod create secret generic athena-oidc \
   --from-literal=oidc-issuer=https://auth.example.com/application/o/athena-admin/
 ```
 
+#### Qdrant Persistent Storage
+
+Qdrant uses a PersistentVolumeClaim by default. Before applying `manifests/athena-prod/`, edit `qdrant.yaml` and replace `YOUR_STORAGE_CLASS` with your cluster's StorageClass:
+
+```bash
+kubectl get storageclass
+# Common values: standard, gp2, local-path, longhorn, ceph-block
+```
+
+**Migrating from emptyDir** (existing deployments): conversation memory and embeddings stored on emptyDir are lost when Qdrant pods restart. Migrating to PVC starts fresh — this is a one-time data loss for previously-running deployments. To preserve current memory: snapshot Qdrant collections via the API before applying, then restore after the new PVC mounts.
+
 #### Deploy Core Services
 
 `deploy.sh` runs a pre-flight check before applying manifests. It verifies that the `athena-prod` namespace exists and that the required secrets (`athena-db-credentials`, `athena-encryption`, `athena-oidc`) are present. If any are missing it aborts with an error pointing you to `create-secrets.sh`. To deploy:
