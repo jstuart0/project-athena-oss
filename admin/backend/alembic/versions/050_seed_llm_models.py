@@ -40,33 +40,36 @@ def upgrade():
     # These are the available models that can be used by the system.
     # endpoint_url comes from OLLAMA_URL environment variable
     ollama_url = OLLAMA_URL
-    op.execute(f"""
-        INSERT INTO llm_backends (
-            model_name, backend_type, endpoint_url, enabled, priority,
-            max_tokens, temperature_default, timeout_seconds, keep_alive_seconds,
-            description, created_at, updated_at, total_requests, total_errors
-        )
-        VALUES
-            ('qwen3:4b', 'ollama', '{ollama_url}', true, 50,
-             4096, 0.7, 90, -1,
-             'Qwen 3 4B - Default OSS model with good reasoning capabilities',
-             NOW(), NOW(), 0, 0),
+    op.get_bind().execute(
+        sa.text("""
+            INSERT INTO llm_backends (
+                model_name, backend_type, endpoint_url, enabled, priority,
+                max_tokens, temperature_default, timeout_seconds, keep_alive_seconds,
+                description, created_at, updated_at, total_requests, total_errors
+            )
+            VALUES
+                ('qwen3:4b', 'ollama', :ollama_url, true, 50,
+                 4096, 0.7, 90, -1,
+                 'Qwen 3 4B - Default OSS model with good reasoning capabilities',
+                 NOW(), NOW(), 0, 0),
 
-            ('llama3.2:3b', 'ollama', '{ollama_url}', true, 50,
-             4096, 0.7, 90, -1,
-             'Llama 3.2 3B - Fast, efficient model for general tasks',
-             NOW(), NOW(), 0, 0),
+                ('llama3.2:3b', 'ollama', :ollama_url, true, 50,
+                 4096, 0.7, 90, -1,
+                 'Llama 3.2 3B - Fast, efficient model for general tasks',
+                 NOW(), NOW(), 0, 0),
 
-            ('phi3:mini', 'ollama', '{ollama_url}', true, 50,
-             4096, 0.7, 90, -1,
-             'Phi-3 Mini - Microsoft small model, good for classification',
-             NOW(), NOW(), 0, 0)
-        ON CONFLICT (model_name) DO UPDATE SET
-            endpoint_url = EXCLUDED.endpoint_url,
-            enabled = EXCLUDED.enabled,
-            description = EXCLUDED.description,
-            updated_at = NOW()
-    """)
+                ('phi3:mini', 'ollama', :ollama_url, true, 50,
+                 4096, 0.7, 90, -1,
+                 'Phi-3 Mini - Microsoft small model, good for classification',
+                 NOW(), NOW(), 0, 0)
+            ON CONFLICT (model_name) DO UPDATE SET
+                endpoint_url = EXCLUDED.endpoint_url,
+                enabled = EXCLUDED.enabled,
+                description = EXCLUDED.description,
+                updated_at = NOW()
+        """),
+        {"ollama_url": ollama_url},
+    )
 
     # ============================================================================
     # 2. Seed Model Configurations
@@ -136,21 +139,30 @@ def upgrade():
     ]
 
     for component_name, display_name, description, category in components:
-        op.execute(f"""
-            INSERT INTO component_model_assignments (
-                component_name, display_name, description, category,
-                model_name, backend_type, enabled, created_at, updated_at
-            )
-            VALUES (
-                '{component_name}', '{display_name}', '{description}', '{category}',
-                '{default_model}', 'ollama', true, NOW(), NOW()
-            )
-            ON CONFLICT (component_name) DO UPDATE SET
-                display_name = EXCLUDED.display_name,
-                description = EXCLUDED.description,
-                category = EXCLUDED.category,
-                updated_at = NOW()
-        """)
+        op.get_bind().execute(
+            sa.text("""
+                INSERT INTO component_model_assignments (
+                    component_name, display_name, description, category,
+                    model_name, backend_type, enabled, created_at, updated_at
+                )
+                VALUES (
+                    :component_name, :display_name, :description, :category,
+                    :default_model, 'ollama', true, NOW(), NOW()
+                )
+                ON CONFLICT (component_name) DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    description = EXCLUDED.description,
+                    category = EXCLUDED.category,
+                    updated_at = NOW()
+            """),
+            {
+                "component_name": component_name,
+                "display_name": display_name,
+                "description": description,
+                "category": category,
+                "default_model": default_model,
+            },
+        )
 
     print("✓ Seeded LLM configuration:")
     print("  - 3 LLM backends (qwen3:4b, llama3.2:3b, phi3:mini)")
@@ -168,8 +180,12 @@ def downgrade():
         'tool_calling_super_complex', 'smart_home_control',
         'response_validator_primary', 'response_validator_secondary', 'fact_check_validation'
     ]
-    component_list = "', '".join(components)
-    op.execute(f"DELETE FROM component_model_assignments WHERE component_name IN ('{component_list}')")
+    params = {f"c{i}": c for i, c in enumerate(components)}
+    placeholders = ", ".join(f":c{i}" for i in range(len(components)))
+    op.get_bind().execute(
+        sa.text(f"DELETE FROM component_model_assignments WHERE component_name IN ({placeholders})"),
+        params,
+    )
 
     # Remove model configurations
     op.execute("DELETE FROM model_configurations WHERE model_name IN ('qwen3:4b', 'llama3.2:3b', 'phi3:mini', '_default')")

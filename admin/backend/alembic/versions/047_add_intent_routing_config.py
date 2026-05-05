@@ -56,11 +56,14 @@ def upgrade():
     ]
 
     for intent_name, display_name, priority in intents:
-        op.execute(f"""
-            INSERT INTO intent_routing_config (intent_name, display_name, routing_strategy, enabled, priority)
-            VALUES ('{intent_name}', '{display_name}', 'cascading', true, {priority})
-            ON CONFLICT (intent_name) DO NOTHING
-        """)
+        op.get_bind().execute(
+            sa.text("""
+                INSERT INTO intent_routing_config (intent_name, display_name, routing_strategy, enabled, priority)
+                VALUES (:intent_name, :display_name, 'cascading', true, :priority)
+                ON CONFLICT (intent_name) DO NOTHING
+            """),
+            {"intent_name": intent_name, "display_name": display_name, "priority": priority},
+        )
 
 
 def downgrade():

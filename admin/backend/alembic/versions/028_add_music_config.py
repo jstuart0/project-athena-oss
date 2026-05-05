@@ -123,11 +123,14 @@ def upgrade() -> None:
 
     # Seed default music config with 20 genres x 10 artists
     import json
-    genre_json = json.dumps(DEFAULT_GENRE_TO_ARTISTS).replace("'", "''")
-    op.execute(f"""
-        INSERT INTO music_config (genre_to_artists, genre_seed_selection_mode, default_volume)
-        VALUES ('{genre_json}'::jsonb, 'random', 0.5)
-    """)
+    genre_json = json.dumps(DEFAULT_GENRE_TO_ARTISTS)
+    op.get_bind().execute(
+        sa.text("""
+            INSERT INTO music_config (genre_to_artists, genre_seed_selection_mode, default_volume)
+            VALUES (:genre_json::jsonb, 'random', 0.5)
+        """),
+        {"genre_json": genre_json},
+    )
 
 
 def downgrade() -> None:
