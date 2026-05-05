@@ -7,6 +7,8 @@ Service URLs, model configurations, and other constants used throughout the orch
 import os
 from typing import Dict
 
+from shared.config import get_config
+
 # ============================================================================
 # RAG Service URLs
 # ============================================================================
@@ -31,7 +33,7 @@ DIRECTIONS_SERVICE_URL = os.getenv("RAG_DIRECTIONS_URL", "http://localhost:8022"
 MODE_SERVICE_URL = os.getenv("MODE_SERVICE_URL", "http://localhost:8021")
 
 # LLM (supports multiple env var names for flexibility)
-OLLAMA_URL = os.getenv("LLM_SERVICE_URL") or os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL = get_config().llm_endpoint
 
 # URL map for RAG service lookup
 RAG_SERVICE_URL_MAP: Dict[str, str] = {

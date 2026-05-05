@@ -25,9 +25,13 @@ from wyoming.tts import Synthesize
 from wyoming.audio import AudioStart, AudioChunk, AudioStop, wav_to_chunks
 from wyoming.event import Event
 
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
+
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, VoiceTest, VoiceTestFeedback, LLMPerformanceMetric, SystemSetting
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -53,7 +57,7 @@ def get_ollama_url(db: Session) -> str:
     setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
     if setting and setting.value:
         return setting.value
-    return os.getenv("OLLAMA_URL", "http://localhost:11434")
+    return get_config().ollama_url
 
 
 async def wyoming_transcribe(audio_path: str) -> dict:

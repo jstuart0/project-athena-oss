@@ -7,12 +7,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import structlog
+from shared.config import get_config
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -44,7 +47,7 @@ PROFILE_RUNS_KEY = "oss_profile_runs"
 RUNTIME_SYNC_KEY = "oss_runtime_sync"
 PROFILE_REGISTRY_STATE_KEY = "oss_profile_registry_state"
 
-DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+DEFAULT_OLLAMA_URL = get_config().ollama_url
 RESTART_HOOK_MODE = os.getenv("ATHENA_OSS_RESTART_HOOK_MODE", "manual").lower()
 
 DEFAULT_COMPONENTS = [

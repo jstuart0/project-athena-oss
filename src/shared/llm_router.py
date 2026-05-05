@@ -7,7 +7,6 @@ fallback.
 
 Open Source Compatible - No vendor lock-in.
 """
-import os
 import httpx
 import time
 from typing import Dict, Any, Optional, List
@@ -15,6 +14,7 @@ from enum import Enum
 from collections import deque
 import structlog
 from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -216,7 +216,7 @@ class LLMRouter:
                 )
                 config = {
                     "backend_type": "ollama",
-                    "endpoint_url": os.getenv("OLLAMA_URL", "http://localhost:11434"),
+                    "endpoint_url": get_config().ollama_url,
                     "max_tokens": 2048,
                     "temperature_default": 0.7,
                     "timeout_seconds": 60,
@@ -238,7 +238,7 @@ class LLMRouter:
             # Fall back to Ollama on Mac Studio
             return {
                 "backend_type": "ollama",
-                "endpoint_url": os.getenv("OLLAMA_URL", "http://localhost:11434"),
+                "endpoint_url": get_config().ollama_url,
                 "max_tokens": 2048,
                 "temperature_default": 0.7,
                 "timeout_seconds": 60,
@@ -392,7 +392,7 @@ class LLMRouter:
                         error=str(e)
                     )
                     # Fall back to Ollama on Mac Studio
-                    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+                    ollama_url = get_config().ollama_url
                     response = await self._generate_ollama(
                         ollama_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options,
                         system_prompt=system_prompt
@@ -972,7 +972,7 @@ class LLMRouter:
 
         Uses Ollama's native tool calling support (for models like llama3.1:8b).
         """
-        endpoint_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+        endpoint_url = get_config().ollama_url
         client = httpx.AsyncClient(base_url=endpoint_url, timeout=60.0)
 
         # Build payload

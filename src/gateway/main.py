@@ -28,6 +28,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.logging_config import configure_logging
+from shared.config import get_config
 from shared.ollama_client import OllamaClient
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
@@ -127,7 +128,7 @@ global_rate_limiter: Optional[TokenBucketRateLimiter] = None
 
 # Configuration (environment variable fallbacks - localhost defaults for development)
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_SERVICE_URL", "http://localhost:8001")
-OLLAMA_URL = os.getenv("LLM_SERVICE_URL") or os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL = get_config().llm_endpoint
 API_KEY = os.getenv("GATEWAY_API_KEY", "dummy-key")  # Optional for Phase 1
 ADMIN_API_URL = get_admin_url()
 SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")

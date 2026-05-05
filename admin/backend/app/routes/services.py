@@ -4,6 +4,8 @@ Service registry API routes.
 Provides CRUD operations for service management and health monitoring.
 """
 import os
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -17,6 +19,7 @@ import ssl
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, ServiceRegistry, ServerConfig, AuditLog
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -181,7 +184,7 @@ def create_audit_log(
 ENV_FALLBACKS = {
     "gateway": os.getenv("GATEWAY_URL", "http://localhost:8000"),
     "orchestrator": os.getenv("ORCHESTRATOR_URL", "http://localhost:8001"),
-    "ollama": os.getenv("OLLAMA_URL", "http://localhost:11434"),
+    "ollama": get_config().ollama_url,
     "redis": f"redis://{os.getenv('REDIS_SERVICE_HOST', 'redis')}:{os.getenv('REDIS_SERVICE_PORT', '6379')}",
     "qdrant": os.getenv("QDRANT_URL", "http://qdrant:6333"),
     "mlx": os.getenv("MLX_URL", ""),

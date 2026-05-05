@@ -5,6 +5,9 @@ Start, stop, restart Athena services and Ollama models.
 Uses Control Agent pattern for secure service management.
 """
 
+import os
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 from datetime import datetime
 from typing import List, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
@@ -17,7 +20,7 @@ import asyncio
 from app.database import get_db
 from app.models import AthenaService, User, LLMBackend, SystemSetting
 from app.auth.oidc import get_current_user
-import os
+from shared.config import get_config
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/service-control", tags=["service-control"])
@@ -36,7 +39,7 @@ def get_ollama_url(db: Session) -> str:
     setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
     if setting and setting.value:
         return setting.value
-    return os.getenv("OLLAMA_URL", "http://localhost:11434")
+    return get_config().ollama_url
 
 
 # Pydantic Models
