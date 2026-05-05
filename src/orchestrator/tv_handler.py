@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 from shared.ha_client import HomeAssistantClient
 from shared.admin_config import AdminConfigClient
+from shared.admin_url import get_admin_url
 
 logger = structlog.get_logger()
 
@@ -56,7 +57,7 @@ async def get_tv_configs() -> Dict[str, Dict[str, Any]]:
     if _tv_config_cache and (time.time() - _tv_config_cache_time) < TV_CONFIG_CACHE_TTL:
         return _tv_config_cache
 
-    admin_url = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+    admin_url = get_admin_url()
 
     try:
         async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
@@ -99,7 +100,7 @@ async def get_app_configs(guest_mode: bool = False) -> List[Dict[str, Any]]:
     if not guest_mode and _app_config_cache and (time.time() - _app_config_cache_time) < TV_CONFIG_CACHE_TTL:
         return _app_config_cache
 
-    admin_url = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+    admin_url = get_admin_url()
 
     try:
         params = {"guest_mode": "true"} if guest_mode else {}
@@ -130,7 +131,7 @@ async def get_feature_flag(feature_name: str) -> bool:
     if _feature_flag_cache and (time.time() - _feature_flag_cache_time) < TV_CONFIG_CACHE_TTL:
         return _feature_flag_cache.get(feature_name, False)
 
-    admin_url = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+    admin_url = get_admin_url()
 
     try:
         async with httpx.AsyncClient(timeout=5.0, verify=False) as client:

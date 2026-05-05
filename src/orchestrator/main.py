@@ -104,6 +104,7 @@ from shared.privacy_filter import (
     get_privacy_filter, configure_privacy_filter,
     filter_for_cloud, should_block_for_cloud
 )
+from shared.admin_url import get_admin_url
 
 # Modular context imports
 from orchestrator.context import (
@@ -10841,7 +10842,7 @@ async def list_models():
     """OpenAI-compatible models endpoint - returns actual available LLM backends."""
     try:
         # Fetch available backends from admin API
-        admin_url = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+        admin_url = get_admin_url()
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{admin_url}/api/llm-backends/public")
             response.raise_for_status()
