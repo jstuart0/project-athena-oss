@@ -106,10 +106,24 @@ By participating in this project, you agree to maintain a respectful and inclusi
 
 When contributing code that requires configuration:
 
-- **Never hardcode** IP addresses, hostnames, passwords, or API keys
-- Read configuration via `os.getenv("VAR_NAME")` (or `src/shared/config.py` for values already centralized there); prefer `os.getenv` directly for new code — not all services import `config.py`
-- Add every new environment variable to `.env.example` with a clear inline comment describing its purpose and an example value; this is the canonical reference for deployers
-- Use sensible defaults that work for local development, and emit a log warning when a required variable is missing rather than failing silently or falling back to a hardcoded value
+- **Never hardcode** IP addresses, hostnames, passwords, or API keys.
+- For configuration values modeled in `src/shared/config.py::AthenaConfig`, read them via `from shared.config import get_config; cfg = get_config(); cfg.field_name`.  See the module for the current field list.
+- For configuration values not yet in `AthenaConfig`, you have two options:
+  1. **(Preferred)** Add a new field to `AthenaConfig` in `src/shared/config.py`, document it in `.env.example`, and read via `get_config().field_name`.  This is how the OSS-First convention extends — every new env var lands in the central object.
+  2. Read directly via `os.getenv("VAR_NAME", default)` if the variable is local to a single module and unlikely to be needed elsewhere.  Document in `.env.example`.  Be aware that any other module needing the same value will end up duplicating the resolution logic — prefer option 1 for cross-cutting values.
+- Add every new environment variable to `.env.example` with a clear inline comment describing its purpose and an example value.
+- Use sensible defaults that work for local development; emit a log warning when a critical variable is missing rather than failing silently or falling back to a hardcoded value.
+
+### Adding a new field to `AthenaConfig`
+
+```python
+# In src/shared/config.py:
+class AthenaConfig(BaseSettings):
+    # ... existing fields ...
+    my_new_var: str = Field(default="")  # set MY_NEW_VAR in env
+```
+
+Then add a unit test in `tests/unit/test_config.py` mirroring the existing field-coverage tests (use `tests/unit/test_admin_url.py` as the template — it shows the autouse `_clear_cache_for_tests()` fixture pattern), and document the variable in `.env.example`.
 
 ## Module Development
 
