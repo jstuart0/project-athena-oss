@@ -23,8 +23,9 @@ athena = None
 def init_athena():
     global athena
     if athena is None:
-        # Set the HA token
-        os.environ['HA_TOKEN'] = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI4NjNhNWIwMDM3OTE0ODE1YTVlODkyZWUwNTMxMmIwZCIsImlhdCI6MTc2MjE4MzY0MiwiZXhwIjoyMDc3NTQzNjQyfQ.M-vSeDlQl3NvGrpeZ35QKat8OjTXA2z3559Hy96EC4A'
+        ha_token = os.getenv("HA_TOKEN", "")
+        if not ha_token:
+            logger.warning("HA_TOKEN not set — Home Assistant integration will fail")
         athena = AthenaLiteLLM()
         logger.info('Athena LLM service ready!')
 

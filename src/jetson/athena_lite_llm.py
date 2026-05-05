@@ -190,10 +190,14 @@ class AthenaLiteLLM:
 def test_intelligent_commands():
     """Test the intelligent command routing"""
     print("Testing Athena Lite with LLM integration...")
-    
-    # Set token for testing
-    os.environ['HA_TOKEN'] = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI4NjNhNWIwMDM3OTE0ODE1YTVlODkyZWUwNTMxMmIwZCIsImlhdCI6MTc2MjE4MzY0MiwiZXhwIjoyMDc3NTQzNjQyfQ.M-vSeDlQl3NvGrpeZ35QKat8OjTXA2z3559Hy96EC4A'
-    
+
+    if not os.environ.get('HA_TOKEN'):
+        print("HA_TOKEN not set — skipping HA tests")
+        return
+
+    # Use HA_TOKEN from environment (set HA_TOKEN before running this test)
+    os.environ['HA_TOKEN'] = os.environ.get('HA_TOKEN', '')
+
     try:
         athena = AthenaLiteLLM()
         
