@@ -6,12 +6,6 @@
  */
 
 (function() {
-    // Dependency check
-    if (!window.Router) {
-        console.error('[CommandPalette] Router not loaded. Check script order.');
-        return;
-    }
-
     const CommandPalette = {
         isOpen: false,
         selectedIndex: 0,
@@ -148,7 +142,7 @@
             if (command.action) {
                 command.action();
             } else if (command.route) {
-                Router.navigate(command.route);
+                showTab(command.route);
             }
         },
 
