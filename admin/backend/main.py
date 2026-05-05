@@ -6,6 +6,8 @@ Deploys to thor Kubernetes cluster.
 """
 
 import os
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src'))
 import httpx
 import socket
 import subprocess
@@ -23,6 +25,7 @@ from sqlalchemy.orm import Session
 import structlog
 
 from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_dev_data, seed_oss_defaults, seed_oss_features, seed_oss_conversation_settings, seed_oss_service_registry, seed_oss_base_knowledge, OSS_DEFAULT_MODEL, OSS_OLLAMA_URL, OSS_AUTO_PULL_MODELS, OSS_SEED_DEFAULTS
+from shared.config import get_config
 from app.services.calendar_sync import start_background_sync, stop_background_sync
 from app.auth.oidc import (
     oauth,
@@ -106,7 +109,7 @@ if DEV_MODE:
     logger.info("dev_mode_session_store", store="in_memory")
 else:
     # Production: Use Redis backend
-    REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
+    REDIS_URL = get_config().redis_url
     redis_client = Redis.from_url(REDIS_URL)
     session_store = RedisStore(connection=redis_client, prefix="athena_session:")
 

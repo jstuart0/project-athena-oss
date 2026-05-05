@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
 from shared.cache import CacheClient, cached
+from shared.config import get_config
 from shared.service_registry import register_service, unregister_service
 from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
@@ -31,7 +32,7 @@ logger = configure_logging("airports-rag")
 
 # Environment variables (fallback if database unavailable)
 FLIGHTAWARE_API_KEY = os.getenv("FLIGHTAWARE_API_KEY", "")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = get_config().redis_url
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8011"))
 SERVICE_NAME = "airports-rag"
 

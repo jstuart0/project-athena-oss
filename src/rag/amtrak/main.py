@@ -26,6 +26,7 @@ from contextlib import asynccontextmanager
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
 from shared.cache import CacheClient, cached
+from shared.config import get_config
 from shared.service_registry import startup_service, unregister_service
 from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
@@ -37,7 +38,7 @@ logger = configure_logging("amtrak-rag")
 SERVICE_NAME = "amtrak-rag"
 
 # Environment variables
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = get_config().redis_url
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8027"))
 
 # GTFS data directory

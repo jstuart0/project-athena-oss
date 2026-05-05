@@ -27,6 +27,7 @@ import feedparser
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
 from shared.cache import CacheClient, cached
+from shared.config import get_config
 from shared.service_registry import startup_service, unregister_service
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
@@ -50,7 +51,7 @@ API_FOOTBALL_KEY_DEFAULT = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_BASE_URL_DEFAULT = os.getenv("API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io")
 # OSS-First: configurable timezone; set DEFAULT_TIMEZONE in env (default: UTC).
 DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = get_config().redis_url
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8017"))
 
 # Fixed endpoints

@@ -3,7 +3,6 @@ Base RAG Service with Database Configuration
 Loads configuration from PostgreSQL and provides caching
 """
 
-import os
 import json
 import httpx
 import asyncio
@@ -13,6 +12,7 @@ from datetime import datetime, timedelta
 import asyncpg
 import redis.asyncio as redis
 import structlog
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -49,7 +49,7 @@ class BaseRAGService:
         self.db_pool = await asyncpg.create_pool(db_url, min_size=1, max_size=5)
 
         # Connect to Redis
-        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+        redis_url = get_config().redis_url
         self.redis_client = redis.from_url(redis_url)
 
         # Create HTTP client

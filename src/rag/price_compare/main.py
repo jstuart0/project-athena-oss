@@ -23,6 +23,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from shared.cache import cached, CacheClient
+from shared.config import get_config
 from shared.service_registry import startup_service, unregister_service
 from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
@@ -119,7 +120,7 @@ logger = configure_logging("price-compare-rag")
 
 SERVICE_NAME = "price-compare"
 SERVICE_PORT = int(os.getenv("PRICE_COMPARE_PORT", "8033"))
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = get_config().redis_url
 
 # Global clients
 cache: Optional[CacheClient] = None
