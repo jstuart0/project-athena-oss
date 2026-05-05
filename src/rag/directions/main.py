@@ -30,6 +30,7 @@ from shared.service_registry import startup_service, unregister_service
 from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
+from shared.admin_url import get_admin_url
 
 # Configure logging
 logger = configure_logging("directions-rag")
@@ -39,7 +40,7 @@ SERVICE_NAME = "directions-rag"
 # Environment variables (fallback if database unavailable)
 GOOGLE_DIRECTIONS_API_KEY = os.getenv("GOOGLE_DIRECTIONS_API_KEY", "")
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "")
-ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+ADMIN_API_URL = get_admin_url()
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SERVICE_PORT = int(os.getenv("DIRECTIONS_PORT", "8030"))
 

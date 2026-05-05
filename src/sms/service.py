@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple, List, Dict, Any
 
 from .splitter import split_for_sms
+from shared.admin_url import get_admin_url
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +250,7 @@ class SMSService:
             return cls(config)
 
         # Fallback to admin backend
-        admin_url = "http://localhost:8080"
+        admin_url = get_admin_url()
 
         async with httpx.AsyncClient() as client:
             # Get SMS settings

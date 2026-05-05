@@ -29,6 +29,7 @@ from shared.service_registry import startup_service, unregister_service
 from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
+from shared.admin_url import get_admin_url
 
 # Import ContentFetcher from orchestrator
 from orchestrator.search_providers.content_fetcher import ContentFetcher
@@ -63,7 +64,7 @@ async def load_config():
     try:
         # Fetch service-specific configuration from public endpoint
         async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-            admin_url = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+            admin_url = get_admin_url()
             response = await client.get(f"{admin_url}/api/site-scraper/config/public")
             if response.status_code == 200:
                 svc_config = response.json()

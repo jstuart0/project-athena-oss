@@ -27,6 +27,7 @@ import structlog
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from sqlalchemy import text
+from admin_url import get_admin_url
 
 # Configure logging
 structlog.configure(
@@ -40,7 +41,7 @@ logger = structlog.get_logger()
 # Configuration from environment
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8000")
-ADMIN_BACKEND_URL = os.getenv("ADMIN_BACKEND_URL", "http://localhost:8080")
+ADMIN_BACKEND_URL = get_admin_url()
 DEFAULT_ROOM = os.getenv("DEFAULT_ROOM", "guest")
 
 # Persistent session DB config
@@ -436,10 +437,7 @@ class SetTemperatureRequest(BaseModel):
 async def get_current_guest() -> Optional[Dict[str, Any]]:
     """Fetch current guest from admin backend using internal endpoint."""
     # Use internal cluster service URL for service-to-service calls
-    internal_url = os.getenv(
-        "ADMIN_INTERNAL_URL",
-        os.getenv("ADMIN_API_URL", "http://athena-admin-backend:8080")
-    )
+    internal_url = get_admin_url()
 
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2178,10 +2176,7 @@ async def set_freezer_temperature(request: SetApplianceTempRequest):
 
 # Room TV configs are now fetched dynamically from admin backend
 # Use internal endpoint for service-to-service calls
-ADMIN_INTERNAL_URL = os.getenv(
-    "ADMIN_INTERNAL_URL",
-    os.getenv("ADMIN_API_URL", "http://athena-admin-backend:8080")
-)
+ADMIN_INTERNAL_URL = get_admin_url()
 
 
 async def get_room_tv_configs() -> Dict[str, Dict[str, str]]:

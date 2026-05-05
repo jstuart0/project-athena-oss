@@ -30,6 +30,7 @@ from shared.cache import CacheClient, cached
 from shared.service_registry import startup_service, unregister_service
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
+from shared.admin_url import get_admin_url
 
 # Configure logging
 logger = configure_logging("sports-rag")
@@ -37,7 +38,7 @@ logger = configure_logging("sports-rag")
 SERVICE_NAME = "sports-rag"
 
 # Environment variables / defaults
-ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+ADMIN_API_URL = get_admin_url()
 SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 NEWS_GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")  # Optional key if provided via admin
 THESPORTSDB_API_KEY = os.getenv("THESPORTSDB_API_KEY", "3")  # Free tier key

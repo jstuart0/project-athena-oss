@@ -14,6 +14,7 @@ import structlog
 import httpx
 from shared.metrics import setup_metrics_endpoint
 from shared.logging_config import configure_logging
+from shared.admin_url import get_admin_url
 
 logger = configure_logging("media-rag")
 
@@ -32,7 +33,7 @@ setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 # Configuration
 OVERSEERR_URL = os.getenv("OVERSEERR_URL", "http://localhost:5055")
 OVERSEERR_API_KEY = os.getenv("OVERSEERR_API_KEY", "")
-ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+ADMIN_API_URL = get_admin_url()
 SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 
 # HTTP client
