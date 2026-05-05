@@ -27,12 +27,11 @@ from pydantic import BaseModel
 
 from shared.cache import cached
 from shared.service_registry import register_service, unregister_service
-from shared.logging_config import setup_logging
+from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
 
-setup_logging(service_name="brightdata-rag")
-logger = structlog.get_logger()
+logger = configure_logging("brightdata-rag")
 
 SERVICE_NAME = "brightdata"
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8040"))

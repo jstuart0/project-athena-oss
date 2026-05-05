@@ -13,8 +13,9 @@ from pydantic import BaseModel
 import structlog
 import httpx
 from shared.metrics import setup_metrics_endpoint
+from shared.logging_config import configure_logging
 
-logger = structlog.get_logger()
+logger = configure_logging("media-rag")
 
 SERVICE_NAME = "media-requests-rag"
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8029"))

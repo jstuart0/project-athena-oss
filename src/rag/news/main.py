@@ -35,9 +35,7 @@ from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
 
-# Configure logging
-configure_logging(service_name="news-rag")
-logger = structlog.get_logger()
+logger = configure_logging("news-rag")
 
 SERVICE_NAME = "news"
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8016"))

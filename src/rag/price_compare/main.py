@@ -24,7 +24,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from shared.cache import cached, CacheClient
 from shared.service_registry import startup_service, unregister_service
-from shared.logging_config import setup_logging
+from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
 
@@ -115,9 +115,7 @@ def get_minimum_price(query: str) -> float:
     return 0  # No minimum if product not recognized
 
 
-# Configure logging
-setup_logging(service_name="price-compare-rag")
-logger = structlog.get_logger()
+logger = configure_logging("price-compare-rag")
 
 SERVICE_NAME = "price-compare"
 SERVICE_PORT = int(os.getenv("PRICE_COMPARE_PORT", "8033"))

@@ -5,6 +5,8 @@ import httpx
 import asyncio
 import time
 
+pytestmark = pytest.mark.integration
+
 BASE_GATEWAY_URL = "http://localhost:8000"
 BASE_ORCHESTRATOR_URL = "http://localhost:8001"
 

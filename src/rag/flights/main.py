@@ -12,13 +12,12 @@ import structlog
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from shared.cache import cached
-from shared.logging_config import setup_logging
+from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.service_registry import register_service, unregister_service
 from shared.metrics import setup_metrics_endpoint
 
-setup_logging(service_name="flights-rag")
-logger = structlog.get_logger()
+logger = configure_logging("flights-rag")
 
 SERVICE_NAME = "flights"
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8013"))  # Default port

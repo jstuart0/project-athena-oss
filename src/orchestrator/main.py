@@ -1326,8 +1326,8 @@ async def get_model_for_component(component_name: str) -> str:
                     config = await admin_client.get_component_model(component_name)
                     if config and config.get("enabled"):
                         return config.get("model_name")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("get_model_for_component_failed", error=str(e))
 
     # Return from cache or fallback
     if component_name in _component_model_cache:
@@ -1555,7 +1555,8 @@ async def _get_preferred_cloud_model() -> Optional[tuple[str, str]]:
                                 default_model = config.get("default_model")
                                 if default_model:
                                     return (default_model, provider)
-            except Exception:
+            except Exception as e:
+                logger.warning("get_preferred_cloud_model_failed", provider=provider, error=str(e))
                 continue
 
     except Exception as e:
@@ -2558,8 +2559,8 @@ async def log_escalation_audit(session_id: str, rule_name: str, target: str, tri
                 }
             }
         )
-    except Exception:
-        pass  # Don't fail main flow for audit logging
+    except Exception as e:
+        logger.warning("log_escalation_audit_failed", error=str(e))  # Don't fail main flow for audit logging
 
 
 # ============================================================================
@@ -3090,8 +3091,8 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 context = await get_conversation_context(state.session_id)
                 if context and context.get("entities"):
                     has_context = True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("get_conversation_context_failed", error=str(e))
         if not has_context:
             state.intent = IntentCategory.GENERAL_INFO
             state.answer = ("I don't have memory of previous sessions. Each conversation starts fresh. "
@@ -6087,7 +6088,8 @@ def _direct_general_info_response(query: str) -> Optional[str]:
             from datetime import datetime, timezone as tz
             local_now = datetime.now(tz.utc).astimezone(ZoneInfo(DEFAULT_TIMEZONE))
             return f"It's {local_now.strftime('%-I:%M %p')}."
-        except Exception:
+        except Exception as e:
+            logger.warning("direct_time_response_failed", error=str(e))
             return None
 
     if normalized in {
@@ -6103,7 +6105,8 @@ def _direct_general_info_response(query: str) -> Optional[str]:
             from datetime import datetime, timezone as tz
             local_now = datetime.now(tz.utc).astimezone(ZoneInfo(DEFAULT_TIMEZONE))
             return f"Today is {local_now.strftime('%A, %B %-d, %Y')}."
-        except Exception:
+        except Exception as e:
+            logger.warning("direct_date_response_failed", error=str(e))
             return None
 
     return None
@@ -6250,8 +6253,8 @@ Response:"""
                     if _entry.get("category") in ("owner", "user") and _entry.get("key") in ("owner_name", "name"):
                         owner_name = _entry.get("value", "").strip() or None
                         break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("synthesize_node_owner_name_failed", error=str(e))
 
         system_context = await build_core_assistant_prompt(
             include_voice_formatting=state.interface_type != "chat",
@@ -7813,8 +7816,8 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                     if _ow_entry.get("category") in ("owner", "user") and _ow_entry.get("key") in ("owner_name", "name"):
                         _tool_owner_name = _ow_entry.get("value", "").strip() or None
                         break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("tool_call_node_owner_name_failed", error=str(e))
 
         # Owner identity fast-path: answer "what is my name" deterministically
         if _tool_owner_name and _tool_user_mode == "owner":
@@ -11216,8 +11219,8 @@ Response:"""
                 if _s_entry.get("category") in ("owner", "user") and _s_entry.get("key") in ("owner_name", "name"):
                     _stream_owner_name = _s_entry.get("value", "").strip() or None
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("build_synthesis_prompt_for_streaming_owner_name_failed", error=str(e))
 
     system_context = await build_core_assistant_prompt(
         include_voice_formatting=state.interface_type != "chat",

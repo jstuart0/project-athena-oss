@@ -26,16 +26,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from shared.cache import cached, CacheClient
 from shared.service_registry import startup_service, unregister_service
-from shared.logging_config import setup_logging
+from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
 
 # Import ContentFetcher from orchestrator
 from orchestrator.search_providers.content_fetcher import ContentFetcher
 
-# Configure logging
-setup_logging(service_name="site-scraper-rag")
-logger = structlog.get_logger()
+logger = configure_logging("site-scraper-rag")
 
 SERVICE_NAME = "site-scraper"
 SERVICE_PORT = int(os.getenv("SITE_SCRAPER_PORT", "8031"))

@@ -2462,7 +2462,7 @@ class GatewayConfig(Base):
     intent_timeout_seconds = Column(Integer, nullable=False, default=5)
 
     # Timeouts
-    orchestrator_timeout_seconds = Column(Integer, nullable=False, default=60)
+    orchestrator_timeout_seconds = Column(Integer, nullable=False, default=120)
 
     # Session Management
     session_timeout_seconds = Column(Integer, nullable=False, default=300)

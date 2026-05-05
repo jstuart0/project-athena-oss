@@ -26,13 +26,11 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from shared.cache import cached
-from shared.logging_config import setup_logging
+from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
 
-# Configure logging
-setup_logging(service_name="serpapi-events-rag")
-logger = structlog.get_logger()
+logger = configure_logging("serpapi-events-rag")
 
 SERVICE_NAME = "serpapi-events"
 SERVICE_PORT = int(os.getenv("SERPAPI_EVENTS_PORT", "8032"))

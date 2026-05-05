@@ -114,6 +114,7 @@ device_session_mgr: Optional[DeviceSessionManager] = None
 admin_client = None  # Admin API client for configuration
 metric_client: Optional[httpx.AsyncClient] = None  # Shared client for metric logging
 ha_client: Optional[httpx.AsyncClient] = None  # Shared client for Home Assistant API
+orchestrator_timeout: float = 120.0  # Resolved at startup from DB config; audit bob:5
 
 # Gateway configuration (loaded from database)
 # This is the centralized configuration object fetched from Admin API
@@ -226,6 +227,7 @@ async def lifespan(app: FastAPI):
     global orchestrator_client, ollama_client, device_session_mgr, admin_client, gateway_config
     global orchestrator_circuit_breaker, global_rate_limiter
     global metric_client, ha_client
+    global orchestrator_timeout
 
     # Kill any existing process on gateway port before starting
     gateway_port = int(os.getenv("GATEWAY_PORT", "8000"))
@@ -259,11 +261,11 @@ async def lifespan(app: FastAPI):
         # value is empty — after bob:1 changes the column default to '', fresh rows
         # would produce '' here without this form.
         orchestrator_url = gateway_config.get("orchestrator_url") or ORCHESTRATOR_URL
-        orchestrator_timeout = gateway_config.get("orchestrator_timeout_seconds", 60)
+        orchestrator_timeout = gateway_config.get("orchestrator_timeout_seconds", 120)
     else:
         logger.warning("Gateway config not available from database, using environment variables")
         orchestrator_url = ORCHESTRATOR_URL
-        orchestrator_timeout = 60
+        orchestrator_timeout = 120
 
     orchestrator_client = httpx.AsyncClient(
         base_url=orchestrator_url,
@@ -1226,12 +1228,12 @@ async def stream_orchestrator_response(
             "extra_body": {"room": device_id or "unknown"}  # Pass room context
         }
 
-        # Stream from orchestrator
+        # Stream from orchestrator using the same timeout as non-streaming path (audit bob:5)
         async with orchestrator_client.stream(
             "POST",
             "/v1/chat/completions",
             json=payload,
-            timeout=120.0
+            timeout=float(orchestrator_timeout)
         ) as response:
             response.raise_for_status()
 
@@ -1832,8 +1834,8 @@ async def get_config():
                 "intent_temperature": 0.1,
                 "intent_max_tokens": 10,
                 "intent_timeout_seconds": 5,
-                "orchestrator_timeout_seconds": 60,
-                "orchestrator_timeout_seconds_resolved": 60,
+                "orchestrator_timeout_seconds": 120,
+                "orchestrator_timeout_seconds_resolved": 120,
             },
             "note": "Gateway config not in database, using defaults with centralized Ollama URL"
         }

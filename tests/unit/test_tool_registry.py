@@ -9,7 +9,8 @@ from dataclasses import dataclass
 
 # Import the tool registry components
 import sys
-sys.path.insert(0, '/Users/jaystuart/dev/project-athena/src')
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
 
 from shared.tool_registry import (
     Tool,

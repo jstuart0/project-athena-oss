@@ -33,12 +33,10 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import JSONResponse
 
-from shared.logging_config import setup_logging
+from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
 
-# Configure logging
-setup_logging(service_name="community-events-rag")
-logger = structlog.get_logger()
+logger = configure_logging("community-events-rag")
 
 SERVICE_NAME = "community-events"
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8026"))
