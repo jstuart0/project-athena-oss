@@ -47,7 +47,7 @@ from shared.admin_url import get_admin_url
 
 logger = structlog.get_logger()
 
-# Admin backend URL for service registry
+# Admin backend URL (resolved by shared.admin_url.get_admin_url)
 ADMIN_BACKEND_URL = get_admin_url()
 
 

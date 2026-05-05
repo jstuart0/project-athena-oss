@@ -95,6 +95,10 @@ JWT_SECRET=$(openssl rand -base64 32)
 ADMIN_API_URL=http://localhost:8080
 ```
 
+> **Admin URL resolution order** (`src/shared/admin_url.py`): `ADMIN_API_URL` → `ADMIN_BACKEND_URL` → `ADMIN_INTERNAL_URL` (deprecated) → `LOCAL_DEV=true` → K8s in-cluster auto-discovery → empty + warning. Set `ADMIN_API_URL` explicitly in all deployments. `ADMIN_INTERNAL_URL` is accepted as a low-priority fallback for backward compatibility but is deprecated and will be removed in a future release.
+>
+> **Upgrade note (2026-05-06)**: If you previously set `ADMIN_INTERNAL_URL` specifically to override `ADMIN_API_URL` for jarvis-web internal calls, set `ADMIN_API_URL` directly instead. The variable is still accepted as a low-priority fallback but will be removed in a future release.
+
 ### 3. Start with Docker Compose
 
 ```bash

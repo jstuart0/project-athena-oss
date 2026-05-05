@@ -89,7 +89,7 @@ class LLMRouter:
     Routes LLM requests to configured backends.
 
     Usage:
-        router = LLMRouter(admin_url="http://localhost:8080")
+        router = LLMRouter()  # admin_url resolved via ADMIN_API_URL env var
         response = await router.generate(
             model="phi3:mini",
             prompt="Hello world",

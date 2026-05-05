@@ -370,7 +370,7 @@ kubectl apply -f apps/jarvis-web/k8s/deployment.yaml
 |----------|---------|-------------|
 | `ORCHESTRATOR_URL` | `http://localhost:8001` | Orchestrator endpoint |
 | `GATEWAY_URL` | `http://localhost:8000` | Gateway endpoint (for LiveKit proxy) |
-| `ADMIN_BACKEND_URL` | `http://localhost:8080` | Admin API (for guest mode) |
+| `ADMIN_API_URL` | (see `src/shared/admin_url.py` resolver) | Admin API URL — set `LOCAL_DEV=true` for `http://localhost:8080` fallback |
 | `HA_URL` | — | Home Assistant URL (for smart home widgets) |
 | `HA_TOKEN` | — | Home Assistant long-lived access token |
 | `VOICE_API_URL` | — | STT/TTS endpoint (for push-to-talk voice) |

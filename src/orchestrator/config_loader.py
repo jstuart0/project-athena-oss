@@ -18,7 +18,7 @@ from shared.admin_url import get_admin_url
 
 logger = structlog.get_logger()
 
-# Admin API configuration
+# Admin API URL (resolved by shared.admin_url.get_admin_url)
 ADMIN_API_URL = get_admin_url()
 
 # Redis connection (optional - graceful degradation if not available)

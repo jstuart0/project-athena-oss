@@ -59,7 +59,7 @@ These MUST be set before starting services. Services will fail fast if missing.
 | Variable | Description | Generate With |
 |----------|-------------|---------------|
 | `ATHENA_DB_PASSWORD` | PostgreSQL password | `openssl rand -base64 24 \| tr -d '/+='` |
-| `ADMIN_API_URL` | Admin backend URL | Set to your admin server |
+| `ADMIN_API_URL` | Admin backend URL (see resolution order below) | Set to your admin server |
 | `ENCRYPTION_KEY` | API key encryption | `openssl rand -base64 32` |
 | `ENCRYPTION_SALT` | Encryption salt | `openssl rand -base64 16` |
 | `SESSION_SECRET_KEY` | Session signing | `openssl rand -base64 32` |
@@ -74,6 +74,14 @@ ENCRYPTION_SALT=xyz789...
 SESSION_SECRET_KEY=secret123...
 JWT_SECRET=jwtsecret...
 ```
+
+**`ADMIN_API_URL` resolution order** (`src/shared/admin_url.py`):
+1. `ADMIN_API_URL` — canonical; set this in all deployments
+2. `ADMIN_BACKEND_URL` — accepted alias for backward compatibility
+3. `ADMIN_INTERNAL_URL` — **DEPRECATED** alias; will be removed in a future release
+4. `LOCAL_DEV=true` — resolves to `http://localhost:8080` (local-dev escape hatch when no env var is set)
+5. K8s in-cluster (`KUBERNETES_SERVICE_HOST` set) — resolves to `http://athena-admin-backend:8080`
+6. Empty string + warning log — callers will receive connection errors
 
 ---
 
@@ -428,9 +436,9 @@ ATHENA_DB_HOST=postgres.athena.svc.cluster.local
 ATHENA_DB_PORT=5432
 
 # Service Discovery
-ADMIN_API_URL=http://athena-admin-backend.athena.svc.cluster.local:8080
-ORCHESTRATOR_URL=http://athena-orchestrator.athena.svc.cluster.local:8001
-GATEWAY_URL=http://athena-gateway.athena.svc.cluster.local:8000
+ADMIN_API_URL=http://athena-admin-backend:8080
+ORCHESTRATOR_URL=http://athena-orchestrator.athena-prod.svc.cluster.local:8001
+GATEWAY_URL=http://athena-gateway.athena-prod.svc.cluster.local:8000
 
 # Infrastructure
 REDIS_URL=redis://redis.athena.svc.cluster.local:6379/0

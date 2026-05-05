@@ -155,8 +155,8 @@ class AthenaConfig:
         if require_admin and not self.admin_api_url:
             errors.append(
                 f"ADMIN_API_URL is required but not set.\n"
-                f"  Set via environment variable: export ADMIN_API_URL='http://admin-backend:8080'\n"
-                f"  Or in .env file: ADMIN_API_URL=http://admin-backend:8080"
+                f"  Set via environment variable: export ADMIN_API_URL=http://your-admin-backend:8080\n"
+                f"  Or in .env file: ADMIN_API_URL=http://your-admin-backend:8080"
             )
 
         # Required: Security keys (for admin backend)
