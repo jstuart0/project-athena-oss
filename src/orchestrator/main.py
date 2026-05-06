@@ -511,12 +511,13 @@ async def get_conversation_context(session_id: str) -> Optional[ConversationCont
         return None
 
     # Try Redis first with timeout to prevent hanging on dead Redis
-    if cache_client and cache_client.client:
+    cache = _runtime.get_cache_client()
+    if cache and cache.client:
         try:
             context_key = f"athena:context:{session_id}"
             # Use asyncio.wait_for to prevent hanging on dead Redis connections
             context_json = await asyncio.wait_for(
-                cache_client.client.get(context_key),
+                cache.client.get(context_key),
                 timeout=2.0  # 2 second timeout
             )
             if context_json:
@@ -1825,6 +1826,9 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     Also detects and handles multi-intent queries.
     """
     start = time.time()
+    cache = _runtime.get_cache_client()
+    llm = _runtime.get_llm_router()
+    classifier = _runtime.get_intent_classifier()
 
     # STT error correction for common Whisper transcription mistakes
     # Apply early so all classification paths use the corrected query
@@ -2062,8 +2066,8 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     # MULTI-INTENT DETECTION
     # Check if query contains multiple intents (e.g., "turn on the lights and what's the weather")
     # Skip for sequence commands - they should be handled as a single unit
-    if intent_classifier and not state.is_multi_intent and not is_sequence_command:
-        intent_parts = intent_classifier.detect_multi_intent(state.query)
+    if classifier and not state.is_multi_intent and not is_sequence_command:
+        intent_parts = classifier.detect_multi_intent(state.query)
         if len(intent_parts) > 1:
             logger.info(
                 f"Multi-intent detected: '{state.query[:50]}...' split into {len(intent_parts)} parts",
@@ -2272,7 +2276,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
     try:
         if not skip_cache:
-            cached = await cache_client.get(cache_key)
+            cached = await cache.get(cache_key)
             if state.timing_tracker:
                 state.timing_tracker.track_substage("graph", "classify", "cache_check", time.time() - cache_start)
             if cached:
@@ -2307,7 +2311,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -2358,7 +2362,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -2416,7 +2420,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -2452,7 +2456,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -2487,7 +2491,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -2533,7 +2537,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -2586,7 +2590,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
                     # Cache the classification for future queries
                     try:
-                        await cache_client.set(cache_key, {
+                        await cache.set(cache_key, {
                             "intent": state.intent.value,
                             "confidence": state.confidence,
                             "complexity": state.complexity,
@@ -2674,7 +2678,7 @@ Respond in JSON format:
         classifier_model = classifier_config["model_name"]
 
         llm_start = time.time()
-        result = await llm_router.generate(
+        result = await llm.generate(
             model=classifier_model,
             prompt=full_prompt,
             temperature=0.3,  # Lower temperature for consistent classification
@@ -2976,7 +2980,7 @@ Respond in JSON format:
                     query=state.query,
                     current_intent=state.intent.value if state.intent else "unknown",
                     current_confidence=state.confidence,
-                    llm_router=llm_router,
+                    llm_router=llm,
                     admin_api_url=ADMIN_API_URL
                 )
 
@@ -3013,7 +3017,7 @@ Respond in JSON format:
 
         # OPTIMIZATION: Cache the result (5 minute TTL)
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,  # NEW: Cache complexity
@@ -3526,6 +3530,7 @@ async def execute_tools_parallel(
 
     results = {}
     admin_client = get_admin_client()
+    rag = _runtime.get_rag_client()
 
     # Execute all tool calls concurrently
     async def execute_single_tool(tool_call: Dict[str, Any]) -> tuple:
@@ -3648,7 +3653,7 @@ async def execute_tools_parallel(
             # Special handling for get_sports_scores (requires two-step flow)
             if function_name == "get_sports_scores":
                 # Update RAG client URL for sports service
-                rag_client.update_service_url("sports", service_url)
+                rag.update_service_url("sports", service_url)
 
                 try:
                     # Step 1: Search for team to get team_id
@@ -3661,7 +3666,7 @@ async def execute_tools_parallel(
                     if league:
                         search_params["league"] = league
 
-                    search_response = await rag_client.get(
+                    search_response = await rag.get(
                         "sports",
                         "/sports/teams/search",
                         params=search_params
@@ -3722,9 +3727,9 @@ async def execute_tools_parallel(
 
                     # Step 2: Get last events, next events, AND live scores (parallel)
                     last_response, next_response, live_response = await asyncio.gather(
-                        rag_client.get("sports", f"/sports/events/{team_id}/last"),
-                        rag_client.get("sports", f"/sports/events/{team_id}/next"),
-                        rag_client.get("sports", f"/sports/scores/live", params={"league": live_league, "team": team_full_name}),
+                        rag.get("sports", f"/sports/events/{team_id}/last"),
+                        rag.get("sports", f"/sports/events/{team_id}/next"),
+                        rag.get("sports", f"/sports/scores/live", params={"league": live_league, "team": team_full_name}),
                         return_exceptions=True
                     )
 
@@ -3783,14 +3788,14 @@ async def execute_tools_parallel(
 
             # Special handling for get_sports_standings (league-wide rankings)
             if function_name == "get_sports_standings":
-                rag_client.update_service_url("sports", service_url)
+                rag.update_service_url("sports", service_url)
 
                 try:
                     league = arguments.get("league", "nfl")
                     limit = arguments.get("limit", 10)
                     logger.info(f"Fetching standings for league: {league}")
 
-                    standings_response = await rag_client.get(
+                    standings_response = await rag.get(
                         "sports",
                         "/sports/standings",
                         params={"league": league, "limit": limit}
@@ -4202,7 +4207,7 @@ async def execute_tools_parallel(
             rag_service_name = service_name_map.get(function_name, function_name.replace("get_", "").replace("search_", ""))
 
             # Update RAG client with dynamic service URL
-            rag_client.update_service_url(rag_service_name, service_url)
+            rag.update_service_url(rag_service_name, service_url)
 
             logger.info(f"Calling tool {function_name} via RAG client ({rag_service_name}) with args: {arguments}")
 
@@ -4218,7 +4223,7 @@ async def execute_tools_parallel(
             if function_name == "search_web":
                 try:
                     from orchestrator.parallel_search import get_parallel_search_engine
-                    parallel_engine = await get_parallel_search_engine(rag_client)
+                    parallel_engine = await get_parallel_search_engine(rag)
                     query = arguments.get("query", "")
                     max_results = arguments.get("count", 5)
 
@@ -4243,10 +4248,10 @@ async def execute_tools_parallel(
 
             if function_name in get_tools:
                 # GET request with query params
-                response = await rag_client.get(rag_service_name, endpoint, params=arguments)
+                response = await rag.get(rag_service_name, endpoint, params=arguments)
             else:
                 # POST request with JSON body
-                response = await rag_client.post(rag_service_name, endpoint, json=arguments)
+                response = await rag.post(rag_service_name, endpoint, json=arguments)
 
             if not response.success:
                 raise Exception(response.error or f"Tool {function_name} call failed")
@@ -4337,6 +4342,9 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
     from orchestrator.rag_tools import get_rag_tools
 
     start = time.time()
+    rag = _runtime.get_rag_client()
+    psearch = _runtime.get_parallel_search_engine()
+    llm = _runtime.get_llm_router()
 
     # Granular timing for tool_call node debugging
     timing_breakdown = {}
@@ -4873,7 +4881,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
 
         # Call LLM with tools
         llm_call_start = time.time()
-        llm_response = await llm_router.generate_with_tools(
+        llm_response = await llm.generate_with_tools(
             model=llm_model,
             messages=messages,
             tools=tools,
@@ -4955,7 +4963,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
 
                 try:
                     # Call the directions RAG service directly using GET with query params
-                    rag_response = await rag_client.get(
+                    rag_response = await rag.get(
                         "directions",
                         "/directions/route",
                         params={"origin": origin, "destination": destination, "mode": "driving"}
@@ -5088,7 +5096,7 @@ Provide a helpful answer:"""
                                 synthesis_config = await get_component_config("response_synthesis")
                                 synthesis_model = synthesis_config["model_name"]
                                 fallback_start = time.time()
-                                synthesis_result = await llm_router.generate(
+                                synthesis_result = await llm.generate(
                                     model=synthesis_model,
                                     prompt=synthesis_prompt,
                                     temperature=0.7,
@@ -5267,7 +5275,7 @@ Provide a helpful answer:"""
 
                     try:
                         # Use parallel search engine for web search fallback
-                        intent, search_results = await parallel_search_engine.search(
+                        intent, search_results = await psearch.search(
                             query=enhanced_query,
                             location=DEFAULT_LOCATION,
                             limit_per_provider=10,
@@ -5386,7 +5394,7 @@ Provide a helpful answer:"""
 
                     logger.info(f"Web search fallback for empty '{function_name}' results: '{enhanced_query[:80]}...'")
 
-                    intent, search_results = await parallel_search_engine.search(
+                    intent, search_results = await psearch.search(
                         query=enhanced_query,
                         location=DEFAULT_LOCATION,
                         limit_per_provider=10,
@@ -5538,7 +5546,7 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
         logger.info("Calling LLM to synthesize final response from tool results")
 
         synthesis_start_time = time.time()
-        final_response = await llm_router.generate_with_tools(
+        final_response = await llm.generate_with_tools(
             model=synthesis_model,
             messages=messages,
             tools=None,  # Don't provide tools during synthesis - just generate response
@@ -5962,6 +5970,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
     if orchestrator_graph is None:
         orchestrator_graph = create_orchestrator_graph()
 
+    sm = _runtime.get_session_manager()
+
     # Track request
     request_counter.labels(intent="unknown", status="started").inc()
 
@@ -5995,7 +6005,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 user_id=user_id,
                 zone=request.room
             )
-            session = await session_manager.get_or_create_session(
+            session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room
@@ -6565,13 +6575,13 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         )
 
         # Save session (with trimming based on config)
-        await session_manager.add_message(
+        await sm.add_message(
             session_id=session.session_id,
             role="user",
             content=request.query,
             metadata={"intent": intent_str, "confidence": final_state.get("confidence")}
         )
-        await session_manager.add_message(
+        await sm.add_message(
             session_id=session.session_id,
             role="assistant",
             content=answer,
@@ -6792,6 +6802,8 @@ async def process_query_stream(request: QueryRequest):
     - Stage 3: Final answer (TRUE streaming - tokens as generated)
     """
     async def event_generator():
+        sm = _runtime.get_session_manager()
+        llm = _runtime.get_llm_router()
         try:
             start_time = time.time()
 
@@ -6819,7 +6831,7 @@ async def process_query_stream(request: QueryRequest):
                     )
 
             # Session management
-            session = await session_manager.get_or_create_session(
+            session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room
@@ -6965,7 +6977,7 @@ async def process_query_stream(request: QueryRequest):
 
                 response_tokens = []
                 try:
-                    async for chunk in llm_router.generate_stream(
+                    async for chunk in llm.generate_stream(
                         model=synthesis_model,
                         prompt=full_prompt,
                         temperature=request.temperature or 0.7,
@@ -7007,19 +7019,19 @@ async def process_query_stream(request: QueryRequest):
             #   stream_completed=True  → persist user + assistant messages (normal)
             #   stream_completed=False → persist user only; log if partial tokens emitted
             if stream_completed:
-                await session_manager.add_message(
+                await sm.add_message(
                     session_id=session.session_id,
                     role="user",
                     content=request.query,
                     metadata={"streaming": True}
                 )
-                await session_manager.add_message(
+                await sm.add_message(
                     session_id=session.session_id,
                     role="assistant",
                     content=full_answer
                 )
             else:
-                await session_manager.add_message(
+                await sm.add_message(
                     session_id=session.session_id,
                     role="user",
                     content=request.query,
@@ -7081,6 +7093,8 @@ async def process_query_stream_v2(request: QueryRequest):
     - {stage: 'complete', total_sentences: 2, full_response: '...', processing_time: 1.5}
     """
     async def sentence_event_generator():
+        sm = _runtime.get_session_manager()
+        llm = _runtime.get_llm_router()
         start_time = time.time()
 
         try:
@@ -7093,7 +7107,7 @@ async def process_query_stream_v2(request: QueryRequest):
                 orchestrator_graph = create_orchestrator_graph()
 
             # Session management
-            session = await session_manager.get_or_create_session(
+            session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=request.mode,
                 zone=request.room
@@ -7162,13 +7176,13 @@ async def process_query_stream_v2(request: QueryRequest):
             yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': len(sentences), 'full_response': answer, 'intent': intent_str, 'processing_time': processing_time})}\n\n"
 
             # Persist session to Redis so context carries across requests and pods
-            await session_manager.add_message(
+            await sm.add_message(
                 session_id=session.session_id,
                 role="user",
                 content=request.query,
                 metadata={"streaming": True}
             )
-            await session_manager.add_message(
+            await sm.add_message(
                 session_id=session.session_id,
                 role="assistant",
                 content=answer
@@ -7719,11 +7733,13 @@ async def chat_completions(request: OpenAIChatRequest):
         if request.stream:
             async def openai_stream_generator():
                 # Initialize state and run orchestrator
+                sm = _runtime.get_session_manager()
+                llm = _runtime.get_llm_router()
                 global orchestrator_graph
                 if orchestrator_graph is None:
                     orchestrator_graph = create_orchestrator_graph()
 
-                session = await session_manager.get_or_create_session(
+                session = await sm.get_or_create_session(
                     session_id="openwebui-session",
                     user_id="openwebui",
                     zone="web"
@@ -7856,7 +7872,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     # For text/chat: stream tokens directly (original behavior)
                     is_voice = interface_type == "voice"
 
-                    async for chunk in llm_router.generate_stream(
+                    async for chunk in llm.generate_stream(
                         model=synthesis_model,
                         prompt=full_prompt,
                         temperature=state.temperature,
@@ -8024,16 +8040,16 @@ async def handle_motion_event(request: MotionEventRequest):
     Returns:
         Status of the motion event processing
     """
-    global follow_me_service
+    fms = _runtime.get_follow_me_service()
 
-    if not follow_me_service:
+    if not fms:
         return {
             "status": "disabled",
             "message": "Follow-me audio service not initialized"
         }
 
     try:
-        await follow_me_service.handle_motion_event(
+        await fms.handle_motion_event(
             room_name=request.room,
             motion_detected=request.motion_detected,
             timestamp=request.timestamp
@@ -8043,7 +8059,7 @@ async def handle_motion_event(request: MotionEventRequest):
             "status": "ok",
             "room": request.room,
             "motion_detected": request.motion_detected,
-            "service_status": follow_me_service.get_status()
+            "service_status": fms.get_status()
         }
 
     except Exception as e:
@@ -8062,9 +8078,9 @@ async def get_follow_me_status():
     Returns:
         Current mode, active rooms, and presence state
     """
-    global follow_me_service
+    fms = _runtime.get_follow_me_service()
 
-    if not follow_me_service:
+    if not fms:
         return {
             "status": "disabled",
             "message": "Follow-me audio service not initialized"
@@ -8072,7 +8088,7 @@ async def get_follow_me_status():
 
     return {
         "status": "ok",
-        **follow_me_service.get_status()
+        **fms.get_status()
     }
 
 
@@ -8087,13 +8103,13 @@ async def set_follow_me_mode(mode: str):
     Returns:
         Updated status
     """
-    global follow_me_service
+    fms = _runtime.get_follow_me_service()
 
-    if not follow_me_service:
+    if not fms:
         return {"status": "disabled", "message": "Service not initialized"}
 
     try:
-        follow_me_service.set_mode(FollowMeMode(mode))
+        fms.set_mode(FollowMeMode(mode))
         return {"status": "ok", "mode": mode}
     except ValueError:
         return {"status": "error", "message": f"Invalid mode: {mode}"}
@@ -8110,12 +8126,12 @@ async def set_follow_me_enabled(enabled: bool):
     Returns:
         Updated status
     """
-    global follow_me_service
+    fms = _runtime.get_follow_me_service()
 
-    if not follow_me_service:
+    if not fms:
         return {"status": "disabled", "message": "Service not initialized"}
 
-    follow_me_service.set_enabled(enabled)
+    fms.set_enabled(enabled)
     return {"status": "ok", "enabled": enabled}
 
 
@@ -8143,7 +8159,8 @@ async def health_check(detailed: bool = False):
 
     # Check Home Assistant (optional - won't fail health check)
     try:
-        ha_healthy = await ha_client.health_check() if ha_client else False
+        _ha = _runtime.get_ha_client()
+        ha_healthy = await _ha.health_check() if _ha else False
         health["components"]["home_assistant"] = ha_healthy
     except Exception as e:
         health["components"]["home_assistant"] = False
@@ -8151,14 +8168,15 @@ async def health_check(detailed: bool = False):
 
     # Check LLM Router (supports Ollama, MLX, etc.)
     try:
-        health["components"]["llm_router"] = llm_router is not None
+        health["components"]["llm_router"] = _runtime.get_llm_router() is not None
     except Exception as e:
         health["components"]["llm_router"] = False
         logger.warning("health_check: llm_router probe failed", exc_info=e)
 
     # Check Redis (optional - caching degrades gracefully)
     try:
-        health["components"]["redis"] = await cache_client.ping() if cache_client else False
+        _cache = _runtime.get_cache_client()
+        health["components"]["redis"] = await _cache.ping() if _cache else False
     except Exception as e:
         health["components"]["redis"] = False
         logger.warning("health_check: redis probe failed", exc_info=e)
@@ -8193,16 +8211,18 @@ async def health_check(detailed: bool = False):
     # RAG services are optional - checking them all takes too long for health probes
     if detailed:
         try:
-            for name, url in rag_client._service_urls.items():
+            _rag = _runtime.get_rag_client()
+            for name, url in _rag._service_urls.items():
                 try:
-                    response = await rag_client.get(name, "/health", skip_circuit_breaker=True, skip_rate_limit=True)
+                    response = await _rag.get(name, "/health", skip_circuit_breaker=True, skip_rate_limit=True)
                     health["components"][f"rag_{name}"] = response.success
                 except Exception as e:
                     logger.debug(f"RAG service {name} health check failed: {e}")
                     health["components"][f"rag_{name}"] = False
         except Exception as e:
             logger.error(f"Failed to check RAG services: {e}")
-            for name in rag_client._service_urls.keys():
+            _rag = _runtime.get_rag_client()
+            for name in _rag._service_urls.keys():
                 health["components"][f"rag_{name}"] = False
 
     # Determine overall health
@@ -8497,7 +8517,7 @@ async def llm_metrics():
     - Per-backend breakdown
     """
     try:
-        metrics_data = llm_router.report_metrics()
+        metrics_data = _runtime.get_llm_router().report_metrics()
         return metrics_data
     except Exception as e:
         logger.error(f"Failed to retrieve LLM metrics: {e}")
@@ -8559,7 +8579,7 @@ async def get_session_details(session_id: str) -> SessionDetailResponse:
     Path Parameters:
     - session_id: Session identifier
     """
-    session = await session_manager.get_session(session_id)
+    session = await _runtime.get_session_manager().get_session(session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
@@ -8585,12 +8605,13 @@ async def delete_session(session_id: str):
     Path Parameters:
     - session_id: Session identifier
     """
-    session = await session_manager.get_session(session_id)
+    sm = _runtime.get_session_manager()
+    session = await sm.get_session(session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
-    await session_manager.delete_session(session_id)
+    await sm.delete_session(session_id)
 
     logger.info(f"Deleted session {session_id}")
 
@@ -8607,7 +8628,7 @@ async def export_session_history(session_id: str, format: str = "json"):
     Query Parameters:
     - format: Export format (json, text, markdown) - default: json
     """
-    session = await session_manager.get_session(session_id)
+    session = await _runtime.get_session_manager().get_session(session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
