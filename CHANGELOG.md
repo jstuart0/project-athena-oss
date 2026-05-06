@@ -9,6 +9,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `thoughts/shared/plans/2026-05-06-deliver-orchestrator-refactor.md`
+> **Ticket:** [ATHENA-10](https://plane.xmojo.net)
+> **Commits:** `615d7d0` → `14fcb73` (19 commits)
+
+Pure refactor — no behavior change. Decomposed `src/orchestrator/main.py` from 12,409 lines into an 8,758-line core plus 12 sibling modules. Zero new failures introduced; 209 new unit tests added (31 failed / 207 passed → 31 failed / 416 passed).
+
+### Added
+
+- `src/orchestrator/nodes/_runtime.py` — runtime singleton accessor (`_runtime.get_X()` / `_runtime.set_X()` / `_runtime.is_ready()` / `_runtime.missing_required()` / `_runtime.required_singletons()`). Singletons are set by lifespan, read at call time. Tests install fakes via setters directly. (#ATHENA-10)
+- `src/orchestrator/urls.py` — 15 module-level service URL constants previously scattered in `main.py`'s constant block. (#ATHENA-10)
+- `src/orchestrator/metrics.py` — 7 Prometheus metric declarations (`request_counter`, `request_duration`, `node_duration`, `tool_call_breakdown`, `validation_counter`, `hallucination_counter`, `validation_layer_duration`) moved verbatim from `main.py`. (#ATHENA-10)
+- `src/orchestrator/helpers.py` — 17 stateless helper functions extracted from `main.py`. Helpers that need runtime singletons call `_runtime.get_X()` at call time (Pattern 1). (#ATHENA-10)
+- `src/orchestrator/mode_permission.py` — 6 mode/permission helpers (`get_current_mode`, `detect_owner_mode_command`, `extract_pin_from_query`, `activate_owner_override`, `check_intent_permission`, `check_entity_permission`) plus `OWNER_MODE_PATTERNS` constant. (#ATHENA-10)
+- `src/orchestrator/nodes/route_info.py` — `route_info_node` (33 LOC, zero runtime dependencies). (#ATHENA-10)
+- `src/orchestrator/nodes/send_sms.py` — `send_sms_node`. (#ATHENA-10)
+- `src/orchestrator/nodes/notification_pref.py` — `notification_pref_node`. (#ATHENA-10)
+- `src/orchestrator/nodes/synthesize.py` — `synthesize_node`. (#ATHENA-10)
+- `src/orchestrator/nodes/validate.py` — `validate_node`. (#ATHENA-10)
+- `src/orchestrator/nodes/finalize.py` — `finalize_node`. (#ATHENA-10)
+- `src/orchestrator/nodes/route_control.py` — `route_control_node`. (#ATHENA-10)
+- `src/orchestrator/nodes/route_music.py` — `route_music_node`. (#ATHENA-10)
+- `src/orchestrator/nodes/route_tv.py` — `route_tv_node`. (#ATHENA-10)
+- `src/orchestrator/nodes/retrieve.py` — `retrieve_node` (largest single extraction; 538 LOC body). (#ATHENA-10)
+- 209 new unit tests across `tests/unit/test_helpers.py`, `test_mode_permission.py`, `test_route_info.py`, `test_send_sms_node.py`, `test_notification_pref.py`, `test_synthesize.py`, `test_validate.py`, `test_finalize.py`, `test_route_control.py`, `test_route_music.py`, `test_route_tv.py`, `test_retrieve.py`, `test_health_probes.py`. (#ATHENA-10)
+
+### Changed
+
+- `src/orchestrator/main.py` reduced from 12,409 → 8,758 lines (−3,651, ~29%). The 10 extracted node functions and 17 helpers are imported back into `main.py`'s graph builder; runtime behavior is byte-identical. (#ATHENA-10)
+- `src/orchestrator/main.py` runtime singletons: 97 bare module-level reads migrated to `_runtime.get_X()` call-time accessors. 16 bare `Optional[X] = None` module-level declarations removed. `global` keyword removed from lifespan. Lifespan dual-write removed (Phase 1.2 scaffolding); `_runtime.set_X()` is now the sole write path. (#ATHENA-10)
+- 6 bare-except blocks in `health_check` and `readiness_probe` replaced with `except Exception as e` + structured log with `exc_info=e`. (#ATHENA-10)
+
+### Notes
+
+- `src/orchestrator/state.py` is now the canonical source for `OrchestratorState`, `IntentCategory`, `ModelTier`, and `ConversationContext`. Duplicate definitions that had accumulated in `main.py` were removed in commit `8034360` (Phase 1.1). (#ATHENA-10)
+- `classify_node` (2,473 lines), `tool_call_node`, route handlers, and streaming functions remain in `main.py`. Extraction is deferred: `classify_node` to Campaign 2; `tool_call_node` to Campaign 1.3; route handlers to Campaign 1.5. (#ATHENA-10)
+- 14 proxy-class instances across `nodes/` share a common `__getattr__`-defers-to-`_runtime.get_X()` shape. Promotion to a shared `orchestrator.nodes._proxy.runtime_proxy()` factory is deferred to Campaign 2. (#ATHENA-10)
+- xander (security review) on Phase 3.1 surfaced 2 HIGH + 3 MEDIUM + 3 LOW pre-existing findings on the permission/PIN surface. All pre-existing; none introduced by this refactor. Tracked for a follow-up security-hardening campaign. (#ATHENA-10)
+
+---
+
+## [Unreleased]
+
 > **Plan:** `thoughts/shared/plans/2026-05-06-deliver-config-py-rebuild.md`
 > **Ticket:** [ATHENA-7](https://plane.xmojo.net)
 > **Commits:** `aaa989d`

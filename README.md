@@ -10,7 +10,7 @@ Commercial AI assistants route your data through cloud servers, add latency, and
 - **No backend lock-in** — use local models (Ollama, MLX), cloud APIs (OpenAI, Anthropic, any OpenAI-compatible endpoint), or a mix — per pipeline stage, your call
 - **Local-first by default** — can run 100% on your hardware with zero cloud dependencies, but cloud is always an option
 - **Built-in chat interface** — Jarvis Web provides streaming text chat, push-to-talk voice, and smart home widgets from any browser
-- **LangGraph state machine** — an 11,000+ line orchestrator with intent classification, complexity-aware model routing, and multi-intent query decomposition
+- **LangGraph state machine** — orchestrator with intent classification, complexity-aware model routing, and multi-intent query decomposition; pipeline core in `main.py` plus 12 sibling modules under `src/orchestrator/`
 - **23 RAG services** — specialized microservices for weather, sports, dining, flights, directions, news, stocks, recipes, and more
 - **Anti-hallucination pipeline** — 4-layer validation checks LLM responses against source data before delivery
 - **Smart home control** — deep Home Assistant integration with 70+ command patterns for lights, locks, thermostats, and more
@@ -427,7 +427,7 @@ curl -X POST http://localhost:8001/query \
 ```
 project-athena/
 ├── src/
-│   ├── orchestrator/        # LangGraph state machine (11,500+ lines)
+│   ├── orchestrator/        # LangGraph state machine; main.py + 12 sibling modules + nodes/
 │   │   ├── main.py          # Core orchestration graph
 │   │   ├── smart_home_controller.py  # HA integration
 │   │   ├── music_handler.py # Music/audio control
