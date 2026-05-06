@@ -376,7 +376,7 @@ async def handle_tool_creation_request(
 
     try:
         # Get LLM router for tool generation
-        llm_router = get_llm_router()
+        llm_router = _runtime.get_llm_router()
 
         # Generate tool definition from the request
         logger.info("generating_tool_definition", query=query[:100])
@@ -1359,8 +1359,7 @@ async def handle_query_with_bypass(
             system_prompt = f"{system_prompt}\n\nContext: {'; '.join(context_parts)}"
 
         # Generate with cloud LLM
-        from shared.llm_router import get_llm_router
-        llm_router = get_llm_router()
+        llm_router = _runtime.get_llm_router()
 
         bypass_start = time.time()
         response = await llm_router.generate(
@@ -8297,7 +8296,7 @@ async def warmup_session(session_id: str) -> dict:
         Status dict with session info
     """
     try:
-        session_manager = await get_session_manager()
+        session_manager = _runtime.get_session_manager()
         session = await session_manager.get_session(session_id)
 
         if session:
