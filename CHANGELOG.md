@@ -31,6 +31,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Deleted dead stub directories under `apps/`: `gateway/`, `orchestrator/`, `rag/`, `share-service/`, `shared/`, `validators/`. These were README-only placeholders with zero importers (verified by librarian agent at HEAD `03736ee`). The live `apps/jarvis-web/` (Jarvis voice/chat web UI) and `apps/chat-embed/` (CORS-relay proxy) are unchanged. (audit bob:6 / librarian:8, ATHENA-11 Phase 2)
 
+### Notes
+
+- This is **Campaign 1 of 6** in the audit-deferred remediation sequence. Subsequent campaigns cover: security-hardening (OIDC `iss` validation, JWT URL removal, SQLite `DEV_MODE` — xander); rate-limiting (`fastapi-limiter`); network policies + RBAC (otto:10); `BaseRAGService` migration (librarian:2/4); and remaining UI scope (ruby:2–10). Changes here are self-contained; none of those campaigns depend on this one shipping first.
+- Per-endpoint disabled-path route tests for Phase 6 (`debug_logs` status, `model_downloads` helper + create/retry/delete gates, `service_control` containers/ollama-health shape) are deferred — `admin/backend` lacks route-level test scaffolding at HEAD. (#ATHENA-11)
+
 ---
 
 ## [Unreleased]
