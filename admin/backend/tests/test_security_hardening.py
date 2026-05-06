@@ -1121,3 +1121,162 @@ class TestPhase1DevModePostgresGate:
             "xander:6 DEV_MODE gate must NOT fire when DEV_MODE=false; "
             f"got output: {combined!r}"
         )
+
+
+# -------------------------------------------------------------------
+# Phase 3 — xander:3 — Runtime-issuer assertion and discovery-doc gate
+# -------------------------------------------------------------------
+# MED-A: after configure_oauth_client() updates oidc_auth.OIDC_ISSUER from DB,
+# a second assertion catches an empty or CONFIGURE_ME placeholder issuer.
+# MED-E: the discovery-doc gate fetches metadata and asserts "issuer" is present
+# and matches the configured value (fail-closed; SystemExit on fetch failure too).
+#
+# Subprocess pattern is used (same as Phase 1/2) to drive startup_event() and
+# capture exact FATAL messages from stderr/stdout.
+
+
+class TestPhase3RuntimeIssuerAndDiscoveryGate:
+    """Phase 3 MED-A + MED-E startup gates (xander:3, ATHENA-12)."""
+
+    _PROD_SECRETS: dict = {
+        "SESSION_SECRET_KEY": "a" * 64,
+        "JWT_SECRET": "b" * 64,
+        "SERVICE_API_KEY": "c" * 64,
+    }
+
+    def _run_startup_subprocess(self, env_overrides: dict) -> "subprocess.CompletedProcess":
+        """Run startup_event() in a subprocess via TestClient (Phase 1/2 pattern)."""
+        import subprocess
+        import sys as _sys
+
+        env = os.environ.copy()
+        _repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        )
+        _src_path = os.path.join(_repo_root, "src")
+        _backend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [_src_path, _backend_path, existing_pythonpath])
+        )
+        for k, v in env_overrides.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+
+        script = (
+            "from fastapi.testclient import TestClient; "
+            "from main import app; "
+            "TestClient(app).__enter__()"
+        )
+        return subprocess.run(
+            [_sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=_backend_path,
+        )
+
+    def _prod_env(self, overrides: dict | None = None) -> dict:
+        base = {
+            "DEV_MODE": "false",
+            "OIDC_ISSUER": "https://idp.example.com/",
+            "OIDC_CLIENT_ID": "real-client-id-for-phase3-testing",
+            **self._PROD_SECRETS,
+        }
+        if overrides:
+            base.update(overrides)
+        return base
+
+    def test_phase3_configure_me_oidc_issuer_exits(self):
+        """MED-A: OIDC_ISSUER=CONFIGURE_ME_... must abort startup.
+
+        Both the env-var gate (main.py:352-358) and the runtime-issuer assertion
+        (MED-A gate added in Phase 3) reject CONFIGURE_ME-prefixed issuers.
+        This ensures neither gate can be bypassed.
+        """
+        result = self._run_startup_subprocess(
+            self._prod_env({"OIDC_ISSUER": "CONFIGURE_ME_OIDC_ISSUER"})
+        )
+        assert result.returncode != 0, (
+            f"Startup must exit non-zero for CONFIGURE_ME OIDC_ISSUER (MED-A); "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "FATAL" in combined, (
+            f"Error output must contain 'FATAL'; got: {combined!r}"
+        )
+        assert "OIDC" in combined, (
+            f"Error output must reference OIDC; got: {combined!r}"
+        )
+
+    def test_phase3_empty_oidc_issuer_exits(self):
+        """MED-A: empty OIDC_ISSUER must abort startup (env-var gate fires first)."""
+        env = self._prod_env()
+        env.pop("OIDC_ISSUER", None)  # simulate missing env var
+        result = self._run_startup_subprocess(env)
+        assert result.returncode != 0, (
+            f"Startup must exit non-zero for empty OIDC_ISSUER (MED-A); "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "FATAL" in combined, (
+            f"Error output must contain 'FATAL'; got: {combined!r}"
+        )
+
+    def test_phase3_claims_options_call_removed_static(self):
+        """Static: authorize_access_token() must NOT be called with a claims_options= kwarg (xander:3).
+
+        The pre-Phase-3 call was:
+            authorize_access_token(request, claims_options={"iss": {"essential": False}, ...})
+        Post-Phase-3 it must be:
+            authorize_access_token(request)
+        Check non-comment lines only.
+        """
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with open(os.path.join(backend_dir, "main.py")) as f:
+            src = f.read()
+
+        # Strip comment lines before checking so references in explanatory comments don't fire
+        code_lines = [l for l in src.splitlines() if not l.lstrip().startswith("#")]
+        code = "\n".join(code_lines)
+        assert "claims_options=" not in code, (
+            "claims_options= kwarg found in non-comment code of main.py — "
+            "the xander:3 token-validation bypass may have regressed."
+        )
+
+    def test_phase3_stale_comment_removed_static(self):
+        """Static: 'Skip ID token validation' comment must be absent from main.py (MED-B).
+
+        The old comment contradicted post-Phase-3 behavior; its presence would mislead
+        operators who read the code expecting validation to be disabled.
+        """
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with open(os.path.join(backend_dir, "main.py")) as f:
+            src = f.read()
+        assert "Skip ID token validation" not in src, (
+            "'Skip ID token validation' comment must not appear in main.py (MED-B); "
+            "it misrepresents post-Phase-3 behavior."
+        )
+
+    def test_phase3_oidc_discovery_gates_present_static(self):
+        """Static: MED-E and MED-A gate log keys must be present in main.py.
+
+        Confirms the discovery-doc gate and runtime-issuer assertion were not
+        accidentally removed by a future editor.
+        """
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with open(os.path.join(backend_dir, "main.py")) as f:
+            src = f.read()
+
+        for key in (
+            "oidc_runtime_issuer_unset",
+            "oidc_discovery_metadata_fetch_failed",
+            "oidc_discovery_missing_issuer",
+            "oidc_discovery_issuer_mismatch",
+        ):
+            assert key in src, (
+                f"Log key {key!r} must be present in main.py (MED-E/MED-A gate); "
+                "it may have been accidentally removed."
+            )

@@ -42,3 +42,6 @@ qdrant-client>=1.7.0
 # FastEmbed for lightweight embeddings (used by memory system)
 # Much lighter than sentence-transformers (~100MB vs ~3GB)
 fastembed>=0.2.0
+
+# test-only (Phase 3 OIDC fixture issuer; ATHENA-12)
+pytest-httpserver>=1.0.8

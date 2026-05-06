@@ -409,6 +409,79 @@ async def startup_event():
                 logger.info("oidc_configuration_loaded")
             except Exception as e:
                 logger.error("oidc_configuration_failed", error=str(e))
+
+            # MED-A (Phase 3) — re-check the runtime OIDC issuer after configure_oauth_client()
+            # because that function may load a different issuer from the DB
+            # (secrets.oidc_provider_url), which the earlier env-var gate at `:352-358` cannot
+            # see.  A compromised or misconfigured DB row would otherwise slip past the gate and
+            # produce a runtime issuer that's empty, a placeholder, or mismatched.
+            _runtime_issuer = oidc_auth.OIDC_ISSUER or ""
+            if not _runtime_issuer or _runtime_issuer.startswith("CONFIGURE_ME"):
+                logger.critical(
+                    "oidc_runtime_issuer_unset",
+                    source="db_or_env",
+                    message="Runtime OIDC issuer is empty or placeholder after configure_oauth_client() (MED-A).",
+                )
+                raise SystemExit(
+                    "FATAL: OIDC_ISSUER (loaded at runtime from DB or env) is empty or a placeholder. "
+                    "If using DB-stored OIDC config, ensure the secrets.oidc_provider_url row is populated. "
+                    "If using env vars, ensure OIDC_ISSUER is set."
+                )
+
+            # MED-E (Phase 3) — load the IdP's discovery document and assert it contains an
+            # "issuer" field that matches the configured issuer.  authlib's iss validation is
+            # conditional on the discovery doc returning "issuer"; if the doc is absent, malformed,
+            # or missing the field, authlib silently skips iss validation even after claims_options
+            # is removed.  Fail-closed: SystemExit on fetch failure OR missing "issuer" OR mismatch.
+            # (per codex r1b NEW-OQ-2: option B accepted; acceptable boot-time dependency on IdP.)
+            try:
+                _discovery_metadata = await oauth.authentik.load_server_metadata()
+            except Exception as _e:
+                logger.critical(
+                    "oidc_discovery_metadata_fetch_failed",
+                    error=str(_e),
+                    issuer=_runtime_issuer,
+                    message="OIDC discovery metadata fetch failed (MED-E). Cannot validate iss without it.",
+                )
+                raise SystemExit(
+                    f"FATAL: OIDC discovery metadata fetch failed: {_e}. "
+                    "Cannot validate ID-token issuer without conformant discovery metadata. "
+                    "Ensure OIDC_ISSUER points to a reachable, conformant IdP."
+                ) from _e
+
+            if "issuer" not in _discovery_metadata:
+                logger.critical(
+                    "oidc_discovery_missing_issuer",
+                    issuer=_runtime_issuer,
+                    message="Discovery doc has no 'issuer' field — authlib would silently skip iss validation (MED-E).",
+                )
+                raise SystemExit(
+                    "FATAL: OIDC discovery doc has no 'issuer' field. authlib silently skips "
+                    "iss validation in this case. Use a conformant IdP."
+                )
+
+            # Trailing-slash normalization: both Authentik and Keycloak may include or omit a
+            # trailing slash; compare stripped forms to avoid a false mismatch.
+            _config_issuer = _runtime_issuer.rstrip("/")
+            _doc_issuer = _discovery_metadata["issuer"].rstrip("/")
+            if _doc_issuer != _config_issuer:
+                logger.critical(
+                    "oidc_discovery_issuer_mismatch",
+                    configured=_config_issuer,
+                    discovered=_doc_issuer,
+                    message="Discovery doc issuer != configured OIDC_ISSUER — token validation would silently fail (MED-E).",
+                )
+                raise SystemExit(
+                    f"FATAL: OIDC discovery doc returns issuer={_doc_issuer!r} but "
+                    f"OIDC_ISSUER is configured as {_config_issuer!r}. "
+                    "Token iss validation would silently fail. Align your IdP configuration."
+                )
+
+            logger.info(
+                "oidc_discovery_issuer_verified",
+                issuer=_doc_issuer,
+                message="Discovery doc issuer matches configured OIDC_ISSUER (MED-E gate passed).",
+            )
         else:
             logger.error("database_connection_failed")
 
@@ -554,16 +627,13 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
 
     logger.info("auth_callback_received", query_params=str(request.query_params))
     try:
-        # Exchange authorization code for tokens
-        # Skip ID token validation - we fetch userinfo directly
-        token = await oauth.authentik.authorize_access_token(
-            request,
-            claims_options={
-                "iss": {"essential": False},
-                "aud": {"essential": False},
-                "exp": {"essential": False}
-            }
-        )
+        # Exchange authorization code for tokens. authlib's parse_id_token validates
+        # iss (against discovery metadata's "issuer" field), aud (against the registered
+        # client_id via IDToken.validate_azp), and exp by default.  The claims_options
+        # override that disabled these checks has been removed (xander:3 / Phase 3).
+        # A startup gate (MED-E) asserts the discovery doc contains "issuer" so that
+        # authlib's conditional iss validation is never silently skipped.
+        token = await oauth.authentik.authorize_access_token(request)
         access_token = token.get('access_token')
         logger.debug("token_exchange_complete", has_access_token=bool(access_token))
 
