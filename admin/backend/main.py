@@ -214,6 +214,25 @@ async def startup_event():
         # DEV_MODE: Use SQLite in-memory, skip external database checks
         logger.info("dev_mode_startup", message="Using SQLite in-memory database")
 
+        # xander:6 — DEV_MODE auto-creates an unauthenticated owner admin (oidc.py:401-421).
+        # Pairing it with a real DATABASE_URL lets that owner persist in production data.
+        # Use startswith("sqlite") rather than SQLAlchemy URL parsing — the threat is a
+        # deployer with a real PostgreSQL URL, not a malicious URL trying to evade detection;
+        # prefix-check is sufficient for the legitimate-misconfig case (see plan D-tradeoff).
+        _db_url = get_config().database_url
+        if _db_url and not _db_url.startswith("sqlite"):
+            logger.critical(
+                "dev_mode_with_real_database",
+                database_url_kind=_db_url.split(":", 1)[0],  # scheme only, NOT credentials
+                message="DEV_MODE=true with a non-SQLite DATABASE_URL is a deploy-shape mismatch (xander:6).",
+            )
+            raise SystemExit(
+                "FATAL: DEV_MODE=true is incompatible with a non-SQLite DATABASE_URL. "
+                "DEV_MODE auto-creates an unauthenticated owner admin (oidc.py:401-421); pairing it "
+                "with a real database grants owner-level API access without credentials. "
+                "Set DEV_MODE=false for production, or use a SQLite DATABASE_URL for local dev."
+            )
+
         # Initialize database schema
         try:
             init_db()

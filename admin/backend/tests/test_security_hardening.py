@@ -623,3 +623,156 @@ class TestTwilioSignatureValidation:
             assert exc_info.value.status_code == 403
         finally:
             sw.TWILIO_AUTH_TOKEN = original
+
+
+# -------------------------------------------------------------------
+# Phase 1 — xander:6 — DEV_MODE + real DATABASE_URL fail-fast gate
+# -------------------------------------------------------------------
+# The misconfig test uses subprocess.run() to drive startup_event() because
+# TestClient on Python 3.14 + anyio wraps SystemExit in a BaseExceptionGroup
+# that is logged as an asyncio shutdown error and re-surfaces as CancelledError —
+# losing the original message in the test-visible exception chain (codex-H3).
+# subprocess.run() gives clean isolation: env vars are exact, process exit code
+# is authoritative, and stderr contains the FATAL message verbatim.
+#
+# The "no abort" cases (sqlite and unset DATABASE_URL) still use TestClient
+# because they must verify the app reaches a healthy started state, not just
+# that it didn't print to stderr.
+#
+# get_config.cache_clear() is required between cases because pydantic-settings
+# BaseSettings is wrapped with @lru_cache; without it, env-var mutations are
+# invisible to subsequent get_config() calls in the same process.
+
+
+class TestPhase1DevModePostgresGate:
+    """xander:6: DEV_MODE=true + non-SQLite DATABASE_URL must abort startup."""
+
+    def _run_startup_subprocess(self, env_overrides: dict) -> "subprocess.CompletedProcess":
+        """Run startup_event() in a subprocess with env_overrides applied on top of os.environ."""
+        import subprocess
+        import sys
+
+        env = os.environ.copy()
+
+        # Ensure `shared` package is resolvable in the subprocess just as conftest.py does it.
+        # __file__ is admin/backend/tests/test_security_hardening.py; three levels up is repo root.
+        _repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        )
+        _src_path = os.path.join(_repo_root, "src")
+        _backend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [_src_path, _backend_path, existing_pythonpath])
+        )
+
+        for k, v in env_overrides.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+
+        # Drive startup via TestClient inside the subprocess — this triggers the lifespan.
+        # The subprocess exits with code 1 when startup raises SystemExit.
+        script = (
+            "from fastapi.testclient import TestClient; "
+            "from main import app; "
+            "TestClient(app).__enter__()"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=_backend_path,
+        )
+
+    def _run_startup_in_process(self, env_overrides: dict) -> None:
+        """
+        Run startup_event() inside the current process using TestClient.
+        Used for the "no abort" cases where we need to verify the app starts cleanly.
+        get_config.cache_clear() is called before/after to isolate pydantic-settings cache.
+        """
+        import sys
+        from shared.config import get_config
+
+        saved = {}
+        for k, v in env_overrides.items():
+            saved[k] = os.environ.get(k)
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+        try:
+            get_config.cache_clear()
+
+            # Re-import main so module-level DEV_MODE reflects the updated env
+            for mod_name in list(sys.modules.keys()):
+                if mod_name == "main" or mod_name.startswith("main."):
+                    del sys.modules[mod_name]
+
+            import main as _main
+            from fastapi.testclient import TestClient
+
+            with TestClient(_main.app, raise_server_exceptions=True):
+                pass
+        finally:
+            for k, orig_v in saved.items():
+                if orig_v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = orig_v
+            get_config.cache_clear()
+
+    def test_phase1_dev_mode_postgres_raises_system_exit(self):
+        """DEV_MODE=true + postgresql DATABASE_URL must abort startup (xander:6)."""
+        result = self._run_startup_subprocess({
+            "DEV_MODE": "true",
+            "DATABASE_URL": "postgresql://user:pass@localhost/testdb",
+        })
+        assert result.returncode != 0, (
+            "Startup must exit non-zero when DEV_MODE=true and DATABASE_URL is non-SQLite; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "FATAL" in combined, (
+            f"Startup output must contain 'FATAL' for xander:6 misconfig; got: {combined!r}"
+        )
+        assert "DEV_MODE" in combined, (
+            f"Startup output must mention 'DEV_MODE'; got: {combined!r}"
+        )
+
+    def test_phase1_dev_mode_sqlite_continues_normally(self):
+        """DEV_MODE=true + sqlite DATABASE_URL must NOT abort startup."""
+        self._run_startup_in_process({
+            "DEV_MODE": "true",
+            "DATABASE_URL": "sqlite:///:memory:",
+        })
+
+    def test_phase1_dev_mode_no_db_url_continues_normally(self):
+        """DEV_MODE=true + unset DATABASE_URL must NOT abort startup (in-memory SQLite fallback)."""
+        self._run_startup_in_process({
+            "DEV_MODE": "true",
+            "DATABASE_URL": None,  # None → pop from env
+        })
+
+    def test_phase1_production_postgres_no_fire(self):
+        """DEV_MODE=false + postgresql DATABASE_URL must NOT fire the DEV_MODE gate.
+
+        Production startup fails on its own terms (insecure default secrets) — the
+        xander:6 gate message must not appear in the output.
+        """
+        result = self._run_startup_subprocess({
+            "DEV_MODE": "false",
+            "DATABASE_URL": "postgresql://user:pass@localhost/testdb",
+            # Insecure defaults so production startup exits predictably on its own check
+            "SESSION_SECRET_KEY": "dev-secret-change-in-production",
+            "JWT_SECRET": "dev-secret-change-in-production",
+            "SERVICE_API_KEY": "dev-service-key-change-in-production",
+        })
+        combined = result.stdout + result.stderr
+        assert "DEV_MODE=true is incompatible" not in combined, (
+            "xander:6 DEV_MODE gate must NOT fire when DEV_MODE=false; "
+            f"got output: {combined!r}"
+        )
