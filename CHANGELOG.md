@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `thoughts/shared/plans/active-2026-05-06-deliver-audit-deferred-quick-wins.md`
+> **Ticket:** [ATHENA-11](https://plane.xmojo.net)
+> **Commits:** phases 1+2
+
+### Removed
+
+- Deleted dead stub directories under `apps/`: `gateway/`, `orchestrator/`, `rag/`, `share-service/`, `shared/`, `validators/`. These were README-only placeholders with zero importers (verified by librarian agent at HEAD `03736ee`). The live `apps/jarvis-web/` (Jarvis voice/chat web UI) and `apps/chat-embed/` (CORS-relay proxy) are unchanged. (audit bob:6 / librarian:8, ATHENA-11 Phase 2)
+
+---
+
+## [Unreleased]
+
 > **Plan:** `thoughts/shared/plans/2026-05-06-deliver-orchestrator-refactor.md`
 > **Ticket:** [ATHENA-10](https://plane.xmojo.net)
 > **Commits:** `615d7d0` → `14fcb73` (19 commits)
