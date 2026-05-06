@@ -1,0 +1,41 @@
+# ollama-model-pull-job
+#
+# Apply once via `./scripts/deploy.sh deploy --first-run` after the initial
+# Ollama deployment becomes available. Default `./scripts/deploy.sh deploy`
+# does NOT apply this file because Job spec.template.spec is immutable and
+# ttlSecondsAfterFinished: 300 makes successful Jobs vanish after 5 min,
+# so a re-apply check is unreliable.
+#
+# TODOs (production-hardening, tracked in docs/INSTALLATION.md):
+#   - Replace curlimages/curl:latest with a pinned tag.
+#   - Add backoffLimit to bound retries on pull failure (default is 6;
+#     consider 2-3 for a cleaner failure signal).
+#   - Reconcile hardcoded models (qwen3:4b, phi3:mini) with the runtime
+#     ConfigMap default (qwen3:4b-instruct-2507-q4_K_M). The Job pulls
+#     supplementary fast-startup models; the divergence is intentional for
+#     fast first-run but should be documented or aligned in a follow-up.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ollama-model-pull
+  namespace: athena-prod
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: model-puller
+        image: curlimages/curl:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Waiting for Ollama to be ready..."
+          sleep 30
+          echo "Pulling qwen3:4b..."
+          curl -X POST http://ollama:11434/api/pull -d '{"name": "qwen3:4b"}'
+          echo "Pulling phi3:mini..."
+          curl -X POST http://ollama:11434/api/pull -d '{"name": "phi3:mini"}'
+          echo "Models pulled successfully"

@@ -19,7 +19,7 @@ spec:
       containers:
       - name: orchestrator
         image: YOUR_REGISTRY/athena-orchestrator:latest
-        imagePullPolicy: Always
+        imagePullPolicy: Always  # DEV DEFAULT — flip to IfNotPresent and pin image tags for production. See docs/INSTALLATION.md#production-hardening-checklist.
         ports:
         - containerPort: 8001
         envFrom:

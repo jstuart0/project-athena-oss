@@ -488,11 +488,21 @@ kubectl get storageclass
 
 #### Deploy Core Services
 
-`deploy.sh` runs a pre-flight check before applying manifests. It verifies that the `athena-prod` namespace exists and that the required secrets (`athena-db-credentials`, `athena-encryption`, `athena-oidc`) are present. If any are missing it aborts with an error pointing you to `create-secrets.sh`. To deploy:
+`deploy.sh` runs a pre-flight check before applying manifests. It verifies that the `athena-prod` namespace exists and that the required secrets (`athena-db-credentials`, `athena-encryption`, `athena-oidc`) are present. If any are missing it aborts with an error pointing you to `create-secrets.sh`.
+
+#### First-time deployment (initial setup)
+
+On your first cluster deployment, pass `--first-run` to apply the one-shot Ollama model-pull Job and wait for it to complete before continuing. Without this, Ollama starts with no models loaded and LLM calls will fail with "model not found".
 
 ```bash
-./scripts/deploy.sh
+# First-time deployment — includes the one-shot model-pull Job
+./scripts/deploy.sh deploy --first-run
+
+# Subsequent deploys (after initial setup)
+./scripts/deploy.sh deploy
 ```
+
+> **Model note:** The first-run Job pulls `qwen3:4b` (smaller variant) for fast initial deployment; the runtime default in `manifests/athena-prod/config.yaml` is `qwen3:4b-instruct-2507-q4_K_M` (longer-context Q4 quant). Reconciling the two is tracked as a deferred follow-up — for now, the Admin Backend's `ATHENA_AUTO_PULL_MODELS` will pull the configured default on startup if it is not already available.
 
 Or apply manifests directly (no pre-flight):
 
@@ -858,6 +868,35 @@ curl http://compute-server:8001/health
 # 6379 - Redis
 # 11434 - Ollama
 ```
+
+---
+
+## Production Hardening Checklist {#production-hardening-checklist}
+
+The default manifests in `manifests/athena-prod/` are tuned for fast iteration, not production stability. Before running traffic at scale, address these items.
+
+### imagePullPolicy
+
+All manifests currently set `imagePullPolicy: Always`. This forces a registry round-trip on every pod restart.
+
+**Risk in production:** if your container registry is unreachable during a node drain or rolling restart, Kubernetes cannot pull the image and the pod will not start — even if the image is already cached on the node.
+
+**Operator action:**
+1. Pin all image tags to a specific digest or version (replace `:latest` with e.g. `:2026-05-06` or `@sha256:...`).
+2. Flip `imagePullPolicy: Always` to `imagePullPolicy: IfNotPresent` in every manifest under `manifests/athena-prod/`.
+3. Do steps 1 and 2 together — `IfNotPresent` with `:latest` will never re-pull even when you push a new image.
+
+### Image tags
+
+The Ollama Deployment (`ollama.yaml`) uses `ollama/ollama:latest` and the model-pull Job (`ollama-model-pull-job.yaml`) uses `curlimages/curl:latest`. Pin both to specific tags before running in production.
+
+### Model-pull Job backoffLimit
+
+`ollama-model-pull-job.yaml` does not set `backoffLimit`, so Kubernetes defaults to 6 retries. Consider setting `spec.backoffLimit: 2` or `3` for a cleaner failure signal if the initial pull fails.
+
+### Model divergence (Job vs. ConfigMap default)
+
+The first-run Job pulls `qwen3:4b` and `phi3:mini` (smaller, faster startup). The runtime ConfigMap default is `qwen3:4b-instruct-2507-q4_K_M` (longer-context Q4 quant). The two are intentionally different for fast first-run, but should be reconciled in a follow-up once the deployment is stable.
 
 ---
 
