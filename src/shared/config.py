@@ -22,9 +22,10 @@ vars before test fixtures have set them.
 
 Tests can reset the cache with ``_clear_cache_for_tests()``.
 
-Currently-modelled fields (Campaign 4)
-----------------------------------------
-Fields below cover 11 high-leverage env vars migrated in Campaign 4.  The
+Currently-modelled fields (Campaign 4 + ATHENA-11)
+---------------------------------------------------
+Fields below cover 12 env vars: 11 migrated in Campaign 4, plus
+``CONTROL_AGENT_ENABLED`` added in ATHENA-11 Phase 6.  The
 remaining ~220 env vars in the codebase are migrated per-PR as those areas
 are touched — see ``CONTRIBUTING.md`` for the extension pattern.
 

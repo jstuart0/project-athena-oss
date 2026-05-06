@@ -13,13 +13,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > **Ticket:** [ATHENA-11](https://plane.xmojo.net)
 > **Commits:** phases 1–6
 
+### Added
+
+- `admin/backend/alembic/versions/053_clear_legacy_gateway_config_ips.py` — data migration that clears legacy maintainer-IP defaults (`http://192.168.10.167:*`) from `gateway_config.orchestrator_url` and `gateway_config.ollama_fallback_url` rows; handles exact and trailing-slash variants. (audit bob:1 follow-up, ATHENA-11 Phase 5)
+- `manifests/athena-prod/ollama-model-pull-job.yaml` — Ollama model-pull Job extracted into its own manifest file. `scripts/deploy.sh` now accepts a `--first-run` flag; the Job apply/wait is gated behind `FIRST_RUN=true` so normal re-deploys skip it. (audit otto:11/12, ATHENA-11 Phase 3)
+
 ### Changed
 
 - **control-agent**: Control Agent is now opt-in via `CONTROL_AGENT_ENABLED` (default `false`). OSS deployers no longer see Control-Agent connection errors out of the box. Existing Mac-Studio-equipped deployments must set `CONTROL_AGENT_ENABLED=true` (and `CONTROL_AGENT_URL=<host>:8099`) in their env or kubeconfig overlay. Disabled-path responses are per-endpoint: 503 for download mutations, structured logs for orchestrator keepalive, neutral typed responses for service-control queries. (audit bob:4, ATHENA-11 Phase 6)
+- `docs/INSTALLATION.md`: `imagePullPolicy: Always` documented as dev-default; first-run vs. normal deploy flow clarified. (audit otto:11/12, ATHENA-11 Phase 3)
 
 ### Fixed
 
-- **db**: alembic migration 053 clears legacy maintainer-IP defaults from `gateway_config.orchestrator_url` and `gateway_config.ollama_fallback_url` rows (handles both exact and trailing-slash variants). Deployers upgrading from versions before commit `4f6b159` should run `alembic upgrade 053` to clear inherited defaults. (audit bob:1 follow-up, ATHENA-11 Phase 5)
+- **a11y**: added `for=`/`id=` associations to ~426 admin-frontend `<label>` elements across 28 files (WCAG 1.3.1, 4.1.2). Display-only label misuse converted to `<p>`/`<span>`. Wrapping labels (~41 residual) left as-is per containment rule. (audit ruby:1, ATHENA-11 Phase 4)
 
 ### Removed
 

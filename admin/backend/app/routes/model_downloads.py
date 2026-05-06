@@ -490,25 +490,29 @@ async def delete_download(
     if not download:
         raise HTTPException(status_code=404, detail="Download not found")
 
-    # Gate: when Control Agent is disabled and there's an on-host file to clean
-    # up, refuse rather than silently leave the file behind and delete the DB row.
-    # Record-only deletes (download_path is null) succeed without the agent.
-    if download.download_path and not get_config().control_agent_enabled:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Control Agent disabled — cannot clean up downloaded file. "
-                "Delete via filesystem or set CONTROL_AGENT_ENABLED=true."
-            ),
-        )
-
-    # Delete file if it exists
+    # Delete file if it exists.  Both guard branches must pass before the DB
+    # row is removed: (a) agent disabled → 503, (b) agent enabled but
+    # returning an error → 502.  Record-only deletes (no download_path) skip
+    # both checks and fall straight through to the DB delete.
     if download.download_path:
-        await call_control_agent(
+        if not get_config().control_agent_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Control Agent disabled — cannot clean up downloaded file. "
+                    "Delete via filesystem or set CONTROL_AGENT_ENABLED=true."
+                ),
+            )
+        success, result = await call_control_agent(
             "DELETE",
             "/huggingface/downloaded",
             params={"file_path": download.download_path}
         )
+        if not success:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Control Agent error: {result.get('error', 'unknown')}",
+            )
 
     # Delete record
     db.delete(download)

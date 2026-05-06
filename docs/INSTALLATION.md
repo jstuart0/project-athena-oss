@@ -452,7 +452,7 @@ pip install -r requirements.txt
 
 # 3. Run database migrations
 cd admin/backend
-alembic upgrade head
+alembic upgrade 053  # use 053, not head — repo has two alembic heads
 cd ../..
 
 # 4. Start services (in separate terminals)
@@ -890,14 +890,10 @@ ATHENA_SEED_DEFAULTS=true
 **Run migrations:**
 ```bash
 cd admin/backend
-alembic upgrade head
+alembic upgrade 053
 ```
 
-> **Note — two alembic heads:** this repo has a pre-existing divergence (`004a` legacy branch + primary chain). If `alembic upgrade head` fails with "Multiple head revisions are present," target the primary chain explicitly:
-> ```bash
-> alembic upgrade 053
-> ```
-> Merging/retiring the `004a` legacy branch is tracked as a separate follow-up campaign.
+> **Note — two alembic heads:** this repo has a pre-existing divergence between the `004a` legacy branch and the primary chain. Running `alembic upgrade head` will fail with "Multiple head revisions are present" because there is no single head. Always target the primary chain explicitly with `alembic upgrade 053`. Merging/retiring the `004a` legacy branch is tracked as a separate follow-up campaign.
 
 #### Migration 053 — clear legacy maintainer IPs from gateway_config (post-ATHENA-11)
 
@@ -921,7 +917,7 @@ primary chain) and `head` is ambiguous.
 # Drop and recreate
 dropdb athena
 createdb athena
-alembic upgrade head
+alembic upgrade 053  # use 053, not head — repo has two alembic heads
 ```
 
 ### Network Issues (Distributed Deployment)
