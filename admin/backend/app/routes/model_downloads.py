@@ -19,6 +19,7 @@ from app.auth.oidc import get_current_user
 from app.utils.encryption import decrypt_value
 from app.routes.websocket import broadcast_model_download_event
 from app.utils.service_auth import verify_service_api_key
+from shared.config import get_config
 
 
 def create_download_alert(
@@ -148,6 +149,8 @@ async def call_control_agent(
     timeout: float = 30.0
 ) -> tuple[bool, dict]:
     """Call Control Agent endpoint."""
+    if not get_config().control_agent_enabled:
+        return (False, {"error": "Control Agent disabled"})
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             url = f"{CONTROL_AGENT_URL}{endpoint}"
@@ -279,6 +282,8 @@ async def create_download(
     """Start a new model download."""
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not get_config().control_agent_enabled:
+        raise HTTPException(status_code=503, detail="Control Agent disabled")
 
     # Check if already exists
     existing = db.query(ModelDownload).filter(
@@ -424,6 +429,8 @@ async def retry_download(
     """Retry a failed download."""
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not get_config().control_agent_enabled:
+        raise HTTPException(status_code=503, detail="Control Agent disabled")
 
     download = db.query(ModelDownload).filter(ModelDownload.id == download_id).first()
     if not download:
@@ -482,6 +489,18 @@ async def delete_download(
     download = db.query(ModelDownload).filter(ModelDownload.id == download_id).first()
     if not download:
         raise HTTPException(status_code=404, detail="Download not found")
+
+    # Gate: when Control Agent is disabled and there's an on-host file to clean
+    # up, refuse rather than silently leave the file behind and delete the DB row.
+    # Record-only deletes (download_path is null) succeed without the agent.
+    if download.download_path and not get_config().control_agent_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Control Agent disabled — cannot clean up downloaded file. "
+                "Delete via filesystem or set CONTROL_AGENT_ENABLED=true."
+            ),
+        )
 
     # Delete file if it exists
     if download.download_path:

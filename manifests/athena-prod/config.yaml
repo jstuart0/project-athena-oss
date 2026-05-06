@@ -87,6 +87,14 @@ data:
   #   CONTROL_AGENT_URL: "http://192.168.1.100:8099"
   # When unset, services fall back to http://localhost:8099.
   # Do NOT set this to an empty string — unset the key entirely to use the default.
+  #
+  # Control Agent is opt-in (default disabled). Enable only if you run a Control
+  # Agent process on a host alongside Ollama (e.g., a Mac Studio or bare-metal node).
+  # Existing deployments must add CONTROL_AGENT_ENABLED=true via a private overlay
+  # or in-cluster env injection. See docs/INSTALLATION.md for operator instructions.
+  #
+  # CONTROL_AGENT_ENABLED: "true"
+  # CONTROL_AGENT_URL: "http://your-control-agent-host:8099"
 
   # Logging
   LOG_LEVEL: "INFO"

@@ -125,6 +125,24 @@ class AthenaConfig(BaseSettings):
 
 Then add a unit test in `tests/unit/test_config.py` mirroring the existing field-coverage tests (use `tests/unit/test_admin_url.py` as the template — it shows the autouse `_clear_cache_for_tests()` fixture pattern), and document the variable in `.env.example`.
 
+### Current `AthenaConfig` fields
+
+| Field | Env var | Default | Notes |
+|-------|---------|---------|-------|
+| `ollama_url` | `OLLAMA_URL` | `http://localhost:11434` | LLM inference endpoint |
+| `llm_service_url` | `LLM_SERVICE_URL` | `""` | Overrides `ollama_url` when set |
+| `llm_endpoint` | _(computed)_ | falls back to `ollama_url` | `llm_service_url` wins when non-empty |
+| `redis_url` | `REDIS_URL` | `redis://redis:6379/0` | In-cluster DNS default |
+| `database_url` | `DATABASE_URL` | `""` | PostgreSQL connection string |
+| `service_api_key` | `SERVICE_API_KEY` | `""` | Service-to-service auth key |
+| `default_timezone` | `DEFAULT_TIMEZONE` | `UTC` | |
+| `default_city` | `DEFAULT_CITY` | `""` | |
+| `oidc_issuer` | `OIDC_ISSUER` | `""` | Whitespace stripped |
+| `oidc_client_id` | `OIDC_CLIENT_ID` | `""` | Whitespace stripped |
+| `dev_mode` | `DEV_MODE` | `false` | |
+| `demo_mode` | `DEMO_MODE` | `false` | |
+| `control_agent_enabled` | `CONTROL_AGENT_ENABLED` | `false` | Opt-in; set `true` only if a Control Agent runs on a host alongside Ollama. Valid values: `true`/`false`/`1`/`0`. Do not set to a blank string. |
+
 ## Module Development
 
 When adding new modules or RAG services:

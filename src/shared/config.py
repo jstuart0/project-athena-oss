@@ -168,6 +168,17 @@ class AthenaConfig(BaseSettings):
     demo_mode: bool = Field(default=False)
 
     # ------------------------------------------------------------------
+    # Control Agent — opt-in feature flag (Campaign 1 / ATHENA-11)
+    # ------------------------------------------------------------------
+    # When False (default), all admin-backend and orchestrator call sites
+    # that talk to the Control Agent short-circuit with a per-endpoint
+    # "disabled" response that matches each route's existing typed contract.
+    # Set CONTROL_AGENT_ENABLED=true in your env only if you actually run
+    # a Control Agent on a host (e.g., a Mac Studio alongside Ollama).
+    # Valid values: true / false / 1 / 0. Do not set to a blank string.
+    control_agent_enabled: bool = Field(default=False)
+
+    # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern
     # ------------------------------------------------------------------
     # Fields below are NOT yet migrated to AthenaConfig.  They are listed
@@ -207,6 +218,7 @@ def get_config() -> AthenaConfig:
             "oidc_client_id_set": bool(config.oidc_client_id),
             "dev_mode": config.dev_mode,
             "demo_mode": config.demo_mode,
+            "control_agent_enabled": config.control_agent_enabled,
         },
     )
     return config

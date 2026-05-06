@@ -11,7 +11,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > **Plan:** `thoughts/shared/plans/active-2026-05-06-deliver-audit-deferred-quick-wins.md`
 > **Ticket:** [ATHENA-11](https://plane.xmojo.net)
-> **Commits:** phases 1–5
+> **Commits:** phases 1–6
+
+### Changed
+
+- **control-agent**: Control Agent is now opt-in via `CONTROL_AGENT_ENABLED` (default `false`). OSS deployers no longer see Control-Agent connection errors out of the box. Existing Mac-Studio-equipped deployments must set `CONTROL_AGENT_ENABLED=true` (and `CONTROL_AGENT_URL=<host>:8099`) in their env or kubeconfig overlay. Disabled-path responses are per-endpoint: 503 for download mutations, structured logs for orchestrator keepalive, neutral typed responses for service-control queries. (audit bob:4, ATHENA-11 Phase 6)
 
 ### Fixed
 

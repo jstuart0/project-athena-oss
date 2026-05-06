@@ -189,6 +189,7 @@ Deep Home Assistant integration (4,500+ lines) with:
 - Ollama (or any OpenAI-compatible LLM API)
 - Redis (optional, for session caching)
 - Home Assistant (optional, for smart home control)
+- Control Agent (optional, for host-level Ollama / Docker / launchd management — set `CONTROL_AGENT_ENABLED=true` + `CONTROL_AGENT_URL`; see [docs/INSTALLATION.md](docs/INSTALLATION.md))
 
 ### Chat-Only Setup
 

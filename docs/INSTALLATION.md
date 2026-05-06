@@ -378,6 +378,60 @@ FLIGHTAWARE_API_KEY=your-key
 
 ---
 
+## Control Agent (optional)
+
+The Control Agent is a lightweight HTTP server that runs **on the same host as Ollama** (or alongside any Docker / launchd services you want to manage). It gives Athena's admin backend the ability to start, stop, and restart Ollama, query Docker container status, and manage download of Hugging Face models to the host filesystem.
+
+**When you'd want it:**
+- Mac Studio / bare-metal deployments where Ollama runs as a local process (brew service or launchd)
+- Any deployment that uses the admin UI's Model Downloads or Mission Control panels
+- Hosts where you want Athena to auto-restart the gateway process via the orchestrator keepalive
+
+**When you don't need it:**
+- Pure Kubernetes deployments where Ollama runs inside the cluster (`ollama` deployment in the same namespace)
+- Read-only or chat-only deployments with no model management via the admin UI
+
+### Enabling the Control Agent
+
+Set two environment variables in your `.env` or private kubeconfig overlay:
+
+```bash
+CONTROL_AGENT_ENABLED=true
+CONTROL_AGENT_URL=http://your-control-agent-host:8099
+```
+
+The public `manifests/athena-prod/config.yaml` deliberately does **not** enable the Control Agent — it is host-specific infrastructure. Add these vars to your private overlay rather than editing the public manifest.
+
+### Starting the Control Agent
+
+On the host that runs Ollama:
+
+```bash
+cd path/to/project-athena/src/control_agent
+nohup python3 -m uvicorn main:app --host 0.0.0.0 --port 8099 > /tmp/control_agent.log 2>&1 &
+```
+
+Verify it is reachable:
+
+```bash
+curl http://your-host:8099/health
+curl http://your-host:8099/ollama/health
+```
+
+### Disabled-path behavior
+
+When `CONTROL_AGENT_ENABLED=false` (the default), all admin-backend routes and orchestrator startup that would normally contact the Control Agent short-circuit cleanly:
+
+- **Debug Logs panel** — shows "Control Agent is disabled" instead of trying to connect
+- **Model Downloads** — `create` / `retry` return HTTP 503 (no ghost DB rows); `delete` returns 503 when an on-host file would need cleanup; record-only deletes succeed
+- **Service Control containers** — returns an empty list (no 500 errors)
+- **Ollama health** — returns `status: control_agent_disabled`, `host: null`
+- **Orchestrator gateway keepalive** — logs `gateway_keepalive_skipped` and continues startup normally
+
+Valid values for `CONTROL_AGENT_ENABLED`: `true` / `false` / `1` / `0`. Do not set to a blank string.
+
+---
+
 ## Deployment Options
 
 ### Local Development

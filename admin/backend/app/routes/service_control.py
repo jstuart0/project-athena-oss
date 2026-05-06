@@ -212,6 +212,9 @@ async def get_containers_status(
     """Get real-time status of Athena containers from Control Agent."""
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not get_config().control_agent_enabled:
+        logger.info("control_agent_disabled", route="containers_status")
+        return []
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -228,7 +231,10 @@ async def get_containers_status(
     except httpx.ConnectError:
         raise HTTPException(
             status_code=503,
-            detail="Control Agent not reachable. Start it on Mac Studio."
+            detail=(
+                "Control Agent not reachable. Set CONTROL_AGENT_URL to the correct "
+                "host or set CONTROL_AGENT_ENABLED=false to disable."
+            ),
         )
     except Exception as e:
         logger.error("container_status_failed", error=str(e))
@@ -380,6 +386,8 @@ async def docker_service_action(container_name: str, action: str) -> Tuple[bool,
     Control Agent provides
     HTTP endpoints for secure Docker container management.
     """
+    if not get_config().control_agent_enabled:
+        return False, "Control Agent disabled"
     try:
         async with httpx.AsyncClient(timeout=65.0) as client:
             # Map action to Control Agent endpoint
@@ -397,7 +405,7 @@ async def docker_service_action(container_name: str, action: str) -> Tuple[bool,
 
     except httpx.ConnectError:
         logger.warning("control_agent_unreachable", container=container_name, action=action)
-        return False, f"Control Agent not reachable. Start it on Mac Studio: python -m control_agent.main"
+        return False, "Control Agent not reachable. Set CONTROL_AGENT_URL to the correct host or set CONTROL_AGENT_ENABLED=false to disable."
     except httpx.TimeoutException:
         return False, "Control Agent request timed out"
     except Exception as e:
@@ -412,6 +420,8 @@ async def process_service_action(port: int, action: str) -> Tuple[bool, str]:
     Control Agent provides
     HTTP endpoints for managing Python/uvicorn processes by port.
     """
+    if not get_config().control_agent_enabled:
+        return False, "Control Agent disabled"
     try:
         async with httpx.AsyncClient(timeout=65.0) as client:
             # Map action to Control Agent process endpoint
@@ -429,7 +439,7 @@ async def process_service_action(port: int, action: str) -> Tuple[bool, str]:
 
     except httpx.ConnectError:
         logger.warning("control_agent_unreachable", port=port, action=action)
-        return False, f"Control Agent not reachable. Start it on Mac Studio: python -m control_agent.main"
+        return False, "Control Agent not reachable. Set CONTROL_AGENT_URL to the correct host or set CONTROL_AGENT_ENABLED=false to disable."
     except httpx.TimeoutException:
         return False, "Control Agent request timed out"
     except Exception as e:
@@ -443,6 +453,8 @@ async def launchd_service_action(service_name: str, action: str) -> Tuple[bool, 
 
     Supports Ollama service start/stop/restart on macOS via brew services.
     """
+    if not get_config().control_agent_enabled:
+        return False, "Control Agent disabled"
     # For Ollama, map to the specific endpoint
     if "ollama" in service_name.lower():
         try:
@@ -466,7 +478,7 @@ async def launchd_service_action(service_name: str, action: str) -> Tuple[bool, 
 
         except httpx.ConnectError:
             logger.warning("control_agent_unreachable", service=service_name, action=action)
-            return False, f"Control Agent not reachable. Start it on Mac Studio: python -m control_agent.main"
+            return False, "Control Agent not reachable. Set CONTROL_AGENT_URL to the correct host or set CONTROL_AGENT_ENABLED=false to disable."
         except Exception as e:
             logger.error("launchd_action_failed", service=service_name, action=action, error=str(e))
             return False, f"Launchd control failed: {str(e)}"
@@ -520,6 +532,16 @@ async def get_ollama_health(
     """
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not get_config().control_agent_enabled:
+        return OllamaHealthResponse(
+            healthy=False,
+            status="control_agent_disabled",
+            api_reachable=False,
+            models_loaded=0,
+            version=None,
+            timestamp=datetime.utcnow().isoformat(),
+            host=None,
+        )
 
     # Get centralized Ollama URL for display
     ollama_url = get_ollama_url(db)

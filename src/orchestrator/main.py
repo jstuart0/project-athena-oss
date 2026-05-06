@@ -48,6 +48,7 @@ from shared.base_knowledge_utils import get_knowledge_context_for_user, get_home
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import register_exception_handlers, RateLimitError, ServiceUnavailableError
 from shared.config import get_config
+import shared.config as _shared_config  # alias to survive the orchestrator.config_loader rebinding below
 from shared.service_registry import get_service_url as registry_get_service_url
 from shared.metrics import record_tool_execution, get_metrics_text, record_timing_metrics
 
@@ -970,6 +971,11 @@ async def ensure_gateway_running() -> bool:
     Returns:
         True if gateway is running (or was started), False if failed
     """
+    # Check if Control Agent is disabled — if so, skip keepalive entirely.
+    if not _shared_config.get_config().control_agent_enabled:
+        logger.info("gateway_keepalive_skipped", reason="control_agent_disabled")
+        return True
+
     # Check if gateway startup is disabled
     start_gateway = os.getenv("START_GATEWAY", "true").lower() in ("true", "1", "yes")
     if not start_gateway:

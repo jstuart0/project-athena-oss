@@ -68,6 +68,7 @@ _CONTROLLED_VARS = (
     "OIDC_CLIENT_ID",
     "DEV_MODE",
     "DEMO_MODE",
+    "CONTROL_AGENT_ENABLED",
     # admin_url helper vars
     "ADMIN_URL",
     "ADMIN_API_URL",
@@ -179,6 +180,17 @@ class TestDefaults:
         _clear_all(monkeypatch)
         cfg = _TestConfig()
         assert cfg.demo_mode is False
+
+    def test_12b_control_agent_enabled_default(self, monkeypatch):
+        """CONTROL_AGENT_ENABLED unset → False (opt-in, OSS-safe default).
+
+        Set CONTROL_AGENT_ENABLED to true/false/1/0, or leave it unset.
+        Do not set to a blank string — pydantic-settings raises ValidationError
+        on bool fields when given an empty string.
+        """
+        _clear_all(monkeypatch)
+        cfg = _TestConfig()
+        assert cfg.control_agent_enabled is False
 
 
 # ---------------------------------------------------------------------------
@@ -377,3 +389,60 @@ class TestLazyFactory:
 
         _clear_cache_for_tests()
         assert get_config().demo_mode is False
+
+
+# ---------------------------------------------------------------------------
+# 7. CONTROL_AGENT_ENABLED — coercion and cache-reset
+# ---------------------------------------------------------------------------
+
+
+class TestControlAgentEnabled:
+    """CONTROL_AGENT_ENABLED field: truthy/falsy coercion and cache isolation.
+
+    Valid values: true / false / 1 / 0, or leave unset (defaults to False).
+    Do not set to a blank string — pydantic-settings raises ValidationError
+    on bool fields when given an empty string (by design; no custom validator).
+    """
+
+    def test_25_truthy_true(self, monkeypatch):
+        """CONTROL_AGENT_ENABLED=true → True."""
+        _clear_all(monkeypatch)
+        monkeypatch.setenv("CONTROL_AGENT_ENABLED", "true")
+        assert _TestConfig().control_agent_enabled is True
+
+    def test_26_truthy_1(self, monkeypatch):
+        """CONTROL_AGENT_ENABLED=1 → True."""
+        _clear_all(monkeypatch)
+        monkeypatch.setenv("CONTROL_AGENT_ENABLED", "1")
+        assert _TestConfig().control_agent_enabled is True
+
+    def test_27_falsy_false(self, monkeypatch):
+        """CONTROL_AGENT_ENABLED=false → False."""
+        _clear_all(monkeypatch)
+        monkeypatch.setenv("CONTROL_AGENT_ENABLED", "false")
+        assert _TestConfig().control_agent_enabled is False
+
+    def test_28_falsy_0(self, monkeypatch):
+        """CONTROL_AGENT_ENABLED=0 → False."""
+        _clear_all(monkeypatch)
+        monkeypatch.setenv("CONTROL_AGENT_ENABLED", "0")
+        assert _TestConfig().control_agent_enabled is False
+
+    def test_29_cache_reset_propagates_change(self, monkeypatch):
+        """lru_cache reset causes get_config() to re-read CONTROL_AGENT_ENABLED.
+
+        Without a cache clear, the cached False survives even after the env var
+        is changed to true.  After _clear_cache_for_tests(), the fresh instance
+        reflects the updated value.
+        """
+        _clear_all(monkeypatch)
+        # First call — env unset, should be False.
+        assert get_config().control_agent_enabled is False
+
+        # Change env without clearing cache — cached value must persist.
+        monkeypatch.setenv("CONTROL_AGENT_ENABLED", "true")
+        assert get_config().control_agent_enabled is False  # still cached False
+
+        # Clear cache — fresh instance must reflect the new env var.
+        _clear_cache_for_tests()
+        assert get_config().control_agent_enabled is True
