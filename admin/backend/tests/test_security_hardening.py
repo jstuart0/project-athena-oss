@@ -1314,3 +1314,206 @@ class TestPhase3RuntimeIssuerAndDiscoveryGate:
         combined = str(exc_info.value)
         assert "FATAL" in combined, f"Expected 'FATAL' in SystemExit message; got: {combined!r}"
         assert "OIDC_ISSUER" in combined, f"Expected 'OIDC_ISSUER' in message; got: {combined!r}"
+
+
+# -------------------------------------------------------------------
+# Phase 4 — xander:4 — JWT removed from OIDC/DEMO_MODE redirect URL
+# -------------------------------------------------------------------
+# Single coordinated commit: backend emits ?logged_in=1 (not ?token=<jwt>),
+# session is stored server-side, frontend fetches JWT via /api/auth/session-token.
+#
+# D1 (hybrid A+B): ?logged_in=1 is the callback-landing signal that tells the
+# frontend to clear stale localStorage before fetching from session.  Without
+# this signal the bookmark/revisit path (localStorage-first) is preserved unchanged.
+#
+# Two fixture shapes:
+#   test_client_with_demo_mode — DEV_MODE=true, DEMO_MODE=true, SQLite; uses the
+#     module-level app_client approach but with DEMO_MODE forced on.
+#   Static tests — read source files for structural invariants.
+#
+# The OIDC callback path (auth_callback) requires a real OIDC provider to drive
+# in integration; that fixture is out of scope here (Phase 3's pytest-httpserver
+# fixture is the correct vehicle).  We cover it with a static assertion.
+
+
+@pytest.fixture
+def demo_mode_client():
+    """
+    TestClient with DEV_MODE=true and DEMO_MODE=true.
+
+    DEMO_MODE triggers the auth_login bypass that issues a demo JWT and redirects.
+    Uses module-reload pattern so module-level DEV_MODE / DEMO_MODE captures
+    in database.py and main.py reflect the env vars.
+    """
+    import sys
+    from shared.config import get_config
+    from fastapi.testclient import TestClient
+    from app.database import Base
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    env_overrides = {
+        "DEV_MODE": "true",
+        "DEMO_MODE": "true",
+        "DATABASE_URL": "sqlite:///:memory:",
+    }
+    saved = {}
+    for k, v in env_overrides.items():
+        saved[k] = os.environ.get(k)
+        os.environ[k] = v
+
+    get_config.cache_clear()
+    _modules_to_evict = [
+        name for name in sys.modules
+        if name == "main" or name.startswith(("main.", "app.", "shared."))
+    ]
+    for name in _modules_to_evict:
+        del sys.modules[name]
+
+    import main as _main
+    from app.database import get_db
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    def override_get_db():
+        db = TestingSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    _main.app.dependency_overrides[get_db] = override_get_db
+
+    import app.utils.service_auth as _service_auth
+    _original_key = _service_auth.SERVICE_API_KEY
+    _service_auth.SERVICE_API_KEY = "test-service-key-for-hardening-tests"
+
+    with TestClient(_main.app, raise_server_exceptions=False) as client:
+        yield client
+
+    _service_auth.SERVICE_API_KEY = _original_key
+    _main.app.dependency_overrides.clear()
+
+    for k, orig_v in saved.items():
+        if orig_v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = orig_v
+    get_config.cache_clear()
+
+
+class TestPhase4JwtRemovedFromRedirectUrl:
+    """Phase 4 — xander:4: OIDC/DEMO_MODE redirects must not carry JWT in URL (ATHENA-12)."""
+
+    def test_phase4_demo_redirect_omits_token(self, demo_mode_client):
+        """xander:4 — DEMO_MODE /auth/login redirect must NOT contain ?token=."""
+        r = demo_mode_client.get("/auth/login", follow_redirects=False)
+        assert r.status_code in (302, 307), (
+            f"Expected redirect from /auth/login in DEMO_MODE; got {r.status_code}"
+        )
+        location = r.headers.get("location", "")
+        assert "token=" not in location, (
+            f"DEMO_MODE redirect must not carry JWT in URL; location={location!r}"
+        )
+
+    def test_phase4_demo_redirect_carries_logged_in_signal(self, demo_mode_client):
+        """xander:4 — DEMO_MODE /auth/login redirect must include ?logged_in=1 signal."""
+        r = demo_mode_client.get("/auth/login", follow_redirects=False)
+        assert r.status_code in (302, 307)
+        location = r.headers.get("location", "")
+        assert "logged_in=1" in location, (
+            f"DEMO_MODE redirect must include ?logged_in=1 callback-landing signal; "
+            f"location={location!r}"
+        )
+
+    def test_phase4_session_token_round_trip_after_demo_login(self, demo_mode_client):
+        """MED-D / tessa:5 — two-step assertion: callback stores JWT in session;
+        /api/auth/session-token returns the same JWT via the session cookie.
+
+        Step 1: hit /auth/login in DEMO_MODE → backend writes access_token to session.
+        Step 2: same TestClient (cookies persisted) → GET /api/auth/session-token → 200 + JWT.
+        """
+        # Step 1 — trigger the DEMO_MODE bypass and capture session cookie
+        r1 = demo_mode_client.get("/auth/login", follow_redirects=False)
+        assert r1.status_code in (302, 307), (
+            f"Expected redirect from /auth/login; got {r1.status_code}"
+        )
+
+        # Step 2 — same client carries the session cookie; fetch token via session endpoint
+        r2 = demo_mode_client.get("/api/auth/session-token")
+        assert r2.status_code == 200, (
+            f"session-token endpoint must return 200 after DEMO_MODE login; got {r2.status_code}"
+        )
+        data = r2.json()
+        assert data.get("token"), (
+            f"session-token response must contain a non-empty 'token' field; got: {data!r}"
+        )
+        # Sanity: it must be a three-segment JWT
+        assert data["token"].count(".") == 2, (
+            f"token must be a JWT (three dot-separated segments); got: {data['token']!r}"
+        )
+
+    def test_phase4_static_no_token_in_redirect_lines(self):
+        """Static safety net — no RedirectResponse with ?token= in main.py (xander:4)."""
+        import re
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with open(os.path.join(backend_dir, "main.py")) as f:
+            src = f.read()
+
+        # Strip comment lines so we don't flag explanatory comments
+        code_lines = [line for line in src.splitlines() if not line.lstrip().startswith("#")]
+        code = "\n".join(code_lines)
+
+        matches = re.findall(r'RedirectResponse[^)]*token=', code)
+        assert matches == [], (
+            f"Found ?token= inside a RedirectResponse call in main.py — "
+            f"xander:4 may have regressed: {matches}"
+        )
+
+    def test_phase4_static_logged_in_signal_in_backend(self):
+        """Static: backend must emit ?logged_in=1 in at least two redirect sites
+        (DEMO_MODE and OIDC callback)."""
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with open(os.path.join(backend_dir, "main.py")) as f:
+            src = f.read()
+
+        count = src.count("logged_in=1")
+        assert count >= 2, (
+            f"Expected at least 2 occurrences of 'logged_in=1' in main.py "
+            f"(DEMO_MODE redirect + OIDC callback redirect); found {count}"
+        )
+
+    def test_phase4_static_frontend_no_url_token_reader(self):
+        """Static: admin frontend must not read ?token= from the URL (xander:4)."""
+        frontend_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
+        )
+        for filename in ("auth.js", "app.js"):
+            fpath = os.path.join(frontend_dir, filename)
+            with open(fpath) as f:
+                content = f.read()
+            assert "urlParams.get('token')" not in content, (
+                f"{filename}: URL ?token= reader must be removed (xander:4); "
+                "frontend must fetch JWT via /api/auth/session-token after OIDC callback."
+            )
+
+    def test_phase4_static_frontend_logged_in_handler_present(self):
+        """Static: admin frontend must handle ?logged_in=1 in both auth.js and app.js."""
+        frontend_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
+        )
+        for filename in ("auth.js", "app.js"):
+            fpath = os.path.join(frontend_dir, filename)
+            with open(fpath) as f:
+                content = f.read()
+            assert "logged_in" in content, (
+                f"{filename}: must contain ?logged_in=1 handler for OIDC callback landing; "
+                "this clears stale localStorage on shared devices (codex-H1 fix)."
+            )

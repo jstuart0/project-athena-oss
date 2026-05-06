@@ -202,19 +202,19 @@ function toggleSidebarPin() {
 // ============================================================================
 
 async function checkAuthStatus() {
-    // Check for token in URL (from auth callback)
+    // xander:4 / codex-H1: detect OIDC callback landing via ?logged_in=1.
+    // Clear stale localStorage before evaluating auth so a previous user's token
+    // cannot authenticate the new user on a shared device.
     const urlParams = new URLSearchParams(window.location.search);
-    const token = urlParams.get('token');
-
-    if (token) {
-        authToken = token;
-        localStorage.setItem('auth_token', token);
-        // Remove token from URL
+    if (urlParams.get('logged_in') === '1') {
+        localStorage.removeItem('auth_token');
+        // Strip the query param from the URL — it has served its purpose.
         window.history.replaceState({}, document.title, window.location.pathname);
-    } else {
-        // Check localStorage
-        authToken = localStorage.getItem('auth_token');
     }
+    // (URL ?token= reader removed in xander:4 — JWT no longer emitted in URL.)
+
+    // Check localStorage (cleared above if we just landed from OIDC callback)
+    authToken = localStorage.getItem('auth_token');
 
     // If no token in localStorage, try to get from session
     if (!authToken) {

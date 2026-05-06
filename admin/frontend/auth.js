@@ -42,23 +42,25 @@
             AppState.setAuthState('checking');
 
             try {
-                // 1. Check for token in URL (from OAuth callback)
+                // xander:4 / codex-H1: detect OIDC callback landing via ?logged_in=1.
+                // On a fresh OIDC return the backend emits this hint instead of ?token=<jwt>.
+                // Clear stale localStorage so a previous user's token cannot contaminate
+                // the new session on a shared device (cross-user contamination fix).
                 const urlParams = new URLSearchParams(window.location.search);
-                const urlToken = urlParams.get('token');
-
-                if (urlToken) {
-                    // Remove token from URL for security
+                if (urlParams.get('logged_in') === '1') {
+                    localStorage.removeItem('auth_token');
+                    // Strip the query param from the URL for cleanliness — it has served its purpose.
                     window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
-                    return await this._validateAndSetToken(urlToken);
                 }
+                // (URL ?token= reader removed in xander:4 — JWT no longer emitted in URL.)
 
-                // 2. Check localStorage
+                // 1. Check localStorage (cleared above if we just landed from OIDC callback)
                 const storedToken = localStorage.getItem('auth_token');
                 if (storedToken) {
                     return await this._validateAndSetToken(storedToken);
                 }
 
-                // 3. Try session cookie
+                // 2. Try session cookie (primary path after OIDC callback)
                 const sessionToken = await this._getSessionToken();
                 if (sessionToken) {
                     return await this._validateAndSetToken(sessionToken);

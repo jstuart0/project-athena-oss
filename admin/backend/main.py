@@ -621,8 +621,15 @@ async def auth_login(request: Request, db: Session = Depends(get_db)):
             }
         )
 
+        # xander:4 — store JWT in session; never emit JWT in URL.
+        # xander:5 — explicit int() cast for JSON serialization safety on session store.
+        request.session['access_token'] = demo_token
+        request.session['user_id'] = int(demo_user.id)
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:8080")
-        return RedirectResponse(url=f"{frontend_url}?token={demo_token}")
+        # ?logged_in=1 is a client-side hint to clear stale localStorage before the
+        # frontend fetches the session token (codex-H1 mitigation for shared devices).
+        # NOT a security boundary — spoofing this param only triggers a localStorage clear.
+        return RedirectResponse(url=f"{frontend_url}?logged_in=1")
 
     # Normal OAuth flow
     # Use explicit HTTPS redirect URI from environment (not request.url_for which returns HTTP)
@@ -679,9 +686,10 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
 
         logger.info("user_authenticated", user_id=user.id, username=user.username)
 
-        # Redirect to frontend with token
+        # xander:4 — session already populated at the 'request.session' lines above;
+        # redirect with a callback-landing signal only — no JWT in URL.
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:8080")
-        return RedirectResponse(url=f"{frontend_url}?token={jwt_token}")
+        return RedirectResponse(url=f"{frontend_url}?logged_in=1")
 
     except Exception as e:
         logger.error("auth_callback_failed", error=str(e))
