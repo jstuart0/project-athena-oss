@@ -204,6 +204,91 @@ app.include_router(oss_profiles.router)
 app.include_router(conversations.router)
 
 
+async def _enforce_oidc_runtime_gates() -> None:
+    """
+    MED-A + MED-E production OIDC safety gates (codex r1b NEW-OQ-2 — fail-closed).
+
+    Called unconditionally in the production startup branch, AFTER configure_oauth_client()
+    has had a chance to update oidc_auth.OIDC_ISSUER from the DB.  Running inside the
+    `if check_db_connection():` block would let a transient DB failure silently skip
+    both gates, making the service fail-open — ian:23.
+
+    Raises SystemExit on any validation failure.
+    """
+    # MED-A — re-check the runtime OIDC issuer after configure_oauth_client()
+    # because that function may load a different issuer from the DB
+    # (secrets.oidc_provider_url), which the earlier env-var gate cannot see.
+    # A compromised or misconfigured DB row would otherwise slip past and
+    # produce a runtime issuer that's empty, a placeholder, or mismatched.
+    _runtime_issuer = oidc_auth.OIDC_ISSUER or ""
+    if not _runtime_issuer or _runtime_issuer.startswith("CONFIGURE_ME"):
+        logger.critical(
+            "oidc_runtime_issuer_unset",
+            source="db_or_env",
+            message="Runtime OIDC issuer is empty or placeholder after configure_oauth_client() (MED-A).",
+        )
+        raise SystemExit(
+            "FATAL: OIDC_ISSUER (loaded at runtime from DB or env) is empty or a placeholder. "
+            "If using DB-stored OIDC config, ensure the secrets.oidc_provider_url row is populated. "
+            "If using env vars, ensure OIDC_ISSUER is set."
+        )
+
+    # MED-E — load the IdP's discovery document and assert it contains an
+    # "issuer" field that matches the configured issuer.  authlib's iss validation is
+    # conditional on the discovery doc returning "issuer"; if the doc is absent, malformed,
+    # or missing the field, authlib silently skips iss validation even after claims_options
+    # is removed.  Fail-closed: SystemExit on fetch failure OR missing "issuer" OR mismatch.
+    # (per codex r1b NEW-OQ-2: option B accepted; acceptable boot-time dependency on IdP.)
+    try:
+        _discovery_metadata = await oauth.authentik.load_server_metadata()
+    except Exception as _e:
+        logger.critical(
+            "oidc_discovery_metadata_fetch_failed",
+            error=str(_e),
+            issuer=_runtime_issuer,
+            message="OIDC discovery metadata fetch failed (MED-E). Cannot validate iss without it.",
+        )
+        raise SystemExit(
+            f"FATAL: OIDC discovery metadata fetch failed: {_e}. "
+            "Cannot validate ID-token issuer without conformant discovery metadata. "
+            "Ensure OIDC_ISSUER points to a reachable, conformant IdP."
+        ) from _e
+
+    if "issuer" not in _discovery_metadata:
+        logger.critical(
+            "oidc_discovery_missing_issuer",
+            issuer=_runtime_issuer,
+            message="Discovery doc has no 'issuer' field — authlib would silently skip iss validation (MED-E).",
+        )
+        raise SystemExit(
+            "FATAL: OIDC discovery doc has no 'issuer' field. authlib silently skips "
+            "iss validation in this case. Use a conformant IdP."
+        )
+
+    # Trailing-slash normalization: both Authentik and Keycloak may include or omit a
+    # trailing slash; compare stripped forms to avoid a false mismatch.
+    _config_issuer = _runtime_issuer.rstrip("/")
+    _doc_issuer = _discovery_metadata["issuer"].rstrip("/")
+    if _doc_issuer != _config_issuer:
+        logger.critical(
+            "oidc_discovery_issuer_mismatch",
+            configured=_config_issuer,
+            discovered=_doc_issuer,
+            message="Discovery doc issuer != configured OIDC_ISSUER — token validation would silently fail (MED-E).",
+        )
+        raise SystemExit(
+            f"FATAL: OIDC discovery doc returns issuer={_doc_issuer!r} but "
+            f"OIDC_ISSUER is configured as {_config_issuer!r}. "
+            "Token iss validation would silently fail. Align your IdP configuration."
+        )
+
+    logger.info(
+        "oidc_discovery_issuer_verified",
+        issuer=_doc_issuer,
+        message="Discovery doc issuer matches configured OIDC_ISSUER (MED-E gate passed).",
+    )
+
+
 # Startup event: Initialize database and check connections
 @app.on_event("startup")
 async def startup_event():
@@ -402,88 +487,21 @@ async def startup_event():
             else:
                 logger.info("oss_defaults_seeding_disabled", reason="ATHENA_SEED_DEFAULTS=false")
 
-            # Configure OAuth/OIDC from database
-            try:
-                from app.auth.oidc import configure_oauth_client
-                configure_oauth_client()
-                logger.info("oidc_configuration_loaded")
-            except Exception as e:
-                logger.error("oidc_configuration_failed", error=str(e))
-
-            # MED-A (Phase 3) — re-check the runtime OIDC issuer after configure_oauth_client()
-            # because that function may load a different issuer from the DB
-            # (secrets.oidc_provider_url), which the earlier env-var gate at `:352-358` cannot
-            # see.  A compromised or misconfigured DB row would otherwise slip past the gate and
-            # produce a runtime issuer that's empty, a placeholder, or mismatched.
-            _runtime_issuer = oidc_auth.OIDC_ISSUER or ""
-            if not _runtime_issuer or _runtime_issuer.startswith("CONFIGURE_ME"):
-                logger.critical(
-                    "oidc_runtime_issuer_unset",
-                    source="db_or_env",
-                    message="Runtime OIDC issuer is empty or placeholder after configure_oauth_client() (MED-A).",
-                )
-                raise SystemExit(
-                    "FATAL: OIDC_ISSUER (loaded at runtime from DB or env) is empty or a placeholder. "
-                    "If using DB-stored OIDC config, ensure the secrets.oidc_provider_url row is populated. "
-                    "If using env vars, ensure OIDC_ISSUER is set."
-                )
-
-            # MED-E (Phase 3) — load the IdP's discovery document and assert it contains an
-            # "issuer" field that matches the configured issuer.  authlib's iss validation is
-            # conditional on the discovery doc returning "issuer"; if the doc is absent, malformed,
-            # or missing the field, authlib silently skips iss validation even after claims_options
-            # is removed.  Fail-closed: SystemExit on fetch failure OR missing "issuer" OR mismatch.
-            # (per codex r1b NEW-OQ-2: option B accepted; acceptable boot-time dependency on IdP.)
-            try:
-                _discovery_metadata = await oauth.authentik.load_server_metadata()
-            except Exception as _e:
-                logger.critical(
-                    "oidc_discovery_metadata_fetch_failed",
-                    error=str(_e),
-                    issuer=_runtime_issuer,
-                    message="OIDC discovery metadata fetch failed (MED-E). Cannot validate iss without it.",
-                )
-                raise SystemExit(
-                    f"FATAL: OIDC discovery metadata fetch failed: {_e}. "
-                    "Cannot validate ID-token issuer without conformant discovery metadata. "
-                    "Ensure OIDC_ISSUER points to a reachable, conformant IdP."
-                ) from _e
-
-            if "issuer" not in _discovery_metadata:
-                logger.critical(
-                    "oidc_discovery_missing_issuer",
-                    issuer=_runtime_issuer,
-                    message="Discovery doc has no 'issuer' field — authlib would silently skip iss validation (MED-E).",
-                )
-                raise SystemExit(
-                    "FATAL: OIDC discovery doc has no 'issuer' field. authlib silently skips "
-                    "iss validation in this case. Use a conformant IdP."
-                )
-
-            # Trailing-slash normalization: both Authentik and Keycloak may include or omit a
-            # trailing slash; compare stripped forms to avoid a false mismatch.
-            _config_issuer = _runtime_issuer.rstrip("/")
-            _doc_issuer = _discovery_metadata["issuer"].rstrip("/")
-            if _doc_issuer != _config_issuer:
-                logger.critical(
-                    "oidc_discovery_issuer_mismatch",
-                    configured=_config_issuer,
-                    discovered=_doc_issuer,
-                    message="Discovery doc issuer != configured OIDC_ISSUER — token validation would silently fail (MED-E).",
-                )
-                raise SystemExit(
-                    f"FATAL: OIDC discovery doc returns issuer={_doc_issuer!r} but "
-                    f"OIDC_ISSUER is configured as {_config_issuer!r}. "
-                    "Token iss validation would silently fail. Align your IdP configuration."
-                )
-
-            logger.info(
-                "oidc_discovery_issuer_verified",
-                issuer=_doc_issuer,
-                message="Discovery doc issuer matches configured OIDC_ISSUER (MED-E gate passed).",
-            )
+            # Configure OAuth/OIDC from database.
+            # No try/except: an exception here (e.g., malformed DB row, oauth.register()
+            # failure) propagates and the process exits.  _enforce_oidc_runtime_gates()
+            # below is the safety net for partial-state cases (DB-path set a bad issuer).
+            from app.auth.oidc import configure_oauth_client
+            configure_oauth_client()
+            logger.info("oidc_configuration_loaded")
         else:
             logger.error("database_connection_failed")
+
+        # MED-A + MED-E (ian:23 fix): gates run UNCONDITIONALLY in the production branch
+        # regardless of DB reachability.  Running them inside `if check_db_connection():`
+        # made the service fail-open when the DB was transiently unreachable at boot —
+        # neither gate would execute and the service would start without OIDC validation.
+        await _enforce_oidc_runtime_gates()
 
     # Check and pull default LLM model if needed (background task)
     if OSS_AUTO_PULL_MODELS:

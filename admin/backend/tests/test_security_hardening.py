@@ -12,6 +12,7 @@ Tests for the security hardening changes:
   - Production startup rejects insecure default secrets
 """
 import os
+import sys
 import hmac
 
 import pytest
@@ -1280,3 +1281,36 @@ class TestPhase3RuntimeIssuerAndDiscoveryGate:
                 f"Log key {key!r} must be present in main.py (MED-E/MED-A gate); "
                 "it may have been accidentally removed."
             )
+
+    def test_phase3_med_a_post_configure_fires_independently_of_env_gate(self):
+        """MED-A post-configure assertion fires when oidc_auth.OIDC_ISSUER is bad at
+        runtime — independent of the env-var gate (ian:26 fix).
+
+        The env-var gate at startup rejects CONFIGURE_ME-prefixed OIDC_ISSUER before
+        configure_oauth_client() runs.  But if the DB-loaded value is bad (empty or
+        placeholder), the env-var gate never sees it.  This test bypasses the env-var
+        gate entirely: it stubs oidc_auth.OIDC_ISSUER directly (simulating a DB-loaded
+        bad value) and calls _enforce_oidc_runtime_gates() to confirm MED-A fires.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        _backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        _src_path = os.path.abspath(os.path.join(_backend_dir, "..", "..", "src"))
+        for _p in (_src_path, _backend_dir):
+            if _p not in sys.path:
+                sys.path.insert(0, _p)
+
+        import main as _main
+
+        # Stub OIDC_ISSUER to CONFIGURE_ME placeholder — simulates a DB row with a bad value
+        # written before the operator configured their IdP.
+        with patch("main.oidc_auth") as mock_oidc_auth:
+            mock_oidc_auth.OIDC_ISSUER = "CONFIGURE_ME_OIDC_ISSUER"
+
+            with pytest.raises(SystemExit) as exc_info:
+                asyncio.run(_main._enforce_oidc_runtime_gates())
+
+        combined = str(exc_info.value)
+        assert "FATAL" in combined, f"Expected 'FATAL' in SystemExit message; got: {combined!r}"
+        assert "OIDC_ISSUER" in combined, f"Expected 'OIDC_ISSUER' in message; got: {combined!r}"

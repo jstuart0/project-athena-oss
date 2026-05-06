@@ -12,9 +12,9 @@ pytest-httpserver starts a local HTTP server; each test registers handler routes
 RSA keypair is generated via cryptography (transitive dep via authlib/python-jose).
 JWTs are signed via authlib.jose.jwt.encode().
 
-Exception namespace: authlib 1.7.1 delegates JWT claim validation to joserfc (a new
-companion package).  Claim errors are raised as joserfc.errors.* types.  We import
-from joserfc.errors directly, with an authlib.jose.errors fallback for older installs.
+Exception namespace: authlib 1.3.0 raises claim errors from authlib.jose.errors.*.
+We import from joserfc.errors directly with an authlib.jose.errors fallback so the
+tests work correctly against the pinned version (authlib==1.3.0 in requirements.txt).
 
 Marker note: these tests do NOT require a live IdP.  pytest-httpserver IS the IdP.
 Do NOT mark these @pytest.mark.integration — they must run in default CI on every PR
@@ -344,6 +344,22 @@ class TestPhase3OIDCValidation:
         with pytest.raises((BadSignatureError, InvalidKeyIdError, JoseError)):
             _parse_id_token(fixture_idp["oauth_client"], id_token)
 
+    def test_phase3_multi_value_aud_without_azp_rejected(self, fixture_idp):
+        """
+        Audience-confusion attack: attacker forges a token where aud is a list
+        containing both their client_id and the victim's.  authlib 1.3.0 rejects
+        this when azp is absent (per OIDC spec — azp REQUIRED when aud is a
+        multi-element list).  Locks in the security guarantee (xander:22).
+        """
+        id_token = _sign_id_token(
+            fixture_idp["private_jwk"],
+            iss=fixture_idp["issuer_url"],
+            aud=None,  # omit the scalar aud; supply list via extra_claims
+            extra_claims={"aud": ["attacker-client", fixture_idp["client_id"]]},
+        )
+        with pytest.raises((MissingClaimError, InvalidClaimError)):
+            _parse_id_token(fixture_idp["oauth_client"], id_token)
+
 
 # ---------------------------------------------------------------------------
 # MED-E test (option B selected): startup gate asserts discovery doc has "issuer"
@@ -359,119 +375,89 @@ class TestPhase3OIDCValidation:
 class TestPhase3DiscoveryDocGate:
     """
     MED-E: startup gate asserts the OIDC discovery doc contains an "issuer" field.
-    The subprocess embeds its own HTTP server so startup_event() can reach it.
-    """
 
-    _PROD_SECRETS: dict = {
-        "SESSION_SECRET_KEY": "a" * 64,
-        "JWT_SECRET": "b" * 64,
-        "SERVICE_API_KEY": "c" * 64,
-    }
+    Tests call _enforce_oidc_runtime_gates() — the real production helper extracted from
+    startup_event() — with stubs for oidc_auth.OIDC_ISSUER and
+    oauth.authentik.load_server_metadata.  No in-process re-implementation of gate logic
+    (ian:24/xander:21 fix): tests exercise the actual production code path.
+    """
 
     def test_phase3_discovery_doc_missing_issuer_exits(self):
         """
-        MED-E option B: startup_event() must raise SystemExit when the OIDC discovery doc
+        MED-E: _enforce_oidc_runtime_gates() must raise SystemExit when the discovery doc
         has no "issuer" field.  authlib silently skips iss validation without it.
 
-        This test exercises the MED-E gate directly by:
-        1. Patching oidc_auth.OIDC_ISSUER to a non-empty, non-placeholder value (so MED-A passes)
-        2. Patching oauth.authentik.load_server_metadata to return a doc without "issuer"
-        3. Calling the relevant subset of startup_event()'s production branch in-process
-
-        We do NOT drive the full startup (that would require a PostgreSQL connection) —
-        instead we test the gate function directly, which is the MED-E assertion block.
+        Stubs:
+        - oidc_auth.OIDC_ISSUER → non-empty, non-placeholder (MED-A passes)
+        - oauth.authentik.load_server_metadata → doc without "issuer"
         """
         import asyncio
+        from unittest.mock import AsyncMock, patch
 
-        async def _run_gate(missing_issuer_metadata: dict) -> None:
-            """Run just the MED-E gate logic with a patched metadata response."""
-            import app.auth.oidc as _oidc_auth
-            from app.auth.oidc import oauth as _oauth
-            import structlog
-
-            _logger = structlog.get_logger()
-            _runtime_issuer = "https://configured-issuer.example.com"
-
-            # Check missing "issuer"
-            if "issuer" not in missing_issuer_metadata:
-                _logger.critical(
-                    "oidc_discovery_missing_issuer",
-                    issuer=_runtime_issuer,
-                    message="Discovery doc has no 'issuer' field — authlib would silently skip iss validation (MED-E).",
-                )
-                raise SystemExit(
-                    "FATAL: OIDC discovery doc has no 'issuer' field. authlib silently skips "
-                    "iss validation in this case. Use a conformant IdP."
-                )
-
-        # Discovery doc without "issuer"
         bad_metadata = {
             "authorization_endpoint": "https://idp.example.com/authorize",
             "token_endpoint": "https://idp.example.com/token",
             "jwks_uri": "https://idp.example.com/jwks",
         }
 
-        with pytest.raises(SystemExit) as exc_info:
-            asyncio.run(_run_gate(bad_metadata))
+        with (
+            patch("app.auth.oidc.OIDC_ISSUER", "https://configured-issuer.example.com"),
+            patch("main.oidc_auth") as mock_oidc_auth,
+            patch("main.oauth") as mock_oauth,
+        ):
+            mock_oidc_auth.OIDC_ISSUER = "https://configured-issuer.example.com"
+            mock_oauth.authentik.load_server_metadata = AsyncMock(return_value=bad_metadata)
+
+            import main as _main
+            with pytest.raises(SystemExit) as exc_info:
+                asyncio.run(_main._enforce_oidc_runtime_gates())
 
         assert "FATAL" in str(exc_info.value)
         assert "issuer" in str(exc_info.value).lower()
 
     def test_phase3_discovery_doc_issuer_mismatch_exits(self):
         """
-        MED-E: SystemExit when the discovery doc "issuer" does not match OIDC_ISSUER.
+        MED-E: _enforce_oidc_runtime_gates() must raise SystemExit when the discovery doc
+        "issuer" does not match the configured OIDC_ISSUER.
         """
         import asyncio
-
-        async def _run_gate(metadata: dict, configured_issuer: str) -> None:
-            import structlog
-            _logger = structlog.get_logger()
-
-            _config_issuer = configured_issuer.rstrip("/")
-            _doc_issuer = metadata.get("issuer", "").rstrip("/")
-
-            if "issuer" not in metadata:
-                raise SystemExit("FATAL: OIDC discovery doc has no 'issuer' field.")
-
-            if _doc_issuer != _config_issuer:
-                _logger.critical(
-                    "oidc_discovery_issuer_mismatch",
-                    configured=_config_issuer,
-                    discovered=_doc_issuer,
-                    message="Discovery doc issuer != configured OIDC_ISSUER (MED-E).",
-                )
-                raise SystemExit(
-                    f"FATAL: OIDC discovery doc returns issuer={_doc_issuer!r} but "
-                    f"OIDC_ISSUER is configured as {_config_issuer!r}. "
-                    "Token iss validation would silently fail. Align your IdP configuration."
-                )
+        from unittest.mock import AsyncMock, patch
 
         mismatch_metadata = {
             "issuer": "https://different-idp.example.com",
             "authorization_endpoint": "https://different-idp.example.com/authorize",
         }
-        configured = "https://configured-issuer.example.com"
 
-        with pytest.raises(SystemExit) as exc_info:
-            asyncio.run(_run_gate(mismatch_metadata, configured))
+        with (
+            patch("main.oidc_auth") as mock_oidc_auth,
+            patch("main.oauth") as mock_oauth,
+        ):
+            mock_oidc_auth.OIDC_ISSUER = "https://configured-issuer.example.com"
+            mock_oauth.authentik.load_server_metadata = AsyncMock(return_value=mismatch_metadata)
+
+            import main as _main
+            with pytest.raises(SystemExit) as exc_info:
+                asyncio.run(_main._enforce_oidc_runtime_gates())
 
         assert "FATAL" in str(exc_info.value)
         assert "different-idp" in str(exc_info.value) or "mismatch" in str(exc_info.value).lower()
 
     def test_phase3_discovery_doc_gate_code_is_present(self):
         """
-        Static contract: the MED-E gate log keys must be present in main.py.
-        If they are, the gate code exists and the assertions above test its logic accurately.
+        Static contract: the MED-E gate log keys and the helper function must be present
+        in main.py.  A future refactor that removes or disables the gate would fail this
+        check before the direct-call tests above even run.
         """
         with open(os.path.join(_BACKEND_PATH, "main.py")) as f:
             src = f.read()
         for key in (
+            "_enforce_oidc_runtime_gates",
             "oidc_discovery_missing_issuer",
             "oidc_discovery_issuer_mismatch",
             "oidc_discovery_metadata_fetch_failed",
         ):
             assert key in src, (
-                f"MED-E gate log key {key!r} not found in main.py — gate may have been removed"
+                f"MED-E gate identifier {key!r} not found in main.py — gate may have been removed"
             )
 
 
