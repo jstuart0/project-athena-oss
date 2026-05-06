@@ -786,14 +786,14 @@ function renderPersistentSessionsConfig(feature) {
             <div class="mt-3 space-y-3 border-t border-dark-border pt-3">
                 <div class="grid grid-cols-2 gap-3">
                     <div>
-                        <label class="text-xs text-gray-400 block mb-1">Session TTL (days)</label>
+                        <label for="pcs-ttl-${feature.id}" class="text-xs text-gray-400 block mb-1">Session TTL (days)</label>
                         <input type="number" min="1" max="365"
                                id="pcs-ttl-${feature.id}"
                                value="${cfg.session_ttl_days ?? 90}"
                                class="w-full bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm text-white">
                     </div>
                     <div>
-                        <label class="text-xs text-gray-400 block mb-1">Max restored turns</label>
+                        <label for="pcs-turns-${feature.id}" class="text-xs text-gray-400 block mb-1">Max restored turns</label>
                         <input type="number" min="1" max="100"
                                id="pcs-turns-${feature.id}"
                                value="${cfg.max_restored_turns ?? 20}"
@@ -801,7 +801,7 @@ function renderPersistentSessionsConfig(feature) {
                     </div>
                 </div>
                 <div>
-                    <label class="text-xs text-gray-400 block mb-1">Cookie name</label>
+                    <label for="pcs-cookie-${feature.id}" class="text-xs text-gray-400 block mb-1">Cookie name</label>
                     <input type="text"
                            id="pcs-cookie-${feature.id}"
                            value="${cfg.cookie_name ?? 'jarvis_uid'}"

@@ -122,7 +122,7 @@ function renderFilterControls() {
     return `
         <div class="flex flex-wrap gap-4 mb-4 items-center">
             <div class="flex items-center gap-2">
-                <label class="text-sm text-gray-400">Status:</label>
+                <label for="intent-status-filter" class="text-sm text-gray-400">Status:</label>
                 <select id="intent-status-filter" onchange="filterIntents()"
                         class="bg-gray-700 text-white rounded px-3 py-1 text-sm border border-gray-600">
                     <option value="">All</option>
@@ -133,13 +133,13 @@ function renderFilterControls() {
                 </select>
             </div>
             <div class="flex items-center gap-2">
-                <label class="text-sm text-gray-400">Min Count:</label>
+                <label for="intent-min-count" class="text-sm text-gray-400">Min Count:</label>
                 <input type="number" id="intent-min-count" value="1" min="1"
                        onchange="filterIntents()"
                        class="bg-gray-700 text-white rounded px-3 py-1 text-sm border border-gray-600 w-20">
             </div>
             <div class="flex items-center gap-2">
-                <label class="text-sm text-gray-400">Category:</label>
+                <label for="intent-category-filter" class="text-sm text-gray-400">Category:</label>
                 <select id="intent-category-filter" onchange="filterIntents()"
                         class="bg-gray-700 text-white rounded px-3 py-1 text-sm border border-gray-600">
                     <option value="">All Categories</option>
@@ -353,14 +353,14 @@ function showPromoteModal(intentId) {
                     Promoting <strong class="text-white">${intent.display_name}</strong> will mark it as a known intent category.
                 </p>
                 <div class="mb-4">
-                    <label class="block text-sm text-gray-400 mb-2">Target Intent Category:</label>
+                    <label for="promote-target" class="block text-sm text-gray-400 mb-2">Target Intent Category:</label>
                     <select id="promote-target" class="w-full bg-gray-700 text-white rounded px-3 py-2 border border-gray-600">
                         ${knownIntents.map(i => `<option value="${i}">${i}</option>`).join('')}
                         <option value="new">Create New Category...</option>
                     </select>
                 </div>
                 <div id="new-intent-field" class="mb-4 hidden">
-                    <label class="block text-sm text-gray-400 mb-2">New Intent Name:</label>
+                    <label for="new-intent-name" class="block text-sm text-gray-400 mb-2">New Intent Name:</label>
                     <input type="text" id="new-intent-name"
                            class="w-full bg-gray-700 text-white rounded px-3 py-2 border border-gray-600"
                            placeholder="snake_case_name">
@@ -446,7 +446,7 @@ function showRejectModal(intentId) {
                     Rejecting <strong class="text-white">${intent.display_name}</strong> marks it as "won't implement".
                 </p>
                 <div class="mb-4">
-                    <label class="block text-sm text-gray-400 mb-2">Rejection Reason:</label>
+                    <label for="reject-reason" class="block text-sm text-gray-400 mb-2">Rejection Reason:</label>
                     <textarea id="reject-reason" rows="3"
                               class="w-full bg-gray-700 text-white rounded px-3 py-2 border border-gray-600"
                               placeholder="Why is this intent being rejected?"></textarea>
@@ -546,7 +546,7 @@ async function mergeSelectedIntents() {
                     Merging ${selectedItems.length} intents. Select which intent to keep as the target:
                 </p>
                 <div class="mb-4">
-                    <label class="block text-sm text-gray-400 mb-2">Target Intent (others will merge into this):</label>
+                    <label for="merge-target" class="block text-sm text-gray-400 mb-2">Target Intent (others will merge into this):</label>
                     <select id="merge-target" class="w-full bg-gray-700 text-white rounded px-3 py-2 border border-gray-600">
                         ${selectedItems.map(i => `
                             <option value="${i.id}">${i.display_name} (${i.occurrence_count} occurrences)</option>

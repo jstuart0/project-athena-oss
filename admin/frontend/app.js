@@ -1048,18 +1048,18 @@ function showCreatePolicyModal() {
                 <h2 class="text-xl font-semibold text-white mb-4">Create Policy</h2>
                 <form onsubmit="createPolicy(event)" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Name</label>
-                        <input type="text" name="name" required
+                        <label for="policy-name" class="block text-sm font-medium text-gray-300 mb-1">Name</label>
+                        <input type="text" id="policy-name" name="name" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Description</label>
-                        <textarea name="description" rows="2"
+                        <label for="policy-description" class="block text-sm font-medium text-gray-300 mb-1">Description</label>
+                        <textarea id="policy-description" name="description" rows="2"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500"></textarea>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Mode</label>
-                        <select name="mode" required
+                        <label for="policy-mode" class="block text-sm font-medium text-gray-300 mb-1">Mode</label>
+                        <select id="policy-mode" name="mode" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                             <option value="fast">Fast (Phi-3 mini)</option>
                             <option value="medium">Medium (Llama 3.1)</option>
@@ -1068,8 +1068,8 @@ function showCreatePolicyModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Configuration (JSON)</label>
-                        <textarea name="config" rows="8" required
+                        <label for="policy-configuration" class="block text-sm font-medium text-gray-300 mb-1">Configuration (JSON)</label>
+                        <textarea id="policy-configuration" name="config" rows="8" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white font-mono text-sm focus:outline-none focus:border-blue-500"
                             placeholder='{"temperature": 0.7, "max_tokens": 500}'></textarea>
                     </div>
@@ -1206,13 +1206,13 @@ function showCreateSecretModal() {
                 <h2 class="text-xl font-semibold text-white mb-4">Create Secret</h2>
                 <form onsubmit="createSecret(event)" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Name</label>
-                        <input type="text" name="name" required
+                        <label for="secret-name" class="block text-sm font-medium text-gray-300 mb-1">Name</label>
+                        <input type="text" id="secret-name" name="name" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Type</label>
-                        <select name="secret_type" required
+                        <label for="secret-type" class="block text-sm font-medium text-gray-300 mb-1">Type</label>
+                        <select id="secret-type" name="secret_type" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                             <option value="api_key">API Key</option>
                             <option value="token">Token</option>
@@ -1222,13 +1222,13 @@ function showCreateSecretModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Description</label>
-                        <textarea name="description" rows="2"
+                        <label for="secret-description" class="block text-sm font-medium text-gray-300 mb-1">Description</label>
+                        <textarea id="secret-description" name="description" rows="2"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500"></textarea>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Secret Value</label>
-                        <textarea name="value" rows="4" required
+                        <label for="secret-value" class="block text-sm font-medium text-gray-300 mb-1">Secret Value</label>
+                        <textarea id="secret-value" name="value" rows="4" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white font-mono text-sm focus:outline-none focus:border-blue-500"></textarea>
                         <p class="text-xs text-gray-500 mt-1">Value will be encrypted before storage</p>
                     </div>
@@ -1379,41 +1379,41 @@ async function showCreateExternalApiKeyModal(serviceName = '') {
                 <form onsubmit="saveExternalApiKey(event, '${existing ? existing.service_name : ''}')" class="space-y-4">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Service Name</label>
-                            <input type="text" name="service_name" value="${payload.service_name || ''}" ${existing ? 'readonly' : ''}
+                            <label for="external-api-key-service-name" class="block text-sm font-medium text-gray-300 mb-1">Service Name</label>
+                            <input type="text" id="external-api-key-service-name" name="service_name" value="${payload.service_name || ''}" ${existing ? 'readonly' : ''}
                                 placeholder="api-football" required
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">API Name</label>
-                            <input type="text" name="api_name" value="${payload.api_name || ''}" placeholder="API-Football.com" required
+                            <label for="external-api-key-api-name" class="block text-sm font-medium text-gray-300 mb-1">API Name</label>
+                            <input type="text" id="external-api-key-api-name" name="api_name" value="${payload.api_name || ''}" placeholder="API-Football.com" required
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                         </div>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Endpoint URL</label>
-                        <input type="text" name="endpoint_url" value="${payload.endpoint_url || ''}" placeholder="https://v3.football.api-sports.io" required
+                        <label for="external-api-key-endpoint-url" class="block text-sm font-medium text-gray-300 mb-1">Endpoint URL</label>
+                        <input type="text" id="external-api-key-endpoint-url" name="endpoint_url" value="${payload.endpoint_url || ''}" placeholder="https://v3.football.api-sports.io" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">API Key</label>
-                        <input type="text" name="api_key" value="" placeholder="${existing ? 'Leave blank to keep existing key' : 'Required'}"
+                        <label for="external-api-key-api-key" class="block text-sm font-medium text-gray-300 mb-1">API Key</label>
+                        <input type="text" id="external-api-key-api-key" name="api_key" value="" placeholder="${existing ? 'Leave blank to keep existing key' : 'Required'}"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                     </div>
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Rate Limit (per minute)</label>
-                            <input type="number" name="rate_limit_per_minute" value="${payload.rate_limit_per_minute || ''}" min="0"
+                            <label for="external-api-key-rate-limit" class="block text-sm font-medium text-gray-300 mb-1">Rate Limit (per minute)</label>
+                            <input type="number" id="external-api-key-rate-limit" name="rate_limit_per_minute" value="${payload.rate_limit_per_minute || ''}" min="0"
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                         </div>
                         <div class="flex items-center gap-2 pt-6">
-                            <input type="checkbox" name="enabled" ${payload.enabled !== false ? 'checked' : ''} class="w-4 h-4">
-                            <label class="text-sm text-gray-300">Enabled</label>
+                            <input type="checkbox" id="external-api-key-enabled" name="enabled" ${payload.enabled !== false ? 'checked' : ''} class="w-4 h-4">
+                            <label for="external-api-key-enabled" class="text-sm text-gray-300">Enabled</label>
                         </div>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Description</label>
-                        <textarea name="description" rows="2" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">${payload.description || ''}</textarea>
+                        <label for="external-api-key-description" class="block text-sm font-medium text-gray-300 mb-1">Description</label>
+                        <textarea id="external-api-key-description" name="description" rows="2" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">${payload.description || ''}</textarea>
                     </div>
                     <div class="flex gap-2 pt-4">
                         <button type="submit" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded">Save</button>
@@ -1553,13 +1553,13 @@ function showCreateDeviceModal() {
                 <h2 class="text-xl font-semibold text-white mb-4">Register Device</h2>
                 <form onsubmit="createDevice(event)" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Name</label>
-                        <input type="text" name="name" required
+                        <label for="device-name" class="block text-sm font-medium text-gray-300 mb-1">Name</label>
+                        <input type="text" id="device-name" name="name" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Device Type</label>
-                        <select name="device_type" required
+                        <label for="device-type" class="block text-sm font-medium text-gray-300 mb-1">Device Type</label>
+                        <select id="device-type" name="device_type" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                             <option value="wyoming">Wyoming Voice Device</option>
                             <option value="jetson">Jetson Edge Device</option>
@@ -1567,18 +1567,18 @@ function showCreateDeviceModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Zone</label>
-                        <input type="text" name="zone" required placeholder="e.g., Office, Kitchen"
+                        <label for="device-zone" class="block text-sm font-medium text-gray-300 mb-1">Zone</label>
+                        <input type="text" id="device-zone" name="zone" required placeholder="e.g., Office, Kitchen"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">IP Address</label>
-                        <input type="text" name="ip_address" required placeholder="192.168.10.x"
+                        <label for="device-ip-address" class="block text-sm font-medium text-gray-300 mb-1">IP Address</label>
+                        <input type="text" id="device-ip-address" name="ip_address" required placeholder="192.168.10.x"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Configuration (JSON, optional)</label>
-                        <textarea name="config" rows="4"
+                        <label for="device-configuration" class="block text-sm font-medium text-gray-300 mb-1">Configuration (JSON, optional)</label>
+                        <textarea id="device-configuration" name="config" rows="4"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white font-mono text-sm focus:outline-none focus:border-blue-500"
                             placeholder='{"port": 10700, "protocol": "wyoming"}'></textarea>
                     </div>
@@ -1755,11 +1755,11 @@ function showCreateLocalUserModal() {
                 <form onsubmit="createLocalUser(event)" class="space-y-4">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-400 mb-2">Username</label>
+                            <label for="local-user-username" class="block text-sm font-medium text-gray-400 mb-2">Username</label>
                             <input id="local-user-username" type="text" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-gray-400 mb-2">Login Type</label>
+                            <label for="local-user-auth-provider" class="block text-sm font-medium text-gray-400 mb-2">Login Type</label>
                             <select id="local-user-auth-provider" onchange="toggleCreateUserPasswordField()" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                                 <option value="local">local</option>
                                 <option value="oidc">oidc</option>
@@ -1768,7 +1768,7 @@ function showCreateLocalUserModal() {
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-400 mb-2">Role</label>
+                            <label for="local-user-role" class="block text-sm font-medium text-gray-400 mb-2">Role</label>
                             <select id="local-user-role" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                                 <option value="viewer">viewer</option>
                                 <option value="support">support</option>
@@ -1778,15 +1778,15 @@ function showCreateLocalUserModal() {
                         </div>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Email</label>
+                        <label for="local-user-email" class="block text-sm font-medium text-gray-400 mb-2">Email</label>
                         <input id="local-user-email" type="email" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Full Name</label>
+                        <label for="local-user-full-name" class="block text-sm font-medium text-gray-400 mb-2">Full Name</label>
                         <input id="local-user-full-name" type="text" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div id="local-user-password-group">
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Temporary Password</label>
+                        <label for="local-user-password" class="block text-sm font-medium text-gray-400 mb-2">Temporary Password</label>
                         <input id="local-user-password" type="password" minlength="10" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         <p class="text-xs text-gray-500 mt-1">Required for local users. OIDC users authenticate through your identity provider.</p>
                     </div>
@@ -1877,11 +1877,11 @@ function showChangeMyPasswordModal() {
                 </div>
                 <form onsubmit="changeMyPassword(event)" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Current Password</label>
+                        <label for="my-current-password" class="block text-sm font-medium text-gray-400 mb-2">Current Password</label>
                         <input id="my-current-password" type="password" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">New Password</label>
+                        <label for="my-new-password" class="block text-sm font-medium text-gray-400 mb-2">New Password</label>
                         <input id="my-new-password" type="password" minlength="10" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         <p class="text-xs text-gray-500 mt-1">Minimum 10 characters.</p>
                     </div>
@@ -2575,25 +2575,25 @@ function showCreateServerModal() {
 
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Server Name</label>
+                        <label for="server-name" class="block text-sm font-medium text-gray-300 mb-1">Server Name</label>
                         <input type="text" id="server-name" placeholder="mac-studio"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Hostname</label>
+                        <label for="server-hostname" class="block text-sm font-medium text-gray-300 mb-1">Hostname</label>
                         <input type="text" id="server-hostname" placeholder="Jays-Mac-Studio.local"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">IP Address</label>
+                        <label for="server-ip" class="block text-sm font-medium text-gray-300 mb-1">IP Address</label>
                         <input type="text" id="server-ip" placeholder="192.168.10.167" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Role</label>
+                        <label for="server-role" class="block text-sm font-medium text-gray-300 mb-1">Role</label>
                         <select id="server-role"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
                             <option value="compute">Compute</option>
@@ -3012,13 +3012,13 @@ function showCreateConnectorModal() {
 
                     <div class="space-y-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Connector Name</label>
+                            <label for="connector-name" class="block text-sm font-medium text-gray-300 mb-1">Connector Name</label>
                             <input type="text" id="connector-name" placeholder="weather"
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
                         </div>
 
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Type</label>
+                            <label for="connector-type" class="block text-sm font-medium text-gray-300 mb-1">Type</label>
                             <select id="connector-type"
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
                                 <option value="external_api">External API</option>
@@ -3028,7 +3028,7 @@ function showCreateConnectorModal() {
                         </div>
 
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Service</label>
+                            <label for="connector-service" class="block text-sm font-medium text-gray-300 mb-1">Service</label>
                             <select id="connector-service"
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
                                 <option value="">None</option>
@@ -3579,25 +3579,25 @@ async function loadMultiIntentConfig() {
             </div>
             <div class="grid grid-cols-2 gap-6">
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Enabled</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Enabled</p>
                     <span class="px-3 py-1 rounded-full text-xs font-medium ${config.enabled ? 'bg-green-900/30 text-green-400' : 'bg-gray-900/30 text-gray-400'}">
                         ${config.enabled ? 'Yes' : 'No'}
                     </span>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Max Intents Per Query</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Max Intents Per Query</p>
                     <span class="text-white">${config.max_intents_per_query}</span>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Parallel Processing</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Parallel Processing</p>
                     <span class="text-white">${config.parallel_processing ? 'Yes' : 'No'}</span>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Combination Strategy</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Combination Strategy</p>
                     <span class="text-white">${config.combination_strategy}</span>
                 </div>
                 <div class="col-span-2">
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Separators</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Separators</p>
                     <div class="flex flex-wrap gap-2">
                         ${config.separators.map(sep => `
                             <span class="px-2 py-1 bg-dark-bg rounded text-xs text-gray-300">"${sep}"</span>
@@ -3963,13 +3963,13 @@ function showCreateBackendModal() {
             <form onsubmit="createBackend(event)" class="space-y-4">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Model Name *</label>
+                        <label for="backend-model-name" class="block text-sm font-medium text-gray-400 mb-2">Model Name *</label>
                         <input type="text" id="backend-model-name" required
                             placeholder="e.g., phi3:mini, llama3.1:8b"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Backend Type *</label>
+                        <label for="backend-type" class="block text-sm font-medium text-gray-400 mb-2">Backend Type *</label>
                         <select id="backend-type" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             <option value="ollama">Ollama</option>
@@ -3980,14 +3980,14 @@ function showCreateBackendModal() {
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Endpoint URL *</label>
+                    <label for="backend-endpoint" class="block text-sm font-medium text-gray-400 mb-2">Endpoint URL *</label>
                     <input type="text" id="backend-endpoint" required
                         placeholder="http://localhost:11434"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Description</label>
+                    <label for="backend-description" class="block text-sm font-medium text-gray-400 mb-2">Description</label>
                     <input type="text" id="backend-description"
                         placeholder="Optional description"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -3995,13 +3995,13 @@ function showCreateBackendModal() {
 
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
+                        <label for="backend-priority" class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
                         <input type="number" id="backend-priority" value="100"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         <p class="text-xs text-gray-500 mt-1">Lower = higher priority for auto mode</p>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Timeout (seconds)</label>
+                        <label for="backend-timeout" class="block text-sm font-medium text-gray-400 mb-2">Timeout (seconds)</label>
                         <input type="number" id="backend-timeout" value="60"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
@@ -4009,12 +4009,12 @@ function showCreateBackendModal() {
 
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Max Tokens</label>
+                        <label for="backend-max-tokens" class="block text-sm font-medium text-gray-400 mb-2">Max Tokens</label>
                         <input type="number" id="backend-max-tokens" value="2048"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Default Temperature</label>
+                        <label for="backend-temperature" class="block text-sm font-medium text-gray-400 mb-2">Default Temperature</label>
                         <input type="number" id="backend-temperature" value="0.7" step="0.1" min="0" max="2"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>

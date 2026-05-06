@@ -719,22 +719,22 @@ function showCreatePresetModal() {
                 <!-- Basic Info -->
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Name</label>
-                        <input type="text" name="name" required
+                        <label for="preset-name" class="block text-sm text-gray-400 mb-1">Name</label>
+                        <input type="text" id="preset-name" name="name" required
                                class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                                placeholder="My Custom Preset">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Icon</label>
-                        <input type="text" name="icon" maxlength="2"
+                        <label for="preset-icon" class="block text-sm text-gray-400 mb-1">Icon</label>
+                        <input type="text" id="preset-icon" name="icon" maxlength="2"
                                class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                                placeholder="⚡" value="⚡">
                     </div>
                 </div>
 
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Description</label>
-                    <textarea name="description" rows="2"
+                    <label for="preset-description" class="block text-sm text-gray-400 mb-1">Description</label>
+                    <textarea id="preset-description" name="description" rows="2"
                               class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                               placeholder="Describe this preset..."></textarea>
                 </div>
@@ -744,26 +744,26 @@ function showCreatePresetModal() {
                     <h4 class="text-sm font-medium text-white mb-3">LLM Model Routing</h4>
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Simple Queries</label>
-                            <select name="tool_calling_simple_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
+                            <label for="preset-simple-model" class="block text-sm text-gray-400 mb-1">Simple Queries</label>
+                            <select id="preset-simple-model" name="tool_calling_simple_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                                 ${generateModelOptions(defaultSettings.tool_calling_simple_model || 'qwen2.5:7b', 'simple')}
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Complex Queries</label>
-                            <select name="tool_calling_complex_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
+                            <label for="preset-complex-model" class="block text-sm text-gray-400 mb-1">Complex Queries</label>
+                            <select id="preset-complex-model" name="tool_calling_complex_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                                 ${generateModelOptions(defaultSettings.tool_calling_complex_model || 'qwen2.5:7b', 'complex')}
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Super Complex Queries</label>
-                            <select name="tool_calling_super_complex_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
+                            <label for="preset-super-complex-model" class="block text-sm text-gray-400 mb-1">Super Complex Queries</label>
+                            <select id="preset-super-complex-model" name="tool_calling_super_complex_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                                 ${generateModelOptions(defaultSettings.tool_calling_super_complex_model || 'qwen2.5:14b', 'super_complex')}
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Response Synthesis</label>
-                            <select name="response_synthesis_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
+                            <label for="preset-synthesis-model" class="block text-sm text-gray-400 mb-1">Response Synthesis</label>
+                            <select id="preset-synthesis-model" name="response_synthesis_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                                 ${generateModelOptions(defaultSettings.response_synthesis_model || 'qwen2.5:7b', 'synthesis')}
                             </select>
                         </div>
@@ -775,14 +775,14 @@ function showCreatePresetModal() {
                     <h4 class="text-sm font-medium text-white mb-3">LLM Parameters</h4>
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Temperature</label>
-                            <input type="number" name="llm_temperature" step="0.1" min="0" max="2"
+                            <label for="preset-temperature" class="block text-sm text-gray-400 mb-1">Temperature</label>
+                            <input type="number" id="preset-temperature" name="llm_temperature" step="0.1" min="0" max="2"
                                    class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                                    value="${defaultSettings.llm_temperature || 0.5}">
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Max Tokens</label>
-                            <input type="number" name="llm_max_tokens" min="64" max="4096"
+                            <label for="preset-max-tokens" class="block text-sm text-gray-400 mb-1">Max Tokens</label>
+                            <input type="number" id="preset-max-tokens" name="llm_max_tokens" min="64" max="4096"
                                    class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                                    value="${defaultSettings.llm_max_tokens || 512}">
                         </div>
@@ -794,16 +794,16 @@ function showCreatePresetModal() {
                     <h4 class="text-sm font-medium text-white mb-3">Conversation Settings</h4>
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">History Mode</label>
-                            <select name="history_mode" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
+                            <label for="preset-history-mode" class="block text-sm text-gray-400 mb-1">History Mode</label>
+                            <select id="preset-history-mode" name="history_mode" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                                 <option value="none">None (Fastest)</option>
                                 <option value="summarized" selected>Summarized (Balanced)</option>
                                 <option value="full">Full (Best Context)</option>
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Max History Messages</label>
-                            <input type="number" name="max_llm_history_messages" min="0" max="50"
+                            <label for="preset-max-history" class="block text-sm text-gray-400 mb-1">Max History Messages</label>
+                            <input type="number" id="preset-max-history" name="max_llm_history_messages" min="0" max="50"
                                    class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                                    value="${defaultSettings.max_llm_history_messages || 5}">
                         </div>
@@ -962,20 +962,20 @@ function showEditPresetModal(presetId) {
                 <!-- Basic Info -->
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Name</label>
-                        <input type="text" name="name" required value="${escapeHtml(preset.name)}"
+                        <label for="edit-preset-name" class="block text-sm text-gray-400 mb-1">Name</label>
+                        <input type="text" id="edit-preset-name" name="name" required value="${escapeHtml(preset.name)}"
                                class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Icon</label>
-                        <input type="text" name="icon" maxlength="2" value="${preset.icon || ''}"
+                        <label for="edit-preset-icon" class="block text-sm text-gray-400 mb-1">Icon</label>
+                        <input type="text" id="edit-preset-icon" name="icon" maxlength="2" value="${preset.icon || ''}"
                                class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                     </div>
                 </div>
 
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Description</label>
-                    <textarea name="description" rows="2"
+                    <label for="edit-preset-description" class="block text-sm text-gray-400 mb-1">Description</label>
+                    <textarea id="edit-preset-description" name="description" rows="2"
                               class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">${escapeHtml(preset.description || '')}</textarea>
                 </div>
 
@@ -984,26 +984,26 @@ function showEditPresetModal(presetId) {
                     <h4 class="text-sm font-medium text-white mb-3">LLM Model Routing</h4>
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Simple Queries</label>
-                            <select name="tool_calling_simple_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
+                            <label for="edit-preset-simple-model" class="block text-sm text-gray-400 mb-1">Simple Queries</label>
+                            <select id="edit-preset-simple-model" name="tool_calling_simple_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                                 ${generateModelOptions(settings.tool_calling_simple_model, 'simple')}
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Complex Queries</label>
-                            <select name="tool_calling_complex_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
+                            <label for="edit-preset-complex-model" class="block text-sm text-gray-400 mb-1">Complex Queries</label>
+                            <select id="edit-preset-complex-model" name="tool_calling_complex_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                                 ${generateModelOptions(settings.tool_calling_complex_model, 'complex')}
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Super Complex Queries</label>
-                            <select name="tool_calling_super_complex_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
+                            <label for="edit-preset-super-complex-model" class="block text-sm text-gray-400 mb-1">Super Complex Queries</label>
+                            <select id="edit-preset-super-complex-model" name="tool_calling_super_complex_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                                 ${generateModelOptions(settings.tool_calling_super_complex_model, 'super_complex')}
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Response Synthesis</label>
-                            <select name="response_synthesis_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
+                            <label for="edit-preset-synthesis-model" class="block text-sm text-gray-400 mb-1">Response Synthesis</label>
+                            <select id="edit-preset-synthesis-model" name="response_synthesis_model" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                                 ${generateModelOptions(settings.response_synthesis_model, 'synthesis')}
                             </select>
                         </div>
@@ -1015,14 +1015,14 @@ function showEditPresetModal(presetId) {
                     <h4 class="text-sm font-medium text-white mb-3">LLM Parameters</h4>
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Temperature</label>
-                            <input type="number" name="llm_temperature" step="0.1" min="0" max="2"
+                            <label for="edit-preset-temperature" class="block text-sm text-gray-400 mb-1">Temperature</label>
+                            <input type="number" id="edit-preset-temperature" name="llm_temperature" step="0.1" min="0" max="2"
                                    class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                                    value="${settings.llm_temperature || 0.5}">
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Max Tokens</label>
-                            <input type="number" name="llm_max_tokens" min="64" max="4096"
+                            <label for="edit-preset-max-tokens" class="block text-sm text-gray-400 mb-1">Max Tokens</label>
+                            <input type="number" id="edit-preset-max-tokens" name="llm_max_tokens" min="64" max="4096"
                                    class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                                    value="${settings.llm_max_tokens || 512}">
                         </div>
@@ -1034,16 +1034,16 @@ function showEditPresetModal(presetId) {
                     <h4 class="text-sm font-medium text-white mb-3">Conversation Settings</h4>
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">History Mode</label>
-                            <select name="history_mode" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
+                            <label for="edit-preset-history-mode" class="block text-sm text-gray-400 mb-1">History Mode</label>
+                            <select id="edit-preset-history-mode" name="history_mode" class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                                 <option value="none" ${settings.history_mode === 'none' ? 'selected' : ''}>None (Fastest)</option>
                                 <option value="summarized" ${settings.history_mode === 'summarized' ? 'selected' : ''}>Summarized (Balanced)</option>
                                 <option value="full" ${settings.history_mode === 'full' ? 'selected' : ''}>Full (Best Context)</option>
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Max History Messages</label>
-                            <input type="number" name="max_llm_history_messages" min="0" max="50"
+                            <label for="edit-preset-max-history" class="block text-sm text-gray-400 mb-1">Max History Messages</label>
+                            <input type="number" id="edit-preset-max-history" name="max_llm_history_messages" min="0" max="50"
                                    class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                                    value="${settings.max_llm_history_messages || 5}">
                         </div>

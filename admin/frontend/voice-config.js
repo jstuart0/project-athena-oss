@@ -480,7 +480,7 @@ function renderVoiceConfig() {
             <h4><i class="fas fa-flask"></i> Test Voice Services</h4>
             <div class="test-controls">
                 <div class="test-group">
-                    <label>TTS Test:</label>
+                    <label for="tts-test-input">TTS Test:</label>
                     <input type="text" id="tts-test-input" placeholder="Enter text to synthesize" value="Hello, I am Athena, your voice assistant.">
                     <button onclick="testTTS()" class="btn btn-primary">
                         <i class="fas fa-play"></i> Test TTS

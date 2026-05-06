@@ -39,28 +39,28 @@ function renderConversationSettings(settings) {
 
     container.innerHTML = `
         <div>
-            <label class="block text-sm font-medium text-gray-400 mb-2 flex items-center">Session Timeout (seconds)${infoIcon('conv-session-timeout')}</label>
+            <label for="timeout-seconds" class="block text-sm font-medium text-gray-400 mb-2 flex items-center">Session Timeout (seconds)${infoIcon('conv-session-timeout')}</label>
             <input type="number" id="timeout-seconds" value="${settings.timeout_seconds || 1800}"
                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
             <p class="text-xs text-gray-500 mt-1">Time before session expires (default: 1800 = 30 min)</p>
         </div>
 
         <div>
-            <label class="block text-sm font-medium text-gray-400 mb-2 flex items-center">Session TTL (seconds)${infoIcon('conv-session-timeout', 'Maximum absolute session lifetime regardless of activity. Sessions older than this are automatically expired.')}</label>
+            <label for="session-ttl-seconds" class="block text-sm font-medium text-gray-400 mb-2 flex items-center">Session TTL (seconds)${infoIcon('conv-session-timeout', 'Maximum absolute session lifetime regardless of activity. Sessions older than this are automatically expired.')}</label>
             <input type="number" id="session-ttl-seconds" value="${settings.session_ttl_seconds || 3600}"
                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
             <p class="text-xs text-gray-500 mt-1">Maximum session lifetime (default: 3600 = 1 hour)</p>
         </div>
 
         <div>
-            <label class="block text-sm font-medium text-gray-400 mb-2 flex items-center">Max Messages${infoIcon('conv-history-length')}</label>
+            <label for="max-messages" class="block text-sm font-medium text-gray-400 mb-2 flex items-center">Max Messages${infoIcon('conv-history-length')}</label>
             <input type="number" id="max-messages" value="${settings.max_messages || 20}"
                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
             <p class="text-xs text-gray-500 mt-1">Maximum messages to store in session (default: 20)</p>
         </div>
 
         <div>
-            <label class="block text-sm font-medium text-gray-400 mb-2 flex items-center">Cleanup Interval (seconds)${infoIcon('conv-session-timeout', 'How often to check for and remove expired sessions.')}</label>
+            <label for="cleanup-interval-seconds" class="block text-sm font-medium text-gray-400 mb-2 flex items-center">Cleanup Interval (seconds)${infoIcon('conv-session-timeout', 'How often to check for and remove expired sessions.')}</label>
             <input type="number" id="cleanup-interval-seconds" value="${settings.cleanup_interval_seconds || 60}"
                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
             <p class="text-xs text-gray-500 mt-1">Session cleanup frequency (default: 60)</p>
@@ -69,21 +69,21 @@ function renderConversationSettings(settings) {
         <div class="flex items-center">
             <input type="checkbox" id="conversation-enabled" ${settings.enabled ? 'checked' : ''}
                 class="w-4 h-4 bg-dark-bg border border-dark-border rounded">
-            <label class="ml-2 text-sm text-gray-400 flex items-center">Enable Conversation Context${infoIcon('conv-session-timeout', 'When enabled, maintains conversation context across multiple turns.')}</label>
+            <label for="conversation-enabled" class="ml-2 text-sm text-gray-400 flex items-center">Enable Conversation Context${infoIcon('conv-session-timeout', 'When enabled, maintains conversation context across multiple turns.')}</label>
         </div>
 
         <div class="flex items-center">
             <input type="checkbox" id="use-context" ${settings.use_context ? 'checked' : ''}
                 class="w-4 h-4 bg-dark-bg border border-dark-border rounded">
-            <label class="ml-2 text-sm text-gray-400 flex items-center">Use Context in LLM Requests${infoIcon('conv-clarification', 'Include conversation history when making LLM requests.')}</label>
+            <label for="use-context" class="ml-2 text-sm text-gray-400 flex items-center">Use Context in LLM Requests${infoIcon('conv-clarification', 'Include conversation history when making LLM requests.')}</label>
         </div>
 
         <!-- History Mode Selection -->
         <div class="col-span-2 mt-4 p-4 bg-dark-bg border border-dark-border rounded-lg">
-            <label class="block text-sm font-medium text-white mb-3">
+            <p class="block text-sm font-medium text-white mb-3">
                 Conversation History Mode
                 <span class="ml-2 text-xs text-gray-400">(affects response latency)</span>
-            </label>
+            </p>
 
             <div class="grid grid-cols-3 gap-4">
                 <label class="relative flex flex-col p-4 border rounded-lg cursor-pointer ${historyMode === 'none' ? 'border-green-500 bg-green-900/20' : 'border-dark-border hover:border-gray-500'}">
@@ -114,7 +114,7 @@ function renderConversationSettings(settings) {
 
         <!-- Max History Messages (only visible for 'full' mode) -->
         <div id="max-history-container" class="col-span-2 ${historyMode === 'full' ? '' : 'hidden'}">
-            <label class="block text-sm font-medium text-gray-400 mb-2 flex items-center">
+            <label for="max-llm-history-messages" class="block text-sm font-medium text-gray-400 mb-2 flex items-center">
                 Max LLM History Messages
                 ${infoIcon('conv-history-length', 'Number of previous messages to include in LLM context. Higher = more context but slower responses.')}
             </label>
@@ -374,7 +374,7 @@ function showCreateSportsTeamModal() {
 
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Ambiguous Team Name</label>
+                    <label for="new-team-name" class="block text-sm font-medium text-gray-400 mb-2">Ambiguous Team Name</label>
                     <input type="text" id="new-team-name" placeholder="e.g., Giants, Cardinals, Jets"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     <p class="text-xs text-gray-500 mt-1">The ambiguous name that needs clarification</p>
@@ -383,11 +383,11 @@ function showCreateSportsTeamModal() {
                 <div class="flex items-center">
                     <input type="checkbox" id="new-team-requires-disambiguation" checked
                         class="w-4 h-4 bg-dark-bg border border-dark-border rounded">
-                    <label class="ml-2 text-sm text-gray-400">Requires Disambiguation</label>
+                    <label for="new-team-requires-disambiguation" class="ml-2 text-sm text-gray-400">Requires Disambiguation</label>
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Option 1</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Option 1</p>
                     <div class="grid grid-cols-3 gap-2">
                         <input type="text" id="option1-id" placeholder="ID (e.g., ny-giants)"
                             class="px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white text-sm">
@@ -399,7 +399,7 @@ function showCreateSportsTeamModal() {
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Option 2</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Option 2</p>
                     <div class="grid grid-cols-3 gap-2">
                         <input type="text" id="option2-id" placeholder="ID (e.g., sf-giants)"
                             class="px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white text-sm">

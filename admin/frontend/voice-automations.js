@@ -155,7 +155,7 @@ async function renderAutomationsPage() {
             <div class="bg-dark-card rounded-lg p-4 border border-dark-border">
                 <div class="flex flex-wrap gap-4 items-center">
                     <div>
-                        <label class="text-sm text-gray-400 mr-2">Owner Type:</label>
+                        <label for="filter-owner-type" class="text-sm text-gray-400 mr-2">Owner Type:</label>
                         <select id="filter-owner-type" onchange="updateAutomationsFilter()"
                                 class="bg-dark-bg border border-dark-border rounded px-3 py-1 text-white text-sm">
                             <option value="">All</option>
@@ -164,7 +164,7 @@ async function renderAutomationsPage() {
                         </select>
                     </div>
                     <div>
-                        <label class="text-sm text-gray-400 mr-2">Status:</label>
+                        <label for="filter-status" class="text-sm text-gray-400 mr-2">Status:</label>
                         <select id="filter-status" onchange="updateAutomationsFilter()"
                                 class="bg-dark-bg border border-dark-border rounded px-3 py-1 text-white text-sm">
                             <option value="active" ${automationsFilter.status === 'active' ? 'selected' : ''}>Active</option>
@@ -173,7 +173,7 @@ async function renderAutomationsPage() {
                         </select>
                     </div>
                     <div>
-                        <label class="text-sm text-gray-400 mr-2">Guest Name:</label>
+                        <label for="filter-guest-name" class="text-sm text-gray-400 mr-2">Guest Name:</label>
                         <input type="text" id="filter-guest-name" placeholder="Search..."
                                value="${escapeHtml(automationsFilter.guest_name)}"
                                onchange="updateAutomationsFilter()"

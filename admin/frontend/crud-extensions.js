@@ -24,13 +24,13 @@ function showCreateValidationModelModal() {
             <form onsubmit="createValidationModel(event)" class="space-y-4">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Name *</label>
+                        <label for="vm-name" class="block text-sm font-medium text-gray-400 mb-2">Name *</label>
                         <input type="text" id="vm-name" required
                             placeholder="e.g., phi3-primary"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Model ID *</label>
+                        <label for="vm-model-id" class="block text-sm font-medium text-gray-400 mb-2">Model ID *</label>
                         <input type="text" id="vm-model-id" required
                             placeholder="e.g., phi3:mini"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -39,7 +39,7 @@ function showCreateValidationModelModal() {
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Model Type *</label>
+                        <label for="vm-model-type" class="block text-sm font-medium text-gray-400 mb-2">Model Type *</label>
                         <select id="vm-model-type" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             <option value="primary">Primary</option>
@@ -48,7 +48,7 @@ function showCreateValidationModelModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Endpoint URL *</label>
+                        <label for="vm-endpoint" class="block text-sm font-medium text-gray-400 mb-2">Endpoint URL *</label>
                         <input type="text" id="vm-endpoint" required
                             placeholder="http://localhost:11434"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -56,7 +56,7 @@ function showCreateValidationModelModal() {
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Categories (comma-separated)</label>
+                    <label for="vm-categories" class="block text-sm font-medium text-gray-400 mb-2">Categories (comma-separated)</label>
                     <input type="text" id="vm-categories"
                         placeholder="home_control, weather, sports"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -64,17 +64,17 @@ function showCreateValidationModelModal() {
 
                 <div class="grid grid-cols-3 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Temperature</label>
+                        <label for="vm-temperature" class="block text-sm font-medium text-gray-400 mb-2">Temperature</label>
                         <input type="number" id="vm-temperature" value="0.1" step="0.1" min="0" max="2"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Max Tokens</label>
+                        <label for="vm-max-tokens" class="block text-sm font-medium text-gray-400 mb-2">Max Tokens</label>
                         <input type="number" id="vm-max-tokens" value="200"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Timeout (seconds)</label>
+                        <label for="vm-timeout" class="block text-sm font-medium text-gray-400 mb-2">Timeout (seconds)</label>
                         <input type="number" id="vm-timeout" value="30"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
@@ -82,12 +82,12 @@ function showCreateValidationModelModal() {
 
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Weight</label>
+                        <label for="vm-weight" class="block text-sm font-medium text-gray-400 mb-2">Weight</label>
                         <input type="number" id="vm-weight" value="1.0" step="0.1" min="0" max="1"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Min Confidence</label>
+                        <label for="vm-min-confidence" class="block text-sm font-medium text-gray-400 mb-2">Min Confidence</label>
                         <input type="number" id="vm-min-confidence" value="0.7" step="0.1" min="0" max="1"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
@@ -184,13 +184,13 @@ function showCreateHallucinationCheckModal() {
             <form onsubmit="createHallucinationCheck(event)" class="space-y-4">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Name *</label>
+                        <label for="hc-name" class="block text-sm font-medium text-gray-400 mb-2">Name *</label>
                         <input type="text" id="hc-name" required
                             placeholder="e.g., weather_location_required"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Display Name *</label>
+                        <label for="hc-display-name" class="block text-sm font-medium text-gray-400 mb-2">Display Name *</label>
                         <input type="text" id="hc-display-name" required
                             placeholder="e.g., Weather Location Check"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -198,7 +198,7 @@ function showCreateHallucinationCheckModal() {
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Description</label>
+                    <label for="hc-description" class="block text-sm font-medium text-gray-400 mb-2">Description</label>
                     <input type="text" id="hc-description"
                         placeholder="Describe what this check validates"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -206,7 +206,7 @@ function showCreateHallucinationCheckModal() {
 
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Check Type *</label>
+                        <label for="hc-check-type" class="block text-sm font-medium text-gray-400 mb-2">Check Type *</label>
                         <select id="hc-check-type" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             <option value="required_elements">Required Elements</option>
@@ -216,7 +216,7 @@ function showCreateHallucinationCheckModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Severity *</label>
+                        <label for="hc-severity" class="block text-sm font-medium text-gray-400 mb-2">Severity *</label>
                         <select id="hc-severity" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             <option value="error">Error</option>
@@ -225,28 +225,28 @@ function showCreateHallucinationCheckModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
+                        <label for="hc-priority" class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
                         <input type="number" id="hc-priority" value="100"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Categories (comma-separated)</label>
+                    <label for="hc-categories" class="block text-sm font-medium text-gray-400 mb-2">Categories (comma-separated)</label>
                     <input type="text" id="hc-categories"
                         placeholder="weather, home_control, sports"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Configuration (JSON)</label>
+                    <label for="hc-configuration" class="block text-sm font-medium text-gray-400 mb-2">Configuration (JSON)</label>
                     <textarea id="hc-configuration" rows="3"
                         placeholder='{"required_fields": ["location"]}'
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white font-mono text-sm">{}</textarea>
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Error Message Template</label>
+                    <label for="hc-error-message" class="block text-sm font-medium text-gray-400 mb-2">Error Message Template</label>
                     <input type="text" id="hc-error-message"
                         placeholder="Response failed validation check"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -254,7 +254,7 @@ function showCreateHallucinationCheckModal() {
 
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Confidence Threshold</label>
+                        <label for="hc-confidence" class="block text-sm font-medium text-gray-400 mb-2">Confidence Threshold</label>
                         <input type="number" id="hc-confidence" value="0.7" step="0.1" min="0" max="1"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
@@ -373,19 +373,19 @@ function showEditMultiIntentConfigModal(config) {
             <form onsubmit="updateMultiIntentConfig(event)" class="space-y-4">
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Max Intents Per Query</label>
+                        <label for="mi-max-intents" class="block text-sm font-medium text-gray-400 mb-2">Max Intents Per Query</label>
                         <input type="number" id="mi-max-intents" value="${config.max_intents_per_query}"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Min Words Per Intent</label>
+                        <label for="mi-min-words" class="block text-sm font-medium text-gray-400 mb-2">Min Words Per Intent</label>
                         <input type="number" id="mi-min-words" value="${config.min_words_per_intent}"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Combination Strategy</label>
+                    <label for="mi-strategy" class="block text-sm font-medium text-gray-400 mb-2">Combination Strategy</label>
                     <select id="mi-strategy"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         <option value="concatenate" ${config.combination_strategy === 'concatenate' ? 'selected' : ''}>Concatenate</option>
@@ -395,14 +395,14 @@ function showEditMultiIntentConfigModal(config) {
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Separators (comma-separated)</label>
+                    <label for="mi-separators" class="block text-sm font-medium text-gray-400 mb-2">Separators (comma-separated)</label>
                     <input type="text" id="mi-separators" value="${config.separators.join(', ')}"
                         placeholder="and, then, also"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Context Words to Preserve (comma-separated)</label>
+                    <label for="mi-context-words" class="block text-sm font-medium text-gray-400 mb-2">Context Words to Preserve (comma-separated)</label>
                     <input type="text" id="mi-context-words" value="${config.context_words_to_preserve.join(', ')}"
                         placeholder="the, my, in, at, to"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">

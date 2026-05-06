@@ -285,16 +285,16 @@ function showConfigModal(config) {
 
                         <div class="grid grid-cols-2 gap-4">
                             <div>
-                                <label class="block text-sm font-medium text-gray-300 mb-1">Model Name *</label>
-                                <input type="text" name="model_name" value="${config?.model_name || ''}"
+                                <label for="model-config-model-name" class="block text-sm font-medium text-gray-300 mb-1">Model Name *</label>
+                                <input type="text" id="model-config-model-name" name="model_name" value="${config?.model_name || ''}"
                                        ${isEdit ? 'readonly' : ''}
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white ${isEdit ? 'opacity-50' : ''}"
                                        placeholder="e.g., qwen3:8b"
                                        required>
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-300 mb-1">Display Name</label>
-                                <input type="text" name="display_name" value="${config?.display_name || ''}"
+                                <label for="model-config-display-name" class="block text-sm font-medium text-gray-300 mb-1">Display Name</label>
+                                <input type="text" id="model-config-display-name" name="display_name" value="${config?.display_name || ''}"
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white"
                                        placeholder="e.g., Qwen3 8B (Mirostat)">
                             </div>
@@ -302,22 +302,22 @@ function showConfigModal(config) {
 
                         <div class="grid grid-cols-3 gap-4">
                             <div>
-                                <label class="block text-sm font-medium text-gray-300 mb-1">Backend</label>
-                                <select name="backend_type" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                                <label for="model-config-backend-type" class="block text-sm font-medium text-gray-300 mb-1">Backend</label>
+                                <select id="model-config-backend-type" name="backend_type" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                                     <option value="ollama" ${config?.backend_type === 'ollama' ? 'selected' : ''}>Ollama</option>
                                     <option value="mlx" ${config?.backend_type === 'mlx' ? 'selected' : ''}>MLX</option>
                                     <option value="auto" ${config?.backend_type === 'auto' ? 'selected' : ''}>Auto</option>
                                 </select>
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-300 mb-1">Temperature</label>
-                                <input type="number" name="temperature" value="${config?.temperature ?? 0.7}"
+                                <label for="model-config-temperature" class="block text-sm font-medium text-gray-300 mb-1">Temperature</label>
+                                <input type="number" id="model-config-temperature" name="temperature" value="${config?.temperature ?? 0.7}"
                                        step="0.1" min="0" max="2"
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-300 mb-1">Max Tokens</label>
-                                <input type="number" name="max_tokens" value="${config?.max_tokens ?? 2048}"
+                                <label for="model-config-max-tokens" class="block text-sm font-medium text-gray-300 mb-1">Max Tokens</label>
+                                <input type="number" id="model-config-max-tokens" name="max_tokens" value="${config?.max_tokens ?? 2048}"
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             </div>
                         </div>
@@ -350,20 +350,20 @@ function showConfigModal(config) {
 
                         <div class="grid grid-cols-3 gap-4">
                             <div>
-                                <label class="block text-sm font-medium text-gray-300 mb-1">Context Window (num_ctx)</label>
-                                <input type="number" name="num_ctx" value="${ollamaOpts.num_ctx || ''}"
+                                <label for="model-config-num-ctx" class="block text-sm font-medium text-gray-300 mb-1">Context Window (num_ctx)</label>
+                                <input type="number" id="model-config-num-ctx" name="num_ctx" value="${ollamaOpts.num_ctx || ''}"
                                        placeholder="4096"
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-300 mb-1">Batch Size (num_batch)</label>
-                                <input type="number" name="num_batch" value="${ollamaOpts.num_batch || ''}"
+                                <label for="model-config-num-batch" class="block text-sm font-medium text-gray-300 mb-1">Batch Size (num_batch)</label>
+                                <input type="number" id="model-config-num-batch" name="num_batch" value="${ollamaOpts.num_batch || ''}"
                                        placeholder="256"
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-300 mb-1">Max Predict (num_predict)</label>
-                                <input type="number" name="num_predict" value="${ollamaOpts.num_predict || ''}"
+                                <label for="model-config-num-predict" class="block text-sm font-medium text-gray-300 mb-1">Max Predict (num_predict)</label>
+                                <input type="number" id="model-config-num-predict" name="num_predict" value="${ollamaOpts.num_predict || ''}"
                                        placeholder=""
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             </div>
@@ -373,21 +373,21 @@ function showConfigModal(config) {
                             <h5 class="text-xs font-medium text-gray-500 mb-3">SAMPLING PARAMETERS</h5>
                             <div class="grid grid-cols-3 gap-4">
                                 <div>
-                                    <label class="block text-sm font-medium text-gray-300 mb-1">Top K</label>
-                                    <input type="number" name="top_k" value="${ollamaOpts.top_k || ''}"
+                                    <label for="model-config-top-k" class="block text-sm font-medium text-gray-300 mb-1">Top K</label>
+                                    <input type="number" id="model-config-top-k" name="top_k" value="${ollamaOpts.top_k || ''}"
                                            placeholder="30"
                                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                                 </div>
                                 <div>
-                                    <label class="block text-sm font-medium text-gray-300 mb-1">Top P</label>
-                                    <input type="number" name="top_p" value="${ollamaOpts.top_p || ''}"
+                                    <label for="model-config-top-p" class="block text-sm font-medium text-gray-300 mb-1">Top P</label>
+                                    <input type="number" id="model-config-top-p" name="top_p" value="${ollamaOpts.top_p || ''}"
                                            step="0.01" min="0" max="1"
                                            placeholder="0.85"
                                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                                 </div>
                                 <div>
-                                    <label class="block text-sm font-medium text-gray-300 mb-1">Repeat Penalty</label>
-                                    <input type="number" name="repeat_penalty" value="${ollamaOpts.repeat_penalty || ''}"
+                                    <label for="model-config-repeat-penalty" class="block text-sm font-medium text-gray-300 mb-1">Repeat Penalty</label>
+                                    <input type="number" id="model-config-repeat-penalty" name="repeat_penalty" value="${ollamaOpts.repeat_penalty || ''}"
                                            step="0.01" min="0.5" max="2"
                                            placeholder="1.08"
                                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -399,23 +399,23 @@ function showConfigModal(config) {
                             <h5 class="text-xs font-medium text-gray-500 mb-3">MIROSTAT (ADAPTIVE SAMPLING)</h5>
                             <div class="grid grid-cols-3 gap-4">
                                 <div>
-                                    <label class="block text-sm font-medium text-gray-300 mb-1">Mirostat Mode</label>
-                                    <select name="mirostat" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                                    <label for="model-config-mirostat" class="block text-sm font-medium text-gray-300 mb-1">Mirostat Mode</label>
+                                    <select id="model-config-mirostat" name="mirostat" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                                         <option value="" ${!ollamaOpts.mirostat ? 'selected' : ''}>Off</option>
                                         <option value="1" ${ollamaOpts.mirostat === 1 ? 'selected' : ''}>Mirostat 1</option>
                                         <option value="2" ${ollamaOpts.mirostat === 2 ? 'selected' : ''}>Mirostat 2.0 (Recommended)</option>
                                     </select>
                                 </div>
                                 <div>
-                                    <label class="block text-sm font-medium text-gray-300 mb-1">Tau (Target Entropy)</label>
-                                    <input type="number" name="mirostat_tau" value="${ollamaOpts.mirostat_tau || ''}"
+                                    <label for="model-config-mirostat-tau" class="block text-sm font-medium text-gray-300 mb-1">Tau (Target Entropy)</label>
+                                    <input type="number" id="model-config-mirostat-tau" name="mirostat_tau" value="${ollamaOpts.mirostat_tau || ''}"
                                            step="0.1" min="0" max="10"
                                            placeholder="5.0"
                                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                                 </div>
                                 <div>
-                                    <label class="block text-sm font-medium text-gray-300 mb-1">Eta (Learning Rate)</label>
-                                    <input type="number" name="mirostat_eta" value="${ollamaOpts.mirostat_eta || ''}"
+                                    <label for="model-config-mirostat-eta" class="block text-sm font-medium text-gray-300 mb-1">Eta (Learning Rate)</label>
+                                    <input type="number" id="model-config-mirostat-eta" name="mirostat_eta" value="${ollamaOpts.mirostat_eta || ''}"
                                            step="0.01" min="0" max="1"
                                            placeholder="0.1"
                                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -426,8 +426,8 @@ function showConfigModal(config) {
 
                     <!-- Description -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Description</label>
-                        <textarea name="description" rows="2"
+                        <label for="model-config-description" class="block text-sm font-medium text-gray-300 mb-1">Description</label>
+                        <textarea id="model-config-description" name="description" rows="2"
                                   class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white"
                                   placeholder="Configuration notes...">${config?.description || ''}</textarea>
                     </div>

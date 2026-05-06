@@ -151,12 +151,12 @@
             const localForm = methods.local_enabled ? `
                 <form onsubmit="Auth.submitLocalLogin(event)" class="space-y-3">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Username</label>
+                        <label for="local-login-username" class="block text-sm font-medium text-gray-400 mb-2">Username</label>
                         <input id="local-login-username" type="text" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Password</label>
+                        <label for="local-login-password" class="block text-sm font-medium text-gray-400 mb-2">Password</label>
                         <input id="local-login-password" type="password" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>

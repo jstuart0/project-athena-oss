@@ -367,7 +367,7 @@ function renderMemoryConfig(config) {
                 return `
                     <div class="bg-dark-card border border-dark-border rounded-lg p-4">
                         <div class="flex justify-between items-start mb-2">
-                            <label class="text-sm font-medium text-white">${item.label}</label>
+                            <p class="text-sm font-medium text-white">${item.label}</p>
                             <button onclick="editConfigValue('${item.key}')" class="text-xs text-blue-400 hover:text-blue-300">Edit</button>
                         </div>
                         <div class="text-lg font-mono text-blue-400" id="config-${item.key}">

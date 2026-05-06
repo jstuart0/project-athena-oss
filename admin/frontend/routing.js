@@ -242,7 +242,7 @@ function showCreatePatternModal() {
 
                 <form onsubmit="createPattern(event)" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Intent Category</label>
+                        <label for="pattern-category" class="block text-sm font-medium text-gray-400 mb-2">Intent Category</label>
                         <select id="pattern-category" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
                             <option value="">Select category...</option>
@@ -258,14 +258,14 @@ function showCreatePatternModal() {
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Keyword</label>
+                        <label for="pattern-keyword" class="block text-sm font-medium text-gray-400 mb-2">Keyword</label>
                         <input type="text" id="pattern-keyword" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                             placeholder="e.g., concert, game, forecast">
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Priority (optional)</label>
+                        <label for="pattern-priority" class="block text-sm font-medium text-gray-400 mb-2">Priority (optional)</label>
                         <input type="number" id="pattern-priority" min="0" max="100"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                             placeholder="0-100 (higher = more important)">
@@ -409,7 +409,7 @@ function showCreateRoutingModal() {
 
                 <form onsubmit="createRouting(event)" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Intent Category</label>
+                        <label for="routing-category" class="block text-sm font-medium text-gray-400 mb-2">Intent Category</label>
                         <select id="routing-category" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
                             <option value="">Select category...</option>
@@ -431,7 +431,7 @@ function showCreateRoutingModal() {
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">RAG Service URL (optional)</label>
+                        <label for="routing-rag-url" class="block text-sm font-medium text-gray-400 mb-2">RAG Service URL (optional)</label>
                         <input type="url" id="routing-rag-url"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                             placeholder="http://localhost:8010">
@@ -571,7 +571,7 @@ function showCreateProviderRoutingModal() {
 
                 <form onsubmit="createProviderRouting(event)" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Intent Category</label>
+                        <label for="provider-category" class="block text-sm font-medium text-gray-400 mb-2">Intent Category</label>
                         <select id="provider-category" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
                             <option value="">Select category...</option>
@@ -583,7 +583,7 @@ function showCreateProviderRoutingModal() {
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Providers (comma-separated, in priority order)</label>
+                        <label for="provider-list" class="block text-sm font-medium text-gray-400 mb-2">Providers (comma-separated, in priority order)</label>
                         <input type="text" id="provider-list" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                             placeholder="ticketmaster, eventbrite, duckduckgo">

@@ -185,20 +185,20 @@ function showCreateRoomGroupModal() {
 
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Display Name *</label>
+                    <label for="group-display-name" class="block text-sm font-medium text-gray-400 mb-2">Display Name *</label>
                     <input type="text" id="group-display-name" placeholder="First Floor"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Internal Name (auto-generated)</label>
+                    <label for="group-name" class="block text-sm font-medium text-gray-400 mb-2">Internal Name (auto-generated)</label>
                     <input type="text" id="group-name" placeholder="first_floor" readonly
                         class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-gray-400 cursor-not-allowed">
                     <p class="text-xs text-gray-500 mt-1">Auto-generated from display name</p>
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Description (optional)</label>
+                    <label for="group-description" class="block text-sm font-medium text-gray-400 mb-2">Description (optional)</label>
                     <textarea id="group-description" rows="2" placeholder="Main living level - living room, dining room, kitchen"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"></textarea>
                 </div>
@@ -244,7 +244,7 @@ function showAddAliasModal(groupId) {
             <h3 class="text-xl font-semibold text-white mb-4">Add Alias</h3>
 
             <div>
-                <label class="block text-sm font-medium text-gray-400 mb-2">Alias</label>
+                <label for="new-alias" class="block text-sm font-medium text-gray-400 mb-2">Alias</label>
                 <input type="text" id="new-alias" placeholder="e.g., 1st floor, main floor, downstairs"
                     class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                 <p class="text-xs text-gray-500 mt-1">Alternative name that users can say</p>
@@ -284,7 +284,7 @@ function showAddMemberModal(groupId) {
 
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Room Name *</label>
+                    <label for="member-room-name" class="block text-sm font-medium text-gray-400 mb-2">Room Name *</label>
                     <select id="member-room-name"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <option value="">Select a room...</option>
@@ -294,19 +294,19 @@ function showAddMemberModal(groupId) {
                 </div>
 
                 <div id="custom-room-input" class="hidden">
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Custom Room Name</label>
+                    <label for="member-custom-room" class="block text-sm font-medium text-gray-400 mb-2">Custom Room Name</label>
                     <input type="text" id="member-custom-room" placeholder="e.g., sunroom, mudroom"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Display Name (optional)</label>
+                    <label for="member-display-name" class="block text-sm font-medium text-gray-400 mb-2">Display Name (optional)</label>
                     <input type="text" id="member-display-name" placeholder="Living Room"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">HA Entity Pattern (optional)</label>
+                    <label for="member-ha-pattern" class="block text-sm font-medium text-gray-400 mb-2">HA Entity Pattern (optional)</label>
                     <input type="text" id="member-ha-pattern" placeholder="light.living*"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                     <p class="text-xs text-gray-500 mt-1">Optional: Home Assistant entity pattern for direct matching</p>
@@ -399,13 +399,13 @@ async function editRoomGroup(groupId) {
 
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Display Name *</label>
+                    <label for="group-display-name" class="block text-sm font-medium text-gray-400 mb-2">Display Name *</label>
                     <input type="text" id="group-display-name" value="${escapeHtml(group.display_name)}"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Description (optional)</label>
+                    <label for="group-description" class="block text-sm font-medium text-gray-400 mb-2">Description (optional)</label>
                     <textarea id="group-description" rows="2"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">${escapeHtml(group.description || '')}</textarea>
                 </div>

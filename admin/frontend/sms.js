@@ -380,11 +380,11 @@ function showAddTemplateModal() {
                 <h3 class="text-lg font-semibold text-white mb-4">Add SMS Template</h3>
                 <form id="add-template-form" class="space-y-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Template Name</label>
+                        <label for="template-name" class="block text-sm text-gray-400 mb-1">Template Name</label>
                         <input type="text" id="template-name" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700 focus:border-blue-500" required>
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Category</label>
+                        <label for="template-category" class="block text-sm text-gray-400 mb-1">Category</label>
                         <select id="template-category" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                             <option value="info">Info</option>
                             <option value="recommendations">Recommendations</option>
@@ -394,15 +394,15 @@ function showAddTemplateModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Subject (optional)</label>
+                        <label for="template-subject" class="block text-sm text-gray-400 mb-1">Subject (optional)</label>
                         <input type="text" id="template-subject" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Message Body</label>
+                        <label for="template-body" class="block text-sm text-gray-400 mb-1">Message Body</label>
                         <textarea id="template-body" rows="4" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700" required placeholder="Use {variable} for dynamic content"></textarea>
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Variables (comma-separated)</label>
+                        <label for="template-variables" class="block text-sm text-gray-400 mb-1">Variables (comma-separated)</label>
                         <input type="text" id="template-variables" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700" placeholder="location, forecast">
                     </div>
                     <div class="flex items-center gap-2">
@@ -489,11 +489,11 @@ async function showEditTemplateModal(templateId) {
                     <form id="edit-template-form" class="space-y-4">
                         <input type="hidden" id="edit-template-id" value="${template.id}">
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Template Name</label>
+                            <label for="edit-template-name" class="block text-sm text-gray-400 mb-1">Template Name</label>
                             <input type="text" id="edit-template-name" value="${escapeHtml(template.name || '')}" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700" required>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Category</label>
+                            <label for="edit-template-category" class="block text-sm text-gray-400 mb-1">Category</label>
                             <select id="edit-template-category" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                                 <option value="info" ${template.category === 'info' ? 'selected' : ''}>Info</option>
                                 <option value="recommendations" ${template.category === 'recommendations' ? 'selected' : ''}>Recommendations</option>
@@ -503,15 +503,15 @@ async function showEditTemplateModal(templateId) {
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Subject (optional)</label>
+                            <label for="edit-template-subject" class="block text-sm text-gray-400 mb-1">Subject (optional)</label>
                             <input type="text" id="edit-template-subject" value="${escapeHtml(template.subject || '')}" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Message Body</label>
+                            <label for="edit-template-body" class="block text-sm text-gray-400 mb-1">Message Body</label>
                             <textarea id="edit-template-body" rows="4" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700" required>${escapeHtml(template.body || '')}</textarea>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Variables (comma-separated)</label>
+                            <label for="edit-template-variables" class="block text-sm text-gray-400 mb-1">Variables (comma-separated)</label>
                             <input type="text" id="edit-template-variables" value="${template.variables ? template.variables.join(', ') : ''}" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                         </div>
                         <div class="flex items-center gap-2">
@@ -627,11 +627,11 @@ function showAddScheduledModal() {
                 <h3 class="text-lg font-semibold text-white mb-4">Add Scheduled SMS Configuration</h3>
                 <form id="add-scheduled-form" class="space-y-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Configuration Name</label>
+                        <label for="scheduled-name" class="block text-sm text-gray-400 mb-1">Configuration Name</label>
                         <input type="text" id="scheduled-name" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700" required placeholder="e.g., Welcome Message">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Trigger Type</label>
+                        <label for="scheduled-trigger-type" class="block text-sm text-gray-400 mb-1">Trigger Type</label>
                         <select id="scheduled-trigger-type" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                             <option value="before_checkin">Before Check-in</option>
                             <option value="after_checkin">After Check-in</option>
@@ -640,11 +640,11 @@ function showAddScheduledModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Trigger Offset (hours)</label>
+                        <label for="scheduled-offset" class="block text-sm text-gray-400 mb-1">Trigger Offset (hours)</label>
                         <input type="number" id="scheduled-offset" value="0" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Custom Message (optional)</label>
+                        <label for="scheduled-message" class="block text-sm text-gray-400 mb-1">Custom Message (optional)</label>
                         <textarea id="scheduled-message" rows="3" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700" placeholder="Leave blank to use template"></textarea>
                     </div>
                     <div class="flex items-center gap-2">
@@ -701,11 +701,11 @@ async function showEditScheduledModal(scheduledId) {
                     <form id="edit-scheduled-form" class="space-y-4">
                         <input type="hidden" id="edit-scheduled-id" value="${item.id}">
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Configuration Name</label>
+                            <label for="edit-scheduled-name" class="block text-sm text-gray-400 mb-1">Configuration Name</label>
                             <input type="text" id="edit-scheduled-name" value="${escapeHtml(item.name || '')}" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700" required>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Trigger Type</label>
+                            <label for="edit-scheduled-trigger-type" class="block text-sm text-gray-400 mb-1">Trigger Type</label>
                             <select id="edit-scheduled-trigger-type" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                                 <option value="before_checkin" ${item.trigger_type === 'before_checkin' ? 'selected' : ''}>Before Check-in</option>
                                 <option value="after_checkin" ${item.trigger_type === 'after_checkin' ? 'selected' : ''}>After Check-in</option>
@@ -714,11 +714,11 @@ async function showEditScheduledModal(scheduledId) {
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Trigger Offset (hours)</label>
+                            <label for="edit-scheduled-offset" class="block text-sm text-gray-400 mb-1">Trigger Offset (hours)</label>
                             <input type="number" id="edit-scheduled-offset" value="${item.trigger_offset_hours || 0}" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Custom Message (optional)</label>
+                            <label for="edit-scheduled-message" class="block text-sm text-gray-400 mb-1">Custom Message (optional)</label>
                             <textarea id="edit-scheduled-message" rows="3" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">${escapeHtml(item.custom_message || '')}</textarea>
                         </div>
                         <div class="flex items-center gap-2">
@@ -853,11 +853,11 @@ function showAddTipModal() {
                 <h3 class="text-lg font-semibold text-white mb-4">Add Tip</h3>
                 <form id="add-tip-form" class="space-y-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Title</label>
+                        <label for="tip-title" class="block text-sm text-gray-400 mb-1">Title</label>
                         <input type="text" id="tip-title" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700" required>
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Category</label>
+                        <label for="tip-category" class="block text-sm text-gray-400 mb-1">Category</label>
                         <select id="tip-category" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                             <option value="local">Local Tips</option>
                             <option value="property">Property Info</option>
@@ -867,11 +867,11 @@ function showAddTipModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Content</label>
+                        <label for="tip-content" class="block text-sm text-gray-400 mb-1">Content</label>
                         <textarea id="tip-content" rows="3" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700" required></textarea>
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Priority (higher = shown first)</label>
+                        <label for="tip-priority" class="block text-sm text-gray-400 mb-1">Priority (higher = shown first)</label>
                         <input type="number" id="tip-priority" value="0" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                     </div>
                     <div class="flex items-center gap-2">
@@ -952,11 +952,11 @@ async function showEditTipModal(tipId) {
                     <form id="edit-tip-form" class="space-y-4">
                         <input type="hidden" id="edit-tip-id" value="${tip.id}">
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Title</label>
+                            <label for="edit-tip-title" class="block text-sm text-gray-400 mb-1">Title</label>
                             <input type="text" id="edit-tip-title" value="${escapeHtml(tip.title || '')}" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700" required>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Category</label>
+                            <label for="edit-tip-category" class="block text-sm text-gray-400 mb-1">Category</label>
                             <select id="edit-tip-category" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                                 <option value="sms_offer" ${tip.category === 'sms_offer' ? 'selected' : ''}>SMS Offer</option>
                                 <option value="feature_hint" ${tip.category === 'feature_hint' ? 'selected' : ''}>Feature Hint</option>
@@ -967,11 +967,11 @@ async function showEditTipModal(tipId) {
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Content</label>
+                            <label for="edit-tip-content" class="block text-sm text-gray-400 mb-1">Content</label>
                             <textarea id="edit-tip-content" rows="3" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700" required>${escapeHtml(tip.content || '')}</textarea>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">Priority (higher = shown first)</label>
+                            <label for="edit-tip-priority" class="block text-sm text-gray-400 mb-1">Priority (higher = shown first)</label>
                             <input type="number" id="edit-tip-priority" value="${tip.priority || 0}" class="w-full bg-dark-bg text-white px-3 py-2 rounded border border-gray-700">
                         </div>
                         <div class="flex items-center gap-2">

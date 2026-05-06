@@ -181,8 +181,8 @@ function editBypassConfig(serviceName) {
                 <form id="bypass-config-form" onsubmit="saveBypassConfig(event, '${serviceName}')" class="p-6 space-y-6">
                     <!-- Cloud Provider -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Cloud Provider</label>
-                        <select name="cloud_provider" class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                        <label for="bypass-cloud-provider" class="block text-sm font-medium text-gray-300 mb-2">Cloud Provider</label>
+                        <select id="bypass-cloud-provider" name="cloud_provider" class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             <option value="">Any available</option>
                             <option value="openai" ${config.cloud_provider === 'openai' ? 'selected' : ''}>OpenAI</option>
                             <option value="anthropic" ${config.cloud_provider === 'anthropic' ? 'selected' : ''}>Anthropic</option>
@@ -192,8 +192,8 @@ function editBypassConfig(serviceName) {
 
                     <!-- Cloud Model -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Model (optional)</label>
-                        <input type="text" name="cloud_model" value="${config.cloud_model || ''}"
+                        <label for="bypass-cloud-model" class="block text-sm font-medium text-gray-300 mb-2">Model (optional)</label>
+                        <input type="text" id="bypass-cloud-model" name="cloud_model" value="${config.cloud_model || ''}"
                                placeholder="e.g., gpt-4o, claude-sonnet"
                                class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         <p class="mt-1 text-xs text-gray-500">Leave empty to use provider's default model</p>
@@ -201,8 +201,8 @@ function editBypassConfig(serviceName) {
 
                     <!-- System Prompt -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">System Prompt</label>
-                        <textarea name="system_prompt" rows="8"
+                        <label for="bypass-system-prompt" class="block text-sm font-medium text-gray-300 mb-2">System Prompt</label>
+                        <textarea id="bypass-system-prompt" name="system_prompt" rows="8"
                                   class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white font-mono text-sm"
                         >${escapeHtmlBypass(config.system_prompt || '')}</textarea>
                         <p class="mt-1 text-xs text-gray-500">Instructions for the cloud LLM when handling this service</p>
@@ -211,14 +211,14 @@ function editBypassConfig(serviceName) {
                     <!-- Temperature & Max Tokens -->
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-2">Temperature</label>
-                            <input type="number" name="temperature" value="${config.temperature || 0.7}"
+                            <label for="bypass-temperature" class="block text-sm font-medium text-gray-300 mb-2">Temperature</label>
+                            <input type="number" id="bypass-temperature" name="temperature" value="${config.temperature || 0.7}"
                                    min="0" max="2" step="0.1"
                                    class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-2">Max Tokens</label>
-                            <input type="number" name="max_tokens" value="${config.max_tokens || 1024}"
+                            <label for="bypass-max-tokens" class="block text-sm font-medium text-gray-300 mb-2">Max Tokens</label>
+                            <input type="number" id="bypass-max-tokens" name="max_tokens" value="${config.max_tokens || 1024}"
                                    min="100" max="4096"
                                    class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         </div>

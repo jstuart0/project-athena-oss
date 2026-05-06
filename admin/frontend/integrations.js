@@ -349,7 +349,7 @@
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">API Key</label>
+                        <label for="integration-api-key" class="block text-sm font-medium text-gray-400 mb-2">API Key</label>
                         <input type="password" id="integration-api-key"
                                placeholder="Enter API key"
                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">
@@ -357,7 +357,7 @@
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Endpoint URL (optional)</label>
+                        <label for="integration-endpoint" class="block text-sm font-medium text-gray-400 mb-2">Endpoint URL (optional)</label>
                         <input type="url" id="integration-endpoint"
                                placeholder="https://api.example.com"
                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">

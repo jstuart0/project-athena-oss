@@ -334,7 +334,7 @@ function renderModelDownloadsPage() {
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                 <!-- Format Filter -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Format</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Format</p>
                     <div class="flex gap-2">
                         <label class="flex items-center gap-2 cursor-pointer">
                             <input type="radio" name="format" value="gguf" ${currentFilters.model_format === 'gguf' ? 'checked' : ''}
@@ -359,7 +359,7 @@ function renderModelDownloadsPage() {
 
                 <!-- Author Filter -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Author</label>
+                    <label for="author-filter" class="block text-sm font-medium text-gray-400 mb-2">Author</label>
                     <input type="text" id="author-filter" placeholder="e.g., TheBloke"
                            class="w-full px-3 py-1.5 bg-dark-bg border border-dark-border rounded-lg text-white text-sm"
                            value="${currentFilters.author}"
@@ -368,7 +368,7 @@ function renderModelDownloadsPage() {
 
                 <!-- Tool Support -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Capabilities</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Capabilities</p>
                     <label class="flex items-center gap-2 cursor-pointer">
                         <input type="checkbox" ${currentFilters.tool_support ? 'checked' : ''}
                                onchange="updateFilter('tool_support', this.checked)"
@@ -379,7 +379,7 @@ function renderModelDownloadsPage() {
 
                 <!-- Quantizations -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Quantization</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Quantization</p>
                     <div class="flex flex-wrap gap-1">
                         ${QUANTIZATION_OPTIONS.slice(0, 3).map(q => `
                             <label class="flex items-center gap-1 cursor-pointer px-2 py-1 rounded border ${currentFilters.quantizations.includes(q.value) ? 'border-blue-500 bg-blue-500/20' : 'border-dark-border'} text-xs">

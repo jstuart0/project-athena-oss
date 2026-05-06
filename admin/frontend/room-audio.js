@@ -300,26 +300,26 @@ function renderRoomCard(config) {
 
             <!-- Entity Display -->
             <div class="mb-4 bg-gray-800/50 rounded px-3 py-2">
-                <label class="text-xs text-gray-500">Entities</label>
+                <p class="text-xs text-gray-500">Entities</p>
                 ${entityListHtml}
             </div>
 
             <!-- Stats Row -->
             <div class="grid grid-cols-4 gap-4 text-sm">
                 <div class="bg-gray-800/50 rounded p-3">
-                    <label class="text-xs text-gray-500 block">Volume</label>
+                    <p class="text-xs text-gray-500 block">Volume</p>
                     <p class="text-white">${Math.round((config.default_volume || 0.5) * 100)}%</p>
                 </div>
                 <div class="bg-gray-800/50 rounded p-3">
-                    <label class="text-xs text-gray-500 block">Provider</label>
+                    <p class="text-xs text-gray-500 block">Provider</p>
                     <p class="text-white">${escapeHtml(config.preferred_provider || 'Default')}</p>
                 </div>
                 <div class="bg-gray-800/50 rounded p-3">
-                    <label class="text-xs text-gray-500 block">Radio Mode</label>
+                    <p class="text-xs text-gray-500 block">Radio Mode</p>
                     <p class="text-white">${config.use_radio_mode ? 'On' : 'Off'}</p>
                 </div>
                 <div class="bg-gray-800/50 rounded p-3">
-                    <label class="text-xs text-gray-500 block">Last Test</label>
+                    <p class="text-xs text-gray-500 block">Last Test</p>
                     <p class="text-white flex items-center gap-1">
                         ${testStatusIcon} ${lastTestedText}
                     </p>
@@ -380,7 +380,7 @@ async function showCreateRoomModal() {
             <div class="space-y-4">
                 <!-- Room Name -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Room Name *</label>
+                    <label for="room-name-select" class="block text-sm font-medium text-gray-400 mb-2">Room Name *</label>
                     <select id="room-name-select" onchange="handleRoomNameChange()"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <option value="">Select a room...</option>
@@ -402,7 +402,7 @@ async function showCreateRoomModal() {
 
                 <!-- Display Name -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Display Name</label>
+                    <label for="room-display-name" class="block text-sm font-medium text-gray-400 mb-2">Display Name</label>
                     <input type="text" id="room-display-name" placeholder="Office (optional)"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                     <p class="text-xs text-gray-500 mt-1">Friendly name for display (defaults to room name)</p>
@@ -410,7 +410,7 @@ async function showCreateRoomModal() {
 
                 <!-- Speaker Type -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Speaker Type *</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Speaker Type *</p>
                     <div class="space-y-2">
                         <label class="flex items-center gap-2">
                             <input type="radio" name="speaker-type" value="single" checked onchange="handleSpeakerTypeChange()"
@@ -432,19 +432,19 @@ async function showCreateRoomModal() {
 
                 <!-- Primary Speaker (always visible) -->
                 <div id="primary-speaker-field">
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Primary Speaker Entity *</label>
+                    <label for="primary-speaker-entity" class="block text-sm font-medium text-gray-400 mb-2">Primary Speaker Entity *</label>
                     ${renderEntitySelect('primary-speaker-entity', availableEntities)}
                 </div>
 
                 <!-- Secondary Speaker (stereo pair only) -->
                 <div id="secondary-speaker-field" style="display: none;">
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Secondary Speaker Entity (Right) *</label>
+                    <label for="secondary-speaker-entity" class="block text-sm font-medium text-gray-400 mb-2">Secondary Speaker Entity (Right) *</label>
                     ${renderEntitySelect('secondary-speaker-entity', availableEntities)}
                 </div>
 
                 <!-- Group Members (group only) -->
                 <div id="group-members-field" style="display: none;">
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Group Members *</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Group Members *</p>
                     <div id="group-members-container" class="space-y-2">
                         <div class="flex gap-2">
                             ${renderEntitySelect('group-member-0', availableEntities)}
@@ -458,14 +458,14 @@ async function showCreateRoomModal() {
 
                 <!-- Volume -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Volume Level: <span id="volume-display">50</span>%</label>
+                    <label for="room-volume" class="block text-sm font-medium text-gray-400 mb-2">Volume Level: <span id="volume-display">50</span>%</label>
                     <input type="range" id="room-volume" min="0" max="100" value="50" oninput="document.getElementById('volume-display').textContent = this.value"
                         class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer slider">
                 </div>
 
                 <!-- Provider -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Provider</label>
+                    <label for="room-provider" class="block text-sm font-medium text-gray-400 mb-2">Provider</label>
                     <select id="room-provider"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <option value="">Default</option>
@@ -545,7 +545,7 @@ async function showEditRoomModal(config) {
             <div class="space-y-4">
                 <!-- Room Name (read-only when editing) -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Room Name</label>
+                    <label for="room-name-readonly" class="block text-sm font-medium text-gray-400 mb-2">Room Name</label>
                     <input type="text" id="room-name-readonly" value="${escapeHtml(config.room_name)}" readonly
                         class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-400 cursor-not-allowed">
                     <p class="text-xs text-gray-500 mt-1">Room name cannot be changed after creation</p>
@@ -553,14 +553,14 @@ async function showEditRoomModal(config) {
 
                 <!-- Display Name -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Display Name</label>
+                    <label for="room-display-name" class="block text-sm font-medium text-gray-400 mb-2">Display Name</label>
                     <input type="text" id="room-display-name" value="${escapeHtml(config.display_name || '')}"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                 </div>
 
                 <!-- Speaker Type -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Speaker Type *</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Speaker Type *</p>
                     <div class="space-y-2">
                         <label class="flex items-center gap-2">
                             <input type="radio" name="speaker-type" value="single" ${config.speaker_type === 'single' ? 'checked' : ''} onchange="handleSpeakerTypeChange()"
@@ -582,19 +582,19 @@ async function showEditRoomModal(config) {
 
                 <!-- Primary Speaker -->
                 <div id="primary-speaker-field">
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Primary Speaker Entity *</label>
+                    <label for="primary-speaker-entity" class="block text-sm font-medium text-gray-400 mb-2">Primary Speaker Entity *</label>
                     ${renderEntitySelect('primary-speaker-entity', availableEntities, config.primary_entity_id)}
                 </div>
 
                 <!-- Secondary Speaker -->
                 <div id="secondary-speaker-field" style="display: ${config.speaker_type === 'stereo_pair' ? 'block' : 'none'};">
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Secondary Speaker Entity (Right) *</label>
+                    <label for="secondary-speaker-entity" class="block text-sm font-medium text-gray-400 mb-2">Secondary Speaker Entity (Right) *</label>
                     ${renderEntitySelect('secondary-speaker-entity', availableEntities, config.secondary_entity_id)}
                 </div>
 
                 <!-- Group Members -->
                 <div id="group-members-field" style="display: ${config.speaker_type === 'group' ? 'block' : 'none'};">
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Group Members *</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Group Members *</p>
                     <div id="group-members-container" class="space-y-2">
                         ${groupMembersHtml}
                     </div>
@@ -605,14 +605,14 @@ async function showEditRoomModal(config) {
 
                 <!-- Volume -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Volume Level: <span id="volume-display">${config.default_volume}</span>%</label>
+                    <label for="room-volume" class="block text-sm font-medium text-gray-400 mb-2">Volume Level: <span id="volume-display">${config.default_volume}</span>%</label>
                     <input type="range" id="room-volume" min="0" max="100" value="${config.default_volume}" oninput="document.getElementById('volume-display').textContent = this.value"
                         class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer slider">
                 </div>
 
                 <!-- Provider -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Provider</label>
+                    <label for="room-provider" class="block text-sm font-medium text-gray-400 mb-2">Provider</label>
                     <select id="room-provider"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <option value="" ${!config.preferred_provider ? 'selected' : ''}>Default</option>
