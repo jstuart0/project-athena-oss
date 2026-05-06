@@ -650,7 +650,11 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
     # Explicitly load session for starsessions compatibility with authlib
     await load_session(request)
 
-    logger.info("auth_callback_received", query_params=str(request.query_params))
+    logger.info(
+        "auth_callback_received",
+        has_code=bool(request.query_params.get("code")),
+        has_state=bool(request.query_params.get("state")),
+    )
     try:
         # Exchange authorization code for tokens. authlib's parse_id_token validates
         # iss (against discovery metadata's "issuer" field), aud (against the registered

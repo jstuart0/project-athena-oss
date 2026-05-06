@@ -1471,7 +1471,7 @@ class TestPhase4JwtRemovedFromRedirectUrl:
         code_lines = [line for line in src.splitlines() if not line.lstrip().startswith("#")]
         code = "\n".join(code_lines)
 
-        matches = re.findall(r'RedirectResponse[^)]*token=', code)
+        matches = re.findall(r'RedirectResponse.*?\?token=', code, re.DOTALL)
         assert matches == [], (
             f"Found ?token= inside a RedirectResponse call in main.py — "
             f"xander:4 may have regressed: {matches}"

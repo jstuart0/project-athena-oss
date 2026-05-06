@@ -209,7 +209,7 @@ async function checkAuthStatus() {
     if (urlParams.get('logged_in') === '1') {
         localStorage.removeItem('auth_token');
         // Strip the query param from the URL — it has served its purpose.
-        window.history.replaceState({}, document.title, window.location.pathname);
+        window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
     }
     // (URL ?token= reader removed in xander:4 — JWT no longer emitted in URL.)
 
