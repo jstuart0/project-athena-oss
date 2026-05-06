@@ -40,7 +40,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.logging_config import configure_logging
 from shared.ha_client import HomeAssistantClient
-from shared.llm_router import get_llm_router, LLMRouter
+from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
 from shared.admin_config import get_admin_client
 from shared.assistant_profile import build_core_assistant_prompt
@@ -57,7 +57,7 @@ from orchestrator.search_providers.result_fusion import ResultFusion
 
 # Session manager imports
 from orchestrator.session_manager import (
-    get_session_manager, SessionManager,
+    get_session_manager,
     get_session_summary, update_session_summary
 )
 from orchestrator.config_loader import get_config
@@ -76,14 +76,14 @@ from orchestrator.sequence_executor import SequenceExecutor, detect_sequence_int
 from orchestrator.automation_agent import AutomationAgent, should_use_automation_agent
 
 # Music playback imports
-from orchestrator.music_handler import MusicHandler, get_music_handler
+from orchestrator.music_handler import get_music_handler
 
 # TV control imports
-from orchestrator.tv_handler import AppleTVHandler, get_tv_handler
+from orchestrator.tv_handler import get_tv_handler
 
 # Follow-me audio imports
 from orchestrator.follow_me_audio import (
-    FollowMeAudioService, FollowMeConfig, FollowMeMode,
+    FollowMeConfig, FollowMeMode,
     initialize_follow_me, get_follow_me_service
 )
 
@@ -136,7 +136,7 @@ from orchestrator.self_building_tools import (
     generate_tool_from_request
 )
 
-# Runtime context accessor — dual-write during Phase 1.2→Phase 4 transition
+# Runtime context accessor (Phase 4.2 — sole singleton read/write path)
 from orchestrator.nodes import _runtime
 from orchestrator.nodes import finalize_node, notification_pref_node, retrieve_node, route_control_node, route_info_node, route_music_node, route_tv_node, send_sms_node, synthesize_node, validate_node
 
@@ -456,24 +456,6 @@ from orchestrator.metrics import (
     node_duration,
     tool_call_breakdown,
 )
-
-# Global clients
-ha_client: Optional[HomeAssistantClient] = None
-llm_router: Optional[LLMRouter] = None
-cache_client: Optional[CacheClient] = None
-session_manager: Optional[SessionManager] = None
-rag_client: Optional[Any] = None  # Unified RAG client with circuit breakers
-parallel_search_engine: Optional[Any] = None  # Parallel search (bob C2 — explicit slot)
-result_fusion: Optional[Any] = None  # Result fusion (bob C2 — explicit slot)
-mode_client: Optional[httpx.AsyncClient] = None  # Phase 2: Guest mode integration
-entity_manager: Optional[HAEntityManager] = None
-smart_controller: Optional[SmartHomeController] = None
-sequence_executor: Optional[SequenceExecutor] = None
-automation_agent: Optional[AutomationAgent] = None
-music_handler: Optional[MusicHandler] = None
-tv_handler: Optional[AppleTVHandler] = None
-follow_me_service: Optional[FollowMeAudioService] = None  # Follow-me audio
-intent_classifier: Optional[IntentClassifier] = None  # Multi-intent detection
 
 # Tool schema cache (OPTIMIZATION: Cache tool schemas to avoid regeneration)
 tool_schema_cache: Dict[str, List[Dict[str, Any]]] = {}
@@ -1036,8 +1018,6 @@ async def ensure_gateway_running() -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
-    global ha_client, llm_router, cache_client, session_manager, rag_client, parallel_search_engine, result_fusion, mode_client, entity_manager, smart_controller, sequence_executor, automation_agent, music_handler, tv_handler, intent_classifier, follow_me_service
-
     # Kill any existing process on orchestrator port before starting
     orchestrator_port = int(os.getenv("ORCHESTRATOR_PORT", "8001"))
     await kill_port(orchestrator_port, "Orchestrator")
@@ -1081,19 +1061,19 @@ async def lifespan(app: FastAPI):
 
     # Initialize clients
     ha_client = HomeAssistantClient(url=ha_url, token=ha_token) if ha_token else None
-    _runtime.set_ha_client(ha_client)  # dual-write (Phase 1.2)
+    _runtime.set_ha_client(ha_client)
     if not ha_client:
         logger.warning("ha_client_not_initialized", reason="No token available")
 
     # Initialize LLM router with database-driven backend configuration
     llm_router = get_llm_router()
-    _runtime.set_llm_router(llm_router)  # dual-write (Phase 1.2)
+    _runtime.set_llm_router(llm_router)
     logger.info(f"LLM Router initialized with admin API: {llm_router.admin_url}")
 
     # Initialize entity manager for dynamic HA entity discovery
     if ha_token:
         entity_manager = HAEntityManager(ha_url=ha_url, ha_token=ha_token)
-        _runtime.set_entity_manager(entity_manager)  # dual-write (Phase 1.2)
+        _runtime.set_entity_manager(entity_manager)
         try:
             await entity_manager.refresh_entities()
             logger.info("Entity manager initialized with HA entities cached")
@@ -1102,29 +1082,29 @@ async def lifespan(app: FastAPI):
 
         # Initialize smart home controller with LLM intent extraction
         smart_controller = SmartHomeController(entity_manager, llm_router)
-        _runtime.set_smart_controller(smart_controller)  # dual-write (Phase 1.2)
+        _runtime.set_smart_controller(smart_controller)
         logger.info("Smart home controller initialized")
 
         # Initialize sequence executor for multi-step commands with delays
         sequence_executor = SequenceExecutor(smart_controller, ha_client)
-        _runtime.set_sequence_executor(sequence_executor)  # dual-write (Phase 1.2)
+        _runtime.set_sequence_executor(sequence_executor)
         logger.info("Sequence executor initialized for multi-step commands")
 
         # Initialize automation agent for dynamic automation handling
         admin_client = get_admin_client()
         automation_agent = AutomationAgent(ha_client, llm_router, admin_client, entity_manager)
-        _runtime.set_automation_agent(automation_agent)  # dual-write (Phase 1.2)
+        _runtime.set_automation_agent(automation_agent)
         logger.info("Automation agent initialized for dynamic automation handling")
 
         # Initialize music handler for Music Assistant integration
         admin_client = get_admin_client()
         music_handler = get_music_handler(ha_client, admin_client)
-        _runtime.set_music_handler(music_handler)  # dual-write (Phase 1.2)
+        _runtime.set_music_handler(music_handler)
         logger.info("Music handler initialized for Music Assistant playback")
 
         # Initialize TV handler for Apple TV control
         tv_handler = get_tv_handler(ha_client, admin_client)
-        _runtime.set_tv_handler(tv_handler)  # dual-write (Phase 1.2)
+        _runtime.set_tv_handler(tv_handler)
         logger.info("TV handler initialized for Apple TV control")
 
         # Initialize follow-me audio service (fully configurable via admin)
@@ -1157,7 +1137,7 @@ async def lifespan(app: FastAPI):
                         room_motion_mapping=room_motion_mapping,
                         config=follow_me_cfg
                     )
-                    _runtime.set_follow_me_service(follow_me_service)  # dual-write (Phase 1.2)
+                    _runtime.set_follow_me_service(follow_me_service)
                     logger.info(
                         "follow_me_initialized",
                         mode=follow_me_cfg.mode.value,
@@ -1173,16 +1153,16 @@ async def lifespan(app: FastAPI):
         logger.warning("entity_manager_not_initialized", reason="No HA token available")
 
     cache_client = CacheClient()
-    _runtime.set_cache_client(cache_client)  # dual-write (Phase 1.2)
+    _runtime.set_cache_client(cache_client)
 
     # Initialize session manager
     session_manager = await get_session_manager()
-    _runtime.set_session_manager(session_manager)  # dual-write (Phase 1.2)
+    _runtime.set_session_manager(session_manager)
     logger.info("Session manager initialized")
 
     # Initialize parallel search engine
     parallel_search_engine = await ParallelSearchEngine.from_environment()
-    _runtime.set_parallel_search_engine(parallel_search_engine)  # dual-write (Phase 1.2)
+    _runtime.set_parallel_search_engine(parallel_search_engine)
     logger.info("Parallel search engine initialized")
 
     # Initialize result fusion
@@ -1190,18 +1170,18 @@ async def lifespan(app: FastAPI):
         similarity_threshold=0.7,
         min_confidence=0.5
     )
-    _runtime.set_result_fusion(result_fusion)  # dual-write (Phase 1.2)
+    _runtime.set_result_fusion(result_fusion)
     logger.info("Result fusion initialized")
 
     # Phase 2: Initialize mode service client for guest mode
     mode_client = httpx.AsyncClient(base_url=MODE_SERVICE_URL, timeout=10.0)
-    _runtime.set_mode_client(mode_client)  # dual-write (Phase 1.2)
+    _runtime.set_mode_client(mode_client)
     logger.info(f"Mode service client initialized: {MODE_SERVICE_URL}")
 
     # Initialize unified RAG client with resilience patterns (circuit breaker, rate limiting)
     # Fetches service URLs from admin backend registry, falls back to hardcoded constants
     rag_client = await initialize_rag_client()
-    _runtime.set_rag_client(rag_client)  # dual-write (Phase 1.2)
+    _runtime.set_rag_client(rag_client)
     logger.info(
         f"Unified RAG client initialized with {len(rag_client._service_urls)} services",
         extra={"from_registry": rag_client.urls_loaded_from_registry}
@@ -1209,7 +1189,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize intent classifier for multi-intent detection
     intent_classifier = IntentClassifier()
-    _runtime.set_intent_classifier(intent_classifier)  # dual-write (Phase 1.2)
+    _runtime.set_intent_classifier(intent_classifier)
     logger.info("Intent classifier initialized for multi-intent detection")
 
     # Check service health via unified RAG client
