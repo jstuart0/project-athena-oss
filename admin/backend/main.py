@@ -248,36 +248,77 @@ async def startup_event():
         logger.info("dev_mode_oidc_skipped", message="OIDC not configured in DEV_MODE")
 
     else:
-        # Production: Reject insecure default secrets at startup.
+        # Production: Reject insecure default secrets and known OIDC placeholders at startup.
         # This prevents silent deployment with known-public placeholder values.
-        _INSECURE_DEFAULTS = {
-            "SESSION_SECRET_KEY": "dev-secret-change-in-production",
-            "JWT_SECRET": "dev-secret-change-in-production",
-            "SERVICE_API_KEY": "dev-service-key-change-in-production",
+        #
+        # Dict shape: var_key → (placeholder_value, kind)
+        #   kind="secret"      — env var must be non-empty AND must not equal the placeholder
+        #   kind="client_id"   — env var must not equal the placeholder (empty handled below by
+        #                        the OIDC_ISSUER gate; empty OIDC_CLIENT_ID is a misconfigured
+        #                        IdP, not a demo-bypass risk)
+        #
+        # HIGH-A / xander:1 — client_id entries are read via get_config().oidc_client_id
+        # (pydantic-settings strips whitespace), NOT os.getenv.  A raw os.getenv read would
+        # allow " demo-mode" (leading space) to bypass the gate while the runtime check at
+        # main.py:414 (which goes through get_config()) still activates the demo bypass.
+        #
+        # codex-M2 — _OIDC_CLIENT_ID_CONFIGURE_ME is a synthetic dict key used to register
+        # the second OIDC_CLIENT_ID placeholder (the value scripts/create-secrets.sh writes
+        # when the real client_id is absent).  Both entries read from get_config().oidc_client_id
+        # via _read_var() below.  The synthetic key never touches os.getenv.
+        _INSECURE_DEFAULTS: dict = {
+            # key: (placeholder_value, kind)
+            "SESSION_SECRET_KEY": ("dev-secret-change-in-production", "secret"),
+            "JWT_SECRET": ("dev-secret-change-in-production", "secret"),
+            "SERVICE_API_KEY": ("dev-service-key-change-in-production", "secret"),
+            # xander:13 — demo-mode activates the demo auth bypass (oidc.py:401-421)
+            "OIDC_CLIENT_ID": ("demo-mode", "client_id"),
+            # codex-M2 — scripts/create-secrets.sh writes this placeholder when OIDC_CLIENT_ID
+            # is absent; the script's contract says the backend rejects it.  Honor that contract.
+            "_OIDC_CLIENT_ID_CONFIGURE_ME": ("CONFIGURE_ME_OIDC_CLIENT_ID", "client_id_configure_me"),
         }
-        for _var, _bad in _INSECURE_DEFAULTS.items():
-            _val = os.getenv(_var, "")
-            if not _val or _val == _bad:
-                logger.critical("insecure_default_secret_detected", var=_var)
-                raise SystemExit(
-                    f"FATAL: {_var} must be set to a strong random secret in production. "
-                    f"Set DEV_MODE=true to run without secrets (development only)."
-                )
+        _MESSAGE_BY_KIND = {
+            "secret": (
+                "FATAL: {var}={val!r} is a publicly-known development placeholder. "
+                "Generate a secure random value (e.g., `openssl rand -hex 32`) and set "
+                "{var} in your environment or kubernetes secret."
+            ),
+            "client_id": (
+                "FATAL: OIDC_CLIENT_ID is set to the publicly-known placeholder {val!r}, "
+                "which activates the demo authentication bypass. "
+                "Set OIDC_CLIENT_ID to your IdP's real client_id, or set DEV_MODE=true for development."
+            ),
+            "client_id_configure_me": (
+                "FATAL: OIDC_CLIENT_ID is still set to {val!r}, the placeholder written by "
+                "scripts/create-secrets.sh when OIDC_CLIENT_ID was unset at deploy time. "
+                "Replace it with your IdP's real client_id before starting the admin backend."
+            ),
+        }
 
-        # OIDC_CLIENT_ID=demo-mode is a development escape valve; reject in production.
-        # It activates the demo auth bypass in oidc.py and must never run against real data.
-        if get_config().oidc_client_id == "demo-mode":
-            logger.critical("demo_mode_oidc_in_production")
-            raise SystemExit(
-                "FATAL: OIDC_CLIENT_ID=demo-mode activates the demo auth bypass and "
-                "must not be used in production. Set OIDC_CLIENT_ID to your IdP's client ID "
-                "or set DEV_MODE=true for development."
-            )
+        def _read_var(name: str) -> str:
+            # client_id entries share the same real env var (OIDC_CLIENT_ID) and must be read
+            # through pydantic-settings so whitespace normalization matches the runtime check.
+            if name in ("OIDC_CLIENT_ID", "_OIDC_CLIENT_ID_CONFIGURE_ME"):
+                return get_config().oidc_client_id or ""
+            return os.getenv(name, "")
+
+        for _var, (_bad, _kind) in _INSECURE_DEFAULTS.items():
+            _val = _read_var(_var)
+            # secret: fail on empty OR matching placeholder.
+            # client_id / client_id_configure_me: fail on exact-match only (exact equality).
+            if (_kind == "secret" and (not _val or _val == _bad)) or (
+                _kind in ("client_id", "client_id_configure_me") and _val == _bad
+            ):
+                # Map synthetic dict key back to the real env var name in logs and messages.
+                _display_var = "OIDC_CLIENT_ID" if _var.startswith("_OIDC_CLIENT_ID") else _var
+                logger.critical("insecure_default_secret_detected", var=_display_var, value_kind=_kind)
+                raise SystemExit(
+                    _MESSAGE_BY_KIND[_kind].format(var=_display_var, val=_bad)
+                )
 
         # OIDC issuer hard-fail: empty or CONFIGURE_ME-style placeholder is unsafe
         # in production because it silently routes auth to no IdP (or the wrong one).
-        # Escape valve: DEV_MODE=true (handled above). The demo-mode escape valve was
-        # closed above (xander:13) — reaching this block means OIDC_CLIENT_ID != "demo-mode".
+        # Escape valve: DEV_MODE=true (handled above).
         _oidc_issuer = get_config().oidc_issuer
         if not _oidc_issuer or _oidc_issuer.startswith("CONFIGURE_ME"):
             logger.critical("oidc_issuer_not_configured")

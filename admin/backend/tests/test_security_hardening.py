@@ -508,37 +508,242 @@ class TestServiceToggleProtected:
         )
 
 
-class TestDemoModeRejectedInProduction:
-    """OIDC_CLIENT_ID=demo-mode must be rejected in production startup (xander:13)."""
+class TestPhase2InsecureDefaults:
+    """Phase 2 — _INSECURE_DEFAULTS consolidation: xander:13, codex-M2, HIGH-A, codex-M4.
 
-    def test_demo_mode_check_present_in_startup(self):
-        """main.py must contain the demo-mode production rejection block."""
-        main_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"
-        )
-        with open(main_path) as f:
-            source = f.read()
+    These tests drive startup_event() via subprocess (same pattern as Phase 1) so
+    pydantic-settings whitespace normalization and module-level import-time captures
+    are handled correctly.  A prod_secrets helper provides valid values for all
+    SECRET-kind keys so each test isolates exactly the variable under examination.
+    """
 
-        assert "demo-mode" in source, (
-            "main.py must contain the OIDC_CLIENT_ID=demo-mode rejection check"
+    # Valid non-placeholder values for all SECRET-kind keys. Any test that sets a
+    # specific key to a bad value must also supply valid values for the other two so
+    # the loop reaches the key under test before bailing on an earlier one.
+    _PROD_SECRETS: dict = {
+        "SESSION_SECRET_KEY": "a" * 64,
+        "JWT_SECRET": "b" * 64,
+        "SERVICE_API_KEY": "c" * 64,
+    }
+
+    def _run_startup_subprocess(self, env_overrides: dict) -> "subprocess.CompletedProcess":
+        """Run startup_event() in a subprocess with env_overrides applied on top of os.environ."""
+        import subprocess
+        import sys
+
+        env = os.environ.copy()
+
+        _repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
         )
-        assert "demo auth bypass" in source, (
-            "main.py rejection message must explain why demo-mode is rejected in production"
+        _src_path = os.path.join(_repo_root, "src")
+        _backend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [_src_path, _backend_path, existing_pythonpath])
         )
 
-    def test_demo_mode_check_after_insecure_defaults(self):
-        """demo-mode check must appear after the _INSECURE_DEFAULTS loop."""
-        main_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"
-        )
-        with open(main_path) as f:
-            source = f.read()
+        for k, v in env_overrides.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
 
-        insecure_pos = source.find("_INSECURE_DEFAULTS")
-        demo_pos = source.find("demo-mode")
-        assert insecure_pos != -1 and demo_pos != -1
-        assert insecure_pos < demo_pos, (
-            "demo-mode check must appear after the _INSECURE_DEFAULTS loop in main.py"
+        script = (
+            "from fastapi.testclient import TestClient; "
+            "from main import app; "
+            "TestClient(app).__enter__()"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=_backend_path,
+        )
+
+    def _prod_env(self, overrides: dict | None = None) -> dict:
+        """Return a base production env (valid secrets, DEV_MODE=false, valid OIDC vars)
+        with optional per-test overrides applied on top."""
+        base = {
+            "DEV_MODE": "false",
+            "OIDC_ISSUER": "https://idp.example.com/",
+            "OIDC_CLIENT_ID": "real-client-id-for-testing",
+            **self._PROD_SECRETS,
+        }
+        if overrides:
+            base.update(overrides)
+        return base
+
+    # ------------------------------------------------------------------
+    # xander:13 — OIDC_CLIENT_ID="demo-mode" must abort production startup
+    # ------------------------------------------------------------------
+
+    def test_phase2_demo_mode_oidc_client_id_exits(self):
+        """xander:13 — OIDC_CLIENT_ID=demo-mode in production must SystemExit."""
+        result = self._run_startup_subprocess(
+            self._prod_env({"OIDC_CLIENT_ID": "demo-mode"})
+        )
+        assert result.returncode != 0, (
+            f"Startup must exit non-zero for OIDC_CLIENT_ID=demo-mode; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "OIDC_CLIENT_ID" in combined, (
+            f"Error output must mention OIDC_CLIENT_ID; got: {combined!r}"
+        )
+        assert "demo-mode" in combined, (
+            f"Error output must name the offending placeholder; got: {combined!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # HIGH-A — whitespace bypass is closed (get_config() strips leading space)
+    # ------------------------------------------------------------------
+
+    def test_phase2_whitespace_bypass_blocked(self):
+        """HIGH-A / xander:1 — OIDC_CLIENT_ID=' demo-mode' (leading space) still triggers.
+
+        os.getenv would return ' demo-mode' and the equality check would pass.
+        _read_var() reads through get_config().oidc_client_id which applies pydantic's
+        _strip_oidc_whitespace validator, returning 'demo-mode', so the gate fires.
+        """
+        result = self._run_startup_subprocess(
+            self._prod_env({"OIDC_CLIENT_ID": " demo-mode"})  # leading space
+        )
+        assert result.returncode != 0, (
+            f"Whitespace-bypass must be blocked; returncode={result.returncode}, "
+            f"stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "OIDC_CLIENT_ID" in combined, (
+            f"Error must mention OIDC_CLIENT_ID; got: {combined!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # codex-M2 — CONFIGURE_ME_OIDC_CLIENT_ID placeholder must abort production startup
+    # ------------------------------------------------------------------
+
+    def test_phase2_configure_me_placeholder_exits(self):
+        """codex-M2 — OIDC_CLIENT_ID=CONFIGURE_ME_OIDC_CLIENT_ID must SystemExit.
+
+        scripts/create-secrets.sh writes this placeholder when OIDC_CLIENT_ID was
+        absent at deploy time; the backend must honor the script's rejection contract.
+        """
+        result = self._run_startup_subprocess(
+            self._prod_env({"OIDC_CLIENT_ID": "CONFIGURE_ME_OIDC_CLIENT_ID"})
+        )
+        assert result.returncode != 0, (
+            f"Startup must exit for CONFIGURE_ME_OIDC_CLIENT_ID placeholder; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "CONFIGURE_ME_OIDC_CLIENT_ID" in combined, (
+            f"Error output must name the placeholder; got: {combined!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # Regression: SESSION_SECRET_KEY bad placeholder still exits (Phase 1 regression check)
+    # ------------------------------------------------------------------
+
+    def test_phase2_session_secret_key_placeholder_exits(self):
+        """Regression — SESSION_SECRET_KEY=dev-secret-change-in-production still aborts."""
+        result = self._run_startup_subprocess(
+            self._prod_env({"SESSION_SECRET_KEY": "dev-secret-change-in-production"})
+        )
+        assert result.returncode != 0, (
+            f"SESSION_SECRET_KEY placeholder must still abort startup; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "SESSION_SECRET_KEY" in combined, (
+            f"Error must mention SESSION_SECRET_KEY; got: {combined!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # codex-M4 — secret-kind error message must NOT say "IdP"; must say "openssl rand"
+    # ------------------------------------------------------------------
+
+    def test_phase2_secret_message_is_kind_appropriate(self):
+        """codex-M4 — SESSION_SECRET_KEY error must mention 'openssl rand', not 'IdP'."""
+        result = self._run_startup_subprocess(
+            self._prod_env({"SESSION_SECRET_KEY": "dev-secret-change-in-production"})
+        )
+        combined = result.stdout + result.stderr
+        assert "openssl rand" in combined, (
+            f"Secret-kind message must reference openssl rand; got: {combined!r}"
+        )
+        assert "IdP" not in combined, (
+            f"Secret-kind message must NOT reference IdP; got: {combined!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # DEV_MODE bypass: OIDC_CLIENT_ID=demo-mode + DEV_MODE=true must NOT exit
+    # ------------------------------------------------------------------
+
+    def test_phase2_dev_mode_bypasses_oidc_client_id_gate(self):
+        """DEV_MODE=true skips the production gate — demo-mode client id is allowed."""
+        import subprocess
+        import sys
+
+        env = os.environ.copy()
+        _repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        )
+        _src_path = os.path.join(_repo_root, "src")
+        _backend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [_src_path, _backend_path, existing_pythonpath])
+        )
+        env["DEV_MODE"] = "true"
+        env["OIDC_CLIENT_ID"] = "demo-mode"
+        env["DATABASE_URL"] = "sqlite:///:memory:"
+        # Remove any non-SQLite DATABASE_URL that might trigger the xander:6 gate
+        for k in list(env):
+            if k == "DATABASE_URL" and not env[k].startswith("sqlite"):
+                env[k] = "sqlite:///:memory:"
+
+        script = (
+            "from fastapi.testclient import TestClient; "
+            "from main import app; "
+            "TestClient(app).__enter__()"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=_backend_path,
+        )
+        assert result.returncode == 0, (
+            f"DEV_MODE=true must bypass the OIDC_CLIENT_ID=demo-mode production gate; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # LOW-C / tessa:6,7 — boundary: case variants and prefix forms must NOT trigger
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("client_id", [
+        "Demo-Mode",
+        "DEMO-MODE",
+        "demo-mode-extended",
+        "x-demo-mode",
+    ])
+    def test_phase2_boundary_case_variants_no_false_positive(self, client_id: str):
+        """LOW-C / tessa:6 — case variations and prefix forms of 'demo-mode' must NOT trigger."""
+        result = self._run_startup_subprocess(
+            self._prod_env({"OIDC_CLIENT_ID": client_id})
+        )
+        # The process will still exit non-zero (production startup has other gates that
+        # fire for a test environment), but the OIDC_CLIENT_ID gate must NOT be the cause.
+        combined = result.stdout + result.stderr
+        assert "publicly-known placeholder" not in combined, (
+            f"OIDC_CLIENT_ID={client_id!r} must NOT trigger the insecure-placeholder gate "
+            f"(exact match only); got: {combined!r}"
+        )
+        assert "placeholder written by" not in combined, (
+            f"OIDC_CLIENT_ID={client_id!r} must NOT match configure-me gate; got: {combined!r}"
         )
 
 
