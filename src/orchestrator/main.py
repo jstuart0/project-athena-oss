@@ -1221,7 +1221,7 @@ async def lifespan(app: FastAPI):
             extra={"missing": _runtime.missing_required()}
         )
     else:
-        logger.info("runtime_context_ready", extra={"singletons": len(_runtime._REQUIRED_SINGLETONS)})
+        logger.info("runtime_context_ready", extra={"singletons": len(_runtime.required_singletons())})
 
     yield
 

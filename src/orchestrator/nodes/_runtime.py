@@ -265,6 +265,11 @@ def missing_required() -> List[str]:
     return [name for name in _REQUIRED_SINGLETONS if getattr(_ctx, name) is None]
 
 
+def required_singletons() -> tuple:
+    """Return the immutable tuple of required singleton names."""
+    return _REQUIRED_SINGLETONS
+
+
 # ---------------------------------------------------------------------------
 # Test helpers (R2-M2)
 # ---------------------------------------------------------------------------
