@@ -223,7 +223,7 @@ async def startup_event():
         if _db_url and not _db_url.startswith("sqlite"):
             logger.critical(
                 "dev_mode_with_real_database",
-                database_url_kind=_db_url.split(":", 1)[0],  # scheme only, NOT credentials
+                database_url_kind=_db_url.split("://", 1)[0],  # scheme only, NOT credentials
                 message="DEV_MODE=true with a non-SQLite DATABASE_URL is a deploy-shape mismatch (xander:6).",
             )
             raise SystemExit(

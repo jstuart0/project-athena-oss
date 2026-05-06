@@ -707,10 +707,15 @@ class TestPhase1DevModePostgresGate:
         try:
             get_config.cache_clear()
 
-            # Re-import main so module-level DEV_MODE reflects the updated env
-            for mod_name in list(sys.modules.keys()):
-                if mod_name == "main" or mod_name.startswith("main."):
-                    del sys.modules[mod_name]
+            # Re-import main (and all app/shared modules) so module-level captures
+            # like `DEV_MODE = get_config().dev_mode` in app/database.py reflect
+            # the updated env rather than a stale import-time value (xander:14).
+            _modules_to_evict = [
+                name for name in sys.modules
+                if name == "main" or name.startswith(("main.", "app.", "shared."))
+            ]
+            for name in _modules_to_evict:
+                del sys.modules[name]
 
             import main as _main
             from fastapi.testclient import TestClient
