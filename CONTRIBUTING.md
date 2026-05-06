@@ -95,6 +95,8 @@ By participating in this project, you agree to maintain a respectful and inclusi
 
    Mark tests that require live services with `@pytest.mark.integration`. New tests should be unit tests unless they genuinely require external state.
 
+   **Test-only dependencies:** `pytest-httpserver>=1.0.8` is in `admin/backend/requirements.txt`, annotated `# test-only`. It is used by the OIDC validation tests (`admin/backend/tests/test_oidc_validation.py`) to stand up a minimal fixture issuer that serves `/.well-known/openid-configuration` and a JWKS endpoint, allowing tests to drive authlib's real validator without mocking it. This package is included in the production image as a known trade-off — splitting dev and production requirements is deferred to a future campaign (tracked as HIGH-E in `thoughts/shared/plans/active-2026-05-06-deliver-security-hardening.md`).
+
 ## Code Style
 
 - Use Python 3.11+ features

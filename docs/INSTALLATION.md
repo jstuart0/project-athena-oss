@@ -227,6 +227,26 @@ QDRANT_URL=http://vector-db:6333
 REDIS_URL=redis://cache-server:6379/0
 ```
 
+### OIDC Configuration and Startup Gates
+
+The admin-backend enforces fail-closed startup behavior for OIDC. If any of the checks below fail, the process exits before accepting connections.
+
+**Requirements for a production deployment:**
+
+1. `OIDC_ISSUER` must be a non-empty URL that is not the `CONFIGURE_ME_OIDC_ISSUER` placeholder. The value must exactly match the `iss` claim that your IdP puts in issued ID tokens — mismatches will cause token validation failures after the OIDC callback.
+2. `OIDC_CLIENT_ID` must be your IdP's real client ID. The values `""`, `"demo-mode"`, and `"CONFIGURE_ME_OIDC_CLIENT_ID"` are rejected at startup.
+3. The IdP must be reachable at startup. The backend fetches `<OIDC_ISSUER>/.well-known/openid-configuration` during `startup_event()`. If the fetch fails or the document does not contain an `issuer` field, the process exits with `FATAL: OIDC discovery metadata fetch failed`. Sequence the admin-backend pod to start after the IdP is available (init container or readiness gate).
+
+**If you are upgrading from a release prior to ATHENA-12:** OIDC `iss`/`aud`/`exp` token validation was previously disabled via a `claims_options` override. That override has been removed. Tokens with an `iss` claim that does not match `OIDC_ISSUER` will now be rejected. Verify your IdP's issuer URL matches `OIDC_ISSUER` before upgrading.
+
+**For local development:** set `DEV_MODE=true`. The backend uses SQLite in-memory and skips all OIDC startup gates.
+
+**Post-OIDC-callback URL contract:** the backend redirects to `<FRONTEND_URL>?logged_in=1` after a successful OIDC callback. The admin frontend reads this signal, clears any stale `localStorage.auth_token`, and fetches the JWT from `/api/auth/session-token`. `FRONTEND_URL` must not include a query string — a `FRONTEND_URL` that already ends in `?foo=bar` would produce a malformed double-query-string redirect.
+
+**Deferred:** the WebSocket connection to admin-jarvis uses `?token=<jwt>` in the upgrade URL. This is a distinct exposure (backend contract change required) tracked separately and not addressed in this release.
+
+---
+
 ### Cross-Service Communication
 
 When services run on different hosts, configure these URLs:

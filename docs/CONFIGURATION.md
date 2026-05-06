@@ -362,6 +362,44 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 | `AUTHENTIK_CLIENT_SECRET` | Authentik OAuth client secret |
 | `AUTHENTIK_ISSUER_URL` | Authentik issuer URL |
 
+### OIDC / SSO Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OIDC_ISSUER` | `""` | IdP issuer URL. In production: must be non-empty and not the `CONFIGURE_ME` placeholder. Must match the `iss` claim in issued ID tokens exactly. Startup exits if invalid. |
+| `OIDC_CLIENT_ID` | `""` | Client ID registered with your IdP. Rejected values (all cause `SystemExit` at startup in production): `""`, `"demo-mode"`, `"CONFIGURE_ME_OIDC_CLIENT_ID"`. |
+| `OIDC_CLIENT_SECRET` | `""` | Client secret from your IdP. |
+| `OIDC_REDIRECT_URI` | `""` | Callback URL registered with your IdP. |
+| `OIDC_SCOPES` | `openid profile email` | Requested OIDC scopes. |
+| `OIDC_USERINFO_URL` | *(derived)* | Override for the OIDC userinfo endpoint. Auto-derived from discovery doc when unset. |
+
+### DEV_MODE and DEMO_MODE
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEV_MODE` | `false` | Development mode: uses SQLite in-memory, skips OIDC gates, auto-creates a `dev-admin` owner account on unauthenticated requests. **Never set `true` in production.** If `DEV_MODE=true` and `DATABASE_URL` points to a non-SQLite database, the backend exits at startup (xander:6 — the auto-owner-creation would silently run against a real DB). |
+| `DEMO_MODE` | `false` | Demo mode: pre-seeded data and demo-user bypass in `auth_login`. Rejected at startup if `DEV_MODE=false` — running `DEMO_MODE=true` in production bypasses the authentication path via the demo-user branch (xander:16). To use demo mode, also set `DEV_MODE=true`. |
+| `DATABASE_URL` | `""` | SQLAlchemy connection string. When `DEV_MODE=true`, this value is ignored by `database.py` (SQLite in-memory is used), but the startup gate checks it first and will exit if the value is a non-SQLite URL. Set to `sqlite:///:memory:` or leave empty for local dev with `DEV_MODE=true`. |
+
+### FRONTEND_URL
+
+`FRONTEND_URL` controls the redirect target after a successful OIDC callback and after a `DEMO_MODE` login. The backend appends `?logged_in=1` to this URL. Do not set `FRONTEND_URL` to a value that already contains a query string — a value like `http://example.com?foo=bar` would produce a malformed double-query-string redirect (`http://example.com?foo=bar?logged_in=1`).
+
+### Admin-backend startup security gates (ATHENA-12)
+
+The admin-backend enforces fail-closed checks in `startup_event()`. All of these raise `SystemExit` before the service accepts connections:
+
+| Condition | Error |
+|-----------|-------|
+| `DEV_MODE=true` + non-SQLite `DATABASE_URL` | `FATAL: DEV_MODE=true is set, but DATABASE_URL points to a non-SQLite database` |
+| `DEMO_MODE=true` + `DEV_MODE=false` | `FATAL: DEMO_MODE=true requires DEV_MODE=true` |
+| `OIDC_CLIENT_ID` is `""`, `"demo-mode"`, or `"CONFIGURE_ME_OIDC_CLIENT_ID"` in production | `insecure_default_secret_detected` |
+| `OIDC_ISSUER` empty or `CONFIGURE_ME`-prefixed in production | `insecure_default_secret_detected` |
+| IdP unreachable or `.well-known/openid-configuration` missing `issuer` | `FATAL: OIDC discovery metadata fetch failed` |
+| DB-loaded runtime issuer empty or placeholder after `configure_oauth_client()` | `FATAL: OIDC runtime issuer is empty or placeholder` |
+
+The `DEV_MODE=true` condition bypasses all OIDC gates; the other gates run in both dev and production (except where noted by the `in production` qualifier above, which means `DEV_MODE=false`).
+
 ---
 
 ## Advanced Settings
