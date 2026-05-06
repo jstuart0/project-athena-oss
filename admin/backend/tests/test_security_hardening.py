@@ -597,26 +597,57 @@ class TestPhase2InsecureDefaults:
         )
 
     # ------------------------------------------------------------------
-    # HIGH-A — whitespace bypass is closed (get_config() strips leading space)
+    # HIGH-A / xander:1 — whitespace bypass is closed (get_config() strips whitespace)
+    # xander:20 — leading, trailing, and both-sides variants all blocked
     # ------------------------------------------------------------------
 
-    def test_phase2_whitespace_bypass_blocked(self):
-        """HIGH-A / xander:1 — OIDC_CLIENT_ID=' demo-mode' (leading space) still triggers.
+    @pytest.mark.parametrize("client_id,description", [
+        (" demo-mode", "leading space"),
+        ("demo-mode ", "trailing space"),
+        (" demo-mode ", "leading and trailing space"),
+    ])
+    def test_phase2_whitespace_bypass_blocked(self, client_id: str, description: str):
+        """HIGH-A / xander:1 / xander:20 — whitespace-padded 'demo-mode' still triggers.
 
-        os.getenv would return ' demo-mode' and the equality check would pass.
+        os.getenv would return the padded string and the equality check would pass.
         _read_var() reads through get_config().oidc_client_id which applies pydantic's
         _strip_oidc_whitespace validator, returning 'demo-mode', so the gate fires.
+        Tests leading, trailing, and both-sides whitespace variants (xander:20).
         """
         result = self._run_startup_subprocess(
-            self._prod_env({"OIDC_CLIENT_ID": " demo-mode"})  # leading space
+            self._prod_env({"OIDC_CLIENT_ID": client_id})
         )
         assert result.returncode != 0, (
-            f"Whitespace-bypass must be blocked; returncode={result.returncode}, "
-            f"stderr={result.stderr!r}"
+            f"Whitespace-bypass ({description}) must be blocked; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
         )
         combined = result.stdout + result.stderr
         assert "OIDC_CLIENT_ID" in combined, (
-            f"Error must mention OIDC_CLIENT_ID; got: {combined!r}"
+            f"Error must mention OIDC_CLIENT_ID ({description}); got: {combined!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # xander:19 — whitespace bypass for CONFIGURE_ME placeholder also blocked
+    # ------------------------------------------------------------------
+
+    def test_phase2_configure_me_whitespace_bypass_blocked(self):
+        """xander:19 — OIDC_CLIENT_ID=' CONFIGURE_ME_OIDC_CLIENT_ID' (leading space) triggers.
+
+        Same whitespace-normalization invariant as test_phase2_whitespace_bypass_blocked
+        but for the CONFIGURE_ME placeholder. pydantic's _strip_oidc_whitespace strips
+        the leading space so the exact-match gate fires.
+        """
+        result = self._run_startup_subprocess(
+            self._prod_env({"OIDC_CLIENT_ID": " CONFIGURE_ME_OIDC_CLIENT_ID"})  # leading space
+        )
+        assert result.returncode != 0, (
+            f"Whitespace-bypass for CONFIGURE_ME placeholder must be blocked; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "OIDC_CLIENT_ID" in combined, (
+            f"Error must mention OIDC_CLIENT_ID for CONFIGURE_ME whitespace bypass; "
+            f"got: {combined!r}"
         )
 
     # ------------------------------------------------------------------
@@ -639,6 +670,13 @@ class TestPhase2InsecureDefaults:
         combined = result.stdout + result.stderr
         assert "CONFIGURE_ME_OIDC_CLIENT_ID" in combined, (
             f"Error output must name the placeholder; got: {combined!r}"
+        )
+        # xander:18 / ian:2 — display-var mapping must show "OIDC_CLIENT_ID", not the
+        # synthetic dict key "_OIDC_CLIENT_ID_CONFIGURE_ME". Pin this invariant here so
+        # a regression in _display_var is caught immediately.
+        assert "OIDC_CLIENT_ID" in combined, (
+            f"Error output must show 'OIDC_CLIENT_ID' (synthetic key must be mapped back "
+            f"to real env var name via _display_var); got: {combined!r}"
         )
 
     # ------------------------------------------------------------------
@@ -718,6 +756,103 @@ class TestPhase2InsecureDefaults:
         assert result.returncode == 0, (
             f"DEV_MODE=true must bypass the OIDC_CLIENT_ID=demo-mode production gate; "
             f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # xander:16 — DEMO_MODE=true in production must abort startup
+    # ------------------------------------------------------------------
+
+    def test_phase2_demo_mode_in_production_exits(self):
+        """xander:16 — DEMO_MODE=true + DEV_MODE=false must SystemExit.
+
+        DEMO_MODE activates the demo-admin bypass at main.py:474, issuing an
+        unauthenticated owner JWT for admin@demo.local without OIDC. This standalone
+        gate catches the privilege-escalation path that the _INSECURE_DEFAULTS loop
+        (which handles placeholder strings) does not cover.
+        """
+        result = self._run_startup_subprocess(
+            self._prod_env({"DEMO_MODE": "true"})
+        )
+        assert result.returncode != 0, (
+            f"Startup must exit non-zero for DEMO_MODE=true in production; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "DEMO_MODE" in combined, (
+            f"Error output must mention DEMO_MODE; got: {combined!r}"
+        )
+        assert "FATAL" in combined, (
+            f"Error output must contain 'FATAL'; got: {combined!r}"
+        )
+
+    def test_phase2_demo_mode_in_dev_no_fire(self):
+        """xander:16 — DEMO_MODE=true + DEV_MODE=true must NOT fire the production gate.
+
+        The xander:16 check lives in the production `else` branch; DEV_MODE=true takes
+        the early-return path and never reaches it. Confirm no spurious exit.
+        """
+        # Use in-process run (same pattern as test_phase1_dev_mode_sqlite_continues_normally)
+        # because we're verifying the app reaches a healthy started state, not subprocess exit.
+        import sys
+        from shared.config import get_config
+
+        env_overrides = {
+            "DEV_MODE": "true",
+            "DEMO_MODE": "true",
+            "DATABASE_URL": "sqlite:///:memory:",
+        }
+        saved = {}
+        for k, v in env_overrides.items():
+            saved[k] = os.environ.get(k)
+            os.environ[k] = v
+
+        try:
+            get_config.cache_clear()
+            _modules_to_evict = [
+                name for name in sys.modules
+                if name == "main" or name.startswith(("main.", "app.", "shared."))
+            ]
+            for name in _modules_to_evict:
+                del sys.modules[name]
+
+            import main as _main
+            from fastapi.testclient import TestClient
+
+            with TestClient(_main.app, raise_server_exceptions=True):
+                pass  # Reaches here means no SystemExit in the production branch
+        finally:
+            for k, orig_v in saved.items():
+                if orig_v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = orig_v
+            get_config.cache_clear()
+
+    # ------------------------------------------------------------------
+    # xander:17 — empty OIDC_CLIENT_ID must abort startup
+    # ------------------------------------------------------------------
+
+    def test_phase2_empty_oidc_client_id_exits(self):
+        """xander:17 — empty OIDC_CLIENT_ID + DEV_MODE=false must SystemExit.
+
+        Empty string passes the _INSECURE_DEFAULTS loop (exact-match only for
+        client_id kinds) but lands at oauth.register(client_id=""), which permissive
+        IdPs may accept — confused-deputy risk. The standalone xander:17 gate catches
+        this before configure_oauth_client() is reached.
+        """
+        result = self._run_startup_subprocess(
+            self._prod_env({"OIDC_CLIENT_ID": ""})
+        )
+        assert result.returncode != 0, (
+            f"Startup must exit non-zero for empty OIDC_CLIENT_ID; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "OIDC_CLIENT_ID" in combined, (
+            f"Error output must mention OIDC_CLIENT_ID; got: {combined!r}"
+        )
+        assert "empty" in combined.lower(), (
+            f"Error output must indicate OIDC_CLIENT_ID is empty; got: {combined!r}"
         )
 
     # ------------------------------------------------------------------

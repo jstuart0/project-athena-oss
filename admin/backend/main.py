@@ -253,9 +253,9 @@ async def startup_event():
         #
         # Dict shape: var_key → (placeholder_value, kind)
         #   kind="secret"      — env var must be non-empty AND must not equal the placeholder
-        #   kind="client_id"   — env var must not equal the placeholder (empty handled below by
-        #                        the OIDC_ISSUER gate; empty OIDC_CLIENT_ID is a misconfigured
-        #                        IdP, not a demo-bypass risk)
+        #   kind="client_id"   — env var must not equal the placeholder (exact-match only;
+        #                        empty OIDC_CLIENT_ID is caught by the standalone xander:17
+        #                        check below, NOT by this loop)
         #
         # HIGH-A / xander:1 — client_id entries are read via get_config().oidc_client_id
         # (pydantic-settings strips whitespace), NOT os.getenv.  A raw os.getenv read would
@@ -315,6 +315,36 @@ async def startup_event():
                 raise SystemExit(
                     _MESSAGE_BY_KIND[_kind].format(var=_display_var, val=_bad)
                 )
+
+        # xander:16 — DEMO_MODE=true in production reaches the demo-admin bypass at
+        # main.py:474 (auth_login issues an unauthenticated owner JWT for admin@demo.local)
+        # regardless of OIDC config. Standalone check because DEMO_MODE is a boolean flag,
+        # not a placeholder string — the _INSECURE_DEFAULTS dict shape doesn't cover it.
+        if get_config().demo_mode:
+            logger.critical(
+                "demo_mode_in_production",
+                message="DEMO_MODE=true is not permitted with DEV_MODE=false (xander:16).",
+            )
+            raise SystemExit(
+                "FATAL: DEMO_MODE=true is not permitted in production. "
+                "DEMO_MODE bypasses OIDC and creates an unauthenticated owner admin "
+                "(main.py:474). Set DEMO_MODE=false, or set DEV_MODE=true for development."
+            )
+
+        # xander:17 — empty OIDC_CLIENT_ID lands at oauth.register(client_id=""), which
+        # permissive IdPs may accept (confused-deputy risk). The _INSECURE_DEFAULTS loop
+        # uses exact-match for client_id kinds (intentional, to support boundary tests),
+        # so empty values pass through. Catch it here.
+        if not get_config().oidc_client_id:
+            logger.critical(
+                "oidc_client_id_unset",
+                message="OIDC_CLIENT_ID is empty (xander:17).",
+            )
+            raise SystemExit(
+                "FATAL: OIDC_CLIENT_ID is empty. The OIDC client cannot be registered "
+                "without a client_id. Set OIDC_CLIENT_ID to your IdP's real client_id, "
+                "or set DEV_MODE=true for development."
+            )
 
         # OIDC issuer hard-fail: empty or CONFIGURE_ME-style placeholder is unsafe
         # in production because it silently routes auth to no IdP (or the wrong one).
