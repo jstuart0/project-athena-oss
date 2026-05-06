@@ -839,6 +839,29 @@ cd admin/backend
 alembic upgrade head
 ```
 
+> **Note — two alembic heads:** this repo has a pre-existing divergence (`004a` legacy branch + primary chain). If `alembic upgrade head` fails with "Multiple head revisions are present," target the primary chain explicitly:
+> ```bash
+> alembic upgrade 053
+> ```
+> Merging/retiring the `004a` legacy branch is tracked as a separate follow-up campaign.
+
+#### Migration 053 — clear legacy maintainer IPs from gateway_config (post-ATHENA-11)
+
+If you deployed Athena before commit `4f6b159` and your `gateway_config` table
+still contains rows with `http://192.168.10.167:*` (the maintainer's homelab IPs
+left over from old column defaults), run:
+
+```bash
+cd admin/backend
+alembic upgrade 053
+```
+
+The migration sets `orchestrator_url` and `ollama_fallback_url` to empty strings
+for any row whose value matches the legacy IPs (exact match or trailing-slash
+variant). Deployer-set values are unaffected. Use `alembic upgrade 053` (not
+`head`) — the repo has a pre-existing two-head divergence (`004a` legacy +
+primary chain) and `head` is ambiguous.
+
 **Reset database (development only):**
 ```bash
 # Drop and recreate

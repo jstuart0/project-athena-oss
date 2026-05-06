@@ -11,7 +11,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > **Plan:** `thoughts/shared/plans/active-2026-05-06-deliver-audit-deferred-quick-wins.md`
 > **Ticket:** [ATHENA-11](https://plane.xmojo.net)
-> **Commits:** phases 1+2
+> **Commits:** phases 1–5
+
+### Fixed
+
+- **db**: alembic migration 053 clears legacy maintainer-IP defaults from `gateway_config.orchestrator_url` and `gateway_config.ollama_fallback_url` rows (handles both exact and trailing-slash variants). Deployers upgrading from versions before commit `4f6b159` should run `alembic upgrade 053` to clear inherited defaults. (audit bob:1 follow-up, ATHENA-11 Phase 5)
 
 ### Removed
 
