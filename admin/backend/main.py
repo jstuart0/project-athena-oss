@@ -289,6 +289,19 @@ async def _enforce_oidc_runtime_gates() -> None:
     )
 
 
+async def _ip_identifier(request: Request) -> str:
+    """Use direct peer IP only — ignore X-Forwarded-For (xander:47).
+
+    fastapi-limiter's default_identifier trusts X-Forwarded-For unconditionally,
+    which lets a client rotate the header to bypass the per-IP rate limit.
+    Athena's admin-backend is reached via in-cluster Service or in-pod localhost,
+    so request.client.host is the trusted Kubernetes/Traefik peer.  If a deployer
+    later puts a proxy in front that DOES want X-Forwarded-For respected, they
+    must opt in explicitly and configure the proxy chain — never trust by default.
+    """
+    return request.client.host if request.client else "unknown"
+
+
 async def _init_rate_limiter(redis_conn) -> None:
     """Initialize fastapi-limiter against the shared Redis client.
 
@@ -304,13 +317,14 @@ async def _init_rate_limiter(redis_conn) -> None:
     parameter avoids any NameError if this helper is called from a test context
     where `redis_client` is not in scope.
 
-    Campaign 3 / ATHENA-14 — Phase 3.
+    Campaign 3 / ATHENA-14 — Phase 3 (identifier= kwarg added in Phase 4 /
+    xander:47).
     """
     from fastapi_limiter import FastAPILimiter
     from app.utils import rate_limit as rate_limit_mod
 
     try:
-        await FastAPILimiter.init(redis_conn)
+        await FastAPILimiter.init(redis_conn, identifier=_ip_identifier)
         rate_limit_mod.LIMITER_ACTIVE = True
         logger.info("rate_limiter_initialized")
     except Exception as e:
