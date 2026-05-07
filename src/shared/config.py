@@ -180,6 +180,22 @@ class AthenaConfig(BaseSettings):
     control_agent_enabled: bool = Field(default=False)
 
     # ------------------------------------------------------------------
+    # Local-login rate limiting + per-account lockout (Campaign 3 / ATHENA-14)
+    # ------------------------------------------------------------------
+    # login_rate_limit_per_minute: max POST /local-login attempts per IP per 60 s
+    #   (fastapi-limiter token bucket, Redis-backed).
+    # login_lockout_threshold: cumulative failures before the account is locked.
+    # login_lockout_minutes: how long an account stays locked after threshold.
+    # login_minimum_delay_ms: floor wall-time on every failure path (user-not-found,
+    #   inactive, wrong-password, locked) to equalise timing and prevent enumeration.
+    #   Default 400 ms: PBKDF2-600k natural cost is 150–400 ms; the floor ensures
+    #   constant-time behaviour when hardware is fast (xander:38 / codex-r1 polish).
+    login_rate_limit_per_minute: int = Field(default=5)
+    login_lockout_threshold: int = Field(default=10)
+    login_lockout_minutes: int = Field(default=30)
+    login_minimum_delay_ms: int = Field(default=400)
+
+    # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern
     # ------------------------------------------------------------------
     # Fields below are NOT yet migrated to AthenaConfig.  They are listed

@@ -289,6 +289,35 @@ async def _enforce_oidc_runtime_gates() -> None:
     )
 
 
+async def _init_rate_limiter(redis_conn) -> None:
+    """Initialize fastapi-limiter against the shared Redis client.
+
+    On success: set app.utils.rate_limit.LIMITER_ACTIVE = True.
+    On failure: log CRITICAL, leave LIMITER_ACTIVE False, continue startup.
+
+    The login dep no-ops when LIMITER_ACTIVE is False — DEV_MODE (init never
+    called) and Redis-down (init raises) both land here gracefully (D2 /
+    codex-r1 LIMITER_ACTIVE single-positive-flag design).
+
+    Takes redis_conn explicitly (xander:33): the production `else` branch binds
+    `redis_client` as a local name inside startup_event; passing it as a
+    parameter avoids any NameError if this helper is called from a test context
+    where `redis_client` is not in scope.
+
+    Campaign 3 / ATHENA-14 — Phase 3.
+    """
+    from fastapi_limiter import FastAPILimiter
+    from app.utils import rate_limit as rate_limit_mod
+
+    try:
+        await FastAPILimiter.init(redis_conn)
+        rate_limit_mod.LIMITER_ACTIVE = True
+        logger.info("rate_limiter_initialized")
+    except Exception as e:
+        logger.critical("rate_limiter_init_failed", error=str(e))
+        # LIMITER_ACTIVE stays False; login dep no-ops; lockout layer still defends.
+
+
 # Startup event: Initialize database and check connections
 @app.on_event("startup")
 async def startup_event():
@@ -518,6 +547,7 @@ async def startup_event():
         # made the service fail-open when the DB was transiently unreachable at boot —
         # neither gate would execute and the service would start without OIDC validation.
         await _enforce_oidc_runtime_gates()
+        await _init_rate_limiter(redis_client)  # Campaign 3 / ATHENA-14 — Phase 3
 
     # Check and pull default LLM model if needed (background task)
     if OSS_AUTO_PULL_MODELS:

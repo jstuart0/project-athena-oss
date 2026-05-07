@@ -1880,3 +1880,144 @@ class TestUserLockoutMigration:
         assert "UPDATE...RETURNING" in source or "UPDATE ... RETURNING" in source, (
             "startup_event guard comment must reference UPDATE...RETURNING"
         )
+
+
+# ---------------------------------------------------------------------------
+# Campaign 3 / ATHENA-14 Phase 3: fastapi-limiter wiring + LIMITER_ACTIVE flag
+# ---------------------------------------------------------------------------
+
+class TestRateLimiterStartup:
+    """Phase 3 — fastapi-limiter init wiring and LIMITER_ACTIVE single-positive-flag.
+
+    Tests cover:
+      (a) Successful init flips LIMITER_ACTIVE True (in-process, fakeredis[lua])
+      (b) Failed init leaves LIMITER_ACTIVE False (in-process, monkeypatched raise)
+      (c) DEV_MODE: _init_rate_limiter is never called, flag stays False (static)
+      (d) login_rate_limit_dep is a plain async function (resolved at request time)
+    """
+
+    _backend_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..")
+    )
+
+    def test_phase3_init_with_fakeredis_sets_limiter_active(self):
+        """In-process: _init_rate_limiter with fakeredis[lua] flips LIMITER_ACTIVE True."""
+        import asyncio
+        import sys
+
+        # Remove cached rate_limit module so re-import sees fresh module-level state.
+        for name in list(sys.modules):
+            if name in ("app.utils.rate_limit",) or name.startswith("app.utils.rate_limit."):
+                sys.modules.pop(name, None)
+
+        from app.utils import rate_limit as rate_limit_mod
+        rate_limit_mod.LIMITER_ACTIVE = False  # ensure we start clean
+
+        import main as _main
+
+        async def _run():
+            import fakeredis.aioredis
+
+            # Close any previously-open FastAPILimiter redis connection to avoid
+            # "Event loop is closed" noise from a prior test.
+            try:
+                from fastapi_limiter import FastAPILimiter
+                if getattr(FastAPILimiter, "redis", None) is not None:
+                    await FastAPILimiter.close()
+            except Exception:
+                pass
+
+            fake_redis = fakeredis.aioredis.FakeRedis()
+            await _main._init_rate_limiter(fake_redis)
+
+            assert rate_limit_mod.LIMITER_ACTIVE is True, (
+                "_init_rate_limiter with a live fakeredis connection must set LIMITER_ACTIVE=True"
+            )
+
+            # Cleanup: close the limiter so subsequent tests start fresh.
+            try:
+                from fastapi_limiter import FastAPILimiter as _FL
+                await _FL.close()
+            except Exception:
+                pass
+            rate_limit_mod.LIMITER_ACTIVE = False
+
+        asyncio.run(_run())
+
+    def test_phase3_init_failure_leaves_limiter_inactive(self, monkeypatch):
+        """Monkeypatched FastAPILimiter.init raises → LIMITER_ACTIVE stays False."""
+        import asyncio
+        import sys
+
+        for name in list(sys.modules):
+            if name in ("app.utils.rate_limit",) or name.startswith("app.utils.rate_limit."):
+                sys.modules.pop(name, None)
+
+        from app.utils import rate_limit as rate_limit_mod
+        rate_limit_mod.LIMITER_ACTIVE = False
+
+        from fastapi_limiter import FastAPILimiter
+
+        async def _boom(*args, **kwargs):
+            raise ConnectionError("redis://127.0.0.1:1 connection refused (test stub)")
+
+        monkeypatch.setattr(FastAPILimiter, "init", _boom)
+
+        import main as _main
+
+        # Use an arbitrary object as redis_conn — the monkeypatched init ignores it.
+        class _FakeConn:
+            pass
+
+        asyncio.run(_main._init_rate_limiter(_FakeConn()))
+
+        assert rate_limit_mod.LIMITER_ACTIVE is False, (
+            "_init_rate_limiter when FastAPILimiter.init raises must leave LIMITER_ACTIVE=False"
+        )
+
+    def test_phase3_dev_mode_skips_rate_limiter_init(self):
+        """Static check: _init_rate_limiter is called only inside the production else branch.
+
+        DEV_MODE takes the `if DEV_MODE:` path in startup_event and returns before
+        reaching the production else block.  We verify this by asserting that the
+        call site sits after the `else:` keyword and before the unconditional
+        OSS_AUTO_PULL_MODELS block — not inside the `if DEV_MODE:` branch.
+        """
+        from pathlib import Path
+
+        source = Path(os.path.join(self._backend_dir, "main.py")).read_text()
+
+        assert "_init_rate_limiter" in source, (
+            "main.py must define and call _init_rate_limiter"
+        )
+        # The call must appear after _enforce_oidc_runtime_gates (production branch)
+        # and before OSS_AUTO_PULL_MODELS (unconditional block).
+        enforce_pos = source.find("await _enforce_oidc_runtime_gates()")
+        limiter_pos = source.find("await _init_rate_limiter(redis_client)")
+        auto_pull_pos = source.find("if OSS_AUTO_PULL_MODELS:")
+
+        assert enforce_pos != -1, "startup_event must call _enforce_oidc_runtime_gates"
+        assert limiter_pos != -1, "startup_event must call _init_rate_limiter(redis_client)"
+        assert auto_pull_pos != -1, "startup_event must have the OSS_AUTO_PULL_MODELS block"
+
+        assert enforce_pos < limiter_pos < auto_pull_pos, (
+            "_init_rate_limiter call must appear AFTER _enforce_oidc_runtime_gates "
+            "and BEFORE the OSS_AUTO_PULL_MODELS block (production else branch only)"
+        )
+
+    def test_phase3_login_rate_limit_dep_resolves_at_request_time(self):
+        """login_rate_limit_dep must be a plain async coroutine function, not a factory call.
+
+        The bob:1 / codex-r1 fix requires the dep to be defined as `async def
+        login_rate_limit_dep(...)` so FastAPI resolves it per-request, not at
+        module-import time.  A factory-call form (e.g. `RateLimiter(...)` returned
+        directly) would bake in LIMITER_ACTIVE at import time, making the
+        graceful-degrade no-op dead code.
+        """
+        import inspect
+        from app.utils.rate_limit import login_rate_limit_dep
+
+        assert inspect.iscoroutinefunction(login_rate_limit_dep), (
+            "login_rate_limit_dep must be an async def coroutine function "
+            "(not a factory-returned RateLimiter instance)"
+        )

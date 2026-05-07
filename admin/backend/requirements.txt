@@ -45,3 +45,8 @@ fastembed>=0.2.0
 
 # test-only (Phase 3 OIDC fixture issuer; ATHENA-12)
 pytest-httpserver>=1.0.8
+
+# Campaign 3 / ATHENA-14 — rate limiter for /local-login
+fastapi-limiter==0.1.6
+# test-only (Campaign 3 / ATHENA-14 — fastapi-limiter Lua scripts)
+fakeredis[lua]>=2.21,<3
