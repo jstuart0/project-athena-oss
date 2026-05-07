@@ -28,73 +28,76 @@ os.environ.setdefault("SERVICE_API_KEY", "test-service-key-for-hardening-tests")
 # Unit tests — service_auth utility (no DB or app needed)
 # -------------------------------------------------------------------
 
+def _make_mini_app():
+    """Return a minimal FastAPI app with a single /ping endpoint gated by verify_service_api_key."""
+    import app.utils.service_auth as sa
+    from fastapi import FastAPI, Depends
+
+    mini = FastAPI()
+
+    @mini.get("/ping")
+    def ping(_: bool = Depends(sa.verify_service_api_key)):
+        return {"ok": True}
+
+    return mini
+
+
 class TestVerifyServiceApiKey:
-    """Unit tests for the verify_service_api_key FastAPI dependency."""
+    """Unit tests for the verify_service_api_key FastAPI dependency.
+
+    Since xander:40 refactored service_auth.py to read SERVICE_API_KEY at
+    call-time via get_config() (rather than capturing it at module import),
+    these tests patch os.environ and clear the lru_cache to control what
+    get_config().service_api_key returns.
+    """
 
     def test_correct_key_returns_true(self):
         """Correct service key should pass through and return True."""
-        # Patch the module-level SERVICE_API_KEY before importing
-        import importlib
-        import app.utils.service_auth as sa
+        from fastapi.testclient import TestClient
+        from shared.config import _clear_cache_for_tests
 
-        original = sa.SERVICE_API_KEY
+        os.environ["SERVICE_API_KEY"] = "test-secret-key-abc123"
+        _clear_cache_for_tests()
         try:
-            sa.SERVICE_API_KEY = "test-secret-key-abc123"
-            from fastapi.testclient import TestClient
-            from fastapi import FastAPI, Depends
-            mini = FastAPI()
-
-            @mini.get("/ping")
-            def ping(_: bool = Depends(sa.verify_service_api_key)):
-                return {"ok": True}
-
+            mini = _make_mini_app()
             with TestClient(mini, raise_server_exceptions=True) as c:
                 r = c.get("/ping", headers={"X-Service-Key": "test-secret-key-abc123"})
             assert r.status_code == 200
         finally:
-            sa.SERVICE_API_KEY = original
+            os.environ["SERVICE_API_KEY"] = "test-service-key-for-hardening-tests"
+            _clear_cache_for_tests()
 
     def test_wrong_key_returns_401(self):
         """Wrong service key should raise 401."""
-        import app.utils.service_auth as sa
         from fastapi.testclient import TestClient
-        from fastapi import FastAPI, Depends
+        from shared.config import _clear_cache_for_tests
 
-        original = sa.SERVICE_API_KEY
+        os.environ["SERVICE_API_KEY"] = "real-secret"
+        _clear_cache_for_tests()
         try:
-            sa.SERVICE_API_KEY = "real-secret"
-            mini = FastAPI()
-
-            @mini.get("/ping")
-            def ping(_: bool = Depends(sa.verify_service_api_key)):
-                return {"ok": True}
-
+            mini = _make_mini_app()
             with TestClient(mini, raise_server_exceptions=False) as c:
                 r = c.get("/ping", headers={"X-Service-Key": "wrong-secret"})
             assert r.status_code == 401
         finally:
-            sa.SERVICE_API_KEY = original
+            os.environ["SERVICE_API_KEY"] = "test-service-key-for-hardening-tests"
+            _clear_cache_for_tests()
 
     def test_missing_header_returns_422(self):
         """Missing X-Service-Key header should return 422 (required field missing)."""
-        import app.utils.service_auth as sa
         from fastapi.testclient import TestClient
-        from fastapi import FastAPI, Depends
+        from shared.config import _clear_cache_for_tests
 
-        original = sa.SERVICE_API_KEY
+        os.environ["SERVICE_API_KEY"] = "real-secret"
+        _clear_cache_for_tests()
         try:
-            sa.SERVICE_API_KEY = "real-secret"
-            mini = FastAPI()
-
-            @mini.get("/ping")
-            def ping(_: bool = Depends(sa.verify_service_api_key)):
-                return {"ok": True}
-
+            mini = _make_mini_app()
             with TestClient(mini, raise_server_exceptions=False) as c:
                 r = c.get("/ping")  # No X-Service-Key header
             assert r.status_code == 422
         finally:
-            sa.SERVICE_API_KEY = original
+            os.environ["SERVICE_API_KEY"] = "test-service-key-for-hardening-tests"
+            _clear_cache_for_tests()
 
     def test_uses_constant_time_comparison(self):
         """verify_service_api_key should use hmac.compare_digest (timing-safe)."""
@@ -107,14 +110,23 @@ class TestVerifyServiceApiKey:
         )
 
     def test_reads_from_config(self):
-        """SERVICE_API_KEY module variable should come from get_config().service_api_key."""
+        """Key must be read via get_config().service_api_key at call time (xander:40)."""
         import inspect
         import app.utils.service_auth as sa
 
         source = inspect.getsource(sa)
         assert "get_config().service_api_key" in source, (
-            "SERVICE_API_KEY must be sourced from get_config().service_api_key "
-            "(AthenaConfig Phase 2d migration) — os.getenv is no longer acceptable here"
+            "service_api_key must be read via get_config().service_api_key at call time "
+            "(xander:40 — not captured at module import)"
+        )
+
+    def test_no_module_level_key_capture(self):
+        """MODULE-LEVEL SERVICE_API_KEY constant must not exist (xander:40 regression guard)."""
+        import app.utils.service_auth as sa
+
+        assert not hasattr(sa, "SERVICE_API_KEY"), (
+            "service_auth.SERVICE_API_KEY must not exist as a module-level attribute; "
+            "the key must be read inside verify_service_api_key at call time (xander:40)"
         )
 
     def test_empty_secret_returns_503(self):
@@ -125,26 +137,21 @@ class TestVerifyServiceApiKey:
         the same as unset — fail-closed with 503, not 401 — to prevent hmac.compare_digest
         accepting "" == "" and granting access to any caller sending an empty header.
         """
-        import app.utils.service_auth as sa
         from fastapi.testclient import TestClient
-        from fastapi import FastAPI, Depends
+        from shared.config import _clear_cache_for_tests
 
-        original = sa.SERVICE_API_KEY
+        os.environ["SERVICE_API_KEY"] = ""
+        _clear_cache_for_tests()
         try:
-            sa.SERVICE_API_KEY = ""  # Simulate env var set to empty string
-            mini = FastAPI()
-
-            @mini.get("/ping")
-            def ping(_: bool = Depends(sa.verify_service_api_key)):
-                return {"ok": True}
-
+            mini = _make_mini_app()
             with TestClient(mini, raise_server_exceptions=False) as c:
                 r = c.get("/ping", headers={"X-Service-Key": ""})
             assert r.status_code == 503, (
                 f"Empty SERVICE_API_KEY must return 503 (fail-closed), got {r.status_code}"
             )
         finally:
-            sa.SERVICE_API_KEY = original
+            os.environ["SERVICE_API_KEY"] = "test-service-key-for-hardening-tests"
+            _clear_cache_for_tests()
 
 
 # -------------------------------------------------------------------
@@ -179,20 +186,18 @@ def app_client():
             db.close()
 
     from main import app
+    from shared.config import _clear_cache_for_tests
 
     app.dependency_overrides[get_db] = override_get_db
 
-    # Patch module-level SERVICE_API_KEY so verify_service_api_key can compare keys.
-    # The variable is captured at import time; patching here ensures wrong-key tests
-    # get 401 (key mismatch) rather than 503 (empty-secret fail-closed guard).
-    import app.utils.service_auth as _service_auth
-    _original_key = _service_auth.SERVICE_API_KEY
-    _service_auth.SERVICE_API_KEY = "test-service-key-for-hardening-tests"
+    # SERVICE_API_KEY is read at call time via get_config() (xander:40 refactor).
+    # os.environ is set at module level (line 25); clear the lru_cache so
+    # get_config() picks up that value for every request in this test session.
+    _clear_cache_for_tests()
 
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client
 
-    _service_auth.SERVICE_API_KEY = _original_key
     app.dependency_overrides.clear()
 
 
@@ -451,6 +456,129 @@ class TestRagBypassPublicEndpointsProtected:
             headers={"X-Service-Key": "bad-key"},
         )
         assert r.status_code == 401
+
+    # --- Positive cases: correct key → 200 (already-gated endpoints) ---
+
+    def test_bypass_config_correct_key_accepted(self, app_client):
+        """Correct X-Service-Key on bypass config route → 200 with sane response."""
+        r = app_client.get(
+            "/api/rag-service-bypass/public/weather/config",
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert "bypass_enabled" in data
+
+    def test_bypass_enabled_correct_key_accepted(self, app_client):
+        """Correct X-Service-Key on bypass enabled route → 200 with list response."""
+        r = app_client.get(
+            "/api/rag-service-bypass/public/enabled",
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    # --- Regression guards: 3 new endpoints gated in Phase 1 (xander:34/35/36) ---
+
+    def test_cloud_providers_enabled_without_key_returns_422(self, app_client):
+        """/api/cloud-providers/public/enabled requires X-Service-Key (xander:34)."""
+        r = app_client.get("/api/cloud-providers/public/enabled")
+        assert r.status_code == 422, (
+            f"Expected 422 (missing required service header) for cloud-providers/public/enabled, "
+            f"got {r.status_code}"
+        )
+
+    def test_cloud_providers_enabled_wrong_key_returns_401(self, app_client):
+        """Wrong X-Service-Key on cloud-providers/public/enabled → 401 (xander:34)."""
+        r = app_client.get(
+            "/api/cloud-providers/public/enabled",
+            headers={"X-Service-Key": "bad-key"},
+        )
+        assert r.status_code == 401
+
+    def test_cloud_providers_enabled_correct_key_accepted(self, app_client):
+        """Correct X-Service-Key on cloud-providers/public/enabled → 200 (xander:34)."""
+        r = app_client.get(
+            "/api/cloud-providers/public/enabled",
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_cloud_providers_config_without_key_returns_422(self, app_client):
+        """/api/cloud-providers/public/{provider}/config requires X-Service-Key (xander:35)."""
+        r = app_client.get("/api/cloud-providers/public/openai/config")
+        assert r.status_code == 422, (
+            f"Expected 422 for cloud-providers/public/openai/config, got {r.status_code}"
+        )
+
+    def test_cloud_providers_config_wrong_key_returns_401(self, app_client):
+        """Wrong X-Service-Key on cloud-providers/public/{provider}/config → 401 (xander:35)."""
+        r = app_client.get(
+            "/api/cloud-providers/public/openai/config",
+            headers={"X-Service-Key": "bad-key"},
+        )
+        assert r.status_code == 401
+
+    def test_cloud_providers_config_correct_key_accepted(self, app_client):
+        """Correct X-Service-Key on cloud-providers/public/{provider}/config → 200 (xander:35)."""
+        r = app_client.get(
+            "/api/cloud-providers/public/openai/config",
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        # Provider not configured in test DB → {"enabled": False}
+        assert "enabled" in data
+
+    def test_site_scraper_config_public_without_key_returns_422(self, app_client):
+        """/api/site-scraper/config/public requires X-Service-Key (xander:36)."""
+        r = app_client.get("/api/site-scraper/config/public")
+        assert r.status_code == 422, (
+            f"Expected 422 for site-scraper/config/public, got {r.status_code}"
+        )
+
+    def test_site_scraper_config_public_wrong_key_returns_401(self, app_client):
+        """Wrong X-Service-Key on site-scraper/config/public → 401 (xander:36)."""
+        r = app_client.get(
+            "/api/site-scraper/config/public",
+            headers={"X-Service-Key": "bad-key"},
+        )
+        assert r.status_code == 401
+
+    def test_site_scraper_config_public_correct_key_accepted(self, app_client):
+        """Correct X-Service-Key on site-scraper/config/public → 200 (xander:36)."""
+        r = app_client.get(
+            "/api/site-scraper/config/public",
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert "allowed_domains" in data
+
+    def test_tool_calling_tools_public_without_key_returns_422(self, app_client):
+        """/api/tool-calling/tools/public requires X-Service-Key."""
+        r = app_client.get("/api/tool-calling/tools/public")
+        assert r.status_code == 422, (
+            f"Expected 422 for tool-calling/tools/public, got {r.status_code}"
+        )
+
+    def test_tool_calling_tools_public_wrong_key_returns_401(self, app_client):
+        """Wrong X-Service-Key on tool-calling/tools/public → 401."""
+        r = app_client.get(
+            "/api/tool-calling/tools/public",
+            headers={"X-Service-Key": "bad-key"},
+        )
+        assert r.status_code == 401
+
+    def test_tool_calling_tools_public_correct_key_accepted(self, app_client):
+        """Correct X-Service-Key on tool-calling/tools/public → 200 with list response."""
+        r = app_client.get(
+            "/api/tool-calling/tools/public",
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
 
 
 class TestModelDownloadProgressOpen:
@@ -1391,14 +1519,15 @@ def demo_mode_client():
 
     _main.app.dependency_overrides[get_db] = override_get_db
 
-    import app.utils.service_auth as _service_auth
-    _original_key = _service_auth.SERVICE_API_KEY
-    _service_auth.SERVICE_API_KEY = "test-service-key-for-hardening-tests"
+    # SERVICE_API_KEY is read at call time via get_config() (xander:40 refactor).
+    # Ensure a known key is in the environment and the lru_cache is fresh so
+    # verify_service_api_key returns the correct key on each request.
+    os.environ.setdefault("SERVICE_API_KEY", "test-service-key-for-hardening-tests")
+    get_config.cache_clear()
 
     with TestClient(_main.app, raise_server_exceptions=False) as client:
         yield client
 
-    _service_auth.SERVICE_API_KEY = _original_key
     _main.app.dependency_overrides.clear()
 
     for k, orig_v in saved.items():

@@ -13,15 +13,12 @@ Configuration:
     DEV_MODE is not active (see main.py startup_event).
 """
 import hmac
-import os
 
 from fastapi import Header, HTTPException, status
 import structlog
 from shared.config import get_config
 
 logger = structlog.get_logger()
-
-SERVICE_API_KEY = get_config().service_api_key
 
 
 def verify_service_api_key(x_service_key: str = Header(..., alias="X-Service-Key")) -> bool:
@@ -31,19 +28,24 @@ def verify_service_api_key(x_service_key: str = Header(..., alias="X-Service-Key
     Requires an X-Service-Key header matching the SERVICE_API_KEY env var.
     Uses constant-time comparison to prevent timing attacks.
 
+    The key is read via get_config() at call time (not at module import) so that:
+      - monkeypatch-based tests work without module reloads
+      - runtime key rotation takes effect without a process restart (xander:40)
+
     Raises:
         HTTPException 503: If SERVICE_API_KEY is not configured (fail-closed).
         HTTPException 401: If the key is missing or does not match.
     """
+    key = get_config().service_api_key
     # Fail-closed: never compare against an empty secret.
     # hmac.compare_digest("", "") returns True, which would allow any caller
     # sending an empty X-Service-Key header to bypass auth entirely.
-    if not SERVICE_API_KEY:
+    if not key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Service authentication not configured",
         )
-    if not hmac.compare_digest(x_service_key, SERVICE_API_KEY):
+    if not hmac.compare_digest(x_service_key, key):
         logger.warning("service_api_key_invalid", key_prefix=x_service_key[:8] if x_service_key else "empty")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

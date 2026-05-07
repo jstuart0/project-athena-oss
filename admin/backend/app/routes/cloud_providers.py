@@ -21,6 +21,7 @@ from app.models import (
     User, CloudLLMProvider, CloudLLMModelPricing, CloudLLMUsage, ExternalAPIKey
 )
 from app.utils.encryption import encrypt_value, decrypt_value
+from app.utils.service_auth import verify_service_api_key
 
 logger = structlog.get_logger()
 
@@ -627,10 +628,14 @@ async def create_model_pricing(
 # =============================================================================
 
 @router.get("/public/enabled")
-async def get_enabled_providers(db: Session = Depends(get_db)):
+async def get_enabled_providers(
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_service_api_key),
+):
     """
-    Public endpoint to get list of enabled providers.
+    Service endpoint to get list of enabled providers.
 
+    Requires X-Service-Key header for service-to-service authentication.
     Used by LLMRouter to check available cloud backends.
     """
     providers = db.query(CloudLLMProvider).filter(
@@ -643,12 +648,14 @@ async def get_enabled_providers(db: Session = Depends(get_db)):
 @router.get("/public/{provider}/config")
 async def get_public_provider_config(
     provider: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_service_api_key),
 ):
     """
-    Public endpoint to get provider configuration.
+    Service endpoint to get provider configuration.
 
-    Used by services to get provider settings without full auth.
+    Requires X-Service-Key header for service-to-service authentication.
+    Used by orchestrator to get provider settings.
     """
     config = db.query(CloudLLMProvider).filter(
         CloudLLMProvider.provider == provider,

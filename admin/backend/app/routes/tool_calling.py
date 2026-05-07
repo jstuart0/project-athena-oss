@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, ToolRegistry, ToolCallingSetting, ToolCallingTrigger, ToolUsageMetric, ToolApiKeyRequirement, ExternalAPIKey
+from app.utils.service_auth import verify_service_api_key
 
 logger = structlog.get_logger()
 
@@ -243,7 +244,8 @@ async def list_tools_public(
     enabled_only: bool = False,
     category: Optional[str] = None,
     guest_mode_only: bool = False,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_service_api_key),
 ):
     """
     List all tools (public endpoint, no auth required).
