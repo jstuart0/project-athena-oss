@@ -46,7 +46,7 @@ def verify_service_api_key(x_service_key: str = Header(..., alias="X-Service-Key
             detail="Service authentication not configured",
         )
     if not hmac.compare_digest(x_service_key, key):
-        logger.warning("service_api_key_invalid", key_prefix=x_service_key[:8] if x_service_key else "empty")
+        logger.warning("service_api_key_invalid", key_length=len(x_service_key) if x_service_key else 0)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid service key",

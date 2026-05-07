@@ -248,10 +248,10 @@ async def list_tools_public(
     _: bool = Depends(verify_service_api_key),
 ):
     """
-    List all tools (public endpoint, no auth required).
+    List all tools (requires X-Service-Key).
 
     This endpoint is used by services (Orchestrator, etc.) to get
-    available tools without requiring authentication.
+    available tools. Requires service-to-service auth via X-Service-Key header.
 
     Query params:
     - enabled_only: If true, only return enabled tools
@@ -765,12 +765,14 @@ async def toggle_trigger(
 @router.post("/metrics/record")
 async def record_metric(
     metric: ToolMetricRecord,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_service_api_key),
 ):
     """
     Record a tool usage metric.
 
-    This endpoint is PUBLIC (no auth required) so the orchestrator can call it.
+    Requires X-Service-Key header (service-to-service auth). Open to orchestrator
+    and other internal services; not accessible to unauthenticated callers.
 
     Args:
         metric: Tool usage metric data

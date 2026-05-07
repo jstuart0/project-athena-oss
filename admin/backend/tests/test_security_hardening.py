@@ -581,6 +581,60 @@ class TestRagBypassPublicEndpointsProtected:
         assert isinstance(r.json(), list)
 
 
+class TestToolCallingMetricsRecordProtected:
+    """POST /api/tool-calling/metrics/record must require X-Service-Key (xander:41)."""
+
+    def test_metrics_record_without_key_returns_422(self, app_client):
+        """Missing X-Service-Key → 422 (required header absent)."""
+        r = app_client.post(
+            "/api/tool-calling/metrics/record",
+            json={
+                "tool_name": "weather",
+                "success": True,
+                "latency_ms": 100,
+            },
+        )
+        assert r.status_code == 422, (
+            f"Expected 422 (missing required service header) for /api/tool-calling/metrics/record, "
+            f"got {r.status_code}"
+        )
+
+    def test_metrics_record_wrong_key_returns_401(self, app_client):
+        """Wrong X-Service-Key → 401."""
+        r = app_client.post(
+            "/api/tool-calling/metrics/record",
+            json={
+                "tool_name": "weather",
+                "success": True,
+                "latency_ms": 100,
+            },
+            headers={"X-Service-Key": "bad-key"},
+        )
+        assert r.status_code == 401, (
+            f"Expected 401 for wrong X-Service-Key on /api/tool-calling/metrics/record, "
+            f"got {r.status_code}"
+        )
+
+    def test_metrics_record_correct_key_accepted(self, app_client):
+        """Correct X-Service-Key → 200 with metric_id in response."""
+        r = app_client.post(
+            "/api/tool-calling/metrics/record",
+            json={
+                "tool_name": "weather",
+                "success": True,
+                "latency_ms": 100,
+            },
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert r.status_code == 200, (
+            f"Expected 200 for correct X-Service-Key on /api/tool-calling/metrics/record, "
+            f"got {r.status_code}"
+        )
+        data = r.json()
+        assert data.get("success") is True
+        assert "metric_id" in data
+
+
 class TestModelDownloadProgressOpen:
     """
     Model download progress callback is intentionally open (no service key required).

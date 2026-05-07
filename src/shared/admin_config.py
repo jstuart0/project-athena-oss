@@ -700,7 +700,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/tool-calling/tools/public?enabled_only=true"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
 
             if response.status_code == 200:
                 tools = response.json()

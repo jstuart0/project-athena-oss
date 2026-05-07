@@ -20,8 +20,9 @@ from sqlalchemy.pool import StaticPool
 
 # Set test environment before importing app.
 # ORDER MATTERS: these must be set before any app module is imported so that
-# module-level constants (e.g. SERVICE_API_KEY in service_auth.py post-Phase-2d)
-# capture the correct values at import time.
+# get_config() (via pydantic-settings) picks up the correct env values.
+# service_auth.py reads SERVICE_API_KEY at call time via get_config() — no
+# module-level capture occurs.
 os.environ["DEV_MODE"] = "true"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ.setdefault("SERVICE_API_KEY", "test-service-key-for-conftest")
