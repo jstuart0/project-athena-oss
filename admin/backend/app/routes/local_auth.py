@@ -76,6 +76,10 @@ async def local_login(payload: LocalLoginRequest, request: Request, db: Session 
     # branches now return identical 401 + "Invalid username or password", honoring
     # the campaign's enumeration-protection claim.
     if not user.active:
+        # xander:50 — pay PBKDF2 cost before floor sleep so this branch's wall time
+        # matches branches 1 and 4. Without this the inactive/locked branches are
+        # statistically distinguishable from not-found/wrong-password on slow hardware.
+        verify_password(payload.password, _DUMMY_PBKDF2_HASH)
         await _enforce_minimum_delay(start)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -93,6 +97,10 @@ async def local_login(payload: LocalLoginRequest, request: Request, db: Session 
         locked_until_utc = locked_until_utc.replace(tzinfo=timezone.utc)
 
     if locked_until_utc and locked_until_utc > now:
+        # xander:50 — pay PBKDF2 cost before floor sleep so this branch's wall time
+        # matches branches 1 and 4. Without this the inactive/locked branches are
+        # statistically distinguishable from not-found/wrong-password on slow hardware.
+        verify_password(payload.password, _DUMMY_PBKDF2_HASH)
         await _enforce_minimum_delay(start)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -121,11 +129,17 @@ async def local_login(payload: LocalLoginRequest, request: Request, db: Session 
             db.execute(
                 sa.update(User)
                 .where(User.id == user.id)
+                # xander:51 — only set locked_until if NULL (idempotent). Past-threshold
+                # requests are no-ops; the original 30-min expiry is preserved. Prevents
+                # an attacker pinning an account locked indefinitely by submitting one
+                # bad-password request every 30 min.
+                .where(User.locked_until.is_(None))
                 .values(locked_until=now + timedelta(minutes=cfg.login_lockout_minutes))
             )
             logger.warning(
                 "local_login_account_locked",
                 user_id=user.id,
+                username=username,            # xander:53 — log username for traceability
                 failed_count=new_count,
                 lockout_minutes=cfg.login_lockout_minutes,
             )

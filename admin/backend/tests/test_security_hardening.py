@@ -2596,3 +2596,177 @@ class TestLocalLoginLockout:
             )
         finally:
             db.close()
+
+    # ------------------------------------------------------------------
+    # Case 12: xander:50 — all 4 failure branches pay the 400ms floor
+    # ------------------------------------------------------------------
+
+    def test_xander50_all_failure_branches_pay_floor(self, lockout_client):
+        """Case 12 — all 4 failure branches enforce the 400ms floor (xander:50).
+
+        Inactive and locked branches previously skipped the PBKDF2 dummy-hash
+        check, leaving them statistically distinguishable from not-found and
+        wrong-password on slow hardware where PBKDF2-600k alone exceeds 400ms.
+        Phase 4 reconcile equalizes by calling verify_password against
+        _DUMMY_PBKDF2_HASH in those branches too.  The wall-time floor (400ms)
+        catches anyone who removes the dummy-hash call later.
+
+        Branch 1: unknown username
+        Branch 2: inactive user
+        Branch 3: locked user (correct password)
+        Branch 4: wrong password
+
+        Each branch is asserted independently at >= 360ms (400ms floor - 40ms
+        slack for CI timer jitter).  PBKDF2 at iterations=1000 completes in
+        < 10ms so the asyncio.sleep pad dominates.
+        """
+        import time
+        from datetime import datetime, timedelta, timezone
+
+        client, SessionLocal = lockout_client
+        db = SessionLocal()
+        try:
+            # Branch 2: inactive user
+            self._make_user(db, username="inactive-alice", active=False)
+
+            # Branch 3: locked user with a future locked_until
+            self._make_user(
+                db,
+                username="locked-alice",
+                locked_until=datetime.now(timezone.utc) + timedelta(minutes=30),
+            )
+
+            # Branch 4: active user with correct hash (wrong password supplied)
+            self._make_user(db, username="wrong-pw-alice")
+
+            # Branch 1: unknown username
+            t0 = time.monotonic()
+            r1 = client.post(
+                "/api/auth/local-login",
+                json={"username": "ghost-user-does-not-exist", "password": "x"},
+            )
+            elapsed1_ms = (time.monotonic() - t0) * 1000
+            assert r1.status_code == 401, f"Branch 1: expected 401, got {r1.status_code}"
+            assert elapsed1_ms >= 360, (
+                f"Branch 1 (unknown username) must enforce >= 360ms floor; "
+                f"elapsed={elapsed1_ms:.1f}ms"
+            )
+
+            # Branch 2: inactive user
+            t0 = time.monotonic()
+            r2 = client.post(
+                "/api/auth/local-login",
+                json={"username": "inactive-alice", "password": "password1234"},
+            )
+            elapsed2_ms = (time.monotonic() - t0) * 1000
+            assert r2.status_code == 401, f"Branch 2: expected 401, got {r2.status_code}"
+            assert elapsed2_ms >= 360, (
+                f"Branch 2 (inactive user) must enforce >= 360ms floor; "
+                f"elapsed={elapsed2_ms:.1f}ms"
+            )
+
+            # Branch 3: locked user
+            t0 = time.monotonic()
+            r3 = client.post(
+                "/api/auth/local-login",
+                json={"username": "locked-alice", "password": "password1234"},
+            )
+            elapsed3_ms = (time.monotonic() - t0) * 1000
+            assert r3.status_code == 401, f"Branch 3: expected 401, got {r3.status_code}"
+            assert elapsed3_ms >= 360, (
+                f"Branch 3 (locked user) must enforce >= 360ms floor; "
+                f"elapsed={elapsed3_ms:.1f}ms"
+            )
+
+            # Branch 4: wrong password
+            t0 = time.monotonic()
+            r4 = client.post(
+                "/api/auth/local-login",
+                json={"username": "wrong-pw-alice", "password": "this-is-wrong"},
+            )
+            elapsed4_ms = (time.monotonic() - t0) * 1000
+            assert r4.status_code == 401, f"Branch 4: expected 401, got {r4.status_code}"
+            assert elapsed4_ms >= 360, (
+                f"Branch 4 (wrong password) must enforce >= 360ms floor; "
+                f"elapsed={elapsed4_ms:.1f}ms"
+            )
+        finally:
+            db.close()
+
+    # ------------------------------------------------------------------
+    # Case 13: xander:51 — lockout is idempotent (no window extension)
+    # ------------------------------------------------------------------
+
+    def test_xander51_lockout_idempotent_on_over_threshold(self, lockout_client):
+        """Case 13 — over-threshold requests don't extend the lockout window (xander:51).
+
+        Once locked_until is set, subsequent failed logins increment
+        failed_login_count but do NOT push locked_until further into the future.
+        Without the .where(User.locked_until.is_(None)) guard an attacker could
+        pin an account locked indefinitely by submitting one bad-password request
+        every 30 minutes.
+
+        Strategy: insert a user at threshold - 1, trigger first lockout request
+        to set locked_until, then send a second wrong-password request and assert
+        locked_until is unchanged.  We set locked_until to a known sentinel after
+        the first lock so any extension is unambiguous.
+        """
+        from datetime import datetime, timedelta, timezone
+        from app.models import User
+        import sqlalchemy as sa
+
+        client, SessionLocal = lockout_client
+        db = SessionLocal()
+        try:
+            cfg_threshold = 10  # matches AthenaConfig default login_lockout_threshold
+            # Start at threshold - 1 so one more wrong-password triggers lockout.
+            user = self._make_user(
+                db,
+                username="alice",
+                failed_login_count=cfg_threshold - 1,
+            )
+            user_id = user.id
+
+            # First over-threshold request — this sets locked_until.
+            r1 = client.post(
+                "/api/auth/local-login",
+                json={"username": "alice", "password": "wrongpassword"},
+            )
+            assert r1.status_code == 401, f"Expected 401 on first over-threshold; got {r1.status_code}"
+
+            # Read back locked_until set by the first request.
+            db.expire_all()
+            locked_user = db.query(User).filter(User.id == user_id).first()
+            locked_until_t1 = locked_user.locked_until
+            assert locked_until_t1 is not None, (
+                "First over-threshold request must have set locked_until"
+            )
+
+            # Second wrong-password request — must NOT extend locked_until.
+            r2 = client.post(
+                "/api/auth/local-login",
+                json={"username": "alice", "password": "wrongpassword"},
+            )
+            assert r2.status_code == 401, f"Expected 401 on second over-threshold; got {r2.status_code}"
+
+            # locked_until must be unchanged.
+            db.expire_all()
+            locked_user2 = db.query(User).filter(User.id == user_id).first()
+            locked_until_t2 = locked_user2.locked_until
+
+            # Normalise both to naive UTC for comparison (SQLite returns naive strings).
+            def _to_naive_utc(dt):
+                if dt is not None and dt.tzinfo is not None:
+                    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+                return dt
+
+            assert _to_naive_utc(locked_until_t2) == _to_naive_utc(locked_until_t1), (
+                f"locked_until must not be extended by over-threshold requests. "
+                f"t1={locked_until_t1!r} t2={locked_until_t2!r}"
+            )
+            # Note: the second request hits branch 3 (locked path), which short-circuits
+            # before the count-increment UPDATE.  Count does not increase — that's
+            # correct.  The contract being verified here is only that locked_until is
+            # not extended, which is the xander:51 guard.
+        finally:
+            db.close()

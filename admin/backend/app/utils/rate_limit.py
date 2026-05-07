@@ -8,6 +8,17 @@ Single positive truth condition handles all three states:
 
 Importing this module does NOT initialize the limiter.  _init_rate_limiter()
 in main.py performs init at startup.
+
+Process-wide identifier note (ian:3 / xander:47):
+    `main._init_rate_limiter` registers a custom `_ip_identifier` with
+    `FastAPILimiter.init`.  ALL rate-limit deps in this module — current and
+    future — share that identifier, which keys buckets by `request.client.host`
+    only and ignores `X-Forwarded-For`.  This is intentional: the admin-backend
+    sits behind in-cluster Traefik / direct Kubernetes Service traffic, so
+    `request.client.host` is the trusted peer.  If a future deployment fronts
+    the admin-backend with a proxy that DOES set X-Forwarded-For with trusted
+    values, the identifier must be made deployer-configurable rather than
+    individual deps overriding it ad hoc.
 """
 from fastapi import Request, Response
 from fastapi_limiter.depends import RateLimiter
