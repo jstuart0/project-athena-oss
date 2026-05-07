@@ -63,10 +63,18 @@ async def load_config():
     """Load configuration from Admin API."""
     global config
     try:
-        # Fetch service-specific configuration from public endpoint
+        # Fetch service-specific configuration from public endpoint.
+        # X-Service-Key required: Phase 1 (ATHENA-14) gated this endpoint with
+        # verify_service_api_key.  codex-r2:1 — without this header the service
+        # received 422 at startup and silently fell back to empty allow/block lists,
+        # meaning admin-configured allowlists were not enforced in production.
         async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
             admin_url = get_admin_url()
-            response = await client.get(f"{admin_url}/api/site-scraper/config/public")
+            service_key = get_config().service_api_key
+            response = await client.get(
+                f"{admin_url}/api/site-scraper/config/public",
+                headers={"X-Service-Key": service_key},
+            )
             if response.status_code == 200:
                 svc_config = response.json()
                 config.update(svc_config)

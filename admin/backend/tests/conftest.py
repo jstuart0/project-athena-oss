@@ -25,7 +25,7 @@ from sqlalchemy.pool import StaticPool
 # module-level capture occurs.
 os.environ["DEV_MODE"] = "true"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
-os.environ.setdefault("SERVICE_API_KEY", "test-service-key-for-conftest")
+os.environ.setdefault("SERVICE_API_KEY", "test-service-key-for-hardening-tests")
 
 from app.database import Base, get_db
 from app.models import User, UserAPIKey

@@ -38,4 +38,12 @@ async def login_rate_limit_dep(request: Request, response: Response) -> None:
     if not LIMITER_ACTIVE:
         return
     cfg = get_config()
+    if cfg.login_rate_limit_per_minute <= 0:
+        # Documented disable: LOGIN_RATE_LIMIT_PER_MINUTE=0 (or negative) means the
+        # rate limiter is bypassed entirely.  fastapi-limiter's Lua script treats
+        # times=0 as "allow 1, then 429" — NOT disabled — so we must short-circuit
+        # here before constructing RateLimiter.  The lockout layer (failed_login_count
+        # + locked_until) and the 400 ms constant-time floor still protect /local-login.
+        # codex-r2:4 / ATHENA-14.
+        return
     await RateLimiter(times=cfg.login_rate_limit_per_minute, seconds=60)(request, response)

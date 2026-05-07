@@ -1125,7 +1125,13 @@ class AdminConfigClient:
                 "session_id": session_id
             }
 
-            response = await self.client.post(url, json=payload)
+            # X-Service-Key required: Phase 1 reconcile (ATHENA-14) gated this
+            # endpoint with verify_service_api_key.  The shared httpx client sends
+            # X-API-Key (legacy), not X-Service-Key, so metrics writes returned 422
+            # → tool usage analytics silently stopped recording.  codex-r2:3.
+            response = await self.client.post(
+                url, json=payload, headers={"X-Service-Key": self.api_key}
+            )
 
             if response.status_code in (200, 201):
                 logger.debug(

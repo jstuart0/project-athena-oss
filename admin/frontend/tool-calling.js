@@ -134,7 +134,10 @@ let allTools = [];
 
 async function loadToolRegistry() {
     try {
-        const response = await fetch(`${TOOL_CALLING_API_BASE}/tools/public`, {
+        // codex-r2:2 — /tools/public is service-key-only after Phase 1 gating
+        // (ATHENA-14).  X-Service-Key cannot live in the browser, so browser flows
+        // use /tools which authenticates via the user's Bearer token instead.
+        const response = await fetch(`${TOOL_CALLING_API_BASE}/tools`, {
             headers: { 'Authorization': `Bearer ${getToken()}` }
         });
         if (!response.ok) throw new Error('Failed to load tools');
@@ -969,7 +972,9 @@ function renderToolMetrics(metrics) {
 async function initToolTesting() {
     // Load tools for selection
     try {
-        const response = await fetch(`${TOOL_CALLING_API_BASE}/tools/public?enabled_only=true`, {
+        // codex-r2:2 — same fix as loadToolRegistry: switch from /tools/public
+        // (service-key-only) to /tools (bearer auth, browser-compatible).
+        const response = await fetch(`${TOOL_CALLING_API_BASE}/tools?enabled_only=true`, {
             headers: { 'Authorization': `Bearer ${getToken()}` }
         });
         if (!response.ok) throw new Error('Failed to load tools');

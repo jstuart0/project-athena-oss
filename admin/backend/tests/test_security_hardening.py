@@ -2071,6 +2071,53 @@ class TestRateLimiterStartup:
             f"Found deps: {dep_names!r}"
         )
 
+    def test_zero_per_minute_short_circuits_rate_limiter(self):
+        """codex-r2:4 — LOGIN_RATE_LIMIT_PER_MINUTE=0 must bypass the limiter entirely.
+
+        fastapi-limiter's Lua script treats times=0 as "allow 1 then 429" — the
+        opposite of the documented 'set to 0 to disable' semantics.  The short-circuit
+        guard added in the reconcile commit (ATHENA-14) must return before constructing
+        RateLimiter so that 0 (or negative) truly disables rate limiting while the
+        lockout layer and 400 ms constant-time floor still protect /local-login.
+        """
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        from shared.config import _clear_cache_for_tests
+        from app.utils import rate_limit as rl
+
+        old_env = os.environ.get("LOGIN_RATE_LIMIT_PER_MINUTE")
+
+        def _set_limit(value: str) -> None:
+            os.environ["LOGIN_RATE_LIMIT_PER_MINUTE"] = value
+            _clear_cache_for_tests()  # force get_config() to re-read env
+
+        mock_request = MagicMock()
+        mock_response = MagicMock()
+
+        try:
+            for limit_val in ("0", "-1"):
+                _set_limit(limit_val)
+                rl.LIMITER_ACTIVE = True
+
+                with patch("app.utils.rate_limit.RateLimiter") as mock_limiter_cls:
+                    # Invoke the dep multiple times — none should reach RateLimiter.
+                    for _ in range(3):
+                        asyncio.run(rl.login_rate_limit_dep(mock_request, mock_response))
+
+                    assert mock_limiter_cls.call_count == 0, (
+                        f"RateLimiter must not be constructed when "
+                        f"LOGIN_RATE_LIMIT_PER_MINUTE={limit_val} "
+                        f"(short-circuit guard, codex-r2:4 / ATHENA-14)"
+                    )
+        finally:
+            # Restore env and flag so subsequent tests are unaffected.
+            if old_env is None:
+                os.environ.pop("LOGIN_RATE_LIMIT_PER_MINUTE", None)
+            else:
+                os.environ["LOGIN_RATE_LIMIT_PER_MINUTE"] = old_env
+            _clear_cache_for_tests()
+            rl.LIMITER_ACTIVE = False
+
 
 # ---------------------------------------------------------------------------
 # Campaign 3 / ATHENA-14 Phase 4: login lockout state machine
