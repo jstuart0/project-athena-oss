@@ -1928,19 +1928,22 @@ class TestRateLimiterStartup:
                 pass
 
             fake_redis = fakeredis.aioredis.FakeRedis()
-            await _main._init_rate_limiter(fake_redis)
-
-            assert rate_limit_mod.LIMITER_ACTIVE is True, (
-                "_init_rate_limiter with a live fakeredis connection must set LIMITER_ACTIVE=True"
-            )
-
-            # Cleanup: close the limiter so subsequent tests start fresh.
             try:
-                from fastapi_limiter import FastAPILimiter as _FL
-                await _FL.close()
-            except Exception:
-                pass
-            rate_limit_mod.LIMITER_ACTIVE = False
+                await _main._init_rate_limiter(fake_redis)
+
+                assert rate_limit_mod.LIMITER_ACTIVE is True, (
+                    "_init_rate_limiter with a live fakeredis connection must set LIMITER_ACTIVE=True"
+                )
+            finally:
+                # ian:1 — teardown must be in a finally block so LIMITER_ACTIVE is
+                # reset even if the assertion above raises, preventing flag bleed
+                # into subsequent tests.
+                try:
+                    from fastapi_limiter import FastAPILimiter as _FL
+                    await _FL.close()
+                except Exception:
+                    pass
+                rate_limit_mod.LIMITER_ACTIVE = False
 
         asyncio.run(_run())
 
@@ -2020,4 +2023,45 @@ class TestRateLimiterStartup:
         assert inspect.iscoroutinefunction(login_rate_limit_dep), (
             "login_rate_limit_dep must be an async def coroutine function "
             "(not a factory-returned RateLimiter instance)"
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Phase 4 attaches login_rate_limit_dep to /local-login (xander:46). "
+            "This test FAILS until Phase 4 ships — intentional CI canary. "
+            "Phase 4 removes this xfail marker."
+        ),
+    )
+    def test_phase3_login_rate_limit_dep_attached_to_route(self):
+        """xander:46 / Phase 3-vs-4 atomic deploy gate.
+
+        Phase 3 wires LIMITER_ACTIVE + login_rate_limit_dep but Phase 4 attaches
+        the dep to /api/auth/local-login.  This test FAILS until Phase 4 lands —
+        intentional CI canary preventing Phase 3 from being deployed without
+        Phase 4's brute-force protection.
+
+        When Phase 4 ships, the dep is in the route's dependencies; this test
+        passes (xpassed with strict=True causes CI to report success).  Remove
+        the xfail marker at that point so xpassed becomes a normal pass.
+        If Phase 4 is later reverted without reverting Phase 3, this test catches it.
+        """
+        from app.routes import local_auth
+        from fastapi.routing import APIRoute
+
+        # Find the /local-login route
+        target_route = None
+        for route in local_auth.router.routes:
+            if isinstance(route, APIRoute) and route.path == "/local-login":
+                target_route = route
+                break
+        assert target_route is not None, "could not find /local-login route in local_auth.router"
+
+        # Check that login_rate_limit_dep is in the route's resolved dependencies
+        dep_callables = [d.dependency for d in target_route.dependant.dependencies]
+        from app.utils.rate_limit import login_rate_limit_dep
+        assert login_rate_limit_dep in dep_callables, (
+            "login_rate_limit_dep MUST be attached to /api/auth/local-login. "
+            "Phase 3 wires the dep but Phase 4 attaches it. If this test is failing, "
+            "Phase 4 hasn't shipped yet — DO NOT deploy Phase 3 alone (xander:46)."
         )

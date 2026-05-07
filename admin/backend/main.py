@@ -314,7 +314,21 @@ async def _init_rate_limiter(redis_conn) -> None:
         rate_limit_mod.LIMITER_ACTIVE = True
         logger.info("rate_limiter_initialized")
     except Exception as e:
-        logger.critical("rate_limiter_init_failed", error=str(e))
+        # xander:49 — reset partial-init class state (redis/identifier/http_callback
+        # slots may have been written before the exception); best-effort.
+        try:
+            await FastAPILimiter.close()
+        except Exception:
+            pass
+
+        # xander:48 — strip embedded Redis credentials from the error message before
+        # logging.  redis-py exceptions can include the full REDIS_URL (with password)
+        # in the message when the connection fails.
+        import re
+        error_msg = str(e)
+        if "redis://" in error_msg and "@" in error_msg:
+            error_msg = re.sub(r"redis://[^@\s]+@", "redis://***:***@", error_msg)
+        logger.critical("rate_limiter_init_failed", error=error_msg, error_type=type(e).__name__)
         # LIMITER_ACTIVE stays False; login dep no-ops; lockout layer still defends.
 
 
