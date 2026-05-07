@@ -295,6 +295,20 @@ async def startup_event():
     """Initialize database and verify connections on startup."""
     logger.info("athena_admin_startup", version="2.0.0", dev_mode=DEV_MODE)
 
+    # Campaign 3 / ATHENA-14 — Phase 4 atomic increment uses UPDATE...RETURNING (SQLite >= 3.35).
+    # Fires regardless of DEV_MODE because the login handler executes the UPDATE in either mode
+    # whenever DATABASE_URL is SQLite. python:3.11-slim Docker base ships SQLite 3.40+; this
+    # guard is defense-in-depth for self-host deployers on older Debian/Ubuntu base images.
+    import sqlite3
+    from urllib.parse import urlparse
+    _db_url_scheme = urlparse(get_config().database_url or "").scheme.lower()
+    if _db_url_scheme.startswith("sqlite") and sqlite3.sqlite_version_info < (3, 35, 0):
+        raise RuntimeError(
+            f"SQLite >= 3.35 required for UPDATE...RETURNING used by local-login lockout "
+            f"(Campaign 3 / ATHENA-14); found {sqlite3.sqlite_version}. "
+            f"Upgrade SQLite or run on PostgreSQL."
+        )
+
     if DEV_MODE:
         # DEV_MODE: Use SQLite in-memory, skip external database checks
         logger.info("dev_mode_startup", message="Using SQLite in-memory database")

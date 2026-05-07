@@ -1700,3 +1700,183 @@ class TestPhase4JwtRemovedFromRedirectUrl:
                 f"{filename}: must contain ?logged_in=1 handler for OIDC callback landing; "
                 "this clears stale localStorage on shared devices (codex-H1 fix)."
             )
+
+
+# ---------------------------------------------------------------------------
+# Campaign 3 / ATHENA-14 Phase 2: Alembic migration 054 + SQLite guard
+# ---------------------------------------------------------------------------
+
+class TestUserLockoutMigration:
+    """Phase 2 — alembic migration 054 adds failed_login_count + locked_until.
+
+    Fixture creates a 053-state DB so we can verify backfill behavior on
+    existing rows (tessa:3: migration tests must use a pre-migration fixture,
+    not the HEAD-schema conftest fixture).
+
+    Implementation note: the migration chain before 053 uses postgresql.ARRAY
+    which cannot compile to SQLite.  We therefore bootstrap the 053 DB state
+    directly: create only the users table via raw SQL at the exact 053 schema,
+    stamp alembic_version to "053", then run command.upgrade/downgrade to
+    exercise only migration 054.  This correctly tests the migration logic
+    (ADD COLUMN with server_default, DROP COLUMN) without needing to replay
+    the full PG-specific migration history on SQLite.
+    """
+
+    _backend_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..")
+    )
+
+    # Users table at exactly the 053 schema — no failed_login_count / locked_until.
+    # Column set derived from app/models.py User class as of revision 053.
+    _USERS_053_DDL = """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            authentik_id VARCHAR(255) UNIQUE,
+            username VARCHAR(255) UNIQUE NOT NULL,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            full_name VARCHAR(255),
+            auth_provider VARCHAR(32) NOT NULL DEFAULT 'oidc',
+            password_hash VARCHAR(512),
+            role VARCHAR(32) NOT NULL DEFAULT 'viewer',
+            active BOOLEAN NOT NULL DEFAULT 1,
+            last_login DATETIME,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """
+
+    def _make_053_state_db(self, tmp_path):
+        """Create a SQLite DB with the users table at revision 053 schema.
+
+        Bootstraps the 053 state by:
+          1. Building an alembic Config pointing at a fresh SQLite file
+          2. Temporarily removing DATABASE_URL from os.environ so env.py uses
+             cfg.set_main_option("sqlalchemy.url") instead of the test-suite's
+             sqlite:///:memory: (which is discarded after stamp)
+          3. Stamping alembic_version to '053' + '93bea4659785' (the side branch
+             that chains off '003') so command.upgrade('054') sees both branch
+             heads as current and runs only migration 054
+          4. Creating the users table via raw DDL at the exact 053 column set
+
+        Returns (engine, alembic_cfg).
+        """
+        from sqlalchemy import create_engine, text
+        from alembic.config import Config
+        from alembic import command
+
+        db_path = str(tmp_path / "phase2_migration_test.db")
+
+        cfg = Config(os.path.join(self._backend_dir, "alembic.ini"))
+        cfg.set_main_option(
+            "script_location", os.path.join(self._backend_dir, "alembic")
+        )
+        cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+
+        # Temporarily remove DATABASE_URL so alembic env.py uses the URL we
+        # set via cfg.set_main_option above.  The test module sets
+        # DATABASE_URL=sqlite:///:memory: globally; if left in the environment,
+        # alembic stamp writes to :memory: (discarded) instead of db_path.
+        _saved_db_url = os.environ.pop("DATABASE_URL", None)
+        try:
+            # Stamp both branch heads so upgrade sees the DB as already at 053.
+            # '93bea4659785' chains off '003' (a PG-only migration); without it
+            # alembic would try to apply '003 → 93bea4659785' on SQLite and fail.
+            command.stamp(cfg, "053")
+            command.stamp(cfg, "93bea4659785")
+        finally:
+            if _saved_db_url is not None:
+                os.environ["DATABASE_URL"] = _saved_db_url
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.connect() as conn:
+            conn.execute(text(self._USERS_053_DDL))
+            conn.commit()
+
+        return engine, cfg
+
+    def _run_alembic(self, cfg, direction, target):
+        """Run alembic upgrade/downgrade with DATABASE_URL temporarily removed.
+
+        The test module sets DATABASE_URL=sqlite:///:memory: globally; alembic
+        env.py prefers os.environ["DATABASE_URL"] over cfg.get_main_option().
+        We must hide it so env.py uses our file-backed URL.
+        """
+        from alembic import command as _cmd
+
+        _saved = os.environ.pop("DATABASE_URL", None)
+        try:
+            if direction == "upgrade":
+                _cmd.upgrade(cfg, target)
+            else:
+                _cmd.downgrade(cfg, target)
+        finally:
+            if _saved is not None:
+                os.environ["DATABASE_URL"] = _saved
+
+    def test_phase2_054_upgrade_adds_columns_with_defaults(self, tmp_path):
+        """Migration 054 adds both columns; existing rows backfill to 0 / NULL."""
+        from sqlalchemy import text
+
+        engine, cfg = self._make_053_state_db(tmp_path)
+        # Insert a row at 053 schema (no lockout columns yet)
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (username, email, role) "
+                    "VALUES ('alice', 'a@x.test', 'admin')"
+                )
+            )
+            conn.commit()
+
+        self._run_alembic(cfg, "upgrade", "054")
+
+        # Both columns must exist and backfill correctly
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT failed_login_count, locked_until "
+                    "FROM users WHERE username='alice'"
+                )
+            ).first()
+        assert row.failed_login_count == 0, (
+            f"failed_login_count backfill must be 0; got {row.failed_login_count!r}"
+        )
+        assert row.locked_until is None, (
+            f"locked_until backfill must be NULL; got {row.locked_until!r}"
+        )
+
+    def test_phase2_054_downgrade_drops_columns(self, tmp_path):
+        """Migration 054 downgrade removes both columns cleanly."""
+        from sqlalchemy import text
+
+        engine, cfg = self._make_053_state_db(tmp_path)
+        self._run_alembic(cfg, "upgrade", "054")
+        self._run_alembic(cfg, "downgrade", "053")
+
+        # Confirm columns no longer exist in the schema
+        with engine.connect() as conn:
+            cols = [
+                r[1]
+                for r in conn.execute(text("PRAGMA table_info(users)")).fetchall()
+            ]
+        assert "failed_login_count" not in cols, (
+            "downgrade must drop failed_login_count from users"
+        )
+        assert "locked_until" not in cols, (
+            "downgrade must drop locked_until from users"
+        )
+
+    def test_phase2_sqlite_capability_guard_present_in_startup(self):
+        """Static check: startup_event must contain the SQLite >= 3.35 capability guard."""
+        from pathlib import Path
+
+        source = Path(os.path.join(self._backend_dir, "main.py")).read_text()
+        assert "sqlite_version_info" in source, (
+            "startup_event must check sqlite_version_info for UPDATE...RETURNING guard"
+        )
+        assert "(3, 35, 0)" in source, (
+            "startup_event guard must compare against (3, 35, 0)"
+        )
+        assert "UPDATE...RETURNING" in source or "UPDATE ... RETURNING" in source, (
+            "startup_event guard comment must reference UPDATE...RETURNING"
+        )
