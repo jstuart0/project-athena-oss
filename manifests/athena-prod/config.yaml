@@ -96,5 +96,28 @@ data:
   # CONTROL_AGENT_ENABLED: "true"
   # CONTROL_AGENT_URL: "http://your-control-agent-host:8099"
 
+  # Local-login brute-force defenses (ATHENA-14) — uncomment to override defaults.
+  # Per-IP rate limit on POST /api/auth/local-login (Redis-backed, ignores
+  # X-Forwarded-For).  Set to "0" to disable rate limiting; lockout + timing
+  # floor still apply.  Default: 5 requests per minute per IP.
+  # LOGIN_RATE_LIMIT_PER_MINUTE: "5"
+  #
+  # Per-username lockout threshold (cumulative wrong-password attempts before
+  # the account is locked).  Lockout is idempotent — past-threshold attempts
+  # do not extend the window.  Default: 10 failures.
+  # LOGIN_LOCKOUT_THRESHOLD: "10"
+  #
+  # Lockout window in minutes.  Lock self-expires lazily on the next attempt
+  # after the window passes.  Manual unlock via psql:
+  #   UPDATE users SET failed_login_count=0, locked_until=NULL WHERE username='<name>';
+  # Default: 30 minutes.
+  # LOGIN_LOCKOUT_MINUTES: "30"
+  #
+  # Wall-time floor (milliseconds) on every failure branch of local-login.
+  # All four paths (not-found, inactive, locked, wrong-password) sleep until
+  # elapsed >= floor after dummy-hash.  Raise on slow hardware if timing
+  # side-channel is a concern.  Default: 400ms.
+  # LOGIN_MINIMUM_DELAY_MS: "400"
+
   # Logging
   LOG_LEVEL: "INFO"
