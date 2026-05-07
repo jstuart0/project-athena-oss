@@ -171,6 +171,8 @@ def _ensure_users_table_compatibility():
         conn.execute(text("ALTER TABLE users ALTER COLUMN auth_provider SET NOT NULL"))
         conn.execute(text("ALTER TABLE users ALTER COLUMN authentik_id DROP NOT NULL"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_auth_provider ON users(auth_provider)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_count INTEGER NOT NULL DEFAULT 0"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP WITH TIME ZONE"))
 
 
 def check_db_connection() -> bool:
