@@ -501,104 +501,6 @@ class AuditLog(Base):
         }
 
 
-class ServerConfig(Base):
-    """
-    Server configuration model for tracking compute nodes.
-
-    Tracks Mac Studio, Mac mini, Home Assistant, and other servers in the system.
-
-    Phase 2 (ATHENA-1): tablename flipped to server_configs_deprecated so that
-    /api/servers continues to work while migration 055 has renamed the underlying
-    table.  The route + model are deleted in Phase 5. (round-2 H2)
-    """
-    __tablename__ = 'server_configs_deprecated'
-
-    id = Column(Integer, primary_key=True)
-    name = Column(String(64), nullable=False, unique=True, index=True)
-    hostname = Column(String(128))
-    ip_address = Column(String(15), nullable=False)
-    role = Column(String(32))  # "compute", "storage", "integration", "orchestration"
-    status = Column(String(16), default='unknown')  # online, offline, degraded, unknown
-    config = Column(JSONB)  # Flexible JSON config (ssh_user, docker_enabled, etc.)
-    last_checked = Column(DateTime(timezone=True))
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-    # Relationships
-    services = relationship('ServiceRegistry', back_populates='server', cascade='all, delete-orphan')
-
-    __table_args__ = (
-        Index('idx_server_configs_name', 'name'),
-        Index('idx_server_configs_status', 'status'),
-    )
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert server config to dictionary for API responses."""
-        return {
-            'id': self.id,
-            'name': self.name,
-            'hostname': self.hostname,
-            'ip_address': self.ip_address,
-            'role': self.role,
-            'status': self.status,
-            'config': self.config,
-            'last_checked': self.last_checked.isoformat() if self.last_checked else None,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-        }
-
-
-class ServiceRegistry(Base):
-    """
-    Service registry for tracking all services across servers.
-
-    Links services to their host servers and tracks health status.
-
-    Phase 2 (ATHENA-1): tablename flipped to service_registry_deprecated.
-    This class is kept in place for the deferred-drop validation window.
-    Deleted in Phase 5. (D5)
-    """
-    __tablename__ = 'service_registry_deprecated'
-
-    id = Column(Integer, primary_key=True)
-    # FK target updated to match Phase 2 renamed table (round-2 H2 / ATHENA-1).
-    server_id = Column(Integer, ForeignKey('server_configs_deprecated.id'), nullable=False)
-    service_name = Column(String(64), nullable=False)
-    port = Column(Integer, nullable=False)
-    health_endpoint = Column(String(256))  # "/health", "/api/health", etc.
-    protocol = Column(String(8), default='http')  # http, https, tcp
-    status = Column(String(16), default='unknown')
-    last_response_time = Column(Integer)  # milliseconds
-    last_checked = Column(DateTime(timezone=True))
-
-    # Relationships
-    server = relationship('ServerConfig', back_populates='services')
-    # NOTE: rag_connectors relationship has been moved to RagService (Phase 1 migration).
-    # ServiceRegistry kept intact for deferred-drop; FK on RAGConnector now points to rag_services.
-
-    __table_args__ = (
-        UniqueConstraint('server_id', 'service_name', 'port', name='uq_service_registry'),
-        Index('idx_service_registry_server_id', 'server_id'),
-        Index('idx_service_registry_status', 'status'),
-    )
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert service registry entry to dictionary for API responses."""
-        return {
-            'id': self.id,
-            'server_id': self.server_id,
-            'server_name': self.server.name if self.server else None,
-            'ip_address': self.server.ip_address if self.server else None,
-            'service_name': self.service_name,
-            'port': self.port,
-            'health_endpoint': self.health_endpoint,
-            'protocol': self.protocol,
-            'status': self.status,
-            'last_response_time': self.last_response_time,
-            'last_checked': self.last_checked.isoformat() if self.last_checked else None,
-        }
-
-
 class RAGConnector(Base):
     """
     RAG connector configuration for external data sources.
@@ -2367,73 +2269,6 @@ class ComponentModelAssignment(Base):
         }
 
 
-class AthenaService(Base):
-    """
-    Tracks Athena services for control and monitoring.
-
-    Enables service control (start/stop/restart) and health monitoring
-    from the admin UI. Supports Docker containers and launchd services.
-
-    Phase 2 (ATHENA-1): tablename flipped to athena_services_deprecated.
-    This class is kept in place for the deferred-drop validation window.
-    Deleted in Phase 5. (D5)
-    """
-    __tablename__ = 'athena_services_deprecated'
-
-    id = Column(Integer, primary_key=True)
-    service_name = Column(String(100), unique=True, nullable=False, index=True)
-    display_name = Column(String(255), nullable=False)
-    description = Column(Text)
-    service_type = Column(String(50), nullable=False)  # 'rag', 'core', 'llm', 'infrastructure'
-
-    # Connection info
-    host = Column(String(255), nullable=False)
-    port = Column(Integer, nullable=False)
-    health_endpoint = Column(String(255), default='/health')
-
-    # Control info
-    control_method = Column(String(50), nullable=False, default='docker')  # docker, launchd, ollama
-    container_name = Column(String(255))  # For docker control
-
-    # Status (updated by health checks)
-    is_running = Column(Boolean, default=False)
-    last_health_check = Column(DateTime(timezone=True))
-    last_error = Column(Text)
-
-    # Configuration
-    auto_start = Column(Boolean, default=True)
-    enabled = Column(Boolean, default=True)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-    __table_args__ = (
-        Index('idx_athena_services_type', 'service_type'),
-        Index('idx_athena_services_running', 'is_running'),
-    )
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'id': self.id,
-            'service_name': self.service_name,
-            'display_name': self.display_name,
-            'description': self.description,
-            'service_type': self.service_type,
-            'host': self.host,
-            'port': self.port,
-            'health_endpoint': self.health_endpoint,
-            'control_method': self.control_method,
-            'container_name': self.container_name,
-            'is_running': self.is_running,
-            'last_health_check': self.last_health_check.isoformat() if self.last_health_check else None,
-            'last_error': self.last_error,
-            'auto_start': self.auto_start,
-            'enabled': self.enabled,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-        }
-
-
 class RagService(Base):
     """
     Unified service registry — single source of truth for all Athena service definitions.
@@ -3330,7 +3165,7 @@ class UserSession(Base):
 # Export all models for Alembic
 __all__ = [
     'Base', 'User', 'Policy', 'PolicyVersion', 'Secret', 'Device', 'AuditLog',
-    'ServerConfig', 'ServiceRegistry', 'RAGConnector', 'RAGStats', 'VoiceTest', 'VoiceTestFeedback',
+    'RAGConnector', 'RAGStats', 'VoiceTest', 'VoiceTestFeedback',
     'IntentCategory', 'HallucinationCheck', 'CrossValidationModel', 'MultiIntentConfig',
     'IntentChainRule', 'ValidationTestScenario', 'ConfidenceScoreRule', 'ResponseEnhancementRule',
     'ConversationSettings', 'ClarificationSettings', 'ClarificationType',
@@ -3339,7 +3174,7 @@ __all__ = [
     'IntentPattern', 'IntentRouting', 'ProviderRouting',
     'GuestModeConfig', 'CalendarEvent', 'ModeOverride',
     'ToolRegistry', 'ToolCallingSetting', 'ToolCallingTrigger', 'ToolUsageMetric',
-    'BaseKnowledge', 'ComponentModelAssignment', 'AthenaService', 'RagService', 'SystemSetting',
+    'BaseKnowledge', 'ComponentModelAssignment', 'RagService', 'SystemSetting',
     'GatewayConfig',
     # SMS Models
     'SMSSettings', 'GuestSMSPreference', 'SMSHistory', 'SMSCostTracking',

@@ -2191,11 +2191,11 @@ function showError(message) {
 }
 
 // ============================================================================
-// SETTINGS TAB - Server Configuration & Service Registry
+// SETTINGS TAB - Service Registry
 // ============================================================================
 
 async function loadSettings() {
-    await Promise.all([loadOIDCSettings(), loadAssistantProfileSettings(), loadServers(), loadServices(), loadAnalyticsModeToggle()]);
+    await Promise.all([loadOIDCSettings(), loadAssistantProfileSettings(), loadServices(), loadAnalyticsModeToggle()]);
 }
 
 async function loadAnalyticsModeToggle() {
@@ -2325,77 +2325,6 @@ async function saveAssistantProfileSettings() {
     }
 }
 
-async function loadServers() {
-    try {
-        const response = await fetch(`${API_BASE}/api/servers`, {
-            headers: { 'Authorization': `Bearer ${getToken()}` }
-        });
-
-        if (!response.ok) throw new Error('Failed to load servers');
-
-        const data = await response.json();
-        const container = document.getElementById('servers-container');
-
-        if (data.servers.length === 0) {
-            container.innerHTML = '<div class="col-span-full text-gray-400 text-center py-8">No servers configured</div>';
-            return;
-        }
-
-        container.innerHTML = data.servers.map(server => `
-            <div class="bg-dark-card border border-dark-border rounded-lg p-4">
-                <div class="flex justify-between items-start mb-3">
-                    <div>
-                        <h4 class="text-lg font-semibold text-white">${escapeHtml(server.name)}</h4>
-                        <p class="text-sm text-gray-400">${escapeHtml(server.hostname || '')}</p>
-                    </div>
-                    <span class="px-2 py-1 rounded text-xs font-medium ${
-                        server.status === 'online' ? 'bg-green-900/30 text-green-400' :
-                        server.status === 'offline' ? 'bg-red-900/30 text-red-400' :
-                        server.status === 'degraded' ? 'bg-yellow-900/30 text-yellow-400' :
-                        'bg-gray-700 text-gray-300'
-                    }">${server.status}</span>
-                </div>
-
-                <div class="space-y-2 text-sm mb-4">
-                    <div class="flex justify-between">
-                        <span class="text-gray-400">IP Address:</span>
-                        <span class="text-gray-200 font-mono">${server.ip_address}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-400">Role:</span>
-                        <span class="text-gray-200">${server.role || 'N/A'}</span>
-                    </div>
-                    ${server.last_checked ? `
-                        <div class="flex justify-between">
-                            <span class="text-gray-400">Last Checked:</span>
-                            <span class="text-gray-200">${new Date(server.last_checked).toLocaleString()}</span>
-                        </div>
-                    ` : ''}
-                </div>
-
-                <div class="flex gap-2">
-                    <button onclick="checkServer(${server.id})"
-                        class="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium transition-colors">
-                        Check Health
-                    </button>
-                    <button onclick="viewServerServices(${server.id})"
-                        class="flex-1 px-3 py-1.5 bg-gray-600 hover:bg-gray-700 text-white rounded text-sm font-medium transition-colors">
-                        View Services
-                    </button>
-                    <button onclick="deleteServer(${server.id})"
-                        class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-sm font-medium transition-colors">
-                        Delete
-                    </button>
-                </div>
-            </div>
-        `).join('');
-
-    } catch (error) {
-        console.error('Load servers error:', error);
-        showError('Failed to load servers');
-    }
-}
-
 async function loadServices() {
     try {
         const response = await fetch(`${API_BASE}/api/service-registry/services`, {
@@ -2474,24 +2403,6 @@ async function loadServices() {
     }
 }
 
-async function checkServer(serverId) {
-    try {
-        const response = await fetch(`${API_BASE}/api/servers/${serverId}/check`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${getToken()}` }
-        });
-
-        if (!response.ok) throw new Error('Health check failed');
-
-        showSuccess('Server health check completed');
-        await loadServers();
-
-    } catch (error) {
-        console.error('Check server error:', error);
-        showError('Server health check failed');
-    }
-}
-
 async function toggleService(serviceName) {
     try {
         const response = await fetch(`${API_BASE}/api/service-registry/services/${serviceName}/toggle`, {
@@ -2567,171 +2478,6 @@ async function refreshAllServices() {
     }
 }
 
-function showCreateServerModal() {
-    const modal = `
-        <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" id="create-server-modal">
-            <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-md w-full mx-4">
-                <h3 class="text-xl font-semibold text-white mb-4">Add Server</h3>
-
-                <div class="space-y-4">
-                    <div>
-                        <label for="server-name" class="block text-sm font-medium text-gray-300 mb-1">Server Name</label>
-                        <input type="text" id="server-name" placeholder="mac-studio"
-                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
-                    </div>
-
-                    <div>
-                        <label for="server-hostname" class="block text-sm font-medium text-gray-300 mb-1">Hostname</label>
-                        <input type="text" id="server-hostname" placeholder="Jays-Mac-Studio.local"
-                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
-                    </div>
-
-                    <div>
-                        <label for="server-ip" class="block text-sm font-medium text-gray-300 mb-1">IP Address</label>
-                        <input type="text" id="server-ip" placeholder="192.168.10.167" required
-                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
-                    </div>
-
-                    <div>
-                        <label for="server-role" class="block text-sm font-medium text-gray-300 mb-1">Role</label>
-                        <select id="server-role"
-                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
-                            <option value="compute">Compute</option>
-                            <option value="storage">Storage</option>
-                            <option value="integration">Integration</option>
-                            <option value="other">Other</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="flex gap-3 mt-6">
-                    <button onclick="createServer()"
-                        class="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors">
-                        Create Server
-                    </button>
-                    <button onclick="closeModal('create-server-modal')"
-                        class="flex-1 px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition-colors">
-                        Cancel
-                    </button>
-                </div>
-            </div>
-        </div>
-    `;
-
-    document.getElementById('modals-container').innerHTML = modal;
-}
-
-async function createServer() {
-    const name = document.getElementById('server-name').value.trim();
-    const hostname = document.getElementById('server-hostname').value.trim();
-    const ip = document.getElementById('server-ip').value.trim();
-    const role = document.getElementById('server-role').value;
-
-    if (!name || !ip) {
-        showError('Name and IP address are required');
-        return;
-    }
-
-    try {
-        const response = await fetch(`${API_BASE}/api/servers`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${getToken()}`
-            },
-            body: JSON.stringify({ name, hostname, ip_address: ip, role })
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Failed to create server');
-        }
-
-        showSuccess('Server created successfully');
-        closeModal('create-server-modal');
-        await loadServers();
-
-    } catch (error) {
-        console.error('Create server error:', error);
-        showError(error.message);
-    }
-}
-
-async function deleteServer(serverId) {
-    if (!confirm('Are you sure you want to delete this server? All associated services will also be deleted.')) {
-        return;
-    }
-
-    try {
-        const response = await fetch(`${API_BASE}/api/servers/${serverId}`, {
-            method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${getToken()}` }
-        });
-
-        if (!response.ok) throw new Error('Failed to delete server');
-
-        showSuccess('Server deleted successfully');
-        await loadServers();
-
-    } catch (error) {
-        console.error('Delete server error:', error);
-        showError('Failed to delete server');
-    }
-}
-
-async function viewServerServices(serverId) {
-    try {
-        const response = await fetch(`${API_BASE}/api/servers/${serverId}/services`, {
-            headers: { 'Authorization': `Bearer ${getToken()}` }
-        });
-
-        if (!response.ok) throw new Error('Failed to load server services');
-
-        const data = await response.json();
-
-        const modal = `
-            <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" id="server-services-modal">
-                <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-auto">
-                    <h3 class="text-xl font-semibold text-white mb-4">Services on ${escapeHtml(data.server_name || 'Server')}</h3>
-
-                    ${data.services.length === 0 ?
-                        '<p class="text-gray-400">No services registered on this server</p>' :
-                        `<div class="space-y-3">
-                            ${data.services.map(service => `
-                                <div class="bg-dark-bg border border-dark-border rounded p-3">
-                                    <div class="flex justify-between items-start">
-                                        <div>
-                                            <h4 class="font-medium text-white">${escapeHtml(service.service_name)}</h4>
-                                            <p class="text-sm text-gray-400">Port ${service.port} (${service.protocol || 'http'})</p>
-                                        </div>
-                                        <span class="px-2 py-1 rounded text-xs font-medium ${
-                                            service.status === 'online' ? 'bg-green-900/30 text-green-400' :
-                                            service.status === 'offline' ? 'bg-red-900/30 text-red-400' :
-                                            service.status === 'degraded' ? 'bg-yellow-900/30 text-yellow-400' :
-                                            'bg-gray-700 text-gray-300'
-                                        }">${service.status}</span>
-                                    </div>
-                                </div>
-                            `).join('')}
-                        </div>`
-                    }
-
-                    <button onclick="closeModal('server-services-modal')"
-                        class="w-full mt-4 px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition-colors">
-                        Close
-                    </button>
-                </div>
-            </div>
-        `;
-
-        document.getElementById('modals-container').innerHTML = modal;
-
-    } catch (error) {
-        console.error('View server services error:', error);
-        showError('Failed to load server services');
-    }
-}
-
 // ============================================================================
 // RAG CONNECTORS TAB
 // ============================================================================
@@ -2771,22 +2517,6 @@ async function loadConnectors() {
                     </label>
                 </div>
 
-                ${connector.service ? `
-                    <div class="space-y-2 text-sm mb-4">
-                        <div class="flex justify-between">
-                            <span class="text-gray-400">Service:</span>
-                            <span class="text-gray-200">${escapeHtml(connector.service.service_name)}</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-400">Server:</span>
-                            <span class="text-gray-200">${escapeHtml(connector.service.server.name)}</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-400">Endpoint:</span>
-                            <span class="text-gray-200 font-mono text-xs">${connector.service.server.ip_address}:${connector.service.port}</span>
-                        </div>
-                    </div>
-                ` : ''}
 
                 ${connector.last_test_at ? `
                     <div class="bg-dark-bg rounded p-2 mb-4 text-sm">

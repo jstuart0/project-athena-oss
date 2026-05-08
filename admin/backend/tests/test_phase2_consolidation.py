@@ -42,7 +42,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db, OSS_SERVICE_REGISTRY, seed_oss_service_registry
-from app.models import RagService, RAGConnector, User, ServerConfig, ServiceRegistry, AthenaService
+from app.models import RagService, RAGConnector, User
 from main import app
 
 
@@ -622,11 +622,16 @@ def test_api_key_encrypted_roundtrips(db):
 # Deprecated model tablename guard (Phase 2 round-2 H2)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skip(
+    reason=(
+        "Phase 5 (ATHENA-1): ServerConfig, ServiceRegistry, and AthenaService "
+        "classes deleted from models.py — tables dropped via migration 056. "
+        "Guard superseded by test_phase5_servers_removed.py."
+    )
+)
 def test_deprecated_model_tablenames():
     """Models for deprecated tables must point at *_deprecated names after Phase 2."""
-    assert ServerConfig.__tablename__ == 'server_configs_deprecated'
-    assert ServiceRegistry.__tablename__ == 'service_registry_deprecated'
-    assert AthenaService.__tablename__ == 'athena_services_deprecated'
+    pass  # classes no longer exist
 
 
 # ---------------------------------------------------------------------------

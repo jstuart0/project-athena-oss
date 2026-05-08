@@ -38,7 +38,7 @@ from app.models import User
 
 # Import API route modules
 from app.routes import (
-    policies, secrets, devices, audit, users, servers, services, rag_connectors, voice_tests,
+    policies, secrets, devices, audit, users, services, rag_connectors, voice_tests,
     hallucination_checks, multi_intent, validation_models, conversation, llm_backends, settings,
     intent_routing, features, external_api_keys, tool_calling, base_knowledge, analytics,
     service_registry, guest_mode, component_models, service_control, internal, gateway_config,
@@ -142,7 +142,6 @@ app.include_router(secrets.router)
 app.include_router(devices.router)
 app.include_router(audit.router)
 app.include_router(users.router)
-app.include_router(servers.router)
 app.include_router(services.router)
 app.include_router(rag_connectors.router)
 app.include_router(voice_tests.router)
