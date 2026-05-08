@@ -1,417 +1,291 @@
-"""Service Registry API routes."""
-from fastapi import APIRouter, HTTPException
-from typing import List, Dict, Any, Optional
-import asyncpg
-import os
-import logging
-import httpx
-from urllib.parse import urlparse
+"""Service Registry API routes.
 
-logger = logging.getLogger(__name__)
+Phase 2 (ATHENA-1): asyncpg client replaced with SQLAlchemy ORM against the
+admin DB's rag_services table.  Health pings are no longer inlined on the GET
+list — callers receive the cached health_status + last_health_check written by
+the Phase 4 background poller.  Between Phase 2 and Phase 4, those columns
+will be NULL / unknown — that is the documented transient state.
+
+Auth: read (GET) endpoints are unauthenticated for backward-compat with the
+existing UI flow.  Write (POST / DELETE) endpoints require dual-auth:
+X-Service-Key (Control Agent / internal callers) OR Bearer JWT / X-API-Key
+(admin UI) via verify_service_or_oidc.  (xander CRIT-1 / D9 / ATHENA-1)
+
+Rate limit: write endpoints are capped at service_registry_write_per_minute
+requests per IP per 60 s via service_registry_rate_limit_dep.
+(xander HIGH-4 / ATHENA-1)
+"""
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models import RagService
+from app.utils.service_auth import verify_service_or_oidc
+from app.utils.rate_limit import service_registry_rate_limit_dep
+from shared.config import get_config
+import structlog
+
+logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/service-registry", tags=["service-registry"])
 
+_WRITE_DEPS = [
+    Depends(verify_service_or_oidc),
+    Depends(service_registry_rate_limit_dep),
+]
 
-async def ensure_rag_services_table(conn: asyncpg.Connection) -> None:
-    """Create the service-registry table when a fresh Athena DB has not been migrated yet.
 
-    NOTE: this DDL is removed in Phase 2 alongside the alembic migration.
-    Widened in Phase 1 reconcile to match the RagService ORM so fresh installs
-    don't break before alembic upgrade. ATHENA-1.
-    """
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS rag_services (
-            id SERIAL PRIMARY KEY,
-            name VARCHAR(64) UNIQUE NOT NULL,
-            display_name VARCHAR(255),
-            description TEXT,
-            service_type VARCHAR(50),
-            host VARCHAR(255),
-            port INTEGER,
-            protocol VARCHAR(8) DEFAULT 'http',
-            health_endpoint VARCHAR(256) DEFAULT '/health',
-            endpoint_url TEXT,
-            control_method VARCHAR(50) DEFAULT 'none',
-            container_name VARCHAR(255),
-            headers JSONB,
-            query_template TEXT,
-            response_parser TEXT,
-            cache_ttl INTEGER DEFAULT 300,
-            timeout INTEGER DEFAULT 5000,
-            rate_limit INTEGER DEFAULT 100,
-            api_key_encrypted TEXT,
-            enabled BOOLEAN DEFAULT true,
-            auto_start BOOLEAN DEFAULT true,
-            health_status VARCHAR(20),
-            is_running BOOLEAN DEFAULT false,
-            last_health_check TIMESTAMP,
-            last_response_time_ms INTEGER,
-            last_error TEXT,
-            health_message VARCHAR(500),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-async def get_db_connection():
-    """Get connection to the Athena database."""
-    password = os.getenv('ATHENA_DB_PASSWORD')
-    if not password:
-        raise HTTPException(status_code=500, detail="ATHENA_DB_PASSWORD not configured")
-    return await asyncpg.connect(
-        host=os.getenv('ATHENA_DB_HOST', 'localhost'),
-        port=int(os.getenv('ATHENA_DB_PORT', '5432')),
-        user=os.getenv('ATHENA_DB_USER', 'psadmin'),
-        password=password,
-        database=os.getenv('ATHENA_DB_NAME', 'athena')
-    )
+# ---------------------------------------------------------------------------
+# GET /services — list all services (cached health; no inline pings)
+# ---------------------------------------------------------------------------
 
 @router.get("/services")
-async def get_all_services() -> Dict[str, Any]:
-    """Get all services from the registry with their status."""
-    conn = await get_db_connection()
+async def get_all_services(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Return all service registry entries with cached health status.
 
-    try:
-        await ensure_rag_services_table(conn)
+    Health is read from rag_services.health_status / last_health_check, NOT
+    from a live ping.  The Phase 4 background poller keeps those columns fresh.
+    Between Phase 2 and Phase 4 they will be NULL — callers should treat NULL
+    as 'pending' (not alarming).  (ATHENA-1 transient state documented in plan)
 
-        # Fetch all services from the registry
-        rows = await conn.fetch("""
-            SELECT
-                name,
-                display_name,
-                service_type,
-                endpoint_url,
-                enabled,
-                cache_ttl,
-                timeout,
-                rate_limit,
-                created_at,
-                updated_at
-            FROM rag_services
-            ORDER BY name
-        """)
+    Response envelope includes control_agent_enabled so the UI can disable
+    start/stop/restart buttons when the Control Agent is not available. (ruby B2)
+    """
+    services = db.query(RagService).order_by(RagService.name).all()
 
-        services = []
-        healthy_count = 0
-        total_count = 0
+    service_list = []
+    for svc in services:
+        d = svc.to_dict()
+        # Normalise None health_status to 'pending' for UI legibility.
+        if d.get('health_status') is None:
+            d['health_status'] = 'pending'
+        service_list.append(d)
 
-        # Check health status for each service
-        for row in rows:
-            service = dict(row)
-            total_count += 1
+    return {
+        'services': service_list,
+        'total_services': len(service_list),
+        'healthy_services': sum(1 for s in service_list if s.get('health_status') == 'healthy'),
+        'overall_health': _overall_health(service_list),
+        'control_agent_enabled': get_config().control_agent_enabled,  # ruby B2
+    }
 
-            # Extract port from endpoint_url
-            if service['endpoint_url']:
-                try:
-                    parsed = urlparse(service['endpoint_url'])
-                    service['host'] = parsed.hostname
-                    service['port'] = parsed.port or 80
-                except:
-                    service['host'] = 'unknown'
-                    service['port'] = 0
-            else:
-                service['host'] = 'unknown'
-                service['port'] = 0
 
-            # Check if service is healthy by calling its health endpoint
-            service['status'] = 'unknown'
-            service['health_message'] = ''
+def _overall_health(services: list) -> str:
+    if not services:
+        return 'unknown'
+    healthy = sum(1 for s in services if s.get('health_status') == 'healthy')
+    if healthy == len(services):
+        return 'healthy'
+    return 'degraded' if healthy > 0 else 'unhealthy'
 
-            if service['enabled'] and service['endpoint_url']:
-                try:
-                    async with httpx.AsyncClient(timeout=2.0) as client:
-                        health_url = f"{service['endpoint_url']}/health"
-                        response = await client.get(health_url)
-                        if response.status_code == 200:
-                            service['status'] = 'healthy'
-                            healthy_count += 1
-                            health_data = response.json()
-                            service['health_message'] = health_data.get('message', 'Service is running')
-                        else:
-                            service['status'] = 'unhealthy'
-                            service['health_message'] = f'Health check returned {response.status_code}'
-                except httpx.ConnectError:
-                    service['status'] = 'offline'
-                    service['health_message'] = 'Cannot connect to service'
-                except httpx.TimeoutException:
-                    service['status'] = 'timeout'
-                    service['health_message'] = 'Health check timed out'
-                except Exception as e:
-                    service['status'] = 'error'
-                    service['health_message'] = str(e)
-            elif not service['enabled']:
-                service['status'] = 'disabled'
-                service['health_message'] = 'Service is disabled'
 
-            # Convert timestamps to ISO format
-            if service.get('created_at'):
-                service['created_at'] = service['created_at'].isoformat()
-            if service.get('updated_at'):
-                service['updated_at'] = service['updated_at'].isoformat()
-
-            services.append(service)
-
-        return {
-            'services': services,
-            'total_services': total_count,
-            'healthy_services': healthy_count,
-            'overall_health': 'healthy' if healthy_count == total_count else
-                             'degraded' if healthy_count > 0 else 'unhealthy'
-        }
-
-    finally:
-        await conn.close()
+# ---------------------------------------------------------------------------
+# GET /services/{service_name} — single service
+# ---------------------------------------------------------------------------
 
 @router.get("/services/{service_name}")
-async def get_service(service_name: str) -> Dict[str, Any]:
-    """Get a single service by name with its status."""
-    conn = await get_db_connection()
+async def get_service(
+    service_name: str,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Return a single service by name with cached health status."""
+    svc = db.query(RagService).filter(RagService.name == service_name).first()
+    if not svc:
+        raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
+    d = svc.to_dict()
+    if d.get('health_status') is None:
+        d['health_status'] = 'pending'
+    return d
 
-    try:
-        await ensure_rag_services_table(conn)
 
-        row = await conn.fetchrow("""
-            SELECT
-                name,
-                display_name,
-                service_type,
-                endpoint_url,
-                enabled,
-                cache_ttl,
-                timeout,
-                rate_limit,
-                created_at,
-                updated_at
-            FROM rag_services
-            WHERE name = $1
-        """, service_name)
-
-        if not row:
-            raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
-
-        service = dict(row)
-
-        # Extract port from endpoint_url
-        if service['endpoint_url']:
-            try:
-                parsed = urlparse(service['endpoint_url'])
-                service['host'] = parsed.hostname
-                service['port'] = parsed.port or 80
-            except:
-                service['host'] = 'unknown'
-                service['port'] = 0
-        else:
-            service['host'] = 'unknown'
-            service['port'] = 0
-
-        # Check if service is healthy
-        service['status'] = 'unknown'
-        service['health_message'] = ''
-
-        if service['enabled'] and service['endpoint_url']:
-            try:
-                async with httpx.AsyncClient(timeout=2.0) as client:
-                    health_url = f"{service['endpoint_url']}/health"
-                    response = await client.get(health_url)
-                    if response.status_code == 200:
-                        service['status'] = 'healthy'
-                        health_data = response.json()
-                        service['health_message'] = health_data.get('message', 'Service is running')
-                    else:
-                        service['status'] = 'unhealthy'
-                        service['health_message'] = f'Health check returned {response.status_code}'
-            except httpx.ConnectError:
-                service['status'] = 'offline'
-                service['health_message'] = 'Cannot connect to service'
-            except httpx.TimeoutException:
-                service['status'] = 'timeout'
-                service['health_message'] = 'Health check timed out'
-            except Exception as e:
-                service['status'] = 'error'
-                service['health_message'] = str(e)
-        elif not service['enabled']:
-            service['status'] = 'disabled'
-            service['health_message'] = 'Service is disabled'
-
-        # Convert timestamps to ISO format
-        if service.get('created_at'):
-            service['created_at'] = service['created_at'].isoformat()
-        if service.get('updated_at'):
-            service['updated_at'] = service['updated_at'].isoformat()
-
-        return service
-
-    finally:
-        await conn.close()
-
+# ---------------------------------------------------------------------------
+# GET /services/{service_name}/url — lightweight URL lookup
+# ---------------------------------------------------------------------------
 
 @router.get("/services/{service_name}/url")
-async def get_service_url(service_name: str) -> Dict[str, Any]:
-    """Get just the URL for a service (lightweight endpoint for service discovery)."""
-    conn = await get_db_connection()
+async def get_service_url(
+    service_name: str,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Return the endpoint URL for a service (lightweight, no health check)."""
+    svc = db.query(RagService).filter(RagService.name == service_name).first()
+    if not svc:
+        raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
+    if not svc.enabled:
+        raise HTTPException(status_code=503, detail=f"Service {service_name} is disabled")
 
-    try:
-        await ensure_rag_services_table(conn)
-
-        row = await conn.fetchrow("""
-            SELECT endpoint_url, enabled
-            FROM rag_services
-            WHERE name = $1
-        """, service_name)
-
-        if not row:
-            raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
-
-        if not row['enabled']:
-            raise HTTPException(status_code=503, detail=f"Service {service_name} is disabled")
-
-        return {
-            'service': service_name,
-            'url': row['endpoint_url']
-        }
-
-    finally:
-        await conn.close()
+    url = svc.endpoint_url or f"{svc.protocol or 'http'}://{svc.host}:{svc.port}"
+    return {'service': service_name, 'url': url}
 
 
-@router.post("/services")
+# ---------------------------------------------------------------------------
+# POST /services — register or update (upsert)
+# ---------------------------------------------------------------------------
+
+@router.post("/services", dependencies=_WRITE_DEPS)
 async def register_service(
-    name: str,
-    endpoint_url: str,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    name: str = "",
+    endpoint_url: str = "",
     display_name: Optional[str] = None,
     service_type: str = 'api',
     cache_ttl: int = 300,
     timeout: int = 5000,
-    rate_limit: int = 100
+    rate_limit: int = 100,
 ) -> Dict[str, Any]:
-    """Register or update a service in the registry."""
-    conn = await get_db_connection()
+    """Register or update (upsert) a service.
 
-    try:
-        # Check if service exists
-        existing = await conn.fetchrow(
-            "SELECT id FROM rag_services WHERE name = $1",
-            name
-        )
+    Idempotent: safe to call repeatedly (Phase 3 CA startup-upsert relies on this).
+    Accepts query params to match the pre-existing calling convention used by the
+    Control Agent in Phase 3.
+    """
+    if not name:
+        raise HTTPException(status_code=422, detail="'name' query parameter is required")
+    if not endpoint_url:
+        raise HTTPException(status_code=422, detail="'endpoint_url' query parameter is required")
 
-        if existing:
-            # Update existing service
-            await conn.execute("""
-                UPDATE rag_services
-                SET endpoint_url = $2,
-                    display_name = COALESCE($3, display_name),
-                    service_type = $4,
-                    cache_ttl = $5,
-                    timeout = $6,
-                    rate_limit = $7,
-                    enabled = true,
-                    updated_at = NOW()
-                WHERE name = $1
-            """, name, endpoint_url, display_name, service_type, cache_ttl, timeout, rate_limit)
-
-            return {
-                'service': name,
-                'action': 'updated',
-                'url': endpoint_url,
-                'message': f"Service {name} has been updated"
-            }
-        else:
-            # Insert new service
-            await conn.execute("""
-                INSERT INTO rag_services (
-                    name, display_name, service_type, endpoint_url,
-                    headers, cache_ttl, timeout, rate_limit, enabled
-                )
-                VALUES ($1, $2, $3, $4, '{"Content-Type": "application/json"}'::jsonb,
-                        $5, $6, $7, true)
-            """, name, display_name or name.replace('-', ' ').title(), service_type,
-                 endpoint_url, cache_ttl, timeout, rate_limit)
-
-            return {
-                'service': name,
-                'action': 'created',
-                'url': endpoint_url,
-                'message': f"Service {name} has been registered"
-            }
-
-    finally:
-        await conn.close()
-
-
-@router.post("/services/{service_name}/toggle")
-async def toggle_service(service_name: str) -> Dict[str, Any]:
-    """Enable or disable a service."""
-    conn = await get_db_connection()
-
-    try:
-        # Get current state
-        current = await conn.fetchrow(
-            "SELECT enabled FROM rag_services WHERE name = $1",
-            service_name
-        )
-
-        if not current:
-            raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
-
-        # Toggle the state
-        new_state = not current['enabled']
-
-        await conn.execute("""
-            UPDATE rag_services
-            SET enabled = $1, updated_at = NOW()
-            WHERE name = $2
-        """, new_state, service_name)
-
+    existing = db.query(RagService).filter(RagService.name == name).first()
+    if existing:
+        existing.endpoint_url = endpoint_url
+        if display_name is not None:
+            existing.display_name = display_name
+        existing.service_type = service_type
+        existing.cache_ttl = cache_ttl
+        existing.timeout = timeout
+        existing.rate_limit = rate_limit
+        existing.enabled = True
+        # Do NOT touch updated_at explicitly — let onupdate handle it so it only
+        # advances on this config-change write.
+        db.commit()
+        logger.info("service_registry_updated", service=name)
         return {
-            'service': service_name,
-            'enabled': new_state,
-            'message': f"Service {service_name} has been {'enabled' if new_state else 'disabled'}"
+            'service': name,
+            'action': 'updated',
+            'url': endpoint_url,
+            'message': f"Service {name} has been updated",
+        }
+    else:
+        svc = RagService(
+            name=name,
+            display_name=display_name or name.replace('-', ' ').title(),
+            service_type=service_type,
+            endpoint_url=endpoint_url,
+            headers={'Content-Type': 'application/json'},
+            cache_ttl=cache_ttl,
+            timeout=timeout,
+            rate_limit=rate_limit,
+            enabled=True,
+        )
+        db.add(svc)
+        db.commit()
+        logger.info("service_registry_created", service=name)
+        return {
+            'service': name,
+            'action': 'created',
+            'url': endpoint_url,
+            'message': f"Service {name} has been registered",
         }
 
-    finally:
-        await conn.close()
 
-@router.post("/services/{service_name}/refresh")
-async def refresh_service(service_name: str) -> Dict[str, Any]:
-    """Refresh a service by updating its registration timestamp."""
-    conn = await get_db_connection()
+# ---------------------------------------------------------------------------
+# POST /services/{service_name}/toggle
+# ---------------------------------------------------------------------------
 
-    try:
-        result = await conn.execute("""
-            UPDATE rag_services
-            SET updated_at = NOW()
-            WHERE name = $1
-        """, service_name)
+@router.post("/services/{service_name}/toggle", dependencies=_WRITE_DEPS)
+async def toggle_service(
+    request: Request,
+    response: Response,
+    service_name: str,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Toggle the enabled state of a service."""
+    svc = db.query(RagService).filter(RagService.name == service_name).first()
+    if not svc:
+        raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
 
-        if result == "UPDATE 0":
-            raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
+    svc.enabled = not svc.enabled
+    db.commit()
+    logger.info("service_registry_toggled", service=service_name, enabled=svc.enabled)
+    return {
+        'service': service_name,
+        'enabled': svc.enabled,
+        'message': f"Service {service_name} has been {'enabled' if svc.enabled else 'disabled'}",
+    }
 
-        return {
-            'service': service_name,
-            'message': f"Service {service_name} registration refreshed"
-        }
 
-    finally:
-        await conn.close()
+# ---------------------------------------------------------------------------
+# POST /services/{service_name}/refresh
+# ---------------------------------------------------------------------------
 
-@router.delete("/services/{service_name}")
-async def remove_service(service_name: str) -> Dict[str, Any]:
+@router.post("/services/{service_name}/refresh", dependencies=_WRITE_DEPS)
+async def refresh_service(
+    request: Request,
+    response: Response,
+    service_name: str,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Touch updated_at to signal the service definition was refreshed."""
+    svc = db.query(RagService).filter(RagService.name == service_name).first()
+    if not svc:
+        raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
+
+    # Explicit datetime write triggers the updated_at onupdate hook.
+    svc.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    logger.info("service_registry_refreshed", service=service_name)
+    return {
+        'service': service_name,
+        'message': f"Service {service_name} registration refreshed",
+    }
+
+
+# ---------------------------------------------------------------------------
+# DELETE /services/{service_name}
+# ---------------------------------------------------------------------------
+
+@router.delete("/services/{service_name}", dependencies=_WRITE_DEPS)
+async def remove_service(
+    request: Request,
+    response: Response,
+    service_name: str,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
     """Remove a service from the registry."""
-    conn = await get_db_connection()
+    svc = db.query(RagService).filter(RagService.name == service_name).first()
+    if not svc:
+        raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
 
-    try:
-        result = await conn.execute(
-            "DELETE FROM rag_services WHERE name = $1",
-            service_name
-        )
+    db.delete(svc)
+    db.commit()
+    logger.info("service_registry_deleted", service=service_name)
+    return {
+        'service': service_name,
+        'message': f"Service {service_name} has been removed from registry",
+    }
 
-        if result == "DELETE 0":
-            raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
 
-        return {
-            'service': service_name,
-            'message': f"Service {service_name} has been removed from registry"
-        }
+# ---------------------------------------------------------------------------
+# POST /services/poll-now — stub for Phase 4 background poller
+# ---------------------------------------------------------------------------
 
-    finally:
-        await conn.close()
+@router.post("/services/poll-now", dependencies=_WRITE_DEPS)
+async def poll_now(
+    request: Request,
+    response: Response,
+) -> Dict[str, Any]:
+    """Trigger an immediate health-poll cycle for all services.
+
+    Phase 2 stub: returns 200 with a note that the poller is wired in Phase 4.
+    The endpoint exists now so the UI button (ruby B4) can be wired without
+    a breaking change in Phase 4.  (ATHENA-1 plan §Phase 2 ruby B4 stub)
+    """
+    return {
+        'queued': False,
+        'note': 'Background health poller is wired in Phase 4 (ATHENA-1). '
+                'Endpoint is live but no poll is triggered in this phase.',
+    }

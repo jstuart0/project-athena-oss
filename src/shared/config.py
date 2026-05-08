@@ -195,6 +195,14 @@ class AthenaConfig(BaseSettings):
     login_lockout_minutes: int = Field(default=30)
     login_minimum_delay_ms: int = Field(default=400)
 
+    # service_registry_write_per_minute: separate rate-limit budget for
+    # POST/toggle/refresh/DELETE on /api/service-registry/services/*.
+    # Distinct bucket from login_rate_limit_per_minute so service-registry writes
+    # and login attempts do not contend for the same token pool.
+    # Default 60 (generous for the CA's startup upsert loop).
+    # (xander HIGH-4 / ATHENA-1 Phase 2)
+    service_registry_write_per_minute: int = Field(default=60)
+
     # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern
     # ------------------------------------------------------------------

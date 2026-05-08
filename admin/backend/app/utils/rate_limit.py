@@ -47,3 +47,23 @@ async def login_rate_limit_dep(request: Request, response: Response) -> None:
         # codex-r2:4 / ATHENA-14.
         return
     await RateLimiter(times=cfg.login_rate_limit_per_minute, seconds=60)(request, response)
+
+
+async def service_registry_rate_limit_dep(request: Request, response: Response) -> None:
+    """FastAPI dependency for service-registry write endpoints.
+
+    Separate rate-limit budget from login_rate_limit_dep so that service-registry
+    writes (POST/toggle/refresh/DELETE) cannot consume the login bucket or vice
+    versa.  Uses service_registry_write_per_minute from AthenaConfig (default 60).
+
+    Resolves LIMITER_ACTIVE at REQUEST time — same pattern as login_rate_limit_dep.
+    When the limiter wasn't initialized (DEV_MODE or Redis-down) this is a no-op.
+    (xander HIGH-4 / ATHENA-1 Phase 2)
+    """
+    if not LIMITER_ACTIVE:
+        return
+    cfg = get_config()
+    limit = cfg.service_registry_write_per_minute
+    if limit <= 0:
+        return
+    await RateLimiter(times=limit, seconds=60)(request, response)

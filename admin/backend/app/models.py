@@ -506,8 +506,12 @@ class ServerConfig(Base):
     Server configuration model for tracking compute nodes.
 
     Tracks Mac Studio, Mac mini, Home Assistant, and other servers in the system.
+
+    Phase 2 (ATHENA-1): tablename flipped to server_configs_deprecated so that
+    /api/servers continues to work while migration 055 has renamed the underlying
+    table.  The route + model are deleted in Phase 5. (round-2 H2)
     """
-    __tablename__ = 'server_configs'
+    __tablename__ = 'server_configs_deprecated'
 
     id = Column(Integer, primary_key=True)
     name = Column(String(64), nullable=False, unique=True, index=True)
@@ -549,11 +553,16 @@ class ServiceRegistry(Base):
     Service registry for tracking all services across servers.
 
     Links services to their host servers and tracks health status.
+
+    Phase 2 (ATHENA-1): tablename flipped to service_registry_deprecated.
+    This class is kept in place for the deferred-drop validation window.
+    Deleted in Phase 5. (D5)
     """
-    __tablename__ = 'service_registry'
+    __tablename__ = 'service_registry_deprecated'
 
     id = Column(Integer, primary_key=True)
-    server_id = Column(Integer, ForeignKey('server_configs.id'), nullable=False)
+    # FK target updated to match Phase 2 renamed table (round-2 H2 / ATHENA-1).
+    server_id = Column(Integer, ForeignKey('server_configs_deprecated.id'), nullable=False)
     service_name = Column(String(64), nullable=False)
     port = Column(Integer, nullable=False)
     health_endpoint = Column(String(256))  # "/health", "/api/health", etc.
@@ -2364,8 +2373,12 @@ class AthenaService(Base):
 
     Enables service control (start/stop/restart) and health monitoring
     from the admin UI. Supports Docker containers and launchd services.
+
+    Phase 2 (ATHENA-1): tablename flipped to athena_services_deprecated.
+    This class is kept in place for the deferred-drop validation window.
+    Deleted in Phase 5. (D5)
     """
-    __tablename__ = 'athena_services'
+    __tablename__ = 'athena_services_deprecated'
 
     id = Column(Integer, primary_key=True)
     service_name = Column(String(100), unique=True, nullable=False, index=True)

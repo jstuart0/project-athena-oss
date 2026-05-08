@@ -546,11 +546,31 @@ async def startup_event():
                 except Exception as e:
                     logger.error("oss_conversation_settings_seeding_failed", error=str(e))
 
+                # Startup gate: alembic migration 055 must have run before we seed.
+                # Assert the Phase 2 columns exist so the seed's UPSERT succeeds.
+                # (bob C2 / otto C2 / ian I-H2 / ATHENA-1 Phase 2)
                 try:
+                    from sqlalchemy import inspect as _sa_inspect
+                    _inspector = _sa_inspect(engine)
+                    _cols = {c['name'] for c in _inspector.get_columns('rag_services')}
+                    _required = {
+                        'host', 'port', 'protocol', 'health_endpoint',
+                        'control_method', 'is_running', 'last_response_time_ms',
+                        'last_error', 'health_message', 'auto_start',
+                        'description', 'api_key_encrypted',
+                    }
+                    _missing = _required - _cols
+                    if _missing:
+                        raise RuntimeError(
+                            f"Admin-backend startup aborted: rag_services table is missing "
+                            f"columns {sorted(_missing)}. "
+                            f"Run `alembic upgrade head` before starting admin-backend."
+                        )
                     seed_oss_service_registry()
                     logger.info("oss_service_registry_seeded")
                 except Exception as e:
                     logger.error("oss_service_registry_seeding_failed", error=str(e))
+                    raise  # Propagate — a missing migration is a fatal misconfiguration.
 
                 try:
                     seed_oss_base_knowledge()
