@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `thoughts/shared/plans/2026-05-07-deliver-consolidate-service-registry.md`
+> **Ticket:** [ATHENA-1](https://plane.xmojo.net)
+> **Commits:** `058d489` → `086e4e1` (phases 1–5)
+
+### service-registry consolidation (ATHENA-1)
+
+- 5-phase architectural refactor consolidating 3 service-definition tables across 2 databases into a single source-of-truth `rag_services` table in the admin DB.
+- New `RagService` SQLAlchemy model (`admin/backend/app/models.py`) replaces `ServiceRegistry` + `AthenaService` + `ServerConfig` as the canonical service definition. The 3 deprecated tables are renamed `*_deprecated` in migration 055 and scheduled for hard drop in migration 056 after a 7-day maintenance window.
+- Background async health poller (`admin/backend/app/services/health_poller.py`) replaces inline-blocking pings on `GET /api/service-registry/services`. Health state (`health_status`, `last_health_check`, `last_error`, `last_response_time_ms`) is written back to `rag_services` by the poller; the admin UI reads the cache. Eliminates the previous up-to-44s block on the listing endpoint (22 services × 2s timeout).
+- Control Agent gains `sync_registry_loop` — on startup it POSTs each entry in `PROCESS_SERVICES` to admin-backend's `POST /api/service-registry/services` using `X-Service-Key`. Host is derived from `urlparse(CONTROL_AGENT_URL).hostname` — no `localhost` fallback (which would silently poison the registry from inside the K8s pod). Missing `CONTROL_AGENT_URL` logs critical and skips the upsert; all other CA endpoints continue normally.
+- 5 new env vars: `SERVICE_REGISTRY_WRITE_PER_MINUTE` (default 60), `HEALTH_POLL_INTERVAL_SECONDS` (default 30), `HEALTH_POLL_TIMEOUT_SECONDS` (default 5), `HEALTH_POLL_CONCURRENCY` (default 8), `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` (comma-separated CIDRs/hostnames overriding the SSRF block; default empty — K8s operators with services on private subnets must set this).
+- SSRF guard in `health_poller._validate_service_url` mirrors `src/control_agent/url_validator.py::_PRIVATE_NETS` — blocks RFC1918 (10/8, 172.16/12, 192.168/16), loopback, link-local, IPv6 ULA (fc00::/7), IPv6 link-local (fe80::/10), and `.cluster.local` / `kubernetes.default.svc` suffix targets. Path-injection (CRLF, `..`, NUL) also rejected. Overridden per-host via `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`.
+- `last_error` values are categorically sanitized — stored as one of `connection_refused`, `timeout`, `http_5xx`, `http_4xx`, `ssrf_blocked`, `unknown`. No raw exception text is written to the DB or rendered in the admin UI.
+- `GET /api/service-registry/services` now requires authentication (Bearer JWT or `X-Service-Key`). Pre-Campaign-4 the endpoint was unauthenticated.
+- Dual-auth helper `verify_service_or_oidc` (`admin/backend/app/utils/service_auth.py`) accepts `X-Service-Key` OR OIDC Bearer JWT. Wired on POST, toggle, refresh, delete, and poll-now endpoints. Write endpoints are also covered by the `SERVICE_REGISTRY_WRITE_PER_MINUTE` rate-limit bucket (separate from the login rate-limit).
+- **Removed**: `admin/backend/app/routes/servers.py` route module, `ServerConfig` model, and the "Servers" tab in the admin UI. The "server" concept was a pre-consolidation artifact with no remaining callers after Phase 5.
+- **Behavioral change**: `health_status` column values normalized to `'healthy'`/`'unhealthy'`/`'unknown'`/`'pending'`. Previous mixed values (`'online'`/`'degraded'`/`'offline'`) from legacy code paths are no longer emitted.
+
+Closes ATHENA-1.
+
+---
+
+## [Unreleased]
+
 > **Plan:** `thoughts/shared/plans/active-2026-05-06-deliver-auth-rate-limit-bypass.md`
 > **Ticket:** [ATHENA-14](https://plane.xmojo.net)
 > **Commits:** `f94c589` → `6e2b8db` (phases 1–4)

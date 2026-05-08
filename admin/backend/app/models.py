@@ -2297,7 +2297,7 @@ class RagService(Base):
     description = Column(Text)
     service_type = Column(String(50))
 
-    # Network coordinates — denormalized from ServerConfig + AthenaService (D2 / D3)
+    # Network coordinates — consolidated from service_registry + athena_services (D2 / D3, ATHENA-1)
     host = Column(String(255))
     port = Column(Integer)
     protocol = Column(String(8), default='http')

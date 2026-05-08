@@ -119,6 +119,12 @@ data:
   # side-channel is a concern.  Default: 400ms.
   # LOGIN_MINIMUM_DELAY_MS: "400"
 
+  # Service-registry write rate limit (ATHENA-1 Phase 2).
+  # Separate token bucket from LOGIN_RATE_LIMIT_PER_MINUTE.  Covers
+  # POST/toggle/refresh/DELETE on /api/service-registry/services/*.
+  # Default 60 (accommodates CA's per-service upsert loop on startup).
+  # SERVICE_REGISTRY_WRITE_PER_MINUTE: "60"
+
   # ==========================================================================
   # Health Poller Configuration (ATHENA-1 Phase 4)
   # ==========================================================================
