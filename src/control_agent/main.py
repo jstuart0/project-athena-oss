@@ -20,9 +20,11 @@ from contextlib import asynccontextmanager
 from typing import Optional, Dict, List, Set
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import httpx
 import structlog
 
 logger = structlog.get_logger()
@@ -142,9 +144,149 @@ async def watchdog_loop():
             await asyncio.sleep(10)  # Brief pause on unexpected errors
 
 
+# =============================================================================
+# REGISTRY SYNC — upsert PROCESS_SERVICES into admin-backend on startup
+# =============================================================================
+
+# How often to re-sync after the initial run (seconds).  Configurable so
+# tests can override via monkeypatching; default 300 s (5 minutes).
+REGISTRY_SYNC_INTERVAL: int = 300
+
+
+async def sync_registry_loop() -> None:
+    """Upsert PROCESS_SERVICES entries into admin-backend's service registry.
+
+    Runs once immediately at startup (so that a freshly-started admin-backend
+    receives the CA's service list without waiting for the first interval).
+    Then re-runs every REGISTRY_SYNC_INTERVAL seconds so that admin-backend
+    restarts automatically recover their registry state.
+
+    Failure is non-fatal: all errors are logged and the watchdog continues
+    unaffected.  Exponential backoff (5 → 300 s) prevents hammering a
+    transiently-down admin-backend.
+    """
+    admin_url = os.getenv("ADMIN_API_URL", "").strip()
+    service_key = os.getenv("SERVICE_API_KEY", "").strip()
+
+    if not admin_url or not service_key:
+        logger.critical(
+            "registry_sync_skipped",
+            reason="ADMIN_API_URL or SERVICE_API_KEY not set",
+            note=(
+                "Control Agent will not register services with admin-backend. "
+                "Set ADMIN_API_URL (Traefik external URL, NOT cluster-internal DNS) "
+                "and SERVICE_API_KEY in the CA's .env file."
+            ),
+        )
+        return
+
+    backoff_s: int = 5
+    while True:
+        try:
+            count_ok, count_skip = await _upsert_all_services(admin_url, service_key)
+            logger.info(
+                "registry_upsert_complete",
+                count_success=count_ok,
+                count_skipped=count_skip,
+            )
+            backoff_s = 5  # reset on success
+            await asyncio.sleep(REGISTRY_SYNC_INTERVAL)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "registry_sync_error",
+                error_type=type(exc).__name__,
+                retry_in_s=backoff_s,
+            )
+            await asyncio.sleep(backoff_s)
+            backoff_s = min(backoff_s * 2, 300)
+
+
+async def _upsert_all_services(admin_url: str, service_key: str) -> tuple[int, int]:
+    """POST each PROCESS_SERVICES entry to admin-backend's registry endpoint.
+
+    Returns (count_success, count_skipped).
+
+    Host derivation: parsed from CONTROL_AGENT_URL via urlparse().hostname so
+    the stored endpoint_url reflects the CA's externally-reachable address.
+    If CONTROL_AGENT_URL is empty or malformed (no hostname resolvable), the
+    entire upsert is skipped with a critical log — we will NOT register services
+    as 'localhost' which would silently poison the registry from inside an
+    admin-backend pod.  (D12 / bob H1 / xander HIGH-3 / 4 r1 reviewers)
+
+    Security: error logs use body_length=len(resp.text) not body=resp.text[:200]
+    to avoid echoing SERVICE_API_KEY back from a 4xx response.  (xander MED-4)
+    """
+    ca_url = os.getenv("CONTROL_AGENT_URL", "").strip()
+    ca_host = urlparse(ca_url).hostname if ca_url else None
+    if not ca_host:
+        logger.critical(
+            "ca_host_unresolvable",
+            control_agent_url=ca_url or "(empty)",
+            note=(
+                "CONTROL_AGENT_URL is empty or has no resolvable hostname. "
+                "Skipping registry-sync to avoid registering services as 'localhost'."
+            ),
+        )
+        return 0, len(PROCESS_SERVICES)
+
+    count_ok = 0
+    count_skip = 0
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for port, config in PROCESS_SERVICES.items():
+            service_name: str = config["name"]
+            endpoint_url = f"http://{ca_host}:{port}"
+            # Derive service_type: names containing "-rag" are RAG services;
+            # everything else is a core service.
+            service_type = "rag" if "-rag" in service_name else "core"
+
+            payload = {
+                "name": service_name,
+                "endpoint_url": endpoint_url,
+                "service_type": service_type,
+                "cache_ttl": 300,
+                "timeout": 5000,
+                "rate_limit": 100,
+            }
+            try:
+                resp = await client.post(
+                    f"{admin_url.rstrip('/')}/api/service-registry/services",
+                    headers={"X-Service-Key": service_key},
+                    params=payload,
+                )
+                if resp.status_code in (200, 201):
+                    count_ok += 1
+                else:
+                    count_skip += 1
+                    logger.warning(
+                        "registry_upsert_failed",
+                        service_name=service_name,
+                        status_code=resp.status_code,
+                        body_length=len(resp.text),
+                    )
+            except httpx.ConnectError:
+                count_skip += 1
+                logger.warning(
+                    "registry_upsert_connect_error",
+                    service_name=service_name,
+                    note="admin-backend unreachable; will retry on next sync cycle",
+                )
+            except httpx.HTTPError as exc:
+                count_skip += 1
+                logger.warning(
+                    "registry_upsert_http_error",
+                    service_name=service_name,
+                    error_type=type(exc).__name__,
+                )
+
+    return count_ok, count_skip
+
+
 @asynccontextmanager
 async def lifespan(app):
-    """Start watchdog on startup, stop on shutdown."""
+    """Start watchdog and registry-sync on startup, stop on shutdown."""
     global watchdog_task
 
     # SSRF guard: warn loudly if no callback allowlist is configured.
@@ -159,6 +301,7 @@ async def lifespan(app):
             ),
         )
 
+    registry_sync_task = asyncio.create_task(sync_registry_loop())
     watchdog_task = asyncio.create_task(watchdog_loop())
     logger.info("watchdog_scheduled", interval=watchdog_interval)
     yield
@@ -168,6 +311,11 @@ async def lifespan(app):
             await watchdog_task
         except asyncio.CancelledError:
             pass
+    registry_sync_task.cancel()
+    try:
+        await registry_sync_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(
