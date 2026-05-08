@@ -25,6 +25,7 @@ from app.database import get_db
 from app.models import RagService
 from app.utils.service_auth import verify_service_or_oidc
 from app.utils.rate_limit import service_registry_rate_limit_dep
+from app.utils.url_validators import validate_endpoint_url
 from shared.config import get_config
 import structlog
 
@@ -146,8 +147,19 @@ async def register_service(
     """
     if not name:
         raise HTTPException(status_code=422, detail="'name' query parameter is required")
+    if len(name) > 64:
+        raise HTTPException(status_code=422, detail="'name' exceeds 64 characters")
     if not endpoint_url:
         raise HTTPException(status_code=422, detail="'endpoint_url' query parameter is required")
+
+    # SSRF protection: validate scheme + host before persisting.
+    # The Phase 4 health poller will make HTTP requests to stored endpoint_url
+    # values; a stored IMDS or cluster-internal URL would be polled silently.
+    # (xander M-3, ATHENA-1 Phase 2 reconcile)
+    try:
+        endpoint_url = validate_endpoint_url(endpoint_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
     existing = db.query(RagService).filter(RagService.name == name).first()
     if existing:

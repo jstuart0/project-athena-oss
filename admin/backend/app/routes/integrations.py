@@ -151,7 +151,7 @@ async def check_rag_service_health(service_name: str, port: int) -> Dict[str, An
                 return {
                     "healthy": True,
                     "status_code": response.status_code,
-                    "endpoint": f"http://{MAC_STUDIO_IP}:{port}",
+                    "endpoint": f"http://{RAG_SERVICE_HOST}:{port}",
                 }
             else:
                 return {

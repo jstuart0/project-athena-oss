@@ -738,3 +738,159 @@ def test_integrations_no_asyncpg():
                 assert alias.name != 'asyncpg', "integrations.py must not import asyncpg"
         elif isinstance(node, ast.ImportFrom):
             assert node.module != 'asyncpg', "integrations.py must not import from asyncpg"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 reconcile regressions — ian H-1 + xander H-1 + xander M-3
+# ATHENA-1 Campaign 4 Phase 2 reconcile
+# ---------------------------------------------------------------------------
+
+class TestPhase2ReconcileRegressions:
+    """
+    ian H-1: verify service-control.js reads health_status, not status.
+    xander H-1: check_rag_service_health healthy path uses RAG_SERVICE_HOST, not MAC_STUDIO_IP.
+    xander M-3: POST /api/service-registry/services endpoint_url SSRF validation.
+    """
+
+    # -----------------------------------------------------------------------
+    # ian H-1 — JS source uses health_status
+    # -----------------------------------------------------------------------
+
+    def test_service_control_js_uses_health_status_not_status(self):
+        """service-control.js renderRagServiceRow must switch on health_status, not status."""
+        import ast as _ast  # noqa: F401 (unused import guard)
+        path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), '..', '..', '..', 'admin', 'frontend', 'service-control.js')
+        )
+        with open(path) as f:
+            source = f.read()
+
+        # The switch must reference service.health_status
+        assert 'service.health_status' in source, (
+            "service-control.js must switch on service.health_status (Phase 2 field name)"
+        )
+        # The fallback filter must also reference health_status
+        assert "s.health_status === 'healthy'" in source, (
+            "updateRagServiceCounts fallback must filter on s.health_status"
+        )
+        # No bare switch on service.status inside renderRagServiceRow
+        # (we allow service.status in renderServiceRow which is a different function)
+        assert "switch (service.status)" not in source, (
+            "renderRagServiceRow must not switch on service.status (stale field from Phase 1)"
+        )
+
+    def test_service_control_js_has_pending_case(self):
+        """service-control.js must have an explicit 'pending' case (Phase 2 normalization)."""
+        path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), '..', '..', '..', 'admin', 'frontend', 'service-control.js')
+        )
+        with open(path) as f:
+            source = f.read()
+        assert "case 'pending':" in source, (
+            "service-control.js must have a 'pending' case for NULL→'pending' normalization"
+        )
+
+    # -----------------------------------------------------------------------
+    # xander H-1 — integrations.py healthy path has no MAC_STUDIO_IP reference
+    # -----------------------------------------------------------------------
+
+    def test_integrations_no_mac_studio_ip(self):
+        """check_rag_service_health healthy path must not reference MAC_STUDIO_IP."""
+        import ast
+
+        path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), '..', 'app', 'routes', 'integrations.py')
+        )
+        with open(path) as f:
+            source = f.read()
+        assert 'MAC_STUDIO_IP' not in source, (
+            "integrations.py must not reference MAC_STUDIO_IP (undefined; use RAG_SERVICE_HOST)"
+        )
+
+    def test_integrations_healthy_path_uses_rag_service_host(self, db, monkeypatch):
+        """check_rag_service_health returns endpoint containing RAG_SERVICE_HOST on 200."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from app.routes.integrations import check_rag_service_health
+
+        # Patch RAG_SERVICE_HOST inside the module under test
+        monkeypatch.setattr(
+            "app.routes.integrations.RAG_SERVICE_HOST",
+            "test-rag-host",
+        )
+
+        # Build a mock httpx response that looks like a 200
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        # Patch httpx.AsyncClient to return our mock response
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("app.routes.integrations.httpx.AsyncClient", return_value=mock_client):
+            result = asyncio.run(check_rag_service_health("weather", 8010))
+
+        assert result["healthy"] is True, "healthy path must return healthy=True"
+        # Endpoint field must contain the configured host — not a NameError crash
+        assert "test-rag-host" in result.get("endpoint", ""), (
+            f"endpoint must contain RAG_SERVICE_HOST; got {result.get('endpoint')!r}"
+        )
+
+    # -----------------------------------------------------------------------
+    # xander M-3 — SSRF validation on POST /api/service-registry/services
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize("bad_url,description", [
+        ("file:///etc/passwd",                           "file:// scheme"),
+        ("http://169.254.169.254/latest/meta-data/",    "cloud IMDS"),
+        ("http://kubernetes.default.svc:443/api",       "k8s cluster-local (.svc suffix)"),
+        ("http://[fe80::1]:8080/",                       "link-local IPv6"),
+        ("gopher://evil.com:70/",                       "gopher scheme"),
+    ])
+    def test_ssrf_blocked_on_upsert(self, client, bad_url, description):
+        """POST /api/service-registry/services must reject SSRF targets (xander M-3)."""
+        resp = client.post(
+            "/api/service-registry/services",
+            params={"name": "ssrf-test", "endpoint_url": bad_url},
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert resp.status_code == 422, (
+            f"Expected 422 for {description} ({bad_url!r}), got {resp.status_code}: {resp.text}"
+        )
+
+    def test_legitimate_k8s_service_allowed(self, client):
+        """http://athena-rag-weather:8001/health must be accepted (internal K8s hostname)."""
+        resp = client.post(
+            "/api/service-registry/services",
+            params={"name": "weather-ssrf-ok", "endpoint_url": "http://athena-rag-weather:8001/health"},
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert resp.status_code == 200, (
+            f"Legitimate K8s hostname must be accepted; got {resp.status_code}: {resp.text}"
+        )
+
+    def test_rfc1918_allowed(self, client):
+        """RFC1918 addresses must be accepted for homelab deployments (with warning)."""
+        resp = client.post(
+            "/api/service-registry/services",
+            params={"name": "rfc1918-svc", "endpoint_url": "http://10.0.0.5:8001/health"},
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert resp.status_code == 200, (
+            f"RFC1918 address must be accepted; got {resp.status_code}: {resp.text}"
+        )
+
+    def test_name_max_length_64(self, client):
+        """POST /api/service-registry/services must reject names > 64 chars."""
+        long_name = "x" * 65
+        resp = client.post(
+            "/api/service-registry/services",
+            params={"name": long_name, "endpoint_url": "http://host:8000"},
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert resp.status_code == 422, (
+            f"name > 64 chars must return 422; got {resp.status_code}"
+        )

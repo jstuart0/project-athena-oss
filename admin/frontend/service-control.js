@@ -472,9 +472,13 @@ function renderRagServiceRow(service) {
     const host = service.host || 'unknown';
     const port = service.port || 0;
 
-    // Status badge based on registry health check
+    // Status badge based on cached health_status from service registry (Phase 2+).
+    // Phase 1 returned an inline-pinged `status` field; Phase 2 removed inline
+    // pings and now returns `health_status` (NULL rows normalised to 'pending' by
+    // the backend).  Reading the old `service.status` caused every row to fall
+    // through to the default branch and render "? Unknown" permanently.
     let statusBadge;
-    switch (service.status) {
+    switch (service.health_status) {
         case 'healthy':
             statusBadge = '<span class="px-2 py-1 text-xs rounded bg-green-900 text-green-300">● Healthy</span>';
             break;
@@ -489,6 +493,11 @@ function renderRagServiceRow(service) {
             break;
         case 'disabled':
             statusBadge = '<span class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-400">○ Disabled</span>';
+            break;
+        case 'pending':
+            // health_status is 'pending' when no poller result exists yet (Phase 2→4
+            // transient state; poller wires up in Phase 4).  Neutral, not alarming.
+            statusBadge = '<span class="px-2 py-1 text-xs rounded bg-gray-600 text-gray-300" title="Health check pending — checks run every 30 seconds.">○ Pending</span>';
             break;
         default:
             statusBadge = '<span class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-400">? Unknown</span>';
@@ -529,7 +538,7 @@ function renderRagServiceRow(service) {
 
 function updateRagServiceCounts(registryResponse) {
     const total = registryResponse.total_services || ragServices.length;
-    const healthy = registryResponse.healthy_services || ragServices.filter(s => s.status === 'healthy').length;
+    const healthy = registryResponse.healthy_services || ragServices.filter(s => s.health_status === 'healthy').length;
     const offline = total - healthy;
 
     // Update RAG-specific counters if they exist
