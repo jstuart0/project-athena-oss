@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `thoughts/shared/plans/2026-05-08-deliver-service-auth-hardening.md`
+> **Ticket:** [ATHENA-21](https://plane.xmojo.net)
+> **Commits:** `3ed22e6` (phase 1)
+
+### service-auth hardening (ATHENA-21)
+
+- Fixed: `verify_service_or_oidc` no longer silently falls through to OIDC when `SERVICE_API_KEY` is unset and a caller sends `X-Service-Key`; the helper now returns HTTP 503 (ATHENA-21). The existing production startup gate that rejects unset `SERVICE_API_KEY` now has a dedicated regression test pinned to the ticket.
+
+---
+
+## [Unreleased]
+
 > **Plan:** `thoughts/shared/plans/2026-05-07-deliver-consolidate-service-registry.md`
 > **Ticket:** [ATHENA-1](https://plane.xmojo.net)
 > **Commits:** `058d489` → `086e4e1` (phases 1–5)

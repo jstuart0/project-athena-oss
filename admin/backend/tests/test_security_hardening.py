@@ -387,6 +387,10 @@ class TestCookieHTTPSOnlyConfiguration:
 class TestStartupSecretValidation:
     """Production startup must reject insecure default secrets."""
 
+    # Superseded by behavioral tests in TestAthena21StartupGate (ATHENA-21). Kept for
+    # now as a static-shape canary for the _INSECURE_DEFAULTS dict structure; can be
+    # removed once the behavioral suite covers all three secret keys
+    # (SESSION_SECRET_KEY, JWT_SECRET, SERVICE_API_KEY) symmetrically.
     def test_insecure_defaults_checked_in_startup(self):
         """main.py startup must check for insecure default values."""
         main_path = os.path.join(
@@ -1062,6 +1066,219 @@ class TestPhase2InsecureDefaults:
         )
         assert "placeholder written by" not in combined, (
             f"OIDC_CLIENT_ID={client_id!r} must NOT match configure-me gate; got: {combined!r}"
+        )
+
+
+# -------------------------------------------------------------------
+# ATHENA-21 — SERVICE_API_KEY startup gate behavioral regression tests
+# -------------------------------------------------------------------
+# The _INSECURE_DEFAULTS loop in admin/backend/main.py already rejects unset
+# or placeholder SERVICE_API_KEY in production. These tests pin that behavior
+# with subprocess execution so a refactor of the loop cannot silently remove
+# the gate without breaking the test suite.
+
+
+class TestAthena21StartupGate:
+    """ATHENA-21 — behavioral regression tests for the SERVICE_API_KEY startup gate.
+
+    The gate itself lives in admin/backend/main.py's _INSECURE_DEFAULTS loop
+    (kind="secret" treats empty AND the documented placeholder as fatal in production).
+    Tests in this class drive startup via subprocess or in-process depending on
+    which signal we need — see individual test docstrings.
+    """
+
+    _PROD_SECRETS: dict = {
+        "SESSION_SECRET_KEY": "a" * 64,
+        "JWT_SECRET": "b" * 64,
+        "SERVICE_API_KEY": "c" * 64,
+    }
+
+    def _run_startup_subprocess(self, env_overrides: dict) -> "subprocess.CompletedProcess":
+        """Run startup_event() in a subprocess with env_overrides applied on top of os.environ."""
+        import subprocess
+        import sys
+
+        env = os.environ.copy()
+
+        _repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        )
+        _src_path = os.path.join(_repo_root, "src")
+        _backend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [_src_path, _backend_path, existing_pythonpath])
+        )
+
+        for k, v in env_overrides.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+
+        script = (
+            "from fastapi.testclient import TestClient; "
+            "from main import app; "
+            "TestClient(app).__enter__()"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=_backend_path,
+        )
+
+    def _run_startup_in_process(self, env_overrides: dict) -> None:
+        """
+        Run startup_event() inside the current process using TestClient.
+        Used for the "no abort" cases where we need to verify the app starts cleanly.
+        get_config.cache_clear() is called before/after to isolate pydantic-settings cache.
+        """
+        import sys
+        from shared.config import get_config
+
+        saved = {}
+        for k, v in env_overrides.items():
+            saved[k] = os.environ.get(k)
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+        try:
+            get_config.cache_clear()
+
+            # Re-import main (and all app/shared modules) so module-level captures
+            # like `DEV_MODE = get_config().dev_mode` in app/database.py reflect
+            # the updated env rather than a stale import-time value (xander:14).
+            _modules_to_evict = [
+                name for name in sys.modules
+                if name == "main" or name.startswith(("main.", "app.", "shared."))
+            ]
+            for name in _modules_to_evict:
+                del sys.modules[name]
+
+            import main as _main
+            from fastapi.testclient import TestClient
+
+            with TestClient(_main.app, raise_server_exceptions=True):
+                pass
+        finally:
+            for k, orig_v in saved.items():
+                if orig_v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = orig_v
+            get_config.cache_clear()
+
+    def _prod_env(self, overrides: dict | None = None) -> dict:
+        """Return a base production env (valid secrets, DEV_MODE=false, valid OIDC vars)
+        with optional per-test overrides applied on top."""
+        base = {
+            "DEV_MODE": "false",
+            "OIDC_ISSUER": "https://idp.example.com/",
+            "OIDC_CLIENT_ID": "real-client-id-for-testing",
+            **self._PROD_SECRETS,
+        }
+        if overrides:
+            base.update(overrides)
+        return base
+
+    # ------------------------------------------------------------------
+    # ATHENA-21 — empty SERVICE_API_KEY must abort production startup
+    # ------------------------------------------------------------------
+
+    def test_unset_service_api_key_in_production_exits(self):
+        """ATHENA-21 — empty SERVICE_API_KEY in production must SystemExit."""
+        result = self._run_startup_subprocess(self._prod_env({"SERVICE_API_KEY": ""}))
+        assert result.returncode != 0, (
+            f"Startup must exit non-zero for empty SERVICE_API_KEY; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "SERVICE_API_KEY" in combined, (
+            f"Error output must mention SERVICE_API_KEY; got: {combined!r}"
+        )
+        assert "FATAL" in combined, (
+            f"Error output must contain 'FATAL'; got: {combined!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # ATHENA-21 — placeholder SERVICE_API_KEY must abort production startup
+    # ------------------------------------------------------------------
+
+    def test_insecure_placeholder_service_api_key_in_production_exits(self):
+        """ATHENA-21 — SERVICE_API_KEY=dev-service-key-change-in-production must SystemExit.
+
+        Pins the placeholder-string branch of the _INSECURE_DEFAULTS loop for the
+        SERVICE_API_KEY secret-kind entry. The empty-string branch is covered by
+        test_unset_service_api_key_in_production_exits above.
+        """
+        result = self._run_startup_subprocess(
+            self._prod_env({"SERVICE_API_KEY": "dev-service-key-change-in-production"})
+        )
+        assert result.returncode != 0, (
+            f"Startup must exit non-zero for placeholder SERVICE_API_KEY; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "SERVICE_API_KEY" in combined, (
+            f"Error output must mention SERVICE_API_KEY; got: {combined!r}"
+        )
+        assert "FATAL" in combined, (
+            f"Error output must contain 'FATAL'; got: {combined!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # ATHENA-21 — DEV_MODE bypasses SERVICE_API_KEY requirement
+    # ------------------------------------------------------------------
+
+    def test_dev_mode_bypasses_service_api_key_requirement(self):
+        """ATHENA-21 — DEV_MODE=true + empty SERVICE_API_KEY must NOT abort startup.
+
+        Uses _run_startup_in_process rather than _run_startup_subprocess because we
+        need to verify the app reaches a healthy started state: subprocess returncode==0
+        does not distinguish between "gate did not fire" and "process exited cleanly for
+        other reasons." _run_startup_in_process raises SystemExit directly into the test
+        on gate failure, giving an unambiguous signal.
+
+        OIDC vars are deliberately omitted: DEV_MODE=true takes the early-return path
+        in startup_event() before any OIDC discovery is attempted.
+        """
+        self._run_startup_in_process({
+            "DEV_MODE": "true",
+            "DATABASE_URL": "sqlite:///:memory:",
+            "SERVICE_API_KEY": "",
+        })
+
+    # ------------------------------------------------------------------
+    # ATHENA-21 — valid SERVICE_API_KEY must NOT trigger the gate (negative assertion)
+    # ------------------------------------------------------------------
+
+    def test_set_service_api_key_in_production_passes(self):
+        """ATHENA-21 — a real SERVICE_API_KEY must not trigger the startup gate.
+
+        This is a negative assertion. It proves the SERVICE_API_KEY gate did not fire
+        on a valid production key. It does NOT assert full startup success — OIDC
+        discovery is expected to fail later in CI without an IdP stub, and that failure
+        is out of scope for this test.
+        """
+        result = self._run_startup_subprocess(
+            self._prod_env({"SERVICE_API_KEY": "real-secret-" + ("a" * 50)})
+        )
+        combined = result.stdout + result.stderr
+        assert "var=SERVICE_API_KEY" not in combined, (
+            f"SERVICE_API_KEY gate must NOT fire on a valid key; got: {combined!r}"
+        )
+        assert "SERVICE_API_KEY='dev-service-key-change-in-production'" not in combined, (
+            f"Placeholder gate must NOT fire on a valid key; got: {combined!r}"
+        )
+        assert "SERVICE_API_KEY=None" not in combined, (
+            f"None-variant gate must NOT fire on a valid key; got: {combined!r}"
+        )
+        assert "SERVICE_API_KEY=''" not in combined, (
+            f"Empty-string gate must NOT fire on a valid key; got: {combined!r}"
         )
 
 
