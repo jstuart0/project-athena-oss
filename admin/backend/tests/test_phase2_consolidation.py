@@ -315,15 +315,26 @@ class TestServiceRegistryUpsert:
 # poll-now stub
 # ---------------------------------------------------------------------------
 
-def test_poll_now_stub_returns_200(client):
-    resp = client.post(
-        "/api/service-registry/services/poll-now",
-        headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
-    )
+def test_poll_now_returns_200(client):
+    """Phase 4: poll-now endpoint is now wired (no longer a stub).
+
+    Returns queued=True + a numeric summary.  The 'note' / queued=False
+    stub from Phase 2 is superseded.
+    """
+    import unittest.mock as _mock
+
+    async def fake_poll(sem):
+        return {'services_polled': 0, 'healthy': 0, 'unhealthy': 0, 'unknown': 0}
+
+    with _mock.patch('app.services.health_poller._poll_all_services', fake_poll):
+        resp = client.post(
+            "/api/service-registry/services/poll-now",
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["queued"] is False
-    assert "Phase 4" in data["note"]
+    assert data["queued"] is True
+    assert "services_polled" in data
 
 
 # ---------------------------------------------------------------------------

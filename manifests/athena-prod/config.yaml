@@ -119,5 +119,34 @@ data:
   # side-channel is a concern.  Default: 400ms.
   # LOGIN_MINIMUM_DELAY_MS: "400"
 
+  # ==========================================================================
+  # Health Poller Configuration (ATHENA-1 Phase 4)
+  # ==========================================================================
+  # Background task that polls each enabled RAG service's /health endpoint on
+  # a schedule and caches results in rag_services.health_status + related
+  # columns. The admin UI reads cached values instead of inline-pinging.
+  #
+  # HEALTH_POLL_INTERVAL_SECONDS: seconds between full poll cycles. Default 30.
+  # HEALTH_POLL_INTERVAL_SECONDS: "30"
+  #
+  # HEALTH_POLL_TIMEOUT_SECONDS: per-request HTTP timeout. Default 5.
+  # HEALTH_POLL_TIMEOUT_SECONDS: "5"
+  #
+  # HEALTH_POLL_CONCURRENCY: max simultaneous outbound pings per cycle. Default 8.
+  # HEALTH_POLL_CONCURRENCY: "8"
+  #
+  # HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: comma-separated CIDRs or hostnames that
+  # override the SSRF block on RFC1918 / loopback / link-local ranges.
+  # Default empty = fail-closed (OSS deployers with public-internet services
+  # don't need this). Homelab / K8s operators whose services are on private
+  # subnets MUST set this to permit the poller to reach them.
+  #
+  # Example for a standard K8s cluster:
+  #   HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: "10.96.0.0/12,10.244.0.0/16"
+  # Example for Jay's homelab (pod CIDR + service CIDR + host subnet):
+  #   HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: "10.96.0.0/12,10.244.0.0/16,192.168.10.0/24"
+  #
+  # HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: ""
+
   # Logging
   LOG_LEVEL: "INFO"

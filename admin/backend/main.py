@@ -25,6 +25,7 @@ import structlog
 from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_dev_data, seed_oss_defaults, seed_oss_features, seed_oss_conversation_settings, seed_oss_service_registry, seed_oss_base_knowledge, OSS_DEFAULT_MODEL, OSS_OLLAMA_URL, OSS_AUTO_PULL_MODELS, OSS_SEED_DEFAULTS
 from shared.config import get_config
 from app.services.calendar_sync import start_background_sync, stop_background_sync
+from app.services.health_poller import start_health_polling, stop_health_polling
 from app.auth.oidc import (
     oauth,
     get_authentik_userinfo,
@@ -611,6 +612,9 @@ async def startup_event():
     # Start background calendar sync task
     start_background_sync()
 
+    # Start background health poll task (Phase 4 / ATHENA-1)
+    start_health_polling()
+
 
 async def ensure_default_model():
     """
@@ -675,6 +679,7 @@ async def shutdown_event():
     """Clean up background tasks on shutdown."""
     logger.info("athena_admin_shutdown")
     await stop_background_sync()
+    await stop_health_polling()
 
 
 # Authentication routes

@@ -15,6 +15,7 @@ Rate limit: write endpoints are capped at service_registry_write_per_minute
 requests per IP per 60 s via service_registry_rate_limit_dep.
 (xander HIGH-4 / ATHENA-1)
 """
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -282,7 +283,7 @@ async def remove_service(
 
 
 # ---------------------------------------------------------------------------
-# POST /services/poll-now — stub for Phase 4 background poller
+# POST /services/poll-now — trigger a full immediate poll cycle (Phase 4)
 # ---------------------------------------------------------------------------
 
 @router.post("/services/poll-now", dependencies=_WRITE_DEPS)
@@ -290,14 +291,87 @@ async def poll_now(
     request: Request,
     response: Response,
 ) -> Dict[str, Any]:
-    """Trigger an immediate health-poll cycle for all services.
+    """Trigger an immediate health-poll cycle for all enabled services.
 
-    Phase 2 stub: returns 200 with a note that the poller is wired in Phase 4.
-    The endpoint exists now so the UI button (ruby B4) can be wired without
-    a breaking change in Phase 4.  (ATHENA-1 plan §Phase 2 ruby B4 stub)
+    Runs the full poll cycle once outside the background loop and returns a
+    summary.  Used by the "Refresh Status" button in the admin UI.
+    Dual-auth + rate-limit via _WRITE_DEPS (same as other write endpoints).
+    (ATHENA-1 Phase 4; ruby B4; plan §Phase 4 D)
     """
+    from app.services.health_poller import _poll_all_services
+    semaphore = asyncio.Semaphore(get_config().health_poll_concurrency)
+    summary = await _poll_all_services(semaphore)
     return {
-        'queued': False,
-        'note': 'Background health poller is wired in Phase 4 (ATHENA-1). '
-                'Endpoint is live but no poll is triggered in this phase.',
+        'queued': True,
+        'services_polled': summary.get('services_polled', 0),
+        'healthy': summary.get('healthy', 0),
+        'unhealthy': summary.get('unhealthy', 0),
+        'unknown': summary.get('unknown', 0),
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /services/{service_name}/check — per-row on-demand health check
+# ---------------------------------------------------------------------------
+
+@router.post("/services/{service_name}/check", dependencies=_WRITE_DEPS)
+async def check_service_health(
+    request: Request,
+    response: Response,
+    service_name: str,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Trigger an on-demand health check for a single service.
+
+    Issues one ping and writes results back synchronously so the UI can
+    re-fetch immediately after the call.  Used by the per-row "Refresh"
+    button. (ATHENA-1 Phase 4; plan §Phase 4 D)
+    """
+    from app.services.health_poller import _poll_one, _classify_and_sanitize
+    from datetime import datetime
+
+    svc = db.query(RagService).filter(RagService.name == service_name).first()
+    if not svc:
+        raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
+    if not svc.enabled:
+        raise HTTPException(status_code=409, detail=f"Service {service_name} is disabled")
+    if not svc.host or not svc.port:
+        raise HTTPException(status_code=422, detail=f"Service {service_name} has no host/port configured")
+
+    cfg = get_config()
+    semaphore = asyncio.Semaphore(1)
+    import httpx as _httpx
+    async with _httpx.AsyncClient(timeout=float(cfg.health_poll_timeout_seconds)) as client:
+        result = await _poll_one(
+            client,
+            semaphore,
+            svc.id,
+            svc.name,
+            svc.host or '',
+            svc.port or 0,
+            svc.health_endpoint or '/health',
+        )
+
+    svc_id, status, response_time_ms, error_category, error_detail, health_message = result
+    last_error = f'{error_category}:{error_detail}' if error_category != 'ok' else None
+
+    db.query(RagService).filter(RagService.id == svc_id).update(
+        {
+            RagService.health_status: status,
+            RagService.last_health_check: datetime.utcnow(),
+            RagService.last_response_time_ms: response_time_ms,
+            RagService.last_error: last_error,
+            RagService.health_message: health_message,
+        },
+        synchronize_session=False,
+    )
+    db.commit()
+
+    logger.info('service_health_checked', service=service_name, status=status)
+    return {
+        'service': service_name,
+        'health_status': status,
+        'last_response_time_ms': response_time_ms,
+        'last_error': last_error,
+        'health_message': health_message,
     }

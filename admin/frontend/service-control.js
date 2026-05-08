@@ -92,19 +92,37 @@ async function loadServices() {
     }
 }
 
+// Module-level flag: populated on first loadRagServicesFromRegistry() call.
+let controlAgentEnabled = false;
+
 async function loadRagServicesFromRegistry() {
     try {
         const response = await apiRequest('/api/service-registry/services');
-        // Service registry returns {services: [...], total_services, healthy_services, overall_health}
+        // Service registry returns {services: [...], total_services, healthy_services,
+        // overall_health, control_agent_enabled}
         ragServices = response.services || [];
+        controlAgentEnabled = response.control_agent_enabled === true;
         renderRagServicesTable();
         updateRagServiceCounts(response);
+        _renderControlAgentBanner();
     } catch (error) {
         console.error('Failed to load RAG services from registry:', error);
         const container = document.getElementById('rag-services-table');
         if (container) {
             container.innerHTML = '<div class="text-center text-red-400 py-8">Failed to load RAG services from registry</div>';
         }
+    }
+}
+
+function _renderControlAgentBanner() {
+    // Render a banner when Control Agent is disabled so operators understand
+    // why start/stop/restart buttons are greyed out.  (ruby B2, plan Phase 4 E)
+    const banner = document.getElementById('control-agent-disabled-banner');
+    if (!banner) return;
+    if (controlAgentEnabled) {
+        banner.classList.add('hidden');
+    } else {
+        banner.classList.remove('hidden');
     }
 }
 
@@ -141,22 +159,32 @@ async function loadOllamaModels() {
     }
 }
 
-async function refreshServiceStatus() {
-    const btn = event.target;
-    btn.disabled = true;
-    btn.textContent = 'Refreshing...';
+async function refreshServiceStatus(btn) {
+    // Accept either an element argument or fall back to event.target.
+    // Passing the element explicitly prevents timing issues with async event
+    // dispatch (event.target may be null by the time the await resolves).
+    const button = btn || (typeof event !== 'undefined' ? event.target : null);
+    if (button) {
+        button.disabled = true;
+        button.innerHTML = '<i data-lucide="loader" class="w-4 h-4 inline-block mr-1 animate-spin"></i> Refreshing…';
+        if (typeof lucide !== 'undefined') lucide.createIcons();
+    }
 
     try {
-        await apiRequest('/api/service-control/refresh-status', { method: 'POST' });
-
-        // Wait a moment for health checks to complete
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        await loadServiceControl();
+        const summary = await apiRequest('/api/service-registry/services/poll-now', { method: 'POST' });
+        showToast(
+            `Health check complete: ${summary.healthy || 0} healthy, ${summary.unhealthy || 0} unhealthy`,
+            'success',
+        );
+        await loadRagServicesFromRegistry();
+    } catch (error) {
+        showToast(`Refresh failed: ${error.message}`, 'error');
     } finally {
-        btn.disabled = false;
-        btn.innerHTML = '<i data-lucide="refresh-cw" class="w-4 h-4 inline-block mr-1"></i> Refresh Status';
-        if (typeof lucide !== 'undefined') lucide.createIcons();
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = '<i data-lucide="refresh-cw" class="w-4 h-4 inline-block mr-1"></i> Refresh Status';
+            if (typeof lucide !== 'undefined') lucide.createIcons();
+        }
     }
 }
 
@@ -445,7 +473,13 @@ function renderRagServicesTable() {
     if (!container) return;
 
     if (ragServices.length === 0) {
-        container.innerHTML = '<div class="text-center text-gray-400 py-8">No RAG services registered</div>';
+        // Actionable empty-state copy (ruby r1 / plan Phase 4 E).
+        container.innerHTML = `
+            <div class="text-center text-gray-400 py-8">
+                <p class="font-medium text-gray-300 mb-1">No services registered.</p>
+                <p class="text-sm">Run <code class="px-1 py-0.5 bg-gray-700 rounded text-xs">alembic upgrade head</code> and restart admin-backend to seed defaults. If running Control Agent, services populate on CA startup.</p>
+            </div>
+        `;
         return;
     }
 
@@ -466,67 +500,145 @@ function renderRagServicesTable() {
     `;
 }
 
+/**
+ * Compute a human-readable "freshness" string and CSS class from a
+ * last_health_check ISO timestamp.
+ *
+ * Thresholds (ruby r1 / plan Phase 4 E):
+ *   < 60s     → silent (no chip rendered)
+ *   60s–5min  → grey  "checked Xs ago"
+ *   5–15min   → amber "stale (Xm)"
+ *   > 15min   → red   "stale (>15m)"
+ *
+ * Returns {text, colorClass} or null when silent (<60s or null timestamp).
+ */
+function _freshnessChip(lastHealthCheck) {
+    if (!lastHealthCheck) return null;
+    const ageMs = Date.now() - new Date(lastHealthCheck).getTime();
+    if (isNaN(ageMs) || ageMs < 0) return null;
+    const ageSec = Math.floor(ageMs / 1000);
+    if (ageSec < 60) return null;
+    if (ageSec < 300) {
+        const label = ageSec < 120 ? '1m' : `${Math.floor(ageSec / 60)}m`;
+        return { text: `checked ${label} ago`, colorClass: 'text-gray-500' };
+    }
+    if (ageSec < 900) {
+        return { text: `stale (${Math.floor(ageSec / 60)}m)`, colorClass: 'text-yellow-500' };
+    }
+    return { text: 'stale (>15m)', colorClass: 'text-red-500' };
+}
+
+/**
+ * Build a human-readable aria-label for a service row's status cell.
+ * Form: "<ServiceName>: <status>, checked <N> seconds ago[, response <N>ms]."
+ */
+function _buildStatusAriaLabel(displayName, healthStatus, lastHealthCheck, responseTimeMs) {
+    const parts = [`${displayName}: ${healthStatus || 'unknown'}`];
+    if (lastHealthCheck) {
+        const ageSec = Math.floor((Date.now() - new Date(lastHealthCheck).getTime()) / 1000);
+        if (!isNaN(ageSec) && ageSec >= 0) {
+            parts.push(`checked ${ageSec} seconds ago`);
+        }
+    }
+    if (responseTimeMs != null) {
+        parts.push(`response ${responseTimeMs}ms`);
+    }
+    return parts.join(', ') + '.';
+}
+
 function renderRagServiceRow(service) {
     const displayName = service.display_name || service.name || 'Unknown';
-    const endpointUrl = service.endpoint_url || '';
     const host = service.host || 'unknown';
     const port = service.port || 0;
 
-    // Status badge based on cached health_status from service registry (Phase 2+).
-    // Phase 1 returned an inline-pinged `status` field; Phase 2 removed inline
-    // pings and now returns `health_status` (NULL rows normalised to 'pending' by
-    // the backend).  Reading the old `service.status` caused every row to fall
-    // through to the default branch and render "? Unknown" permanently.
+    // Status badge — reads health_status (cached, written by Phase 4 poller).
+    // Phase 1 inline-pinged `status`; Phase 2+ uses `health_status` (NULL→'pending'
+    // normalised by the backend).
     let statusBadge;
+    let statusLabel;
+    const rt = service.last_response_time_ms != null
+        ? ` <span class="font-mono text-gray-400 text-xs">(${service.last_response_time_ms}ms)</span>`
+        : '';
+
     switch (service.health_status) {
         case 'healthy':
-            statusBadge = '<span class="px-2 py-1 text-xs rounded bg-green-900 text-green-300">● Healthy</span>';
+            statusLabel = `● Healthy${rt}`;
+            statusBadge = `<span class="px-2 py-1 text-xs rounded bg-green-900 text-green-300">${statusLabel}</span>`;
             break;
         case 'unhealthy':
         case 'degraded':
-            statusBadge = '<span class="px-2 py-1 text-xs rounded bg-yellow-900 text-yellow-300">● Degraded</span>';
+            statusLabel = `● Degraded${rt}`;
+            statusBadge = `<span class="px-2 py-1 text-xs rounded bg-yellow-900 text-yellow-300">${statusLabel}</span>`;
             break;
         case 'offline':
         case 'error':
         case 'timeout':
-            statusBadge = '<span class="px-2 py-1 text-xs rounded bg-red-900 text-red-300">● Offline</span>';
+            statusLabel = `● Offline${rt}`;
+            statusBadge = `<span class="px-2 py-1 text-xs rounded bg-red-900 text-red-300">${statusLabel}</span>`;
             break;
         case 'disabled':
             statusBadge = '<span class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-400">○ Disabled</span>';
             break;
         case 'pending':
-            // health_status is 'pending' when no poller result exists yet (Phase 2→4
-            // transient state; poller wires up in Phase 4).  Neutral, not alarming.
+            // Neutral — no poller result yet (Phase 2→4 transient; never alarming).
             statusBadge = '<span class="px-2 py-1 text-xs rounded bg-gray-600 text-gray-300" title="Health check pending — checks run every 30 seconds.">○ Pending</span>';
             break;
         default:
             statusBadge = '<span class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-400">? Unknown</span>';
     }
 
+    // Freshness pill — silent when < 60 s old. (ruby r1 / plan Phase 4 E)
+    const chip = _freshnessChip(service.last_health_check);
+    const freshnessPill = chip
+        ? `<div class="text-xs ${chip.colorClass} mt-1">${escapeHtml(chip.text)}</div>`
+        : '';
+
+    // last_error display (category only — URL/IP scrubbed by backend MED-1).
     const healthMessage = service.health_message
         ? `<div class="text-xs text-gray-500 mt-1">${escapeHtml(service.health_message.substring(0, 100))}</div>`
         : '';
 
+    // Accessible label for the status cell. (ruby B3)
+    const ariaLabel = _buildStatusAriaLabel(
+        displayName,
+        service.health_status,
+        service.last_health_check,
+        service.last_response_time_ms,
+    );
+
     const isEnabled = service.enabled !== false;
+    const safeName = escapeHtml(service.name || '');
+
+    // Control Agent gate: disable start/stop/restart when CA is unavailable.
+    const caDisabled = !controlAgentEnabled;
+    const caTitle = caDisabled ? ' title="Service control requires the Control Agent."' : '';
+    const caClass = caDisabled ? ' opacity-50 cursor-not-allowed' : '';
 
     return `
-        <tr class="hover:bg-gray-800/50">
+        <tr class="hover:bg-gray-800/50" id="rag-row-${safeName}">
             <td class="px-4 py-3">
                 <div class="text-white font-medium">${escapeHtml(displayName)}</div>
-                <div class="text-xs text-gray-500">${escapeHtml(service.name || '')}</div>
+                <div class="text-xs text-gray-500">${safeName}</div>
             </td>
             <td class="px-4 py-3">
-                <div class="text-sm text-gray-300">${host}:${port}</div>
+                <div class="text-sm text-gray-300">${escapeHtml(String(host))}:${port}</div>
                 ${healthMessage}
             </td>
-            <td class="px-4 py-3">${statusBadge}</td>
+            <td class="px-4 py-3"
+                aria-live="polite"
+                aria-label="${escapeHtml(ariaLabel)}"
+                data-status-item="${safeName}">
+                ${statusBadge}
+                ${freshnessPill}
+            </td>
             <td class="px-4 py-3">
                 <div class="flex gap-2">
-                    <button onclick="toggleRagService('${escapeHtml(service.name)}')"
+                    <button onclick="toggleRagService('${safeName}')"
                             class="px-2 py-1 text-xs ${isEnabled ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'} text-white rounded">
                         ${isEnabled ? 'Disable' : 'Enable'}
                     </button>
-                    <button onclick="refreshRagService('${escapeHtml(service.name)}')"
+                    <button id="check-btn-${safeName}"
+                            onclick="checkRagServiceHealth('${safeName}', this)"
                             class="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded">
                         Refresh
                     </button>
@@ -559,6 +671,42 @@ async function toggleRagService(serviceName) {
     } catch (error) {
         showToast(`Failed to toggle ${serviceName}: ${error.message}`, 'error');
     }
+}
+
+/**
+ * Per-row on-demand health check.
+ * Disables the Refresh button and shows "Checking…" in the status cell until
+ * the response returns, then reloads the row.  (ruby r1 / plan Phase 4 E)
+ *
+ * @param {string} serviceName - service name from data model
+ * @param {HTMLElement} btn - the button element that was clicked
+ */
+async function checkRagServiceHealth(serviceName, btn) {
+    // Disable button + show checking state in the status cell.
+    const statusCell = document.querySelector(`[data-status-item="${CSS.escape(serviceName)}"]`);
+    let originalBtnContent = '';
+    if (btn) {
+        originalBtnContent = btn.innerHTML;
+        btn.disabled = true;
+        btn.textContent = 'Checking…';
+    }
+    if (statusCell) {
+        statusCell.innerHTML = '<span class="px-2 py-1 text-xs rounded bg-gray-600 text-gray-300">Checking…</span>';
+    }
+
+    try {
+        const result = await apiRequest(
+            `/api/service-registry/services/${encodeURIComponent(serviceName)}/check`,
+            { method: 'POST' },
+        );
+        const status = result.health_status || 'unknown';
+        showToast(`${serviceName}: ${status}`, status === 'healthy' ? 'success' : 'warning');
+    } catch (error) {
+        showToast(`Health check failed for ${serviceName}: ${error.message}`, 'error');
+    }
+
+    // Always reload the full table to pick up the updated row.
+    await loadRagServicesFromRegistry();
 }
 
 async function refreshRagService(serviceName) {
