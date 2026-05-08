@@ -16,7 +16,7 @@ import httpx
 import asyncio
 
 from app.database import get_db
-from app.models import AthenaService, User, LLMBackend, SystemSetting
+from app.models import RagService, User, LLMBackend, SystemSetting
 from app.auth.oidc import get_current_user
 from shared.config import get_config
 
@@ -43,20 +43,21 @@ def get_ollama_url(db: Session) -> str:
 # Pydantic Models
 class ServiceResponse(BaseModel):
     id: int
-    service_name: str
+    name: str
+    service_name: str  # back-compat alias — mirrors RagService.service_name property
     display_name: str
-    description: Optional[str]
-    service_type: str
-    host: str
-    port: int
-    health_endpoint: str
-    control_method: str
-    container_name: Optional[str]
-    is_running: bool
-    last_health_check: Optional[str]
-    last_error: Optional[str]
-    auto_start: bool
-    enabled: bool
+    description: Optional[str] = None
+    service_type: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    health_endpoint: Optional[str] = None
+    control_method: Optional[str] = None
+    container_name: Optional[str] = None
+    is_running: bool = False
+    last_health_check: Optional[str] = None
+    last_error: Optional[str] = None
+    auto_start: bool = True
+    enabled: bool = True
 
     class Config:
         from_attributes = True
@@ -94,11 +95,11 @@ async def list_services(
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    query = db.query(AthenaService)
+    query = db.query(RagService)
     if service_type:
-        query = query.filter(AthenaService.service_type == service_type)
+        query = query.filter(RagService.service_type == service_type)
 
-    services = query.order_by(AthenaService.service_type, AthenaService.display_name).all()
+    services = query.order_by(RagService.service_type, RagService.display_name).all()
     return [ServiceResponse(**s.to_dict()) for s in services]
 
 
@@ -127,7 +128,7 @@ async def start_service(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    service = db.query(AthenaService).filter(AthenaService.service_name == service_name).first()
+    service = db.query(RagService).filter(RagService.name == service_name).first()
     if not service:
         raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
 
@@ -158,7 +159,7 @@ async def stop_service(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    service = db.query(AthenaService).filter(AthenaService.service_name == service_name).first()
+    service = db.query(RagService).filter(RagService.name == service_name).first()
     if not service:
         raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
 
@@ -188,7 +189,7 @@ async def restart_service(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    service = db.query(AthenaService).filter(AthenaService.service_name == service_name).first()
+    service = db.query(RagService).filter(RagService.name == service_name).first()
     if not service:
         raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
 
@@ -365,16 +366,16 @@ async def unload_ollama_model(
 
 
 # Helper Functions
-async def execute_service_action(service: AthenaService, action: str) -> Tuple[bool, str]:
+async def execute_service_action(service: RagService, action: str) -> Tuple[bool, str]:
     """Execute start/stop/restart action on a service."""
     if service.control_method == "docker":
         return await docker_service_action(service.container_name, action)
     elif service.control_method == "process":
         return await process_service_action(service.port, action)
     elif service.control_method == "launchd":
-        return await launchd_service_action(service.service_name, action)
+        return await launchd_service_action(service.name, action)
     elif service.control_method == "none":
-        return False, f"Service '{service.service_name}' does not support control actions"
+        return False, f"Service '{service.name}' does not support control actions"
     else:
         return False, f"Unknown control method: {service.control_method}"
 
@@ -487,22 +488,29 @@ async def launchd_service_action(service_name: str, action: str) -> Tuple[bool, 
 
 
 async def check_all_services_health(db: Session):
-    """Background task to check health of all services."""
-    services = db.query(AthenaService).filter(AthenaService.enabled == True).all()
+    """Background task to check health of all enabled services.
+
+    Writes to the health-poll-owned columns only:
+    ``health_status``, ``last_health_check``, ``last_error``, ``last_response_time_ms``.
+    Does NOT touch ``is_running`` or ``updated_at`` (dexter D2 / D7).
+    """
+    services = db.query(RagService).filter(RagService.enabled == True).all()
 
     async with httpx.AsyncClient(timeout=5.0) as client:
         for service in services:
             try:
-                url = f"http://{service.host}:{service.port}{service.health_endpoint}"
+                endpoint = service.health_endpoint or '/health'
+                protocol = service.protocol or 'http'
+                url = f"{protocol}://{service.host}:{service.port}{endpoint}"
                 response = await client.get(url)
 
-                service.is_running = response.status_code == 200
-                service.last_error = None if service.is_running else f"HTTP {response.status_code}"
+                service.health_status = 'online' if response.status_code == 200 else 'degraded'
+                service.last_error = None if response.status_code == 200 else f"HTTP {response.status_code}"
                 service.last_health_check = datetime.utcnow()
 
             except Exception as e:
-                service.is_running = False
-                service.last_error = str(e)[:500]  # Truncate long errors
+                service.health_status = 'offline'
+                service.last_error = str(e)[:500]
                 service.last_health_check = datetime.utcnow()
 
     db.commit()

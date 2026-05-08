@@ -14,7 +14,7 @@ import time
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
-from app.models import User, RAGConnector, ServiceRegistry, RAGStats, AuditLog
+from app.models import User, RAGConnector, RagService, RAGStats, AuditLog
 
 logger = structlog.get_logger()
 
@@ -137,7 +137,7 @@ async def create_connector(
 
     # Verify service exists if service_id provided
     if connector_data.service_id:
-        service = db.query(ServiceRegistry).filter(ServiceRegistry.id == connector_data.service_id).first()
+        service = db.query(RagService).filter(RagService.id == connector_data.service_id).first()
         if not service:
             raise HTTPException(status_code=404, detail=f"Service ID {connector_data.service_id} not found")
 
@@ -195,7 +195,7 @@ async def update_connector(
         connector.connector_type = connector_data.connector_type
     if connector_data.service_id is not None:
         # Verify service exists
-        service = db.query(ServiceRegistry).filter(ServiceRegistry.id == connector_data.service_id).first()
+        service = db.query(RagService).filter(RagService.id == connector_data.service_id).first()
         if not service:
             raise HTTPException(status_code=404, detail=f"Service ID {connector_data.service_id} not found")
         connector.service_id = connector_data.service_id

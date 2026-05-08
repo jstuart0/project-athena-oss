@@ -14,7 +14,7 @@ import structlog
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
-from app.models import User, PipelineEvent, Alert, AthenaService, ExternalAPIKey, Feature, ConversationAnalytics
+from app.models import User, PipelineEvent, Alert, ExternalAPIKey, Feature, ConversationAnalytics
 import httpx
 
 logger = structlog.get_logger()

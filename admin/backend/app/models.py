@@ -564,7 +564,8 @@ class ServiceRegistry(Base):
 
     # Relationships
     server = relationship('ServerConfig', back_populates='services')
-    rag_connectors = relationship('RAGConnector', back_populates='service')
+    # NOTE: rag_connectors relationship has been moved to RagService (Phase 1 migration).
+    # ServiceRegistry kept intact for deferred-drop; FK on RAGConnector now points to rag_services.
 
     __table_args__ = (
         UniqueConstraint('server_id', 'service_name', 'port', name='uq_service_registry'),
@@ -600,7 +601,7 @@ class RAGConnector(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(64), nullable=False, unique=True, index=True)
     connector_type = Column(String(32), nullable=False)  # "external_api", "vector_db", "cache", "custom"
-    service_id = Column(Integer, ForeignKey('service_registry.id'))
+    service_id = Column(Integer, ForeignKey('rag_services.id'))
     enabled = Column(Boolean, default=True)
     config = Column(JSONB)  # Connector-specific config (API endpoints, parameters, etc.)
     cache_config = Column(JSONB)  # Cache settings (TTL, size limits, eviction policy)
@@ -609,7 +610,7 @@ class RAGConnector(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # Relationships
-    service = relationship('ServiceRegistry', back_populates='rag_connectors')
+    service = relationship('RagService', back_populates='rag_connectors')
     creator = relationship('User')
     stats = relationship('RAGStats', back_populates='connector', cascade='all, delete-orphan')
 
@@ -2415,6 +2416,120 @@ class AthenaService(Base):
             'last_error': self.last_error,
             'auto_start': self.auto_start,
             'enabled': self.enabled,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class RagService(Base):
+    """
+    Unified service registry — single source of truth for all Athena service definitions.
+
+    Replaces the three concurrent registries that existed before ATHENA-1 Campaign 4:
+    - ``service_registry`` table (per-server, FK to server_configs)
+    - ``athena_services`` table (control metadata)
+    - ``rag_services`` table in the asyncpg ``athena`` DB
+
+    After Phase 2 the alembic migration merges all three into this table and renames
+    the old tables to ``*_deprecated``.  Phase 1 creates the model and migrates callers;
+    the DB columns added here are populated by the Phase 2 migration.
+
+    Column ownership (dexter D2):
+    - Health poller (Phase 4): ``health_status``, ``last_health_check``, ``last_error``,
+      ``last_response_time_ms``, ``health_message``
+    - service_control.py start/stop/restart: ``is_running``, ``last_error``
+    - Admin UI / POST upsert: everything else
+    - ``updated_at`` tracks **config changes only** — the health poller MUST NOT touch it.
+    """
+    __tablename__ = 'rag_services'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(64), unique=True, nullable=False, index=True)
+    display_name = Column(String(255), nullable=False)
+    description = Column(Text)
+    service_type = Column(String(50))
+
+    # Network coordinates — denormalized from ServerConfig + AthenaService (D2 / D3)
+    host = Column(String(255))
+    port = Column(Integer)
+    protocol = Column(String(8), default='http')
+    health_endpoint = Column(String(256), default='/health')
+    endpoint_url = Column(Text)  # kept for asyncpg consumers until Phase 2 completes
+
+    # Control metadata (from athena_services / PROCESS_SERVICES)
+    control_method = Column(String(50), default='none')  # docker | process | launchd | none
+    container_name = Column(String(255))
+
+    # RAG connector config (from existing rag_services columns)
+    headers = Column(JSONB)
+    query_template = Column(Text)
+    response_parser = Column(Text)
+    cache_ttl = Column(Integer, default=300)
+    timeout = Column(Integer, default=5000)
+    rate_limit = Column(Integer, default=100)
+    api_key_encrypted = Column(Text)  # xander CRIT-2: read by base_rag_service.py:160
+
+    # Flags
+    enabled = Column(Boolean, default=True)
+    auto_start = Column(Boolean, default=True)
+
+    # Health / control state (writer: health poller or service_control respectively)
+    health_status = Column(String(20))
+    is_running = Column(Boolean, default=False)
+    last_health_check = Column(DateTime(timezone=True))
+    last_response_time_ms = Column(Integer)
+    last_error = Column(Text)
+    health_message = Column(String(500))  # ruby B1: consumed by service-control.js:497
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # updated_at: config-change audit only — health poller MUST NOT write this. (dexter D7)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    rag_connectors = relationship('RAGConnector', back_populates='service')
+
+    __table_args__ = (
+        Index('idx_rag_services_name', 'name'),
+        Index('idx_rag_services_enabled', 'enabled'),
+        Index('idx_rag_services_service_type', 'service_type'),
+    )
+
+    @property
+    def service_name(self) -> str:
+        """JSON-serialization back-compat alias.
+
+        RAGConnector.to_dict() emits ``service_name`` for app.js:2778 which reads
+        ``connector.service.service_name``.  Use ``.name`` for all ORM queries.
+        """
+        return self.name
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API responses."""
+        return {
+            'id': self.id,
+            'name': self.name,
+            'service_name': self.name,  # back-compat key (app.js:2778)
+            'display_name': self.display_name,
+            'description': self.description,
+            'service_type': self.service_type,
+            'host': self.host,
+            'port': self.port,
+            'protocol': self.protocol,
+            'health_endpoint': self.health_endpoint,
+            'endpoint_url': self.endpoint_url,
+            'control_method': self.control_method,
+            'container_name': self.container_name,
+            'cache_ttl': self.cache_ttl,
+            'timeout': self.timeout,
+            'rate_limit': self.rate_limit,
+            'enabled': self.enabled,
+            'auto_start': self.auto_start,
+            'health_status': self.health_status,
+            'is_running': self.is_running,
+            'last_health_check': self.last_health_check.isoformat() if self.last_health_check else None,
+            'last_response_time_ms': self.last_response_time_ms,
+            'last_error': self.last_error,
+            'health_message': self.health_message,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
