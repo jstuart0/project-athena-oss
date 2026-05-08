@@ -212,17 +212,17 @@ class AthenaConfig(BaseSettings):
     #   ping. Default 5s.
     # health_poll_concurrency: max simultaneous outbound pings per cycle
     #   (asyncio.Semaphore). Default 8.
-    # health_poll_allow_loopback: set True in local-dev / tests to allow
-    #   127.0.0.x targets through the SSRF guard. Default False (fail-closed).
     # health_poll_allowed_private_hosts: comma-separated CIDRs or hostnames
     #   that override the RFC1918/loopback/ULA block. Empty default = fail-
     #   closed for OSS deployers. Jay's homelab: set "192.168.10.0/24" (or the
     #   specific pod/service CIDR) so the poller can reach in-cluster services.
     #   Example for K8s: "10.96.0.0/12,10.244.0.0/16"
+    #   To allow loopback (local-dev only): add "127.0.0.0/8" to this list.
+    #   health_poll_allow_loopback was removed in Phase 4 reconcile (ATHENA-1)
+    #   because it was defined but never consumed — it was a silent no-op.
     health_poll_interval_seconds: int = Field(default=30)
     health_poll_timeout_seconds: int = Field(default=5)
     health_poll_concurrency: int = Field(default=8)
-    health_poll_allow_loopback: bool = Field(default=False)
     health_poll_allowed_private_hosts: str = Field(default='')
 
     # ------------------------------------------------------------------

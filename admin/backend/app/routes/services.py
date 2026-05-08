@@ -26,99 +26,6 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/services", tags=["services"])
 
 
-async def _perform_health_check(service: RagService) -> bool:
-    """Internal function to perform health check on a service."""
-    import time
-    start = time.time()
-
-    # Resolve the host to use; fall back to service.host when not overridden.
-    host = service.host or ""
-    port = service.port or 0
-
-    try:
-        # Special handling for Wyoming protocol services (Whisper, Piper)
-        # These don't have HTTP endpoints; use TCP check instead.
-        if 'whisper' in service.name.lower() or 'piper' in service.name.lower():
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            result = sock.connect_ex((host, port))
-            sock.close()
-            elapsed = int((time.time() - start) * 1000)
-
-            if result == 0:
-                service.health_status = 'online'
-                service.last_response_time_ms = elapsed
-                service.last_health_check = datetime.utcnow()
-                return True
-            else:
-                service.health_status = 'offline'
-                service.last_health_check = datetime.utcnow()
-                return False
-
-        if service.health_endpoint:
-            # Special handling for HA-API: use domain name instead of IP.
-            # Direct IP access from Kubernetes pods is blocked by HA firewall.
-            if 'ha-api' in service.name.lower():
-                check_host = "localhost"
-                check_port = 443  # Use standard HTTPS port for domain access
-            else:
-                check_host = host
-                check_port = port
-
-            url = f"{service.protocol or 'http'}://{check_host}:{check_port}{service.health_endpoint}"
-
-            # Create SSL context that doesn't verify certificates (for self-signed certs)
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    elapsed = int((time.time() - start) * 1000)
-                    if resp.status == 200:
-                        service.health_status = 'online'
-                        service.last_response_time_ms = elapsed
-                        service.last_health_check = datetime.utcnow()
-                        return True
-                    elif resp.status == 401:
-                        # Gateway and other services may require auth on /health;
-                        # treat 401 as service running (auth required).
-                        service.health_status = 'online'
-                        service.last_response_time_ms = elapsed
-                        service.last_health_check = datetime.utcnow()
-                        return True
-                    else:
-                        service.health_status = 'degraded'
-                        service.last_response_time_ms = elapsed
-                        service.last_health_check = datetime.utcnow()
-                        return False
-        else:
-            # TCP port check for services without HTTP health endpoint
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            result = sock.connect_ex((host, port))
-            sock.close()
-            elapsed = int((time.time() - start) * 1000)
-
-            if result == 0:
-                service.health_status = 'online'
-                service.last_response_time_ms = elapsed
-                service.last_health_check = datetime.utcnow()
-                return True
-            else:
-                service.health_status = 'offline'
-                service.last_health_check = datetime.utcnow()
-                return False
-    except Exception as e:
-        elapsed = int((time.time() - start) * 1000)
-        service.health_status = 'offline'
-        service.last_health_check = datetime.utcnow()
-        logger.error("service_health_check_failed", service=service.name, error=str(e))
-        return False
-
 
 # Private aliases kept for ServiceCreate / ServiceUpdate field_validator calls
 # below; the shared implementations live in app.utils.url_validators so that
@@ -742,7 +649,13 @@ async def check_service_health(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Check service health and update status."""
+    """Check service health and update status.
+
+    Phase 4 reconcile (xander HIGH-1, ATHENA-1): redirected from the legacy
+    _perform_health_check path (no SSRF guard, legacy status vocabulary) to the
+    Phase 4 _poll_one so SSRF protection and canonical status values are uniform.
+    Response shape preserved for frontend compatibility.
+    """
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
@@ -750,8 +663,39 @@ async def check_service_health(
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
 
-    await _perform_health_check(service)
+    from app.services.health_poller import _poll_one
+    from shared.config import get_config as _get_config
+    import asyncio as _asyncio
+    import httpx as _httpx
+    from datetime import datetime as _dt
+
+    cfg = _get_config()
+    semaphore = _asyncio.Semaphore(1)
+    async with _httpx.AsyncClient(timeout=float(cfg.health_poll_timeout_seconds)) as client:
+        result = await _poll_one(
+            client,
+            semaphore,
+            service.id,
+            service.name,
+            service.host or '',
+            service.port or 0,
+            service.health_endpoint or '/health',
+        )
+
+    svc_id, status, response_time_ms, error_category, error_detail, health_message = result
+    last_error = f'{error_category}:{error_detail}' if error_category != 'ok' else None
+
+    db.query(RagService).filter(RagService.id == svc_id).update(
+        {
+            RagService.health_status: status,
+            RagService.last_health_check: _dt.utcnow(),
+            RagService.last_response_time_ms: response_time_ms,
+            RagService.last_error: last_error,
+        },
+        synchronize_session=False,
+    )
     db.commit()
+    db.refresh(service)
 
     return {
         "service_id": service.id,
@@ -767,30 +711,27 @@ async def get_all_service_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Check status of all services."""
+    """Check status of all services.
+
+    Phase 4 reconcile (xander HIGH-1, ATHENA-1): redirected from the legacy
+    _perform_health_check bulk loop (no SSRF guard, legacy vocabulary) to the
+    Phase 4 _poll_all_services.  Response shape {checked, healthy, unhealthy}
+    preserved for frontend compatibility.
+    """
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    services = db.query(RagService).all()
+    from app.services.health_poller import _poll_all_services
+    from shared.config import get_config as _get_config
+    import asyncio as _asyncio
 
-    checked = 0
-    healthy = 0
-    unhealthy = 0
-
-    for service in services:
-        checked += 1
-        is_healthy = await _perform_health_check(service)
-        if is_healthy:
-            healthy += 1
-        else:
-            unhealthy += 1
-
-    db.commit()
+    semaphore = _asyncio.Semaphore(_get_config().health_poll_concurrency)
+    summary = await _poll_all_services(semaphore)
 
     return {
-        "checked": checked,
-        "healthy": healthy,
-        "unhealthy": unhealthy,
+        "checked": summary.get('services_polled', 0),
+        "healthy": summary.get('healthy', 0),
+        "unhealthy": summary.get('unhealthy', 0),
     }
 
 

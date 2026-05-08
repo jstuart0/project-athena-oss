@@ -109,11 +109,22 @@ async def refresh_all_service_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Trigger health check refresh for all services."""
+    """Trigger an immediate health-poll cycle for all services.
+
+    Phase 4 reconcile (ian HIGH / xander HIGH-1, ATHENA-1): the previous
+    implementation called check_all_services_health which had its own httpx
+    loop with legacy status vocabulary ('online'/'degraded'/'offline') and no
+    SSRF guard.  Redirected to the Phase 4 poller so status vocabulary and
+    SSRF protection are consistent.  Background-task semantics preserved:
+    caller gets immediate 200, poll runs asynchronously.
+    """
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    background_tasks.add_task(check_all_services_health, db)
+    from app.services.health_poller import _poll_all_services
+    import asyncio as _asyncio
+    semaphore = _asyncio.Semaphore(get_config().health_poll_concurrency)
+    background_tasks.add_task(_poll_all_services, semaphore)
 
     return {"message": "Health check refresh started", "status": "pending"}
 
@@ -486,35 +497,6 @@ async def launchd_service_action(service_name: str, action: str) -> Tuple[bool, 
 
     return False, f"Launchd control not implemented for service: {service_name}"
 
-
-async def check_all_services_health(db: Session):
-    """Background task to check health of all enabled services.
-
-    Writes to the health-poll-owned columns only:
-    ``health_status``, ``last_health_check``, ``last_error``, ``last_response_time_ms``.
-    Does NOT touch ``is_running`` or ``updated_at`` (dexter D2 / D7).
-    """
-    services = db.query(RagService).filter(RagService.enabled == True).all()
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        for service in services:
-            try:
-                endpoint = service.health_endpoint or '/health'
-                protocol = service.protocol or 'http'
-                url = f"{protocol}://{service.host}:{service.port}{endpoint}"
-                response = await client.get(url)
-
-                service.health_status = 'online' if response.status_code == 200 else 'degraded'
-                service.last_error = None if response.status_code == 200 else f"HTTP {response.status_code}"
-                service.last_health_check = datetime.utcnow()
-
-            except Exception as e:
-                service.health_status = 'offline'
-                service.last_error = str(e)[:500]
-                service.last_health_check = datetime.utcnow()
-
-    db.commit()
-    logger.info("service_health_check_complete", checked=len(services))
 
 
 # Ollama Health Response Model

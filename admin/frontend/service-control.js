@@ -293,7 +293,7 @@ function renderServiceRow(service) {
                 <div class="text-xs text-gray-500">${escapeHtml(service.description || '')}</div>
             </td>
             <td class="px-4 py-3">
-                <div class="text-sm text-gray-300">${host}:${service.port}</div>
+                <div class="text-sm text-gray-300">${escapeHtml(String(host))}:${service.port}</div>
                 ${errorText}
             </td>
             <td class="px-4 py-3">${statusBadge}</td>

@@ -6,10 +6,12 @@ list — callers receive the cached health_status + last_health_check written by
 the Phase 4 background poller.  Between Phase 2 and Phase 4, those columns
 will be NULL / unknown — that is the documented transient state.
 
-Auth: read (GET) endpoints are unauthenticated for backward-compat with the
-existing UI flow.  Write (POST / DELETE) endpoints require dual-auth:
-X-Service-Key (Control Agent / internal callers) OR Bearer JWT / X-API-Key
-(admin UI) via verify_service_or_oidc.  (xander CRIT-1 / D9 / ATHENA-1)
+Auth: GET /services requires get_current_user (OIDC bearer; Phase 4 reconcile
+xander MED-2).  Other GET endpoints (single service, URL lookup) remain
+unauthenticated — they expose only non-sensitive lookups.  Write (POST /
+DELETE) endpoints require dual-auth: X-Service-Key (Control Agent / internal
+callers) OR Bearer JWT / X-API-Key (admin UI) via verify_service_or_oidc.
+(xander CRIT-1 / D9 / ATHENA-1)
 
 Rate limit: write endpoints are capped at service_registry_write_per_minute
 requests per IP per 60 s via service_registry_rate_limit_dep.
@@ -23,7 +25,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import RagService
+from app.models import RagService, User
+from app.auth.oidc import get_current_user
 from app.utils.service_auth import verify_service_or_oidc
 from app.utils.rate_limit import service_registry_rate_limit_dep
 from app.utils.url_validators import validate_endpoint_url
@@ -45,7 +48,10 @@ _WRITE_DEPS = [
 # ---------------------------------------------------------------------------
 
 @router.get("/services")
-async def get_all_services(db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def get_all_services(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
     """Return all service registry entries with cached health status.
 
     Health is read from rag_services.health_status / last_health_check, NOT
@@ -55,6 +61,11 @@ async def get_all_services(db: Session = Depends(get_db)) -> Dict[str, Any]:
 
     Response envelope includes control_agent_enabled so the UI can disable
     start/stop/restart buttons when the Control Agent is not available. (ruby B2)
+
+    Auth: requires valid OIDC session.  Previously unauthenticated, exposing
+    host/port/endpoint_url topology to unauthenticated callers.  Pre-
+    consolidation backward-compat claim no longer applies.
+    (xander MED-2, ATHENA-1 Phase 4 reconcile)
     """
     services = db.query(RagService).order_by(RagService.name).all()
 
