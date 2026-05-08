@@ -375,61 +375,217 @@ class TestRagConnectorsRoute:
 
 
 # ---------------------------------------------------------------------------
-# Dual-auth helper unit tests (D9)
+# Dual-auth helper unit tests (D9 / ATHENA-21)
 # ---------------------------------------------------------------------------
 
 class TestVerifyServiceOrOidc:
-    """Tests for verify_service_or_oidc dual-auth dependency."""
+    """Tests for verify_service_or_oidc dual-auth dependency.
 
-    def _mini_app(self):
-        from fastapi import FastAPI, Depends
-        from app.utils.service_auth import verify_service_or_oidc
+    All tests use the module-level `client` + `db` fixtures (wired with
+    Base.metadata.create_all and get_db override) so that the OIDC fallthrough
+    path's get_optional_user → users table query succeeds.
 
-        mini = FastAPI()
+    The private _mini_app() helper has been removed; it lacked DB setup and
+    caused sqlite3.OperationalError: no such table: users on the OIDC path.
 
-        @mini.get("/protected")
-        async def protected(_: bool = Depends(verify_service_or_oidc)):
-            return {"ok": True}
+    Every test that mutates os.environ["SERVICE_API_KEY"] uses try/finally
+    to restore the module default "test-svc-key-phase1" and calls
+    _clear_cache_for_tests() in the finally block (ATHENA-21; pattern from
+    test_security_hardening.py:62-68).
+    """
 
-        return mini
+    # ------------------------------------------------------------------
+    # Regression guards — set key, correct / wrong header
+    # ------------------------------------------------------------------
 
-    def test_valid_service_key_accepted(self):
-        from fastapi.testclient import TestClient
+    def test_set_key_with_correct_header_succeeds(self, client):
+        """SERVICE_API_KEY set and header matches → 200 (regression guard)."""
         from shared.config import _clear_cache_for_tests
 
         os.environ["SERVICE_API_KEY"] = "test-svc-key-phase1"
         _clear_cache_for_tests()
+        try:
+            resp = client.post(
+                "/api/service-registry/services",
+                params={"name": "athena-test-svc", "endpoint_url": "http://athena-test-svc:8010/health"},
+                headers={"X-Service-Key": "test-svc-key-phase1"},
+            )
+            assert resp.status_code == 200
+        finally:
+            os.environ["SERVICE_API_KEY"] = "test-svc-key-phase1"
+            _clear_cache_for_tests()
 
-        mini = self._mini_app()
-        with TestClient(mini, raise_server_exceptions=True) as c:
-            resp = c.get("/protected", headers={"X-Service-Key": "test-svc-key-phase1"})
-        assert resp.status_code == 200
-
-    def test_wrong_service_key_rejected(self):
-        from fastapi.testclient import TestClient
+    def test_set_key_with_wrong_header_returns_401(self, client):
+        """SERVICE_API_KEY set but wrong X-Service-Key value → 401 (regression guard)."""
         from shared.config import _clear_cache_for_tests
 
         os.environ["SERVICE_API_KEY"] = "test-svc-key-phase1"
         _clear_cache_for_tests()
+        try:
+            resp = client.post(
+                "/api/service-registry/services",
+                params={"name": "athena-test-svc", "endpoint_url": "http://athena-test-svc:8010/health"},
+                headers={"X-Service-Key": "wrong-key"},
+            )
+            assert resp.status_code == 401
+            assert resp.json() == {"detail": "Invalid service key"}
+        finally:
+            os.environ["SERVICE_API_KEY"] = "test-svc-key-phase1"
+            _clear_cache_for_tests()
 
-        mini = self._mini_app()
-        with TestClient(mini, raise_server_exceptions=False) as c:
-            resp = c.get("/protected", headers={"X-Service-Key": "wrong-key"})
-        assert resp.status_code == 401
+    # ------------------------------------------------------------------
+    # ATHENA-21 core fix: 503 when SERVICE_API_KEY unset and header present
+    # ------------------------------------------------------------------
 
-    def test_no_auth_dev_mode_allowed(self):
-        """In DEV_MODE, verify_service_or_oidc falls through to get_optional_user which
-        returns the dev-admin bypass user — so no-creds requests are accepted.
-        This tests the DEV_MODE path; production path is tested by wrong-key rejection above.
+    def test_unset_key_with_header_returns_503(self, client):
+        """SERVICE_API_KEY unset + non-empty X-Service-Key → 503 fail-closed (ATHENA-21).
+
+        The 503 fires regardless of DEV_MODE (helper-level guard; xander L3).
+        No WWW-Authenticate header should be present — this is a server-side
+        config error, not a credential error (codex C1).
         """
-        from fastapi.testclient import TestClient
+        from shared.config import _clear_cache_for_tests
 
-        # DEV_MODE=true is set at module level — bypass is expected
-        mini = self._mini_app()
-        with TestClient(mini, raise_server_exceptions=True) as c:
-            resp = c.get("/protected")
-        # DEV_MODE bypass means no-auth succeeds in test environment
-        assert resp.status_code == 200
+        os.environ["SERVICE_API_KEY"] = ""
+        _clear_cache_for_tests()
+        try:
+            resp = client.post(
+                "/api/service-registry/services",
+                params={"name": "athena-test-svc", "endpoint_url": "http://athena-test-svc:8010/health"},
+                headers={"X-Service-Key": "any-value"},
+            )
+            assert resp.status_code == 503
+            assert resp.json() == {"detail": "Service authentication not configured"}
+            assert "WWW-Authenticate" not in resp.headers  # codex C1
+        finally:
+            os.environ["SERVICE_API_KEY"] = "test-svc-key-phase1"
+            _clear_cache_for_tests()
+
+    def test_unset_key_with_header_and_bearer_token_returns_503(self, client):
+        """SERVICE_API_KEY unset + X-Service-Key + Authorization: Bearer → 503.
+
+        Service-key misconfig wins over OIDC fallthrough (codex C1 mixed-auth).
+        """
+        from shared.config import _clear_cache_for_tests
+
+        os.environ["SERVICE_API_KEY"] = ""
+        _clear_cache_for_tests()
+        try:
+            resp = client.post(
+                "/api/service-registry/services",
+                params={"name": "athena-test-svc", "endpoint_url": "http://athena-test-svc:8010/health"},
+                headers={"X-Service-Key": "any", "Authorization": "Bearer fake-jwt"},
+            )
+            assert resp.status_code == 503
+            assert resp.json() == {"detail": "Service authentication not configured"}
+            assert "WWW-Authenticate" not in resp.headers
+        finally:
+            os.environ["SERVICE_API_KEY"] = "test-svc-key-phase1"
+            _clear_cache_for_tests()
+
+    # ------------------------------------------------------------------
+    # OIDC fallthrough: no X-Service-Key header → DEV_MODE bypass
+    # ATHENA-21: rewritten from broken _mini_app() form to use real client+db fixtures
+    # ------------------------------------------------------------------
+
+    def test_unset_key_without_header_dev_mode_falls_through_to_oidc(self, client):
+        """SERVICE_API_KEY unset, no X-Service-Key, DEV_MODE=true → 200 via dev-admin bypass.
+
+        No X-Service-Key header means the 503 path is never reached; the OIDC
+        fallthrough fires, and in DEV_MODE=true the dev-admin bypass user is
+        returned → 200 (ATHENA-21; replaces broken test_no_auth_dev_mode_allowed).
+
+        # ATHENA-21: rewritten from broken _mini_app() form to use real client+db fixtures
+        """
+        from shared.config import _clear_cache_for_tests
+
+        os.environ["SERVICE_API_KEY"] = ""
+        _clear_cache_for_tests()
+        try:
+            resp = client.post(
+                "/api/service-registry/services",
+                params={"name": "athena-test-svc", "endpoint_url": "http://athena-test-svc:8010/health"},
+            )
+            assert resp.status_code == 200
+        finally:
+            os.environ["SERVICE_API_KEY"] = "test-svc-key-phase1"
+            _clear_cache_for_tests()
+
+    # ------------------------------------------------------------------
+    # Decision 5 boundary tests (tessa M1 / ATHENA-21)
+    # ------------------------------------------------------------------
+
+    def test_whitespace_service_api_key_with_header_returns_401(self, client):
+        """SERVICE_API_KEY="   " (whitespace) + non-empty X-Service-Key → 401.
+
+        Whitespace SERVICE_API_KEY is treated as a present-but-mismatched key by
+        the dispatcher (Decision 5α): `not "   "` is False so the 503 guard does
+        NOT fire; the helper proceeds to hmac.compare_digest(header, "   ") which
+        returns False and raises 401 {"detail": "Invalid service key"}.
+        Runtime is fail-closed. The _INSECURE_DEFAULTS whitespace-divergence
+        (xander M1) is tracked separately as a follow-up.
+        """
+        from shared.config import _clear_cache_for_tests
+
+        os.environ["SERVICE_API_KEY"] = "   "
+        _clear_cache_for_tests()
+        try:
+            resp = client.post(
+                "/api/service-registry/services",
+                params={"name": "athena-test-svc", "endpoint_url": "http://athena-test-svc:8010/health"},
+                headers={"X-Service-Key": "anything"},
+            )
+            assert resp.status_code == 401
+            assert resp.json() == {"detail": "Invalid service key"}
+        finally:
+            os.environ["SERVICE_API_KEY"] = "test-svc-key-phase1"
+            _clear_cache_for_tests()
+
+    def test_empty_string_x_service_key_value_falls_through(self, client):
+        """Empty X-Service-Key header value treated as absent header (Decision 5).
+
+        FastAPI delivers x_service_key="" for a header with no value.  The
+        dispatcher's `if x_service_key:` treats this as falsy, skipping the
+        service-key branch entirely → OIDC fallthrough → DEV_MODE bypass → 200.
+        The 503 does NOT fire for an empty header value.
+        """
+        from shared.config import _clear_cache_for_tests
+
+        os.environ["SERVICE_API_KEY"] = ""
+        _clear_cache_for_tests()
+        try:
+            resp = client.post(
+                "/api/service-registry/services",
+                params={"name": "athena-test-svc", "endpoint_url": "http://athena-test-svc:8010/health"},
+                headers={"X-Service-Key": ""},
+            )
+            # Empty value == absent header; DEV_MODE=true falls through to OIDC dev-admin → 200
+            assert resp.status_code == 200
+        finally:
+            os.environ["SERVICE_API_KEY"] = "test-svc-key-phase1"
+            _clear_cache_for_tests()
+
+    def test_mixed_case_x_service_key_header(self, client):
+        """Lowercase x-service-key header is matched case-insensitively (RFC 7230 §3.2).
+
+        Pins FastAPI's Header(alias="X-Service-Key") case-insensitivity via
+        Starlette's MutableHeaders lookup so a framework upgrade can't silently
+        regress this (tessa M1).
+        """
+        from shared.config import _clear_cache_for_tests
+
+        os.environ["SERVICE_API_KEY"] = "test-svc-key-phase1"
+        _clear_cache_for_tests()
+        try:
+            resp = client.post(
+                "/api/service-registry/services",
+                params={"name": "athena-test-svc", "endpoint_url": "http://athena-test-svc:8010/health"},
+                headers={"x-service-key": "test-svc-key-phase1"},
+            )
+            assert resp.status_code == 200
+        finally:
+            os.environ["SERVICE_API_KEY"] = "test-svc-key-phase1"
+            _clear_cache_for_tests()
 
 
 # ---------------------------------------------------------------------------
