@@ -189,11 +189,16 @@ async def _poll_one(
     host: str,
     port: int,
     path: str,
+    protocol: str = 'http',
 ) -> tuple[int, str, Optional[int], str, str, Optional[str]]:
     """Poll one service.
 
     Returns (svc_id, status, response_time_ms, error_category, error_detail,
     health_message).
+
+    protocol: 'http' or 'https' — read from RagService.protocol so that HTTPS
+    services are polled at the correct scheme.  Defaults to 'http' for callers
+    that pre-date the protocol column (codex r2 M-4).
     """
     # SSRF guard — must precede every outbound HTTP request. (xander HIGH-1)
     ok, reason = _validate_service_url(host, port, path)
@@ -202,8 +207,11 @@ async def _poll_one(
         # last_error stores categorical value per MED-1 spec.
         return (svc_id, 'unhealthy', None, 'ssrf_blocked', f'ssrf-blocked:{reason[:80]}', None)
 
+    # Normalise protocol — only http/https are valid; fall back to http.
+    scheme = protocol if protocol in ('http', 'https') else 'http'
+
     async with semaphore:
-        url = f'http://{host}:{port}{path}'
+        url = f'{scheme}://{host}:{port}{path}'
         start = time.monotonic()
         try:
             resp = await client.get(url)
@@ -242,8 +250,10 @@ async def _poll_all_services(semaphore: asyncio.Semaphore) -> dict:
     with get_db_context() as db:
         services = db.query(RagService).filter(RagService.enabled.is_(True)).all()
         # Extract fields before closing the read context.
+        # Tuple: (svc_id, name, host, port, path, protocol) — protocol added by
+        # codex r2 M-4 so _poll_one uses the stored scheme instead of hardcoding http.
         targets = [
-            (s.id, s.name, s.host or '', s.port or 0, s.health_endpoint or '/health')
+            (s.id, s.name, s.host or '', s.port or 0, s.health_endpoint or '/health', s.protocol or 'http')
             for s in services
         ]
 

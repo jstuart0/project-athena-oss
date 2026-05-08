@@ -2344,7 +2344,10 @@ async function loadServices() {
         // Sort services by name
         data.services.sort((a, b) => a.name.localeCompare(b.name));
 
-        container.innerHTML = data.services.map(service => `
+        container.innerHTML = data.services.map(service => {
+            // Escape name for use in single-quoted onclick attrs (codex r2 M-5).
+            const safeName = escapeHtml(service.name || '');
+            return `
             <div class="bg-dark-card border border-dark-border rounded-lg p-4">
                 <div class="flex justify-between items-start mb-3">
                     <div>
@@ -2385,17 +2388,18 @@ async function loadServices() {
                 </div>
 
                 <div class="flex gap-2">
-                    <button onclick="toggleService('${service.name}')"
+                    <button onclick="toggleService('${safeName}')"
                         class="flex-1 px-3 py-1.5 ${service.enabled ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'} text-white rounded text-sm font-medium transition-colors">
                         ${service.enabled ? 'Disable' : 'Enable'}
                     </button>
-                    <button onclick="refreshService('${service.name}')"
+                    <button onclick="refreshService('${safeName}')"
                         class="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium transition-colors">
                         Refresh
                     </button>
                 </div>
             </div>
-        `).join('');
+        `;
+        }).join('');
 
     } catch (error) {
         console.error('Load services error:', error);

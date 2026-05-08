@@ -91,3 +91,99 @@ def test_migration_056_downgrade_raises():
 
     with pytest.raises(NotImplementedError):
         mod.downgrade()
+
+
+def _load_migration_056():
+    """Load migration 056 as a fresh module (avoids sys.modules collisions)."""
+    import importlib.util, pathlib
+    versions_dir = pathlib.Path(__file__).parent.parent / "alembic" / "versions"
+    migration_file = versions_dir / "056_drop_deprecated_service_tables.py"
+    spec = importlib.util.spec_from_file_location("_migration_056_test", migration_file)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_migration_056_date_guard_skips_before_cutoff(monkeypatch):
+    """upgrade() must no-op on PostgreSQL before 2026-05-15 without FORCE flag.
+
+    Approach: patch _EARLIEST_DROP_DATE forward (far future) on the loaded
+    module so that datetime.now() is always before the cutoff.
+    (codex r2 H-1 date guard)
+    """
+    from unittest.mock import MagicMock, patch
+    from datetime import datetime, timezone
+
+    monkeypatch.delenv("FORCE_PHASE_5_DROP", raising=False)
+
+    mod = _load_migration_056()
+
+    mock_conn = MagicMock()
+    mock_conn.dialect.name = "postgresql"
+
+    # Override the module-level cutoff to a far-future date so now() is before it.
+    mod._EARLIEST_DROP_DATE = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+    with patch.object(mod, "op") as mock_op, patch("builtins.print"):
+        mock_op.get_bind.return_value = mock_conn
+        mod.upgrade()
+
+    mock_conn.execute.assert_not_called(), (
+        "upgrade() must not execute any SQL before the cutoff on PostgreSQL "
+        "without FORCE_PHASE_5_DROP=1"
+    )
+
+
+def test_migration_056_date_guard_runs_with_force_flag(monkeypatch):
+    """upgrade() must execute DROP TABLE on PostgreSQL when FORCE_PHASE_5_DROP=1.
+
+    Even with a far-future cutoff, FORCE_PHASE_5_DROP=1 overrides the guard.
+    (codex r2 H-1 date guard override)
+    """
+    from unittest.mock import MagicMock, patch
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("FORCE_PHASE_5_DROP", "1")
+
+    mod = _load_migration_056()
+
+    mock_conn = MagicMock()
+    mock_conn.dialect.name = "postgresql"
+
+    mod._EARLIEST_DROP_DATE = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+    with patch.object(mod, "op") as mock_op, patch("builtins.print"):
+        mock_op.get_bind.return_value = mock_conn
+        mod.upgrade()
+
+    assert mock_conn.execute.call_count == 3, (
+        "upgrade() must execute 3 DROP TABLE statements when FORCE_PHASE_5_DROP=1"
+    )
+
+
+def test_migration_056_sqlite_always_runs(monkeypatch):
+    """upgrade() must always run on SQLite regardless of date or FORCE flag.
+
+    SQLite is the test-DB dialect; blocking it would prevent CI migration tests.
+    (codex r2 H-1 SQLite bypass)
+    """
+    from unittest.mock import MagicMock, patch
+    from datetime import datetime, timezone
+
+    monkeypatch.delenv("FORCE_PHASE_5_DROP", raising=False)
+
+    mod = _load_migration_056()
+
+    mock_conn = MagicMock()
+    mock_conn.dialect.name = "sqlite"
+
+    # Even with a far-future cutoff, SQLite must run unconditionally.
+    mod._EARLIEST_DROP_DATE = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+    with patch.object(mod, "op") as mock_op, patch("builtins.print"):
+        mock_op.get_bind.return_value = mock_conn
+        mod.upgrade()
+
+    assert mock_conn.execute.call_count == 3, (
+        "upgrade() must execute 3 DROP TABLE statements on SQLite regardless of date"
+    )

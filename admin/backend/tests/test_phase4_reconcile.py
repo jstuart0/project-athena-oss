@@ -180,7 +180,7 @@ class TestRefreshStatusVocabulary:
             yield db
 
         # Simulate a poll that produces 'unhealthy' (the Phase 4 failure value).
-        async def fake_poll_one(http_client, sem, svc_id, name, host, port, path):
+        async def fake_poll_one(http_client, sem, svc_id, name, host, port, path, protocol='http'):
             return (svc_id, 'unhealthy', None, 'connection_refused', 'refused', None)
 
         with mock.patch('app.services.health_poller.get_db_context', _patched_db_context):
@@ -262,7 +262,7 @@ class TestLegacyCheckSSRFGuard:
     def test_legacy_check_response_shape_preserved(self, client, db, simple_service):
         """Response shape {service_id, service_name, status, ...} must be preserved."""
 
-        async def fake_poll_one(http_client, sem, svc_id, name, host, port, path):
+        async def fake_poll_one(http_client, sem, svc_id, name, host, port, path, protocol='http'):
             return (svc_id, 'healthy', 55, 'ok', '', 'all good')
 
         with mock.patch('app.services.health_poller._poll_one', fake_poll_one):

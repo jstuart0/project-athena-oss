@@ -276,7 +276,8 @@ function renderServiceRow(service) {
     const displayName = service.display_name || service.service_name || 'Unknown';
     const host = service.host || service.ip_address || 'unknown';
     const isRunning = service.is_running ?? (service.status === 'running' || service.status === 'healthy' || service.status === 'online');
-    const serviceName = service.service_name || service.name;
+    // escapeHtml guards the single-quoted onclick attrs against XSS (codex r2 M-5).
+    const serviceName = escapeHtml(service.service_name || service.name || '');
 
     const statusBadge = isRunning
         ? '<span class="px-2 py-1 text-xs rounded bg-green-900 text-green-300">● Running</span>'

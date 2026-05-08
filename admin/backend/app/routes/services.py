@@ -19,6 +19,7 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, RagService, AuditLog
 from app.utils.url_validators import validate_protocol, validate_host, validate_health_endpoint
+from app.services.health_poller import _validate_service_url
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -202,6 +203,34 @@ def get_service_url(db: Session, service_name: str, fallback_key: str = None) ->
     return ENV_FALLBACKS.get(key, "")
 
 
+def _ssrf_check_url(url: str, health_path: str = "/health") -> Optional[dict]:
+    """Apply the SSRF allowlist guard to a URL before an outbound request.
+
+    Returns a dict suitable for returning directly as the endpoint response if
+    the URL is blocked, or None if the URL is allowed.  Callers MUST check the
+    return value and short-circuit when it is not None.
+
+    Phase 3 H-3 (codex r2): applies the same _validate_service_url guard used
+    by the background health poller to the 6 per-service-type quick-check
+    endpoints that previously bypassed it.
+    """
+    from urllib.parse import urlparse as _urlparse
+    try:
+        parsed = _urlparse(url)
+        host = parsed.hostname or ''
+        port = parsed.port
+        if port is None:
+            port = 443 if parsed.scheme == 'https' else 80
+    except Exception:
+        return {"status": "ssrf_blocked", "error": "malformed URL"}
+
+    allowed, reason = _validate_service_url(host, port, health_path)
+    if not allowed:
+        logger.warning("quick_check_ssrf_blocked", url=url, reason=reason)
+        return {"status": "ssrf_blocked", "error": f"SSRF guard: {reason}"}
+    return None
+
+
 @router.get("/gateway/health")
 async def check_gateway_health(
     db: Session = Depends(get_db),
@@ -214,6 +243,10 @@ async def check_gateway_health(
     url = get_service_url(db, "gateway")
     if not url:
         return {"status": "not_configured", "error": "Gateway not found in database"}
+
+    blocked = _ssrf_check_url(url, "/health")
+    if blocked:
+        return blocked
 
     try:
         ssl_context = ssl.create_default_context()
@@ -260,6 +293,10 @@ async def check_orchestrator_health(
     if not url:
         return {"status": "not_configured", "error": "Orchestrator not found in database"}
 
+    blocked = _ssrf_check_url(url, "/health")
+    if blocked:
+        return blocked
+
     try:
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
@@ -304,6 +341,10 @@ async def check_ollama_health(
     url = get_service_url(db, "ollama")
     if not url:
         return {"status": "not_configured", "error": "Ollama not found in database"}
+
+    blocked = _ssrf_check_url(url, "/api/tags")
+    if blocked:
+        return blocked
 
     try:
         ssl_context = ssl.create_default_context()
@@ -359,6 +400,13 @@ async def check_redis_health(
         redis_host = os.getenv("REDIS_SERVICE_HOST", os.getenv("REDIS_HOST", "redis"))
         redis_port = int(os.getenv("REDIS_SERVICE_PORT", "6379"))
 
+    # SSRF guard (codex r2 H-3): Redis uses a raw socket; guard the host/port
+    # directly since there is no URL to pass to _ssrf_check_url.
+    redis_allowed, redis_block_reason = _validate_service_url(redis_host, redis_port, "/")
+    if not redis_allowed:
+        logger.warning("quick_check_ssrf_blocked", service="redis", reason=redis_block_reason)
+        return {"status": "ssrf_blocked", "error": f"SSRF guard: {redis_block_reason}"}
+
     try:
         import socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -412,6 +460,10 @@ async def check_qdrant_health(
     if not qdrant_url:
         return {"status": "not_configured", "error": "Qdrant not found in database"}
 
+    blocked = _ssrf_check_url(qdrant_url, "/healthz")
+    if blocked:
+        return blocked
+
     try:
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
@@ -456,6 +508,10 @@ async def check_mlx_health(
 
     if not mlx_url:
         return {"status": "not_configured", "error": "MLX not found in database or MLX_URL not set"}
+
+    blocked = _ssrf_check_url(mlx_url, "/v1/models")
+    if blocked:
+        return blocked
 
     try:
         ssl_context = ssl.create_default_context()
@@ -680,6 +736,7 @@ async def check_service_health(
             service.host or '',
             service.port or 0,
             service.health_endpoint or '/health',
+            service.protocol or 'http',
         )
 
     svc_id, status, response_time_ms, error_category, error_detail, health_message = result

@@ -18,6 +18,7 @@ requests per IP per 60 s via service_registry_rate_limit_dep.
 (xander HIGH-4 / ATHENA-1)
 """
 import asyncio
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -29,13 +30,18 @@ from app.models import RagService, User
 from app.auth.oidc import get_current_user
 from app.utils.service_auth import verify_service_or_oidc
 from app.utils.rate_limit import service_registry_rate_limit_dep
-from app.utils.url_validators import validate_endpoint_url
+from app.utils.url_validators import validate_endpoint_url, parse_endpoint_url
 from shared.config import get_config
 import structlog
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/service-registry", tags=["service-registry"])
+
+# Allowlist for service names used in inline JS onclick handlers.
+# Rejects names that could break out of single-quoted JS string literals.
+# (codex r2 M-5 / xander L-2)
+_SERVICE_NAME_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
 _WRITE_DEPS = [
     Depends(verify_service_or_oidc),
@@ -159,8 +165,14 @@ async def register_service(
     """
     if not name:
         raise HTTPException(status_code=422, detail="'name' query parameter is required")
-    if len(name) > 64:
-        raise HTTPException(status_code=422, detail="'name' exceeds 64 characters")
+    # Service name allowlist: must match identifier-safe chars so it cannot
+    # break out of single-quoted JS onclick handlers in the admin UI.
+    # (codex r2 M-5 / xander L-2)
+    if not _SERVICE_NAME_RE.match(name):
+        raise HTTPException(
+            status_code=422,
+            detail="'name' must match ^[a-zA-Z0-9_-]{1,64}$",
+        )
     if not endpoint_url:
         raise HTTPException(status_code=422, detail="'endpoint_url' query parameter is required")
 
@@ -173,9 +185,21 @@ async def register_service(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
+    # Parse endpoint_url → host/port/protocol/health_endpoint so that the NOT
+    # NULL columns added by migration 055 are populated and the Phase 4 poller
+    # can reach newly-registered services.  (codex r2 H-2)
+    try:
+        parsed = parse_endpoint_url(endpoint_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
     existing = db.query(RagService).filter(RagService.name == name).first()
     if existing:
         existing.endpoint_url = endpoint_url
+        existing.host = parsed['host']
+        existing.port = parsed['port']
+        existing.protocol = parsed['protocol']
+        existing.health_endpoint = parsed['health_endpoint']
         if display_name is not None:
             existing.display_name = display_name
         existing.service_type = service_type
@@ -199,6 +223,10 @@ async def register_service(
             display_name=display_name or name.replace('-', ' ').title(),
             service_type=service_type,
             endpoint_url=endpoint_url,
+            host=parsed['host'],
+            port=parsed['port'],
+            protocol=parsed['protocol'],
+            health_endpoint=parsed['health_endpoint'],
             headers={'Content-Type': 'application/json'},
             cache_ttl=cache_ttl,
             timeout=timeout,
@@ -361,6 +389,7 @@ async def check_service_health(
             svc.host or '',
             svc.port or 0,
             svc.health_endpoint or '/health',
+            svc.protocol or 'http',
         )
 
     svc_id, status, response_time_ms, error_category, error_detail, health_message = result

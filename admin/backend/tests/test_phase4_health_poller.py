@@ -588,7 +588,7 @@ class TestCheckEndpoint:
     def test_check_writes_health_status(self, client, db, weather_service):
         """check endpoint must write health_status back to DB."""
 
-        async def fake_poll_one(http_client, sem, svc_id, name, host, port, path):
+        async def fake_poll_one(http_client, sem, svc_id, name, host, port, path, protocol='http'):
             return (svc_id, 'healthy', 42, 'ok', '', 'all good')
 
         with mock.patch('app.services.health_poller._poll_one', fake_poll_one):

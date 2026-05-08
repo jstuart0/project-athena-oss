@@ -146,3 +146,49 @@ def validate_endpoint_url(v: str) -> str:
     validate_host(host)
 
     return v
+
+
+def parse_endpoint_url(endpoint_url: str) -> dict:
+    """Parse endpoint_url into host/port/protocol/health_endpoint components.
+
+    Used by POST /api/service-registry/services to populate the NOT-NULL
+    host/port columns from the legacy endpoint_url query param so the Phase 4
+    health poller can poll newly-CA-upserted services.  (codex r2 H-2)
+
+    Returns a dict with keys: host, port, protocol, health_endpoint.
+    Raises ValueError with a descriptive message on malformed input.
+
+    The caller is responsible for running validate_endpoint_url() on the same
+    value first (SSRF + scheme checks).  This helper only decomposes the URL.
+    """
+    try:
+        parsed = urlparse(endpoint_url)
+    except Exception:
+        raise ValueError(f"endpoint_url {endpoint_url!r} is not a valid URL")
+
+    scheme = parsed.scheme.lower()
+    if scheme not in ('http', 'https'):
+        raise ValueError(
+            f"endpoint_url scheme {scheme!r} is not allowed; use http or https"
+        )
+
+    host = parsed.hostname or ''
+    if not host:
+        raise ValueError(f"endpoint_url {endpoint_url!r} has no hostname")
+
+    port = parsed.port
+    if port is None:
+        port = 443 if scheme == 'https' else 80
+
+    # Use the path as the health_endpoint, defaulting to '/health' when absent.
+    path = parsed.path or '/health'
+    # Normalise empty or root-only paths that carry no information to '/health'.
+    if path in ('', '/'):
+        path = '/health'
+
+    return {
+        'host': host,
+        'port': port,
+        'protocol': scheme,
+        'health_endpoint': path,
+    }
