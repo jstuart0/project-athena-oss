@@ -322,7 +322,7 @@ async def test_connector(
 async def test_weather_connector(connector: RAGConnector, test_query: str = None):
     """Test weather RAG connector."""
     city = test_query or "Chicago"
-    url = f"http://{connector.service.server.ip_address}:{connector.service.port}/weather?location={city}"
+    url = f"http://{connector.service.host}:{connector.service.port}/weather?location={city}"
 
     start = time.time()
     async with aiohttp.ClientSession() as session:
@@ -344,7 +344,7 @@ async def test_weather_connector(connector: RAGConnector, test_query: str = None
 async def test_airports_connector(connector: RAGConnector, test_query: str = None):
     """Test airports/flights RAG connector."""
     airport = test_query or "ORD"
-    url = f"http://{connector.service.server.ip_address}:{connector.service.port}/airport?code={airport}"
+    url = f"http://{connector.service.host}:{connector.service.port}/airport?code={airport}"
 
     start = time.time()
     async with aiohttp.ClientSession() as session:
@@ -366,7 +366,7 @@ async def test_airports_connector(connector: RAGConnector, test_query: str = Non
 async def test_sports_connector(connector: RAGConnector, test_query: str = None):
     """Test sports RAG connector."""
     team = test_query or "Chicago Bulls"
-    url = f"http://{connector.service.server.ip_address}:{connector.service.port}/team?name={team}"
+    url = f"http://{connector.service.host}:{connector.service.port}/team?name={team}"
 
     start = time.time()
     async with aiohttp.ClientSession() as session:
@@ -387,7 +387,7 @@ async def test_sports_connector(connector: RAGConnector, test_query: str = None)
 
 async def test_qdrant_connector(connector: RAGConnector):
     """Test Qdrant vector database connector."""
-    url = f"http://{connector.service.server.ip_address}:{connector.service.port}/"
+    url = f"http://{connector.service.host}:{connector.service.port}/"
 
     start = time.time()
     async with aiohttp.ClientSession() as session:
@@ -417,7 +417,7 @@ async def test_redis_connector(connector: RAGConnector):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2)
-        result = sock.connect_ex((connector.service.server.ip_address, connector.service.port))
+        result = sock.connect_ex((connector.service.host, connector.service.port))
         sock.close()
         elapsed = time.time() - start
 
@@ -439,7 +439,7 @@ async def test_generic_connector(connector: RAGConnector):
     if not connector.service.health_endpoint:
         return {"success": False, "error": "No health endpoint configured"}
 
-    url = f"{connector.service.protocol}://{connector.service.server.ip_address}:{connector.service.port}{connector.service.health_endpoint}"
+    url = f"{connector.service.protocol}://{connector.service.host}:{connector.service.port}{connector.service.health_endpoint}"
 
     start = time.time()
     async with aiohttp.ClientSession() as session:

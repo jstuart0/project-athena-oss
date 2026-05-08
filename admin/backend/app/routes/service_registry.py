@@ -13,25 +13,41 @@ router = APIRouter(prefix="/api/service-registry", tags=["service-registry"])
 
 
 async def ensure_rag_services_table(conn: asyncpg.Connection) -> None:
-    """Create the service-registry table when a fresh Athena DB has not been migrated yet."""
+    """Create the service-registry table when a fresh Athena DB has not been migrated yet.
+
+    NOTE: this DDL is removed in Phase 2 alongside the alembic migration.
+    Widened in Phase 1 reconcile to match the RagService ORM so fresh installs
+    don't break before alembic upgrade. ATHENA-1.
+    """
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS rag_services (
             id SERIAL PRIMARY KEY,
-            name VARCHAR(50) UNIQUE NOT NULL,
-            display_name VARCHAR(100),
+            name VARCHAR(64) UNIQUE NOT NULL,
+            display_name VARCHAR(255),
+            description TEXT,
             service_type VARCHAR(50),
+            host VARCHAR(255),
+            port INTEGER,
+            protocol VARCHAR(8) DEFAULT 'http',
+            health_endpoint VARCHAR(256) DEFAULT '/health',
             endpoint_url TEXT,
-            api_key_encrypted TEXT,
+            control_method VARCHAR(50) DEFAULT 'none',
+            container_name VARCHAR(255),
             headers JSONB,
             query_template TEXT,
             response_parser TEXT,
             cache_ttl INTEGER DEFAULT 300,
             timeout INTEGER DEFAULT 5000,
             rate_limit INTEGER DEFAULT 100,
+            api_key_encrypted TEXT,
             enabled BOOLEAN DEFAULT true,
-            health_check_url TEXT,
-            last_health_check TIMESTAMP,
+            auto_start BOOLEAN DEFAULT true,
             health_status VARCHAR(20),
+            is_running BOOLEAN DEFAULT false,
+            last_health_check TIMESTAMP,
+            last_response_time_ms INTEGER,
+            last_error TEXT,
+            health_message VARCHAR(500),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )

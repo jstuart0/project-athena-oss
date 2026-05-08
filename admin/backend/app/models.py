@@ -3326,7 +3326,7 @@ __all__ = [
     'IntentPattern', 'IntentRouting', 'ProviderRouting',
     'GuestModeConfig', 'CalendarEvent', 'ModeOverride',
     'ToolRegistry', 'ToolCallingSetting', 'ToolCallingTrigger', 'ToolUsageMetric',
-    'BaseKnowledge', 'ComponentModelAssignment', 'AthenaService', 'SystemSetting',
+    'BaseKnowledge', 'ComponentModelAssignment', 'AthenaService', 'RagService', 'SystemSetting',
     'GatewayConfig',
     # SMS Models
     'SMSSettings', 'GuestSMSPreference', 'SMSHistory', 'SMSCostTracking',

@@ -3,11 +3,13 @@ Service registry API routes.
 
 Provides CRUD operations for service management and health monitoring.
 """
+import ipaddress
 import os
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from datetime import datetime
 import structlog
 import aiohttp
@@ -118,6 +120,88 @@ async def _perform_health_check(service: RagService) -> bool:
         return False
 
 
+def _validate_protocol(v: str) -> str:
+    """Protocol must be http or https. Other schemes (file, ftp, ...) are rejected."""
+    if v not in ('http', 'https'):
+        raise ValueError('protocol must be http or https')
+    return v
+
+
+def _validate_host(v: str) -> str:
+    """
+    Reject empty hosts and known SSRF-exploit targets at the write boundary.
+
+    Blocks:
+    - Cloud IMDS addresses (169.254.169.254, IPv6 equivalents)
+    - Loopback / unspecified / multicast IP ranges
+    - Kubernetes control-plane cluster-local DNS suffixes
+
+    RFC1918 private addresses (10.x, 172.16-31.x, 192.168.x) are ALLOWED
+    with a warning because homelab services legitimately run on RFC1918.
+    A runtime allowlist for the background health poller lands in Phase 4
+    (xander HIGH-1 from r1 codex); this validator is the write-boundary layer
+    that covers the synchronous POST /check SSRF trigger added in Phase 1.
+    """
+    if not v:
+        raise ValueError('host is required')
+    v = v.strip()
+    if not v:
+        raise ValueError('host cannot be blank')
+
+    # Hostname path: reject Kubernetes control-plane DNS suffixes regardless
+    # of whether the value is also a valid IP (belt-and-suspenders).
+    if v.endswith('.cluster.local') or v.endswith('.svc'):
+        raise ValueError(
+            f'host {v!r} resolves to a k8s cluster-internal address (forbidden)'
+        )
+
+    try:
+        ip = ipaddress.ip_address(v)
+    except ValueError:
+        # Not a parseable IP address — it's a hostname; allow it after the
+        # DNS suffix check above.
+        return v
+
+    # It IS an IP address — apply range checks.
+    # Cloud IMDS — always reject
+    if v in ('169.254.169.254', '::ffff:169.254.169.254', 'fe80::1'):
+        raise ValueError(f'host {v} is a forbidden cloud metadata address')
+    if ip.is_link_local:
+        raise ValueError(f'host {v} is a link-local address (forbidden SSRF range)')
+    if ip.is_loopback:
+        raise ValueError(f'host {v} is a loopback address')
+    if ip.is_multicast:
+        raise ValueError(f'host {v} is a multicast address')
+    if ip.is_unspecified:
+        raise ValueError(f'host {v} is an unspecified address')
+    # RFC1918 allowed — homelab services run on private IPs
+    if ip.is_private:
+        logger.warning(
+            "service_host_is_rfc1918",
+            host=v,
+            note="allowed for homelab deployments; Phase 4 adds runtime allowlist",
+        )
+    return v
+
+
+def _validate_health_endpoint(v: Optional[str]) -> Optional[str]:
+    """
+    Reject CRLF injection, null bytes, path traversal, and non-/ prefixes.
+    Returns '/health' for None/empty inputs.
+    """
+    if not v:
+        return '/health'
+    if any(c in v for c in ('\r', '\n', '\0')):
+        raise ValueError('health_endpoint contains invalid characters (CRLF/null)')
+    if '..' in v:
+        raise ValueError('health_endpoint contains path traversal (..)')
+    if not v.startswith('/'):
+        raise ValueError('health_endpoint must start with /')
+    if len(v) > 256:
+        raise ValueError('health_endpoint exceeds 256 characters')
+    return v
+
+
 class ServiceCreate(BaseModel):
     """Request model for registering a service."""
     name: str
@@ -133,6 +217,21 @@ class ServiceCreate(BaseModel):
     auto_start: bool = True
     enabled: bool = True
 
+    @field_validator('protocol')
+    @classmethod
+    def validate_protocol(cls, v: str) -> str:
+        return _validate_protocol(v)
+
+    @field_validator('host')
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        return _validate_host(v)
+
+    @field_validator('health_endpoint')
+    @classmethod
+    def validate_health_endpoint(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_health_endpoint(v)
+
 
 class ServiceUpdate(BaseModel):
     """Request model for updating a service."""
@@ -147,6 +246,27 @@ class ServiceUpdate(BaseModel):
     container_name: Optional[str] = None
     auto_start: Optional[bool] = None
     enabled: Optional[bool] = None
+
+    @field_validator('protocol')
+    @classmethod
+    def validate_protocol(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return _validate_protocol(v)
+
+    @field_validator('host')
+    @classmethod
+    def validate_host(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return _validate_host(v)
+
+    @field_validator('health_endpoint')
+    @classmethod
+    def validate_health_endpoint(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return _validate_health_endpoint(v)
 
 
 class ServiceResponse(BaseModel):
@@ -224,7 +344,7 @@ def get_service_url_from_db(db: Session, service_name: str) -> Optional[dict]:
     Returns dict with url, protocol, health_endpoint or None if not found.
     """
     service = db.query(RagService).filter(
-        RagService.name.ilike(f"%{service_name}%")
+        func.lower(RagService.name) == service_name.lower()
     ).first()
 
     if service and service.host:
@@ -250,7 +370,10 @@ def get_service_url(db: Session, service_name: str, fallback_key: str = None) ->
 
 
 @router.get("/gateway/health")
-async def check_gateway_health(db: Session = Depends(get_db)):
+async def check_gateway_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for Gateway service. URL sourced from database."""
     import time
     start = time.time()
@@ -292,7 +415,10 @@ async def check_gateway_health(db: Session = Depends(get_db)):
 
 
 @router.get("/orchestrator/health")
-async def check_orchestrator_health(db: Session = Depends(get_db)):
+async def check_orchestrator_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for Orchestrator service. URL sourced from database."""
     import time
     start = time.time()
@@ -334,7 +460,10 @@ async def check_orchestrator_health(db: Session = Depends(get_db)):
 
 
 @router.get("/ollama/health")
-async def check_ollama_health(db: Session = Depends(get_db)):
+async def check_ollama_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for Ollama LLM server. URL sourced from database."""
     import time
     start = time.time()
@@ -379,7 +508,10 @@ async def check_ollama_health(db: Session = Depends(get_db)):
 
 
 @router.get("/redis/health")
-async def check_redis_health(db: Session = Depends(get_db)):
+async def check_redis_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for Redis cache server. URL sourced from database."""
     import time
     start = time.time()
@@ -435,7 +567,10 @@ async def check_redis_health(db: Session = Depends(get_db)):
 
 
 @router.get("/qdrant/health")
-async def check_qdrant_health(db: Session = Depends(get_db)):
+async def check_qdrant_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for Qdrant vector database. URL sourced from database."""
     import time
     start = time.time()
@@ -475,7 +610,10 @@ async def check_qdrant_health(db: Session = Depends(get_db)):
 
 
 @router.get("/mlx/health")
-async def check_mlx_health(db: Session = Depends(get_db)):
+async def check_mlx_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for MLX-LM server on Apple Silicon. URL sourced from database."""
     import time
     start = time.time()
