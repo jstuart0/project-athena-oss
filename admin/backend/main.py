@@ -551,7 +551,8 @@ async def startup_event():
                 # (bob C2 / otto C2 / ian I-H2 / ATHENA-1 Phase 2)
                 try:
                     from sqlalchemy import inspect as _sa_inspect
-                    _inspector = _sa_inspect(engine)
+                    from app.database import engine as _engine
+                    _inspector = _sa_inspect(_engine)
                     _cols = {c['name'] for c in _inspector.get_columns('rag_services')}
                     _required = {
                         'host', 'port', 'protocol', 'health_endpoint',

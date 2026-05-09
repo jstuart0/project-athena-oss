@@ -9,7 +9,7 @@ import httpx
 from typing import Optional, Dict, Any, List
 import structlog
 from shared.admin_url import get_admin_url
-from shared.config import get_config
+from shared.config import get_config as _get_athena_config  # local async get_config(key) below shadows this name; alias to keep both available
 
 logger = structlog.get_logger()
 
@@ -35,7 +35,7 @@ class AdminConfigClient:
                 "admin_url_unconfigured",
                 message="ADMIN_URL is empty; service-to-admin callbacks will fail.",
             )
-        self.api_key = api_key or get_config().service_api_key
+        self.api_key = api_key or _get_athena_config().service_api_key
         if not self.api_key:
             logger.warning(
                 "service_api_key_empty",

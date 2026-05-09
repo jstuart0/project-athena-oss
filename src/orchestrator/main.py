@@ -201,7 +201,9 @@ if not EVENTS_AVAILABLE:
     logger.warning("Event system not available - Admin Jarvis monitoring disabled")
 
 # Service API key for service-to-service auth (admin backend internal endpoints)
-_SERVICE_API_KEY = get_config().service_api_key
+# Use _shared_config alias because orchestrator.config_loader.get_config (line 64)
+# shadowed shared.config.get_config in this module's namespace.
+_SERVICE_API_KEY = _shared_config.get_config().service_api_key
 if not _SERVICE_API_KEY:
     logger.warning(
         "SERVICE_API_KEY_empty",
@@ -467,6 +469,10 @@ tool_config_cache: Dict[str, List[Dict[str, Any]]] = {}
 # ============================================================================
 # Conversation Context System
 # ============================================================================
+
+# Forward import — main consolidated import is at line 609 but
+# get_conversation_context's type annotation at line 493 needs it earlier.
+from orchestrator.state import ConversationContext  # noqa: E402
 
 # ConversationContext now imported from orchestrator.state (via IntentCategory/ModelTier import block above)
 # Note: CONTEXT_REF_PATTERNS, ROOM_INDICATORS, and detect_context_reference

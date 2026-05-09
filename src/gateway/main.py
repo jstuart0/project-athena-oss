@@ -28,7 +28,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.logging_config import configure_logging
-from shared.config import get_config
+from shared.config import get_config as _get_athena_config  # local async get_config() route below shadows this name
 from shared.ollama_client import OllamaClient
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
@@ -128,10 +128,10 @@ global_rate_limiter: Optional[TokenBucketRateLimiter] = None
 
 # Configuration (environment variable fallbacks - localhost defaults for development)
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_SERVICE_URL", "http://localhost:8001")
-OLLAMA_URL = get_config().llm_endpoint
+OLLAMA_URL = _get_athena_config().llm_endpoint
 API_KEY = os.getenv("GATEWAY_API_KEY", "dummy-key")  # Optional for Phase 1
 ADMIN_API_URL = get_admin_url()
-SERVICE_API_KEY = get_config().service_api_key
+SERVICE_API_KEY = _get_athena_config().service_api_key
 
 # Feature flag cache - per-flag caching with TTL
 # Structure: {flag_name: (timestamp, value)}
@@ -280,12 +280,12 @@ async def lifespan(app: FastAPI):
         # Use first backend as primary Ollama URL
         primary_backend = backends[0]
         # Fetch centralized URL for fallback
-        centralized_ollama_url = await admin_client.get_ollama_url()
+        centralized_ollama_url = _get_athena_config().ollama_url
         ollama_url = primary_backend.get("endpoint_url") or centralized_ollama_url
         logger.info(f"Using LLM backend from database: {primary_backend.get('model_name')} @ {ollama_url}")
     else:
         # Fall back to centralized system_settings
-        ollama_url = await admin_client.get_ollama_url()
+        ollama_url = _get_athena_config().ollama_url
         logger.info(f"Using centralized Ollama URL from system_settings: {ollama_url}")
 
     ollama_client = OllamaClient(url=ollama_url)
@@ -778,7 +778,7 @@ Respond with ONLY the category name (athena or general)."""
     # Get configuration from database or use defaults
     # Use centralized Ollama URL from system_settings
     admin_client = get_admin_client()
-    centralized_ollama_url = await admin_client.get_ollama_url()
+    centralized_ollama_url = _get_athena_config().ollama_url
 
     # Always use centralized Ollama URL from system_settings
     ollama_url = centralized_ollama_url
@@ -1793,7 +1793,7 @@ async def get_config():
     """
     # Always fetch centralized Ollama URL from system_settings
     admin_client = get_admin_client()
-    centralized_ollama_url = await admin_client.get_ollama_url()
+    centralized_ollama_url = _get_athena_config().ollama_url
 
     if gateway_config:
         # Compute the resolved value using the same `or` fallback as startup so
