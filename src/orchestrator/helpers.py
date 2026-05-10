@@ -821,7 +821,7 @@ async def _fallback_to_web_search(state: 'Any', rag_service: str, error_msg: str
             if priority_urls:
                 logger.info(f"Attempting content fetch from {len(priority_urls)} high-value URLs")
 
-                from search_providers.content_fetcher import ContentFetcher
+                from shared.content_fetcher import ContentFetcher
 
                 fetcher = ContentFetcher(timeout=2.0, max_concurrent=2)
 

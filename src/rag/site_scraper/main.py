@@ -32,8 +32,7 @@ from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
 from shared.admin_url import get_admin_url
 
-# Import ContentFetcher from orchestrator
-from orchestrator.search_providers.content_fetcher import ContentFetcher
+from shared.content_fetcher import ContentFetcher
 
 logger = configure_logging("site-scraper-rag")
 
@@ -202,7 +201,7 @@ setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    from orchestrator.search_providers.content_fetcher import HAS_PLAYWRIGHT
+    from shared.content_fetcher import HAS_PLAYWRIGHT
     return JSONResponse(
         status_code=200,
         content={

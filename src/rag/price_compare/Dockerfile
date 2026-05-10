@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy service code
 COPY rag/price_compare/main.py /app/
-COPY rag/price_compare/ /app/rag_service/
+COPY rag/price_compare/providers /app/providers
 
 # Create non-root user
 RUN useradd -m -u 1000 athena && chown -R athena:athena /app

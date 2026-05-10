@@ -51,6 +51,9 @@ data:
   GATEWAY_URL: "http://athena-gateway:8000"
   ORCHESTRATOR_URL: "http://athena-orchestrator:8001"
   REDIS_URL: "redis://redis:6379/0"
+  # community_events uses DB 1 to isolate its cache from other services.
+  # The DB index is encoded in the path so redis.from_url() reads it unambiguously.
+  COMMUNITY_EVENTS_REDIS_URL: "redis://redis:6379/1"
   QDRANT_URL: "http://qdrant:6333"
 
   # MLX-LM server (optional - for Apple Silicon acceleration)

@@ -5,5 +5,6 @@ uvicorn[standard]>=0.24.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
 httpx>=0.24.0
+asyncpg>=0.29.0
 redis>=5.0.0
 structlog>=23.2.0

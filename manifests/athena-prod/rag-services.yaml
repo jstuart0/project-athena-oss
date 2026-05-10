@@ -1260,6 +1260,8 @@ spec:
             secretKeyRef:
               name: athena-api-keys
               key: TESLA_API_KEY
+        - name: TESLAMATE_ENABLED
+          value: "false"
         resources:
           requests:
             memory: "64Mi"
