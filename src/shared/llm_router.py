@@ -1101,14 +1101,31 @@ class LLMRouter:
         # -1 = keep forever, 0 = unload immediately, >0 = seconds
         payload["keep_alive"] = keep_alive
 
+        # Disable thinking mode for qwen3 models. Without `think: false`,
+        # qwen3 emits internal reasoning that consumes the num_predict budget
+        # and leaves `response` empty. Mirrors the with-tools handler at
+        # _generate_ollama_with_tools (line ~995). The /no_think system
+        # prompt is also injected upstream, but Ollama's API-level flag is
+        # what actually disables the thinking generation.
+        if "qwen3" in model.lower():
+            payload["think"] = False
+            logger.info("ollama_think_disabled", model=model)
+
         try:
             response = await client.post("/api/generate", json=payload)
 
             response.raise_for_status()
             data = response.json()
 
+            # Defense-in-depth: strip any <think>...</think> blocks that may
+            # have leaked through (e.g., older Ollama versions that don't
+            # honor `think: false`). The `_strip_think_tags` helper handles
+            # incomplete (no closing tag) and complete blocks.
+            raw_response = data.get("response") or ""
+            cleaned_response = _strip_think_tags(raw_response)
+
             return {
-                "response": data.get("response"),
+                "response": cleaned_response,
                 "backend": "ollama",
                 "model": model,
                 "done": data.get("done", True),

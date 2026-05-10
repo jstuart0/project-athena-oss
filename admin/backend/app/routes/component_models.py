@@ -47,6 +47,7 @@ class ComponentModelResponse(BaseModel):
     temperature: Optional[float]
     max_tokens: Optional[int]
     timeout_seconds: Optional[int]
+    disable_thinking: bool = False
     enabled: bool
     created_at: Optional[str]
     updated_at: Optional[str]
@@ -61,6 +62,7 @@ class ComponentModelUpdate(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     timeout_seconds: Optional[int] = None
+    disable_thinking: Optional[bool] = None
     enabled: Optional[bool] = None
 
 
