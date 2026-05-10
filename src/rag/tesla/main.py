@@ -1229,6 +1229,10 @@ async def natural_query(
                 "data": status
             }
 
+    except HTTPException:
+        # Preserve 503 from disabled-mode guards (TESLAMATE_ENABLED=false) and
+        # any other intentional HTTP responses raised by the inner handlers.
+        raise
     except Exception as e:
         logger.error("tesla_query_error", error=str(e), query=q)
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
