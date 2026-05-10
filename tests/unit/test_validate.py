@@ -385,3 +385,139 @@ def test_timing_tracker_track_sync_called():
     with _patch_guardrails():
         _run(validate_node(state))
     tracker.track_sync.assert_called_once_with("graph", "validate", state.node_timings["validate"])
+
+
+# ---------------------------------------------------------------------------
+# New tests — training-knowledge fallback bypass (ATHENA-39)
+# ---------------------------------------------------------------------------
+
+def _make_state_with_history(**kwargs):
+    """Like _make_state but with a populated conversation_history."""
+    state = _make_state(**kwargs)
+    state.conversation_history = [{"role": "user", "content": "previous turn"}]
+    return state
+
+
+# Test 17: GENERAL_INFO + no retrieval bypasses Layer 4 entirely.
+def test_general_info_no_retrieval_bypasses_llm_fact_check():
+    # Answer includes a time pattern that normally triggers Layer 2 → Layer 4 path.
+    state = _make_state(
+        query="What's the capital of France?",
+        answer="Paris is the capital of France. The current population is about 2.1 million as of 3:00 PM.",
+        intent=IntentCategory.GENERAL_INFO,
+        retrieved_data={},
+        base_knowledge_populated=False,
+    )
+    router = _make_llm_router()
+    _runtime.set_llm_router(router)
+    with _patch_guardrails():
+        result = _run(validate_node(state))
+    assert result.validation_passed is True
+    assert result.validation_reason is None
+    assert "validate" in result.node_timings
+    assert result.node_timings["validate"] >= 0.0
+    router.generate.assert_not_called()
+
+
+# Test 18: Conversation history (non-GENERAL_INFO intent) bypasses Layer 4.
+def test_training_knowledge_fallback_bypasses_llm_fact_check():
+    # WEATHER intent with conversation history — matches is_training_knowledge_path via
+    # the history branch (synthesize.py:152-166 permits training knowledge here).
+    state = _make_state_with_history(
+        query="What's the weather in Baltimore?",
+        answer="Baltimore is generally mild in May, around 65°F.",
+        intent=IntentCategory.WEATHER,
+        retrieved_data={},
+        base_knowledge_populated=False,
+    )
+    router = _make_llm_router()
+    _runtime.set_llm_router(router)
+    with _patch_guardrails():
+        result = _run(validate_node(state))
+    assert result.validation_passed is True
+    assert result.validation_reason is None
+    assert "validate" in result.node_timings
+    router.generate.assert_not_called()
+
+
+# Test 19: Bypass path increments the training_knowledge_fallback metric label.
+def test_training_knowledge_fallback_increments_bypass_metric():
+    state = _make_state_with_history(
+        query="What's the weather in Baltimore?",
+        answer="Baltimore is generally mild in May, around 65°F.",
+        intent=IntentCategory.WEATHER,
+        retrieved_data={},
+        base_knowledge_populated=False,
+    )
+    mock_counter = MagicMock()
+    router = _make_llm_router()
+    _runtime.set_llm_router(router)
+    with _patch_guardrails(), \
+         patch("orchestrator.nodes.validate.validation_counter", mock_counter):
+        _run(validate_node(state))
+    mock_counter.labels(passed="true", reason="training_knowledge_fallback").inc.assert_called_once()
+
+
+# Test 20: Bypass path does NOT increment hallucination_counter (Decision 3 in plan).
+def test_training_knowledge_fallback_does_not_increment_hallucination_counter():
+    # Phone pattern in answer would normally trigger hallucination_counter.
+    # With bypass, we return before Layer 3, so the counter must not fire.
+    state = _make_state_with_history(
+        query="What's the weather in Baltimore?",
+        answer="Call 555-123-4567 for a weather update.",
+        intent=IntentCategory.WEATHER,
+        retrieved_data={},
+        base_knowledge_populated=False,
+    )
+    mock_hallucination = MagicMock()
+    router = _make_llm_router()
+    _runtime.set_llm_router(router)
+    with _patch_guardrails(), \
+         patch("orchestrator.nodes.validate.hallucination_counter", mock_hallucination):
+        _run(validate_node(state))
+    mock_hallucination.labels.assert_not_called()
+
+
+# Test 21: WEBSEARCH carve-out — no-retrieval WEBSEARCH still runs LLM fact-check.
+def test_websearch_no_retrieval_with_specific_facts_still_runs_llm_check():
+    clean_payload = json.dumps({
+        "contains_hallucinations": False,
+        "reason": "all claims verified",
+        "specific_claims": [],
+    })
+    router = _make_llm_router(response_json=clean_payload)
+    _runtime.set_llm_router(router)
+    state = _make_state(
+        query="Search the web for AI news",
+        answer="AI news update: prices changed by $25.00 yesterday.",
+        intent=IntentCategory.WEBSEARCH,
+        retrieved_data={},
+        base_knowledge_populated=False,
+    )
+    with _patch_guardrails(), _patch_component_config():
+        result = _run(validate_node(state))
+    # LLM must have been called (bypass did not fire for WEBSEARCH)
+    router.generate.assert_called_once()
+    assert result.validation_passed is True  # LLM said clean
+
+
+# Test 22: GENERAL_INFO + retrieved_data present → existing has_supporting_data path,
+# not training_knowledge_fallback bypass (bypass requires not retrieved_data).
+def test_general_info_with_retrieved_data_uses_supporting_data_path():
+    state = _make_state(
+        query="What's the capital of France?",
+        answer="Call the embassy at 555-000-1234 for information about France.",
+        intent=IntentCategory.GENERAL_INFO,
+        retrieved_data={"capital": "Paris"},
+        base_knowledge_populated=False,
+    )
+    router = _make_llm_router()
+    _runtime.set_llm_router(router)
+    mock_counter = MagicMock()
+    with _patch_guardrails(), \
+         patch("orchestrator.nodes.validate.validation_counter", mock_counter):
+        result = _run(validate_node(state))
+    # has_supporting_data=True → skips Layer 4 entirely via the else branch
+    router.generate.assert_not_called()
+    assert result.validation_passed is True
+    mock_counter.labels(passed="true", reason="has_supporting_data").inc.assert_called()

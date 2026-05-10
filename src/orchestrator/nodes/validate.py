@@ -151,6 +151,38 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
     if phone_patterns:
         logger.info(f"Pattern detection: found {len(phone_patterns)} phone patterns")
 
+    # Training-knowledge fallback bypass (ATHENA-39)
+    # Mirrors synthesize_node's two training-knowledge-permitted branches:
+    #   synthesize.py:129-144  — intent == GENERAL_INFO, no retrieved_data: "you may answer
+    #                             using your built-in knowledge"
+    #   synthesize.py:152-166  — any intent with conversation context: "Use the previous
+    #                             conversation context... you may answer using your built-in
+    #                             knowledge"
+    # The anti-fabrication branch (synthesize.py:167-179) is explicitly NOT bypassed:
+    # that prompt tells the LLM "NEVER make up specific facts, dates, names, numbers, or
+    # events", so Layer 4 protection is correctly aligned there.
+    # WEBSEARCH is carved out even with conversation context because the user explicitly
+    # requested fresh data; a training-knowledge answer should not bypass validation there.
+    is_training_knowledge_path = (
+        state.intent == IntentCategory.GENERAL_INFO
+        or bool(state.conversation_history or state.history_summary)
+    )
+    is_training_knowledge_fallback = (
+        is_training_knowledge_path
+        and not state.retrieved_data
+        and not state.base_knowledge_populated
+        and state.intent != IntentCategory.WEBSEARCH
+    )
+    if is_training_knowledge_fallback:
+        state.validation_passed = True
+        state.validation_reason = None
+        state.node_timings["validate"] = time.time() - start
+        validation_counter.labels(passed="true", reason="training_knowledge_fallback").inc()
+        if state.timing_tracker:
+            state.timing_tracker.track_substage("graph", "validate", "training_knowledge_bypass", time.time() - start)
+        logger.info("Validation bypassed for training-knowledge fallback", extra={"intent": state.intent.value if state.intent else None})
+        return state
+
     # Layer 3: Check if we have data to support specific facts.
     # Base knowledge injected into the system prompt is authoritative — it counts as
     # supporting data. The LLM fact-checker has no visibility into the system prompt, so

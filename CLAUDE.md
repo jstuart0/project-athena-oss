@@ -140,6 +140,17 @@ Project Athena is an AI-powered smart home assistant with voice interface, RAG (
 - **R2-C3**: sibling modules (`helpers.py`, `mode_permission.py`, `urls.py`, `metrics.py`) and node modules MUST NOT `from orchestrator.main import ...`. Use `_runtime.get_X()` for runtime singletons; import from `helpers.py`, `mode_permission.py`, `state.py`, `urls.py`, or `metrics.py` for everything else.
 - **R2-H1 (lifespan construction)**: lifespan constructs each client as a local variable first, then calls `_runtime.set_X(local)`. Never invert this (e.g., `_runtime.set_X(SomeClass(_runtime.get_other()))` is forbidden).
 
+**`validate_node` training-knowledge bypass (ATHENA-39)**
+
+`validate_node` bypasses the Layer 4 LLM fact-check when `is_training_knowledge_fallback` is true:
+
+```
+is_training_knowledge_path = (intent == GENERAL_INFO) OR (conversation_history OR history_summary populated)
+is_training_knowledge_fallback = is_training_knowledge_path AND not retrieved_data AND not base_knowledge_populated AND intent != WEBSEARCH
+```
+
+This matches exactly the two synthesize-node branches that explicitly permit training-knowledge synthesis (`synthesize.py:129-144` for `GENERAL_INFO` and `synthesize.py:152-166` for any intent with conversation context). First-turn current-domain queries (WEATHER, SPORTS, STOCKS, NEWS, etc.) with no RAG data do NOT match and continue to run Layer 4 — `synthesize.py:167-179` tells the LLM not to invent specifics for that branch, so Layer 4 protection is correctly aligned. WEBSEARCH is carved out even with conversation context because the user explicitly requested fresh data. Layer 1 (length) and Layer 2 (pattern detection) still run on the bypass path; `hallucination_counter` does NOT increment on bypass because the `*_unsupported` counters were specifically counting cases where Layer 4 then ran. Observable via `validation_counter{passed="true", reason="training_knowledge_fallback"}`. When adding new intents that should always have retrieval, add an explicit WEBSEARCH-style carve-out to the bypass condition.
+
 **What stays in `main.py` for now**
 
 `classify_node` (2,473 lines), `tool_call_node`, route handlers, and streaming functions remain in `main.py`. Extraction is deferred: `classify_node` to Campaign 2, `tool_call_node` to Campaign 1.3, route handlers to Campaign 1.5.

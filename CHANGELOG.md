@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `thoughts/shared/plans/2026-05-09-deliver-validator-fix-general-info.md`
+> **Ticket:** [ATHENA-39](https://plane.xmojo.net)
+
+### Validator training-knowledge bypass (ATHENA-39)
+
+- **Fixed** (`ATHENA-39`): `src/orchestrator/nodes/validate_node` — validator no longer rejects GENERAL_INFO and conversation-context responses synthesized from LLM training knowledge when no retrieved data and no base knowledge are available. Previously, `validate.py:189`'s fact-check prompt ("ANY specific factual claims are likely hallucinations" when no Retrieved Data is present) caused false-positive Layer 4 rejections for responses that `synthesize_node` itself explicitly allowed using training knowledge (`synthesize.py:129-144` for `GENERAL_INFO`, `synthesize.py:152-166` for any intent with conversation history). First-turn current-domain queries (WEATHER, SPORTS, STOCKS, NEWS, etc.) with no RAG data continue to run the LLM fact-check because their synthesize branch (`synthesize.py:167-179`) tells the model not to invent specifics — Layer 4 protection is correctly aligned there. WEBSEARCH is carved out even with conversation context (freshness implied by intent).
+- **Added** (`ATHENA-39`): new Prometheus metric label `validation_counter{passed="true", reason="training_knowledge_fallback"}` for observability of the bypass path. No env var or API change.
+
+---
+
+## [Unreleased]
+
 > **Plan:** `thoughts/shared/plans/2026-05-09-deliver-rag-oss-dep-cleanup.md`
 > **Ticket:** [ATHENA-33..38](https://plane.xmojo.net)
 
