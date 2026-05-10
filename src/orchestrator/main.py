@@ -3428,7 +3428,8 @@ def _pattern_based_classification(query: str, return_confidence: bool = False):
     recipe_patterns = [
         "recipe", "recipes", "how to make", "how to cook", "how to bake",
         "how do i make", "how do you make", "cooking instructions",
-        "ingredients for", "what's in", "homemade", "from scratch"
+        "ingredients for", "what's in this recipe", "what's in this dish",
+        "homemade", "from scratch"
     ]
     if any(p in query_lower for p in recipe_patterns):
         return result(IntentCategory.RECIPES)
