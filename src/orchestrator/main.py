@@ -4869,6 +4869,14 @@ If the user is asking to repeat, search again, or modify the previous request, u
             llm_backend = component_config["backend_type"]
             logger.info(f"Using {llm_model} ({llm_backend}) for super complex query: {state.query[:50]}")
 
+        # Honor DB-configured max_tokens for this component when no user-intent override fired.
+        # is_continue_query / is_story_query (set above) take precedence — those are explicit
+        # per-query overrides and should win over the per-component cap.
+        db_max_tokens = component_config.get("max_tokens")
+        if db_max_tokens and not is_continue_query and not is_story_query:
+            max_tokens = db_max_tokens
+            logger.info(f"applied_db_max_tokens: component={component_config.get('component_name')} max_tokens={max_tokens}")
+
         logger.info(f"Calling LLM for tool selection: model={llm_model}, backend={llm_backend}, complexity={complexity}")
 
         # Call LLM with tools
