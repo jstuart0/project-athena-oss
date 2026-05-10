@@ -1,0 +1,39 @@
+name: RAG Dockerfile Generator Drift (Advisory)
+
+# Advisory-only until ATHENA-36b reconciles the generator template with all 23
+# live Dockerfiles and flips this to enforced (exit 1 on drift).
+# This workflow always exits 0 — it will NOT block merges.
+
+on:
+  pull_request:
+    paths:
+      - "src/rag/**"
+      - "scripts/generate-rag-dockerfiles.py"
+      - "scripts/service-defs.sh"
+      - ".github/workflows/rag-generator-drift.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    name: Generator drift check (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check for Dockerfile drift (advisory — always exits 0)
+        run: |
+          python3 scripts/generate-rag-dockerfiles.py --check-advisory | tee drift-summary.txt
+          echo "## RAG Dockerfile Generator Drift" >> "${GITHUB_STEP_SUMMARY}"
+          cat drift-summary.txt >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "> Advisory only. Open ATHENA-36b to reconcile and enforce." >> "${GITHUB_STEP_SUMMARY}"

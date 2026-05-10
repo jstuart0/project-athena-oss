@@ -306,6 +306,7 @@ os-project-athena/
 - **ALWAYS consolidate and expose functionality through the Admin UI** when possible. The Admin UI should be the central management interface for all system operations. When adding new features, health checks, configuration options, or service controls, make sure they are accessible and manageable through the Admin UI rather than requiring command-line access or direct API calls
 - All services use `imagePullPolicy: Always` during development
 - RAG services without required API keys will start but return errors for queries
+- RAG service additions must pass `make smoke-rags SERVICE=<image-name>` before merge; CI enforces this on PRs touching `src/rag/**` or `src/shared/**`
 - The orchestrator timeout is 120 seconds to accommodate slower LLM inference
 - qwen3 models have `/no_think` optimization enabled to reduce response time
 

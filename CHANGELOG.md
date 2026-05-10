@@ -9,6 +9,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `thoughts/shared/plans/2026-05-09-deliver-rag-oss-dep-cleanup.md`
+> **Ticket:** [ATHENA-33..38](https://plane.xmojo.net)
+
+### RAG OSS dependency cleanup (ATHENA-33..38)
+
+- **Fixed** (`ATHENA-33`): `src/rag/sports/requirements.txt` — added `feedparser>=6.0.10`. Service had `import feedparser` but the package was missing, causing CrashLoopBackOff at startup.
+- **Fixed** (`ATHENA-34`): `src/rag/community_events/main.py` — replaced `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB` env-var reads with `COMMUNITY_EVENTS_REDIS_URL` (default `redis://redis:6379/1`). The kubelet auto-injects `REDIS_PORT=tcp://<svc-ip>:6379` for any K8s Service named `redis`, which broke the `int(os.getenv("REDIS_PORT"))` cast at import time. The new URL-based approach is unambiguous and immune to the injection.
+- **Fixed** (`ATHENA-35`): `src/rag/price_compare/Dockerfile` — `providers/` subpackage is now COPYd to `/app/providers` (the WORKDIR, matching `from providers.base import ...`). Previously it was copied to `/app/rag_service/providers/` (unreachable on `sys.path`). Fix is encoded in `scripts/generate-rag-dockerfiles.py` via the new `SERVICE_EXTRA_COPIES` dict so future `--force` regeneration doesn't clobber it.
+- **Fixed** (`ATHENA-36`): `src/rag/site_scraper/main.py` — `ContentFetcher` is now imported from `shared.content_fetcher` (not `orchestrator.search_providers.content_fetcher`, which was never in the site_scraper image). `ContentFetcher` moved to `src/shared/content_fetcher.py`; backward-compat shim at the old path re-exports all public symbols. See ATHENA-36-followup for shim removal.
+- **Fixed** (`ATHENA-37`): `src/rag/tesla/requirements.txt` — added `asyncpg>=0.29.0`. Service startup no longer crashes on import. Pool creation is now gated behind `TESLAMATE_ENABLED` (default `false`); when disabled the service starts cleanly and query endpoints return HTTP 503 with a clear remediation message. `/health` returns 200 regardless of DB state.
+- **Fixed** (`ATHENA-38`): `src/rag/transportation/requirements.txt` — added `beautifulsoup4>=4.12.0`. Service had `from bs4 import BeautifulSoup` but the package was missing.
+- **Added** (`ATHENA-35`): `scripts/generate-rag-dockerfiles.py` — `SERVICE_EXTRA_COPIES` dict for service-specific subpackage COPY entries; `--service <name>` flag to regenerate a single service; `--check` and `--check-advisory` flags for drift detection.
+- **Added**: `scripts/service-defs.sh` — single source of truth for `RAG_SERVICES`, `CORE_SRC_SERVICES`, `ADMIN_SERVICES` arrays; sourced by both `build-and-push.sh` and `smoke-rag-images.sh`.
+- **Added**: `scripts/smoke-rag-images.sh` — builds all 23 RAG images and verifies `python -c "import main"` for each. Full-sweep (not fail-fast); `--service <name>` for single-service runs.
+- **Added**: `Makefile` with `smoke-rags` target (`make smoke-rags SERVICE=<name>`).
+- **Added**: `.github/workflows/rag-smoke.yml` — PR-gated CI check on `src/rag/**` and `src/shared/**` changes.
+- **Added**: `.github/workflows/rag-generator-drift.yml` — advisory-only CI check for generator/Dockerfile drift (always exits 0 until ATHENA-36b).
+- **Added**: `CONTRIBUTING.md` — "Adding or modifying a RAG service" checklist (6 items).
+
+---
+
+## [Unreleased]
+
 > **Plan:** `thoughts/shared/plans/2026-05-08-deliver-service-auth-hardening.md`
 > **Ticket:** [ATHENA-21](https://plane.xmojo.net)
 > **Commits:** `3ed22e6` (phase 1), `eb8b305` (phase 2)
