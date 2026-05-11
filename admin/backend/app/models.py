@@ -2273,17 +2273,9 @@ class RagService(Base):
     """
     Unified service registry — single source of truth for all Athena service definitions.
 
-    Replaces the three concurrent registries that existed before ATHENA-1 Campaign 4:
-    - ``service_registry`` table (per-server, FK to server_configs)
-    - ``athena_services`` table (control metadata)
-    - ``rag_services`` table in the asyncpg ``athena`` DB
-
-    After Phase 2 the alembic migration merges all three into this table and renames
-    the old tables to ``*_deprecated``.  Phase 1 creates the model and migrates callers;
-    the DB columns added here are populated by the Phase 2 migration.
-
-    Column ownership (dexter D2):
-    - Health poller (Phase 4): ``health_status``, ``last_health_check``, ``last_error``,
+    Column ownership:
+    - Health poller (``admin/backend/app/services/health_poller.py``):
+      ``health_status``, ``last_health_check``, ``last_error``,
       ``last_response_time_ms``, ``health_message``
     - service_control.py start/stop/restart: ``is_running``, ``last_error``
     - Admin UI / POST upsert: everything else
@@ -2297,18 +2289,18 @@ class RagService(Base):
     description = Column(Text)
     service_type = Column(String(50))
 
-    # Network coordinates — consolidated from service_registry + athena_services (D2 / D3, ATHENA-1)
+    # Network coordinates
     host = Column(String(255))
     port = Column(Integer)
     protocol = Column(String(8), default='http')
     health_endpoint = Column(String(256), default='/health')
     endpoint_url = Column(Text)  # kept for asyncpg consumers until Phase 2 completes
 
-    # Control metadata (from athena_services / PROCESS_SERVICES)
+    # Control metadata (from PROCESS_SERVICES on the Control Agent)
     control_method = Column(String(50), default='none')  # docker | process | launchd | none
     container_name = Column(String(255))
 
-    # RAG connector config (from existing rag_services columns)
+    # RAG connector config
     headers = Column(JSONB)
     query_template = Column(Text)
     response_parser = Column(Text)

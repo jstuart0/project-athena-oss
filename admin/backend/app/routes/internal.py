@@ -94,8 +94,8 @@ async def get_conversation_settings() -> Dict[str, Any]:
             "history_mode": "full"
         }
     except Exception as e:
-        logger.error("fetch_conversation_settings_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_conversation_settings_failed", route="get_conversation_settings", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -114,8 +114,8 @@ async def get_clarification_settings() -> Dict[str, Any]:
             "timeout_seconds": 300
         }
     except Exception as e:
-        logger.error("fetch_clarification_settings_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_clarification_settings_failed", route="get_clarification_settings", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -132,8 +132,8 @@ async def get_clarification_types() -> List[Dict[str, Any]]:
         """)
         return [dict(row) for row in rows]
     except Exception as e:
-        logger.error("fetch_clarification_types_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_clarification_types_failed", route="get_clarification_types", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -154,8 +154,8 @@ async def get_sports_teams() -> List[Dict[str, Any]]:
         """)
         return [dict(row) for row in rows]
     except Exception as e:
-        logger.error("fetch_sports_teams_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_sports_teams_failed", route="get_sports_teams", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -172,8 +172,8 @@ async def get_device_rules() -> List[Dict[str, Any]]:
         """)
         return [dict(row) for row in rows]
     except Exception as e:
-        logger.error("fetch_device_rules_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_device_rules_failed", route="get_device_rules", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -192,8 +192,8 @@ async def get_multi_intent_config() -> Dict[str, Any]:
             return dict(row)
         return {}
     except Exception as e:
-        logger.error("fetch_multi_intent_config_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_multi_intent_config_failed", route="get_multi_intent_config", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -210,8 +210,8 @@ async def get_intent_chain_rules() -> List[Dict[str, Any]]:
         """)
         return [dict(row) for row in rows]
     except Exception as e:
-        logger.error("fetch_intent_chain_rules_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_intent_chain_rules_failed", route="get_intent_chain_rules", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -232,8 +232,8 @@ async def get_hallucination_checks() -> List[Dict[str, Any]]:
         """)
         return [dict(row) for row in rows]
     except Exception as e:
-        logger.error("fetch_hallucination_checks_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_hallucination_checks_failed", route="get_hallucination_checks", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -250,8 +250,8 @@ async def get_validation_models() -> List[Dict[str, Any]]:
         """)
         return [dict(row) for row in rows]
     except Exception as e:
-        logger.error("fetch_validation_models_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_validation_models_failed", route="get_validation_models", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -268,8 +268,8 @@ async def get_validation_scenarios() -> List[Dict[str, Any]]:
         """)
         return [dict(row) for row in rows]
     except Exception as e:
-        logger.error("fetch_validation_scenarios_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_validation_scenarios_failed", route="get_validation_scenarios", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -293,8 +293,8 @@ async def get_base_knowledge() -> Dict[str, Any]:
             "preferences": {}
         }
     except Exception as e:
-        logger.error("fetch_base_knowledge_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_base_knowledge_failed", route="get_base_knowledge", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -389,8 +389,8 @@ async def get_all_config() -> Dict[str, Any]:
         return result
 
     except Exception as e:
-        logger.error("fetch_all_config_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_all_config_failed", route="get_all_config", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         if admin_conn:
             await admin_conn.close()
@@ -416,8 +416,8 @@ async def get_rag_service_urls(db: Session = Depends(get_db)) -> Dict[str, str]:
             for svc in services
         }
     except Exception as e:
-        logger.error("fetch_rag_service_urls_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_rag_service_urls_failed", route="get_rag_service_urls", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # =============================================================================
@@ -477,8 +477,8 @@ async def log_analytics_event(event: AnalyticsEventRequest) -> Dict[str, Any]:
         return {"status": "logged", "event_type": event.event_type}
 
     except Exception as e:
-        logger.error("log_analytics_event_failed", error=str(e), event_type=event.event_type)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("log_analytics_event_failed", route="log_analytics_event", error_type=type(e).__name__, error=str(e), event_type=event.event_type)
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -520,8 +520,8 @@ async def get_all_validation_config() -> Dict[str, Any]:
         return result
 
     except Exception as e:
-        logger.error("fetch_validation_config_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_validation_config_failed", route="get_all_validation_config", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -567,8 +567,8 @@ async def get_service_usage(service_name: str) -> Dict[str, Any]:
         }
 
     except Exception as e:
-        logger.error("get_service_usage_failed", service=service_name, error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("get_service_usage_failed", route="get_service_usage", error_type=type(e).__name__, service=service_name, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -605,8 +605,8 @@ async def record_service_usage(service_name: str, count: int = 1) -> Dict[str, A
         }
 
     except Exception as e:
-        logger.error("record_service_usage_failed", service=service_name, error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("record_service_usage_failed", route="record_service_usage", error_type=type(e).__name__, service=service_name, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()
 
@@ -639,7 +639,7 @@ async def get_all_service_usage() -> List[Dict[str, Any]]:
         } for row in rows]
 
     except Exception as e:
-        logger.error("get_all_service_usage_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("get_all_service_usage_failed", route="get_all_service_usage", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await conn.close()

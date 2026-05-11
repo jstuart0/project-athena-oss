@@ -258,6 +258,22 @@ async def _upsert_all_services(admin_url: str, service_key: str) -> tuple[int, i
                 )
                 if resp.status_code in (200, 201):
                     count_ok += 1
+                elif resp.status_code == 429:
+                    # ATHENA-26: rate-limit budget exhausted. Don't keep hammering;
+                    # log the remaining services as skipped and break — they'll be
+                    # picked up on the next sync_registry_loop iteration after the
+                    # rate-limit window resets.
+                    remaining_count = sum(1 for p in PROCESS_SERVICES if p > port)
+                    count_skip += 1 + remaining_count
+                    logger.warning(
+                        "registry_upsert_rate_limited",
+                        service_name=service_name,
+                        status_code=resp.status_code,
+                        body_length=len(resp.text),
+                        remaining_skipped=remaining_count,
+                        note="aborting inner loop; will retry on next sync cycle",
+                    )
+                    break
                 else:
                     count_skip += 1
                     logger.warning(
