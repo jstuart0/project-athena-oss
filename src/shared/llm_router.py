@@ -7,6 +7,7 @@ fallback.
 
 Open Source Compatible - No vendor lock-in.
 """
+import asyncio
 import httpx
 import time
 from typing import Dict, Any, Optional, List
@@ -42,6 +43,13 @@ def _strip_think_tags(text: str) -> str:
         parts = text.split("</think>")
         cleaned = parts[-1].strip()
     return cleaned
+
+
+# Retry once on httpx.ReadTimeout in _generate_ollama / _generate_ollama_with_tools (ATHENA-31).
+# Tool-calling and synthesis are idempotent at the LLM call layer, so retrying after a transient
+# read timeout is safe. The backoff gives Mac Studio's Ollama a moment to finish a stalled
+# request that was about to complete.
+OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S = 2.0
 
 
 class BackendType(str, Enum):
@@ -576,7 +584,9 @@ class LLMRouter:
                 )
             elif backend == "ollama":
                 response = await self._generate_ollama_with_tools(
-                    model, messages, tools, temperature, max_tokens, request_id, keep_alive
+                    model, messages, tools, temperature, max_tokens, request_id,
+                    timeout=config.get("timeout_seconds", 60),
+                    keep_alive=keep_alive,
                 )
             elif backend == "mlx":
                 if tools:
@@ -965,6 +975,7 @@ class LLMRouter:
         temperature: Optional[float],
         max_tokens: Optional[int],
         request_id: Optional[str],
+        timeout: int = 60,
         keep_alive: int = -1
     ) -> Dict[str, Any]:
         """
@@ -973,7 +984,10 @@ class LLMRouter:
         Uses Ollama's native tool calling support (for models like llama3.1:8b).
         """
         endpoint_url = get_config().ollama_url
-        client = httpx.AsyncClient(base_url=endpoint_url, timeout=60.0)
+        client = httpx.AsyncClient(
+            base_url=endpoint_url,
+            timeout=httpx.Timeout(connect=10.0, read=float(timeout), write=10.0, pool=10.0),
+        )
 
         # Build payload
         payload = {
@@ -997,7 +1011,21 @@ class LLMRouter:
 
         try:
             # Call Ollama with tools
-            response = await client.post("/api/chat", json=payload)
+            try:
+                response = await client.post("/api/chat", json=payload)
+            except httpx.ReadTimeout:
+                logger.warning(
+                    "ollama_read_timeout_retrying",
+                    model=model,
+                    timeout=timeout,
+                    backoff_s=OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S,
+                )
+                await asyncio.sleep(OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S)
+                response = await client.post("/api/chat", json=payload)
+                logger.info(
+                    "ollama_read_timeout_retry_succeeded",
+                    model=model,
+                )
 
             response.raise_for_status()
             data = response.json()
@@ -1065,7 +1093,10 @@ class LLMRouter:
             ollama_options: Additional Ollama options (num_ctx, num_batch, mirostat, etc.)
             system_prompt: Optional system prompt (e.g., "/no_think" for Qwen3)
         """
-        client = httpx.AsyncClient(base_url=endpoint_url, timeout=timeout)
+        client = httpx.AsyncClient(
+            base_url=endpoint_url,
+            timeout=httpx.Timeout(connect=10.0, read=float(timeout), write=10.0, pool=10.0),
+        )
 
         # Prepend system prompt if provided (e.g., "/no_think" for Qwen3 models)
         if system_prompt:
@@ -1112,7 +1143,21 @@ class LLMRouter:
             logger.info("ollama_think_disabled", model=model)
 
         try:
-            response = await client.post("/api/generate", json=payload)
+            try:
+                response = await client.post("/api/generate", json=payload)
+            except httpx.ReadTimeout:
+                logger.warning(
+                    "ollama_read_timeout_retrying",
+                    model=model,
+                    timeout=timeout,
+                    backoff_s=OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S,
+                )
+                await asyncio.sleep(OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S)
+                response = await client.post("/api/generate", json=payload)
+                logger.info(
+                    "ollama_read_timeout_retry_succeeded",
+                    model=model,
+                )
 
             response.raise_for_status()
             data = response.json()
