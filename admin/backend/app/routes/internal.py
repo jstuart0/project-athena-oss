@@ -46,28 +46,38 @@ async def get_athena_db_connection():
     """Get connection to the Athena database (rag_services, validation tables)."""
     password = os.getenv('ATHENA_DB_PASSWORD')
     if not password:
-        raise HTTPException(status_code=500, detail="ATHENA_DB_PASSWORD not configured")
-    return await asyncpg.connect(
-        host=os.getenv('ATHENA_DB_HOST', 'localhost'),
-        port=int(os.getenv('ATHENA_DB_PORT', '5432')),
-        user=os.getenv('ATHENA_DB_USER', 'psadmin'),
-        password=password,
-        database=os.getenv('ATHENA_DB_NAME', 'athena')
-    )
+        logger.error("db_password_not_configured", db="athena")
+        raise HTTPException(status_code=500, detail="Database not configured")
+    try:
+        return await asyncpg.connect(
+            host=os.getenv('ATHENA_DB_HOST', 'localhost'),
+            port=int(os.getenv('ATHENA_DB_PORT', '5432')),
+            user=os.getenv('ATHENA_DB_USER', 'psadmin'),
+            password=password,
+            database=os.getenv('ATHENA_DB_NAME', 'athena')
+        )
+    except Exception as e:
+        logger.error("athena_db_connect_failed", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Database not configured")
 
 
 async def get_admin_db_connection():
     """Get connection to the Admin database (conversation settings, clarification)."""
     password = os.getenv('ATHENA_DB_PASSWORD')
     if not password:
-        raise HTTPException(status_code=500, detail="ATHENA_DB_PASSWORD not configured")
-    return await asyncpg.connect(
-        host=os.getenv('ADMIN_DB_HOST', os.getenv('ATHENA_DB_HOST', 'localhost')),
-        port=int(os.getenv('ADMIN_DB_PORT', os.getenv('ATHENA_DB_PORT', '5432'))),
-        user=os.getenv('ADMIN_DB_USER', os.getenv('ATHENA_DB_USER', 'psadmin')),
-        password=password,
-        database=os.getenv('ADMIN_DB_NAME', 'athena_admin')
-    )
+        logger.error("db_password_not_configured", db="admin")
+        raise HTTPException(status_code=500, detail="Database not configured")
+    try:
+        return await asyncpg.connect(
+            host=os.getenv('ADMIN_DB_HOST', os.getenv('ATHENA_DB_HOST', 'localhost')),
+            port=int(os.getenv('ADMIN_DB_PORT', os.getenv('ATHENA_DB_PORT', '5432'))),
+            user=os.getenv('ADMIN_DB_USER', os.getenv('ATHENA_DB_USER', 'psadmin')),
+            password=password,
+            database=os.getenv('ADMIN_DB_NAME', 'athena_admin')
+        )
+    except Exception as e:
+        logger.error("admin_db_connect_failed", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Database not configured")
 
 
 # =============================================================================
@@ -77,8 +87,9 @@ async def get_admin_db_connection():
 @router.get("/config/conversation")
 async def get_conversation_settings() -> Dict[str, Any]:
     """Get conversation settings for orchestrator."""
-    conn = await get_admin_db_connection()
+    conn = None
     try:
+        conn = await get_admin_db_connection()
         row = await conn.fetchrow("SELECT * FROM conversation_settings LIMIT 1")
         if row:
             return dict(row)
@@ -93,18 +104,22 @@ async def get_conversation_settings() -> Dict[str, Any]:
             "max_llm_history_messages": 10,
             "history_mode": "full"
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_conversation_settings_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_conversation_settings_failed", route="get_conversation_settings", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 @router.get("/config/clarification")
 async def get_clarification_settings() -> Dict[str, Any]:
     """Get clarification settings for orchestrator."""
-    conn = await get_admin_db_connection()
+    conn = None
     try:
+        conn = await get_admin_db_connection()
         row = await conn.fetchrow("SELECT * FROM clarification_settings LIMIT 1")
         if row:
             return dict(row)
@@ -113,29 +128,36 @@ async def get_clarification_settings() -> Dict[str, Any]:
             "enabled": True,
             "timeout_seconds": 300
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_clarification_settings_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_clarification_settings_failed", route="get_clarification_settings", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 @router.get("/config/clarification-types")
 async def get_clarification_types() -> List[Dict[str, Any]]:
     """Get all clarification types for orchestrator."""
-    conn = await get_admin_db_connection()
+    conn = None
     try:
+        conn = await get_admin_db_connection()
         rows = await conn.fetch("""
             SELECT * FROM clarification_types
             WHERE enabled = true
             ORDER BY priority DESC
         """)
         return [dict(row) for row in rows]
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_clarification_types_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_clarification_types_failed", route="get_clarification_types", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 # =============================================================================
@@ -145,37 +167,45 @@ async def get_clarification_types() -> List[Dict[str, Any]]:
 @router.get("/config/sports-teams")
 async def get_sports_teams() -> List[Dict[str, Any]]:
     """Get sports team disambiguation rules."""
-    conn = await get_admin_db_connection()
+    conn = None
     try:
+        conn = await get_admin_db_connection()
         rows = await conn.fetch("""
             SELECT * FROM sports_team_disambiguation
             WHERE requires_disambiguation = true
             ORDER BY team_name
         """)
         return [dict(row) for row in rows]
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_sports_teams_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_sports_teams_failed", route="get_sports_teams", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 @router.get("/config/device-rules")
 async def get_device_rules() -> List[Dict[str, Any]]:
     """Get device disambiguation rules."""
-    conn = await get_admin_db_connection()
+    conn = None
     try:
+        conn = await get_admin_db_connection()
         rows = await conn.fetch("""
             SELECT * FROM device_disambiguation_rules
             WHERE requires_disambiguation = true
             ORDER BY device_type
         """)
         return [dict(row) for row in rows]
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_device_rules_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_device_rules_failed", route="get_device_rules", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 # =============================================================================
@@ -185,35 +215,43 @@ async def get_device_rules() -> List[Dict[str, Any]]:
 @router.get("/config/multi-intent")
 async def get_multi_intent_config() -> Dict[str, Any]:
     """Get multi-intent configuration."""
-    conn = await get_athena_db_connection()
+    conn = None
     try:
+        conn = await get_athena_db_connection()
         row = await conn.fetchrow("SELECT * FROM multi_intent_config LIMIT 1")
         if row:
             return dict(row)
         return {}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_multi_intent_config_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_multi_intent_config_failed", route="get_multi_intent_config", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 @router.get("/config/intent-chains")
 async def get_intent_chain_rules() -> List[Dict[str, Any]]:
     """Get intent chain rules."""
-    conn = await get_athena_db_connection()
+    conn = None
     try:
+        conn = await get_athena_db_connection()
         rows = await conn.fetch("""
             SELECT * FROM intent_chain_rules
             WHERE enabled = true
             ORDER BY priority DESC
         """)
         return [dict(row) for row in rows]
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_intent_chain_rules_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_intent_chain_rules_failed", route="get_intent_chain_rules", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 # =============================================================================
@@ -223,55 +261,67 @@ async def get_intent_chain_rules() -> List[Dict[str, Any]]:
 @router.get("/config/hallucination-checks")
 async def get_hallucination_checks() -> List[Dict[str, Any]]:
     """Get hallucination check patterns."""
-    conn = await get_athena_db_connection()
+    conn = None
     try:
+        conn = await get_athena_db_connection()
         rows = await conn.fetch("""
             SELECT * FROM hallucination_checks
             WHERE enabled = true
             ORDER BY priority DESC, category
         """)
         return [dict(row) for row in rows]
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_hallucination_checks_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_hallucination_checks_failed", route="get_hallucination_checks", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 @router.get("/config/validation-models")
 async def get_validation_models() -> List[Dict[str, Any]]:
     """Get cross-validation models."""
-    conn = await get_athena_db_connection()
+    conn = None
     try:
+        conn = await get_athena_db_connection()
         rows = await conn.fetch("""
             SELECT * FROM cross_validation_models
             WHERE enabled = true
             ORDER BY priority DESC
         """)
         return [dict(row) for row in rows]
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_validation_models_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_validation_models_failed", route="get_validation_models", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 @router.get("/config/validation-scenarios")
 async def get_validation_scenarios() -> List[Dict[str, Any]]:
     """Get validation test scenarios."""
-    conn = await get_athena_db_connection()
+    conn = None
     try:
+        conn = await get_athena_db_connection()
         rows = await conn.fetch("""
             SELECT * FROM validation_test_scenarios
             WHERE enabled = true
             ORDER BY category, name
         """)
         return [dict(row) for row in rows]
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_validation_scenarios_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_validation_scenarios_failed", route="get_validation_scenarios", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 # =============================================================================
@@ -281,8 +331,9 @@ async def get_validation_scenarios() -> List[Dict[str, Any]]:
 @router.get("/config/base-knowledge")
 async def get_base_knowledge() -> Dict[str, Any]:
     """Get base knowledge configuration (default location, user context)."""
-    conn = await get_athena_db_connection()
+    conn = None
     try:
+        conn = await get_athena_db_connection()
         row = await conn.fetchrow("SELECT * FROM base_knowledge LIMIT 1")
         if row:
             return dict(row)
@@ -292,11 +343,14 @@ async def get_base_knowledge() -> Dict[str, Any]:
             "user_name": None,
             "preferences": {}
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_base_knowledge_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_base_knowledge_failed", route="get_base_knowledge", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 # =============================================================================
@@ -388,9 +442,11 @@ async def get_all_config() -> Dict[str, Any]:
 
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_all_config_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_all_config_failed", route="get_all_config", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         if admin_conn:
             await admin_conn.close()
@@ -416,8 +472,8 @@ async def get_rag_service_urls(db: Session = Depends(get_db)) -> Dict[str, str]:
             for svc in services
         }
     except Exception as e:
-        logger.error("fetch_rag_service_urls_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_rag_service_urls_failed", route="get_rag_service_urls", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # =============================================================================
@@ -448,8 +504,9 @@ async def log_analytics_event(event: AnalyticsEventRequest) -> Dict[str, Any]:
     from app.routes.websocket import broadcast_to_admin_jarvis
     import time
 
-    conn = await get_admin_db_connection()
+    conn = None
     try:
+        conn = await get_admin_db_connection()
         # Insert into conversation_analytics table
         await conn.execute("""
             INSERT INTO conversation_analytics (session_id, event_type, metadata, timestamp)
@@ -476,11 +533,14 @@ async def log_analytics_event(event: AnalyticsEventRequest) -> Dict[str, Any]:
 
         return {"status": "logged", "event_type": event.event_type}
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("log_analytics_event_failed", error=str(e), event_type=event.event_type)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("log_analytics_event_failed", route="log_analytics_event", error_type=type(e).__name__, error=str(e), event_type=event.event_type)
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 @router.get("/config/validation-all")
@@ -489,8 +549,9 @@ async def get_all_validation_config() -> Dict[str, Any]:
     Get all validation configuration in a single request.
     For db_validator.py startup.
     """
-    conn = await get_athena_db_connection()
+    conn = None
     try:
+        conn = await get_athena_db_connection()
         result = {}
 
         # Hallucination checks
@@ -519,11 +580,14 @@ async def get_all_validation_config() -> Dict[str, Any]:
 
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("fetch_validation_config_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("fetch_validation_config_failed", route="get_all_validation_config", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 # =============================================================================
@@ -538,8 +602,9 @@ async def get_service_usage(service_name: str) -> Dict[str, Any]:
     Used by RAG services (like Bright Data) to check budget before making requests.
     Returns monthly count and limit (if set).
     """
-    conn = await get_admin_db_connection()
+    conn = None
     try:
+        conn = await get_admin_db_connection()
         current_month = datetime.now().strftime("%Y-%m")
 
         row = await conn.fetchrow("""
@@ -566,11 +631,14 @@ async def get_service_usage(service_name: str) -> Dict[str, Any]:
             "remaining": None
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("get_service_usage_failed", service=service_name, error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("get_service_usage_failed", route="get_service_usage", error_type=type(e).__name__, service=service_name, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 @router.post("/service-usage/{service_name}/increment")
@@ -581,8 +649,9 @@ async def record_service_usage(service_name: str, count: int = 1) -> Dict[str, A
     Called by RAG services after each API request to track usage.
     Creates a new record if one doesn't exist for the current month.
     """
-    conn = await get_admin_db_connection()
+    conn = None
     try:
+        conn = await get_admin_db_connection()
         current_month = datetime.now().strftime("%Y-%m")
 
         # Upsert: increment if exists, insert if not
@@ -604,11 +673,14 @@ async def record_service_usage(service_name: str, count: int = 1) -> Dict[str, A
             "remaining": (row['monthly_limit'] - row['request_count']) if row['monthly_limit'] else None
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("record_service_usage_failed", service=service_name, error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("record_service_usage_failed", route="record_service_usage", error_type=type(e).__name__, service=service_name, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
 
 @router.get("/service-usage")
@@ -618,8 +690,9 @@ async def get_all_service_usage() -> List[Dict[str, Any]]:
 
     Used by Admin UI to display budget status across all tracked services.
     """
-    conn = await get_admin_db_connection()
+    conn = None
     try:
+        conn = await get_admin_db_connection()
         current_month = datetime.now().strftime("%Y-%m")
 
         rows = await conn.fetch("""
@@ -638,8 +711,11 @@ async def get_all_service_usage() -> List[Dict[str, Any]]:
             "last_updated": row['last_updated'].isoformat() if row['last_updated'] else None
         } for row in rows]
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("get_all_service_usage_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("get_all_service_usage_failed", route="get_all_service_usage", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
