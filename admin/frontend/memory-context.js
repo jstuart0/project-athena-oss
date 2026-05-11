@@ -320,24 +320,24 @@
                     <div class="p-4 space-y-4">
                         <div class="grid grid-cols-2 gap-4">
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">City</label>
+                                <label for="knowledge-city" class="block text-sm font-medium text-gray-400 mb-2">City</label>
                                 <input type="text" id="knowledge-city" value="${escapeHtml(knowledge.city || '')}"
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">State</label>
+                                <label for="knowledge-state" class="block text-sm font-medium text-gray-400 mb-2">State</label>
                                 <input type="text" id="knowledge-state" value="${escapeHtml(knowledge.state || '')}"
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">
                             </div>
                         </div>
                         <div class="grid grid-cols-2 gap-4">
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Latitude</label>
+                                <label for="knowledge-latitude" class="block text-sm font-medium text-gray-400 mb-2">Latitude</label>
                                 <input type="text" id="knowledge-latitude" value="${escapeHtml(knowledge.latitude || '')}"
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Longitude</label>
+                                <label for="knowledge-longitude" class="block text-sm font-medium text-gray-400 mb-2">Longitude</label>
                                 <input type="text" id="knowledge-longitude" value="${escapeHtml(knowledge.longitude || '')}"
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">
                             </div>
@@ -356,7 +356,7 @@
                     </div>
                     <div class="p-4 space-y-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-400 mb-2">Timezone</label>
+                            <label for="knowledge-timezone" class="block text-sm font-medium text-gray-400 mb-2">Timezone</label>
                             <select id="knowledge-timezone"
                                     class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">
                                 <option value="America/New_York" ${knowledge.timezone === 'America/New_York' ? 'selected' : ''}>Eastern (America/New_York)</option>
@@ -383,7 +383,7 @@
                     </div>
                     <div class="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-400 mb-2">Temperature Unit</label>
+                            <label for="knowledge-temp-unit" class="block text-sm font-medium text-gray-400 mb-2">Temperature Unit</label>
                             <select id="knowledge-temp-unit"
                                     class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">
                                 <option value="F" ${knowledge.temp_unit === 'F' ? 'selected' : ''}>Fahrenheit (°F)</option>
@@ -391,7 +391,7 @@
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-gray-400 mb-2">Distance Unit</label>
+                            <label for="knowledge-distance-unit" class="block text-sm font-medium text-gray-400 mb-2">Distance Unit</label>
                             <select id="knowledge-distance-unit"
                                     class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">
                                 <option value="mi" ${knowledge.distance_unit === 'mi' ? 'selected' : ''}>Miles</option>
@@ -399,7 +399,7 @@
                             </select>
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-gray-400 mb-2">Date Format</label>
+                            <label for="knowledge-date-format" class="block text-sm font-medium text-gray-400 mb-2">Date Format</label>
                             <select id="knowledge-date-format"
                                     class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500 transition-colors">
                                 <option value="MM/DD/YYYY" ${knowledge.date_format === 'MM/DD/YYYY' ? 'selected' : ''}>MM/DD/YYYY</option>
@@ -458,17 +458,17 @@
             content: `
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Summary</label>
+                        <label for="memory-summary" class="block text-sm font-medium text-gray-400 mb-2">Summary</label>
                         <input type="text" id="memory-summary" placeholder="e.g., Pet Name"
                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Content</label>
+                        <label for="memory-content" class="block text-sm font-medium text-gray-400 mb-2">Content</label>
                         <textarea id="memory-content" rows="4" placeholder="e.g., Our dog is named Max, a golden retriever"
                                   class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500"></textarea>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Category</label>
+                        <label for="memory-category" class="block text-sm font-medium text-gray-400 mb-2">Category</label>
                         <select id="memory-category"
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                             <option value="fact">Fact</option>
@@ -521,17 +521,17 @@
             content: `
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Summary</label>
+                        <label for="memory-summary" class="block text-sm font-medium text-gray-400 mb-2">Summary</label>
                         <input type="text" id="memory-summary" value="${escapeHtml(memory.summary || '')}"
                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Content</label>
+                        <label for="memory-content" class="block text-sm font-medium text-gray-400 mb-2">Content</label>
                         <textarea id="memory-content" rows="4"
                                   class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">${escapeHtml(memory.content || '')}</textarea>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Category</label>
+                        <label for="memory-category" class="block text-sm font-medium text-gray-400 mb-2">Category</label>
                         <select id="memory-category"
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                             <option value="fact" ${memory.category === 'fact' ? 'selected' : ''}>Fact</option>
@@ -605,22 +605,22 @@
             content: `
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Name</label>
+                        <label for="guest-name" class="block text-sm font-medium text-gray-400 mb-2">Name</label>
                         <input type="text" id="guest-name" placeholder="Guest name"
                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Phone Number (optional)</label>
+                        <label for="guest-phone" class="block text-sm font-medium text-gray-400 mb-2">Phone Number (optional)</label>
                         <input type="tel" id="guest-phone" placeholder="+1 (555) 123-4567"
                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Email (optional)</label>
+                        <label for="guest-email" class="block text-sm font-medium text-gray-400 mb-2">Email (optional)</label>
                         <input type="email" id="guest-email" placeholder="guest@example.com"
                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Notes (optional)</label>
+                        <label for="guest-notes" class="block text-sm font-medium text-gray-400 mb-2">Notes (optional)</label>
                         <textarea id="guest-notes" rows="3" placeholder="Any notes about this guest"
                                   class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500"></textarea>
                     </div>
@@ -672,22 +672,22 @@
             content: `
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Name</label>
+                        <label for="guest-name" class="block text-sm font-medium text-gray-400 mb-2">Name</label>
                         <input type="text" id="guest-name" value="${escapeHtml(guest.name)}"
                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Phone Number (optional)</label>
+                        <label for="guest-phone" class="block text-sm font-medium text-gray-400 mb-2">Phone Number (optional)</label>
                         <input type="tel" id="guest-phone" value="${escapeHtml(guest.phone_number || '')}"
                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Email (optional)</label>
+                        <label for="guest-email" class="block text-sm font-medium text-gray-400 mb-2">Email (optional)</label>
                         <input type="email" id="guest-email" value="${escapeHtml(guest.email || '')}"
                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Notes (optional)</label>
+                        <label for="guest-notes" class="block text-sm font-medium text-gray-400 mb-2">Notes (optional)</label>
                         <textarea id="guest-notes" rows="3"
                                   class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">${escapeHtml(guest.notes || '')}</textarea>
                     </div>

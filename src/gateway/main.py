@@ -28,8 +28,10 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.logging_config import configure_logging
+from shared.config import get_config as _get_athena_config  # local async get_config() route below shadows this name
 from shared.ollama_client import OllamaClient
 from shared.admin_config import get_admin_client
+from shared.admin_url import get_admin_url
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import (
     register_exception_handlers,
@@ -114,6 +116,7 @@ device_session_mgr: Optional[DeviceSessionManager] = None
 admin_client = None  # Admin API client for configuration
 metric_client: Optional[httpx.AsyncClient] = None  # Shared client for metric logging
 ha_client: Optional[httpx.AsyncClient] = None  # Shared client for Home Assistant API
+orchestrator_timeout: float = 120.0  # Resolved at startup from DB config; audit bob:5
 
 # Gateway configuration (loaded from database)
 # This is the centralized configuration object fetched from Admin API
@@ -125,10 +128,10 @@ global_rate_limiter: Optional[TokenBucketRateLimiter] = None
 
 # Configuration (environment variable fallbacks - localhost defaults for development)
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_SERVICE_URL", "http://localhost:8001")
-OLLAMA_URL = os.getenv("LLM_SERVICE_URL") or os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL = _get_athena_config().llm_endpoint
 API_KEY = os.getenv("GATEWAY_API_KEY", "dummy-key")  # Optional for Phase 1
-ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8080")
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
+ADMIN_API_URL = get_admin_url()
+SERVICE_API_KEY = _get_athena_config().service_api_key
 
 # Feature flag cache - per-flag caching with TTL
 # Structure: {flag_name: (timestamp, value)}
@@ -226,6 +229,7 @@ async def lifespan(app: FastAPI):
     global orchestrator_client, ollama_client, device_session_mgr, admin_client, gateway_config
     global orchestrator_circuit_breaker, global_rate_limiter
     global metric_client, ha_client
+    global orchestrator_timeout
 
     # Kill any existing process on gateway port before starting
     gateway_port = int(os.getenv("GATEWAY_PORT", "8000"))
@@ -254,12 +258,16 @@ async def lifespan(app: FastAPI):
             orchestrator_timeout=gateway_config.get("orchestrator_timeout_seconds")
         )
         # Use config values with env var fallbacks
-        orchestrator_url = gateway_config.get("orchestrator_url", ORCHESTRATOR_URL)
-        orchestrator_timeout = gateway_config.get("orchestrator_timeout_seconds", 60)
+        # Use `or` fallback so an empty-string DB value also resolves to env var.
+        # dict.get(key, default) only fires when the key is missing, not when the
+        # value is empty — after bob:1 changes the column default to '', fresh rows
+        # would produce '' here without this form.
+        orchestrator_url = gateway_config.get("orchestrator_url") or ORCHESTRATOR_URL
+        orchestrator_timeout = gateway_config.get("orchestrator_timeout_seconds", 120)
     else:
         logger.warning("Gateway config not available from database, using environment variables")
         orchestrator_url = ORCHESTRATOR_URL
-        orchestrator_timeout = 60
+        orchestrator_timeout = 120
 
     orchestrator_client = httpx.AsyncClient(
         base_url=orchestrator_url,
@@ -272,12 +280,12 @@ async def lifespan(app: FastAPI):
         # Use first backend as primary Ollama URL
         primary_backend = backends[0]
         # Fetch centralized URL for fallback
-        centralized_ollama_url = await admin_client.get_ollama_url()
+        centralized_ollama_url = _get_athena_config().ollama_url
         ollama_url = primary_backend.get("endpoint_url") or centralized_ollama_url
         logger.info(f"Using LLM backend from database: {primary_backend.get('model_name')} @ {ollama_url}")
     else:
         # Fall back to centralized system_settings
-        ollama_url = await admin_client.get_ollama_url()
+        ollama_url = _get_athena_config().ollama_url
         logger.info(f"Using centralized Ollama URL from system_settings: {ollama_url}")
 
     ollama_client = OllamaClient(url=ollama_url)
@@ -770,7 +778,7 @@ Respond with ONLY the category name (athena or general)."""
     # Get configuration from database or use defaults
     # Use centralized Ollama URL from system_settings
     admin_client = get_admin_client()
-    centralized_ollama_url = await admin_client.get_ollama_url()
+    centralized_ollama_url = _get_athena_config().ollama_url
 
     # Always use centralized Ollama URL from system_settings
     ollama_url = centralized_ollama_url
@@ -1222,12 +1230,12 @@ async def stream_orchestrator_response(
             "extra_body": {"room": device_id or "unknown"}  # Pass room context
         }
 
-        # Stream from orchestrator
+        # Stream from orchestrator using the same timeout as non-streaming path (audit bob:5)
         async with orchestrator_client.stream(
             "POST",
             "/v1/chat/completions",
             json=payload,
-            timeout=120.0
+            timeout=float(orchestrator_timeout)
         ) as response:
             response.raise_for_status()
 
@@ -1785,19 +1793,27 @@ async def get_config():
     """
     # Always fetch centralized Ollama URL from system_settings
     admin_client = get_admin_client()
-    centralized_ollama_url = await admin_client.get_ollama_url()
+    centralized_ollama_url = _get_athena_config().ollama_url
 
     if gateway_config:
+        # Compute the resolved value using the same `or` fallback as startup so
+        # operators can distinguish "what's stored in DB" from "what's in use".
+        _orchestrator_url_raw = gateway_config.get("orchestrator_url") or ""
+        _orchestrator_url_resolved = _orchestrator_url_raw or ORCHESTRATOR_URL
+        _timeout_raw = gateway_config.get("orchestrator_timeout_seconds")
+        _timeout_resolved = _timeout_raw if _timeout_raw is not None else 60
         return {
             "source": "database",
             "config": {
-                "orchestrator_url": gateway_config.get("orchestrator_url"),
+                "orchestrator_url": _orchestrator_url_raw,
+                "orchestrator_url_resolved": _orchestrator_url_resolved,
                 "ollama_url": centralized_ollama_url,  # Always from system_settings
                 "intent_model": gateway_config.get("intent_model"),
                 "intent_temperature": gateway_config.get("intent_temperature"),
                 "intent_max_tokens": gateway_config.get("intent_max_tokens"),
                 "intent_timeout_seconds": gateway_config.get("intent_timeout_seconds"),
-                "orchestrator_timeout_seconds": gateway_config.get("orchestrator_timeout_seconds"),
+                "orchestrator_timeout_seconds": _timeout_raw,
+                "orchestrator_timeout_seconds_resolved": _timeout_resolved,
                 "session_timeout_seconds": gateway_config.get("session_timeout_seconds"),
                 "session_max_age_seconds": gateway_config.get("session_max_age_seconds"),
                 "cache_ttl_seconds": gateway_config.get("cache_ttl_seconds"),
@@ -1813,13 +1829,15 @@ async def get_config():
         return {
             "source": "fallback",
             "config": {
-                "orchestrator_url": ORCHESTRATOR_URL,
+                "orchestrator_url": "",
+                "orchestrator_url_resolved": ORCHESTRATOR_URL,
                 "ollama_url": centralized_ollama_url,
                 "intent_model": "phi3:mini",
                 "intent_temperature": 0.1,
                 "intent_max_tokens": 10,
                 "intent_timeout_seconds": 5,
-                "orchestrator_timeout_seconds": 60,
+                "orchestrator_timeout_seconds": 120,
+                "orchestrator_timeout_seconds_resolved": 120,
             },
             "note": "Gateway config not in database, using defaults with centralized Ollama URL"
         }
@@ -1946,7 +1964,7 @@ async def list_models():
     """List available models (OpenAI-compatible) - returns actual available LLM backends."""
     try:
         # Fetch available backends from admin API
-        admin_url = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+        admin_url = get_admin_url()
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{admin_url}/api/llm-backends/public")
             response.raise_for_status()

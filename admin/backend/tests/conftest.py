@@ -2,6 +2,15 @@
 Test configuration and fixtures for API key testing.
 """
 import os
+import sys
+
+# Ensure src/ is on sys.path so `from shared.config import get_config` works when
+# pytest is invoked from the repo root.  Containers install shared via
+# `pip install -e /app/shared` (admin/backend/Dockerfile), so this is test-only.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+if os.path.join(_REPO_ROOT, 'src') not in sys.path:
+    sys.path.insert(0, os.path.join(_REPO_ROOT, 'src'))
+
 import pytest
 from datetime import datetime, timedelta
 from fastapi.testclient import TestClient
@@ -9,9 +18,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-# Set test environment before importing app
+# Set test environment before importing app.
+# ORDER MATTERS: these must be set before any app module is imported so that
+# get_config() (via pydantic-settings) picks up the correct env values.
+# service_auth.py reads SERVICE_API_KEY at call time via get_config() — no
+# module-level capture occurs.
 os.environ["DEV_MODE"] = "true"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+os.environ.setdefault("SERVICE_API_KEY", "test-service-key-for-hardening-tests")
 
 from app.database import Base, get_db
 from app.models import User, UserAPIKey

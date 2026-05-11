@@ -5,6 +5,7 @@ Provides endpoints for managing gateway service configuration.
 Gateway config is a singleton table (id=1) for hot-reconfiguration
 without service restart.
 """
+import os
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ import structlog
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, GatewayConfig, SystemSetting
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -76,11 +78,10 @@ class GatewayConfigUpdate(BaseModel):
 
 def get_centralized_ollama_url(db: Session) -> str:
     """Get the centralized Ollama URL from system_settings."""
-    import os
     setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
     if setting and setting.value:
         return setting.value
-    return os.getenv("OLLAMA_URL", "http://localhost:11434")
+    return get_config().ollama_url
 
 
 def ensure_singleton_config(db: Session) -> GatewayConfig:

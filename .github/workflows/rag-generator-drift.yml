@@ -1,0 +1,38 @@
+name: RAG Dockerfile Generator Drift
+
+# Enforced check: any RAG Dockerfile that drifts from the generator output
+# (scripts/generate-rag-dockerfiles.py) fails CI. To resolve drift, re-run the
+# generator and commit the output, or update the generator template to match
+# intentional Dockerfile changes.
+
+on:
+  pull_request:
+    paths:
+      - "src/rag/**"
+      - "scripts/generate-rag-dockerfiles.py"
+      - "scripts/service-defs.sh"
+      - ".github/workflows/rag-generator-drift.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    name: Generator drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check for Dockerfile drift
+        run: |
+          python3 scripts/generate-rag-dockerfiles.py --check | tee drift-summary.txt
+          echo "## RAG Dockerfile Generator Drift" >> "${GITHUB_STEP_SUMMARY}"
+          cat drift-summary.txt >> "${GITHUB_STEP_SUMMARY}"

@@ -14,26 +14,12 @@ import json
 import structlog
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
+from shared.admin_url import get_admin_url
 
 logger = structlog.get_logger()
 
-# Admin API configuration
-# Priority: ADMIN_API_URL env var > detect K8s vs external
-def _get_admin_url() -> str:
-    """Determine the correct Admin API URL based on environment."""
-    # Explicit env var takes priority
-    explicit_url = os.getenv("ADMIN_API_URL") or os.getenv("ADMIN_BACKEND_URL")
-    if explicit_url:
-        return explicit_url
-
-    # Check if running inside Kubernetes
-    if os.getenv("KUBERNETES_SERVICE_HOST"):
-        return "http://athena-admin-backend.athena-admin.svc.cluster.local:8080"
-
-    # Running outside K8s (local dev) - use localhost
-    return "http://localhost:8080"
-
-ADMIN_API_URL = _get_admin_url()
+# Admin API URL (resolved by shared.admin_url.get_admin_url)
+ADMIN_API_URL = get_admin_url()
 
 # Redis connection (optional - graceful degradation if not available)
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")

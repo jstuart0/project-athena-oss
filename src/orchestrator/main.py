@@ -40,13 +40,15 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.logging_config import configure_logging
 from shared.ha_client import HomeAssistantClient
-from shared.llm_router import get_llm_router, LLMRouter
+from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
 from shared.admin_config import get_admin_client
-from shared.assistant_profile import build_core_assistant_prompt, get_validation_guardrails
+from shared.assistant_profile import build_core_assistant_prompt
 from shared.base_knowledge_utils import get_knowledge_context_for_user, get_home_address_for_user
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import register_exception_handlers, RateLimitError, ServiceUnavailableError
+from shared.config import get_config
+import shared.config as _shared_config  # alias to survive the orchestrator.config_loader rebinding below
 from shared.service_registry import get_service_url as registry_get_service_url
 from shared.metrics import record_tool_execution, get_metrics_text, record_timing_metrics
 
@@ -56,15 +58,13 @@ from orchestrator.search_providers.result_fusion import ResultFusion
 
 # Session manager imports
 from orchestrator.session_manager import (
-    get_session_manager, SessionManager,
+    get_session_manager,
     get_session_summary, update_session_summary
 )
 from orchestrator.config_loader import get_config
 from orchestrator.timing import TimingTracker
 from orchestrator.tts_normalizer import normalize_for_tts
 
-# RAG validation imports
-from orchestrator.rag_validator import validator, ValidationResult
 from orchestrator.search_providers.intent_classifier import IntentClassifier
 
 # Complexity detection
@@ -77,14 +77,14 @@ from orchestrator.sequence_executor import SequenceExecutor, detect_sequence_int
 from orchestrator.automation_agent import AutomationAgent, should_use_automation_agent
 
 # Music playback imports
-from orchestrator.music_handler import MusicHandler, get_music_handler
+from orchestrator.music_handler import get_music_handler
 
 # TV control imports
-from orchestrator.tv_handler import AppleTVHandler, get_tv_handler
+from orchestrator.tv_handler import get_tv_handler
 
 # Follow-me audio imports
 from orchestrator.follow_me_audio import (
-    FollowMeAudioService, FollowMeConfig, FollowMeMode,
+    FollowMeConfig, FollowMeMode,
     initialize_follow_me, get_follow_me_service
 )
 
@@ -104,6 +104,7 @@ from shared.privacy_filter import (
     get_privacy_filter, configure_privacy_filter,
     filter_for_cloud, should_block_for_cloud
 )
+from shared.admin_url import get_admin_url
 
 # Modular context imports
 from orchestrator.context import (
@@ -114,13 +115,11 @@ from orchestrator.context import (
     CONTEXT_REF_PATTERNS,
     ROOM_INDICATORS,
 )
-from orchestrator.utils.constants import DEFAULT_LOCATION, DEFAULT_CITY, CITY_STATE_MAP
+from orchestrator.utils.constants import DEFAULT_LOCATION, CITY_STATE_MAP, DEFAULT_TIMEZONE
 
 # SMS integration imports
 from sms.content_detector import detect_textable_content, extract_sms_content
 from sms.text_me_that import is_text_me_that_request
-from sms.service import get_sms_service
-
 # Intent discovery imports
 from orchestrator.intent_discovery import discover_intent, record_intent_metric, INTENT_DISCOVERY_CONFIG
 from orchestrator.config_loader import ADMIN_API_URL
@@ -131,14 +130,42 @@ from orchestrator.memory_manager import get_memory_manager, MemoryManager
 # Performance optimization imports (2026-01-12)
 from orchestrator.airport_lookup import resolve_flight_parameters, is_airport_code
 from orchestrator.search_preclassifier import preclassify_query, IntentMatch
-from orchestrator.ha_status_optimizer import (
-    optimize_status_query, should_skip_synthesis, detect_status_query_type
-)
 
 # Self-building tools imports
 from orchestrator.self_building_tools import (
     SelfBuildingToolsFactory,
     generate_tool_from_request
+)
+
+# Runtime context accessor (Phase 4.2 — sole singleton read/write path)
+from orchestrator.nodes import _runtime
+from orchestrator.nodes import finalize_node, notification_pref_node, retrieve_node, route_control_node, route_info_node, route_music_node, route_tv_node, send_sms_node, synthesize_node, validate_node
+
+# Helpers extracted to helpers.py (Phase 2.1, ATHENA-10)
+from orchestrator.mode_permission import (
+    activate_owner_override,
+    check_entity_permission,
+    check_intent_permission,
+    detect_owner_mode_command,
+    extract_pin_from_query,
+    get_current_mode,
+)
+from orchestrator.helpers import (
+    get_feature_config,
+    get_automation_system_mode,
+    get_post_synthesis_fallback_config,
+    enhance_query_with_year,
+    detect_insufficient_response,
+    store_conversation_context,
+    get_model_for_component,
+    get_component_config,
+    _component_system_prompt,
+    _normalized_general_info_query,
+    _direct_general_info_response,
+    _strip_hallucinated_continuation,
+    _CONTINUATION_PATTERN,
+    summarize_conversation_history,
+    _fallback_to_web_search,
 )
 
 # Event system imports for real-time pipeline monitoring
@@ -172,6 +199,18 @@ logger = configure_logging("orchestrator")
 
 if not EVENTS_AVAILABLE:
     logger.warning("Event system not available - Admin Jarvis monitoring disabled")
+
+# Service API key for service-to-service auth (admin backend internal endpoints)
+# Use _shared_config alias because orchestrator.config_loader.get_config (line 64)
+# shadowed shared.config.get_config in this module's namespace.
+_SERVICE_API_KEY = _shared_config.get_config().service_api_key
+if not _SERVICE_API_KEY:
+    logger.warning(
+        "SERVICE_API_KEY_empty",
+        message="SERVICE_API_KEY is not set; calls to authenticated admin endpoints "
+                "(bypass config, service usage) will receive 503. "
+                "Set SERVICE_API_KEY in the orchestrator environment.",
+    )
 
 
 # =============================================================================
@@ -221,418 +260,6 @@ async def get_feature_flag(flag_name: str, default: bool = False) -> bool:
         logger.warning("feature_flag_fetch_failed", flag=flag_name, error=str(e))
 
     return default
-
-
-async def get_feature_config(flag_name: str) -> Dict[str, Any]:
-    """
-    Get feature flag with full config dict (not just enabled/disabled).
-
-    Args:
-        flag_name: Name of the feature flag
-
-    Returns:
-        Dict with enabled status and config, or empty dict if not found
-    """
-    import time
-
-    cache_key = f"{flag_name}_config"
-
-    # Check cache first
-    if cache_key in _orch_feature_flag_cache:
-        cached_time, cached_value = _orch_feature_flag_cache[cache_key]
-        if time.time() - cached_time < _orch_feature_flag_cache_ttl:
-            return cached_value
-
-    # Fetch from admin API
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.get(
-                f"{ADMIN_API_URL}/api/features/public",
-                params={"name": flag_name}
-            )
-            if response.status_code == 200:
-                flags = response.json()
-                for flag in flags:
-                    if flag.get("name") == flag_name:
-                        result = {
-                            "enabled": flag.get("enabled", False),
-                            "config": flag.get("config", {}),
-                        }
-                        _orch_feature_flag_cache[cache_key] = (time.time(), result)
-                        return result
-    except Exception as e:
-        logger.warning("feature_config_fetch_failed", flag=flag_name, error=str(e))
-
-    return {"enabled": False, "config": {}}
-
-
-async def get_automation_system_mode() -> str:
-    """
-    Get the automation system mode from feature flag config.
-
-    Returns:
-        "pattern_matching" or "dynamic_agent"
-    """
-    import time
-
-    flag_name = "automation_system_mode"
-
-    # Check cache first
-    if flag_name in _orch_feature_flag_cache:
-        cached_time, cached_value = _orch_feature_flag_cache[flag_name]
-        if time.time() - cached_time < _orch_feature_flag_cache_ttl:
-            return cached_value
-
-    # Fetch from admin API
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.get(
-                f"{ADMIN_API_URL}/api/features/public",
-                params={"name": flag_name}
-            )
-            if response.status_code == 200:
-                flags = response.json()
-                for flag in flags:
-                    if flag.get("name") == flag_name:
-                        config = flag.get("config", {})
-                        mode = config.get("mode", "pattern_matching")
-                        _orch_feature_flag_cache[flag_name] = (time.time(), mode)
-                        return mode
-    except Exception as e:
-        logger.warning("automation_mode_fetch_failed", error=str(e))
-
-    return "pattern_matching"  # Default to pattern matching
-
-
-async def get_weather_provider_mode() -> str:
-    """
-    Get the weather provider mode from feature flag config.
-
-    Returns:
-        "standard" (free tier) or "onecall" (OneCall 3.0)
-    """
-    import time
-
-    flag_name = "weather_provider"
-
-    # Check cache first
-    if flag_name in _orch_feature_flag_cache:
-        cached_time, cached_value = _orch_feature_flag_cache[flag_name]
-        if time.time() - cached_time < _orch_feature_flag_cache_ttl:
-            return cached_value
-
-    # Fetch from admin API
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.get(
-                f"{ADMIN_API_URL}/api/features/public",
-                params={"name": flag_name}
-            )
-            if response.status_code == 200:
-                flags = response.json()
-                for flag in flags:
-                    if flag.get("name") == flag_name:
-                        config = flag.get("config", {})
-                        mode = config.get("mode", "standard")
-                        _orch_feature_flag_cache[flag_name] = (time.time(), mode)
-                        return mode
-    except Exception as e:
-        logger.warning("weather_provider_mode_fetch_failed", error=str(e))
-
-    return "standard"  # Default to standard weather service
-
-
-# =============================================================================
-# Post-Synthesis Web Search Fallback
-# =============================================================================
-
-_post_synthesis_fallback_cache: Dict[str, Tuple[float, Dict]] = {}
-_post_synthesis_fallback_cache_ttl = 60.0  # 60 second cache
-
-
-async def get_post_synthesis_fallback_config() -> Dict[str, Any]:
-    """
-    Get post-synthesis fallback configuration from feature flags.
-
-    Returns:
-        Dict with 'enabled' and 'config' keys
-    """
-    cache_key = "post_synthesis_fallback"
-
-    # Check cache
-    if cache_key in _post_synthesis_fallback_cache:
-        cached_time, cached_config = _post_synthesis_fallback_cache[cache_key]
-        if time.time() - cached_time < _post_synthesis_fallback_cache_ttl:
-            return cached_config
-
-    # Fetch from admin API
-    try:
-        config = await get_feature_config("post_synthesis_fallback")
-        _post_synthesis_fallback_cache[cache_key] = (time.time(), config)
-        return config
-    except Exception as e:
-        logger.warning("post_synthesis_fallback_config_fetch_failed", error=str(e))
-
-    return {"enabled": False, "config": {}}
-
-
-def enhance_query_with_year(query: str) -> str:
-    """
-    Enhance a search query with the current year for better relevance.
-
-    Adds the current year to queries that ask about current/recent information
-    but don't already contain a year reference.
-
-    Args:
-        query: The original search query
-
-    Returns:
-        Enhanced query with year appended if applicable
-    """
-    import re
-    from datetime import datetime
-
-    current_year = datetime.now().year
-    query_lower = query.lower()
-
-    # Skip if query already contains a recent year (2020-2030)
-    if re.search(r'\b20[2-3]\d\b', query):
-        return query
-
-    # Keywords that indicate the user wants current/recent information
-    current_indicators = [
-        "current", "latest", "now", "today", "this season", "this year",
-        "right now", "at the moment", "standings", "playoff", "rankings",
-        "score", "results", "schedule", "upcoming", "recent", "new"
-    ]
-
-    # Check if query contains current-info indicators
-    needs_year = any(indicator in query_lower for indicator in current_indicators)
-
-    # Also add year for sports/news queries that typically need fresh data
-    sports_news_keywords = [
-        "nfl", "nba", "mlb", "nhl", "soccer", "football", "basketball",
-        "baseball", "hockey", "game", "match", "championship", "super bowl",
-        "world series", "finals", "news", "election", "price", "stock"
-    ]
-    if any(kw in query_lower for kw in sports_news_keywords):
-        needs_year = True
-
-    if needs_year:
-        return f"{query} {current_year}"
-
-    return query
-
-
-def detect_insufficient_response(response: str, config: Dict[str, Any]) -> Optional[str]:
-    """
-    Detect if LLM response indicates it couldn't find the requested information.
-
-    Args:
-        response: The LLM response to check
-        config: Feature config with detection_patterns
-
-    Returns:
-        The matched pattern if found, None otherwise
-    """
-    if not response:
-        return "empty_response"
-
-    # Check minimum response length
-    min_length = config.get("min_response_length", 10)
-    if len(response) < min_length:
-        return "response_too_short"
-
-    patterns = config.get("detection_patterns", [
-        "couldn't find",
-        "could not find",
-        "don't have information",
-        "no information available",
-        "unable to find",
-        "I don't know",
-        "I'm not sure",
-        "I cannot find",
-        "no data available",
-        "not able to find"
-    ])
-
-    response_lower = response.lower()
-    for pattern in patterns:
-        if pattern.lower() in response_lower:
-            return pattern
-
-    return None
-
-
-async def maybe_post_synthesis_fallback(state: 'OrchestratorState') -> bool:
-    """
-    Check if synthesis produced insufficient response and retry with web search.
-
-    This function is called after the normal synthesis completes. If the response
-    matches detection patterns (e.g., "I couldn't find information"), it triggers
-    a web search to try to find the answer.
-
-    Args:
-        state: The current orchestrator state
-
-    Returns:
-        True if fallback was triggered and succeeded, False otherwise
-    """
-    # Get feature config
-    fallback_config = await get_post_synthesis_fallback_config()
-
-    if not fallback_config.get("enabled", False):
-        return False
-
-    config = fallback_config.get("config", {})
-
-    # Check excluded intents
-    excluded_intents = config.get("excluded_intents", ["control", "automation", "scene", "timer", "reminder"])
-    if state.intent:
-        intent_value = state.intent.value.lower() if hasattr(state.intent, 'value') else str(state.intent).lower()
-        if intent_value in [e.lower() for e in excluded_intents]:
-            logger.debug(
-                "post_synthesis_fallback_skipped_excluded_intent",
-                intent=intent_value
-            )
-            return False
-
-    # Check if response indicates insufficient data
-    matched_pattern = detect_insufficient_response(state.answer, config)
-    if not matched_pattern:
-        return False
-
-    logger.info(
-        "post_synthesis_fallback_triggered",
-        matched_pattern=matched_pattern,
-        original_response_preview=state.answer[:100] if state.answer else None,
-        intent=state.intent.value if state.intent and hasattr(state.intent, 'value') else str(state.intent),
-        query_preview=state.query[:50] if state.query else None
-    )
-
-    # Execute web search fallback
-    try:
-        fallback_start = time.time()
-
-        # Build enhanced search query with year for relevance
-        search_query = enhance_query_with_year(state.query)
-        if state.entities:
-            location = state.entities.get("location")
-            if location:
-                search_query = f"{search_query} {location}"
-
-        logger.info(f"post_synthesis_fallback_search_query: '{search_query}'")
-
-        # Execute web search
-        global parallel_search_engine
-        if not parallel_search_engine:
-            logger.warning("post_synthesis_fallback_no_search_engine")
-            return False
-
-        intent, search_results = await parallel_search_engine.search(
-            query=search_query,
-            location=DEFAULT_LOCATION,
-            limit_per_provider=10,
-            force_search=True
-        )
-
-        if not search_results:
-            logger.warning("post_synthesis_fallback_no_results", query=search_query)
-            return False
-
-        # Check latency budget
-        max_latency_ms = config.get("max_latency_ms", 5000)
-        elapsed_ms = (time.time() - fallback_start) * 1000
-        if elapsed_ms > max_latency_ms:
-            logger.warning(
-                "post_synthesis_fallback_latency_exceeded",
-                elapsed_ms=elapsed_ms,
-                max_latency_ms=max_latency_ms
-            )
-            # Still continue - we have results
-
-        # Build context from search results
-        context_parts = []
-        for result in search_results[:8]:
-            if hasattr(result, 'snippet') and result.snippet:
-                context_parts.append(result.snippet)
-            elif hasattr(result, 'to_dict'):
-                rd = result.to_dict()
-                if rd.get('snippet'):
-                    context_parts.append(rd['snippet'])
-
-        if not context_parts:
-            logger.warning("post_synthesis_fallback_no_context")
-            return False
-
-        context = "\n\n".join(context_parts[:5])
-
-        # Synthesize response from web search results
-        synthesis_prompt = f"""The user asked: "{state.query}"
-
-The original response could not find the requested information. Here are web search results that may help:
-
-{context}
-
-Based on these search results, provide a helpful, accurate answer to the user's question. Be concise but informative."""
-
-        try:
-            # get_model_for_component is defined in this file
-            synthesis_config = await get_component_config("response_synthesis")
-            synthesis_model = synthesis_config["model_name"]
-            synthesis_start = time.time()
-
-            synthesis_result = await llm_router.generate(
-                model=synthesis_model,
-                prompt=synthesis_prompt,
-                temperature=0.7,
-                system_prompt=_component_system_prompt(synthesis_config),
-                request_id=state.request_id,
-                session_id=state.session_id,
-                stage="post_synthesis_fallback"
-            )
-
-            synthesis_duration = time.time() - synthesis_start
-
-            # Track LLM call for metrics
-            if state.timing_tracker:
-                tokens = synthesis_result.get("eval_count", 0)
-                state.timing_tracker.record_llm_call(
-                    "post_synthesis_fallback", synthesis_model, tokens, int(synthesis_duration * 1000), "synthesis"
-                )
-
-            new_response = synthesis_result.get("response", "")
-            if new_response and len(new_response) > 20:
-                # Store original response for debugging
-                original_response = state.answer
-                state.answer = new_response
-                state.data_source = f"Web Search (post-synthesis fallback)"
-                state.node_timings["post_synthesis_fallback"] = time.time() - fallback_start
-
-                if config.get("log_triggers", True):
-                    logger.info(
-                        "post_synthesis_fallback_succeeded",
-                        new_response_preview=new_response[:100],
-                        original_response_preview=original_response[:100] if original_response else None,
-                        results_count=len(search_results),
-                        latency_ms=elapsed_ms
-                    )
-
-                return True
-            else:
-                logger.warning("post_synthesis_fallback_empty_synthesis")
-                return False
-
-        except Exception as synth_err:
-            logger.error(f"post_synthesis_fallback_synthesis_failed: {synth_err}")
-            return False
-
-    except Exception as e:
-        logger.error(f"post_synthesis_fallback_failed: {e}")
-        return False
 
 
 # =============================================================================
@@ -752,7 +379,7 @@ async def handle_tool_creation_request(
 
     try:
         # Get LLM router for tool generation
-        llm_router = get_llm_router()
+        llm_router = _runtime.get_llm_router()
 
         # Generate tool definition from the request
         logger.info("generating_tool_definition", query=query[:100])
@@ -825,62 +452,13 @@ async def handle_tool_creation_request(
             "success": False
         }
 
-# Metrics
-request_counter = Counter(
-    'orchestrator_requests_total',
-    'Total requests to orchestrator',
-    ['intent', 'status']
+# Metrics — declarations moved to orchestrator.metrics (Phase 1.2)
+from orchestrator.metrics import (
+    request_counter,
+    request_duration,
+    node_duration,
+    tool_call_breakdown,
 )
-request_duration = Histogram(
-    'orchestrator_request_duration_seconds',
-    'Request duration in seconds',
-    ['intent']
-)
-node_duration = Histogram(
-    'orchestrator_node_duration_seconds',
-    'Node execution duration in seconds',
-    ['node']
-)
-tool_call_breakdown = Histogram(
-    'athena_tool_call_phase_seconds',
-    'Tool call node phase breakdown in seconds',
-    ['phase'],
-    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
-)
-
-# Validation and Hallucination Metrics
-validation_counter = Counter(
-    'athena_validation_total',
-    'Total validation outcomes',
-    ['passed', 'reason']  # passed: true/false, reason: too_short, too_long, hallucination, etc.
-)
-hallucination_counter = Counter(
-    'athena_hallucinations_detected_total',
-    'Hallucinations detected by detection layer',
-    ['layer', 'type']  # layer: pattern_detection, llm_fact_check, tool_filter; type: date, time, money, phone, tool_name
-)
-validation_layer_duration = Histogram(
-    'athena_validation_duration_seconds',
-    'Validation node duration in seconds',
-    ['layer'],  # layer: basic, pattern, llm_fact_check
-    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
-)
-
-# Global clients
-ha_client: Optional[HomeAssistantClient] = None
-llm_router: Optional[LLMRouter] = None
-cache_client: Optional[CacheClient] = None
-session_manager: Optional[SessionManager] = None
-rag_client: Optional[Any] = None  # Unified RAG client with circuit breakers
-mode_client: Optional[httpx.AsyncClient] = None  # Phase 2: Guest mode integration
-entity_manager: Optional[HAEntityManager] = None
-smart_controller: Optional[SmartHomeController] = None
-sequence_executor: Optional[SequenceExecutor] = None
-automation_agent: Optional[AutomationAgent] = None
-music_handler: Optional[MusicHandler] = None
-tv_handler: Optional[AppleTVHandler] = None
-follow_me_service: Optional[FollowMeAudioService] = None  # Follow-me audio
-intent_classifier: Optional[IntentClassifier] = None  # Multi-intent detection
 
 # Tool schema cache (OPTIMIZATION: Cache tool schemas to avoid regeneration)
 tool_schema_cache: Dict[str, List[Dict[str, Any]]] = {}
@@ -892,21 +470,11 @@ tool_config_cache: Dict[str, List[Dict[str, Any]]] = {}
 # Conversation Context System
 # ============================================================================
 
-class ConversationContext(BaseModel):
-    """
-    Stores conversation context for continuity across turns.
-    Allows follow-up queries like "do that again", "what about tomorrow?", "turn them off".
-    """
-    intent: str = Field(..., description="Last intent type (control, weather, sports, etc.)")
-    query: str = Field(..., description="Original query text")
-    entities: Dict[str, Any] = Field(default_factory=dict, description="Extracted entities (room, location, team, etc.)")
-    parameters: Dict[str, Any] = Field(default_factory=dict, description="Action parameters (colors, brightness, etc.)")
-    response: Optional[str] = Field(None, description="Last response given")
-    timestamp: float = Field(default_factory=time.time, description="When context was stored")
+# Forward import — main consolidated import is at line 609 but
+# get_conversation_context's type annotation at line 493 needs it earlier.
+from orchestrator.state import ConversationContext  # noqa: E402
 
-    class Config:
-        extra = "allow"
-
+# ConversationContext now imported from orchestrator.state (via IntentCategory/ModelTier import block above)
 # Note: CONTEXT_REF_PATTERNS, ROOM_INDICATORS, and detect_context_reference
 # are now imported from orchestrator.context module
 
@@ -932,12 +500,13 @@ async def get_conversation_context(session_id: str) -> Optional[ConversationCont
         return None
 
     # Try Redis first with timeout to prevent hanging on dead Redis
-    if cache_client and cache_client.client:
+    cache = _runtime.get_cache_client()
+    if cache and cache.client:
         try:
             context_key = f"athena:context:{session_id}"
             # Use asyncio.wait_for to prevent hanging on dead Redis connections
             context_json = await asyncio.wait_for(
-                cache_client.client.get(context_key),
+                cache.client.get(context_key),
                 timeout=2.0  # 2 second timeout
             )
             if context_json:
@@ -961,59 +530,6 @@ async def get_conversation_context(session_id: str) -> Optional[ConversationCont
 
     return None
 
-
-async def store_conversation_context(
-    session_id: str,
-    intent: str,
-    query: str,
-    entities: Dict[str, Any],
-    parameters: Dict[str, Any],
-    response: str,
-    ttl: int = 300  # 5 minute default TTL
-) -> bool:
-    """Store conversation context in Redis (with in-memory fallback)."""
-    if not session_id:
-        return False
-
-    context = ConversationContext(
-        intent=intent,
-        query=query,
-        entities=entities,
-        parameters=parameters,
-        response=response,
-        timestamp=time.time()
-    )
-
-    # Try Redis first with timeout to prevent hanging on dead Redis
-    redis_success = False
-    if cache_client and cache_client.client:
-        try:
-            context_key = f"athena:context:{session_id}"
-            await asyncio.wait_for(
-                cache_client.client.setex(context_key, ttl, context.model_dump_json()),
-                timeout=2.0  # 2 second timeout
-            )
-            logger.info(f"Stored context in Redis for session {session_id[:8]}...: intent={intent}")
-            redis_success = True
-        except asyncio.TimeoutError:
-            logger.warning(f"Redis context storage timed out, using memory fallback")
-        except Exception as e:
-            logger.warning(f"Redis context storage failed, using memory fallback: {e}")
-
-    # Always store in memory as fallback (ensures context works even if Redis fails later)
-    _memory_context[session_id] = {
-        "context": context,
-        "expires_at": time.time() + ttl
-    }
-
-    # Periodic cleanup (every ~10 stores)
-    if len(_memory_context) > 0 and len(_memory_context) % 10 == 0:
-        _cleanup_expired_contexts()
-
-    if not redis_success:
-        logger.info(f"Stored context in memory for session {session_id[:8]}...: intent={intent}")
-
-    return True
 
 
 def merge_with_context(
@@ -1074,65 +590,30 @@ def merge_with_context(
 
     return merged
 
-# Configuration
-# Phase 1 RAG Services
-WEATHER_SERVICE_URL = os.getenv("RAG_WEATHER_URL", "http://localhost:8010")
-ONECALL_SERVICE_URL = os.getenv("RAG_ONECALL_URL", "http://localhost:8021")
-AIRPORTS_SERVICE_URL = os.getenv("RAG_AIRPORTS_URL", "http://localhost:8011")
-FLIGHTS_SERVICE_URL = os.getenv("RAG_FLIGHTS_URL", "http://localhost:8012")
-
-# Phase 2 RAG Services
-EVENTS_SERVICE_URL = os.getenv("RAG_EVENTS_URL", "http://localhost:8013")
-STREAMING_SERVICE_URL = os.getenv("RAG_STREAMING_URL", "http://localhost:8014")
-NEWS_SERVICE_URL = os.getenv("RAG_NEWS_URL", "http://localhost:8015")
-STOCKS_SERVICE_URL = os.getenv("RAG_STOCKS_URL", "http://localhost:8016")
-SPORTS_SERVICE_URL = os.getenv("RAG_SPORTS_URL", "http://localhost:8017")
-WEBSEARCH_SERVICE_URL = os.getenv("RAG_WEBSEARCH_URL", "http://localhost:8018")
-DINING_SERVICE_URL = os.getenv("RAG_DINING_URL", "http://localhost:8019")
-RECIPES_SERVICE_URL = os.getenv("RAG_RECIPES_URL", "http://localhost:8020")
-DIRECTIONS_SERVICE_URL = os.getenv("RAG_DIRECTIONS_URL", "http://localhost:8030")
-
-# Phase 2: Mode service
-MODE_SERVICE_URL = os.getenv("MODE_SERVICE_URL", "http://localhost:8022")
-
-# Notifications service (for proactive notification preferences)
-NOTIFICATIONS_SERVICE_URL = os.getenv("NOTIFICATIONS_SERVICE_URL", "http://localhost:8050")
+# URL constants — declarations moved to orchestrator.urls (Phase 1.2)
+from orchestrator.urls import (
+    WEATHER_SERVICE_URL,
+    ONECALL_SERVICE_URL,
+    AIRPORTS_SERVICE_URL,
+    FLIGHTS_SERVICE_URL,
+    EVENTS_SERVICE_URL,
+    STREAMING_SERVICE_URL,
+    NEWS_SERVICE_URL,
+    STOCKS_SERVICE_URL,
+    SPORTS_SERVICE_URL,
+    WEBSEARCH_SERVICE_URL,
+    DINING_SERVICE_URL,
+    RECIPES_SERVICE_URL,
+    DIRECTIONS_SERVICE_URL,
+    MODE_SERVICE_URL,
+)
 
 
-# Intent categories
-class IntentCategory(str, Enum):
-    CONTROL = "control"  # Home Assistant control
-    WEATHER = "weather"  # Weather information
-    AIRPORTS = "airports"  # Airport/flight info
-    SPORTS = "sports"  # Sports information
-    FLIGHTS = "flights"  # Flight tracking (Phase 2)
-    EVENTS = "events"  # Events and venues (Phase 2)
-    STREAMING = "streaming"  # Movies and TV shows (Phase 2)
-    NEWS = "news"  # News and headlines (Phase 2)
-    STOCKS = "stocks"  # Stock market data (Phase 2)
-    RECIPES = "recipes"  # Recipe search (Phase 2)
-    DINING = "dining"  # Restaurant search (Phase 2)
-    DIRECTIONS = "directions"  # Navigation and route planning (Phase 2)
-    WEBSEARCH = "websearch"  # Explicit web search request ("search the web for X")
-    TEXT_ME_THAT = "text_me_that"  # SMS: User wants info texted to them
-    MUSIC_PLAY = "music_play"  # Music playback (play jazz, play Pink Floyd)
-    MUSIC_CONTROL = "music_control"  # Music controls (pause, next, volume)
-    TV_CONTROL = "tv_control"  # Apple TV control (open Netflix, turn on TV)
-    NOTIFICATION_PREF = "notification_pref"  # Opt-out/opt-in for proactive notifications
-    TESLA = "tesla"  # Tesla vehicle queries (owner mode only - blocked for guests)
-    GENERAL_INFO = "general_info"  # General knowledge
-    UNKNOWN = "unknown"  # Unclear intent
+# IntentCategory and ModelTier now imported from orchestrator.state
+from orchestrator.state import IntentCategory, ModelTier, ConversationContext
 
 # Default model for portable deployments (override via ATHENA_DEFAULT_MODEL)
-_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b")
-
-# Model tiers (all preloaded with keep_alive=-1)
-class ModelTier(str, Enum):
-    CLASSIFIER = os.getenv("ATHENA_MODEL_CLASSIFIER", _DEFAULT_MODEL)  # Fast classification
-    SMALL = os.getenv("ATHENA_MODEL_SMALL", _DEFAULT_MODEL)  # Fast tool calling
-    MEDIUM = os.getenv("ATHENA_MODEL_MEDIUM", _DEFAULT_MODEL)  # Fast for most tasks
-    LARGE = os.getenv("ATHENA_MODEL_LARGE", _DEFAULT_MODEL)  # Complex queries
-    SYNTHESIS = os.getenv("ATHENA_MODEL_SYNTHESIS", _DEFAULT_MODEL)  # Response synthesis
+_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
 
 
 # Fallback model values if database unavailable
@@ -1148,12 +629,6 @@ FALLBACK_MODELS = {
     "fact_check_validation": os.getenv("ATHENA_FALLBACK_MODEL_FACT_CHECK_VALIDATION", _DEFAULT_MODEL),
     "conversation_summarizer": os.getenv("ATHENA_FALLBACK_MODEL_CONVERSATION_SUMMARIZER", _DEFAULT_MODEL),
 }
-
-# Component model cache (performance optimization)
-# Caches all component models to avoid per-request database lookups
-_component_model_cache: Dict[str, Dict[str, Any]] = {}
-_component_model_cache_time: float = 0
-COMPONENT_MODEL_CACHE_TTL = 300  # 5 minutes
 
 # Origin placeholder patterns cache (for directions override)
 # Fetched from admin API, cached to avoid per-request lookups
@@ -1288,103 +763,6 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
 
     return None
 
-
-async def get_model_for_component(component_name: str) -> str:
-    """Get model for a component with caching to reduce database calls.
-
-    Uses a 5-minute TTL cache to avoid per-request database lookups.
-    Falls back to FALLBACK_MODELS if cache refresh fails.
-    """
-    global _component_model_cache, _component_model_cache_time
-
-    now = time.time()
-
-    # Refresh cache if expired
-    if now - _component_model_cache_time > COMPONENT_MODEL_CACHE_TTL:
-        try:
-            admin_client = get_admin_client()
-            all_models = await admin_client.get_all_component_models()
-            _component_model_cache = {m['component_name']: m for m in all_models}
-            _component_model_cache_time = now
-            logger.debug("component_model_cache_refreshed", count=len(_component_model_cache))
-        except Exception as e:
-            logger.warning(f"Failed to refresh component model cache: {e}")
-            # If cache is completely empty, try single lookup as fallback
-            if not _component_model_cache:
-                try:
-                    admin_client = get_admin_client()
-                    config = await admin_client.get_component_model(component_name)
-                    if config and config.get("enabled"):
-                        return config.get("model_name")
-                except Exception:
-                    pass
-
-    # Return from cache or fallback
-    if component_name in _component_model_cache:
-        config = _component_model_cache[component_name]
-        if config.get("enabled"):
-            return config.get("model_name")
-
-    return FALLBACK_MODELS.get(component_name, _DEFAULT_MODEL)
-
-
-async def get_component_config(component_name: str) -> dict:
-    """Get full component configuration including model settings and backend type.
-
-    Uses the same cache as get_model_for_component for efficiency.
-
-    Returns dict with:
-        - model_name: The LLM model to use
-        - backend_type: ollama, mlx, openai, etc.
-        - temperature: Temperature setting (optional)
-        - max_tokens: Max tokens limit (optional)
-        - disable_thinking: If True, prepend /no_think to disable Qwen3 thinking mode
-        - enabled: If component is enabled
-    """
-    global _component_model_cache, _component_model_cache_time
-
-    now = time.time()
-
-    # Refresh cache if expired
-    if now - _component_model_cache_time > COMPONENT_MODEL_CACHE_TTL:
-        try:
-            admin_client = get_admin_client()
-            all_models = await admin_client.get_all_component_models()
-            _component_model_cache = {m['component_name']: m for m in all_models}
-            _component_model_cache_time = now
-            logger.debug("component_model_cache_refreshed", count=len(_component_model_cache))
-        except Exception as e:
-            logger.warning(f"Failed to refresh component model cache: {e}")
-
-    # Return from cache or fallback
-    if component_name in _component_model_cache:
-        config = _component_model_cache[component_name]
-        if config.get("enabled"):
-            return {
-                "model_name": config.get("model_name"),
-                "backend_type": config.get("backend_type", "ollama"),
-                "temperature": config.get("temperature"),
-                "max_tokens": config.get("max_tokens"),
-                "disable_thinking": config.get("disable_thinking", False),
-                "enabled": config.get("enabled", True),
-            }
-
-    # Return fallback with defaults
-    return {
-        "model_name": FALLBACK_MODELS.get(component_name, _DEFAULT_MODEL),
-        "backend_type": "ollama",
-        "temperature": None,
-        "max_tokens": None,
-        "disable_thinking": False,
-        "enabled": True,
-    }
-
-
-def _component_system_prompt(component_config: Optional[dict]) -> Optional[str]:
-    """Return a system prompt that disables reasoning/thinking when configured."""
-    if component_config and component_config.get("disable_thinking"):
-        return "/no_think"
-    return None
 
 
 # =========================================================================
@@ -1545,7 +923,8 @@ async def _get_preferred_cloud_model() -> Optional[tuple[str, str]]:
                                 default_model = config.get("default_model")
                                 if default_model:
                                     return (default_model, provider)
-            except Exception:
+            except Exception as e:
+                logger.warning("get_preferred_cloud_model_failed", provider=provider, error=str(e))
                 continue
 
     except Exception as e:
@@ -1554,93 +933,8 @@ async def _get_preferred_cloud_model() -> Optional[tuple[str, str]]:
     return None
 
 
-# Orchestrator state
-class OrchestratorState(BaseModel):
-    """State that flows through the LangGraph state machine."""
-
-    # Input
-    query: str = Field(..., description="User's query")
-    mode: Literal["owner", "guest"] = Field("owner", description="User mode")
-    room: str = Field("unknown", description="Room/zone identifier")
-    temperature: float = Field(0.7, description="LLM temperature")
-    session_id: Optional[str] = Field(None, description="Conversation session ID")
-    interface_type: Literal["voice", "text", "chat"] = Field("voice", description="Interface type for response formatting")
-
-    # Barge-in / Interruption context (when user interrupts previous response)
-    interruption_context: Optional[Dict[str, Any]] = Field(None, description="Context when user interrupted (previous_query, interrupted_response, audio_position_ms)")
-
-    # Conversation context
-    conversation_history: List[Dict[str, str]] = Field(default_factory=list, description="Previous conversation messages")
-    history_summary: str = Field("", description="Summarized conversation context (for summarized mode)")
-    context_ref_info: Dict[str, Any] = Field(default_factory=dict, description="Detected context reference info")
-    prev_context: Optional[Dict[str, Any]] = Field(None, description="Previous conversation context from Redis")
-
-    # Phase 2: Guest Mode permissions
-    permissions: Dict[str, Any] = Field(default_factory=dict, description="User permissions from mode service")
-
-    # SMS Integration: Additional context (phone_number, calendar_event_id, guest_name, etc.)
-    context: Dict[str, Any] = Field(default_factory=dict, description="Additional context for SMS and guest integration")
-
-    # Classification
-    intent: Optional[IntentCategory] = None
-    confidence: float = 0.0
-    entities: Dict[str, Any] = Field(default_factory=dict)
-    complexity: Optional[str] = Field(None, description="Query complexity: simple, complex, super_complex")
-
-    # Model selection
-    model_tier: Optional[ModelTier] = None
-    model_component: Optional[str] = None  # Component name for model lookup
-    model_used: Optional[str] = None  # Actual model name used for synthesis (e.g. mlx path or ollama tag)
-
-    # Retrieved data
-    retrieved_data: Dict[str, Any] = Field(default_factory=dict)
-    data_source: Optional[str] = None
-    base_knowledge_populated: bool = Field(False, description="True when base knowledge was successfully injected into the system prompt")
-
-    # Response
-    answer: Optional[str] = None
-    citations: List[str] = Field(default_factory=list)
-    skip_synthesis: bool = Field(False, description="Skip LLM synthesis (used by status query optimization)")
-    was_truncated: bool = Field(False, description="Whether response was truncated due to token limit")
-    is_fallback: bool = Field(False, description="Whether response is a fallback/error (should not be cached)")
-
-    # Validation
-    validation_passed: bool = True
-    validation_reason: Optional[str] = None
-    validation_details: List[str] = Field(default_factory=list)
-
-    # Metadata
-    request_id: str = Field(default_factory=lambda: hashlib.md5(str(time.time()).encode()).hexdigest()[:8])
-    start_time: float = Field(default_factory=time.time)
-    node_timings: Dict[str, float] = Field(default_factory=dict)
-    timing_tracker: Optional[Any] = Field(default=None, exclude=True)  # TimingTracker instance for granular timing
-    error: Optional[str] = None
-
-    # LLM Token Metrics (for frontend display)
-    llm_tokens: int = Field(0, description="Number of tokens generated by LLM")
-    llm_tokens_per_second: float = Field(0.0, description="LLM inference throughput")
-
-    # SMS Integration
-    offer_sms: bool = Field(False, description="Whether to offer SMS for this response")
-    sms_content: Optional[str] = Field(None, description="Content to send via SMS if offered")
-    sms_content_type: Optional[str] = Field(None, description="Type of detected SMS content")
-
-    # Intent Discovery
-    is_novel_intent: bool = Field(False, description="Whether this is a novel/discovered intent")
-    emerging_intent_id: Optional[int] = Field(None, description="ID of the emerging intent if novel")
-    novel_intent_name: Optional[str] = Field(None, description="Canonical name of the novel intent")
-
-    # Memory Context
-    memory_context: str = Field("", description="Relevant memories for LLM context augmentation")
-
-    # Multi-Intent Support
-    is_multi_intent: bool = Field(False, description="Whether this query contains multiple intents")
-    intent_parts: List[str] = Field(default_factory=list, description="Split query parts for multi-intent")
-    intent_results: List[Dict[str, Any]] = Field(default_factory=list, description="Results from each intent part")
-    current_intent_index: int = Field(0, description="Current intent being processed")
-
-    # Pronoun Resolution Support
-    needs_history_context: bool = Field(False, description="Whether query needs conversation history for pronoun resolution")
+# OrchestratorState now imported from orchestrator.state
+from orchestrator.state import OrchestratorState
 
 
 async def kill_port(port: int, service_name: str = "service"):
@@ -1683,6 +977,11 @@ async def ensure_gateway_running() -> bool:
     Returns:
         True if gateway is running (or was started), False if failed
     """
+    # Check if Control Agent is disabled — if so, skip keepalive entirely.
+    if not _shared_config.get_config().control_agent_enabled:
+        logger.info("gateway_keepalive_skipped", reason="control_agent_disabled")
+        return True
+
     # Check if gateway startup is disabled
     start_gateway = os.getenv("START_GATEWAY", "true").lower() in ("true", "1", "yes")
     if not start_gateway:
@@ -1731,8 +1030,6 @@ async def ensure_gateway_running() -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
-    global ha_client, llm_router, cache_client, session_manager, rag_client, parallel_search_engine, result_fusion, mode_client, entity_manager, smart_controller, sequence_executor, automation_agent, music_handler, tv_handler, intent_classifier, follow_me_service
-
     # Kill any existing process on orchestrator port before starting
     orchestrator_port = int(os.getenv("ORCHESTRATOR_PORT", "8001"))
     await kill_port(orchestrator_port, "Orchestrator")
@@ -1776,16 +1073,19 @@ async def lifespan(app: FastAPI):
 
     # Initialize clients
     ha_client = HomeAssistantClient(url=ha_url, token=ha_token) if ha_token else None
+    _runtime.set_ha_client(ha_client)
     if not ha_client:
         logger.warning("ha_client_not_initialized", reason="No token available")
 
     # Initialize LLM router with database-driven backend configuration
     llm_router = get_llm_router()
+    _runtime.set_llm_router(llm_router)
     logger.info(f"LLM Router initialized with admin API: {llm_router.admin_url}")
 
     # Initialize entity manager for dynamic HA entity discovery
     if ha_token:
         entity_manager = HAEntityManager(ha_url=ha_url, ha_token=ha_token)
+        _runtime.set_entity_manager(entity_manager)
         try:
             await entity_manager.refresh_entities()
             logger.info("Entity manager initialized with HA entities cached")
@@ -1794,24 +1094,29 @@ async def lifespan(app: FastAPI):
 
         # Initialize smart home controller with LLM intent extraction
         smart_controller = SmartHomeController(entity_manager, llm_router)
+        _runtime.set_smart_controller(smart_controller)
         logger.info("Smart home controller initialized")
 
         # Initialize sequence executor for multi-step commands with delays
         sequence_executor = SequenceExecutor(smart_controller, ha_client)
+        _runtime.set_sequence_executor(sequence_executor)
         logger.info("Sequence executor initialized for multi-step commands")
 
         # Initialize automation agent for dynamic automation handling
         admin_client = get_admin_client()
         automation_agent = AutomationAgent(ha_client, llm_router, admin_client, entity_manager)
+        _runtime.set_automation_agent(automation_agent)
         logger.info("Automation agent initialized for dynamic automation handling")
 
         # Initialize music handler for Music Assistant integration
         admin_client = get_admin_client()
         music_handler = get_music_handler(ha_client, admin_client)
+        _runtime.set_music_handler(music_handler)
         logger.info("Music handler initialized for Music Assistant playback")
 
         # Initialize TV handler for Apple TV control
         tv_handler = get_tv_handler(ha_client, admin_client)
+        _runtime.set_tv_handler(tv_handler)
         logger.info("TV handler initialized for Apple TV control")
 
         # Initialize follow-me audio service (fully configurable via admin)
@@ -1844,6 +1149,7 @@ async def lifespan(app: FastAPI):
                         room_motion_mapping=room_motion_mapping,
                         config=follow_me_cfg
                     )
+                    _runtime.set_follow_me_service(follow_me_service)
                     logger.info(
                         "follow_me_initialized",
                         mode=follow_me_cfg.mode.value,
@@ -1859,13 +1165,16 @@ async def lifespan(app: FastAPI):
         logger.warning("entity_manager_not_initialized", reason="No HA token available")
 
     cache_client = CacheClient()
+    _runtime.set_cache_client(cache_client)
 
     # Initialize session manager
     session_manager = await get_session_manager()
+    _runtime.set_session_manager(session_manager)
     logger.info("Session manager initialized")
 
     # Initialize parallel search engine
     parallel_search_engine = await ParallelSearchEngine.from_environment()
+    _runtime.set_parallel_search_engine(parallel_search_engine)
     logger.info("Parallel search engine initialized")
 
     # Initialize result fusion
@@ -1873,15 +1182,18 @@ async def lifespan(app: FastAPI):
         similarity_threshold=0.7,
         min_confidence=0.5
     )
+    _runtime.set_result_fusion(result_fusion)
     logger.info("Result fusion initialized")
 
     # Phase 2: Initialize mode service client for guest mode
     mode_client = httpx.AsyncClient(base_url=MODE_SERVICE_URL, timeout=10.0)
+    _runtime.set_mode_client(mode_client)
     logger.info(f"Mode service client initialized: {MODE_SERVICE_URL}")
 
     # Initialize unified RAG client with resilience patterns (circuit breaker, rate limiting)
     # Fetches service URLs from admin backend registry, falls back to hardcoded constants
     rag_client = await initialize_rag_client()
+    _runtime.set_rag_client(rag_client)
     logger.info(
         f"Unified RAG client initialized with {len(rag_client._service_urls)} services",
         extra={"from_registry": rag_client.urls_loaded_from_registry}
@@ -1889,6 +1201,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize intent classifier for multi-intent detection
     intent_classifier = IntentClassifier()
+    _runtime.set_intent_classifier(intent_classifier)
     logger.info("Intent classifier initialized for multi-intent detection")
 
     # Check service health via unified RAG client
@@ -1912,26 +1225,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Mode service not available: {e}")
 
+    # Post-init readiness assertion (R2-M2) — logged only; does not raise to avoid
+    # pod restart loops on transient init failures. /health/ready reflects the state.
+    if not _runtime.is_ready():
+        logger.error(
+            "runtime_context_not_fully_initialized",
+            extra={"missing": _runtime.missing_required()}
+        )
+    else:
+        logger.info("runtime_context_ready", extra={"singletons": len(_runtime.required_singletons())})
+
     yield
 
-    # Shutdown
+    # Shutdown — _runtime.close_all() is the sole shutdown path (R2-H1 Pattern A).
+    # Atomic replacement of the 8 explicit if-close lines; avoids double-close window.
+    # admin_client is a per-call client (not a runtime singleton) — closed explicitly.
     logger.info("Shutting down Orchestrator service")
     if admin_client:
         await admin_client.close()
-    if ha_client:
-        await ha_client.close()
-    if llm_router:
-        await llm_router.close()
-    if cache_client:
-        await cache_client.close()
-    if session_manager:
-        await session_manager.close()
-    if parallel_search_engine:
-        await parallel_search_engine.close_all()
-    if mode_client:
-        await mode_client.aclose()
-    if rag_client:
-        await rag_client.close()
+    await _runtime.close_all()
 
 app = FastAPI(
     title="Athena Orchestrator",
@@ -1965,9 +1277,13 @@ async def check_service_bypass(intent: str) -> Optional[Dict[str, Any]]:
         Bypass configuration dict if enabled, None otherwise
     """
     try:
+        headers = {}
+        if _SERVICE_API_KEY:
+            headers["X-Service-Key"] = _SERVICE_API_KEY
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
-                f"{ADMIN_URL}/api/rag-service-bypass/public/{intent}/config"
+                f"{ADMIN_API_URL}/api/rag-service-bypass/public/{intent}/config",
+                headers=headers
             )
             if response.status_code == 200:
                 config = response.json()
@@ -2035,8 +1351,7 @@ async def handle_query_with_bypass(
             system_prompt = f"{system_prompt}\n\nContext: {'; '.join(context_parts)}"
 
         # Generate with cloud LLM
-        from shared.llm_router import get_llm_router
-        llm_router = get_llm_router()
+        llm_router = _runtime.get_llm_router()
 
         bypass_start = time.time()
         response = await llm_router.generate(
@@ -2068,64 +1383,6 @@ async def handle_query_with_bypass(
 
     return None  # Fall back to local RAG on any failure
 
-
-async def get_rag_service_url(intent: str) -> Optional[str]:
-    """
-    Get RAG service URL for intent from service registry.
-
-    Priority order:
-    1. Intent routing table (for custom routing overrides)
-    2. Service registry (source of truth for service URLs)
-    3. Environment variables (last resort fallback)
-
-    Args:
-        intent: Intent category (e.g., "weather", "sports", "airports")
-
-    Returns:
-        RAG service URL or None
-    """
-    # 1. First try intent routing table (for custom routing)
-    try:
-        client = get_admin_client()
-        routing_config = await client.get_intent_routing()
-
-        if routing_config and intent in routing_config:
-            url = routing_config[intent].get("rag_service_url")
-            if url:
-                logger.info(f"Using intent routing URL for '{intent}': {url}")
-                return url
-    except Exception as e:
-        logger.debug(f"Intent routing lookup failed for '{intent}': {e}")
-
-    # 2. Query service registry (source of truth)
-    try:
-        registry_url = await registry_get_service_url(intent)
-        if registry_url:
-            logger.info(f"Using service registry URL for '{intent}': {registry_url}")
-            return registry_url
-    except Exception as e:
-        logger.warning(f"Service registry lookup failed for '{intent}': {e}")
-
-    # 3. Last resort: environment variable fallback
-    env_var_map = {
-        "weather": WEATHER_SERVICE_URL,
-        "onecall": ONECALL_SERVICE_URL,
-        "airports": AIRPORTS_SERVICE_URL,
-        "sports": SPORTS_SERVICE_URL,
-        "flights": FLIGHTS_SERVICE_URL,
-        "events": EVENTS_SERVICE_URL,
-        "streaming": STREAMING_SERVICE_URL,
-        "news": NEWS_SERVICE_URL,
-        "stocks": STOCKS_SERVICE_URL,
-        "websearch": WEBSEARCH_SERVICE_URL,
-        "dining": DINING_SERVICE_URL,
-        "recipes": RECIPES_SERVICE_URL,
-        "directions": DIRECTIONS_SERVICE_URL,
-    }
-    fallback_url = env_var_map.get(intent)
-    if fallback_url:
-        logger.warning(f"Using env var fallback URL for '{intent}': {fallback_url} (service registry unavailable)")
-    return fallback_url
 
 
 # ============================================================================
@@ -2544,361 +1801,9 @@ async def log_escalation_audit(session_id: str, rule_name: str, target: str, tri
                 }
             }
         )
-    except Exception:
-        pass  # Don't fail main flow for audit logging
-
-
-# ============================================================================
-# Phase 2: Guest Mode Permission Functions
-# ============================================================================
-
-async def get_current_mode() -> Dict[str, Any]:
-    """
-    Get current mode from mode service (Phase 2: Guest Mode).
-
-    Fetches mode (guest vs owner) and permission settings from the mode service.
-    Falls back to owner mode if service unavailable (safe default).
-
-    Returns:
-        Dict with mode, permissions, and metadata
-    """
-    try:
-        response = await mode_client.get("/mode")
-        response.raise_for_status()
-        mode_data = response.json()
-
-        # Get permissions for current mode
-        perms_response = await mode_client.get("/mode/permissions")
-        perms_response.raise_for_status()
-        permissions = perms_response.json()
-
-        logger.info(
-            "mode_fetched",
-            mode=mode_data.get("mode", "owner"),
-            override_active=mode_data.get("override_active", False)
-        )
-
-        return {
-            "mode": mode_data.get("mode", "owner"),
-            "permissions": permissions,
-            "override_active": mode_data.get("override_active", False),
-            "reason": mode_data.get("reason", "Unknown")
-        }
     except Exception as e:
-        logger.warning(f"Failed to get mode from mode service: {e}")
-        # Default to owner mode on error (safe default)
-        return {
-            "mode": "owner",
-            "permissions": {
-                "mode": "owner",
-                "allowed_intents": [],
-                "restricted_entities": [],
-                "allowed_domains": [],
-                "max_queries_per_minute": 100
-            },
-            "override_active": False,
-            "reason": "Mode service unavailable"
-        }
+        logger.warning("log_escalation_audit_failed", error=str(e))  # Don't fail main flow for audit logging
 
-
-# ============================================================================
-# Phase 4: Voice PIN Override Detection and Handling
-# ============================================================================
-
-# Patterns for detecting owner mode commands
-OWNER_MODE_PATTERNS = [
-    r"\b(switch|change|enable|activate)\s+(to\s+)?owner\s*mode\b",
-    r"\bowner\s*mode\b.*\bpin\b",
-    r"\bpin\b.*\bowner\s*mode\b",
-    r"\bi'?m\s+(the\s+)?owner\b",
-    r"\bexit\s+guest\s*mode\b",
-    r"\bdeactivate\s+guest\s*mode\b",
-    r"\bowner\s+override\b",
-]
-
-
-def detect_owner_mode_command(query: str) -> bool:
-    """
-    Detect if the query is an owner mode command (Phase 4: Voice PIN Override).
-
-    Args:
-        query: User query string
-
-    Returns:
-        True if query appears to be an owner mode command
-    """
-    query_lower = query.lower()
-    for pattern in OWNER_MODE_PATTERNS:
-        if re.search(pattern, query_lower):
-            return True
-    return False
-
-
-def extract_pin_from_query(query: str) -> Optional[str]:
-    """
-    Extract a 6-digit PIN from a query (Phase 4: Voice PIN Override).
-
-    Handles various spoken formats:
-    - "pin 123456"
-    - "pin one two three four five six"
-    - "code 123456"
-    - "123456"
-
-    Args:
-        query: User query string
-
-    Returns:
-        6-digit PIN string or None if not found
-    """
-    # Word to digit mapping for spoken numbers
-    word_to_digit = {
-        "zero": "0", "oh": "0", "o": "0",
-        "one": "1", "won": "1",
-        "two": "2", "to": "2", "too": "2",
-        "three": "3", "tree": "3",
-        "four": "4", "for": "4", "fore": "4",
-        "five": "5",
-        "six": "6", "sicks": "6", "sex": "6",
-        "seven": "7",
-        "eight": "8", "ate": "8",
-        "nine": "9", "niner": "9",
-    }
-
-    query_lower = query.lower()
-
-    # First try to find numeric digits directly
-    # Match 6 consecutive digits
-    numeric_match = re.search(r'\b(\d{6})\b', query_lower)
-    if numeric_match:
-        return numeric_match.group(1)
-
-    # Match 6 digits with spaces between them (e.g., "1 2 3 4 5 6")
-    spaced_match = re.search(r'\b(\d)\s+(\d)\s+(\d)\s+(\d)\s+(\d)\s+(\d)\b', query_lower)
-    if spaced_match:
-        return ''.join(spaced_match.groups())
-
-    # Try to find spoken digits after "pin" or "code"
-    pin_context = re.search(r'(?:pin|code)\s+(.+)', query_lower)
-    if pin_context:
-        digit_portion = pin_context.group(1)
-        digits = []
-
-        # Split by spaces and convert words to digits
-        words = digit_portion.split()
-        for word in words:
-            # Clean punctuation
-            word_clean = re.sub(r'[^\w]', '', word)
-            if word_clean.isdigit():
-                digits.append(word_clean)
-            elif word_clean in word_to_digit:
-                digits.append(word_to_digit[word_clean])
-
-            # Stop if we have 6 digits
-            if len(digits) >= 6:
-                break
-
-        if len(digits) == 6:
-            return ''.join(digits)
-
-    return None
-
-
-async def activate_owner_override(
-    pin: Optional[str],
-    voice_device_id: Optional[str] = None,
-    timeout_minutes: Optional[int] = None
-) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
-    """
-    Activate owner mode override via mode service (Phase 4: Voice PIN Override).
-
-    Args:
-        pin: 6-digit PIN or None
-        voice_device_id: Optional device identifier
-        timeout_minutes: Override duration
-
-    Returns:
-        Tuple of (success, message, response_data)
-    """
-    try:
-        request_data = {
-            "mode": "owner",
-            "voice_pin": pin,
-            "timeout_minutes": timeout_minutes,
-            "voice_device_id": voice_device_id
-        }
-
-        response = await mode_client.post("/mode/override", json=request_data)
-
-        if response.status_code == 200:
-            data = response.json()
-            logger.info(
-                "owner_override_activated",
-                expires_at=data.get("expires_at"),
-                device=voice_device_id
-            )
-            return True, data.get("message", "Owner mode activated."), data
-
-        elif response.status_code == 401:
-            # PIN required but not provided
-            logger.info("owner_override_pin_required", device=voice_device_id)
-            return False, "Please provide your 6-digit owner PIN. Say 'owner mode' followed by your PIN.", None
-
-        elif response.status_code == 403:
-            # Invalid PIN
-            logger.warning("owner_override_pin_invalid", device=voice_device_id)
-            return False, "Invalid PIN. Access denied.", None
-
-        elif response.status_code == 400:
-            # Invalid PIN format
-            detail = response.json().get("detail", "Invalid PIN format")
-            logger.warning("owner_override_invalid_format", detail=detail, device=voice_device_id)
-            return False, f"{detail}. Please provide a 6-digit PIN.", None
-
-        else:
-            logger.error(
-                "owner_override_unexpected_error",
-                status_code=response.status_code,
-                device=voice_device_id
-            )
-            return False, "Unable to process owner mode request. Please try again.", None
-
-    except Exception as e:
-        logger.error(f"owner_override_failed: {e}")
-        return False, "Mode service unavailable. Owner mode request could not be processed.", None
-
-
-def check_intent_permission(intent: IntentCategory, permissions: Dict[str, Any]) -> bool:
-    """
-    Check if intent is allowed based on current permissions (Phase 2: Guest Mode).
-
-    Uses a deny-list approach: intents in restricted_intents are blocked,
-    everything else is allowed (unless allowed_intents is populated).
-
-    Args:
-        intent: Intent category
-        permissions: Permissions from mode service
-
-    Returns:
-        True if allowed, False otherwise
-    """
-    mode = permissions.get("mode", "owner")
-
-    # Owner mode: everything allowed
-    if mode == "owner":
-        return True
-
-    intent_value = intent.value.lower()
-
-    # Primary check: restricted_intents (deny list)
-    restricted_intents = permissions.get("restricted_intents", [])
-    if restricted_intents:
-        is_restricted = intent_value in [i.lower() for i in restricted_intents]
-        if is_restricted:
-            logger.info(
-                "intent_blocked_restricted",
-                intent=intent_value,
-                mode=mode,
-                restricted_intents=restricted_intents
-            )
-            return False
-
-    # Secondary check: allowed_intents (allow list) if populated
-    allowed_intents = permissions.get("allowed_intents", [])
-    if allowed_intents:
-        is_allowed = intent_value in [i.lower() for i in allowed_intents]
-        logger.info(
-            "intent_permission_check",
-            intent=intent_value,
-            mode=mode,
-            allowed=is_allowed,
-            allowed_intents=allowed_intents
-        )
-        return is_allowed
-
-    # No allow list specified - allow by default (only restricted_intents blocked)
-    logger.info(
-        "intent_allowed_default",
-        intent=intent_value,
-        mode=mode
-    )
-    return True
-
-
-def check_entity_permission(entity_id: str, permissions: Dict[str, Any]) -> bool:
-    """
-    Check if entity access is allowed based on current permissions (Phase 2: Guest Mode).
-
-    Uses regex patterns for restricted_entities (e.g., ".*tesla.*", ".*vehicle.*").
-    Falls back to domain-based allow list if no match.
-
-    Args:
-        entity_id: Home Assistant entity ID (e.g., "light.bedroom")
-        permissions: Permissions from mode service
-
-    Returns:
-        True if allowed, False otherwise
-    """
-    import re
-
-    mode = permissions.get("mode", "owner")
-
-    # Owner mode: everything allowed
-    if mode == "owner":
-        return True
-
-    # Guest mode: check restrictions
-    restricted_entities = permissions.get("restricted_entities", [])
-    allowed_domains = permissions.get("allowed_domains", [])
-
-    # Check if entity matches restricted pattern (supports regex)
-    for pattern in restricted_entities:
-        try:
-            if re.match(pattern, entity_id, re.IGNORECASE):
-                logger.info(
-                    "entity_blocked_by_regex",
-                    entity_id=entity_id,
-                    pattern=pattern,
-                    mode=mode
-                )
-                return False
-        except re.error:
-            # Invalid regex - try simple wildcard match as fallback
-            if pattern.endswith("*"):
-                prefix = pattern[:-1]
-                if entity_id.startswith(prefix):
-                    logger.info(
-                        "entity_blocked_by_wildcard",
-                        entity_id=entity_id,
-                        pattern=pattern,
-                        mode=mode
-                    )
-                    return False
-            elif pattern == entity_id:
-                logger.info(
-                    "entity_blocked_exact",
-                    entity_id=entity_id,
-                    mode=mode
-                )
-                return False
-
-    # Check if entity domain is allowed
-    entity_domain = entity_id.split(".")[0] if "." in entity_id else entity_id
-    if allowed_domains and entity_domain not in allowed_domains:
-        logger.info(
-            "entity_blocked_domain",
-            entity_id=entity_id,
-            domain=entity_domain,
-            allowed_domains=allowed_domains,
-            mode=mode
-        )
-        return False
-
-    logger.info(
-        "entity_allowed",
-        entity_id=entity_id,
-        mode=mode
-    )
-    return True
 
 
 # ============================================================================
@@ -2912,6 +1817,9 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     Also detects and handles multi-intent queries.
     """
     start = time.time()
+    cache = _runtime.get_cache_client()
+    llm = _runtime.get_llm_router()
+    classifier = _runtime.get_intent_classifier()
 
     # STT error correction for common Whisper transcription mistakes
     # Apply early so all classification paths use the corrected query
@@ -3076,8 +1984,8 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 context = await get_conversation_context(state.session_id)
                 if context and context.get("entities"):
                     has_context = True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("get_conversation_context_failed", error=str(e))
         if not has_context:
             state.intent = IntentCategory.GENERAL_INFO
             state.answer = ("I don't have memory of previous sessions. Each conversation starts fresh. "
@@ -3149,8 +2057,8 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     # MULTI-INTENT DETECTION
     # Check if query contains multiple intents (e.g., "turn on the lights and what's the weather")
     # Skip for sequence commands - they should be handled as a single unit
-    if intent_classifier and not state.is_multi_intent and not is_sequence_command:
-        intent_parts = intent_classifier.detect_multi_intent(state.query)
+    if classifier and not state.is_multi_intent and not is_sequence_command:
+        intent_parts = classifier.detect_multi_intent(state.query)
         if len(intent_parts) > 1:
             logger.info(
                 f"Multi-intent detected: '{state.query[:50]}...' split into {len(intent_parts)} parts",
@@ -3359,7 +2267,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
     try:
         if not skip_cache:
-            cached = await cache_client.get(cache_key)
+            cached = await cache.get(cache_key)
             if state.timing_tracker:
                 state.timing_tracker.track_substage("graph", "classify", "cache_check", time.time() - cache_start)
             if cached:
@@ -3394,7 +2302,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -3445,7 +2353,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -3503,7 +2411,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -3539,7 +2447,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -3574,7 +2482,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -3620,7 +2528,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
         # Cache the classification
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,
@@ -3673,7 +2581,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
                     # Cache the classification for future queries
                     try:
-                        await cache_client.set(cache_key, {
+                        await cache.set(cache_key, {
                             "intent": state.intent.value,
                             "confidence": state.confidence,
                             "complexity": state.complexity,
@@ -3761,7 +2669,7 @@ Respond in JSON format:
         classifier_model = classifier_config["model_name"]
 
         llm_start = time.time()
-        result = await llm_router.generate(
+        result = await llm.generate(
             model=classifier_model,
             prompt=full_prompt,
             temperature=0.3,  # Lower temperature for consistent classification
@@ -4063,7 +2971,7 @@ Respond in JSON format:
                     query=state.query,
                     current_intent=state.intent.value if state.intent else "unknown",
                     current_confidence=state.confidence,
-                    llm_router=llm_router,
+                    llm_router=llm,
                     admin_api_url=ADMIN_API_URL
                 )
 
@@ -4100,7 +3008,7 @@ Respond in JSON format:
 
         # OPTIMIZATION: Cache the result (5 minute TTL)
         try:
-            await cache_client.set(cache_key, {
+            await cache.set(cache_key, {
                 "intent": state.intent.value,
                 "confidence": state.confidence,
                 "complexity": state.complexity,  # NEW: Cache complexity
@@ -4520,7 +3428,8 @@ def _pattern_based_classification(query: str, return_confidence: bool = False):
     recipe_patterns = [
         "recipe", "recipes", "how to make", "how to cook", "how to bake",
         "how do i make", "how do you make", "cooking instructions",
-        "ingredients for", "what's in", "homemade", "from scratch"
+        "ingredients for", "what's in this recipe", "what's in this dish",
+        "homemade", "from scratch"
     ]
     if any(p in query_lower for p in recipe_patterns):
         return result(IntentCategory.RECIPES)
@@ -4584,2151 +3493,9 @@ def _pattern_based_classification(query: str, return_confidence: bool = False):
     # for truly novel queries, but not common conversational patterns
     return result(IntentCategory.GENERAL_INFO, is_specific=False)
 
-async def route_control_node(state: OrchestratorState) -> OrchestratorState:
-    """
-    Handle home automation control commands via Home Assistant API.
-    Uses LLM-based intent extraction and dynamic entity discovery.
-    Supports context continuation for follow-up commands.
-    """
-    start = time.time()
 
-    try:
-        # FAST PATH: Check if this is a sensor/occupancy query from fast-path classification
-        # If entities already indicate sensor, go directly to sensor handler
-        if state.entities and state.entities.get("device_type") == "sensor":
-            logger.info(f"Fast path sensor query detected, routing to sensor handler")
-            if smart_controller:
-                result = await smart_controller._handle_sensor_intent(
-                    "sensor",
-                    state.entities.get("parameters", {}),
-                    state.query
-                )
-                state.answer = result
-                state.node_timings["route_control"] = time.time() - start
-                return state
 
-        # PRESENCE/OCCUPANCY QUERY DETECTION - Pattern-based fast path
-        # These queries should go to sensor handler, not LLM extraction
-        query_lower = state.query.lower()
-        presence_patterns = [
-            "anyone home", "anybody home", "someone home", "who's home", "who is home",
-            "is anyone", "is anybody", "is someone", "anyone there", "anybody there",
-            # Round 15: "is there anybody in the basement"
-            "anybody in", "anyone in", "someone in", "somebody in",
-            "is there anybody", "is there anyone", "is there someone",
-            "someone was home", "anyone was home", "anybody was home",
-            "last time someone", "last time anyone", "last time somebody",
-            "when was someone", "when was anyone", "when was the last",
-            "last motion", "last movement", "last activity",
-            "recent motion", "recent activity", "who was home", "who was here",
-            "occupancy", "is the house empty", "house empty", "home empty"
-        ]
-        if any(p in query_lower for p in presence_patterns):
-            logger.info(f"Presence/occupancy query detected via pattern matching: {state.query[:50]}...")
-            if smart_controller:
-                result = await smart_controller._handle_sensor_intent(
-                    "sensor",
-                    {"query_type": "presence"},
-                    state.query
-                )
-                state.answer = result
-                state.node_timings["route_control"] = time.time() - start
-                return state
 
-        # HA STATUS QUERY OPTIMIZATION (2026-01-12)
-        # Detect status queries and use optimized bulk HA state queries
-        # This saves 1-3 seconds by avoiding per-entity queries and LLM synthesis
-        status_bulk_config = await get_feature_config("status_bulk_query")
-        status_skip_config = await get_feature_config("status_skip_synthesis")
-
-        if status_bulk_config.get("enabled", True) and detect_status_query_type(state.query):
-            try:
-                # Check if we have HA entity access via global entity_manager
-                if entity_manager:
-                    status_start = time.time()
-
-                    # Use optimized status query handler
-                    status_result = await optimize_status_query(
-                        state.query,
-                        entity_manager=entity_manager,
-                        feature_config=status_bulk_config.get("config", {})
-                    )
-
-                    if status_result:
-                        # Check if we should skip synthesis
-                        skip_synthesis_enabled = status_skip_config.get("enabled", True)
-                        should_skip, templated_response = should_skip_synthesis(
-                            status_result,
-                            feature_enabled=skip_synthesis_enabled
-                        )
-
-                        if should_skip and templated_response:
-                            # Return templated response directly - skip LLM synthesis
-                            state.answer = templated_response
-                            state.skip_synthesis = True
-                            status_duration = time.time() - status_start
-
-                            logger.info(
-                                "status_query_optimized",
-                                query=state.query[:50],
-                                query_type=status_result.query_type,
-                                entity_count=len(status_result.entities),
-                                skip_synthesis=True,
-                                duration_ms=round(status_duration * 1000, 1)
-                            )
-
-                            state.node_timings["route_control"] = time.time() - start
-                            return state
-                        else:
-                            # Low confidence or synthesis needed - store raw states for LLM
-                            state.context = state.context or {}
-                            state.context["ha_status_data"] = {
-                                "query_type": status_result.query_type,
-                                "entities": status_result.entities,
-                                "raw_states": status_result.raw_states
-                            }
-                            logger.info(
-                                "status_query_bulk_loaded",
-                                query_type=status_result.query_type,
-                                entity_count=len(status_result.entities)
-                            )
-                            # Fall through to normal processing with pre-loaded data
-            except Exception as e:
-                logger.warning(f"Status query optimization failed, falling back: {e}")
-
-        # Use smart controller for LLM-based intent extraction and execution
-        if smart_controller:
-            # AUTOMATION SYSTEM MODE: Check if we should use dynamic agent vs pattern matching
-            automation_mode = await get_automation_system_mode()
-
-            # DYNAMIC AGENT: Route sequences/automations to LLM-based agent
-            if automation_mode == "dynamic_agent" and automation_agent and should_use_automation_agent(state.query):
-                logger.info(f"Dynamic agent mode - routing to automation agent: {state.query[:50]}...")
-
-                # Build context for automation agent
-                context = {
-                    "room": state.room,
-                    "mode": state.mode,
-                    "session_id": state.session_id,
-                    "guest_name": getattr(state, 'guest_name', None),
-                    "guest_session_id": getattr(state, 'guest_session_id', None),
-                }
-
-                # Execute via automation agent
-                result = await automation_agent.execute(
-                    query=state.query,
-                    context=context,
-                    model="llama3.1:8b"  # Use capable model for automation
-                )
-                state.answer = result
-                state.node_timings["route_control"] = time.time() - start
-                return state
-
-            # PATTERN MATCHING: Check if this is a multi-step command with delays/loops/scheduling
-            if smart_controller.detect_sequence_intent(state.query):
-                logger.info(f"Sequence intent detected (pattern matching mode): {state.query[:50]}...")
-
-                # Extract sequence from the complex command
-                sequence_data = await smart_controller.extract_sequence_intent(
-                    state.query,
-                    device_room=state.room
-                )
-
-                if sequence_data and sequence_data.get("steps"):
-                    steps = sequence_data["steps"]
-                    acknowledge = sequence_data.get("acknowledge", "Starting sequence...")
-
-                    logger.info(f"Executing sequence with {len(steps)} steps")
-
-                    # Execute sequence in background - return acknowledgment immediately
-                    if sequence_executor:
-                        result = await sequence_executor.execute_sequence(
-                            steps,
-                            session_id=state.session_id,
-                            background=True
-                        )
-                        state.answer = acknowledge
-                    else:
-                        state.answer = "Sequence executor not available."
-
-                    state.node_timings["route_control"] = time.time() - start
-                    return state
-
-            # Check if we have previous context from classify_node
-            has_context = state.prev_context is not None
-            ref_info = state.context_ref_info or {}
-
-            # Handle inquiry follow-ups - return info about previous action instead of executing
-            if has_context and ref_info.get("is_inquiry"):
-                prev = state.prev_context
-                prev_response = prev.get("response", "")
-                prev_entities = prev.get("entities", {})
-                prev_room = prev_entities.get("room", "unknown")
-                prev_action = prev.get("parameters", {}).get("action", "")
-
-                # Generate conversational response about what was done
-                if prev_room and prev_response:
-                    state.answer = f"I {prev_action.replace('_', 'ed ').replace('turn_', 'turned ')} the {prev_room} lights. {prev_response}"
-                else:
-                    state.answer = prev_response or "I performed the action you requested."
-
-                logger.info(f"Inquiry follow-up answered from context: room={prev_room}, action={prev_action}")
-                state.node_timings["route_control"] = time.time() - start
-                return state
-
-            if has_context and ref_info.get("has_context_ref"):
-                # Use previous context to resolve the command
-                prev = state.prev_context
-                prev_params = prev.get("parameters", {})
-                prev_query = prev.get("query", "")
-                prev_response = prev.get("response", "")
-                prev_entities = prev.get("entities", {})
-
-                # Merge entities and parameters for full context
-                # prev_params is the full intent, prev_entities has room/device_type
-                prev_intent_for_llm = prev_params.copy() if prev_params else {}
-                if prev_entities:
-                    prev_intent_for_llm.update(prev_entities)
-
-                # Extract intent with conversation context for corrections/follow-ups
-                # e.g., "no, just my side" after "Warming bed on both sides at level 3"
-                new_intent = await smart_controller.extract_intent(
-                    state.query,
-                    device_room=state.room,
-                    prev_query=prev_query,
-                    prev_response=prev_response,
-                    prev_intent_entities=prev_intent_for_llm
-                )
-                new_room = new_intent.get('room')
-
-                # Merge previous context with new info
-                # Start with previous parameters as base
-                intent = prev_params.copy() if prev_params else {}
-
-                # If new intent has meaningful data, merge it (preserving previous params not overwritten)
-                if new_intent.get('device_type') and new_intent.get('action'):
-                    # Merge parameters: start with previous, update with new
-                    prev_params_dict = intent.get('parameters', {}) if isinstance(intent.get('parameters'), dict) else {}
-                    new_params_dict = new_intent.get('parameters', {}) if isinstance(new_intent.get('parameters'), dict) else {}
-                    merged_params = {**prev_params_dict, **new_params_dict}
-
-                    # Now merge the intent itself
-                    intent.update(new_intent)
-                    intent['parameters'] = merged_params
-                    logger.info(f"LLM interpreted follow-up with context: {intent}")
-
-                # If new room specified, use it; otherwise keep previous room
-                if new_room:
-                    intent['room'] = new_room
-                    logger.info(f"Context continuation - applying previous command to new room: {new_room}")
-                elif prev.get("entities", {}).get("room"):
-                    intent['room'] = prev["entities"]["room"]
-
-                # Handle reversal patterns - "turn them back on", "turn it back off"
-                query_lower = state.query.lower()
-                if "back on" in query_lower or "on again" in query_lower:
-                    intent["action"] = "turn_on"
-                    logger.info("Context reversal: detected 'back on' - setting action to turn_on")
-                elif "back off" in query_lower or "off again" in query_lower:
-                    intent["action"] = "turn_off"
-                    logger.info("Context reversal: detected 'back off' - setting action to turn_off")
-
-                # Handle modifier-based adjustments
-                if "modifier" in ref_info.get("ref_types", []):
-                    if "brighter" in query_lower:
-                        # Increase brightness
-                        current_brightness = intent.get("parameters", {}).get("brightness", 200)
-                        intent.setdefault("parameters", {})["brightness"] = min(255, current_brightness + 50)
-                        intent["action"] = "set_brightness"
-                    elif "dimmer" in query_lower:
-                        # Decrease brightness
-                        current_brightness = intent.get("parameters", {}).get("brightness", 200)
-                        intent.setdefault("parameters", {})["brightness"] = max(50, current_brightness - 50)
-                        intent["action"] = "set_brightness"
-                    elif "different color" in query_lower or "another color" in query_lower:
-                        # Re-extract to get new colors with context
-                        intent = await smart_controller.extract_intent(
-                            state.query + " different colors",
-                            device_room=state.room,
-                            prev_query=prev_query,
-                            prev_response=prev_response,
-                            prev_intent_entities=prev_intent_for_llm
-                        )
-                        if prev.get("entities", {}).get("room"):
-                            intent['room'] = prev["entities"]["room"]
-                    logger.info(f"Modifier adjustment applied: {ref_info.get('ref_types')}")
-
-                # Ensure we have required fields
-                if not intent.get('device_type'):
-                    intent['device_type'] = prev_params.get('device_type', 'light')
-                if not intent.get('action'):
-                    intent['action'] = prev_params.get('action', 'set_color')
-            else:
-                # Normal extraction - no context continuation
-                # Pass device room for context when query doesn't specify room
-                intent = await smart_controller.extract_intent(state.query, device_room=state.room)
-
-            logger.info(f"Extracted intent: {intent}")
-
-            # Execute the intent with permission checking
-            device_type = intent.get('device_type', 'light')
-            room = intent.get('room')
-
-            # Execute the command (pass original query for fallback room extraction, and device_room for context)
-            result = await smart_controller.execute_intent(intent, ha_client, original_query=state.query, device_room=state.room)
-            state.answer = result
-            state.retrieved_data = {"intent": intent}
-
-            logger.info(f"Smart control executed: {intent.get('action')} on {device_type} in {room}")
-
-            # Store context for future reference using new context system
-            if state.session_id and "couldn't" not in result.lower():
-                await store_conversation_context(
-                    session_id=state.session_id,
-                    intent="control",
-                    query=state.query,
-                    entities={"room": room, "device_type": device_type},
-                    parameters=intent,
-                    response=result,
-                    ttl=300  # 5 minutes
-                )
-
-        else:
-            # Fallback to simple pattern matching if smart controller not available
-            device = state.entities.get("device")
-            query_lower = state.query.lower()
-
-            # Simple pattern matching for common commands
-            if "turn on" in query_lower:
-                action = "turn_on"
-            elif "turn off" in query_lower:
-                action = "turn_off"
-            else:
-                action = None
-
-            if not device:
-                device = "light.office"  # Default
-
-            if device and action:
-                # Phase 2: Check entity permission before executing command
-                if not check_entity_permission(device, state.permissions):
-                    logger.warning(
-                        "entity_blocked_by_guest_mode",
-                        entity_id=device,
-                        mode=state.mode
-                    )
-                    state.answer = f"I'm sorry, you don't have permission to control {device.replace('_', ' ').replace('.', ' ')} in {state.mode} mode."
-                    state.error = "permission_denied"
-                    return state
-
-                # Call Home Assistant service
-                domain = device.split(".")[0]
-                result = await ha_client.call_service(
-                    domain=domain,
-                    service=action,
-                    service_data={"entity_id": device}
-                )
-
-                state.answer = f"Done! I've turned {'on' if action == 'turn_on' else 'off'} the {device.replace('_', ' ').replace('.', ' ')}."
-                state.retrieved_data = {"ha_response": result}
-
-            else:
-                state.answer = "I understand you want to control something, but I need more details."
-
-            logger.info(f"Fallback control executed: {device} - {action}")
-
-    except Exception as e:
-        logger.error(f"Control execution error: {e}", exc_info=True)
-        state.answer = "I encountered an error while trying to control that device. Please try again."
-        state.error = str(e)
-
-    route_control_duration = time.time() - start
-    state.node_timings["route_control"] = route_control_duration
-    # Track node time to Prometheus
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "route_control", route_control_duration)
-    return state
-
-
-async def route_music_node(state: OrchestratorState) -> OrchestratorState:
-    """
-    Handle music playback and control commands via Music Assistant.
-
-    Supports:
-    - Playing music (artists, albums, playlists, genres)
-    - Music controls (pause, next, volume)
-    - Multi-room playback
-    - Queue management
-    - Music transfer between rooms
-    - Browser playback (Jarvis Web)
-    """
-    start = time.time()
-
-    try:
-        if not music_handler:
-            state.answer = "Music playback is not configured. Please set up Music Assistant in Home Assistant."
-            state.error = "music_handler_not_initialized"
-            state.node_timings["route_music"] = time.time() - start
-            return state
-
-        if state.intent == IntentCategory.MUSIC_PLAY:
-            # Parse the play intent, passing interface_type for browser detection
-            intent_data = await music_handler.parse_music_play_intent(
-                state.query,
-                room=state.room,
-                interface_type=getattr(state, 'interface_type', None)
-            )
-
-            # Check for browser playback request
-            play_in_browser = intent_data.get("play_in_browser", False)
-
-            if play_in_browser:
-                # Browser playback requested via "here", "on this device", etc.
-                # Since direct browser streaming doesn't work for Spotify (DRM),
-                # we play on the room speaker instead and show a mini player UI
-                logger.info(
-                    "browser_playback_requested_fallback_to_room",
-                    media_type=intent_data.get("media_type"),
-                    media_id=intent_data.get("media_id"),
-                    room=state.room
-                )
-
-                media_id = intent_data.get("media_id", "")
-                media_type = intent_data.get("media_type", "artist")
-
-                # Play on the room speaker (fallback since browser streaming not supported)
-                target_room = state.room if state.room and state.room != "jarvis_web" else "office"
-                result = await music_handler.handle_play(
-                    media_type=media_type,
-                    media_id=media_id,
-                    room=target_room,
-                    radio_mode=intent_data.get("radio_mode", True)
-                )
-
-                state.answer = f"Playing {media_id} on {target_room}."
-                state.retrieved_data = {
-                    "music_intent": intent_data,
-                    "playback_room": target_room
-                }
-
-            else:
-                # Check if this is a room group request
-                # parse_music_play_intent now sets is_room_group if it matched a group/alias
-                is_room_group = intent_data.get("is_room_group", False)
-
-                if is_room_group:
-                    # Play to room group (synced playback)
-                    result = await music_handler.handle_room_group_play(
-                        group_name=intent_data.get("room"),
-                        media_type=intent_data.get("media_type"),
-                        media_id=intent_data.get("media_id"),
-                        radio_mode=intent_data.get("radio_mode", True)
-                    )
-                else:
-                    # Single room playback
-                    result = await music_handler.handle_play(
-                        media_type=intent_data.get("media_type"),
-                        media_id=intent_data.get("media_id"),
-                        room=intent_data.get("room"),
-                        radio_mode=intent_data.get("radio_mode", True)
-                    )
-
-                state.answer = result
-                state.retrieved_data = {"music_intent": intent_data}
-
-            logger.info(
-                "music_play_handled",
-                media_id=intent_data.get("media_id"),
-                room=intent_data.get("room"),
-                browser=play_in_browser
-            )
-
-        elif state.intent == IntentCategory.MUSIC_CONTROL:
-            # Parse the control intent
-            intent_data = await music_handler.parse_music_control_intent(
-                state.query,
-                room=state.room
-            )
-
-            result = await music_handler.handle_control(
-                action=intent_data.get("action"),
-                room=intent_data.get("room"),
-                volume_level=intent_data.get("volume_level")
-            )
-
-            state.answer = result
-            state.retrieved_data = {"music_intent": intent_data}
-
-            logger.info(
-                "music_control_handled",
-                action=intent_data.get("action"),
-                room=intent_data.get("room")
-            )
-
-        # Store context for potential follow-up commands
-        if state.session_id and state.answer and "sorry" not in state.answer.lower():
-            await store_conversation_context(
-                session_id=state.session_id,
-                intent="music",
-                query=state.query,
-                entities={"room": state.room},
-                parameters=state.retrieved_data.get("music_intent", {}),
-                response=state.answer,
-                ttl=300  # 5 minutes
-            )
-
-    except Exception as e:
-        logger.error(f"Music execution error: {e}", exc_info=True)
-        state.answer = "I encountered an error with music playback. Please try again."
-        state.error = str(e)
-
-    route_music_duration = time.time() - start
-    state.node_timings["route_music"] = route_music_duration
-    # Track node time to Prometheus
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "route_music", route_music_duration)
-    return state
-
-
-async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
-    """
-    Handle Apple TV control commands.
-
-    Supports:
-    - Launching apps (Netflix, YouTube, Disney+, etc.)
-    - Power control (on/off)
-    - Remote navigation (up, down, left, right, select, menu, home)
-    - Playback control (play, pause)
-    - YouTube deep links
-    - Multi-TV control ("open Netflix everywhere")
-    """
-    start = time.time()
-
-    try:
-        if not tv_handler:
-            state.answer = "Apple TV control is not configured. Please set up the TV handler."
-            state.error = "tv_handler_not_initialized"
-            state.node_timings["route_tv"] = time.time() - start
-            return state
-
-        # Parse the TV intent from the query
-        guest_mode = state.mode == "guest"
-        intent = await tv_handler.parse_tv_intent(state.query, room=state.room, mode=state.mode)
-
-        logger.info(
-            "tv_intent_parsed",
-            action=intent.action,
-            app=intent.app_name,
-            room=intent.room,
-            all_tvs=intent.all_tvs
-        )
-
-        result = None
-
-        if intent.action == "launch":
-            if intent.all_tvs:
-                result = await tv_handler.handle_launch_everywhere(
-                    app_name=intent.app_name,
-                    guest_mode=guest_mode
-                )
-            else:
-                result = await tv_handler.handle_launch(
-                    app_name=intent.app_name,
-                    room=intent.room or state.room,
-                    guest_mode=guest_mode
-                )
-
-        elif intent.action == "power":
-            result = await tv_handler.handle_power(
-                action=intent.power_action,
-                room=intent.room or state.room
-            )
-
-        elif intent.action == "navigate":
-            result = await tv_handler.handle_navigate(
-                command=intent.command,
-                room=intent.room or state.room
-            )
-
-        elif intent.action == "playback":
-            result = await tv_handler.handle_playback(
-                command=intent.command,
-                room=intent.room or state.room
-            )
-
-        elif intent.youtube_video_id:
-            result = await tv_handler.handle_youtube_video(
-                video_id=intent.youtube_video_id,
-                room=intent.room or state.room
-            )
-
-        else:
-            result = {
-                "success": False,
-                "message": "I'm not sure what you want me to do with the TV. Try 'open Netflix' or 'turn on the TV'."
-            }
-
-        state.answer = result.get("message", "Done.")
-        state.retrieved_data = {"tv_intent": intent.__dict__, "result": result}
-
-        if not result.get("success"):
-            state.error = result.get("error", "unknown_error")
-
-        logger.info(
-            "tv_command_handled",
-            action=intent.action,
-            success=result.get("success", False)
-        )
-
-        # Store context for potential follow-up commands
-        if state.session_id and result.get("success"):
-            await store_conversation_context(
-                session_id=state.session_id,
-                intent="tv_control",
-                query=state.query,
-                entities={"room": intent.room or state.room, "app": intent.app_name},
-                parameters=intent.__dict__,
-                response=state.answer,
-                ttl=300  # 5 minutes
-            )
-
-    except Exception as e:
-        logger.error(f"TV control error: {e}", exc_info=True)
-        state.answer = "I encountered an error controlling the TV. Please try again."
-        state.error = str(e)
-
-    route_tv_duration = time.time() - start
-    state.node_timings["route_tv"] = route_tv_duration
-    # Track node time to Prometheus
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "route_tv", route_tv_duration)
-    return state
-
-
-async def route_info_node(state: OrchestratorState) -> OrchestratorState:
-    """
-    Select appropriate model tier for information queries.
-    Uses complexity determined by classify_node's feature-based detection.
-    """
-    start = time.time()
-
-    # Use complexity from classification (feature-based detection)
-    # This properly routes complex queries to more capable models
-    if state.complexity == "super_complex":
-        state.model_tier = ModelTier.LARGE
-        state.model_component = "tool_calling_super_complex"
-    elif state.complexity == "complex":
-        state.model_tier = ModelTier.MEDIUM
-        state.model_component = "tool_calling_complex"
-    else:  # simple
-        state.model_tier = ModelTier.SMALL
-        state.model_component = "tool_calling_simple"
-
-    # Log model selection decision
-    logger.info(
-        f"Model selection: complexity={state.complexity} -> "
-        f"tier={state.model_tier.value}, component={state.model_component}"
-    )
-
-    route_info_duration = time.time() - start
-    state.node_timings["route_info"] = route_info_duration
-    # Track node time to Prometheus
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "route_info", route_info_duration)
-    return state
-
-async def _fallback_to_web_search(state: OrchestratorState, rag_service: str, error_msg: str):
-    """
-    Enhanced fallback with 3-tier content retrieval system.
-
-    Tier 1: Structured data extraction (fastest - no fetching)
-    Tier 2: Selective content fetching (1-2 high-value URLs)
-    Tier 3: Multi-snippet aggregation (current fallback)
-
-    Args:
-        state: Current orchestrator state
-        rag_service: Name of the failed RAG service (for logging)
-        error_msg: Error message from the failed service
-    """
-    logger.warning(f"{rag_service} RAG service failed ({error_msg}), falling back to web search")
-
-    try:
-        # Location-sensitive RAG services need location in query (search providers ignore location param)
-        location_sensitive_services = ["weather", "dining", "events", "flights", "airports"]
-        user_location = state.entities.get("location", DEFAULT_LOCATION) if state.entities else DEFAULT_LOCATION
-
-        if rag_service.lower() in location_sensitive_services:
-            search_query = f"{enhance_query_with_year(state.query)} {user_location}"
-        else:
-            search_query = enhance_query_with_year(state.query)
-
-        # STEP 1: Execute parallel search with increased result limit
-        intent, search_results = await parallel_search_engine.search(
-            query=search_query,
-            location=DEFAULT_LOCATION,
-            limit_per_provider=10,  # Increased from 5 for better coverage
-            force_search=True  # CRITICAL: Force web search even for RAG intents
-        )
-
-        logger.info(f"Fallback search intent classified as: '{intent}', {len(search_results)} total results")
-
-        if not search_results:
-            # No search results at all - use LLM knowledge
-            state.retrieved_data = {}
-            state.data_source = "LLM knowledge (web search returned no results)"
-            logger.warning(f"Fallback web search returned no results, using LLM knowledge")
-            return
-
-        # STEP 2: Check if content fetching would be beneficial (TIER 1 check)
-        from search_providers.structured_data import (
-            should_fetch_content,
-            get_fetch_priority_urls,
-            estimate_fetch_benefit
-        )
-
-        fetch_benefit = estimate_fetch_benefit(state.query, search_results)
-        should_fetch = should_fetch_content(state.query, search_results)
-
-        logger.info(f"Content fetch benefit: {fetch_benefit}, should_fetch: {should_fetch}")
-
-        fetched_content = None
-
-        # STEP 3: TIER 2 - Selective Content Fetching (if beneficial)
-        if should_fetch:
-            priority_urls = get_fetch_priority_urls(search_results, state.query, max_urls=2)
-
-            if priority_urls:
-                logger.info(f"Attempting content fetch from {len(priority_urls)} high-value URLs")
-
-                from search_providers.content_fetcher import ContentFetcher
-
-                fetcher = ContentFetcher(timeout=2.0, max_concurrent=2)
-
-                try:
-                    # Fetch URLs in parallel
-                    results = await fetcher.fetch_multiple_urls(priority_urls)
-
-                    # Use first successful result
-                    for result in results:
-                        if result:
-                            fetched_content = result
-                            logger.info(
-                                f"Content fetch successful: {result['type']} from {result['source_url']} "
-                                f"({result['extraction_time_ms']:.0f}ms)"
-                            )
-                            break
-
-                except Exception as e:
-                    logger.warning(f"Content fetching failed: {e}")
-
-                finally:
-                    await fetcher.close()
-
-        # STEP 4: Format response based on what we retrieved
-        if fetched_content:
-            # TIER 2 SUCCESS - We got comprehensive data from fetching
-            state.retrieved_data = {
-                "intent": intent,
-                "fetched_content": fetched_content,
-                "search_results": [r.to_dict() for r in search_results[:5]],
-                "sources": [fetched_content["source_url"]],
-                "data_type": fetched_content["type"],
-                "extraction_time_ms": fetched_content.get("extraction_time_ms", 0),
-                "fallback_note": f"Comprehensive data retrieved via {fetched_content['type']} extraction"
-            }
-            state.data_source = f"Content Fetch ({fetched_content['type']}): {fetched_content['source_url']}"
-            state.citations.append(f"Content extracted from {fetched_content['source_url']}")
-            state.citations.append(f"Extraction method: {fetched_content['type']}")
-            logger.info(
-                f"Using Tier 2 (content fetch): {fetched_content['type']} "
-                f"in {fetched_content['extraction_time_ms']:.0f}ms"
-            )
-
-        else:
-            # TIER 3 - Fall back to multi-snippet aggregation
-            fused_results = result_fusion.get_top_results(
-                results=search_results,
-                query=state.query,
-                intent=intent,
-                limit=10  # Increased from 5 for better coverage
-            )
-
-            logger.info(f"Fallback to Tier 3 (snippets): {len(fused_results)} fused results")
-
-            search_data = {
-                "intent": intent,
-                "results": [r.to_dict() for r in fused_results],
-                "sources": list(set(r.source for r in fused_results)),
-                "total_results": len(search_results),
-                "fused_results": len(fused_results),
-                "fallback_note": f"Data aggregated from search snippets (primary {rag_service} service unavailable)"
-            }
-
-            state.retrieved_data = search_data
-            state.data_source = f"Web Search Snippets ({intent}): {', '.join(search_data['sources'])}"
-            state.citations.extend([f"Search result from {r.source}" for r in fused_results])
-            logger.info(f"Using Tier 3 (snippets): intent={intent}, sources={search_data['sources']}")
-
-        # Add note about fallback
-        state.citations.append(f"Note: {rag_service} service unavailable, used web search fallback")
-
-    except Exception as e:
-        logger.error(f"Fallback web search failed: {e}", exc_info=True)
-        state.retrieved_data = {}
-        state.data_source = "LLM knowledge (RAG and web search failed)"
-
-
-async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
-    """
-    Retrieve information from appropriate RAG service.
-    Falls back to web search if RAG service is unavailable.
-    """
-    start = time.time()
-
-    try:
-        # Skip RAG for pronoun-based follow-ups that need LLM to resolve from conversation history
-        # e.g., "what team does he play for now" after "who was the MVP of the Super Bowl"
-        if state.needs_history_context:
-            logger.info(f"Skipping RAG - query '{state.query[:50]}...' needs conversation history for pronoun resolution")
-            # Use previous response as context for the LLM to answer from
-            prev_response = state.entities.get("previous_response", "")
-            prev_query = state.entities.get("previous_query", "")
-            if prev_response or prev_query:
-                state.retrieved_data = {
-                    "type": "conversation_context",
-                    "previous_query": prev_query,
-                    "previous_response": prev_response,
-                    "current_query": state.query,
-                    "note": "Answer this follow-up question using the previous context"
-                }
-                state.data_source = "ConversationHistory"
-                state.citations.append("Based on previous conversation")
-            state.node_timings["retrieve"] = time.time() - start
-            return state
-
-        if state.intent == IntentCategory.WEATHER:
-            # Check which weather provider to use (feature flag)
-            weather_mode = await get_weather_provider_mode()
-            service_name = "onecall" if weather_mode == "onecall" else "weather"
-
-            # Get dynamic RAG service URL and update client if needed
-            service_url = await get_rag_service_url(service_name)
-            if not service_url:
-                logger.error(f"{service_name.title()} RAG service URL not configured")
-                # Fall back to web search instead of failing
-                await _fallback_to_web_search(state, "Weather", "service not configured")
-            else:
-                try:
-                    # Update RAG client URL if different from default
-                    rag_client.update_service_url(service_name, service_url)
-
-                    # Call weather service with unified RAG client (includes circuit breaker, rate limiting)
-                    # Filter out temporal words/phrases that shouldn't be treated as locations
-                    TEMPORAL_WORDS = {'today', 'tomorrow', 'tonight', 'yesterday', 'now', 'morning',
-                                      'afternoon', 'evening', 'night', 'weekend', 'week', 'day', 'hour'}
-                    TEMPORAL_PHRASES = {
-                        'next couple of days', 'next few days', 'next week', 'this week',
-                        'this weekend', 'next weekend', 'coming days', 'few days',
-                        'couple of days', 'couple days', 'rest of the week', 'rest of the day',
-                        'next couple days', 'next several days', 'the week', 'the weekend',
-                    }
-                    raw_location = state.entities.get("location", DEFAULT_LOCATION)
-                    raw_lower = raw_location.lower().strip() if raw_location else ""
-                    # Use default location if extracted location is actually a temporal word/phrase
-                    if raw_lower and (raw_lower in TEMPORAL_WORDS or raw_lower in TEMPORAL_PHRASES):
-                        logger.info(f"Filtering temporal expression '{raw_location}' from location, using default: {DEFAULT_LOCATION}")
-                        location = DEFAULT_LOCATION
-                    else:
-                        location = raw_location or DEFAULT_LOCATION
-                    time_ref = state.entities.get("time_ref")
-
-                    # Detect temporal intent from query when time_ref is not set by classifier
-                    if not time_ref:
-                        query_lower = state.query.lower()
-                        if any(p in query_lower for p in ['next couple', 'next few', 'next several', 'coming days', 'forecast']):
-                            time_ref = "this_week"
-                        elif 'tomorrow' in query_lower:
-                            time_ref = "tomorrow"
-                        elif 'weekend' in query_lower:
-                            time_ref = "this_weekend"
-                        elif any(p in query_lower for p in ['next week', 'this week', 'rest of the week']):
-                            time_ref = "this_week"
-                        if time_ref:
-                            logger.info(f"Inferred time_ref='{time_ref}' from query")
-
-                    # Round 17: Detect far-future weather requests beyond forecast range (7-10 days)
-                    # Patterns like "3 weeks", "in 2 weeks", "next month" should acknowledge limitations
-                    query_lower = state.query.lower()
-                    far_future_patterns = [
-                        r'\b(\d+)\s*weeks?\b',  # "3 weeks", "in 2 weeks"
-                        r'\bnext\s+month\b', r'\bin\s+a\s+month\b',  # "next month"
-                        r'\b(\d+)\s+days?\b',  # Check if days > 10
-                    ]
-                    is_far_future = False
-                    import re as weather_re
-                    for pattern in far_future_patterns:
-                        match = weather_re.search(pattern, query_lower)
-                        if match:
-                            if 'week' in pattern or 'month' in pattern:
-                                # Any mention of weeks or months is too far
-                                num_weeks = int(match.group(1)) if match.lastindex else 1
-                                if num_weeks >= 2 or 'month' in query_lower:
-                                    is_far_future = True
-                                    break
-                            elif 'days' in pattern:
-                                num_days = int(match.group(1)) if match.lastindex else 0
-                                if num_days > 10:
-                                    is_far_future = True
-                                    break
-
-                    if is_far_future:
-                        # Return a limitation acknowledgment instead of inaccurate forecast
-                        logger.info(f"Far future weather request detected: '{state.query}'")
-                        state.retrieved_data = {
-                            "limitation": True,
-                            "message": "Weather forecasts are only reliable up to about 7-10 days out. "
-                                      "Predictions beyond that become increasingly inaccurate. "
-                                      "I can tell you the current weather or the forecast for the next week, "
-                                      "but I can't provide reliable information that far in advance.",
-                            "location": location
-                        }
-                        state.data_source = "Weather forecast limitation"
-                        state.citations.append("Weather forecast range limitation")
-                        # Skip the actual weather API call - go directly to synthesis
-                    else:
-                        # Normal weather processing - not a far-future request
-                        # Determine which endpoint to use based on temporal context
-                        if time_ref:
-                            # Use forecast endpoint for temporal follow-ups
-                            days = 1 if time_ref == "tomorrow" else 5 if time_ref == "this_weekend" else 7
-                            # OneCall supports up to 8 days
-                            if weather_mode == "onecall" and days > 5:
-                                days = min(days, 8)
-                            logger.info(f"Using forecast endpoint for time_ref={time_ref}, days={days}, provider={weather_mode}")
-                            response = await rag_client.get(
-                                service_name,
-                                "/weather/forecast",
-                                params={"location": location, "days": days}
-                            )
-                        else:
-                            # Use current weather endpoint
-                            response = await rag_client.get(
-                                service_name,
-                                "/weather/current",
-                                params={"location": location}
-                            )
-
-                        if not response.success:
-                            raise Exception(response.error or f"{service_name} service call failed")
-
-                        weather_data = response.data
-
-                        # Validate Weather RAG response quality
-                        validation_result, reason, suggestions = validator.validate_weather_response(
-                            weather_data, state.query
-                        )
-
-                        if validation_result == ValidationResult.VALID:
-                            # Response is good, use it
-                            state.retrieved_data = weather_data
-                            state.data_source = "OpenWeatherMap OneCall 3.0" if weather_mode == "onecall" else "OpenWeatherMap"
-                            state.citations.append(f"Weather data from {state.data_source} for {location}")
-                            logger.debug(f"Weather RAG validation passed: {reason}, provider={weather_mode}")
-
-                        elif validation_result in [ValidationResult.EMPTY, ValidationResult.INVALID]:
-                            # Data is empty or invalid, trigger web search fallback
-                            logger.warning(
-                                f"Weather RAG validation failed: {validation_result.value} - {reason}"
-                            )
-                            if suggestions:
-                                logger.info(f"Fallback suggestion: {suggestions}")
-                            await _fallback_to_web_search(state, "Weather", reason)
-
-                        elif validation_result == ValidationResult.NEEDS_RETRY:
-                            # Data structure mismatch or missing information
-                            logger.info(
-                                f"Weather RAG needs retry: {reason}. Suggestions: {suggestions}"
-                            )
-                            # For now, fall back to web search for retry scenarios
-                            await _fallback_to_web_search(state, "Weather", reason)
-
-                except Exception as e:
-                    # RAG service failed - fall back to web search
-                    await _fallback_to_web_search(state, "Weather", str(e))
-
-        elif state.intent == IntentCategory.AIRPORTS:
-            # Get dynamic RAG service URL and update client if needed
-            service_url = await get_rag_service_url("airports")
-            if not service_url:
-                logger.error("Airports RAG service URL not configured")
-                await _fallback_to_web_search(state, "Airports", "service not configured")
-            else:
-                try:
-                    # Update RAG client URL if different from default
-                    rag_client.update_service_url("airports", service_url)
-
-                    # Call airports service with unified RAG client
-                    airport = state.entities.get("airport", "BWI")
-                    response = await rag_client.get("airports", f"/airports/{airport}")
-
-                    if not response.success:
-                        raise Exception(response.error or "Airports service call failed")
-
-                    airports_data = response.data
-
-                    # Validate Airports RAG response quality
-                    validation_result, reason, suggestions = validator.validate_airports_response(
-                        airports_data, state.query
-                    )
-
-                    if validation_result == ValidationResult.VALID:
-                        # Response is good, use it
-                        state.retrieved_data = airports_data
-                        state.data_source = "FlightAware"
-                        state.citations.append(f"Flight data from FlightAware for {airport}")
-                        logger.debug(f"Airports RAG validation passed: {reason}")
-
-                    elif validation_result in [ValidationResult.EMPTY, ValidationResult.INVALID]:
-                        # Data is empty or invalid, trigger web search fallback
-                        logger.warning(
-                            f"Airports RAG validation failed: {validation_result.value} - {reason}"
-                        )
-                        if suggestions:
-                            logger.info(f"Fallback suggestion: {suggestions}")
-                        await _fallback_to_web_search(state, "Airports", reason)
-
-                    elif validation_result == ValidationResult.NEEDS_RETRY:
-                        # Data structure mismatch or missing information
-                        logger.info(
-                            f"Airports RAG needs retry: {reason}. Suggestions: {suggestions}"
-                        )
-                        # For now, fall back to web search for retry scenarios
-                        await _fallback_to_web_search(state, "Airports", reason)
-
-                except Exception as e:
-                    # RAG service failed - fall back to web search
-                    await _fallback_to_web_search(state, "Airports", str(e))
-
-        elif state.intent == IntentCategory.SPORTS:
-            # Get dynamic RAG service URL and update client if needed
-            service_url = await get_rag_service_url("sports")
-            if not service_url:
-                logger.error("Sports RAG service URL not configured")
-                await _fallback_to_web_search(state, "Sports", "service not configured")
-            else:
-                try:
-                    # Update RAG client URL if different from default
-                    rag_client.update_service_url("sports", service_url)
-
-                    # Call sports service with unified RAG client
-                    team = state.entities.get("team", "Ravens")
-
-                    # Search for team
-                    search_response = await rag_client.get(
-                        "sports",
-                        "/sports/teams/search",
-                        params={"query": team}
-                    )
-                    if not search_response.success:
-                        raise Exception(search_response.error or "Sports team search failed")
-
-                    search_data = search_response.data
-
-                    if search_data.get("teams"):
-                        team_info = search_data["teams"][0]
-                        team_id = team_info["idTeam"]
-                        team_full_name = team_info.get("strTeam", team)
-                        team_league = team_info.get("strLeague", "")
-
-                        # Determine league for live scores
-                        league_code_map = {
-                            "soccer/eng.1": "premier-league",
-                            "soccer/esp.1": "la-liga",
-                            "football/nfl": "nfl",
-                            "basketball/nba": "nba",
-                            "baseball/mlb": "mlb",
-                            "hockey/nhl": "nhl",
-                        }
-                        live_league = league_code_map.get(team_league, "nfl")
-
-                        # Fetch last events, next events, AND live scores in parallel
-                        # This provides comprehensive data for any sports query
-                        last_response, next_response, live_response = await asyncio.gather(
-                            rag_client.get("sports", f"/sports/events/{team_id}/last"),
-                            rag_client.get("sports", f"/sports/events/{team_id}/next"),
-                            rag_client.get("sports", f"/sports/scores/live", params={"league": live_league, "team": team_full_name}),
-                            return_exceptions=True
-                        )
-
-                        # Build combined response with past, upcoming, and live games
-                        events_data = {
-                            "team": team_full_name,
-                            "team_id": team_id,
-                            "league": team_league
-                        }
-
-                        # Process last games
-                        if isinstance(last_response, Exception) or not last_response.success:
-                            events_data["last_games"] = []
-                            logger.debug(f"Last events fetch failed: {last_response}")
-                        else:
-                            events_data["last_games"] = last_response.data.get("events", [])
-
-                        # Process next games (may include season_status if season ended)
-                        if isinstance(next_response, Exception) or not next_response.success:
-                            events_data["upcoming_games"] = []
-                            logger.debug(f"Next events fetch failed: {next_response}")
-                        else:
-                            next_events = next_response.data.get("events", [])
-                            events_data["upcoming_games"] = next_events
-                            # Check if season has ended
-                            if next_events and next_events[0].get("season_status") == "ended":
-                                events_data["season_status"] = "ended"
-                                events_data["team_record"] = next_events[0].get("team_record")
-                                events_data["team_standing"] = next_events[0].get("team_standing")
-                                events_data["season_message"] = next_events[0].get("message")
-
-                        # Process live scores
-                        if isinstance(live_response, Exception) or not live_response.success:
-                            events_data["live_games"] = []
-                        else:
-                            live_data = live_response.data
-                            live_games = live_data.get("games", [])
-                            # Filter to only games with this team
-                            team_lower = team_full_name.lower()
-                            matching_live = [
-                                g for g in live_games
-                                if team_lower in g.get("home_team", "").lower()
-                                or team_lower in g.get("away_team", "").lower()
-                            ]
-                            events_data["live_games"] = matching_live
-                            if matching_live:
-                                events_data["has_live_game"] = True
-                                game = matching_live[0]
-                                events_data["live_score_summary"] = (
-                                    f"{game['away_team']} {game['away_score']} - "
-                                    f"{game['home_score']} {game['home_team']} ({game['status']})"
-                                )
-
-                        logger.info(
-                            f"Sports data fetched for {team_full_name}",
-                            last_games=len(events_data.get("last_games", [])),
-                            upcoming_games=len(events_data.get("upcoming_games", [])),
-                            live_games=len(events_data.get("live_games", [])),
-                            season_ended=events_data.get("season_status") == "ended"
-                        )
-
-                        # Validate Sports RAG response quality
-                        validation_result, reason, suggestions = validator.validate_sports_response(
-                            events_data, state.query
-                        )
-
-                        if validation_result == ValidationResult.VALID:
-                            # Response is good, use it
-                            state.retrieved_data = events_data
-                            state.data_source = "TheSportsDB"
-                            state.citations.append(f"Sports data from TheSportsDB for {team}")
-                            logger.debug(f"Sports RAG validation passed: {reason}")
-
-                        elif validation_result in [ValidationResult.EMPTY, ValidationResult.INVALID]:
-                            # Data is empty or invalid, trigger web search fallback
-                            logger.warning(
-                                f"Sports RAG validation failed: {validation_result.value} - {reason}"
-                            )
-                            if suggestions:
-                                logger.info(f"Fallback suggestion: {suggestions}")
-                            await _fallback_to_web_search(state, "Sports", reason)
-
-                        elif validation_result == ValidationResult.NEEDS_RETRY:
-                            # Data structure mismatch (e.g., got schedule when query wants scores)
-                            logger.info(
-                                f"Sports RAG needs retry: {reason}. Suggestions: {suggestions}"
-                            )
-                            # For now, fall back to web search for retry scenarios
-                            await _fallback_to_web_search(state, "Sports", reason)
-
-                except Exception as e:
-                    # RAG service failed - fall back to web search
-                    await _fallback_to_web_search(state, "Sports", str(e))
-
-        elif state.intent == IntentCategory.WEBSEARCH:
-            # Explicit web search request - use Brave Search via websearch RAG service
-            service_url = await get_rag_service_url("websearch")
-            if not service_url:
-                # Fall back to environment variable URL
-                service_url = WEBSEARCH_SERVICE_URL
-
-            if not service_url or service_url == "http://localhost:8018":
-                logger.error("WebSearch RAG service URL not configured properly")
-                # Fall back to parallel search as last resort
-                state.retrieved_data = {}
-                state.data_source = "LLM knowledge (websearch service unavailable)"
-            else:
-                try:
-                    # Extract the actual search query by removing common prefixes
-                    search_query = state.query.lower()
-                    prefixes_to_remove = [
-                        "search the web for ", "search the web ", "search the internet for ",
-                        "search the internet ", "search online for ", "search online ",
-                        "look up online ", "google ", "find on the web ",
-                        "find on the internet ", "find online ", "web search for ",
-                        "web search ", "do a web search for ", "do a web search ",
-                        "search for information on ", "search for information about ",
-                        "can you search for ", "could you search for ",
-                        "i want you to search for ", "i want you to search ",
-                        "please search for "
-                    ]
-                    for prefix in prefixes_to_remove:
-                        if search_query.startswith(prefix):
-                            search_query = state.query[len(prefix):].strip()
-                            break
-                    else:
-                        # No prefix matched, use original query
-                        search_query = state.query
-
-                    logger.info(f"WebSearch: Searching for '{search_query}'")
-
-                    # Update RAG client URL if different from default
-                    rag_client.update_service_url("websearch", service_url)
-
-                    # Call websearch service
-                    search_response = await rag_client.get(
-                        "websearch",
-                        "/search",
-                        params={"query": search_query, "count": 10, "safesearch": "moderate"}
-                    )
-
-                    if search_response.success and search_response.data:
-                        search_data = search_response.data
-                        results = search_data.get("results", [])
-
-                        if results:
-                            state.retrieved_data = {
-                                "query": search_query,
-                                "results": results,
-                                "total_results": len(results),
-                                "source": "brave_search"
-                            }
-                            state.data_source = "Brave Search"
-                            state.citations.extend([
-                                f"[{r.get('title', 'Web result')}]({r.get('url', '')})"
-                                for r in results[:3] if r.get('url')
-                            ])
-                            logger.info(f"WebSearch: Found {len(results)} results")
-                        else:
-                            logger.warning("WebSearch: No results found, falling back to LLM knowledge")
-                            state.retrieved_data = {}
-                            state.data_source = "LLM knowledge (no web results)"
-                    else:
-                        error_msg = search_response.error or "Unknown error"
-                        logger.warning(f"WebSearch: Service returned error: {error_msg}")
-                        state.retrieved_data = {}
-                        state.data_source = f"LLM knowledge (websearch error: {error_msg})"
-
-                except Exception as e:
-                    logger.error(f"WebSearch: Exception occurred: {e}", exc_info=True)
-                    state.retrieved_data = {}
-                    state.data_source = f"LLM knowledge (websearch exception)"
-
-        else:
-            # Use intent-based parallel web search for unknown/general queries
-            logger.info("Attempting intent-based parallel search")
-
-            # Check if query has location-sensitive keywords that need location context
-            location_keywords = ["local", "near me", "nearby", "in my area", "around here", "close by", "in town"]
-            query_lower = state.query.lower()
-            user_location = state.entities.get("location", DEFAULT_LOCATION) if state.entities else DEFAULT_LOCATION
-
-            if any(kw in query_lower for kw in location_keywords):
-                search_query = f"{enhance_query_with_year(state.query)} {user_location}"
-                logger.info(f"Location-sensitive query detected, adding location: {user_location}")
-            else:
-                search_query = enhance_query_with_year(state.query)
-
-            # Execute parallel search with automatic intent classification
-            intent, search_results = await parallel_search_engine.search(
-                query=search_query,
-                location=DEFAULT_LOCATION,
-                limit_per_provider=5
-            )
-
-            logger.info(f"Search intent classified as: '{intent}'")
-
-            if search_results:
-                # Fuse and rank results based on classified intent
-                fused_results = result_fusion.get_top_results(
-                    results=search_results,
-                    query=state.query,
-                    intent=intent,
-                    limit=5
-                )
-
-                logger.info(f"Parallel search returned {len(fused_results)} fused results (intent: {intent})")
-
-                # Convert to dict format for LLM
-                search_data = {
-                    "intent": intent,
-                    "results": [r.to_dict() for r in fused_results],
-                    "sources": list(set(r.source for r in fused_results)),
-                    "total_results": len(search_results),
-                    "fused_results": len(fused_results)
-                }
-
-                state.retrieved_data = search_data
-                state.data_source = f"Parallel Search ({intent}): {', '.join(search_data['sources'])}"
-                state.citations.extend([f"Search result from {r.source}" for r in fused_results])
-                logger.info(f"Parallel search completed: intent={intent}, sources={search_data['sources']}")
-            else:
-                # Fallback to LLM knowledge
-                state.retrieved_data = {}
-                state.data_source = "LLM knowledge"
-                logger.info(f"Parallel search returned no results (intent: {intent}), using LLM knowledge")
-
-        logger.info(f"Retrieved data from {state.data_source}")
-
-    except Exception as e:
-        logger.error(f"Retrieval error: {e}", exc_info=True)
-        state.error = f"Retrieval failed: {str(e)}"
-
-    # If RAG retrieval returned no data but we have conversation context,
-    # re-route to GENERAL_INFO so the synthesis prompt uses conversation history
-    # instead of the restrictive "no information" path. This handles cases like
-    # "what city was that restaurant in?" being classified as dining but having
-    # no RAG data — the answer is in the conversation history.
-    if (not state.retrieved_data
-            and state.intent != IntentCategory.GENERAL_INFO
-            and (state.conversation_history or state.history_summary)):
-        logger.info(
-            "retrieve_reroute_to_general_info",
-            original_intent=state.intent.value if state.intent else None,
-            reason="no_rag_data_with_conversation_context"
-        )
-        state.intent = IntentCategory.GENERAL_INFO
-
-    retrieve_duration = time.time() - start
-    state.node_timings["retrieve"] = retrieve_duration
-
-    # Track retrieve timing in timing tracker
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "retrieve", retrieve_duration)
-
-    return state
-
-
-async def summarize_conversation_history(
-    history: List[Dict[str, str]],
-    current_query: str,
-    request_id: str = None,
-    previous_summary: str = ""
-) -> str:
-    """
-    Summarize conversation history into a brief context statement.
-
-    Uses a rolling accumulation strategy: if a previous summary exists,
-    it is included so that facts from earlier turns are preserved even
-    after they fall out of the message history window.
-
-    Args:
-        history: List of previous messages [{"role": "user/assistant", "content": "..."}]
-        current_query: The current user query (for relevance)
-        request_id: Optional request ID for logging
-        previous_summary: Optional previous summary to accumulate facts from
-
-    Returns:
-        A brief summary string (e.g., "Previous context: User is Sarah, a software engineer...")
-    """
-    if not history:
-        return previous_summary or ""
-
-    # SHORT HISTORY PATH (1-2 messages):
-    # Skip the LLM entirely. Small models struggle to "summarize" when there's
-    # barely anything to compress — they often respond with "no relevant context"
-    # or hallucinate filler. For 1-2 messages, the raw user content IS the best
-    # summary. At 3+ messages the LLM adds value by compressing and extracting
-    # patterns across turns.
-    if len(history) <= 2:
-        user_messages = [m["content"] for m in history if m["role"] == "user"]
-        if user_messages:
-            raw_context = " ".join(msg[:300] for msg in user_messages)
-            if previous_summary:
-                clean_prev = previous_summary.replace("Previous context: ", "", 1)
-                result = f"Previous context: {clean_prev} {raw_context}"
-            else:
-                result = f"Previous context: {raw_context}"
-            logger.info(f"Short history path: {len(history)} messages -> {len(result)} chars (no LLM)")
-            return result
-
-    # LONG HISTORY PATH (3+ messages): Use LLM summarizer
-    # Format history for summarization — use all available history
-    history_text = "\n".join([
-        f"{msg['role'].capitalize()}: {msg['content'][:300]}"
-        for msg in history[-12:]  # Use up to last 12 messages for better coverage
-    ])
-
-    # If we have a previous summary, include it so facts accumulate across turns
-    prior_context_section = ""
-    if previous_summary:
-        # Strip the "Previous context: " prefix if present
-        clean_prev = previous_summary.replace("Previous context: ", "", 1)
-        prior_context_section = f"""
-Previously known facts about the user (MUST be preserved in your summary):
-{clean_prev}
-
-"""
-
-    prompt = f"""Extract ALL user facts and context from this conversation. Preserve every detail the user stated about themselves.
-{prior_context_section}Recent conversation:
-{history_text}
-
-Write a concise summary (2-5 sentences) that captures:
-1. ALL facts the user stated about themselves (name, location, occupation, pets, family, preferences, etc.) — include facts from the "previously known" section above
-2. Key topics discussed and any decisions or corrections made (corrections override old facts)
-3. Any context relevant to this new query: "{current_query}"
-
-IMPORTANT: Never drop user-stated facts even if they seem unrelated to the new query. The user expects you to remember everything they told you. If a user corrected a fact (e.g., "actually Mochi is 4 now"), use the corrected value.
-You MUST produce a summary. Every user message contains information worth preserving for conversation continuity.
-
-Summary:"""
-
-    try:
-        # Get summarizer model from database config
-        summarizer_config = await get_component_config("conversation_summarizer")
-        summarizer_model = summarizer_config["model_name"]
-
-        # Use configurable model for summarization
-        summarize_start = time.time()
-        result = await llm_router.generate(
-            model=summarizer_model,
-            prompt=prompt,
-            temperature=0.3,
-            system_prompt=_component_system_prompt(summarizer_config),
-            request_id=request_id,
-            stage="summarize"
-        )
-        summarize_duration = time.time() - summarize_start
-
-        # Record LLM call for metrics
-        from shared.metrics import LLM_CALL_DURATION, LLM_TOKENS_GENERATED
-        tokens = result.get("eval_count", 0)
-        LLM_CALL_DURATION.labels(
-            stage="summarize",
-            model=summarizer_model,
-            call_type="inference"
-        ).observe(summarize_duration)
-        if tokens > 0:
-            LLM_TOKENS_GENERATED.labels(stage="summarize", model=summarizer_model).inc(tokens)
-
-        summary = result.get("response", "").strip()
-
-        # Validate summary isn't too long or empty
-        if summary and len(summary) < 1000 and "No relevant prior context" not in summary:
-            logger.info(f"History summarized: {len(history)} messages -> {len(summary)} chars")
-            return f"Previous context: {summary}"
-
-        return ""
-
-    except Exception as e:
-        logger.warning(f"History summarization failed: {e}")
-        return ""
-
-
-def _normalized_general_info_query(query: str) -> str:
-    """Lowercase query with punctuation removed for low-latency fast-path matching."""
-    return re.sub(r"[^a-z0-9\s]", "", (query or "").lower()).strip()
-
-
-def _direct_general_info_response(query: str) -> Optional[str]:
-    """Return deterministic responses for trivial chat and local time/date requests."""
-    normalized = _normalized_general_info_query(query)
-    if not normalized:
-        return None
-
-    direct_responses = {
-        "hello": "Hello. How can I help?",
-        "hi": "Hi. How can I help?",
-        "hey": "Hey. How can I help?",
-        "good morning": "Good morning. How can I help?",
-        "good afternoon": "Good afternoon. How can I help?",
-        "good evening": "Good evening. How can I help?",
-        "how are you": "I'm doing well. How can I help?",
-        "hows it going": "I'm here and ready to help.",
-        "thanks": "You're welcome.",
-        "thank you": "You're welcome.",
-        "bye": "Good night.",
-        "goodbye": "Goodbye.",
-        "see you": "See you later.",
-    }
-    if normalized in direct_responses:
-        return direct_responses[normalized]
-
-    if normalized in {
-        "what time is it",
-        "whats the time",
-        "what is the time",
-        "current time",
-        "tell me the time",
-    }:
-        try:
-            from zoneinfo import ZoneInfo
-            from datetime import datetime, timezone as tz
-            local_now = datetime.now(tz.utc).astimezone(ZoneInfo("America/New_York"))
-            return f"It's {local_now.strftime('%-I:%M %p')}."
-        except Exception:
-            return None
-
-    if normalized in {
-        "what date is it",
-        "whats the date",
-        "what is todays date",
-        "whats todays date",
-        "current date",
-        "what day is it",
-    }:
-        try:
-            from zoneinfo import ZoneInfo
-            from datetime import datetime, timezone as tz
-            local_now = datetime.now(tz.utc).astimezone(ZoneInfo("America/New_York"))
-            return f"Today is {local_now.strftime('%A, %B %-d, %Y')}."
-        except Exception:
-            return None
-
-    return None
-
-
-async def synthesize_node(state: OrchestratorState) -> OrchestratorState:
-    """
-    Generate natural language response using LLM with retrieved data and conversation history.
-    """
-    start = time.time()
-
-    # SKIP SYNTHESIS OPTIMIZATION (2026-01-12)
-    # If skip_synthesis flag is set, we already have a templated response
-    # (e.g., from status query optimization) - skip LLM synthesis entirely
-    if state.skip_synthesis and state.answer:
-        logger.info(
-            "synthesis_skipped",
-            reason="skip_synthesis_flag",
-            answer_length=len(state.answer)
-        )
-        state.node_timings["synthesize"] = time.time() - start
-        return state
-
-    try:
-        if state.intent == IntentCategory.GENERAL_INFO and not state.retrieved_data:
-            direct_response = _direct_general_info_response(state.query)
-            if direct_response:
-                duration = time.time() - start
-                state.answer = direct_response
-                state.skip_synthesis = True
-                state.llm_tokens = 0
-                state.llm_tokens_per_second = 0.0
-                state.node_timings["synthesize"] = duration
-                if state.timing_tracker:
-                    state.timing_tracker.track_substage("graph", "synthesize", "direct_fast_path", duration)
-                logger.info("synthesis_skipped", reason="direct_general_info_fast_path", query=state.query[:40])
-                return state
-
-        # Check if this is a continuation response (user answering a question from Athena)
-        ref_info = state.context_ref_info or {}
-        is_continuation = ref_info.get("is_continuation", False)
-
-        # Build synthesis prompt based on context
-        if state.retrieved_data:
-            context = json.dumps(state.retrieved_data, indent=2)
-            synthesis_prompt = f"""Answer the following question using ONLY the provided context.
-
-Question: {state.query}
-
-Context Data:
-{context}
-
-CRITICAL ANTI-HALLUCINATION INSTRUCTIONS:
-1. ONLY use facts from the Context Data above - NO EXCEPTIONS
-2. If the context doesn't have specific information, say "I don't have information about that"
-3. NEVER INVENT OR MAKE UP:
-   - Business names, restaurant names, or venue names
-   - Addresses or locations
-   - Phone numbers or hours
-   - Prices or ratings
-   - Event names or dates
-   - Any specific factual details not in the context
-4. If asked for recommendations but context is empty, say "I couldn't find current information for that request"
-5. Be concise and only state facts that appear in the Context Data
-6. If context contains errors or no results, acknowledge that honestly
-
-Response:"""
-        elif is_continuation and state.conversation_history:
-            # Continuation response - user is answering Athena's question or continuing conversation
-            synthesis_prompt = f"""The user is continuing a conversation with you. Their response: "{state.query}"
-
-Based on the conversation history above, understand what the user means and respond appropriately.
-
-INSTRUCTIONS:
-1. Look at your previous question/statement in the conversation history
-2. Understand what "{state.query}" means in that context
-3. If they answered a question you asked, proceed with what they requested originally
-4. If they declined something or said "no preference", continue with reasonable defaults
-5. Be helpful and continue the task they originally requested
-
-Your response:"""
-            logger.info(f"Using continuation prompt for '{state.query}' with {len(state.conversation_history)} history messages")
-        elif state.intent == IntentCategory.GENERAL_INFO:
-            synthesis_prompt = f"""Question: {state.query}
-
-Respond naturally as a helpful assistant.
-
-INSTRUCTIONS:
-1. For greetings, thanks, farewells, and casual conversation, respond conversationally.
-2. Do not mention the current local time or date unless the user explicitly asked for it.
-3. If the user asks for the current local time or current date, answer directly using the provided current local time context.
-4. You may answer using your built-in knowledge and the provided assistant context.
-5. Do not claim to have current web data unless it was actually provided in context.
-6. For other time-sensitive or highly specific current facts that were not provided, say you don't have current information.
-7. Keep the response concise and direct.
-8. SAFETY: If this question asks for harmful information (weapon/drug synthesis, lethal doses, hacking, self-harm methods, etc.), follow the safety guardrails in your system instructions. Decline clearly but helpfully — acknowledge the underlying concern and redirect to a legitimate resource. Do NOT simply say "I can't help with that." Offer something constructive.
-
-Response:"""
-        else:
-            # No RAG data retrieved — use conversation context and general knowledge
-            # If conversation history is available, the user may be referencing prior
-            # discussion (e.g., "what city was that restaurant in?"). Allow the LLM to
-            # use conversation history to answer, while still being honest about lacking
-            # external data.
-            has_conversation_context = bool(state.conversation_history or state.history_summary)
-            if has_conversation_context:
-                synthesis_prompt = f"""Question: {state.query}
-
-Respond naturally as a helpful assistant using the conversation history and your built-in knowledge.
-
-INSTRUCTIONS:
-1. Use the previous conversation context to understand references like "the younger one", "that restaurant", "my project", etc.
-2. If the user is referring to something they mentioned earlier, answer based on what they told you.
-3. You may answer using your built-in knowledge and the provided assistant context.
-4. Do not claim to have current web data unless it was actually provided in context.
-5. For time-sensitive or highly specific current facts that were not provided, say you don't have current information.
-6. Keep the response concise and direct.
-7. SAFETY: If this question asks for harmful information, follow the safety guardrails in your system instructions.
-
-Response:"""
-            else:
-                synthesis_prompt = f"""Question: {state.query}
-
-CRITICAL: You do NOT have access to current or specific information to answer this question.
-
-You must respond with:
-1. Acknowledge you don't have current/specific information
-2. Suggest where the user can find this information
-3. NEVER make up specific facts, dates, names, numbers, or events
-
-Respond honestly about your limitations.
-
-Response:"""
-
-        guest_name = state.context.get("guest_name") if state.context else None
-
-        # Resolve owner_name from base knowledge for owner-mode requests
-        owner_name = None
-        if state.mode == "owner":
-            try:
-                _admin_client = get_admin_client()
-                _bk_entries = await _admin_client.get_base_knowledge(applies_to="owner", enabled_only=True)
-                for _entry in (_bk_entries or []):
-                    if _entry.get("category") in ("owner", "user") and _entry.get("key") in ("owner_name", "name"):
-                        owner_name = _entry.get("value", "").strip() or None
-                        break
-            except Exception:
-                pass
-
-        system_context = await build_core_assistant_prompt(
-            include_voice_formatting=state.interface_type != "chat",
-            guest_name=guest_name,
-            owner_name=owner_name,
-            interface_type=state.interface_type,
-        ) + "\n"
-
-        # Inject base knowledge context from Admin API
-        try:
-            admin_client = get_admin_client()
-            user_mode = state.mode if state.mode else "guest"
-            knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
-            if knowledge_context:
-                system_context += knowledge_context
-                state.base_knowledge_populated = True
-                logger.info(f"Base knowledge context injected for mode={user_mode}")
-        except Exception as e:
-            logger.warning(f"Failed to fetch base knowledge context: {e}")
-            # Continue without base knowledge - not critical
-
-        if guest_name:
-            logger.info(f"Guest context injected for personalization: {guest_name}")
-
-        # Inject relevant memories for context augmentation
-        if state.memory_context:
-            system_context += state.memory_context
-            logger.info("Memory context injected into LLM prompt")
-
-        # When conversation history exists, instruct the LLM to distinguish
-        # between the assistant owner's profile and the current conversation partner
-        if state.conversation_history or state.history_summary:
-            system_context += """
-IMPORTANT: The CONTEXT INFORMATION above describes this assistant's owner and
-environment. The CONVERSATION CONTEXT below contains facts stated by the CURRENT
-USER in this session. When the user asks about themselves ("my name", "my cats",
-"my project", etc.), answer from the conversation context. When they ask about
-the assistant's owner or environment, answer from the context information above.
-Do not conflate the two — the current user may not be the owner.
-
-"""
-
-        # Barge-in: If user interrupted previous response, acknowledge naturally
-        if state.interruption_context:
-            interrupted_response = state.interruption_context.get("interrupted_response", "")
-            previous_query = state.interruption_context.get("previous_query", "")
-            audio_position_ms = state.interruption_context.get("audio_position_ms", 0)
-
-            # Only acknowledge if they interrupted meaningfully (not just silence detection)
-            if interrupted_response:
-                system_context += f"""
-IMPORTANT: The user just interrupted you while you were responding.
-- You were answering: "{previous_query}"
-- You had said (approximately): "{interrupted_response[:200]}..."
-- They interrupted around {audio_position_ms}ms into your response
-
-Acknowledge naturally that they interrupted (e.g., "Sure, go ahead", "Yes?", "Of course")
-and then address their new query. Don't repeat what you were saying unless they ask.
-Keep your acknowledgment brief - don't dwell on the interruption.
-
-"""
-                logger.info("interruption_context_injected",
-                           previous_query=previous_query[:30],
-                           audio_position_ms=audio_position_ms)
-
-        # Format conversation history for LLM context
-        history_context = ""
-        if state.history_summary:
-            history_context = f"""
-CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", pronouns, etc.):
-{state.history_summary}
-
-"""
-            logger.info("Using summarized history context")
-        elif state.conversation_history:
-            logger.info(f"Including {len(state.conversation_history)} previous messages in context")
-            history_context = "CONVERSATION CONTEXT (use this to resolve references like \"my\", \"the\", \"that\", pronouns, etc.):\n"
-            for msg in state.conversation_history:
-                role = msg["role"].capitalize()
-                content = msg["content"]
-                history_context += f"{role}: {content}\n"
-            history_context += "\n"
-
-        # Combine system context, history, and synthesis prompt
-        # Place history right before the synthesis prompt so it's closest to the question
-        full_prompt = system_context + history_context + synthesis_prompt
-
-        # Get synthesis model from database or use fallback
-        synthesis_config = await get_component_config("response_synthesis")
-        synthesis_model = synthesis_config["model_name"]
-        state.model_used = synthesis_model  # persist for analytics
-
-        # Emit LLM generating event for Admin Jarvis monitoring
-        llm_start_time = time.time()
-        if EVENTS_AVAILABLE and state.session_id:
-            await emit_llm_generating(
-                session_id=state.session_id,
-                model=synthesis_model,
-                interface=state.interface_type
-            )
-
-        result = await llm_router.generate(
-            model=synthesis_model,
-            prompt=full_prompt,
-            temperature=state.temperature,
-            system_prompt=_component_system_prompt(synthesis_config),
-            request_id=state.request_id,
-            session_id=state.session_id,
-            user_id=state.mode,
-            zone=state.room,
-            intent=state.intent.value if state.intent else None,
-            stage="synthesize"
-        )
-
-        state.answer = result.get("response", "")
-
-        # Capture token metrics for frontend display
-        llm_duration = time.time() - llm_start_time
-        state.llm_tokens = result.get("eval_count", 0)
-        if state.llm_tokens > 0 and llm_duration > 0:
-            state.llm_tokens_per_second = state.llm_tokens / llm_duration
-        else:
-            state.llm_tokens_per_second = 0.0
-
-        # Track LLM call in timing tracker
-        if state.timing_tracker:
-            state.timing_tracker.track_substage("graph", "synthesize", "llm_inference", llm_duration)
-            state.timing_tracker.record_llm_call("synthesize", synthesis_model, state.llm_tokens, int(llm_duration * 1000))
-
-        # Emit LLM complete event
-        if EVENTS_AVAILABLE and state.session_id:
-            llm_duration_ms = int((time.time() - llm_start_time) * 1000)
-            await emit_llm_complete(
-                session_id=state.session_id,
-                model=synthesis_model,
-                tokens=result.get("tokens", 0),
-                duration_ms=llm_duration_ms,
-                interface=state.interface_type
-            )
-
-        # Log data attribution for debugging (not shown to user)
-        if state.citations:
-            logger.debug(f"Citations: {', '.join(set(state.citations))}")
-
-        logger.info(f"Synthesized response using {state.model_tier}")
-
-        # SMS Integration: Detect textable content in response
-        # Only offer SMS for voice interface when response contains textable info
-        if state.interface_type == "voice" and state.answer:
-            try:
-                should_offer, detected_items, reason = detect_textable_content(state.answer)
-                if should_offer and detected_items:
-                    state.offer_sms = True
-                    state.sms_content_type = detected_items[0].content_type  # Primary content type
-                    state.sms_content = extract_sms_content(state.answer, detected_items)
-                    logger.info(
-                        f"SMS content detected: type={state.sms_content_type}, "
-                        f"reason='{reason}', offer_sms=True"
-                    )
-            except Exception as sms_err:
-                logger.warning(f"SMS content detection failed: {sms_err}")
-                # Non-critical - continue without SMS offer
-
-        # Store conversation context for follow-up queries
-        # This enables "what about tomorrow?" for weather, "how about the Lakers?" for sports, etc.
-        if state.session_id and state.answer and state.intent:
-            try:
-                # Extract entities based on intent type
-                context_entities = {}
-                context_params = {}
-
-                if state.intent == IntentCategory.WEATHER:
-                    # Extract location from query or use default
-                    context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
-                    context_entities["query_type"] = "weather"
-                    if state.retrieved_data:
-                        context_params["last_data"] = state.retrieved_data
-
-                elif state.intent == IntentCategory.SPORTS:
-                    # Extract team/sport info
-                    context_entities["team"] = state.entities.get("team")
-                    context_entities["sport"] = state.entities.get("sport")
-                    context_entities["query_type"] = "sports"
-
-                elif state.intent == IntentCategory.DINING:
-                    # Extract cuisine/location preferences
-                    context_entities["cuisine"] = state.entities.get("cuisine")
-                    context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
-                    context_entities["query_type"] = "dining"
-
-                elif state.intent == IntentCategory.NEWS:
-                    # Extract topic
-                    context_entities["topic"] = state.entities.get("topic")
-                    context_entities["query_type"] = "news"
-
-                elif state.intent == IntentCategory.EVENTS:
-                    # Extract event type/location
-                    context_entities["event_type"] = state.entities.get("event_type")
-                    context_entities["location"] = state.entities.get("location", DEFAULT_CITY)
-                    context_entities["query_type"] = "events"
-
-                elif state.intent == IntentCategory.STREAMING:
-                    # Extract movie/show info
-                    context_entities["title"] = state.entities.get("title")
-                    context_entities["query_type"] = "streaming"
-
-                elif state.intent == IntentCategory.STOCKS:
-                    # Extract stock symbol
-                    context_entities["symbol"] = state.entities.get("symbol")
-                    context_entities["query_type"] = "stocks"
-
-                elif state.intent == IntentCategory.FLIGHTS:
-                    # Extract flight info
-                    context_entities["origin"] = state.entities.get("origin")
-                    context_entities["destination"] = state.entities.get("destination")
-                    context_entities["query_type"] = "flights"
-
-                elif state.intent == IntentCategory.DIRECTIONS:
-                    # Extract directions info
-                    context_entities["origin"] = state.entities.get("origin")
-                    context_entities["destination"] = state.entities.get("destination")
-                    context_entities["travel_mode"] = state.entities.get("travel_mode", "driving")
-                    context_entities["query_type"] = "directions"
-
-                # Store context for all RAG-based intents
-                await store_conversation_context(
-                    session_id=state.session_id,
-                    intent=state.intent.value,
-                    query=state.query,
-                    entities=context_entities,
-                    parameters=context_params,
-                    response=state.answer or "",  # Store full response for conversation continuity
-                    ttl=300  # 5 minute TTL
-                )
-            except Exception as ctx_err:
-                logger.warning(f"Failed to store synthesis context: {ctx_err}")
-
-    except Exception as e:
-        logger.error(f"Synthesis error: {e}", exc_info=True)
-        state.answer = "I apologize, but I'm having trouble generating a response. Please try again."
-        state.error = f"Synthesis failed: {str(e)}"
-
-    synthesize_duration = time.time() - start
-    state.node_timings["synthesize"] = synthesize_duration
-    # Track node time to Prometheus
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "synthesize", synthesize_duration)
-    return state
-
-async def validate_node(state: OrchestratorState) -> OrchestratorState:
-    """
-    Multi-layer anti-hallucination validation.
-
-    Layer 1: Basic checks (length, error patterns)
-    Layer 2: Pattern detection (specific facts without data)
-    Layer 3: LLM-based fact checking
-    Layer 4: Uncertainty marker detection
-    """
-    start = time.time()
-
-    validation_guardrails = await get_validation_guardrails()
-    min_response_chars = validation_guardrails["min_response_chars"]
-    max_response_chars = validation_guardrails["max_response_chars"]
-
-    # Layer 1: Basic validation
-    basic_start = time.time()
-    if not state.answer or len(state.answer) < min_response_chars:
-        state.validation_passed = False
-        state.validation_reason = "Response too short"
-        logger.warning(f"Validation failed: {state.validation_reason}")
-        validate_duration = time.time() - start
-        state.node_timings["validate"] = validate_duration
-        # Track metrics
-        validation_counter.labels(passed="false", reason="too_short").inc()
-        validation_layer_duration.labels(layer="basic").observe(time.time() - basic_start)
-        if state.timing_tracker:
-            state.timing_tracker.track_substage("graph", "validate", "basic_check", validate_duration)
-        return state
-
-    if len(state.answer) > max_response_chars:
-        state.validation_passed = False
-        state.validation_reason = "Response too long"
-        logger.warning(f"Validation failed: {state.validation_reason}")
-        validate_duration = time.time() - start
-        state.node_timings["validate"] = validate_duration
-        # Track metrics
-        validation_counter.labels(passed="false", reason="too_long").inc()
-        validation_layer_duration.labels(layer="basic").observe(time.time() - basic_start)
-        if state.timing_tracker:
-            state.timing_tracker.track_substage("graph", "validate", "basic_check", validate_duration)
-        return state
-
-    validation_layer_duration.labels(layer="basic").observe(time.time() - basic_start)
-
-    # Layer 2: Pattern detection for hallucinations
-    # Look for specific patterns that indicate fabricated information
-    import re
-    pattern_start = time.time()
-
-    # Detect specific dates (Month DD, YYYY or MM/DD/YYYY)
-    date_patterns = re.findall(r'(\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b|\b\d{1,2}/\d{1,2}/\d{2,4}\b)', state.answer)
-
-    # Detect specific times (HH:MM AM/PM)
-    time_patterns = re.findall(r'\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)\b', state.answer)
-
-    # Detect specific dollar amounts
-    money_patterns = re.findall(r'\$\d+(?:,\d{3})*(?:\.\d{2})?', state.answer)
-
-    # Detect phone numbers
-    phone_patterns = re.findall(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b', state.answer)
-
-    has_specific_facts = bool(date_patterns or time_patterns or money_patterns or phone_patterns)
-    validation_layer_duration.labels(layer="pattern").observe(time.time() - pattern_start)
-
-    query_lower = state.query.lower()
-    is_low_risk_chitchat = state.intent == IntentCategory.GENERAL_INFO and any(
-        phrase in query_lower for phrase in [
-            "hello", "hi", "hey", "good morning", "good afternoon", "good evening",
-            "thanks", "thank you", "bye", "goodbye", "see you", "how are you",
-            "tell me about yourself", "who are you"
-        ]
-    )
-    is_builtin_time_or_date_query = state.intent == IntentCategory.GENERAL_INFO and any(
-        phrase in query_lower for phrase in [
-            "what time", "time is it", "current time", "what's the time", "whats the time",
-            "what date", "today's date", "current date", "what day", "what month", "what year",
-        ]
-    )
-
-    if is_low_risk_chitchat:
-        state.validation_passed = True
-        state.validation_reason = None
-        state.node_timings["validate"] = time.time() - start
-        validation_counter.labels(passed="true", reason="low_risk_chitchat").inc()
-        validation_layer_duration.labels(layer="pattern").observe(time.time() - pattern_start)
-        if state.timing_tracker:
-            state.timing_tracker.track_substage("graph", "validate", "low_risk_bypass", time.time() - start)
-        logger.info("Validation bypassed for low-risk chitchat")
-        return state
-
-    if is_builtin_time_or_date_query:
-        state.validation_passed = True
-        state.validation_reason = None
-        state.node_timings["validate"] = time.time() - start
-        validation_counter.labels(passed="true", reason="builtin_time_or_date").inc()
-        if state.timing_tracker:
-            state.timing_tracker.track_substage("graph", "validate", "builtin_time_or_date_bypass", time.time() - start)
-        logger.info("Validation bypassed for built-in time/date query")
-        return state
-
-    # Track what patterns were detected (for hallucination analysis)
-    if date_patterns:
-        logger.info(f"Pattern detection: found {len(date_patterns)} date patterns")
-    if time_patterns:
-        logger.info(f"Pattern detection: found {len(time_patterns)} time patterns")
-    if money_patterns:
-        logger.info(f"Pattern detection: found {len(money_patterns)} money patterns")
-    if phone_patterns:
-        logger.info(f"Pattern detection: found {len(phone_patterns)} phone patterns")
-
-    # Layer 3: Check if we have data to support specific facts.
-    # Base knowledge injected into the system prompt is authoritative — it counts as
-    # supporting data. The LLM fact-checker has no visibility into the system prompt, so
-    # without this flag it would wrongly flag dates from base knowledge as hallucinations.
-    has_supporting_data = bool(state.retrieved_data) or state.base_knowledge_populated
-
-    if has_specific_facts and not has_supporting_data and not is_builtin_time_or_date_query:
-        logger.warning(f"Response contains specific facts but no supporting data retrieved")
-        logger.warning(f"Dates: {date_patterns}, Times: {time_patterns}, Money: {money_patterns}, Phones: {phone_patterns}")
-
-        # Track suspicious patterns found (potential hallucinations without supporting data)
-        if date_patterns:
-            hallucination_counter.labels(layer="pattern_detection", type="date_unsupported").inc(len(date_patterns))
-        if time_patterns:
-            hallucination_counter.labels(layer="pattern_detection", type="time_unsupported").inc(len(time_patterns))
-        if money_patterns:
-            hallucination_counter.labels(layer="pattern_detection", type="money_unsupported").inc(len(money_patterns))
-        if phone_patterns:
-            hallucination_counter.labels(layer="pattern_detection", type="phone_unsupported").inc(len(phone_patterns))
-
-        # Layer 4: LLM-based fact checking
-        llm_fact_check_start = time.time()
-        try:
-            fact_check_prompt = f"""You are a fact-checking assistant. Analyze this response for hallucinations.
-
-Original Query: {state.query}
-
-Retrieved Data Available: {'Yes' if state.retrieved_data else 'No'}
-{f"Retrieved Data: {json.dumps(state.retrieved_data, indent=2)}" if state.retrieved_data else "No data was retrieved from external sources."}
-
-Generated Response:
-{state.answer}
-
-Question: Does this response contain specific factual claims (dates, times, names, phone numbers, prices, events) that are NOT present in the Retrieved Data?
-
-IMPORTANT: If no Retrieved Data is available, ANY specific factual claims are likely hallucinations.
-
-Respond ONLY with valid JSON:
-{{"contains_hallucinations": true/false, "reason": "brief explanation", "specific_claims": ["list of suspicious claims"]}}"""
-
-            # Combine system and user prompts
-            full_fact_check_prompt = f"You are a precise fact-checking assistant. Always respond with valid JSON.\n\n{fact_check_prompt}"
-
-            # Get validation model from database or use fallback
-            validation_config = await get_component_config("fact_check_validation")
-            validation_model = validation_config["model_name"]
-
-            validation_start = time.time()
-            result = await llm_router.generate(
-                model=validation_model,
-                prompt=full_fact_check_prompt,
-                temperature=0.1,  # Low temperature for consistent checking
-                system_prompt=_component_system_prompt(validation_config),
-                request_id=state.request_id,
-                session_id=state.session_id,
-                user_id=state.mode,
-                zone=state.room,
-                intent=state.intent.value if state.intent else None,
-                stage="validation"
-            )
-            validation_duration = time.time() - validation_start
-
-            # Track LLM call for metrics
-            if state.timing_tracker:
-                tokens = result.get("eval_count", 0)
-                state.timing_tracker.record_llm_call(
-                    "validation", validation_model, tokens, int(validation_duration * 1000), "fact_check"
-                )
-
-            fact_check_response = result.get("response", "")
-
-            # Parse fact check response
-            try:
-                # Extract JSON from response (handle markdown code blocks)
-                json_match = re.search(r'\{.*\}', fact_check_response, re.DOTALL)
-                if json_match:
-                    fact_check_result = json.loads(json_match.group())
-
-                    if fact_check_result.get("contains_hallucinations", False):
-                        state.validation_passed = False
-                        state.validation_reason = f"Hallucination detected: {fact_check_result.get('reason', 'Unknown')}"
-                        state.validation_details = fact_check_result.get("specific_claims", [])
-                        logger.warning(f"Hallucination detected by LLM fact checker: {state.validation_reason}")
-                        logger.warning(f"Suspicious claims: {state.validation_details}")
-                        # Track LLM-detected hallucinations
-                        hallucination_counter.labels(layer="llm_fact_check", type="confirmed").inc()
-                        validation_counter.labels(passed="false", reason="hallucination_llm").inc()
-                    else:
-                        state.validation_passed = True
-                        logger.info("Response passed LLM fact checking")
-                        validation_counter.labels(passed="true", reason="llm_verified").inc()
-                else:
-                    logger.warning(f"Could not parse fact check response as JSON: {fact_check_response}")
-                    # Default to failing validation if we can't parse
-                    state.validation_passed = False
-                    state.validation_reason = "Could not verify response accuracy"
-                    validation_counter.labels(passed="false", reason="parse_error").inc()
-
-            except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse fact check JSON: {e}")
-                # Default to failing validation if we can't parse
-                state.validation_passed = False
-                state.validation_reason = "Could not verify response accuracy"
-                validation_counter.labels(passed="false", reason="json_error").inc()
-
-            # Track LLM fact check duration
-            validation_layer_duration.labels(layer="llm_fact_check").observe(time.time() - llm_fact_check_start)
-
-        except Exception as e:
-            logger.error(f"Fact checking error: {e}", exc_info=True)
-            # If fact checking fails, be conservative and fail validation
-            state.validation_passed = False
-            state.validation_reason = f"Validation error: {str(e)}"
-            validation_counter.labels(passed="false", reason="exception").inc()
-            validation_layer_duration.labels(layer="llm_fact_check").observe(time.time() - llm_fact_check_start)
-
-    else:
-        # No specific facts or we have supporting data
-        state.validation_passed = True
-        if has_supporting_data:
-            validation_counter.labels(passed="true", reason="has_supporting_data").inc()
-        else:
-            validation_counter.labels(passed="true", reason="no_specific_facts").inc()
-        logger.info("Response passed validation (no specific facts or has supporting data)")
-
-    validate_duration = time.time() - start
-    state.node_timings["validate"] = validate_duration
-    # Track node time to Prometheus
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "validate", validate_duration)
-    return state
 
 async def execute_tools_parallel(
     tool_calls: List[Dict[str, Any]],
@@ -6755,6 +3522,7 @@ async def execute_tools_parallel(
 
     results = {}
     admin_client = get_admin_client()
+    rag = _runtime.get_rag_client()
 
     # Execute all tool calls concurrently
     async def execute_single_tool(tool_call: Dict[str, Any]) -> tuple:
@@ -6877,7 +3645,7 @@ async def execute_tools_parallel(
             # Special handling for get_sports_scores (requires two-step flow)
             if function_name == "get_sports_scores":
                 # Update RAG client URL for sports service
-                rag_client.update_service_url("sports", service_url)
+                rag.update_service_url("sports", service_url)
 
                 try:
                     # Step 1: Search for team to get team_id
@@ -6890,7 +3658,7 @@ async def execute_tools_parallel(
                     if league:
                         search_params["league"] = league
 
-                    search_response = await rag_client.get(
+                    search_response = await rag.get(
                         "sports",
                         "/sports/teams/search",
                         params=search_params
@@ -6951,9 +3719,9 @@ async def execute_tools_parallel(
 
                     # Step 2: Get last events, next events, AND live scores (parallel)
                     last_response, next_response, live_response = await asyncio.gather(
-                        rag_client.get("sports", f"/sports/events/{team_id}/last"),
-                        rag_client.get("sports", f"/sports/events/{team_id}/next"),
-                        rag_client.get("sports", f"/sports/scores/live", params={"league": live_league, "team": team_full_name}),
+                        rag.get("sports", f"/sports/events/{team_id}/last"),
+                        rag.get("sports", f"/sports/events/{team_id}/next"),
+                        rag.get("sports", f"/sports/scores/live", params={"league": live_league, "team": team_full_name}),
                         return_exceptions=True
                     )
 
@@ -7012,14 +3780,14 @@ async def execute_tools_parallel(
 
             # Special handling for get_sports_standings (league-wide rankings)
             if function_name == "get_sports_standings":
-                rag_client.update_service_url("sports", service_url)
+                rag.update_service_url("sports", service_url)
 
                 try:
                     league = arguments.get("league", "nfl")
                     limit = arguments.get("limit", 10)
                     logger.info(f"Fetching standings for league: {league}")
 
-                    standings_response = await rag_client.get(
+                    standings_response = await rag.get(
                         "sports",
                         "/sports/standings",
                         params={"league": league, "limit": limit}
@@ -7431,7 +4199,7 @@ async def execute_tools_parallel(
             rag_service_name = service_name_map.get(function_name, function_name.replace("get_", "").replace("search_", ""))
 
             # Update RAG client with dynamic service URL
-            rag_client.update_service_url(rag_service_name, service_url)
+            rag.update_service_url(rag_service_name, service_url)
 
             logger.info(f"Calling tool {function_name} via RAG client ({rag_service_name}) with args: {arguments}")
 
@@ -7447,7 +4215,7 @@ async def execute_tools_parallel(
             if function_name == "search_web":
                 try:
                     from orchestrator.parallel_search import get_parallel_search_engine
-                    parallel_engine = await get_parallel_search_engine(rag_client)
+                    parallel_engine = await get_parallel_search_engine(rag)
                     query = arguments.get("query", "")
                     max_results = arguments.get("count", 5)
 
@@ -7472,10 +4240,10 @@ async def execute_tools_parallel(
 
             if function_name in get_tools:
                 # GET request with query params
-                response = await rag_client.get(rag_service_name, endpoint, params=arguments)
+                response = await rag.get(rag_service_name, endpoint, params=arguments)
             else:
                 # POST request with JSON body
-                response = await rag_client.post(rag_service_name, endpoint, json=arguments)
+                response = await rag.post(rag_service_name, endpoint, json=arguments)
 
             if not response.success:
                 raise Exception(response.error or f"Tool {function_name} call failed")
@@ -7566,6 +4334,9 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
     from orchestrator.rag_tools import get_rag_tools
 
     start = time.time()
+    rag = _runtime.get_rag_client()
+    psearch = _runtime.get_parallel_search_engine()
+    llm = _runtime.get_llm_router()
 
     # Granular timing for tool_call node debugging
     timing_breakdown = {}
@@ -7799,8 +4570,8 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                     if _ow_entry.get("category") in ("owner", "user") and _ow_entry.get("key") in ("owner_name", "name"):
                         _tool_owner_name = _ow_entry.get("value", "").strip() or None
                         break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("tool_call_node_owner_name_failed", error=str(e))
 
         # Owner identity fast-path: answer "what is my name" deterministically
         if _tool_owner_name and _tool_user_mode == "owner":
@@ -8098,11 +4869,19 @@ If the user is asking to repeat, search again, or modify the previous request, u
             llm_backend = component_config["backend_type"]
             logger.info(f"Using {llm_model} ({llm_backend}) for super complex query: {state.query[:50]}")
 
+        # Honor DB-configured max_tokens for this component when no user-intent override fired.
+        # is_continue_query / is_story_query (set above) take precedence — those are explicit
+        # per-query overrides and should win over the per-component cap.
+        db_max_tokens = component_config.get("max_tokens")
+        if db_max_tokens and not is_continue_query and not is_story_query:
+            max_tokens = db_max_tokens
+            logger.info(f"applied_db_max_tokens: component={component_config.get('component_name')} max_tokens={max_tokens}")
+
         logger.info(f"Calling LLM for tool selection: model={llm_model}, backend={llm_backend}, complexity={complexity}")
 
         # Call LLM with tools
         llm_call_start = time.time()
-        llm_response = await llm_router.generate_with_tools(
+        llm_response = await llm.generate_with_tools(
             model=llm_model,
             messages=messages,
             tools=tools,
@@ -8184,7 +4963,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
 
                 try:
                     # Call the directions RAG service directly using GET with query params
-                    rag_response = await rag_client.get(
+                    rag_response = await rag.get(
                         "directions",
                         "/directions/route",
                         params={"origin": origin, "destination": destination, "mode": "driving"}
@@ -8317,7 +5096,7 @@ Provide a helpful answer:"""
                                 synthesis_config = await get_component_config("response_synthesis")
                                 synthesis_model = synthesis_config["model_name"]
                                 fallback_start = time.time()
-                                synthesis_result = await llm_router.generate(
+                                synthesis_result = await llm.generate(
                                     model=synthesis_model,
                                     prompt=synthesis_prompt,
                                     temperature=0.7,
@@ -8496,7 +5275,7 @@ Provide a helpful answer:"""
 
                     try:
                         # Use parallel search engine for web search fallback
-                        intent, search_results = await parallel_search_engine.search(
+                        intent, search_results = await psearch.search(
                             query=enhanced_query,
                             location=DEFAULT_LOCATION,
                             limit_per_provider=10,
@@ -8615,7 +5394,7 @@ Provide a helpful answer:"""
 
                     logger.info(f"Web search fallback for empty '{function_name}' results: '{enhanced_query[:80]}...'")
 
-                    intent, search_results = await parallel_search_engine.search(
+                    intent, search_results = await psearch.search(
                         query=enhanced_query,
                         location=DEFAULT_LOCATION,
                         limit_per_provider=10,
@@ -8767,7 +5546,7 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
         logger.info("Calling LLM to synthesize final response from tool results")
 
         synthesis_start_time = time.time()
-        final_response = await llm_router.generate_with_tools(
+        final_response = await llm.generate_with_tools(
             model=synthesis_model,
             messages=messages,
             tools=None,  # Don't provide tools during synthesis - just generate response
@@ -8907,373 +5686,6 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
         total_duration=f"{tool_call_duration:.2f}s",
         breakdown={k: f"{v:.3f}s" for k, v in timing_breakdown.items()}
     )
-
-    return state
-
-
-async def finalize_node(state: OrchestratorState) -> OrchestratorState:
-    """
-    Prepare final response with fallbacks for validation failures.
-    Also handles multi-intent result aggregation.
-    """
-    start = time.time()
-
-    # MULTI-INTENT HANDLING
-    if state.is_multi_intent:
-        # Store current result
-        current_result = {
-            "query": state.query,
-            "intent": state.intent.value if state.intent else "unknown",
-            "answer": state.answer,
-            "data_source": state.data_source
-        }
-        state.intent_results.append(current_result)
-        logger.info(
-            f"Multi-intent result {state.current_intent_index + 1}/{len(state.intent_parts)}: {state.intent}",
-            extra={"answer_preview": state.answer[:100] if state.answer else None}
-        )
-
-        # Check if there are more intents to process
-        if state.current_intent_index < len(state.intent_parts) - 1:
-            # More intents to process - set up next intent
-            state.current_intent_index += 1
-            state.query = state.intent_parts[state.current_intent_index]
-            # Reset state for next intent processing
-            state.intent = None
-            state.confidence = 0.0
-            state.answer = None
-            state.retrieved_data = {}
-            state.data_source = None
-            state.validation_passed = True
-            state.validation_reason = None
-            logger.info(f"Preparing next intent ({state.current_intent_index + 1}/{len(state.intent_parts)}): '{state.query}'")
-            finalize_duration = time.time() - start
-            state.node_timings["finalize"] = finalize_duration
-            if state.timing_tracker:
-                state.timing_tracker.track_sync("graph", "finalize", finalize_duration)
-            return state  # Will route back to classify via conditional edge
-
-        # All intents processed - combine results
-        combined_answers = []
-        for i, result in enumerate(state.intent_results):
-            if result.get("answer"):
-                # Add a transition phrase for subsequent answers
-                if i > 0:
-                    combined_answers.append("")  # Add spacing
-                combined_answers.append(result["answer"])
-
-        state.answer = "\n\n".join(combined_answers)
-        logger.info(
-            f"Multi-intent complete: {len(state.intent_results)} intents processed",
-            extra={"intents": [r.get("intent") for r in state.intent_results]}
-        )
-
-    # POST-SYNTHESIS FALLBACK: Check if response indicates insufficient data
-    # and retry with web search if enabled
-    if state.answer and state.validation_passed:
-        try:
-            fallback_triggered = await maybe_post_synthesis_fallback(state)
-            if fallback_triggered:
-                logger.info(
-                    "post_synthesis_fallback_completed_in_finalize",
-                    request_id=state.request_id
-                )
-        except Exception as fallback_err:
-            logger.warning(f"post_synthesis_fallback_error: {fallback_err}")
-
-    if not state.validation_passed:
-        # Provide fallback response based on validation failure reason
-        logger.warning(f"Validation failed, providing fallback response: {state.validation_reason}")
-
-        if "hallucination" in state.validation_reason.lower():
-            # Hallucination detected - provide helpful fallback
-            state.answer = f"I don't have current information to answer that accurately. I recommend checking reliable sources for up-to-date information about {state.query.lower()}."
-        elif state.error:
-            state.answer = "I encountered an issue processing your request. Please try rephrasing your question."
-        else:
-            state.answer = "I'm not confident in my response. Could you please rephrase your question?"
-
-    # Safety net: never return an empty answer
-    if not state.answer:
-        logger.warning(
-            "finalize_node_empty_answer_fallback",
-            intent=state.intent.value if state.intent else None,
-            error=state.error,
-            request_id=state.request_id
-        )
-        state.answer = "I'm not sure how to help with that. Could you rephrase your question?"
-        state.is_fallback = True
-
-    # Strip any hallucinated role-continuation text (e.g. "\nUser:", "\nHuman:")
-    state.answer = _strip_hallucinated_continuation(state.answer)
-
-    # Calculate total processing time
-    total_time = time.time() - state.start_time
-    logger.info(
-        f"Request {state.request_id} completed in {total_time:.2f}s",
-        extra={
-            "request_id": state.request_id,
-            "intent": state.intent,
-            "total_time": total_time,
-            "node_timings": state.node_timings
-        }
-    )
-
-    # Cache conversation context for follow-ups
-    try:
-        await cache_client.set(
-            f"conversation:{state.request_id}",
-            {
-                "query": state.query,
-                "intent": state.intent.value if state.intent else None,
-                "answer": state.answer,
-                "timestamp": time.time()
-            },
-            ttl=3600  # 1 hour TTL
-        )
-    except Exception as cache_err:
-        logger.warning(f"Failed to cache conversation context: {cache_err}")
-
-    finalize_duration = time.time() - start
-    state.node_timings["finalize"] = finalize_duration
-    # Track node time to Prometheus
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "finalize", finalize_duration)
-    return state
-
-
-async def send_sms_node(state: OrchestratorState) -> OrchestratorState:
-    """
-    Handle "text me that" requests by sending the previous response via SMS.
-
-    This node:
-    1. Gets the previous response from conversation history
-    2. Extracts textable content
-    3. Queues SMS for sending via admin backend
-    """
-    from sms.text_me_that import handle_text_me_that
-
-    start = time.time()
-
-    try:
-        # Get the previous assistant response from conversation history
-        previous_response = None
-        for msg in reversed(state.conversation_history):
-            if msg.get("role") == "assistant":
-                previous_response = msg.get("content", "")
-                break
-
-        if not previous_response:
-            state.answer = "I don't have a previous message to text you. Could you ask me something first?"
-            state.node_timings["send_sms"] = time.time() - start
-            return state
-
-        # Get guest's phone number from context
-        context = state.context or {}
-        phone_number = context.get("phone_number") or context.get("guest_phone")
-        calendar_event_id = context.get("calendar_event_id")
-
-        if not phone_number:
-            # No phone number available - prompt user for it
-            state.answer = (
-                "I'd be happy to text that to you! "
-                "Could you tell me your phone number? "
-                "Just say it like 'four one zero, five five five, one two three four'."
-            )
-            send_sms_duration = time.time() - start
-            state.node_timings["send_sms"] = send_sms_duration
-            if state.timing_tracker:
-                state.timing_tracker.track_sync("graph", "send_sms", send_sms_duration)
-            return state
-
-        # Get SMS service (will be in test mode if Twilio not configured)
-        try:
-            sms_service = await get_sms_service()
-        except Exception as e:
-            logger.warning(f"Could not initialize SMS service: {e}")
-            sms_service = None
-
-        # Use the text_me_that handler to process and send
-        result = await handle_text_me_that(
-            query=state.query,
-            conversation_history=state.conversation_history,
-            guest_phone=phone_number,
-            sms_service=sms_service,
-            calendar_event_id=calendar_event_id,
-        )
-
-        if result.get("success"):
-            state.answer = result.get("answer", "Done! I've texted that information to you.")
-        elif result.get("needs_phone"):
-            state.answer = result.get("answer", "What phone number should I send it to?")
-        else:
-            state.answer = result.get("answer", "I'm sorry, I couldn't send the text right now. Please try again.")
-
-    except Exception as e:
-        logger.error(f"SMS send error: {e}", exc_info=True)
-        state.answer = "I'm having trouble sending the text. Please try again later."
-        state.error = f"SMS send failed: {str(e)}"
-
-    send_sms_duration = time.time() - start
-    state.node_timings["send_sms"] = send_sms_duration
-    # Track node time to Prometheus
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "send_sms", send_sms_duration)
-    return state
-
-
-async def notification_pref_node(state: OrchestratorState) -> OrchestratorState:
-    """
-    Handle notification preference changes via voice commands.
-
-    Examples:
-    - "Stop the morning notifications" -> opt-out of morning_greeting
-    - "I don't want morning updates" -> opt-out of morning_greeting
-    - "Turn morning updates back on" -> opt-in to morning_greeting
-    - "Enable notifications" -> opt-in to all
-    - "Pause notifications" -> opt-out of all
-
-    Uses the notifications service at NOTIFICATIONS_SERVICE_URL.
-    """
-    import httpx
-
-    start = time.time()
-    query_lower = state.query.lower()
-
-    # Determine if opt-in or opt-out
-    opt_out_keywords = ["stop", "disable", "turn off", "don't want", "no more", "pause", "opt out"]
-    opt_in_keywords = ["start", "enable", "turn on", "resume", "opt in", "back on", "want"]
-
-    is_opt_out = any(kw in query_lower for kw in opt_out_keywords)
-    is_opt_in = any(kw in query_lower for kw in opt_in_keywords)
-
-    # If both or neither, default based on common patterns
-    if is_opt_out == is_opt_in:
-        # "I want morning updates" vs "I don't want morning updates"
-        if "don't" in query_lower or "not" in query_lower:
-            is_opt_out = True
-            is_opt_in = False
-        else:
-            # Ambiguous - default to opt-out since most voice requests are to stop something
-            is_opt_out = True
-            is_opt_in = False
-
-    action = "opt-out" if is_opt_out else "opt-in"
-
-    # Determine which rule(s) are affected
-    rule_slugs = []
-    if "morning" in query_lower or "greeting" in query_lower:
-        rule_slugs.append("morning_greeting")
-    if "alert" in query_lower:
-        rule_slugs.append("fridge_open_alert")
-        rule_slugs.append("door_unlocked_alert")
-        rule_slugs.append("tesla_charge_alert")
-    if "weather" in query_lower:
-        rule_slugs.append("morning_greeting")  # Weather is part of morning greeting
-
-    # If no specific rule identified, assume morning_greeting (most common)
-    if not rule_slugs:
-        rule_slugs = ["morning_greeting"]
-
-    # Get room from state
-    room = state.room or "office"
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            results = []
-
-            for rule_slug in rule_slugs:
-                endpoint = f"{NOTIFICATIONS_SERVICE_URL}/api/preferences/{action}"
-                payload = {
-                    "rule_slug": rule_slug,
-                    "room": room,
-                    "reason": "voice_command"
-                }
-
-                logger.info(
-                    "notification_pref_request",
-                    action=action,
-                    rule_slug=rule_slug,
-                    room=room,
-                    endpoint=endpoint
-                )
-
-                response = await client.post(endpoint, json=payload)
-
-                if response.status_code == 200:
-                    result = response.json()
-                    results.append({
-                        "rule": rule_slug,
-                        "status": result.get("status"),
-                        "success": True
-                    })
-                elif response.status_code == 404:
-                    # Rule not found - might not be configured yet
-                    results.append({
-                        "rule": rule_slug,
-                        "status": "rule_not_found",
-                        "success": False
-                    })
-                else:
-                    results.append({
-                        "rule": rule_slug,
-                        "status": "error",
-                        "success": False,
-                        "error": response.text
-                    })
-
-            # Build response message
-            successful = [r for r in results if r["success"]]
-            failed = [r for r in results if not r["success"]]
-
-            if action == "opt-out":
-                if successful:
-                    if "morning_greeting" in [r["rule"] for r in successful]:
-                        state.answer = "Okay, I've turned off the morning notifications for this room. Just say 'turn morning updates back on' whenever you'd like them again."
-                    else:
-                        rule_names = ", ".join([r["rule"].replace("_", " ") for r in successful])
-                        state.answer = f"Done, I've disabled notifications for: {rule_names}. Let me know when you want them back."
-                elif failed:
-                    if any(r.get("status") == "rule_not_found" for r in failed):
-                        state.answer = "I couldn't find that notification rule. The proactive notification system may still be setting up."
-                    else:
-                        state.answer = "I'm having trouble updating your notification preferences right now. Please try again later."
-            else:  # opt-in
-                if successful:
-                    if "morning_greeting" in [r["rule"] for r in successful]:
-                        state.answer = "Great, I've turned morning notifications back on for this room. You'll start getting them again tomorrow."
-                    else:
-                        rule_names = ", ".join([r["rule"].replace("_", " ") for r in successful])
-                        state.answer = f"Done, I've re-enabled notifications for: {rule_names}."
-                elif failed:
-                    if any(r.get("status") == "already_opted_in" for r in failed):
-                        state.answer = "You're already receiving those notifications."
-                    elif any(r.get("status") == "rule_not_found" for r in failed):
-                        state.answer = "I couldn't find that notification rule. The proactive notification system may still be setting up."
-                    else:
-                        state.answer = "I'm having trouble updating your notification preferences right now. Please try again later."
-
-            logger.info(
-                "notification_pref_complete",
-                action=action,
-                results=results,
-                answer=state.answer[:100]
-            )
-
-    except httpx.ConnectError:
-        logger.warning("notification_service_unreachable", url=NOTIFICATIONS_SERVICE_URL)
-        state.answer = "The notification service isn't available right now. Please try again later."
-        state.error = "Notifications service unreachable"
-
-    except Exception as e:
-        logger.error(f"notification_pref_error: {e}", exc_info=True)
-        state.answer = "I had trouble updating your notification preferences. Please try again."
-        state.error = f"Notification preference update failed: {str(e)}"
-
-    notif_pref_duration = time.time() - start
-    state.node_timings["notification_pref"] = notif_pref_duration
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "notification_pref", notif_pref_duration)
 
     return state
 
@@ -9558,6 +5970,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
     if orchestrator_graph is None:
         orchestrator_graph = create_orchestrator_graph()
 
+    sm = _runtime.get_session_manager()
+
     # Track request
     request_counter.labels(intent="unknown", status="started").inc()
 
@@ -9591,7 +6005,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 user_id=user_id,
                 zone=request.room
             )
-            session = await session_manager.get_or_create_session(
+            session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room
@@ -10161,13 +6575,13 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         )
 
         # Save session (with trimming based on config)
-        await session_manager.add_message(
+        await sm.add_message(
             session_id=session.session_id,
             role="user",
             content=request.query,
             metadata={"intent": intent_str, "confidence": final_state.get("confidence")}
         )
-        await session_manager.add_message(
+        await sm.add_message(
             session_id=session.session_id,
             role="assistant",
             content=answer,
@@ -10295,6 +6709,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         should_cache = (
             response.answer
             and not final_state.get("is_fallback", False)
+            and not _looks_like_fallback(response.answer)
             and final_state.get("validation_passed", True)
             and response.confidence >= 0.3
             and response.intent != "unknown"
@@ -10388,6 +6803,8 @@ async def process_query_stream(request: QueryRequest):
     - Stage 3: Final answer (TRUE streaming - tokens as generated)
     """
     async def event_generator():
+        sm = _runtime.get_session_manager()
+        llm = _runtime.get_llm_router()
         try:
             start_time = time.time()
 
@@ -10415,7 +6832,7 @@ async def process_query_stream(request: QueryRequest):
                     )
 
             # Session management
-            session = await session_manager.get_or_create_session(
+            session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room
@@ -10561,7 +6978,7 @@ async def process_query_stream(request: QueryRequest):
 
                 response_tokens = []
                 try:
-                    async for chunk in llm_router.generate_stream(
+                    async for chunk in llm.generate_stream(
                         model=synthesis_model,
                         prompt=full_prompt,
                         temperature=request.temperature or 0.7,
@@ -10603,19 +7020,19 @@ async def process_query_stream(request: QueryRequest):
             #   stream_completed=True  → persist user + assistant messages (normal)
             #   stream_completed=False → persist user only; log if partial tokens emitted
             if stream_completed:
-                await session_manager.add_message(
+                await sm.add_message(
                     session_id=session.session_id,
                     role="user",
                     content=request.query,
                     metadata={"streaming": True}
                 )
-                await session_manager.add_message(
+                await sm.add_message(
                     session_id=session.session_id,
                     role="assistant",
                     content=full_answer
                 )
             else:
-                await session_manager.add_message(
+                await sm.add_message(
                     session_id=session.session_id,
                     role="user",
                     content=request.query,
@@ -10677,6 +7094,8 @@ async def process_query_stream_v2(request: QueryRequest):
     - {stage: 'complete', total_sentences: 2, full_response: '...', processing_time: 1.5}
     """
     async def sentence_event_generator():
+        sm = _runtime.get_session_manager()
+        llm = _runtime.get_llm_router()
         start_time = time.time()
 
         try:
@@ -10689,7 +7108,7 @@ async def process_query_stream_v2(request: QueryRequest):
                 orchestrator_graph = create_orchestrator_graph()
 
             # Session management
-            session = await session_manager.get_or_create_session(
+            session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=request.mode,
                 zone=request.room
@@ -10758,13 +7177,13 @@ async def process_query_stream_v2(request: QueryRequest):
             yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': len(sentences), 'full_response': answer, 'intent': intent_str, 'processing_time': processing_time})}\n\n"
 
             # Persist session to Redis so context carries across requests and pods
-            await session_manager.add_message(
+            await sm.add_message(
                 session_id=session.session_id,
                 role="user",
                 content=request.query,
                 metadata={"streaming": True}
             )
-            await session_manager.add_message(
+            await sm.add_message(
                 session_id=session.session_id,
                 role="assistant",
                 content=answer
@@ -10824,7 +7243,7 @@ async def list_models():
     """OpenAI-compatible models endpoint - returns actual available LLM backends."""
     try:
         # Fetch available backends from admin API
-        admin_url = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+        admin_url = get_admin_url()
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{admin_url}/api/llm-backends/public")
             response.raise_for_status()
@@ -10865,51 +7284,6 @@ async def list_models():
             ]
         }
 
-
-# ============================================================================
-# LLM Response Post-Processing Utilities
-# ============================================================================
-
-# Matches hallucinated role-continuation lines like "\nUser: ", "\nHuman: ", etc.
-# These appear when synthesis prompts end with "Response:" and no stop tokens are
-# configured, causing the LLM to generate the next conversation turn itself.
-_CONTINUATION_PATTERN = re.compile(
-    r'\n\s*(User|Human|Jarvis|Assistant)\s*:',
-    re.IGNORECASE
-)
-
-
-def _strip_hallucinated_continuation(text: str) -> str:
-    """
-    Strip LLM-hallucinated role-continuation text from a response.
-
-    Truncates at the first line that looks like a new role turn (e.g. "\\nUser:",
-    "\\nHuman:", "\\nAssistant:", "\\nJarvis:"). These occur when the LLM starts
-    generating the next conversation turn instead of stopping after its response.
-
-    Also detects paragraph-level repetition (e.g. thinking-mode leak that causes
-    the model to repeat the same block multiple times) and truncates before the
-    first repeated paragraph.
-    """
-    if not text:
-        return text
-    match = _CONTINUATION_PATTERN.search(text)
-    if match:
-        text = text[:match.start()].rstrip()
-
-    # Paragraph-level repetition detector: if the same paragraph (first 120 chars)
-    # appears more than once, truncate before the second occurrence.
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    if len(paragraphs) >= 3:
-        seen: Dict[str, int] = {}
-        for i, para in enumerate(paragraphs):
-            key = para[:120]
-            if key in seen:
-                text = "\n\n".join(paragraphs[:i]).rstrip()
-                break
-            seen[key] = i
-
-    return text
 
 
 # ============================================================================
@@ -10989,6 +7363,30 @@ def _get_analytics_source() -> Optional[str]:
     if os.getenv("ATHENA_DEBUG_MODE", "false").lower() == "true":
         return "debug"
     return None
+
+
+# Fallback / error-response markers used to defend the semantic cache against
+# storing responses that should never be replayed (ATHENA-32). The is_fallback
+# state flag is the primary signal; this is a belt-and-suspenders pattern check
+# for fallback sites that may not have set the flag.
+_FALLBACK_RESPONSE_MARKERS = (
+    "i'm not sure how to help",
+    "i'm not confident in my response",
+    "i don't have current information to answer",
+    "i encountered an issue processing",
+    "i apologize, but i'm having trouble generating",
+    "i'm having trouble updating your notification preferences",
+    "i'm sorry, i couldn't send the text",
+    "i'm having trouble sending the text",
+)
+
+
+def _looks_like_fallback(answer: str) -> bool:
+    """Lowercase-substring match against known fallback markers (ATHENA-32 belt-and-suspenders)."""
+    if not answer:
+        return True  # empty answer is always non-cacheable
+    lower = answer.lower()
+    return any(marker in lower for marker in _FALLBACK_RESPONSE_MARKERS)
 
 
 async def _should_capture_analytics(debug_source: Optional[str]) -> Optional[str]:
@@ -11202,8 +7600,8 @@ Response:"""
                 if _s_entry.get("category") in ("owner", "user") and _s_entry.get("key") in ("owner_name", "name"):
                     _stream_owner_name = _s_entry.get("value", "").strip() or None
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("build_synthesis_prompt_for_streaming_owner_name_failed", error=str(e))
 
     system_context = await build_core_assistant_prompt(
         include_voice_formatting=state.interface_type != "chat",
@@ -11360,11 +7758,13 @@ async def chat_completions(request: OpenAIChatRequest):
         if request.stream:
             async def openai_stream_generator():
                 # Initialize state and run orchestrator
+                sm = _runtime.get_session_manager()
+                llm = _runtime.get_llm_router()
                 global orchestrator_graph
                 if orchestrator_graph is None:
                     orchestrator_graph = create_orchestrator_graph()
 
-                session = await session_manager.get_or_create_session(
+                session = await sm.get_or_create_session(
                     session_id="openwebui-session",
                     user_id="openwebui",
                     zone="web"
@@ -11497,7 +7897,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     # For text/chat: stream tokens directly (original behavior)
                     is_voice = interface_type == "voice"
 
-                    async for chunk in llm_router.generate_stream(
+                    async for chunk in llm.generate_stream(
                         model=synthesis_model,
                         prompt=full_prompt,
                         temperature=state.temperature,
@@ -11665,16 +8065,16 @@ async def handle_motion_event(request: MotionEventRequest):
     Returns:
         Status of the motion event processing
     """
-    global follow_me_service
+    fms = _runtime.get_follow_me_service()
 
-    if not follow_me_service:
+    if not fms:
         return {
             "status": "disabled",
             "message": "Follow-me audio service not initialized"
         }
 
     try:
-        await follow_me_service.handle_motion_event(
+        await fms.handle_motion_event(
             room_name=request.room,
             motion_detected=request.motion_detected,
             timestamp=request.timestamp
@@ -11684,7 +8084,7 @@ async def handle_motion_event(request: MotionEventRequest):
             "status": "ok",
             "room": request.room,
             "motion_detected": request.motion_detected,
-            "service_status": follow_me_service.get_status()
+            "service_status": fms.get_status()
         }
 
     except Exception as e:
@@ -11703,9 +8103,9 @@ async def get_follow_me_status():
     Returns:
         Current mode, active rooms, and presence state
     """
-    global follow_me_service
+    fms = _runtime.get_follow_me_service()
 
-    if not follow_me_service:
+    if not fms:
         return {
             "status": "disabled",
             "message": "Follow-me audio service not initialized"
@@ -11713,7 +8113,7 @@ async def get_follow_me_status():
 
     return {
         "status": "ok",
-        **follow_me_service.get_status()
+        **fms.get_status()
     }
 
 
@@ -11728,13 +8128,13 @@ async def set_follow_me_mode(mode: str):
     Returns:
         Updated status
     """
-    global follow_me_service
+    fms = _runtime.get_follow_me_service()
 
-    if not follow_me_service:
+    if not fms:
         return {"status": "disabled", "message": "Service not initialized"}
 
     try:
-        follow_me_service.set_mode(FollowMeMode(mode))
+        fms.set_mode(FollowMeMode(mode))
         return {"status": "ok", "mode": mode}
     except ValueError:
         return {"status": "error", "message": f"Invalid mode: {mode}"}
@@ -11751,12 +8151,12 @@ async def set_follow_me_enabled(enabled: bool):
     Returns:
         Updated status
     """
-    global follow_me_service
+    fms = _runtime.get_follow_me_service()
 
-    if not follow_me_service:
+    if not fms:
         return {"status": "disabled", "message": "Service not initialized"}
 
-    follow_me_service.set_enabled(enabled)
+    fms.set_enabled(enabled)
     return {"status": "ok", "enabled": enabled}
 
 
@@ -11784,22 +8184,27 @@ async def health_check(detailed: bool = False):
 
     # Check Home Assistant (optional - won't fail health check)
     try:
-        ha_healthy = await ha_client.health_check() if ha_client else False
+        _ha = _runtime.get_ha_client()
+        ha_healthy = await _ha.health_check() if _ha else False
         health["components"]["home_assistant"] = ha_healthy
-    except:
+    except Exception as e:
         health["components"]["home_assistant"] = False
+        logger.warning("health_check: home_assistant probe failed", exc_info=e)
 
     # Check LLM Router (supports Ollama, MLX, etc.)
     try:
-        health["components"]["llm_router"] = llm_router is not None
-    except:
+        health["components"]["llm_router"] = _runtime.get_llm_router() is not None
+    except Exception as e:
         health["components"]["llm_router"] = False
+        logger.warning("health_check: llm_router probe failed", exc_info=e)
 
     # Check Redis (optional - caching degrades gracefully)
     try:
-        health["components"]["redis"] = await cache_client.ping() if cache_client else False
-    except:
+        _cache = _runtime.get_cache_client()
+        health["components"]["redis"] = await _cache.ping() if _cache else False
+    except Exception as e:
         health["components"]["redis"] = False
+        logger.warning("health_check: redis probe failed", exc_info=e)
 
     # Add resilience pattern status (circuit breakers, rate limiters)
     # Note: Open circuits don't make the orchestrator unhealthy - RAG services are optional
@@ -11831,16 +8236,18 @@ async def health_check(detailed: bool = False):
     # RAG services are optional - checking them all takes too long for health probes
     if detailed:
         try:
-            for name, url in rag_client._service_urls.items():
+            _rag = _runtime.get_rag_client()
+            for name, url in _rag._service_urls.items():
                 try:
-                    response = await rag_client.get(name, "/health", skip_circuit_breaker=True, skip_rate_limit=True)
+                    response = await _rag.get(name, "/health", skip_circuit_breaker=True, skip_rate_limit=True)
                     health["components"][f"rag_{name}"] = response.success
                 except Exception as e:
                     logger.debug(f"RAG service {name} health check failed: {e}")
                     health["components"][f"rag_{name}"] = False
         except Exception as e:
             logger.error(f"Failed to check RAG services: {e}")
-            for name in rag_client._service_urls.keys():
+            _rag = _runtime.get_rag_client()
+            for name in _rag._service_urls.keys():
                 health["components"][f"rag_{name}"] = False
 
     # Determine overall health
@@ -11915,7 +8322,7 @@ async def warmup_session(session_id: str) -> dict:
         Status dict with session info
     """
     try:
-        session_manager = await get_session_manager()
+        session_manager = _runtime.get_session_manager()
         session = await session_manager.get_session(session_id)
 
         if session:
@@ -11959,30 +8366,36 @@ async def readiness_probe():
     Returns healthy if the service is ready to accept traffic.
     K8s will remove from load balancer if this fails.
     """
-    ready = True
+    # Critical readiness gate: all required singletons must be initialized (Phase 1.2)
+    ready = _runtime.is_ready()
     components = {}
 
-    # Check LLM Router (critical)
+    # Check LLM Router (critical — also reflected in _runtime.is_ready())
     try:
-        components["llm_router"] = llm_router is not None
+        components["llm_router"] = _runtime.get_llm_router() is not None
         if not components["llm_router"]:
             ready = False
-    except:
+    except Exception as e:
         components["llm_router"] = False
         ready = False
+        logger.warning("readiness_probe: llm_router probe failed", exc_info=e)
 
     # Check Home Assistant (optional - degraded if down)
     try:
-        ha_healthy = await ha_client.health_check() if ha_client else False
+        _ha = _runtime.get_ha_client()
+        ha_healthy = await _ha.health_check() if _ha else False
         components["home_assistant"] = ha_healthy
-    except:
+    except Exception as e:
         components["home_assistant"] = False
+        logger.warning("readiness_probe: home_assistant probe failed", exc_info=e)
 
     # Check Redis (optional)
     try:
-        components["redis"] = await cache_client.ping() if cache_client else False
-    except:
+        _cache = _runtime.get_cache_client()
+        components["redis"] = await _cache.ping() if _cache else False
+    except Exception as e:
         components["redis"] = False
+        logger.warning("readiness_probe: redis probe failed", exc_info=e)
 
     status_code = 200 if ready else 503
     return Response(
@@ -12129,7 +8542,7 @@ async def llm_metrics():
     - Per-backend breakdown
     """
     try:
-        metrics_data = llm_router.report_metrics()
+        metrics_data = _runtime.get_llm_router().report_metrics()
         return metrics_data
     except Exception as e:
         logger.error(f"Failed to retrieve LLM metrics: {e}")
@@ -12191,7 +8604,7 @@ async def get_session_details(session_id: str) -> SessionDetailResponse:
     Path Parameters:
     - session_id: Session identifier
     """
-    session = await session_manager.get_session(session_id)
+    session = await _runtime.get_session_manager().get_session(session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
@@ -12217,12 +8630,13 @@ async def delete_session(session_id: str):
     Path Parameters:
     - session_id: Session identifier
     """
-    session = await session_manager.get_session(session_id)
+    sm = _runtime.get_session_manager()
+    session = await sm.get_session(session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
-    await session_manager.delete_session(session_id)
+    await sm.delete_session(session_id)
 
     logger.info(f"Deleted session {session_id}")
 
@@ -12239,7 +8653,7 @@ async def export_session_history(session_id: str, format: str = "json"):
     Query Parameters:
     - format: Export format (json, text, markdown) - default: json
     """
-    session = await session_manager.get_session(session_id)
+    session = await _runtime.get_session_manager().get_session(session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")

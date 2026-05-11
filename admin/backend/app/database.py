@@ -12,6 +12,7 @@ DEV_MODE Support:
 import os
 from contextlib import contextmanager
 from typing import Generator, Optional
+from shared.config import get_config
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -24,14 +25,14 @@ from app.models import Base
 logger = structlog.get_logger()
 
 # Check for DEV_MODE
-DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
+DEV_MODE = get_config().dev_mode
 
 # Database configuration from environment
 if DEV_MODE:
     DATABASE_URL = "sqlite:///:memory:"
     logger.info("dev_mode_enabled", database="sqlite_in_memory")
 else:
-    DATABASE_URL = os.getenv("DATABASE_URL")
+    DATABASE_URL = get_config().database_url
     if not DATABASE_URL:
         raise ValueError(
             "DATABASE_URL environment variable is required. "
@@ -170,6 +171,8 @@ def _ensure_users_table_compatibility():
         conn.execute(text("ALTER TABLE users ALTER COLUMN auth_provider SET NOT NULL"))
         conn.execute(text("ALTER TABLE users ALTER COLUMN authentik_id DROP NOT NULL"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_auth_provider ON users(auth_provider)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_count INTEGER NOT NULL DEFAULT 0"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP WITH TIME ZONE"))
 
 
 def check_db_connection() -> bool:
@@ -265,34 +268,43 @@ def seed_dev_data():
 
 # OSS default model configuration
 OSS_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
-OSS_OLLAMA_URL = os.getenv("OLLAMA_URL") or os.getenv("LLM_SERVICE_URL", "http://localhost:11434")
+# OSS_OLLAMA_URL preserved as module-level constant for compatibility with
+# admin/backend/main.py:25 import (`from app.database import ... OSS_OLLAMA_URL`)
+# and main.py:350, 352, 355, 380 reads.  Resolution is now centralized via
+# get_config().llm_endpoint with the dominant LLM_SERVICE_URL > OLLAMA_URL precedence.
+OSS_OLLAMA_URL = get_config().llm_endpoint
 OSS_AUTO_PULL_MODELS = os.getenv("ATHENA_AUTO_PULL_MODELS", "true").lower() == "true"
 OSS_SEED_DEFAULTS = os.getenv("ATHENA_SEED_DEFAULTS", "true").lower() == "true"
+# OSS_SERVICE_REGISTRY — 7-tuple shape (Phase 2 / ATHENA-1).
+# Tuple fields: (name, display_name, host, port, protocol, cache_ttl, enabled)
+# host is the in-cluster K8s service DNS shortname; port is the container port.
+# endpoint_url is derived as f"{protocol}://{host}:{port}" by the seed function.
+# (Phase 2 bob C2 / otto C2 — CREATE TABLE removed; alembic owns the schema now)
 OSS_SERVICE_REGISTRY = [
-    ("weather", "Weather Service", "http://athena-rag-weather:8010", 600, True),
-    ("airports", "Airports Service", "http://athena-rag-airports:8011", 120, True),
-    ("stocks", "Stock Market Service", "http://athena-rag-stocks:8012", 300, True),
-    ("flights", "Flights Service", "http://athena-rag-flights:8013", 300, True),
-    ("events", "Events Service", "http://athena-rag-events:8014", 300, True),
-    ("streaming", "Streaming Service", "http://athena-rag-streaming:8015", 300, True),
-    ("news", "News Service", "http://athena-rag-news:8016", 300, True),
-    ("sports", "Sports Service", "http://athena-rag-sports:8017", 300, True),
-    ("websearch", "Web Search Service", "http://athena-rag-websearch:8018", 300, True),
-    ("dining", "Dining Service", "http://athena-rag-dining:8019", 300, True),
-    ("recipes", "Recipe Service", "http://athena-rag-recipes:8020", 300, True),
-    ("onecall", "OneCall Service", "http://athena-rag-onecall:8021", 300, True),
-    ("mode", "Mode Service", "http://athena-mode-service:8022", 60, True),
-    ("seatgeek", "SeatGeek Service", "http://athena-rag-seatgeek:8024", 300, True),
-    ("transportation", "Transportation Service", "http://athena-rag-transportation:8025", 300, True),
-    ("community", "Community Service", "http://athena-rag-community:8026", 300, True),
-    ("amtrak", "Amtrak Service", "http://athena-rag-amtrak:8027", 300, True),
-    ("tesla", "Tesla Service", "http://athena-rag-tesla:8028", 300, False),
-    ("media", "Media Service", "http://athena-rag-media:8029", 300, True),
-    ("directions", "Directions Service", "http://athena-rag-directions:8030", 300, True),
-    ("sitescraper", "Site Scraper Service", "http://athena-rag-sitescraper:8031", 300, True),
-    ("serpapi", "SerpAPI Service", "http://athena-rag-serpapi:8032", 300, True),
-    ("pricecompare", "Price Compare Service", "http://athena-rag-pricecompare:8033", 300, True),
-    ("brightdata", "Bright Data Service", "http://athena-rag-brightdata:8040", 300, True),
+    ("weather",       "Weather Service",        "athena-rag-weather",        8010, "http", 600, True),
+    ("airports",      "Airports Service",        "athena-rag-airports",       8011, "http", 120, True),
+    ("stocks",        "Stock Market Service",    "athena-rag-stocks",         8012, "http", 300, True),
+    ("flights",       "Flights Service",         "athena-rag-flights",        8013, "http", 300, True),
+    ("events",        "Events Service",          "athena-rag-events",         8014, "http", 300, True),
+    ("streaming",     "Streaming Service",       "athena-rag-streaming",      8015, "http", 300, True),
+    ("news",          "News Service",            "athena-rag-news",           8016, "http", 300, True),
+    ("sports",        "Sports Service",          "athena-rag-sports",         8017, "http", 300, True),
+    ("websearch",     "Web Search Service",      "athena-rag-websearch",      8018, "http", 300, True),
+    ("dining",        "Dining Service",          "athena-rag-dining",         8019, "http", 300, True),
+    ("recipes",       "Recipe Service",          "athena-rag-recipes",        8020, "http", 300, True),
+    ("onecall",       "OneCall Service",         "athena-rag-onecall",        8021, "http", 300, True),
+    ("mode",          "Mode Service",            "athena-mode-service",       8022, "http",  60, True),
+    ("seatgeek",      "SeatGeek Service",        "athena-rag-seatgeek",       8024, "http", 300, True),
+    ("transportation","Transportation Service",  "athena-rag-transportation", 8025, "http", 300, True),
+    ("community",     "Community Service",       "athena-rag-community",      8026, "http", 300, True),
+    ("amtrak",        "Amtrak Service",          "athena-rag-amtrak",         8027, "http", 300, True),
+    ("tesla",         "Tesla Service",           "athena-rag-tesla",          8028, "http", 300, False),
+    ("media",         "Media Service",           "athena-rag-media",          8029, "http", 300, True),
+    ("directions",    "Directions Service",      "athena-rag-directions",     8030, "http", 300, True),
+    ("sitescraper",   "Site Scraper Service",    "athena-rag-sitescraper",    8031, "http", 300, True),
+    ("serpapi",       "SerpAPI Service",         "athena-rag-serpapi",        8032, "http", 300, True),
+    ("pricecompare",  "Price Compare Service",   "athena-rag-pricecompare",   8033, "http", 300, True),
+    ("brightdata",    "Bright Data Service",     "athena-rag-brightdata",     8040, "http", 300, True),
 ]
 
 
@@ -300,7 +312,7 @@ def seed_oss_defaults():
     """
     Seed OSS default configuration for LLM backends and component assignments.
 
-    This ensures a working out-of-the-box experience with qwen3:4b as the default model.
+    This ensures a working out-of-the-box experience with qwen3:4b-instruct-2507-q4_K_M as the default model.
     Called during production startup to ensure configuration exists.
     """
     from datetime import datetime
@@ -720,60 +732,52 @@ def seed_oss_base_knowledge():
 
 
 def seed_oss_service_registry():
-    """
-    Seed OSS default service registry entries for cluster-local RAG services.
+    """Seed OSS default service registry entries for cluster-local RAG services.
 
-    Ensures the admin service registry works on fresh installs without manual SQL.
+    Phase 2 (ATHENA-1): CREATE TABLE block removed — alembic migration 055 owns
+    the schema now (bob C2 / otto C2 / ian I-H2).  The startup gate in main.py
+    asserts the required columns exist before this function is called.
+
+    The 7-tuple shape is (name, display_name, host, port, protocol, cache_ttl, enabled).
+    endpoint_url is derived as f"{protocol}://{host}:{port}".
     """
     with get_db_context() as db:
-        db.execute(text("""
-            CREATE TABLE IF NOT EXISTS rag_services (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(50) UNIQUE NOT NULL,
-                display_name VARCHAR(100),
-                service_type VARCHAR(50),
-                endpoint_url TEXT,
-                api_key_encrypted TEXT,
-                headers JSONB,
-                query_template TEXT,
-                response_parser TEXT,
-                cache_ttl INTEGER DEFAULT 300,
-                timeout INTEGER DEFAULT 5000,
-                rate_limit INTEGER DEFAULT 100,
-                enabled BOOLEAN DEFAULT true,
-                health_check_url TEXT,
-                last_health_check TIMESTAMP,
-                health_status VARCHAR(20),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """))
-
         created_count = 0
         updated_count = 0
-        for name, display_name, endpoint_url, cache_ttl, enabled in OSS_SERVICE_REGISTRY:
+        for name, display_name, host, port, protocol, cache_ttl, enabled in OSS_SERVICE_REGISTRY:
+            endpoint_url = f"{protocol}://{host}:{port}"
             result = db.execute(text("""
                 INSERT INTO rag_services (
-                    name, display_name, service_type, endpoint_url, headers,
-                    cache_ttl, timeout, rate_limit, enabled, updated_at
+                    name, display_name, service_type,
+                    host, port, protocol, endpoint_url,
+                    headers, cache_ttl, timeout, rate_limit,
+                    enabled, updated_at
                 ) VALUES (
-                    :name, :display_name, 'api', :endpoint_url,
-                    CAST(:headers AS jsonb), :cache_ttl, 5000, 100, :enabled, NOW()
+                    :name, :display_name, 'api',
+                    :host, :port, :protocol, :endpoint_url,
+                    CAST(:headers AS jsonb), :cache_ttl, 5000, 100,
+                    :enabled, NOW()
                 )
                 ON CONFLICT (name) DO UPDATE SET
                     display_name = EXCLUDED.display_name,
                     service_type = EXCLUDED.service_type,
+                    host         = EXCLUDED.host,
+                    port         = EXCLUDED.port,
+                    protocol     = EXCLUDED.protocol,
                     endpoint_url = EXCLUDED.endpoint_url,
-                    headers = EXCLUDED.headers,
-                    cache_ttl = EXCLUDED.cache_ttl,
-                    timeout = EXCLUDED.timeout,
-                    rate_limit = EXCLUDED.rate_limit,
-                    enabled = EXCLUDED.enabled,
-                    updated_at = NOW()
+                    headers      = EXCLUDED.headers,
+                    cache_ttl    = EXCLUDED.cache_ttl,
+                    timeout      = EXCLUDED.timeout,
+                    rate_limit   = EXCLUDED.rate_limit,
+                    enabled      = EXCLUDED.enabled,
+                    updated_at   = NOW()
                 RETURNING (xmax = 0) AS inserted
             """), {
                 "name": name,
                 "display_name": display_name,
+                "host": host,
+                "port": port,
+                "protocol": protocol,
                 "endpoint_url": endpoint_url,
                 "headers": '{"Content-Type":"application/json"}',
                 "cache_ttl": cache_ttl,

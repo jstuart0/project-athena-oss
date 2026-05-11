@@ -25,21 +25,20 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from shared.cache import cached, CacheClient
+from shared.config import get_config
 from shared.service_registry import startup_service, unregister_service
-from shared.logging_config import setup_logging
+from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
+from shared.admin_url import get_admin_url
 
-# Import ContentFetcher from orchestrator
-from orchestrator.search_providers.content_fetcher import ContentFetcher
+from shared.content_fetcher import ContentFetcher
 
-# Configure logging
-setup_logging(service_name="site-scraper-rag")
-logger = structlog.get_logger()
+logger = configure_logging("site-scraper-rag")
 
 SERVICE_NAME = "site-scraper"
 SERVICE_PORT = int(os.getenv("SITE_SCRAPER_PORT", "8031"))
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = get_config().redis_url
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
 
 # Global clients
@@ -63,10 +62,18 @@ async def load_config():
     """Load configuration from Admin API."""
     global config
     try:
-        # Fetch service-specific configuration from public endpoint
+        # Fetch service-specific configuration from public endpoint.
+        # X-Service-Key required: Phase 1 (ATHENA-14) gated this endpoint with
+        # verify_service_api_key.  codex-r2:1 — without this header the service
+        # received 422 at startup and silently fell back to empty allow/block lists,
+        # meaning admin-configured allowlists were not enforced in production.
         async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-            admin_url = os.getenv("ADMIN_API_URL", "http://localhost:8080")
-            response = await client.get(f"{admin_url}/api/site-scraper/config/public")
+            admin_url = get_admin_url()
+            service_key = get_config().service_api_key
+            response = await client.get(
+                f"{admin_url}/api/site-scraper/config/public",
+                headers={"X-Service-Key": service_key},
+            )
             if response.status_code == 200:
                 svc_config = response.json()
                 config.update(svc_config)
@@ -194,7 +201,7 @@ setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    from orchestrator.search_providers.content_fetcher import HAS_PLAYWRIGHT
+    from shared.content_fetcher import HAS_PLAYWRIGHT
     return JSONResponse(
         status_code=200,
         content={

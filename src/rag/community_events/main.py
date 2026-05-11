@@ -33,20 +33,19 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import JSONResponse
 
-from shared.logging_config import setup_logging
+from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
 
-# Configure logging
-setup_logging(service_name="community-events-rag")
-logger = structlog.get_logger()
+logger = configure_logging("community-events-rag")
 
 SERVICE_NAME = "community-events"
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8026"))
 
-# Redis configuration
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-REDIS_DB = int(os.getenv("REDIS_DB", "1"))  # Use DB 1 for community events
+# Service-specific Redis URL (path encodes DB 1 to isolate community events cache).
+# Falls back to a localhost default for OSS first-boot without Redis configured.
+# Do NOT use REDIS_HOST/REDIS_PORT — the kubelet injects REDIS_PORT=tcp://... for
+# any K8s Service named "redis", which breaks int() casts at import time.
+REDIS_URL = os.getenv("COMMUNITY_EVENTS_REDIS_URL", "redis://localhost:6379/1")
 CACHE_TTL = 86400  # 24 hours in seconds
 
 # Redis keys for sorted set storage
@@ -81,15 +80,12 @@ async def get_redis_client():
     if redis_client is None:
         try:
             import redis.asyncio as redis
-            redis_client = redis.Redis(
-                host=REDIS_HOST,
-                port=REDIS_PORT,
-                db=REDIS_DB,
-                decode_responses=True
-            )
+            # URL path encodes the DB index; do NOT pass db= kwarg (it would be
+            # silently overridden by the URL path per redis-py precedence rules).
+            redis_client = redis.from_url(REDIS_URL, decode_responses=True)
             # Test connection
             await redis_client.ping()
-            logger.info("redis_connected", host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+            logger.info("redis_connected", url=REDIS_URL)
         except Exception as e:
             logger.warning("redis_connection_failed", error=str(e))
             redis_client = None

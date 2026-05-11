@@ -1,8 +1,11 @@
 # Auto-generated RAG Services Manifests
-# Generated: 2026-01-22T11:45:44.101031
+# Generated: 2026-05-05T04:04:52.964463
 # Total services: 23
+# Registry: YOUR_REGISTRY  (set REGISTRY env var to override)
+# Tag: latest  (set TAG env var to override)
 #
-# To regenerate: python3 scripts/generate-rag-manifests.py > manifests/athena-prod/rag-services.yaml
+# To regenerate:
+#   REGISTRY=your.registry.example.com python3 scripts/generate-rag-manifests.py > manifests/athena-prod/rag-services.yaml
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -35,6 +38,11 @@ spec:
         env:
         - name: PORT
           value: "8010"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: OPENWEATHER_API_KEY
           valueFrom:
             secretKeyRef:
@@ -107,7 +115,11 @@ spec:
         env:
         - name: PORT
           value: "8011"
-
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         resources:
           requests:
             memory: "64Mi"
@@ -175,6 +187,11 @@ spec:
         env:
         - name: PORT
           value: "8012"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: ALPHA_VANTAGE_API_KEY
           valueFrom:
             secretKeyRef:
@@ -247,6 +264,11 @@ spec:
         env:
         - name: PORT
           value: "8013"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: FLIGHTAWARE_API_KEY
           valueFrom:
             secretKeyRef:
@@ -319,6 +341,11 @@ spec:
         env:
         - name: PORT
           value: "8014"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: TICKETMASTER_API_KEY
           valueFrom:
             secretKeyRef:
@@ -391,6 +418,11 @@ spec:
         env:
         - name: PORT
           value: "8015"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: TMDB_API_KEY
           valueFrom:
             secretKeyRef:
@@ -463,6 +495,11 @@ spec:
         env:
         - name: PORT
           value: "8016"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: NEWSAPI_KEY
           valueFrom:
             secretKeyRef:
@@ -535,6 +572,11 @@ spec:
         env:
         - name: PORT
           value: "8017"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: THESPORTSDB_API_KEY
           valueFrom:
             secretKeyRef:
@@ -607,6 +649,11 @@ spec:
         env:
         - name: PORT
           value: "8018"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: BRAVE_API_KEY
           valueFrom:
             secretKeyRef:
@@ -679,6 +726,11 @@ spec:
         env:
         - name: PORT
           value: "8019"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: YELP_API_KEY
           valueFrom:
             secretKeyRef:
@@ -751,6 +803,11 @@ spec:
         env:
         - name: PORT
           value: "8020"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: SPOONACULAR_API_KEY
           valueFrom:
             secretKeyRef:
@@ -823,6 +880,11 @@ spec:
         env:
         - name: PORT
           value: "8021"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: OPENWEATHER_API_KEY
           valueFrom:
             secretKeyRef:
@@ -895,6 +957,11 @@ spec:
         env:
         - name: PORT
           value: "8024"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: SEATGEEK_API_KEY
           valueFrom:
             secretKeyRef:
@@ -967,7 +1034,11 @@ spec:
         env:
         - name: PORT
           value: "8025"
-
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         resources:
           requests:
             memory: "64Mi"
@@ -1035,7 +1106,11 @@ spec:
         env:
         - name: PORT
           value: "8026"
-
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         resources:
           requests:
             memory: "64Mi"
@@ -1103,7 +1178,11 @@ spec:
         env:
         - name: PORT
           value: "8027"
-
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         resources:
           requests:
             memory: "64Mi"
@@ -1171,11 +1250,18 @@ spec:
         env:
         - name: PORT
           value: "8028"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: TESLA_API_KEY
           valueFrom:
             secretKeyRef:
               name: athena-api-keys
               key: TESLA_API_KEY
+        - name: TESLAMATE_ENABLED
+          value: "false"
         resources:
           requests:
             memory: "64Mi"
@@ -1243,7 +1329,11 @@ spec:
         env:
         - name: PORT
           value: "8029"
-
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         resources:
           requests:
             memory: "64Mi"
@@ -1311,6 +1401,11 @@ spec:
         env:
         - name: PORT
           value: "8030"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: GOOGLE_MAPS_API_KEY
           valueFrom:
             secretKeyRef:
@@ -1383,7 +1478,11 @@ spec:
         env:
         - name: PORT
           value: "8031"
-
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         resources:
           requests:
             memory: "64Mi"
@@ -1451,6 +1550,11 @@ spec:
         env:
         - name: PORT
           value: "8032"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: SERPAPI_KEY
           valueFrom:
             secretKeyRef:
@@ -1523,7 +1627,11 @@ spec:
         env:
         - name: PORT
           value: "8033"
-
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         resources:
           requests:
             memory: "64Mi"
@@ -1591,6 +1699,11 @@ spec:
         env:
         - name: PORT
           value: "8040"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         - name: BRIGHTDATA_API_KEY
           valueFrom:
             secretKeyRef:

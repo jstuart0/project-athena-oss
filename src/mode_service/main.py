@@ -31,13 +31,15 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.logging_config import configure_logging
 from shared.cache import CacheClient
+from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 # Configure logging
 logger = configure_logging("mode-service")
 
 # Environment variables
-ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:5000")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+ADMIN_API_URL = get_admin_url()
+REDIS_URL = get_config().redis_url
 SERVICE_PORT = int(os.getenv("MODE_SERVICE_PORT", "8021"))
 POLL_INTERVAL_SECONDS = int(os.getenv("CALENDAR_POLL_INTERVAL_SECONDS", "600"))  # 10 minutes
 

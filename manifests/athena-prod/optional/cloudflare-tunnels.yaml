@@ -32,6 +32,12 @@
 # =============================================================================
 
 ---
+# Ensure the cloudflare namespace exists before the ConfigMaps and Deployments below.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudflare
+---
 # Athena Admin Portal Tunnel
 apiVersion: v1
 kind: ConfigMap
@@ -47,7 +53,8 @@ data:
     no-autoupdate: true
 
     ingress:
-      - hostname: athena.xmojo.net  # UPDATE: Your domain
+      # REQUIRED: Replace YOUR_DOMAIN_HERE with your domain (e.g., yourdomain.com)
+      - hostname: athena.YOUR_DOMAIN_HERE
         service: https://traefik.traefik.svc.cluster.local:443
         originRequest:
           noTLSVerify: true
@@ -122,7 +129,8 @@ data:
     no-autoupdate: true
 
     ingress:
-      - hostname: chat.xmojo.net  # UPDATE: Your domain
+      # REQUIRED: Replace YOUR_DOMAIN_HERE with your domain (e.g., yourdomain.com)
+      - hostname: chat.YOUR_DOMAIN_HERE
         service: https://traefik.traefik.svc.cluster.local:443
         originRequest:
           noTLSVerify: true

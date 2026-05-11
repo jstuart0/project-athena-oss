@@ -42,23 +42,25 @@
             AppState.setAuthState('checking');
 
             try {
-                // 1. Check for token in URL (from OAuth callback)
+                // xander:4 / codex-H1: detect OIDC callback landing via ?logged_in=1.
+                // On a fresh OIDC return the backend emits this hint instead of ?token=<jwt>.
+                // Clear stale localStorage so a previous user's token cannot contaminate
+                // the new session on a shared device (cross-user contamination fix).
                 const urlParams = new URLSearchParams(window.location.search);
-                const urlToken = urlParams.get('token');
-
-                if (urlToken) {
-                    // Remove token from URL for security
+                if (urlParams.get('logged_in') === '1') {
+                    localStorage.removeItem('auth_token');
+                    // Strip the query param from the URL for cleanliness — it has served its purpose.
                     window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
-                    return await this._validateAndSetToken(urlToken);
                 }
+                // (URL ?token= reader removed in xander:4 — JWT no longer emitted in URL.)
 
-                // 2. Check localStorage
+                // 1. Check localStorage (cleared above if we just landed from OIDC callback)
                 const storedToken = localStorage.getItem('auth_token');
                 if (storedToken) {
                     return await this._validateAndSetToken(storedToken);
                 }
 
-                // 3. Try session cookie
+                // 2. Try session cookie (primary path after OIDC callback)
                 const sessionToken = await this._getSessionToken();
                 if (sessionToken) {
                     return await this._validateAndSetToken(sessionToken);
@@ -151,12 +153,12 @@
             const localForm = methods.local_enabled ? `
                 <form onsubmit="Auth.submitLocalLogin(event)" class="space-y-3">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Username</label>
+                        <label for="local-login-username" class="block text-sm font-medium text-gray-400 mb-2">Username</label>
                         <input id="local-login-username" type="text" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Password</label>
+                        <label for="local-login-password" class="block text-sm font-medium text-gray-400 mb-2">Password</label>
                         <input id="local-login-password" type="password" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
@@ -211,7 +213,7 @@
 
                 const data = await response.json();
                 if (!response.ok) {
-                    throw new Error(data.detail || 'Login failed');
+                    throw new Error(data.detail || data.error || 'Login failed');
                 }
 
                 closeModal('login-modal');
@@ -246,7 +248,7 @@
             if (container) {
                 container.innerHTML = `
                     <div class="flex flex-col items-center justify-center py-16">
-                        <div class="text-6xl mb-4">🔐</div>
+                        <i data-lucide="lock" class="w-12 h-12 mb-4 text-gray-400"></i>
                         <h2 class="text-xl font-semibold text-white mb-2">Authentication Required</h2>
                         <p class="text-gray-400 mb-6">Please login to access this page.</p>
                         <button onclick="Auth.login()"
@@ -255,6 +257,7 @@
                         </button>
                     </div>
                 `;
+                if (typeof lucide !== 'undefined') lucide.createIcons();
             }
         },
 

@@ -202,19 +202,19 @@ function toggleSidebarPin() {
 // ============================================================================
 
 async function checkAuthStatus() {
-    // Check for token in URL (from auth callback)
+    // xander:4 / codex-H1: detect OIDC callback landing via ?logged_in=1.
+    // Clear stale localStorage before evaluating auth so a previous user's token
+    // cannot authenticate the new user on a shared device.
     const urlParams = new URLSearchParams(window.location.search);
-    const token = urlParams.get('token');
-
-    if (token) {
-        authToken = token;
-        localStorage.setItem('auth_token', token);
-        // Remove token from URL
-        window.history.replaceState({}, document.title, window.location.pathname);
-    } else {
-        // Check localStorage
-        authToken = localStorage.getItem('auth_token');
+    if (urlParams.get('logged_in') === '1') {
+        localStorage.removeItem('auth_token');
+        // Strip the query param from the URL — it has served its purpose.
+        window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
     }
+    // (URL ?token= reader removed in xander:4 — JWT no longer emitted in URL.)
+
+    // Check localStorage (cleared above if we just landed from OIDC callback)
+    authToken = localStorage.getItem('auth_token');
 
     // If no token in localStorage, try to get from session
     if (!authToken) {
@@ -1048,18 +1048,18 @@ function showCreatePolicyModal() {
                 <h2 class="text-xl font-semibold text-white mb-4">Create Policy</h2>
                 <form onsubmit="createPolicy(event)" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Name</label>
-                        <input type="text" name="name" required
+                        <label for="policy-name" class="block text-sm font-medium text-gray-300 mb-1">Name</label>
+                        <input type="text" id="policy-name" name="name" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Description</label>
-                        <textarea name="description" rows="2"
+                        <label for="policy-description" class="block text-sm font-medium text-gray-300 mb-1">Description</label>
+                        <textarea id="policy-description" name="description" rows="2"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500"></textarea>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Mode</label>
-                        <select name="mode" required
+                        <label for="policy-mode" class="block text-sm font-medium text-gray-300 mb-1">Mode</label>
+                        <select id="policy-mode" name="mode" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                             <option value="fast">Fast (Phi-3 mini)</option>
                             <option value="medium">Medium (Llama 3.1)</option>
@@ -1068,8 +1068,8 @@ function showCreatePolicyModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Configuration (JSON)</label>
-                        <textarea name="config" rows="8" required
+                        <label for="policy-configuration" class="block text-sm font-medium text-gray-300 mb-1">Configuration (JSON)</label>
+                        <textarea id="policy-configuration" name="config" rows="8" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white font-mono text-sm focus:outline-none focus:border-blue-500"
                             placeholder='{"temperature": 0.7, "max_tokens": 500}'></textarea>
                     </div>
@@ -1206,13 +1206,13 @@ function showCreateSecretModal() {
                 <h2 class="text-xl font-semibold text-white mb-4">Create Secret</h2>
                 <form onsubmit="createSecret(event)" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Name</label>
-                        <input type="text" name="name" required
+                        <label for="secret-name" class="block text-sm font-medium text-gray-300 mb-1">Name</label>
+                        <input type="text" id="secret-name" name="name" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Type</label>
-                        <select name="secret_type" required
+                        <label for="secret-type" class="block text-sm font-medium text-gray-300 mb-1">Type</label>
+                        <select id="secret-type" name="secret_type" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                             <option value="api_key">API Key</option>
                             <option value="token">Token</option>
@@ -1222,13 +1222,13 @@ function showCreateSecretModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Description</label>
-                        <textarea name="description" rows="2"
+                        <label for="secret-description" class="block text-sm font-medium text-gray-300 mb-1">Description</label>
+                        <textarea id="secret-description" name="description" rows="2"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500"></textarea>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Secret Value</label>
-                        <textarea name="value" rows="4" required
+                        <label for="secret-value" class="block text-sm font-medium text-gray-300 mb-1">Secret Value</label>
+                        <textarea id="secret-value" name="value" rows="4" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white font-mono text-sm focus:outline-none focus:border-blue-500"></textarea>
                         <p class="text-xs text-gray-500 mt-1">Value will be encrypted before storage</p>
                     </div>
@@ -1379,41 +1379,41 @@ async function showCreateExternalApiKeyModal(serviceName = '') {
                 <form onsubmit="saveExternalApiKey(event, '${existing ? existing.service_name : ''}')" class="space-y-4">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Service Name</label>
-                            <input type="text" name="service_name" value="${payload.service_name || ''}" ${existing ? 'readonly' : ''}
+                            <label for="external-api-key-service-name" class="block text-sm font-medium text-gray-300 mb-1">Service Name</label>
+                            <input type="text" id="external-api-key-service-name" name="service_name" value="${payload.service_name || ''}" ${existing ? 'readonly' : ''}
                                 placeholder="api-football" required
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">API Name</label>
-                            <input type="text" name="api_name" value="${payload.api_name || ''}" placeholder="API-Football.com" required
+                            <label for="external-api-key-api-name" class="block text-sm font-medium text-gray-300 mb-1">API Name</label>
+                            <input type="text" id="external-api-key-api-name" name="api_name" value="${payload.api_name || ''}" placeholder="API-Football.com" required
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                         </div>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Endpoint URL</label>
-                        <input type="text" name="endpoint_url" value="${payload.endpoint_url || ''}" placeholder="https://v3.football.api-sports.io" required
+                        <label for="external-api-key-endpoint-url" class="block text-sm font-medium text-gray-300 mb-1">Endpoint URL</label>
+                        <input type="text" id="external-api-key-endpoint-url" name="endpoint_url" value="${payload.endpoint_url || ''}" placeholder="https://v3.football.api-sports.io" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">API Key</label>
-                        <input type="text" name="api_key" value="" placeholder="${existing ? 'Leave blank to keep existing key' : 'Required'}"
+                        <label for="external-api-key-api-key" class="block text-sm font-medium text-gray-300 mb-1">API Key</label>
+                        <input type="text" id="external-api-key-api-key" name="api_key" value="" placeholder="${existing ? 'Leave blank to keep existing key' : 'Required'}"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                     </div>
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Rate Limit (per minute)</label>
-                            <input type="number" name="rate_limit_per_minute" value="${payload.rate_limit_per_minute || ''}" min="0"
+                            <label for="external-api-key-rate-limit" class="block text-sm font-medium text-gray-300 mb-1">Rate Limit (per minute)</label>
+                            <input type="number" id="external-api-key-rate-limit" name="rate_limit_per_minute" value="${payload.rate_limit_per_minute || ''}" min="0"
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                         </div>
                         <div class="flex items-center gap-2 pt-6">
-                            <input type="checkbox" name="enabled" ${payload.enabled !== false ? 'checked' : ''} class="w-4 h-4">
-                            <label class="text-sm text-gray-300">Enabled</label>
+                            <input type="checkbox" id="external-api-key-enabled" name="enabled" ${payload.enabled !== false ? 'checked' : ''} class="w-4 h-4">
+                            <label for="external-api-key-enabled" class="text-sm text-gray-300">Enabled</label>
                         </div>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Description</label>
-                        <textarea name="description" rows="2" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">${payload.description || ''}</textarea>
+                        <label for="external-api-key-description" class="block text-sm font-medium text-gray-300 mb-1">Description</label>
+                        <textarea id="external-api-key-description" name="description" rows="2" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">${payload.description || ''}</textarea>
                     </div>
                     <div class="flex gap-2 pt-4">
                         <button type="submit" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded">Save</button>
@@ -1553,13 +1553,13 @@ function showCreateDeviceModal() {
                 <h2 class="text-xl font-semibold text-white mb-4">Register Device</h2>
                 <form onsubmit="createDevice(event)" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Name</label>
-                        <input type="text" name="name" required
+                        <label for="device-name" class="block text-sm font-medium text-gray-300 mb-1">Name</label>
+                        <input type="text" id="device-name" name="name" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Device Type</label>
-                        <select name="device_type" required
+                        <label for="device-type" class="block text-sm font-medium text-gray-300 mb-1">Device Type</label>
+                        <select id="device-type" name="device_type" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                             <option value="wyoming">Wyoming Voice Device</option>
                             <option value="jetson">Jetson Edge Device</option>
@@ -1567,18 +1567,18 @@ function showCreateDeviceModal() {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Zone</label>
-                        <input type="text" name="zone" required placeholder="e.g., Office, Kitchen"
+                        <label for="device-zone" class="block text-sm font-medium text-gray-300 mb-1">Zone</label>
+                        <input type="text" id="device-zone" name="zone" required placeholder="e.g., Office, Kitchen"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">IP Address</label>
-                        <input type="text" name="ip_address" required placeholder="192.168.10.x"
+                        <label for="device-ip-address" class="block text-sm font-medium text-gray-300 mb-1">IP Address</label>
+                        <input type="text" id="device-ip-address" name="ip_address" required placeholder="192.168.10.x"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Configuration (JSON, optional)</label>
-                        <textarea name="config" rows="4"
+                        <label for="device-configuration" class="block text-sm font-medium text-gray-300 mb-1">Configuration (JSON, optional)</label>
+                        <textarea id="device-configuration" name="config" rows="4"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white font-mono text-sm focus:outline-none focus:border-blue-500"
                             placeholder='{"port": 10700, "protocol": "wyoming"}'></textarea>
                     </div>
@@ -1755,11 +1755,11 @@ function showCreateLocalUserModal() {
                 <form onsubmit="createLocalUser(event)" class="space-y-4">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-400 mb-2">Username</label>
+                            <label for="local-user-username" class="block text-sm font-medium text-gray-400 mb-2">Username</label>
                             <input id="local-user-username" type="text" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-gray-400 mb-2">Login Type</label>
+                            <label for="local-user-auth-provider" class="block text-sm font-medium text-gray-400 mb-2">Login Type</label>
                             <select id="local-user-auth-provider" onchange="toggleCreateUserPasswordField()" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                                 <option value="local">local</option>
                                 <option value="oidc">oidc</option>
@@ -1768,7 +1768,7 @@ function showCreateLocalUserModal() {
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-400 mb-2">Role</label>
+                            <label for="local-user-role" class="block text-sm font-medium text-gray-400 mb-2">Role</label>
                             <select id="local-user-role" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                                 <option value="viewer">viewer</option>
                                 <option value="support">support</option>
@@ -1778,15 +1778,15 @@ function showCreateLocalUserModal() {
                         </div>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Email</label>
+                        <label for="local-user-email" class="block text-sm font-medium text-gray-400 mb-2">Email</label>
                         <input id="local-user-email" type="email" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Full Name</label>
+                        <label for="local-user-full-name" class="block text-sm font-medium text-gray-400 mb-2">Full Name</label>
                         <input id="local-user-full-name" type="text" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div id="local-user-password-group">
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Temporary Password</label>
+                        <label for="local-user-password" class="block text-sm font-medium text-gray-400 mb-2">Temporary Password</label>
                         <input id="local-user-password" type="password" minlength="10" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         <p class="text-xs text-gray-500 mt-1">Required for local users. OIDC users authenticate through your identity provider.</p>
                     </div>
@@ -1877,11 +1877,11 @@ function showChangeMyPasswordModal() {
                 </div>
                 <form onsubmit="changeMyPassword(event)" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Current Password</label>
+                        <label for="my-current-password" class="block text-sm font-medium text-gray-400 mb-2">Current Password</label>
                         <input id="my-current-password" type="password" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">New Password</label>
+                        <label for="my-new-password" class="block text-sm font-medium text-gray-400 mb-2">New Password</label>
                         <input id="my-new-password" type="password" minlength="10" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         <p class="text-xs text-gray-500 mt-1">Minimum 10 characters.</p>
                     </div>
@@ -2191,11 +2191,11 @@ function showError(message) {
 }
 
 // ============================================================================
-// SETTINGS TAB - Server Configuration & Service Registry
+// SETTINGS TAB - Service Registry
 // ============================================================================
 
 async function loadSettings() {
-    await Promise.all([loadOIDCSettings(), loadAssistantProfileSettings(), loadServers(), loadServices(), loadAnalyticsModeToggle()]);
+    await Promise.all([loadOIDCSettings(), loadAssistantProfileSettings(), loadServices(), loadAnalyticsModeToggle()]);
 }
 
 async function loadAnalyticsModeToggle() {
@@ -2325,77 +2325,6 @@ async function saveAssistantProfileSettings() {
     }
 }
 
-async function loadServers() {
-    try {
-        const response = await fetch(`${API_BASE}/api/servers`, {
-            headers: { 'Authorization': `Bearer ${getToken()}` }
-        });
-
-        if (!response.ok) throw new Error('Failed to load servers');
-
-        const data = await response.json();
-        const container = document.getElementById('servers-container');
-
-        if (data.servers.length === 0) {
-            container.innerHTML = '<div class="col-span-full text-gray-400 text-center py-8">No servers configured</div>';
-            return;
-        }
-
-        container.innerHTML = data.servers.map(server => `
-            <div class="bg-dark-card border border-dark-border rounded-lg p-4">
-                <div class="flex justify-between items-start mb-3">
-                    <div>
-                        <h4 class="text-lg font-semibold text-white">${escapeHtml(server.name)}</h4>
-                        <p class="text-sm text-gray-400">${escapeHtml(server.hostname || '')}</p>
-                    </div>
-                    <span class="px-2 py-1 rounded text-xs font-medium ${
-                        server.status === 'online' ? 'bg-green-900/30 text-green-400' :
-                        server.status === 'offline' ? 'bg-red-900/30 text-red-400' :
-                        server.status === 'degraded' ? 'bg-yellow-900/30 text-yellow-400' :
-                        'bg-gray-700 text-gray-300'
-                    }">${server.status}</span>
-                </div>
-
-                <div class="space-y-2 text-sm mb-4">
-                    <div class="flex justify-between">
-                        <span class="text-gray-400">IP Address:</span>
-                        <span class="text-gray-200 font-mono">${server.ip_address}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-400">Role:</span>
-                        <span class="text-gray-200">${server.role || 'N/A'}</span>
-                    </div>
-                    ${server.last_checked ? `
-                        <div class="flex justify-between">
-                            <span class="text-gray-400">Last Checked:</span>
-                            <span class="text-gray-200">${new Date(server.last_checked).toLocaleString()}</span>
-                        </div>
-                    ` : ''}
-                </div>
-
-                <div class="flex gap-2">
-                    <button onclick="checkServer(${server.id})"
-                        class="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium transition-colors">
-                        Check Health
-                    </button>
-                    <button onclick="viewServerServices(${server.id})"
-                        class="flex-1 px-3 py-1.5 bg-gray-600 hover:bg-gray-700 text-white rounded text-sm font-medium transition-colors">
-                        View Services
-                    </button>
-                    <button onclick="deleteServer(${server.id})"
-                        class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-sm font-medium transition-colors">
-                        Delete
-                    </button>
-                </div>
-            </div>
-        `).join('');
-
-    } catch (error) {
-        console.error('Load servers error:', error);
-        showError('Failed to load servers');
-    }
-}
-
 async function loadServices() {
     try {
         const response = await fetch(`${API_BASE}/api/service-registry/services`, {
@@ -2415,7 +2344,10 @@ async function loadServices() {
         // Sort services by name
         data.services.sort((a, b) => a.name.localeCompare(b.name));
 
-        container.innerHTML = data.services.map(service => `
+        container.innerHTML = data.services.map(service => {
+            // Escape name for use in single-quoted onclick attrs (codex r2 M-5).
+            const safeName = escapeHtml(service.name || '');
+            return `
             <div class="bg-dark-card border border-dark-border rounded-lg p-4">
                 <div class="flex justify-between items-start mb-3">
                     <div>
@@ -2456,39 +2388,22 @@ async function loadServices() {
                 </div>
 
                 <div class="flex gap-2">
-                    <button onclick="toggleService('${service.name}')"
+                    <button onclick="toggleService('${safeName}')"
                         class="flex-1 px-3 py-1.5 ${service.enabled ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'} text-white rounded text-sm font-medium transition-colors">
                         ${service.enabled ? 'Disable' : 'Enable'}
                     </button>
-                    <button onclick="refreshService('${service.name}')"
+                    <button onclick="refreshService('${safeName}')"
                         class="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium transition-colors">
                         Refresh
                     </button>
                 </div>
             </div>
-        `).join('');
+        `;
+        }).join('');
 
     } catch (error) {
         console.error('Load services error:', error);
         showError('Failed to load services');
-    }
-}
-
-async function checkServer(serverId) {
-    try {
-        const response = await fetch(`${API_BASE}/api/servers/${serverId}/check`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${getToken()}` }
-        });
-
-        if (!response.ok) throw new Error('Health check failed');
-
-        showSuccess('Server health check completed');
-        await loadServers();
-
-    } catch (error) {
-        console.error('Check server error:', error);
-        showError('Server health check failed');
     }
 }
 
@@ -2567,171 +2482,6 @@ async function refreshAllServices() {
     }
 }
 
-function showCreateServerModal() {
-    const modal = `
-        <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" id="create-server-modal">
-            <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-md w-full mx-4">
-                <h3 class="text-xl font-semibold text-white mb-4">Add Server</h3>
-
-                <div class="space-y-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Server Name</label>
-                        <input type="text" id="server-name" placeholder="mac-studio"
-                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
-                    </div>
-
-                    <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Hostname</label>
-                        <input type="text" id="server-hostname" placeholder="Jays-Mac-Studio.local"
-                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
-                    </div>
-
-                    <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">IP Address</label>
-                        <input type="text" id="server-ip" placeholder="192.168.10.167" required
-                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
-                    </div>
-
-                    <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Role</label>
-                        <select id="server-role"
-                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
-                            <option value="compute">Compute</option>
-                            <option value="storage">Storage</option>
-                            <option value="integration">Integration</option>
-                            <option value="other">Other</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="flex gap-3 mt-6">
-                    <button onclick="createServer()"
-                        class="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors">
-                        Create Server
-                    </button>
-                    <button onclick="closeModal('create-server-modal')"
-                        class="flex-1 px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition-colors">
-                        Cancel
-                    </button>
-                </div>
-            </div>
-        </div>
-    `;
-
-    document.getElementById('modals-container').innerHTML = modal;
-}
-
-async function createServer() {
-    const name = document.getElementById('server-name').value.trim();
-    const hostname = document.getElementById('server-hostname').value.trim();
-    const ip = document.getElementById('server-ip').value.trim();
-    const role = document.getElementById('server-role').value;
-
-    if (!name || !ip) {
-        showError('Name and IP address are required');
-        return;
-    }
-
-    try {
-        const response = await fetch(`${API_BASE}/api/servers`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${getToken()}`
-            },
-            body: JSON.stringify({ name, hostname, ip_address: ip, role })
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Failed to create server');
-        }
-
-        showSuccess('Server created successfully');
-        closeModal('create-server-modal');
-        await loadServers();
-
-    } catch (error) {
-        console.error('Create server error:', error);
-        showError(error.message);
-    }
-}
-
-async function deleteServer(serverId) {
-    if (!confirm('Are you sure you want to delete this server? All associated services will also be deleted.')) {
-        return;
-    }
-
-    try {
-        const response = await fetch(`${API_BASE}/api/servers/${serverId}`, {
-            method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${getToken()}` }
-        });
-
-        if (!response.ok) throw new Error('Failed to delete server');
-
-        showSuccess('Server deleted successfully');
-        await loadServers();
-
-    } catch (error) {
-        console.error('Delete server error:', error);
-        showError('Failed to delete server');
-    }
-}
-
-async function viewServerServices(serverId) {
-    try {
-        const response = await fetch(`${API_BASE}/api/servers/${serverId}/services`, {
-            headers: { 'Authorization': `Bearer ${getToken()}` }
-        });
-
-        if (!response.ok) throw new Error('Failed to load server services');
-
-        const data = await response.json();
-
-        const modal = `
-            <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" id="server-services-modal">
-                <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-auto">
-                    <h3 class="text-xl font-semibold text-white mb-4">Services on ${escapeHtml(data.server_name || 'Server')}</h3>
-
-                    ${data.services.length === 0 ?
-                        '<p class="text-gray-400">No services registered on this server</p>' :
-                        `<div class="space-y-3">
-                            ${data.services.map(service => `
-                                <div class="bg-dark-bg border border-dark-border rounded p-3">
-                                    <div class="flex justify-between items-start">
-                                        <div>
-                                            <h4 class="font-medium text-white">${escapeHtml(service.service_name)}</h4>
-                                            <p class="text-sm text-gray-400">Port ${service.port} (${service.protocol || 'http'})</p>
-                                        </div>
-                                        <span class="px-2 py-1 rounded text-xs font-medium ${
-                                            service.status === 'online' ? 'bg-green-900/30 text-green-400' :
-                                            service.status === 'offline' ? 'bg-red-900/30 text-red-400' :
-                                            service.status === 'degraded' ? 'bg-yellow-900/30 text-yellow-400' :
-                                            'bg-gray-700 text-gray-300'
-                                        }">${service.status}</span>
-                                    </div>
-                                </div>
-                            `).join('')}
-                        </div>`
-                    }
-
-                    <button onclick="closeModal('server-services-modal')"
-                        class="w-full mt-4 px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition-colors">
-                        Close
-                    </button>
-                </div>
-            </div>
-        `;
-
-        document.getElementById('modals-container').innerHTML = modal;
-
-    } catch (error) {
-        console.error('View server services error:', error);
-        showError('Failed to load server services');
-    }
-}
-
 // ============================================================================
 // RAG CONNECTORS TAB
 // ============================================================================
@@ -2771,22 +2521,6 @@ async function loadConnectors() {
                     </label>
                 </div>
 
-                ${connector.service ? `
-                    <div class="space-y-2 text-sm mb-4">
-                        <div class="flex justify-between">
-                            <span class="text-gray-400">Service:</span>
-                            <span class="text-gray-200">${escapeHtml(connector.service.service_name)}</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-400">Server:</span>
-                            <span class="text-gray-200">${escapeHtml(connector.service.server.name)}</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-400">Endpoint:</span>
-                            <span class="text-gray-200 font-mono text-xs">${connector.service.server.ip_address}:${connector.service.port}</span>
-                        </div>
-                    </div>
-                ` : ''}
 
                 ${connector.last_test_at ? `
                     <div class="bg-dark-bg rounded p-2 mb-4 text-sm">
@@ -3012,13 +2746,13 @@ function showCreateConnectorModal() {
 
                     <div class="space-y-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Connector Name</label>
+                            <label for="connector-name" class="block text-sm font-medium text-gray-300 mb-1">Connector Name</label>
                             <input type="text" id="connector-name" placeholder="weather"
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
                         </div>
 
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Type</label>
+                            <label for="connector-type" class="block text-sm font-medium text-gray-300 mb-1">Type</label>
                             <select id="connector-type"
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
                                 <option value="external_api">External API</option>
@@ -3028,7 +2762,7 @@ function showCreateConnectorModal() {
                         </div>
 
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Service</label>
+                            <label for="connector-service" class="block text-sm font-medium text-gray-300 mb-1">Service</label>
                             <select id="connector-service"
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-200">
                                 <option value="">None</option>
@@ -3579,25 +3313,25 @@ async function loadMultiIntentConfig() {
             </div>
             <div class="grid grid-cols-2 gap-6">
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Enabled</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Enabled</p>
                     <span class="px-3 py-1 rounded-full text-xs font-medium ${config.enabled ? 'bg-green-900/30 text-green-400' : 'bg-gray-900/30 text-gray-400'}">
                         ${config.enabled ? 'Yes' : 'No'}
                     </span>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Max Intents Per Query</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Max Intents Per Query</p>
                     <span class="text-white">${config.max_intents_per_query}</span>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Parallel Processing</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Parallel Processing</p>
                     <span class="text-white">${config.parallel_processing ? 'Yes' : 'No'}</span>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Combination Strategy</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Combination Strategy</p>
                     <span class="text-white">${config.combination_strategy}</span>
                 </div>
                 <div class="col-span-2">
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Separators</label>
+                    <p class="block text-sm font-medium text-gray-400 mb-2">Separators</p>
                     <div class="flex flex-wrap gap-2">
                         ${config.separators.map(sep => `
                             <span class="px-2 py-1 bg-dark-bg rounded text-xs text-gray-300">"${sep}"</span>
@@ -3963,13 +3697,13 @@ function showCreateBackendModal() {
             <form onsubmit="createBackend(event)" class="space-y-4">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Model Name *</label>
+                        <label for="backend-model-name" class="block text-sm font-medium text-gray-400 mb-2">Model Name *</label>
                         <input type="text" id="backend-model-name" required
                             placeholder="e.g., phi3:mini, llama3.1:8b"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Backend Type *</label>
+                        <label for="backend-type" class="block text-sm font-medium text-gray-400 mb-2">Backend Type *</label>
                         <select id="backend-type" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             <option value="ollama">Ollama</option>
@@ -3980,14 +3714,14 @@ function showCreateBackendModal() {
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Endpoint URL *</label>
+                    <label for="backend-endpoint" class="block text-sm font-medium text-gray-400 mb-2">Endpoint URL *</label>
                     <input type="text" id="backend-endpoint" required
                         placeholder="http://localhost:11434"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Description</label>
+                    <label for="backend-description" class="block text-sm font-medium text-gray-400 mb-2">Description</label>
                     <input type="text" id="backend-description"
                         placeholder="Optional description"
                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -3995,13 +3729,13 @@ function showCreateBackendModal() {
 
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
+                        <label for="backend-priority" class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
                         <input type="number" id="backend-priority" value="100"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         <p class="text-xs text-gray-500 mt-1">Lower = higher priority for auto mode</p>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Timeout (seconds)</label>
+                        <label for="backend-timeout" class="block text-sm font-medium text-gray-400 mb-2">Timeout (seconds)</label>
                         <input type="number" id="backend-timeout" value="60"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
@@ -4009,12 +3743,12 @@ function showCreateBackendModal() {
 
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Max Tokens</label>
+                        <label for="backend-max-tokens" class="block text-sm font-medium text-gray-400 mb-2">Max Tokens</label>
                         <input type="number" id="backend-max-tokens" value="2048"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Default Temperature</label>
+                        <label for="backend-temperature" class="block text-sm font-medium text-gray-400 mb-2">Default Temperature</label>
                         <input type="number" id="backend-temperature" value="0.7" step="0.1" min="0" max="2"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>

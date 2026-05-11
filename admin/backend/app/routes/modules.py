@@ -6,11 +6,7 @@ Used by the admin frontend to dynamically show/hide tabs based on enabled module
 """
 from fastapi import APIRouter
 from typing import List, Dict, Any
-import sys
 import os
-
-# Add src to path so we can import shared modules
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..', 'src'))
 
 from shared.module_registry import module_registry, MODULES, ModuleStatus
 

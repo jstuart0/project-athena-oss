@@ -135,33 +135,33 @@ function renderSourceCard(source) {
 
             <!-- URL Display (masked) -->
             <div class="mb-4 bg-gray-800/50 rounded px-3 py-2">
-                <label class="text-xs text-gray-500">iCal URL</label>
+                <p class="text-xs text-gray-500">iCal URL</p>
                 <p class="text-gray-300 font-mono text-sm">${escapeHtml(source.ical_url_masked || source.ical_url)}</p>
             </div>
 
             <!-- Stats Row -->
             <div class="grid grid-cols-4 gap-4 text-sm">
                 <div class="bg-gray-800/50 rounded p-3">
-                    <label class="text-xs text-gray-500 block">Last Sync</label>
+                    <p class="text-xs text-gray-500 block">Last Sync</p>
                     <p class="text-white">${lastSyncText}</p>
                 </div>
                 <div class="bg-gray-800/50 rounded p-3">
-                    <label class="text-xs text-gray-500 block">Status</label>
+                    <p class="text-xs text-gray-500 block">Status</p>
                     ${statusBadge}
                 </div>
                 <div class="bg-gray-800/50 rounded p-3">
-                    <label class="text-xs text-gray-500 block">Events Found</label>
+                    <p class="text-xs text-gray-500 block">Events Found</p>
                     <p class="text-white">${source.last_event_count || 0}</p>
                 </div>
                 <div class="bg-gray-800/50 rounded p-3">
-                    <label class="text-xs text-gray-500 block">Sync Interval</label>
+                    <p class="text-xs text-gray-500 block">Sync Interval</p>
                     <p class="text-white">${source.sync_interval_minutes} min</p>
                 </div>
             </div>
 
             ${source.last_sync_error ? `
                 <div class="mt-4 bg-red-900/30 border border-red-700 rounded p-3">
-                    <label class="text-xs text-red-400 block">Last Error</label>
+                    <p class="text-xs text-red-400 block">Last Error</p>
                     <p class="text-red-300 text-sm">${escapeHtml(source.last_sync_error)}</p>
                 </div>
             ` : ''}
@@ -219,13 +219,13 @@ function showCreateCalendarSourceModal() {
 
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Name *</label>
+                    <label for="source-name" class="block text-sm font-medium text-gray-400 mb-2">Name *</label>
                     <input type="text" id="source-name" placeholder="Airbnb - Main Property"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Source Type *</label>
+                    <label for="source-type" class="block text-sm font-medium text-gray-400 mb-2">Source Type *</label>
                     <select id="source-type"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                         ${typeOptions}
@@ -233,27 +233,27 @@ function showCreateCalendarSourceModal() {
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">iCal URL *</label>
+                    <label for="source-ical-url" class="block text-sm font-medium text-gray-400 mb-2">iCal URL *</label>
                     <input type="url" id="source-ical-url" placeholder="https://www.airbnb.com/calendar/ical/..."
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                     <p class="text-xs text-gray-500 mt-1">Find this in your platform's calendar export settings</p>
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Sync Interval (minutes)</label>
+                    <label for="source-sync-interval" class="block text-sm font-medium text-gray-400 mb-2">Sync Interval (minutes)</label>
                     <input type="number" id="source-sync-interval" value="30" min="5" max="1440"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
+                    <label for="source-priority" class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
                     <input type="number" id="source-priority" value="1" min="1" max="10"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                     <p class="text-xs text-gray-500 mt-1">Higher priority sources take precedence for conflicting events</p>
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Description (optional)</label>
+                    <label for="source-description" class="block text-sm font-medium text-gray-400 mb-2">Description (optional)</label>
                     <textarea id="source-description" rows="2" placeholder="Notes about this calendar source"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"></textarea>
                 </div>
@@ -304,13 +304,13 @@ function showEditCalendarSourceModal(source) {
 
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Name *</label>
+                    <label for="source-name" class="block text-sm font-medium text-gray-400 mb-2">Name *</label>
                     <input type="text" id="source-name" value="${escapeHtml(source.name)}"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Source Type *</label>
+                    <label for="source-type" class="block text-sm font-medium text-gray-400 mb-2">Source Type *</label>
                     <select id="source-type"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                         ${typeOptions}
@@ -318,25 +318,25 @@ function showEditCalendarSourceModal(source) {
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">iCal URL *</label>
+                    <label for="source-ical-url" class="block text-sm font-medium text-gray-400 mb-2">iCal URL *</label>
                     <input type="url" id="source-ical-url" value="${escapeHtml(source.ical_url)}"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Sync Interval (minutes)</label>
+                    <label for="source-sync-interval" class="block text-sm font-medium text-gray-400 mb-2">Sync Interval (minutes)</label>
                     <input type="number" id="source-sync-interval" value="${source.sync_interval_minutes}" min="5" max="1440"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
+                    <label for="source-priority" class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
                     <input type="number" id="source-priority" value="${source.priority}" min="1" max="10"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Description</label>
+                    <label for="source-description" class="block text-sm font-medium text-gray-400 mb-2">Description</label>
                     <textarea id="source-description" rows="2"
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500">${escapeHtml(source.description || '')}</textarea>
                 </div>

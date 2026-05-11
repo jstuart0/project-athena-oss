@@ -33,15 +33,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from shared.service_registry import startup_service, unregister_service
-from shared.logging_config import setup_logging
+from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
 
-# Configure logging
-setup_logging(service_name="tesla-rag")
-logger = structlog.get_logger()
+logger = configure_logging("tesla-rag")
 
 SERVICE_NAME = "tesla"
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8028"))
+
+# TeslaMate integration opt-in gate (default false for OSS deployers without TeslaMate).
+# Set TESLAMATE_ENABLED=true and configure TESLAMATE_DB_* only if TeslaMate is running.
+TESLAMATE_ENABLED = os.getenv("TESLAMATE_ENABLED", "false").lower() == "true"
 
 # TeslaMate PostgreSQL connection
 # Configure via environment variables for your installation
@@ -340,23 +342,29 @@ async def lifespan(app: FastAPI):
     # Register service
     await startup_service(SERVICE_NAME, SERVICE_PORT, "Tesla Metrics Service (Owner Mode Only)")
 
-    # Initialize database pool
-    try:
-        db_pool = await asyncpg.create_pool(
-            host=TESLAMATE_DB_HOST,
-            port=TESLAMATE_DB_PORT,
-            database=TESLAMATE_DB_NAME,
-            user=TESLAMATE_DB_USER,
-            password=TESLAMATE_DB_PASS,
-            min_size=1,
-            max_size=5,
-            command_timeout=30,
-            ssl=False  # TeslaMate postgres doesn't use SSL
+    # Initialize database pool (only when TESLAMATE_ENABLED=true)
+    if TESLAMATE_ENABLED:
+        try:
+            db_pool = await asyncpg.create_pool(
+                host=TESLAMATE_DB_HOST,
+                port=TESLAMATE_DB_PORT,
+                database=TESLAMATE_DB_NAME,
+                user=TESLAMATE_DB_USER,
+                password=TESLAMATE_DB_PASS,
+                min_size=1,
+                max_size=5,
+                command_timeout=30,
+                ssl=False  # TeslaMate postgres doesn't use SSL
+            )
+            logger.info("tesla_service.db_connected", host=TESLAMATE_DB_HOST)
+        except Exception as e:
+            logger.error("tesla_service.db_connection_failed", error=str(e))
+            raise
+    else:
+        logger.info(
+            "tesla_service.teslamate_disabled",
+            msg="TESLAMATE_ENABLED=false; running in degraded mode — query endpoints will return 503",
         )
-        logger.info("tesla_service.db_connected", host=TESLAMATE_DB_HOST)
-    except Exception as e:
-        logger.error("tesla_service.db_connection_failed", error=str(e))
-        raise
 
     logger.info("tesla_service.startup.complete")
 
@@ -382,7 +390,23 @@ setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint.
+
+    Returns 200 regardless of TeslaMate DB state when TESLAMATE_ENABLED=false.
+    Readiness is service-up, not DB-up.
+    """
+    if not TESLAMATE_ENABLED:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "healthy",
+                "service": "tesla-rag",
+                "database": "disabled",
+                "teslamate_enabled": False,
+                "owner_mode_only": True,
+            },
+        )
+
     db_healthy = False
     if db_pool:
         try:
@@ -398,14 +422,17 @@ async def health_check():
             "status": "healthy" if db_healthy else "unhealthy",
             "service": "tesla-rag",
             "database": "connected" if db_healthy else "disconnected",
-            "owner_mode_only": True
-        }
+            "teslamate_enabled": True,
+            "owner_mode_only": True,
+        },
     )
 
 
 @app.get("/car")
 async def get_car_info():
     """Get vehicle information."""
+    if db_pool is None:
+        raise HTTPException(status_code=503, detail="Tesla integration not configured (set TESLAMATE_ENABLED=true and TESLAMATE_DB_* env vars)")
     async with db_pool.acquire() as conn:
         car = await conn.fetchrow("""
             SELECT
@@ -444,6 +471,8 @@ async def get_car_info():
 @app.get("/status")
 async def get_current_status():
     """Get current vehicle status including battery, range, and location."""
+    if db_pool is None:
+        raise HTTPException(status_code=503, detail="Tesla integration not configured (set TESLAMATE_ENABLED=true and TESLAMATE_DB_* env vars)")
     async with db_pool.acquire() as conn:
         # Get latest position data
         pos = await conn.fetchrow("""
@@ -517,6 +546,8 @@ async def _get_drives_internal(
     sort_by: str = "date"
 ):
     """Internal drive query implementation with plain Python defaults."""
+    if db_pool is None:
+        raise HTTPException(status_code=503, detail="Tesla integration not configured (set TESLAMATE_ENABLED=true and TESLAMATE_DB_* env vars)")
     from datetime import datetime as dt
 
     async with db_pool.acquire() as conn:
@@ -667,6 +698,8 @@ async def get_charges(
     limit: int = Query(20, description="Maximum charges to return", ge=1, le=100)
 ):
     """Get charging history and statistics."""
+    if db_pool is None:
+        raise HTTPException(status_code=503, detail="Tesla integration not configured (set TESLAMATE_ENABLED=true and TESLAMATE_DB_* env vars)")
     async with db_pool.acquire() as conn:
         # Get recent charging sessions
         charges = await conn.fetch("""
@@ -735,6 +768,8 @@ async def get_efficiency(
     days: int = Query(30, description="Number of days to analyze", ge=1, le=365)
 ):
     """Get efficiency metrics."""
+    if db_pool is None:
+        raise HTTPException(status_code=503, detail="Tesla integration not configured (set TESLAMATE_ENABLED=true and TESLAMATE_DB_* env vars)")
     async with db_pool.acquire() as conn:
         # Calculate efficiency from drives
         efficiency = await conn.fetchrow("""
@@ -776,6 +811,8 @@ async def get_battery_health(
     days: int = Query(90, description="Days to analyze for degradation", ge=30, le=365)
 ):
     """Get battery health and degradation metrics."""
+    if db_pool is None:
+        raise HTTPException(status_code=503, detail="Tesla integration not configured (set TESLAMATE_ENABLED=true and TESLAMATE_DB_* env vars)")
     async with db_pool.acquire() as conn:
         # Get battery level samples at 100% charge
         full_charges = await conn.fetch("""
@@ -835,6 +872,8 @@ async def get_state_history(
     limit: int = Query(50, description="Maximum states to return", ge=1, le=200)
 ):
     """Get vehicle state history (online, offline, driving, charging, etc.)."""
+    if db_pool is None:
+        raise HTTPException(status_code=503, detail="Tesla integration not configured (set TESLAMATE_ENABLED=true and TESLAMATE_DB_* env vars)")
     async with db_pool.acquire() as conn:
         states = await conn.fetch("""
             SELECT state, start_date, end_date,
@@ -881,6 +920,8 @@ async def get_state_history(
 @app.get("/updates")
 async def get_software_updates():
     """Get software update history."""
+    if db_pool is None:
+        raise HTTPException(status_code=503, detail="Tesla integration not configured (set TESLAMATE_ENABLED=true and TESLAMATE_DB_* env vars)")
     async with db_pool.acquire() as conn:
         updates = await conn.fetch("""
             SELECT version, start_date, end_date
@@ -909,6 +950,8 @@ async def get_vampire_drain(
     days: int = Query(7, description="Days to analyze", ge=1, le=30)
 ):
     """Analyze phantom/vampire drain when vehicle is parked."""
+    if db_pool is None:
+        raise HTTPException(status_code=503, detail="Tesla integration not configured (set TESLAMATE_ENABLED=true and TESLAMATE_DB_* env vars)")
     async with db_pool.acquire() as conn:
         # Find periods where car was parked (not driving, not charging) and lost range
         drain_periods = await conn.fetch("""
@@ -962,6 +1005,8 @@ async def get_vampire_drain(
 @app.get("/stats")
 async def get_aggregate_stats():
     """Get comprehensive aggregate statistics."""
+    if db_pool is None:
+        raise HTTPException(status_code=503, detail="Tesla integration not configured (set TESLAMATE_ENABLED=true and TESLAMATE_DB_* env vars)")
     async with db_pool.acquire() as conn:
         # Lifetime stats
         lifetime = await conn.fetchrow("""
@@ -1184,6 +1229,10 @@ async def natural_query(
                 "data": status
             }
 
+    except HTTPException:
+        # Preserve 503 from disabled-mode guards (TESLAMATE_ENABLED=false) and
+        # any other intentional HTTP responses raised by the inner handlers.
+        raise
     except Exception as e:
         logger.error("tesla_query_error", error=str(e), query=q)
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")

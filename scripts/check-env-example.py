@@ -79,6 +79,56 @@ def _string_literal(node: ast.AST) -> str | None:
     return None
 
 
+def collect_config_field_names() -> set[str]:
+    """Return env-var names consumed via AthenaConfig fields in src/shared/config.py.
+
+    Parses the AST of src/shared/config.py and finds every plain ``Field(...)``
+    assignment inside the ``AthenaConfig`` class body.  The Python attribute name
+    (snake_case) is uppercased to derive the env-var name that pydantic-settings
+    will read, e.g. ``ollama_url`` → ``OLLAMA_URL``.
+
+    ``@computed_field`` properties are intentionally excluded: they are derived
+    from other fields (or from helper functions such as ``get_admin_url()``) and
+    do NOT correspond to user-set env vars.
+    """
+    config_path = REPO_ROOT / "src" / "shared" / "config.py"
+    if not config_path.exists():
+        return set()
+    try:
+        tree = ast.parse(config_path.read_text(encoding="utf-8"), filename=str(config_path))
+    except (SyntaxError, UnicodeDecodeError):
+        return set()
+
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ClassDef) and node.name == "AthenaConfig"):
+            continue
+        # Walk only the direct body of AthenaConfig (not nested classes/funcs).
+        for stmt in node.body:
+            # Pattern: `field_name: type = Field(...)` → ast.AnnAssign with a
+            # Call to Field() on the right-hand side.
+            if not isinstance(stmt, ast.AnnAssign):
+                continue
+            if not isinstance(stmt.target, ast.Name):
+                continue
+            # Must have a value that is a Call (the Field(...) constructor).
+            if not isinstance(stmt.value, ast.Call):
+                continue
+            func = stmt.value.func
+            is_field_call = (
+                (isinstance(func, ast.Name) and func.id == "Field")
+                or (isinstance(func, ast.Attribute) and func.attr == "Field")
+            )
+            if not is_field_call:
+                continue
+            attr_name = stmt.target.id
+            # Skip dunder / private names that aren't env vars.
+            if attr_name.startswith("_"):
+                continue
+            names.add(attr_name.upper())
+    return names
+
+
 def collect_getenv_names(root: Path) -> set[str]:
     names: set[str] = set()
     for py in root.rglob("*.py"):
@@ -196,6 +246,14 @@ def main() -> int:
         d = REPO_ROOT / sub
         if d.is_dir():
             code_names |= collect_getenv_names(d)
+
+    # Also treat every AthenaConfig Field in src/shared/config.py as a
+    # "consumed" env var — post-migration, those vars are read via
+    # get_config().<field> rather than os.getenv(), so the AST scanner above
+    # won't see them.  This extension is purely additive; old os.getenv
+    # detection is unchanged.
+    config_field_names = collect_config_field_names()
+    code_names |= config_field_names
 
     code_names -= RUNTIME_INJECTED_NAMES
     deploy_refs = collect_non_python_refs()

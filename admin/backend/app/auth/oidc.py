@@ -28,6 +28,7 @@ from app.database import get_db, DEV_MODE
 from app.models import User, Secret, UserAPIKey
 from app.utils.encryption import decrypt_value
 from app.utils.api_keys import verify_api_key, extract_key_prefix, is_valid_key_format
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -36,10 +37,10 @@ if DEV_MODE:
     logger.info("oidc_dev_mode_enabled", message="Authentication will be bypassed")
 
 # Default OIDC configuration from environment (fallback)
-DEFAULT_OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID", "")
+DEFAULT_OIDC_CLIENT_ID = get_config().oidc_client_id
 DEFAULT_OIDC_CLIENT_SECRET = os.getenv("OIDC_CLIENT_SECRET", "")
-DEFAULT_OIDC_ISSUER = os.getenv("OIDC_ISSUER", "https://auth.xmojo.net/application/o/athena-admin/")
-DEFAULT_OIDC_REDIRECT_URI = os.getenv("OIDC_REDIRECT_URI", "https://athena-admin.xmojo.net/auth/callback")
+DEFAULT_OIDC_ISSUER = get_config().oidc_issuer
+DEFAULT_OIDC_REDIRECT_URI = os.getenv("OIDC_REDIRECT_URI", "")
 DEFAULT_OIDC_SCOPES = os.getenv("OIDC_SCOPES", "openid profile email")
 
 # Active OIDC configuration (set during startup)
@@ -75,7 +76,10 @@ def load_oidc_config_from_db() -> Dict[str, str]:
     """
     try:
         # Create database connection
-        database_url = os.getenv("DATABASE_URL", "postgresql://psadmin@postgres-01.xmojo.net:5432/athena_admin")
+        database_url = get_config().database_url
+        if not database_url:
+            logger.info("oidc_config_db_skipped_no_database_url")
+            return {}
         engine = create_engine(database_url)
 
         with engine.connect() as conn:
@@ -144,7 +148,7 @@ def configure_oauth_client():
         name='authentik',
         client_id=OIDC_CLIENT_ID,
         client_secret=OIDC_CLIENT_SECRET,
-        server_metadata_url=f'{OIDC_ISSUER}.well-known/openid-configuration',
+        server_metadata_url=f'{OIDC_ISSUER.rstrip("/")}/.well-known/openid-configuration',
         client_kwargs={
             'scope': OIDC_SCOPES,
         }
@@ -172,9 +176,21 @@ async def get_authentik_userinfo(access_token: str) -> Dict[str, Any]:
         HTTPException: If token is invalid or userinfo request fails
     """
     try:
+        # Resolve userinfo endpoint: env override → OIDC discovery metadata → constructed fallback.
+        userinfo_url = os.getenv("OIDC_USERINFO_URL", "")
+        if not userinfo_url:
+            try:
+                oauth_client = oauth.create_client("authentik")
+                if oauth_client is not None and hasattr(oauth_client, "load_server_metadata"):
+                    metadata = await oauth_client.load_server_metadata()
+                    userinfo_url = metadata.get("userinfo_endpoint", "")
+            except Exception:
+                pass
+        if not userinfo_url:
+            # Last-resort: construct from issuer (non-spec but works for most IdPs).
+            userinfo_url = f"{OIDC_ISSUER.rstrip('/')}/userinfo/"
+
         async with httpx.AsyncClient() as client:
-            # Authentik userinfo endpoint is shared across all applications
-            userinfo_url = "https://auth.xmojo.net/application/o/userinfo/"
             response = await client.get(
                 userinfo_url,
                 headers={"Authorization": f"Bearer {access_token}"}
@@ -185,7 +201,7 @@ async def get_authentik_userinfo(access_token: str) -> Dict[str, Any]:
         logger.error("authentik_userinfo_failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Failed to fetch user information from Authentik"
+            detail="Failed to fetch user information from identity provider"
         )
 
 

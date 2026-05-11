@@ -14,12 +14,11 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import structlog
 import httpx
-import asyncpg
 import os
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
-from app.models import User, ExternalAPIKey
+from app.models import User, ExternalAPIKey, RagService
 
 logger = structlog.get_logger()
 
@@ -152,7 +151,7 @@ async def check_rag_service_health(service_name: str, port: int) -> Dict[str, An
                 return {
                     "healthy": True,
                     "status_code": response.status_code,
-                    "endpoint": f"http://{MAC_STUDIO_IP}:{port}",
+                    "endpoint": f"http://{RAG_SERVICE_HOST}:{port}",
                 }
             else:
                 return {
@@ -177,33 +176,27 @@ async def check_rag_service_health(service_name: str, port: int) -> Dict[str, An
         }
 
 
-async def get_rag_service_from_registry(service_name: str) -> Optional[Dict[str, Any]]:
-    """Get RAG service info from the service registry database."""
-    password = os.getenv('ATHENA_DB_PASSWORD')
-    if not password:
-        return None
+def get_rag_service_from_registry(
+    service_name: str, db: Session
+) -> Optional[Dict[str, Any]]:
+    """Return display info for a single RAG service from the admin registry.
 
+    Synchronous — uses SQLAlchemy against the admin DB's rag_services table.
+    Replaced the asyncpg connection to the legacy athena DB. (ian I-H5 / ATHENA-1 Phase 2)
+    """
     try:
-        conn = await asyncpg.connect(
-            host=os.getenv('ATHENA_DB_HOST', 'localhost'),
-            port=int(os.getenv('ATHENA_DB_PORT', '5432')),
-            user=os.getenv('ATHENA_DB_USER', 'psadmin'),
-            password=password,
-            database=os.getenv('ATHENA_DB_NAME', 'athena')
-        )
-
-        try:
-            row = await conn.fetchrow("""
-                SELECT name, display_name, endpoint_url, enabled
-                FROM rag_services
-                WHERE name = $1
-            """, service_name)
-
-            if row:
-                return dict(row)
+        svc = db.query(RagService).filter(RagService.name == service_name).first()
+        if not svc:
             return None
-        finally:
-            await conn.close()
+        return {
+            'name': svc.name,
+            'display_name': svc.display_name,
+            'endpoint_url': (
+                svc.endpoint_url
+                or f"{svc.protocol or 'http'}://{svc.host}:{svc.port}"
+            ),
+            'enabled': svc.enabled,
+        }
     except Exception as e:
         logger.error("rag_registry_lookup_failed", service=service_name, error=str(e))
         return None
@@ -271,8 +264,8 @@ async def get_integration_status(
                 config["port"]
             )
 
-            # Also check service registry
-            registry_info = await get_rag_service_from_registry(config["rag_service_name"])
+            # Also check service registry (synchronous ORM lookup — no await)
+            registry_info = get_rag_service_from_registry(config["rag_service_name"], db)
 
             if health["healthy"]:
                 return IntegrationStatus(

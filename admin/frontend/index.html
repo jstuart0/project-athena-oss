@@ -2162,7 +2162,7 @@
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                             <div>
                                 <label class="block text-sm font-medium text-gray-400 mb-2">OIDC Provider URL</label>
-                                <input type="text" id="oidc-provider-url" placeholder="https://auth.xmojo.net/application/o/athena-admin/"
+                                <input type="text" id="oidc-provider-url" placeholder="https://auth.example.com/application/o/athena-admin/"
                                     class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                             </div>
                             <div>
@@ -2177,8 +2177,8 @@
                             </div>
                             <div>
                                 <label class="block text-sm font-medium text-gray-400 mb-2">Redirect URI</label>
-                                <input type="text" id="oidc-redirect-uri" value="https://athena-admin.xmojo.net/api/auth/callback" readonly
-                                    class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-400 cursor-not-allowed">
+                                <input type="text" id="oidc-redirect-uri" value="" placeholder="https://your-domain/api/auth/callback"
+                                    class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
                             </div>
                         </div>
                         <div class="mt-6 flex items-center justify-between">
@@ -2277,17 +2277,6 @@
                             </button>
                         </div>
                     </div>
-                </div>
-
-                <!-- Server Configuration Section -->
-                <div class="mb-8">
-                    <div class="flex justify-between items-center mb-4">
-                        <h3 class="text-lg font-semibold text-white">Server Configuration</h3>
-                        <button onclick="showCreateServerModal()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors">
-                            ➕ Add Server
-                        </button>
-                    </div>
-                    <div id="servers-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
                 </div>
 
                 <!-- Service Registry Section -->
@@ -4902,7 +4891,6 @@
     <script src="/refresh-manager.js?v=20260107"></script>
 
     <!-- Phase 1-7: UI Components -->
-    <script src="/router.js?v=20260107"></script>
     <script src="/status-bar.js?v=20260107"></script>
     <script src="/icons.js?v=20260107"></script>
     <script src="/skeleton.js?v=20260107"></script>

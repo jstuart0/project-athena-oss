@@ -46,12 +46,12 @@ class PresetSettings(BaseModel):
     gateway_intent_max_tokens: int = Field(10, ge=1, le=100)
 
     # Orchestrator component models (complexity-based routing)
-    intent_classifier_model: str = "qwen3:4b"  # Fast classification
+    intent_classifier_model: str = "qwen3:4b-instruct-2507-q4_K_M"  # Fast classification
     tool_calling_simple_model: str = "qwen3:4b-instruct-2507-q4_K_M"  # Simple queries
     tool_calling_complex_model: str = "qwen3:4b-instruct-2507-q4_K_M"  # Complex queries
     tool_calling_super_complex_model: str = "qwen3:8b"  # Deep reasoning
     response_synthesis_model: str = "qwen3:4b-instruct-2507-q4_K_M"  # Final response generation
-    conversation_summarizer_model: str = "qwen3:4b"  # Conversation history summarization
+    conversation_summarizer_model: str = "qwen3:4b-instruct-2507-q4_K_M"  # Conversation history summarization
 
     # LLM generation settings
     llm_temperature: float = Field(0.5, ge=0.0, le=2.0)
@@ -377,12 +377,12 @@ async def capture_current_settings(
         "gateway_intent_max_tokens": gateway_config.intent_max_tokens if gateway_config else 10,
 
         # Orchestrator component models
-        "intent_classifier_model": component_models.get('intent_classifier', 'qwen3:4b'),
+        "intent_classifier_model": component_models.get('intent_classifier', 'qwen3:4b-instruct-2507-q4_K_M'),
         "tool_calling_simple_model": component_models.get('tool_calling_simple', 'qwen3:4b-instruct-2507-q4_K_M'),
         "tool_calling_complex_model": component_models.get('tool_calling_complex', 'qwen3:4b-instruct-2507-q4_K_M'),
         "tool_calling_super_complex_model": component_models.get('tool_calling_super_complex', 'qwen3:8b'),
         "response_synthesis_model": component_models.get('response_synthesis', 'qwen3:4b-instruct-2507-q4_K_M'),
-        "conversation_summarizer_model": component_models.get('conversation_summarizer', 'qwen3:4b'),
+        "conversation_summarizer_model": component_models.get('conversation_summarizer', 'qwen3:4b-instruct-2507-q4_K_M'),
 
         # General LLM settings
         "llm_temperature": 0.5,

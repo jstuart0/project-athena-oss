@@ -4,6 +4,7 @@ uvicorn[standard]==0.24.0
 httpx==0.25.2
 aiohttp==3.9.1
 pydantic==2.5.0
+pydantic-settings>=2.1.0,<3.0
 email-validator==2.1.0.post1
 structlog==23.2.0
 
@@ -41,3 +42,11 @@ qdrant-client>=1.7.0
 # FastEmbed for lightweight embeddings (used by memory system)
 # Much lighter than sentence-transformers (~100MB vs ~3GB)
 fastembed>=0.2.0
+
+# test-only (Phase 3 OIDC fixture issuer; ATHENA-12)
+pytest-httpserver>=1.0.8
+
+# Campaign 3 / ATHENA-14 — rate limiter for /local-login
+fastapi-limiter==0.1.6
+# test-only (Campaign 3 / ATHENA-14 — fastapi-limiter Lua scripts)
+fakeredis[lua]>=2.21,<3

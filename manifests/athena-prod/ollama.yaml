@@ -1,9 +1,19 @@
 # Optional: In-cluster Ollama deployment
-# Use this for testing or when external Mac Studio isn't available
-# For production, prefer baremetal Mac Studio at 192.168.10.108 for better performance
+# Use this for testing or when an external Ollama server is not available.
+# For best performance on Apple Silicon, run Ollama on a Mac and point
+# OLLAMA_URL in config.yaml to that host instead of using this file.
 #
-# To use external Ollama instead, set OLLAMA_URL in services to:
-#   http://192.168.10.108:11434
+# =============================================================================
+# REQUIRED: Set storageClassName below before applying.
+#   Run: kubectl get storageclass
+#   Then replace YOUR_STORAGE_CLASS with the name that fits your cluster.
+#
+# WARNING — PVC immutability: storageClassName is immutable on an existing PVC.
+# If you have already applied this file and have a bound ollama-models PVC,
+# you MUST delete the PVC before re-applying (data will be lost — back up first):
+#   kubectl -n athena-prod delete pvc ollama-models
+#   kubectl apply -f manifests/athena-prod/ollama.yaml
+# =============================================================================
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -16,7 +26,7 @@ spec:
   resources:
     requests:
       storage: 50Gi
-  storageClassName: ceph-block
+  storageClassName: YOUR_STORAGE_CLASS  # REQUIRED: set to your cluster's StorageClass (run: kubectl get storageclass)
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -81,30 +91,6 @@ spec:
   ports:
   - port: 11434
     targetPort: 11434
----
-# Job to pull models after Ollama starts
-# Run manually: kubectl -n athena-prod create -f ollama-model-pull-job.yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: ollama-model-pull
-  namespace: athena-prod
-spec:
-  ttlSecondsAfterFinished: 300
-  template:
-    spec:
-      restartPolicy: OnFailure
-      containers:
-      - name: model-puller
-        image: curlimages/curl:latest
-        command:
-        - /bin/sh
-        - -c
-        - |
-          echo "Waiting for Ollama to be ready..."
-          sleep 30
-          echo "Pulling qwen3:4b..."
-          curl -X POST http://ollama:11434/api/pull -d '{"name": "qwen3:4b"}'
-          echo "Pulling phi3:mini..."
-          curl -X POST http://ollama:11434/api/pull -d '{"name": "phi3:mini"}'
-          echo "Models pulled successfully"
+# NOTE: The ollama-model-pull Job has been moved to ollama-model-pull-job.yaml.
+# Apply it once on first-run via: ./scripts/deploy.sh deploy --first-run
+# See docs/INSTALLATION.md for the first-time deployment sequence.

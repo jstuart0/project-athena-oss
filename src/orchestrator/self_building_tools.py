@@ -39,6 +39,8 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 import httpx
 import structlog
+from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -280,8 +282,8 @@ class SelfBuildingToolsManager:
         # Use Thor's central n8n service by default
         self.n8n_url = n8n_url or os.getenv("N8N_URL", "http://localhost:5678")
         self.n8n_api_key = n8n_api_key or os.getenv("N8N_API_KEY", "")
-        self.admin_url = admin_url or os.getenv("ADMIN_API_URL", "http://localhost:8080")
-        self._service_api_key = os.getenv("SERVICE_API_KEY", "dev-service-key-change-in-production")
+        self.admin_url = admin_url or get_admin_url()
+        self._service_api_key = get_config().service_api_key
 
         self._proposals: Dict[str, ToolProposal] = {}
         self._enabled = False

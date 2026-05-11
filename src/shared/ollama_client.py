@@ -1,15 +1,16 @@
 """Ollama LLM client for Project Athena"""
 
-import os
 import httpx
 from typing import Optional, Dict, Any, AsyncIterator
+
+from shared.config import get_config
 
 
 class OllamaClient:
     """Client for interacting with Ollama LLM server"""
-    
+
     def __init__(self, url: Optional[str] = None):
-        self.url = url or os.getenv("OLLAMA_URL", "http://localhost:11434")
+        self.url = url or get_config().ollama_url
         self.client = httpx.AsyncClient(base_url=self.url, timeout=60.0)
     
     async def generate(

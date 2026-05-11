@@ -176,13 +176,13 @@ function renderGatewaySettings() {
                 </h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Orchestrator URL</label>
+                        <label for="gw-orchestrator-url" class="block text-sm font-medium text-gray-400 mb-2">Orchestrator URL</label>
                         <input type="text" id="gw-orchestrator-url" value="${gatewayConfig.orchestrator_url}"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">Primary orchestrator service endpoint</p>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Ollama Fallback URL</label>
+                        <label for="gw-ollama-url" class="block text-sm font-medium text-gray-400 mb-2">Ollama Fallback URL</label>
                         <input type="text" id="gw-ollama-url" value="${gatewayConfig.ollama_fallback_url}"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">Fallback when orchestrator unavailable</p>
@@ -197,27 +197,27 @@ function renderGatewaySettings() {
                 </h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Model</label>
+                        <label for="gw-intent-model" class="block text-sm font-medium text-gray-400 mb-2">Model</label>
                         <input type="text" id="gw-intent-model" value="${gatewayConfig.intent_model}"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">LLM model for intent detection</p>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Temperature</label>
+                        <label for="gw-intent-temperature" class="block text-sm font-medium text-gray-400 mb-2">Temperature</label>
                         <input type="number" id="gw-intent-temperature" value="${gatewayConfig.intent_temperature}"
                             min="0" max="2" step="0.1"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">0.0 - 2.0 (lower = more deterministic)</p>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Max Tokens</label>
+                        <label for="gw-intent-max-tokens" class="block text-sm font-medium text-gray-400 mb-2">Max Tokens</label>
                         <input type="number" id="gw-intent-max-tokens" value="${gatewayConfig.intent_max_tokens}"
                             min="1" max="100"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">1 - 100 tokens for classification</p>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Timeout (seconds)</label>
+                        <label for="gw-intent-timeout" class="block text-sm font-medium text-gray-400 mb-2">Timeout (seconds)</label>
                         <input type="number" id="gw-intent-timeout" value="${gatewayConfig.intent_timeout_seconds}"
                             min="1" max="60"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
@@ -233,28 +233,28 @@ function renderGatewaySettings() {
                 </h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Orchestrator Timeout (s)</label>
+                        <label for="gw-orchestrator-timeout" class="block text-sm font-medium text-gray-400 mb-2">Orchestrator Timeout (s)</label>
                         <input type="number" id="gw-orchestrator-timeout" value="${gatewayConfig.orchestrator_timeout_seconds}"
                             min="5" max="300"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">5 - 300 seconds</p>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Session Timeout (s)</label>
+                        <label for="gw-session-timeout" class="block text-sm font-medium text-gray-400 mb-2">Session Timeout (s)</label>
                         <input type="number" id="gw-session-timeout" value="${gatewayConfig.session_timeout_seconds}"
                             min="60" max="3600"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">60 - 3600 seconds (inactivity)</p>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Max Session Age (s)</label>
+                        <label for="gw-session-max-age" class="block text-sm font-medium text-gray-400 mb-2">Max Session Age (s)</label>
                         <input type="number" id="gw-session-max-age" value="${gatewayConfig.session_max_age_seconds}"
                             min="3600" max="604800"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">1 hour - 7 days max lifetime</p>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Cleanup Interval (s)</label>
+                        <label for="gw-session-cleanup" class="block text-sm font-medium text-gray-400 mb-2">Cleanup Interval (s)</label>
                         <input type="number" id="gw-session-cleanup" value="${gatewayConfig.session_cleanup_interval_seconds}"
                             min="10" max="600"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
@@ -270,7 +270,7 @@ function renderGatewaySettings() {
                 </h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Cache TTL (seconds)</label>
+                        <label for="gw-cache-ttl" class="block text-sm font-medium text-gray-400 mb-2">Cache TTL (seconds)</label>
                         <input type="number" id="gw-cache-ttl" value="${gatewayConfig.cache_ttl_seconds}"
                             min="5" max="300"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
@@ -297,7 +297,7 @@ function renderGatewaySettings() {
                         <span class="text-sm text-gray-400">Enable Rate Limiting</span>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Requests per Minute</label>
+                        <label for="gw-rate-limit-rpm" class="block text-sm font-medium text-gray-400 mb-2">Requests per Minute</label>
                         <input type="number" id="gw-rate-limit-rpm" value="${gatewayConfig.rate_limit_requests_per_minute}"
                             min="1" max="1000"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
@@ -325,14 +325,14 @@ function renderGatewaySettings() {
                         <span class="text-sm text-gray-400">Enable Circuit Breaker</span>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Failure Threshold</label>
+                        <label for="gw-circuit-failure-threshold" class="block text-sm font-medium text-gray-400 mb-2">Failure Threshold</label>
                         <input type="number" id="gw-circuit-failure-threshold" value="${gatewayConfig.circuit_breaker_failure_threshold}"
                             min="1" max="50"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">Failures before opening circuit</p>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-400 mb-2">Recovery Timeout (s)</label>
+                        <label for="gw-circuit-recovery-timeout" class="block text-sm font-medium text-gray-400 mb-2">Recovery Timeout (s)</label>
                         <input type="number" id="gw-circuit-recovery-timeout" value="${gatewayConfig.circuit_breaker_recovery_timeout_seconds}"
                             min="5" max="300"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white focus:outline-none focus:border-blue-500">

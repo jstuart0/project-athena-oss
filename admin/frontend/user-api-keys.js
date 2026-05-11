@@ -148,13 +148,13 @@ function showCreateUserApiKeyModal() {
                 <form id="create-api-key-form" onsubmit="createUserApiKey(event)">
                     <div class="space-y-4">
                         <div>
-                            <label class="block text-gray-400 text-sm mb-1">Name *</label>
-                            <input type="text" name="name" required
+                            <label for="user-api-key-name" class="block text-gray-400 text-sm mb-1">Name *</label>
+                            <input type="text" id="user-api-key-name" name="name" required
                                    placeholder="e.g., CI/CD Pipeline, Local Development"
                                    class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none">
                         </div>
                         <div>
-                            <label class="block text-gray-400 text-sm mb-2">Permissions *</label>
+                            <p class="block text-gray-400 text-sm mb-2">Permissions *</p>
                             <div class="flex gap-2 mb-2">
                                 <button type="button" onclick="toggleAllScopes(true)"
                                         class="px-3 py-1 bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 rounded text-xs transition-colors">
@@ -170,13 +170,13 @@ function showCreateUserApiKeyModal() {
                             </div>
                         </div>
                         <div>
-                            <label class="block text-gray-400 text-sm mb-1">Expires In (days)</label>
-                            <input type="number" name="expires_in_days" min="1" max="365" value="90"
+                            <label for="user-api-key-expires" class="block text-gray-400 text-sm mb-1">Expires In (days)</label>
+                            <input type="number" id="user-api-key-expires" name="expires_in_days" min="1" max="365" value="90"
                                    class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none">
                         </div>
                         <div>
-                            <label class="block text-gray-400 text-sm mb-1">Reason (optional)</label>
-                            <input type="text" name="reason"
+                            <label for="user-api-key-reason" class="block text-gray-400 text-sm mb-1">Reason (optional)</label>
+                            <input type="text" id="user-api-key-reason" name="reason"
                                    placeholder="e.g., For automated testing"
                                    class="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none">
                         </div>

@@ -10,14 +10,13 @@ This allows simple queries to skip the full orchestrator pipeline,
 reducing latency significantly for common interactions.
 """
 
-import os
 from typing import Literal, Optional
 import httpx
 import structlog
 
 from shared.assistant_profile import build_simple_intent_prompt
-
 from shared.admin_config import get_admin_client
+from shared.config import get_config
 
 logger = structlog.get_logger("gateway.intent_prerouter")
 
@@ -43,7 +42,7 @@ async def _get_ollama_url() -> str:
         admin_client = get_admin_client()
         return await admin_client.get_ollama_url()
     except Exception:
-        return os.getenv("OLLAMA_URL", "http://localhost:11434")
+        return get_config().ollama_url
 
 # Fast model for classification
 CLASSIFICATION_MODEL = "qwen2.5:1.5b"

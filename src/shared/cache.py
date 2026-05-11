@@ -4,18 +4,19 @@ Redis URL is fetched from admin backend, with fallback to REDIS_URL env var.
 No hardcoded defaults - configuration must come from admin or environment.
 """
 
-import os
 import json
 import httpx
 import redis.asyncio as redis
 from typing import Optional, Any
 from functools import wraps
 import logging
+from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 logger = logging.getLogger(__name__)
 
 # Admin backend URL for fetching configuration
-ADMIN_BACKEND_URL = os.getenv("ADMIN_BACKEND_URL", "http://localhost:8080")
+ADMIN_BACKEND_URL = get_admin_url()
 
 # Cached Redis URL (fetched once from admin backend)
 _cached_redis_url: Optional[str] = None
@@ -79,7 +80,7 @@ def get_redis_url() -> str:
         return url
 
     # Fall back to environment variable
-    env_url = os.getenv("REDIS_URL")
+    env_url = get_config().redis_url
     if env_url:
         logger.info(f"Using Redis URL from environment: {env_url}")
         _cached_redis_url = env_url

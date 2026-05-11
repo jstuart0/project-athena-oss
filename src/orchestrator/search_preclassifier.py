@@ -94,6 +94,8 @@ INTENT_TEMPLATES: Dict[str, List[str]] = {
     ],
     "news": [
         "what's in the news",
+        "what's in the news today",
+        "what is in the news today",
         "latest headlines",
         "news today",
         "current events",

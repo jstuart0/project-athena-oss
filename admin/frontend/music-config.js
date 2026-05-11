@@ -211,7 +211,7 @@ function renderConnectionCard() {
             </div>
             <div class="p-5">
                 <div class="mb-4">
-                    <label class="block text-sm text-gray-400 mb-2">Server URL</label>
+                    <label for="music-assistant-url" class="block text-sm text-gray-400 mb-2">Server URL</label>
                     <div class="flex gap-2">
                         <input
                             type="url"
@@ -268,7 +268,7 @@ function renderPlaybackCard() {
                 <!-- Volume Slider -->
                 <div>
                     <div class="flex items-center justify-between mb-2">
-                        <label class="text-sm text-gray-400">Default Volume</label>
+                        <label for="default-volume" class="text-sm text-gray-400">Default Volume</label>
                         <span id="volume-display" class="text-sm font-mono text-purple-400">${volume}%</span>
                     </div>
                     <div class="relative">
@@ -291,7 +291,7 @@ function renderPlaybackCard() {
 
                 <!-- Provider Selection -->
                 <div class="pt-4">
-                    <label class="block text-sm text-gray-400 mb-3">Default Provider</label>
+                    <p class="block text-sm text-gray-400 mb-3">Default Provider</p>
                     <div class="grid grid-cols-3 gap-2">
                         ${providers.map(p => `
                             <button onclick="selectProvider('${p.id}')"
@@ -511,7 +511,7 @@ function renderAdvancedSettings() {
 
                     <!-- Timeout Setting -->
                     <div class="p-4 bg-dark-bg rounded-lg border border-dark-border">
-                        <label class="block text-sm text-white mb-2">Stream Timeout</label>
+                        <label for="stream-timeout" class="block text-sm text-white mb-2">Stream Timeout</label>
                         <div class="flex items-center gap-2">
                             <input type="number" id="stream-timeout" value="${timeout}" min="5" max="60"
                                 class="w-20 px-3 py-1.5 bg-dark-card border border-dark-border rounded-lg text-white text-center focus:border-blue-500 outline-none" />
@@ -753,17 +753,17 @@ function createSpotifyAccountModal() {
                 </div>
                 <form id="spotify-account-form" onsubmit="saveSpotifyAccount(event)" class="p-6 space-y-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-2">Account Name</label>
+                        <label for="spotify-name" class="block text-sm text-gray-400 mb-2">Account Name</label>
                         <input type="text" id="spotify-name" required
                             class="w-full px-4 py-2.5 bg-dark-bg border border-dark-border rounded-lg text-white placeholder-gray-500 focus:border-green-500 focus:ring-1 focus:ring-green-500 outline-none" />
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-2">Email (optional)</label>
+                        <label for="spotify-email" class="block text-sm text-gray-400 mb-2">Email (optional)</label>
                         <input type="email" id="spotify-email"
                             class="w-full px-4 py-2.5 bg-dark-bg border border-dark-border rounded-lg text-white placeholder-gray-500 focus:border-green-500 focus:ring-1 focus:ring-green-500 outline-none" />
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-2">Access Token</label>
+                        <label for="spotify-token" class="block text-sm text-gray-400 mb-2">Access Token</label>
                         <textarea id="spotify-token" required rows="3"
                             class="w-full px-4 py-2.5 bg-dark-bg border border-dark-border rounded-lg text-white placeholder-gray-500 focus:border-green-500 focus:ring-1 focus:ring-green-500 outline-none resize-none font-mono text-sm"></textarea>
                     </div>
@@ -990,13 +990,13 @@ function createGenreModal() {
                 </div>
                 <form id="genre-form" onsubmit="saveGenre(event)" class="p-6 space-y-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-2">Genre Name</label>
+                        <label for="genre-name" class="block text-sm text-gray-400 mb-2">Genre Name</label>
                         <input type="text" id="genre-name" required
                             class="w-full px-4 py-2.5 bg-dark-bg border border-dark-border rounded-lg text-white placeholder-gray-500 focus:border-orange-500 focus:ring-1 focus:ring-orange-500 outline-none"
                             placeholder="e.g., Classic Rock" />
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-2">Add Artists</label>
+                        <label for="artist-search" class="block text-sm text-gray-400 mb-2">Add Artists</label>
                         <div class="relative">
                             <input type="text" id="artist-search" autocomplete="off"
                                 class="w-full px-4 py-2.5 bg-dark-bg border border-dark-border rounded-lg text-white placeholder-gray-500 focus:border-orange-500 focus:ring-1 focus:ring-orange-500 outline-none"

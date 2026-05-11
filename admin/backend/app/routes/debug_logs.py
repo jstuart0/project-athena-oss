@@ -12,6 +12,7 @@ import httpx
 from typing import List, Optional
 from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
+from shared.config import get_config
 
 router = APIRouter(prefix="/api/debug-logs", tags=["debug-logs"])
 
@@ -76,10 +77,10 @@ async def proxy_to_control_agent(path: str, params: dict = None) -> Optional[dic
     Proxy request to the Control Agent.
 
     Returns the parsed JSON response on success.
-    Returns None if the Control Agent is not configured or unreachable.
+    Returns None if the Control Agent is disabled, not configured, or unreachable.
     Raises HTTPException for application-level errors (404, 5xx from agent).
     """
-    if not CONTROL_AGENT_URL:
+    if not get_config().control_agent_enabled or not CONTROL_AGENT_URL:
         return None
 
     url = f"{CONTROL_AGENT_URL}{path}"
@@ -106,6 +107,8 @@ async def proxy_to_control_agent(path: str, params: dict = None) -> Optional[dic
 @router.get("/status", response_model=DebugStatusResponse)
 async def get_debug_status():
     """Check if debug mode is enabled and get log directory info."""
+    if not get_config().control_agent_enabled:
+        return _unavailable_status("Control Agent is disabled (CONTROL_AGENT_ENABLED=false)")
     if not CONTROL_AGENT_URL:
         return _unavailable_status("CONTROL_AGENT_URL is not configured")
 

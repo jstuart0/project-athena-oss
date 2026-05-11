@@ -51,6 +51,9 @@ data:
   GATEWAY_URL: "http://athena-gateway:8000"
   ORCHESTRATOR_URL: "http://athena-orchestrator:8001"
   REDIS_URL: "redis://redis:6379/0"
+  # community_events uses DB 1 to isolate its cache from other services.
+  # The DB index is encoded in the path so redis.from_url() reads it unambiguously.
+  COMMUNITY_EVENTS_REDIS_URL: "redis://redis:6379/1"
   QDRANT_URL: "http://qdrant:6333"
 
   # MLX-LM server (optional - for Apple Silicon acceleration)
@@ -80,6 +83,79 @@ data:
   MODULE_NOTIFICATIONS: "true"
   MODULE_JARVIS_WEB: "true"
   MODULE_MONITORING: "false"
+
+  # Control Agent — optional service that manages Ollama and other host-level
+  # processes (runs on the same host as Ollama, outside the cluster).
+  # Set this to the URL of your Control Agent if deployed, e.g.:
+  #   CONTROL_AGENT_URL: "http://192.168.1.100:8099"
+  # When unset, services fall back to http://localhost:8099.
+  # Do NOT set this to an empty string — unset the key entirely to use the default.
+  #
+  # Control Agent is opt-in (default disabled). Enable only if you run a Control
+  # Agent process on a host alongside Ollama (e.g., a Mac Studio or bare-metal node).
+  # Existing deployments must add CONTROL_AGENT_ENABLED=true via a private overlay
+  # or in-cluster env injection. See docs/INSTALLATION.md for operator instructions.
+  #
+  # CONTROL_AGENT_ENABLED: "true"
+  # CONTROL_AGENT_URL: "http://your-control-agent-host:8099"
+
+  # Local-login brute-force defenses (ATHENA-14) — uncomment to override defaults.
+  # Per-IP rate limit on POST /api/auth/local-login (Redis-backed, ignores
+  # X-Forwarded-For).  Set to "0" to disable rate limiting; lockout + timing
+  # floor still apply.  Default: 5 requests per minute per IP.
+  # LOGIN_RATE_LIMIT_PER_MINUTE: "5"
+  #
+  # Per-username lockout threshold (cumulative wrong-password attempts before
+  # the account is locked).  Lockout is idempotent — past-threshold attempts
+  # do not extend the window.  Default: 10 failures.
+  # LOGIN_LOCKOUT_THRESHOLD: "10"
+  #
+  # Lockout window in minutes.  Lock self-expires lazily on the next attempt
+  # after the window passes.  Manual unlock via psql:
+  #   UPDATE users SET failed_login_count=0, locked_until=NULL WHERE username='<name>';
+  # Default: 30 minutes.
+  # LOGIN_LOCKOUT_MINUTES: "30"
+  #
+  # Wall-time floor (milliseconds) on every failure branch of local-login.
+  # All four paths (not-found, inactive, locked, wrong-password) sleep until
+  # elapsed >= floor after dummy-hash.  Raise on slow hardware if timing
+  # side-channel is a concern.  Default: 400ms.
+  # LOGIN_MINIMUM_DELAY_MS: "400"
+
+  # Service-registry write rate limit (ATHENA-1 Phase 2).
+  # Separate token bucket from LOGIN_RATE_LIMIT_PER_MINUTE.  Covers
+  # POST/toggle/refresh/DELETE on /api/service-registry/services/*.
+  # Default 60 (accommodates CA's per-service upsert loop on startup).
+  # SERVICE_REGISTRY_WRITE_PER_MINUTE: "60"
+
+  # ==========================================================================
+  # Health Poller Configuration (ATHENA-1 Phase 4)
+  # ==========================================================================
+  # Background task that polls each enabled RAG service's /health endpoint on
+  # a schedule and caches results in rag_services.health_status + related
+  # columns. The admin UI reads cached values instead of inline-pinging.
+  #
+  # HEALTH_POLL_INTERVAL_SECONDS: seconds between full poll cycles. Default 30.
+  # HEALTH_POLL_INTERVAL_SECONDS: "30"
+  #
+  # HEALTH_POLL_TIMEOUT_SECONDS: per-request HTTP timeout. Default 5.
+  # HEALTH_POLL_TIMEOUT_SECONDS: "5"
+  #
+  # HEALTH_POLL_CONCURRENCY: max simultaneous outbound pings per cycle. Default 8.
+  # HEALTH_POLL_CONCURRENCY: "8"
+  #
+  # HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: comma-separated CIDRs or hostnames that
+  # override the SSRF block on RFC1918 / loopback / link-local ranges.
+  # Default empty = fail-closed (OSS deployers with public-internet services
+  # don't need this). Homelab / K8s operators whose services are on private
+  # subnets MUST set this to permit the poller to reach them.
+  #
+  # Example for a standard K8s cluster:
+  #   HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: "10.96.0.0/12,10.244.0.0/16"
+  # Example for Jay's homelab (pod CIDR + service CIDR + host subnet):
+  #   HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: "10.96.0.0/12,10.244.0.0/16,192.168.10.0/24"
+  #
+  # HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: ""
 
   # Logging
   LOG_LEVEL: "INFO"

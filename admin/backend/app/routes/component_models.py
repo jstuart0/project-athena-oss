@@ -1,11 +1,10 @@
-import os
 """
 Component Model Assignment Routes
 
 Manages which LLM model is assigned to each system component.
 Enables hot-swapping of models without service restart via cache TTL.
 """
-
+import os
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +16,7 @@ import httpx
 from app.database import get_db
 from app.models import ComponentModelAssignment, User, LLMBackend, CloudLLMProvider, ExternalAPIKey, SystemSetting
 from app.auth.oidc import get_current_user
+from shared.config import get_config
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/component-models", tags=["component-models"])
@@ -32,7 +32,7 @@ def get_ollama_url(db: Session) -> str:
     setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
     if setting and setting.value:
         return setting.value
-    return os.getenv("OLLAMA_URL", "http://localhost:11434")
+    return get_config().ollama_url
 
 
 # Pydantic Models
@@ -47,6 +47,7 @@ class ComponentModelResponse(BaseModel):
     temperature: Optional[float]
     max_tokens: Optional[int]
     timeout_seconds: Optional[int]
+    disable_thinking: bool = False
     enabled: bool
     created_at: Optional[str]
     updated_at: Optional[str]
@@ -61,6 +62,7 @@ class ComponentModelUpdate(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     timeout_seconds: Optional[int] = None
+    disable_thinking: Optional[bool] = None
     enabled: Optional[bool] = None
 
 

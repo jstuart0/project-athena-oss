@@ -8,7 +8,7 @@
 #   4. (Optional) Ollama server running (local or remote)
 #
 # Usage:
-#   ./scripts/deploy.sh [phase]
+#   ./scripts/deploy.sh [--first-run] [phase]
 #
 # Phases:
 #   all       - Run all phases (default)
@@ -16,6 +16,12 @@
 #   images    - Build and push container images only
 #   deploy    - Deploy manifests only
 #   status    - Show deployment status
+#
+# Flags:
+#   --first-run  Apply the one-shot ollama-model-pull Job and wait for it to
+#                complete. Use on initial cluster setup only. Omit on subsequent
+#                deploys — the Job's spec.template.spec is immutable and
+#                re-applying will fail if it still exists.
 #
 # Environment variables (or set in config.env):
 #   REGISTRY  - Container registry URL
@@ -116,6 +122,22 @@ build_images() {
 deploy_manifests() {
     log_phase "Deploying to Kubernetes"
 
+    # Pre-flight: verify required secrets exist before applying any manifests.
+    # Run ./scripts/create-secrets.sh first if any are missing.
+    log_info "Verifying required secrets exist..."
+    if ! kubectl get namespace "$NAMESPACE" &>/dev/null; then
+        log_error "Namespace '$NAMESPACE' does not exist. Run: ./scripts/create-secrets.sh first."
+        exit 1
+    fi
+    for secret in athena-db-credentials athena-encryption athena-oidc; do
+        if ! kubectl -n "$NAMESPACE" get secret "$secret" &>/dev/null; then
+            log_error "Required secret '$secret' not found in namespace $NAMESPACE."
+            log_error "Run: ./scripts/create-secrets.sh"
+            exit 1
+        fi
+    done
+    log_info "All required secrets present."
+
     # Apply in order
     log_info "Creating namespace..."
     kubectl apply -f "$PROJECT_ROOT/manifests/athena-prod/namespace.yaml"
@@ -133,11 +155,12 @@ deploy_manifests() {
     kubectl -n $NAMESPACE wait --for=condition=available --timeout=120s deployment/ollama || true
     kubectl -n $NAMESPACE wait --for=condition=available --timeout=60s deployment/redis
 
-    log_info "Pulling Ollama models..."
-    kubectl -n $NAMESPACE delete job ollama-model-pull 2>/dev/null || true
-    kubectl apply -f "$PROJECT_ROOT/manifests/athena-prod/ollama.yaml"
-    # Wait a bit for models to start pulling
-    sleep 10
+    if [[ "$FIRST_RUN" == "true" ]]; then
+        log_info "Applying one-shot model-pull Job (--first-run)..."
+        kubectl apply -f "$PROJECT_ROOT/manifests/athena-prod/ollama-model-pull-job.yaml"
+        log_info "Waiting for Ollama model-pull Job to complete (up to 600s)..."
+        kubectl -n "$NAMESPACE" wait --for=condition=complete --timeout=600s job/ollama-model-pull
+    fi
 
     log_info "Deploying Admin services..."
     kubectl apply -f "$PROJECT_ROOT/manifests/athena-prod/admin-backend.yaml"
@@ -185,7 +208,19 @@ show_status() {
 }
 
 # Main
-PHASE="${1:-all}"
+
+# First-run flag pre-pass — strips --first-run from args and sets FIRST_RUN.
+# Preserves positional PHASE semantics for the existing case dispatch below.
+FIRST_RUN=false
+ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--first-run" ]]; then
+        FIRST_RUN=true
+    else
+        ARGS+=("$arg")
+    fi
+done
+PHASE="${ARGS[0]:-all}"
 
 case $PHASE in
     all)
@@ -208,7 +243,7 @@ case $PHASE in
         show_status
         ;;
     *)
-        echo "Usage: $0 [all|secrets|images|deploy|status]"
+        echo "Usage: $0 [--first-run] [all|secrets|images|deploy|status]"
         exit 1
         ;;
 esac

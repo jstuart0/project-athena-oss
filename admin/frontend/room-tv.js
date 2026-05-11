@@ -327,7 +327,7 @@ function renderRemoteControlSection() {
         <div class="max-w-md mx-auto">
             <!-- Room Selector -->
             <div class="mb-6">
-                <label class="block text-sm font-medium text-gray-400 mb-2">Select TV</label>
+                <label for="remote-room-select" class="block text-sm font-medium text-gray-400 mb-2">Select TV</label>
                 <select id="remote-room-select" class="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
                     ${roomOptions}
                 </select>
@@ -624,20 +624,20 @@ function editTVConfig(configId) {
     showModal('Edit TV Configuration', `
         <div class="space-y-4">
             <div>
-                <label class="block text-sm font-medium text-gray-400 mb-1">Display Name</label>
+                <label for="edit-tv-display-name" class="block text-sm font-medium text-gray-400 mb-1">Display Name</label>
                 <input type="text" id="edit-tv-display-name" value="${escapeHtml(config.display_name)}" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-400 mb-1">Media Player Entity</label>
+                <label for="edit-tv-media-player" class="block text-sm font-medium text-gray-400 mb-1">Media Player Entity</label>
                 <input type="text" id="edit-tv-media-player" value="${escapeHtml(config.media_player_entity_id)}" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-400 mb-1">Remote Entity</label>
+                <label for="edit-tv-remote" class="block text-sm font-medium text-gray-400 mb-1">Remote Entity</label>
                 <input type="text" id="edit-tv-remote" value="${escapeHtml(config.remote_entity_id)}" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white">
             </div>
             <div class="flex items-center gap-2">
                 <input type="checkbox" id="edit-tv-enabled" ${config.enabled ? 'checked' : ''} class="rounded bg-gray-700 border-gray-600">
-                <label class="text-sm text-gray-400">Enabled</label>
+                <label for="edit-tv-enabled" class="text-sm text-gray-400">Enabled</label>
             </div>
         </div>
     `, [

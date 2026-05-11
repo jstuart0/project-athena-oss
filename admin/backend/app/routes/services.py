@@ -6,8 +6,9 @@ Provides CRUD operations for service management and health monitoring.
 import os
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from datetime import datetime
 import structlog
 import aiohttp
@@ -16,132 +17,115 @@ import ssl
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
-from app.models import User, ServiceRegistry, ServerConfig, AuditLog
+from app.models import User, RagService, AuditLog
+from app.utils.url_validators import validate_protocol, validate_host, validate_health_endpoint
+from app.services.health_poller import _validate_service_url
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/services", tags=["services"])
 
 
-async def _perform_health_check(service: ServiceRegistry) -> bool:
-    """Internal function to perform health check on a service."""
-    import time
-    start = time.time()
 
-    try:
-        # Special handling for Wyoming protocol services (Whisper, Piper)
-        # These don't have HTTP endpoints, use TCP check instead
-        if 'whisper' in service.service_name.lower() or 'piper' in service.service_name.lower():
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            result = sock.connect_ex((service.server.ip_address, service.port))
-            sock.close()
-            elapsed = int((time.time() - start) * 1000)
-
-            if result == 0:
-                service.status = 'online'
-                service.last_response_time = elapsed
-                service.last_checked = datetime.utcnow()
-                return True
-            else:
-                service.status = 'offline'
-                service.last_checked = datetime.utcnow()
-                return False
-
-        if service.health_endpoint:
-            # Special handling for HA-API: use domain name instead of IP
-            # Direct IP access from Kubernetes pods is blocked by HA firewall
-            if 'ha-api' in service.service_name.lower():
-                host = "localhost"
-                port = 443  # Use standard HTTPS port for domain access
-            else:
-                host = service.server.ip_address
-                port = service.port
-
-            url = f"{service.protocol}://{host}:{port}{service.health_endpoint}"
-
-            # Create SSL context that doesn't verify certificates (for self-signed certs)
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    elapsed = int((time.time() - start) * 1000)
-                    if resp.status == 200:
-                        service.status = 'online'
-                        service.last_response_time = elapsed
-                        service.last_checked = datetime.utcnow()
-                        return True
-                    elif resp.status == 401:
-                        # Gateway and other services may require auth on /health
-                        # Treat 401 as service running (auth required)
-                        service.status = 'online'
-                        service.last_response_time = elapsed
-                        service.last_checked = datetime.utcnow()
-                        return True
-                    else:
-                        service.status = 'degraded'
-                        service.last_response_time = elapsed
-                        service.last_checked = datetime.utcnow()
-                        return False
-        else:
-            # TCP port check for services without HTTP health endpoint
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            result = sock.connect_ex((service.server.ip_address, service.port))
-            sock.close()
-            elapsed = int((time.time() - start) * 1000)
-
-            if result == 0:
-                service.status = 'online'
-                service.last_response_time = elapsed
-                service.last_checked = datetime.utcnow()
-                return True
-            else:
-                service.status = 'offline'
-                service.last_checked = datetime.utcnow()
-                return False
-    except Exception as e:
-        elapsed = int((time.time() - start) * 1000)
-        service.status = 'offline'
-        service.last_checked = datetime.utcnow()
-        logger.error("service_health_check_failed", service=service.service_name, error=str(e))
-        return False
+# Private aliases kept for ServiceCreate / ServiceUpdate field_validator calls
+# below; the shared implementations live in app.utils.url_validators so that
+# service_registry.py can apply the same SSRF rules without duplicating logic.
+_validate_protocol = validate_protocol
+_validate_host = validate_host
+_validate_health_endpoint = validate_health_endpoint
 
 
 class ServiceCreate(BaseModel):
     """Request model for registering a service."""
-    server_id: int
-    service_name: str
+    name: str
+    display_name: str
+    host: str
     port: int
-    health_endpoint: str = None
     protocol: str = "http"
+    health_endpoint: Optional[str] = "/health"
+    service_type: Optional[str] = None
+    description: Optional[str] = None
+    control_method: Optional[str] = "none"
+    container_name: Optional[str] = None
+    auto_start: bool = True
+    enabled: bool = True
+
+    @field_validator('protocol')
+    @classmethod
+    def validate_protocol(cls, v: str) -> str:
+        return _validate_protocol(v)
+
+    @field_validator('host')
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        return _validate_host(v)
+
+    @field_validator('health_endpoint')
+    @classmethod
+    def validate_health_endpoint(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_health_endpoint(v)
 
 
 class ServiceUpdate(BaseModel):
     """Request model for updating a service."""
-    health_endpoint: str = None
-    protocol: str = None
-    status: str = None
+    display_name: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    health_endpoint: Optional[str] = None
+    protocol: Optional[str] = None
+    service_type: Optional[str] = None
+    description: Optional[str] = None
+    control_method: Optional[str] = None
+    container_name: Optional[str] = None
+    auto_start: Optional[bool] = None
+    enabled: Optional[bool] = None
+
+    @field_validator('protocol')
+    @classmethod
+    def validate_protocol(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return _validate_protocol(v)
+
+    @field_validator('host')
+    @classmethod
+    def validate_host(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return _validate_host(v)
+
+    @field_validator('health_endpoint')
+    @classmethod
+    def validate_health_endpoint(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return _validate_health_endpoint(v)
 
 
 class ServiceResponse(BaseModel):
     """Response model for service data."""
     id: int
-    server_id: int
-    server_name: Optional[str] = None
-    ip_address: Optional[str] = None
-    service_name: str
-    port: int
+    name: str
+    display_name: str
+    host: Optional[str] = None
+    port: Optional[int] = None
+    protocol: Optional[str] = None
     health_endpoint: Optional[str] = None
-    protocol: str
-    status: str
-    last_response_time: Optional[int] = None
-    last_checked: Optional[str] = None
+    service_type: Optional[str] = None
+    description: Optional[str] = None
+    control_method: Optional[str] = None
+    container_name: Optional[str] = None
+    auto_start: bool = True
+    enabled: bool = True
+    health_status: Optional[str] = None
+    is_running: bool = False
+    last_health_check: Optional[str] = None
+    last_response_time_ms: Optional[int] = None
+    last_error: Optional[str] = None
+    health_message: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -151,7 +135,7 @@ def create_audit_log(
     db: Session,
     user: User,
     action: str,
-    service: ServiceRegistry,
+    service: RagService,
     old_value: dict = None,
     new_value: dict = None,
     request: Request = None
@@ -181,7 +165,7 @@ def create_audit_log(
 ENV_FALLBACKS = {
     "gateway": os.getenv("GATEWAY_URL", "http://localhost:8000"),
     "orchestrator": os.getenv("ORCHESTRATOR_URL", "http://localhost:8001"),
-    "ollama": os.getenv("OLLAMA_URL", "http://localhost:11434"),
+    "ollama": get_config().ollama_url,
     "redis": f"redis://{os.getenv('REDIS_SERVICE_HOST', 'redis')}:{os.getenv('REDIS_SERVICE_PORT', '6379')}",
     "qdrant": os.getenv("QDRANT_URL", "http://qdrant:6333"),
     "mlx": os.getenv("MLX_URL", ""),
@@ -193,17 +177,16 @@ def get_service_url_from_db(db: Session, service_name: str) -> Optional[dict]:
     Look up service URL from database.
     Returns dict with url, protocol, health_endpoint or None if not found.
     """
-    # Try exact match first, then partial match
-    service = db.query(ServiceRegistry).filter(
-        ServiceRegistry.service_name.ilike(f"%{service_name}%")
+    service = db.query(RagService).filter(
+        func.lower(RagService.name) == service_name.lower()
     ).first()
 
-    if service and service.server:
+    if service and service.host:
         return {
-            "url": f"{service.protocol}://{service.server.ip_address}:{service.port}",
-            "protocol": service.protocol,
+            "url": f"{service.protocol or 'http'}://{service.host}:{service.port}",
+            "protocol": service.protocol or 'http',
             "health_endpoint": service.health_endpoint,
-            "ip": service.server.ip_address,
+            "ip": service.host,
             "port": service.port,
         }
     return None
@@ -220,8 +203,39 @@ def get_service_url(db: Session, service_name: str, fallback_key: str = None) ->
     return ENV_FALLBACKS.get(key, "")
 
 
+def _ssrf_check_url(url: str, health_path: str = "/health") -> Optional[dict]:
+    """Apply the SSRF allowlist guard to a URL before an outbound request.
+
+    Returns a dict suitable for returning directly as the endpoint response if
+    the URL is blocked, or None if the URL is allowed.  Callers MUST check the
+    return value and short-circuit when it is not None.
+
+    Phase 3 H-3 (codex r2): applies the same _validate_service_url guard used
+    by the background health poller to the 6 per-service-type quick-check
+    endpoints that previously bypassed it.
+    """
+    from urllib.parse import urlparse as _urlparse
+    try:
+        parsed = _urlparse(url)
+        host = parsed.hostname or ''
+        port = parsed.port
+        if port is None:
+            port = 443 if parsed.scheme == 'https' else 80
+    except Exception:
+        return {"status": "ssrf_blocked", "error": "malformed URL"}
+
+    allowed, reason = _validate_service_url(host, port, health_path)
+    if not allowed:
+        logger.warning("quick_check_ssrf_blocked", url=url, reason=reason)
+        return {"status": "ssrf_blocked", "error": f"SSRF guard: {reason}"}
+    return None
+
+
 @router.get("/gateway/health")
-async def check_gateway_health(db: Session = Depends(get_db)):
+async def check_gateway_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for Gateway service. URL sourced from database."""
     import time
     start = time.time()
@@ -229,6 +243,10 @@ async def check_gateway_health(db: Session = Depends(get_db)):
     url = get_service_url(db, "gateway")
     if not url:
         return {"status": "not_configured", "error": "Gateway not found in database"}
+
+    blocked = _ssrf_check_url(url, "/health")
+    if blocked:
+        return blocked
 
     try:
         ssl_context = ssl.create_default_context()
@@ -263,7 +281,10 @@ async def check_gateway_health(db: Session = Depends(get_db)):
 
 
 @router.get("/orchestrator/health")
-async def check_orchestrator_health(db: Session = Depends(get_db)):
+async def check_orchestrator_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for Orchestrator service. URL sourced from database."""
     import time
     start = time.time()
@@ -271,6 +292,10 @@ async def check_orchestrator_health(db: Session = Depends(get_db)):
     url = get_service_url(db, "orchestrator")
     if not url:
         return {"status": "not_configured", "error": "Orchestrator not found in database"}
+
+    blocked = _ssrf_check_url(url, "/health")
+    if blocked:
+        return blocked
 
     try:
         ssl_context = ssl.create_default_context()
@@ -305,7 +330,10 @@ async def check_orchestrator_health(db: Session = Depends(get_db)):
 
 
 @router.get("/ollama/health")
-async def check_ollama_health(db: Session = Depends(get_db)):
+async def check_ollama_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for Ollama LLM server. URL sourced from database."""
     import time
     start = time.time()
@@ -313,6 +341,10 @@ async def check_ollama_health(db: Session = Depends(get_db)):
     url = get_service_url(db, "ollama")
     if not url:
         return {"status": "not_configured", "error": "Ollama not found in database"}
+
+    blocked = _ssrf_check_url(url, "/api/tags")
+    if blocked:
+        return blocked
 
     try:
         ssl_context = ssl.create_default_context()
@@ -350,7 +382,10 @@ async def check_ollama_health(db: Session = Depends(get_db)):
 
 
 @router.get("/redis/health")
-async def check_redis_health(db: Session = Depends(get_db)):
+async def check_redis_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for Redis cache server. URL sourced from database."""
     import time
     start = time.time()
@@ -364,6 +399,13 @@ async def check_redis_health(db: Session = Depends(get_db)):
         # Fall back to environment variables
         redis_host = os.getenv("REDIS_SERVICE_HOST", os.getenv("REDIS_HOST", "redis"))
         redis_port = int(os.getenv("REDIS_SERVICE_PORT", "6379"))
+
+    # SSRF guard (codex r2 H-3): Redis uses a raw socket; guard the host/port
+    # directly since there is no URL to pass to _ssrf_check_url.
+    redis_allowed, redis_block_reason = _validate_service_url(redis_host, redis_port, "/")
+    if not redis_allowed:
+        logger.warning("quick_check_ssrf_blocked", service="redis", reason=redis_block_reason)
+        return {"status": "ssrf_blocked", "error": f"SSRF guard: {redis_block_reason}"}
 
     try:
         import socket
@@ -406,7 +448,10 @@ async def check_redis_health(db: Session = Depends(get_db)):
 
 
 @router.get("/qdrant/health")
-async def check_qdrant_health(db: Session = Depends(get_db)):
+async def check_qdrant_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for Qdrant vector database. URL sourced from database."""
     import time
     start = time.time()
@@ -414,6 +459,10 @@ async def check_qdrant_health(db: Session = Depends(get_db)):
     qdrant_url = get_service_url(db, "qdrant")
     if not qdrant_url:
         return {"status": "not_configured", "error": "Qdrant not found in database"}
+
+    blocked = _ssrf_check_url(qdrant_url, "/healthz")
+    if blocked:
+        return blocked
 
     try:
         ssl_context = ssl.create_default_context()
@@ -446,7 +495,10 @@ async def check_qdrant_health(db: Session = Depends(get_db)):
 
 
 @router.get("/mlx/health")
-async def check_mlx_health(db: Session = Depends(get_db)):
+async def check_mlx_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Quick health check for MLX-LM server on Apple Silicon. URL sourced from database."""
     import time
     start = time.time()
@@ -456,6 +508,10 @@ async def check_mlx_health(db: Session = Depends(get_db)):
 
     if not mlx_url:
         return {"status": "not_configured", "error": "MLX not found in database or MLX_URL not set"}
+
+    blocked = _ssrf_check_url(mlx_url, "/v1/models")
+    if blocked:
+        return blocked
 
     try:
         ssl_context = ssl.create_default_context()
@@ -504,7 +560,7 @@ async def check_mlx_health(db: Session = Depends(get_db)):
 
 @router.get("")
 async def list_services(
-    server_id: int = None,
+    service_type: str = None,
     status: str = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -513,14 +569,14 @@ async def list_services(
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    query = db.query(ServiceRegistry)
+    query = db.query(RagService)
 
-    if server_id:
-        query = query.filter(ServiceRegistry.server_id == server_id)
+    if service_type:
+        query = query.filter(RagService.service_type == service_type)
     if status:
-        query = query.filter(ServiceRegistry.status == status)
+        query = query.filter(RagService.health_status == status)
 
-    services = query.order_by(ServiceRegistry.service_name).all()
+    services = query.order_by(RagService.name).all()
     return {"services": [s.to_dict() for s in services]}
 
 
@@ -534,7 +590,7 @@ async def get_service(
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    service = db.query(ServiceRegistry).filter(ServiceRegistry.id == service_id).first()
+    service = db.query(RagService).filter(RagService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
 
@@ -552,45 +608,40 @@ async def register_service(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # Verify server exists
-    server = db.query(ServerConfig).filter(ServerConfig.id == service_data.server_id).first()
-    if not server:
-        raise HTTPException(status_code=404, detail=f"Server ID {service_data.server_id} not found")
-
-    # Check if service already exists
-    existing = db.query(ServiceRegistry).filter(
-        ServiceRegistry.server_id == service_data.server_id,
-        ServiceRegistry.service_name == service_data.service_name,
-        ServiceRegistry.port == service_data.port
-    ).first()
+    # Check if service name already exists
+    existing = db.query(RagService).filter(RagService.name == service_data.name).first()
     if existing:
         raise HTTPException(
             status_code=400,
-            detail=f"Service '{service_data.service_name}' already registered on server {server.name}:{service_data.port}"
+            detail=f"Service '{service_data.name}' already registered"
         )
 
-    # Create service
-    service = ServiceRegistry(
-        server_id=service_data.server_id,
-        service_name=service_data.service_name,
+    service = RagService(
+        name=service_data.name,
+        display_name=service_data.display_name,
+        host=service_data.host,
         port=service_data.port,
-        health_endpoint=service_data.health_endpoint,
         protocol=service_data.protocol,
-        status='unknown'
+        health_endpoint=service_data.health_endpoint,
+        service_type=service_data.service_type,
+        description=service_data.description,
+        control_method=service_data.control_method,
+        container_name=service_data.container_name,
+        auto_start=service_data.auto_start,
+        enabled=service_data.enabled,
     )
     db.add(service)
     db.commit()
     db.refresh(service)
 
-    # Audit log
     create_audit_log(
         db, current_user, 'create', service,
-        new_value={'service': service.service_name, 'port': service.port, 'server': server.name},
+        new_value={'name': service.name, 'host': service.host, 'port': service.port},
         request=request
     )
 
-    logger.info("service_registered", service_id=service.id, name=service.service_name,
-                server=server.name, user=current_user.username)
+    logger.info("service_registered", service_id=service.id, name=service.name,
+                user=current_user.username)
 
     return service.to_dict()
 
@@ -607,37 +658,43 @@ async def update_service(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    service = db.query(ServiceRegistry).filter(ServiceRegistry.id == service_id).first()
+    service = db.query(RagService).filter(RagService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
 
-    # Store old values for audit
-    old_value = {
-        'health_endpoint': service.health_endpoint,
-        'protocol': service.protocol,
-        'status': service.status
-    }
+    old_value = service.to_dict()
 
-    # Update fields
+    if service_data.display_name is not None:
+        service.display_name = service_data.display_name
+    if service_data.host is not None:
+        service.host = service_data.host
+    if service_data.port is not None:
+        service.port = service_data.port
     if service_data.health_endpoint is not None:
         service.health_endpoint = service_data.health_endpoint
     if service_data.protocol is not None:
         service.protocol = service_data.protocol
-    if service_data.status is not None:
-        service.status = service_data.status
+    if service_data.service_type is not None:
+        service.service_type = service_data.service_type
+    if service_data.description is not None:
+        service.description = service_data.description
+    if service_data.control_method is not None:
+        service.control_method = service_data.control_method
+    if service_data.container_name is not None:
+        service.container_name = service_data.container_name
+    if service_data.auto_start is not None:
+        service.auto_start = service_data.auto_start
+    if service_data.enabled is not None:
+        service.enabled = service_data.enabled
 
     db.commit()
     db.refresh(service)
 
-    # Audit log
-    new_value = {
-        'health_endpoint': service.health_endpoint,
-        'protocol': service.protocol,
-        'status': service.status
-    }
-    create_audit_log(db, current_user, 'update', service, old_value=old_value, new_value=new_value, request=request)
+    create_audit_log(db, current_user, 'update', service,
+                     old_value=old_value, new_value=service.to_dict(), request=request)
 
-    logger.info("service_updated", service_id=service.id, name=service.service_name, user=current_user.username)
+    logger.info("service_updated", service_id=service.id, name=service.name,
+                user=current_user.username)
 
     return service.to_dict()
 
@@ -648,67 +705,61 @@ async def check_service_health(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Check service health and update status."""
+    """Check service health and update status.
+
+    Phase 4 reconcile (xander HIGH-1, ATHENA-1): redirected from the legacy
+    _perform_health_check path (no SSRF guard, legacy status vocabulary) to the
+    Phase 4 _poll_one so SSRF protection and canonical status values are uniform.
+    Response shape preserved for frontend compatibility.
+    """
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    service = db.query(ServiceRegistry).filter(ServiceRegistry.id == service_id).first()
+    service = db.query(RagService).filter(RagService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
 
-    # Perform health check
-    import time
-    start = time.time()
+    from app.services.health_poller import _poll_one
+    from shared.config import get_config as _get_config
+    import asyncio as _asyncio
+    import httpx as _httpx
+    from datetime import datetime as _dt
 
-    try:
-        if service.health_endpoint:
-            url = f"{service.protocol}://{service.server.ip_address}:{service.port}{service.health_endpoint}"
+    cfg = _get_config()
+    semaphore = _asyncio.Semaphore(1)
+    async with _httpx.AsyncClient(timeout=float(cfg.health_poll_timeout_seconds)) as client:
+        result = await _poll_one(
+            client,
+            semaphore,
+            service.id,
+            service.name,
+            service.host or '',
+            service.port or 0,
+            service.health_endpoint or '/health',
+            service.protocol or 'http',
+        )
 
-            # Create SSL context that doesn't verify certificates (for self-signed certs)
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
+    svc_id, status, response_time_ms, error_category, error_detail, health_message = result
+    last_error = f'{error_category}:{error_detail}' if error_category != 'ok' else None
 
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    elapsed = int((time.time() - start) * 1000)
-                    if resp.status == 200:
-                        service.status = 'online'
-                        service.last_response_time = elapsed
-                    else:
-                        service.status = 'degraded'
-                        service.last_response_time = elapsed
-        else:
-            # TCP check if no health endpoint
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            result = sock.connect_ex((service.server.ip_address, service.port))
-            sock.close()
-            elapsed = int((time.time() - start) * 1000)
-
-            if result == 0:
-                service.status = 'online'
-                service.last_response_time = elapsed
-            else:
-                service.status = 'offline'
-                service.last_response_time = None
-
-    except Exception as e:
-        service.status = 'offline'
-        service.last_response_time = None
-        logger.error("service_health_check_failed", service_id=service_id, error=str(e))
-
-    service.last_checked = datetime.utcnow()
+    db.query(RagService).filter(RagService.id == svc_id).update(
+        {
+            RagService.health_status: status,
+            RagService.last_health_check: _dt.utcnow(),
+            RagService.last_response_time_ms: response_time_ms,
+            RagService.last_error: last_error,
+        },
+        synchronize_session=False,
+    )
     db.commit()
+    db.refresh(service)
 
     return {
         "service_id": service.id,
-        "service_name": service.service_name,
-        "status": service.status,
-        "last_response_time": service.last_response_time,
-        "last_checked": service.last_checked.isoformat()
+        "service_name": service.name,
+        "status": service.health_status,
+        "last_response_time_ms": service.last_response_time_ms,
+        "last_health_check": service.last_health_check.isoformat() if service.last_health_check else None,
     }
 
 
@@ -717,33 +768,27 @@ async def get_all_service_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Check status of all services."""
+    """Check status of all services.
+
+    Phase 4 reconcile (xander HIGH-1, ATHENA-1): redirected from the legacy
+    _perform_health_check bulk loop (no SSRF guard, legacy vocabulary) to the
+    Phase 4 _poll_all_services.  Response shape {checked, healthy, unhealthy}
+    preserved for frontend compatibility.
+    """
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    services = db.query(ServiceRegistry).all()
+    from app.services.health_poller import _poll_all_services
+    from shared.config import get_config as _get_config
+    import asyncio as _asyncio
 
-    # Check each service health
-    checked = 0
-    healthy = 0
-    unhealthy = 0
-
-    for service in services:
-        checked += 1
-        is_healthy = await _perform_health_check(service)
-
-        if is_healthy:
-            healthy += 1
-        else:
-            unhealthy += 1
-
-    # Commit all status updates
-    db.commit()
+    semaphore = _asyncio.Semaphore(_get_config().health_poll_concurrency)
+    summary = await _poll_all_services(semaphore)
 
     return {
-        "checked": checked,
-        "healthy": healthy,
-        "unhealthy": unhealthy
+        "checked": summary.get('services_polled', 0),
+        "healthy": summary.get('healthy', 0),
+        "unhealthy": summary.get('unhealthy', 0),
     }
 
 
@@ -758,20 +803,20 @@ async def delete_service(
     if not current_user.has_permission('delete'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    service = db.query(ServiceRegistry).filter(ServiceRegistry.id == service_id).first()
+    service = db.query(RagService).filter(RagService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
 
-    service_name = service.service_name
+    service_name = service.name
 
-    # Audit log before deletion
-    old_value = {'service': service.service_name, 'port': service.port, 'server': service.server.name}
-    create_audit_log(db, current_user, 'delete', service, old_value=old_value, request=request)
+    create_audit_log(db, current_user, 'delete', service,
+                     old_value={'name': service.name, 'host': service.host, 'port': service.port},
+                     request=request)
 
-    # Delete
     db.delete(service)
     db.commit()
 
-    logger.info("service_deleted", service_id=service_id, name=service_name, user=current_user.username)
+    logger.info("service_deleted", service_id=service_id, name=service_name,
+                user=current_user.username)
 
     return None

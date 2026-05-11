@@ -18,6 +18,8 @@ from app.models import ModelDownload, User, ExternalAPIKey, Alert
 from app.auth.oidc import get_current_user
 from app.utils.encryption import decrypt_value
 from app.routes.websocket import broadcast_model_download_event
+from app.utils.service_auth import verify_service_api_key
+from shared.config import get_config
 
 
 def create_download_alert(
@@ -147,6 +149,8 @@ async def call_control_agent(
     timeout: float = 30.0
 ) -> tuple[bool, dict]:
     """Call Control Agent endpoint."""
+    if not get_config().control_agent_enabled:
+        return (False, {"error": "Control Agent disabled"})
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             url = f"{CONTROL_AGENT_URL}{endpoint}"
@@ -278,6 +282,8 @@ async def create_download(
     """Start a new model download."""
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not get_config().control_agent_enabled:
+        raise HTTPException(status_code=503, detail="Control Agent disabled")
 
     # Check if already exists
     existing = db.query(ModelDownload).filter(
@@ -423,6 +429,8 @@ async def retry_download(
     """Retry a failed download."""
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not get_config().control_agent_enabled:
+        raise HTTPException(status_code=503, detail="Control Agent disabled")
 
     download = db.query(ModelDownload).filter(ModelDownload.id == download_id).first()
     if not download:
@@ -482,13 +490,29 @@ async def delete_download(
     if not download:
         raise HTTPException(status_code=404, detail="Download not found")
 
-    # Delete file if it exists
+    # Delete file if it exists.  Both guard branches must pass before the DB
+    # row is removed: (a) agent disabled → 503, (b) agent enabled but
+    # returning an error → 502.  Record-only deletes (no download_path) skip
+    # both checks and fall straight through to the DB delete.
     if download.download_path:
-        await call_control_agent(
+        if not get_config().control_agent_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Control Agent disabled — cannot clean up downloaded file. "
+                    "Delete via filesystem or set CONTROL_AGENT_ENABLED=true."
+                ),
+            )
+        success, result = await call_control_agent(
             "DELETE",
             "/huggingface/downloaded",
             params={"file_path": download.download_path}
         )
+        if not success:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Control Agent error: {result.get('error', 'unknown')}",
+            )
 
     # Delete record
     db.delete(download)
@@ -596,12 +620,16 @@ class ProgressUpdateRequest(BaseModel):
 async def update_download_progress(
     download_id: int,
     request: ProgressUpdateRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Update download progress (called by Control Agent).
 
-    This is an internal endpoint - no user auth required since it comes from trusted Control Agent.
+    NOTE: Auth on this endpoint is intentionally deferred.
+    The Control Agent runs out-of-cluster (on the Ollama host) and distributing
+    SERVICE_API_KEY to external hosts was descoped (see xander:2 deferred items).
+    When xander:2 is addressed, add Depends(verify_service_api_key) and inject
+    SERVICE_API_KEY into the Control Agent environment.
     """
     download = db.query(ModelDownload).filter(ModelDownload.id == download_id).first()
     if not download:

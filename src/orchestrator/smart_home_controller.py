@@ -8,6 +8,7 @@ import random
 from typing import Dict, List, Optional, Tuple
 from .ha_entity_manager import HAEntityManager
 from shared.admin_config import get_admin_client
+from shared.admin_url import get_admin_url
 
 
 # Round 17: Response variety templates for natural conversation
@@ -2882,7 +2883,7 @@ Return ONLY valid JSON."""
         logger = logging.getLogger(__name__)
 
         try:
-            admin_url = "http://localhost:8080"
+            admin_url = get_admin_url()
 
             alert_payload = {
                 "alert_type": "stuck_sensor",
@@ -2922,7 +2923,7 @@ Return ONLY valid JSON."""
         logger = logging.getLogger(__name__)
 
         try:
-            admin_url = "http://localhost:8080"
+            admin_url = get_admin_url()
 
             async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
                 response = await client.post(
@@ -3173,7 +3174,7 @@ Return ONLY valid JSON."""
         logger = logging.getLogger(__name__)
 
         try:
-            admin_url = "http://localhost:8080"
+            admin_url = get_admin_url()
             async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
                 response = await client.get(f"{admin_url}/api/settings/house-layout")
                 if response.status_code == 200:

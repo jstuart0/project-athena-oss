@@ -30,19 +30,22 @@ def upgrade():
 
     # Insert ollama_url into system_settings
     # This is the single source of truth for all services
-    op.execute(f"""
-        INSERT INTO system_settings (key, value, description, category)
-        VALUES (
-            'ollama_url',
-            '{OLLAMA_URL}',
-            'Primary Ollama API URL. All LLM requests use this endpoint unless overridden per-model.',
-            'llm'
-        )
-        ON CONFLICT (key) DO UPDATE SET
-            value = EXCLUDED.value,
-            description = EXCLUDED.description,
-            category = EXCLUDED.category
-    """)
+    op.get_bind().execute(
+        sa.text("""
+            INSERT INTO system_settings (key, value, description, category)
+            VALUES (
+                'ollama_url',
+                :ollama_url,
+                'Primary Ollama API URL. All LLM requests use this endpoint unless overridden per-model.',
+                'llm'
+            )
+            ON CONFLICT (key) DO UPDATE SET
+                value = EXCLUDED.value,
+                description = EXCLUDED.description,
+                category = EXCLUDED.category
+        """),
+        {"ollama_url": OLLAMA_URL},
+    )
 
     print(f"✓ Added ollama_url system setting: {OLLAMA_URL}")
 

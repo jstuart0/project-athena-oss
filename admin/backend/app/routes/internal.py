@@ -26,8 +26,11 @@ from fastapi import APIRouter, Depends, HTTPException
 import asyncpg
 import os
 import structlog
+from sqlalchemy.orm import Session
 
 from app.utils.service_auth import verify_service_api_key
+from app.database import get_db
+from app.models import RagService
 
 logger = structlog.get_logger()
 
@@ -396,28 +399,25 @@ async def get_all_config() -> Dict[str, Any]:
 
 
 @router.get("/config/rag-services")
-async def get_rag_service_urls() -> Dict[str, str]:
-    """
-    Get RAG service URL map for orchestrator startup.
+async def get_rag_service_urls(db: Session = Depends(get_db)) -> Dict[str, str]:
+    """Return enabled service URL map for orchestrator startup.
 
-    Returns a dict mapping service name to endpoint URL.
-    Only returns enabled services.
-
-    Used by: Orchestrator RAGClient on startup
+    Response shape: {name: url} — matches rag_client.py:65-91 consumer.
+    Reads from the admin DB's rag_services table (ORM) instead of the legacy
+    asyncpg connection to the athena DB.  (ian I-C1 / ATHENA-1 Phase 2)
     """
-    conn = await get_athena_db_connection()
     try:
-        rows = await conn.fetch("""
-            SELECT name, endpoint_url
-            FROM rag_services
-            WHERE enabled = true
-        """)
-        return {row['name']: row['endpoint_url'] for row in rows}
+        services = db.query(RagService).filter(RagService.enabled.is_(True)).all()
+        return {
+            svc.name: (
+                svc.endpoint_url
+                or f"{svc.protocol or 'http'}://{svc.host}:{svc.port}"
+            )
+            for svc in services
+        }
     except Exception as e:
         logger.error("fetch_rag_service_urls_failed", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        await conn.close()
 
 
 # =============================================================================

@@ -98,18 +98,29 @@ def upgrade() -> None:
 
     for tool in rag_tools:
         tool_name, display_name, description, category, service_url, guest_mode, schema = tool
-        op.execute(f"""
-            INSERT INTO tool_registry
-                (tool_name, display_name, description, category, service_url, enabled, guest_mode_allowed, function_schema, source)
-            VALUES
-                ('{tool_name}', '{display_name}', '{description}', '{category}',
-                 '{service_url}', true, {str(guest_mode).lower()}, '{schema}'::jsonb, 'static')
-            ON CONFLICT (tool_name)
-            DO UPDATE SET
-                service_url = EXCLUDED.service_url,
-                source = 'static',
-                enabled = true;
-        """)
+        op.get_bind().execute(
+            sa.text("""
+                INSERT INTO tool_registry
+                    (tool_name, display_name, description, category, service_url, enabled, guest_mode_allowed, function_schema, source)
+                VALUES
+                    (:tool_name, :display_name, :description, :category,
+                     :service_url, true, :guest_mode, CAST(:schema AS jsonb), 'static')
+                ON CONFLICT (tool_name)
+                DO UPDATE SET
+                    service_url = EXCLUDED.service_url,
+                    source = 'static',
+                    enabled = true;
+            """),
+            {
+                "tool_name": tool_name,
+                "display_name": display_name,
+                "description": description,
+                "category": category,
+                "service_url": service_url,
+                "guest_mode": guest_mode,
+                "schema": schema,
+            },
+        )
 
 
 def downgrade() -> None:

@@ -43,7 +43,7 @@ function renderToolCallingSettings(settings) {
                 </div>
 
                 <div class="py-3 border-b border-dark-border">
-                    <label class="block text-white font-medium mb-2 flex items-center">Max Parallel Tools${infoIcon('tool-parallel')}</label>
+                    <label for="setting-max-parallel" class="block text-white font-medium mb-2 flex items-center">Max Parallel Tools${infoIcon('tool-parallel')}</label>
                     <div class="text-sm text-gray-400 mb-2">Maximum number of tools that can execute in parallel</div>
                     <input type="number" id="setting-max-parallel" value="${settings.max_parallel_tools}"
                            onchange="updateSetting('max_parallel_tools', parseInt(this.value))"
@@ -52,7 +52,7 @@ function renderToolCallingSettings(settings) {
                 </div>
 
                 <div class="py-3 border-b border-dark-border">
-                    <label class="block text-white font-medium mb-2 flex items-center">Tool Call Timeout (seconds)${infoIcon('tool-timeout')}</label>
+                    <label for="setting-timeout" class="block text-white font-medium mb-2 flex items-center">Tool Call Timeout (seconds)${infoIcon('tool-timeout')}</label>
                     <div class="text-sm text-gray-400 mb-2">Maximum time to wait for tool execution</div>
                     <input type="number" id="setting-timeout" value="${settings.tool_call_timeout_seconds}"
                            onchange="updateSetting('tool_call_timeout_seconds', parseInt(this.value))"
@@ -61,7 +61,7 @@ function renderToolCallingSettings(settings) {
                 </div>
 
                 <div class="py-3 border-b border-dark-border">
-                    <label class="block text-white font-medium mb-2 flex items-center">Default Model${infoIcon('llm-backend', 'LLM model to use for tool calling decisions. Faster models reduce latency but may be less accurate.')}</label>
+                    <label for="setting-model" class="block text-white font-medium mb-2 flex items-center">Default Model${infoIcon('llm-backend', 'LLM model to use for tool calling decisions. Faster models reduce latency but may be less accurate.')}</label>
                     <div class="text-sm text-gray-400 mb-2">LLM model to use for tool calling decisions</div>
                     <select id="setting-model" onchange="updateSetting('llm_model', this.value)"
                             class="w-64 px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -72,7 +72,7 @@ function renderToolCallingSettings(settings) {
                 </div>
 
                 <div class="py-3 border-b border-dark-border">
-                    <label class="block text-white font-medium mb-2 flex items-center">LLM Backend${infoIcon('llm-backend')}</label>
+                    <label for="setting-backend" class="block text-white font-medium mb-2 flex items-center">LLM Backend${infoIcon('llm-backend')}</label>
                     <div class="text-sm text-gray-400 mb-2">Which LLM provider to use</div>
                     <select id="setting-backend" onchange="updateSetting('llm_backend', this.value)"
                             class="w-64 px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
@@ -82,7 +82,7 @@ function renderToolCallingSettings(settings) {
                 </div>
 
                 <div class="py-3">
-                    <label class="block text-white font-medium mb-2 flex items-center">Temperature${infoIcon('tool-temperature')}</label>
+                    <label for="setting-temperature" class="block text-white font-medium mb-2 flex items-center">Temperature${infoIcon('tool-temperature')}</label>
                     <div class="text-sm text-gray-400 mb-2">LLM temperature for tool calling (0.0 - 1.0)</div>
                     <input type="number" id="setting-temperature" value="${settings.temperature}"
                            onchange="updateSetting('temperature', parseFloat(this.value))"
@@ -134,7 +134,10 @@ let allTools = [];
 
 async function loadToolRegistry() {
     try {
-        const response = await fetch(`${TOOL_CALLING_API_BASE}/tools/public`, {
+        // codex-r2:2 — /tools/public is service-key-only after Phase 1 gating
+        // (ATHENA-14).  X-Service-Key cannot live in the browser, so browser flows
+        // use /tools which authenticates via the user's Bearer token instead.
+        const response = await fetch(`${TOOL_CALLING_API_BASE}/tools`, {
             headers: { 'Authorization': `Bearer ${getToken()}` }
         });
         if (!response.ok) throw new Error('Failed to load tools');
@@ -323,25 +326,25 @@ function showEditToolModal(toolId) {
                     <input type="hidden" id="edit-tool-id" value="${tool.id}">
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Display Name</label>
+                        <label for="edit-display-name" class="block text-sm font-medium text-gray-300 mb-1">Display Name</label>
                         <input type="text" id="edit-display-name" value="${tool.display_name}"
                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-1">Description</label>
+                        <label for="edit-description" class="block text-sm font-medium text-gray-300 mb-1">Description</label>
                         <textarea id="edit-description" rows="2"
                                   class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">${tool.description}</textarea>
                     </div>
 
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Timeout (seconds)</label>
+                            <label for="edit-timeout" class="block text-sm font-medium text-gray-300 mb-1">Timeout (seconds)</label>
                             <input type="number" id="edit-timeout" value="${tool.timeout_seconds}" min="5" max="300"
                                    class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-gray-300 mb-1">Priority</label>
+                            <label for="edit-priority" class="block text-sm font-medium text-gray-300 mb-1">Priority</label>
                             <input type="number" id="edit-priority" value="${tool.priority}" min="1" max="1000"
                                    class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         </div>
@@ -557,7 +560,7 @@ async function showApiKeyRequirementsModal(toolId) {
                     <div class="space-y-4">
                         <div class="grid grid-cols-2 gap-4">
                             <div>
-                                <label class="block text-sm font-medium text-gray-300 mb-1">API Key Service</label>
+                                <label for="new-api-key-service" class="block text-sm font-medium text-gray-300 mb-1">API Key Service</label>
                                 <select id="new-api-key-service"
                                         class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                                     <option value="">-- Select API Key --</option>
@@ -570,14 +573,14 @@ async function showApiKeyRequirementsModal(toolId) {
                                 </select>
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-300 mb-1">Inject As (param name)</label>
+                                <label for="new-inject-as" class="block text-sm font-medium text-gray-300 mb-1">Inject As (param name)</label>
                                 <input type="text" id="new-inject-as" placeholder="e.g., api_key, google_api_key"
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             </div>
                         </div>
                         <div class="grid grid-cols-2 gap-4">
                             <div>
-                                <label class="block text-sm font-medium text-gray-300 mb-1">Description</label>
+                                <label for="new-description" class="block text-sm font-medium text-gray-300 mb-1">Description</label>
                                 <input type="text" id="new-description" placeholder="Why this key is needed"
                                        class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                             </div>
@@ -969,7 +972,9 @@ function renderToolMetrics(metrics) {
 async function initToolTesting() {
     // Load tools for selection
     try {
-        const response = await fetch(`${TOOL_CALLING_API_BASE}/tools/public?enabled_only=true`, {
+        // codex-r2:2 — same fix as loadToolRegistry: switch from /tools/public
+        // (service-key-only) to /tools (bearer auth, browser-compatible).
+        const response = await fetch(`${TOOL_CALLING_API_BASE}/tools?enabled_only=true`, {
             headers: { 'Authorization': `Bearer ${getToken()}` }
         });
         if (!response.ok) throw new Error('Failed to load tools');

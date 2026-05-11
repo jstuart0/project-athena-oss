@@ -13,10 +13,12 @@ from datetime import datetime
 import structlog
 import httpx
 
+from shared.admin_url import get_admin_url
+
 logger = structlog.get_logger(__name__)
 
 # Admin backend URL for database access
-ADMIN_BACKEND_URL = "http://localhost:8080"
+ADMIN_BACKEND_URL = get_admin_url()
 
 
 class TipsService:

@@ -5,6 +5,7 @@ Start, stop, restart Athena services and Ollama models.
 Uses Control Agent pattern for secure service management.
 """
 
+import os
 from datetime import datetime
 from typing import List, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
@@ -15,9 +16,9 @@ import httpx
 import asyncio
 
 from app.database import get_db
-from app.models import AthenaService, User, LLMBackend, SystemSetting
+from app.models import RagService, User, LLMBackend, SystemSetting
 from app.auth.oidc import get_current_user
-import os
+from shared.config import get_config
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/service-control", tags=["service-control"])
@@ -36,26 +37,27 @@ def get_ollama_url(db: Session) -> str:
     setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
     if setting and setting.value:
         return setting.value
-    return os.getenv("OLLAMA_URL", "http://localhost:11434")
+    return get_config().ollama_url
 
 
 # Pydantic Models
 class ServiceResponse(BaseModel):
     id: int
-    service_name: str
+    name: str
+    service_name: str  # back-compat alias — mirrors RagService.service_name property
     display_name: str
-    description: Optional[str]
-    service_type: str
-    host: str
-    port: int
-    health_endpoint: str
-    control_method: str
-    container_name: Optional[str]
-    is_running: bool
-    last_health_check: Optional[str]
-    last_error: Optional[str]
-    auto_start: bool
-    enabled: bool
+    description: Optional[str] = None
+    service_type: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    health_endpoint: Optional[str] = None
+    control_method: Optional[str] = None
+    container_name: Optional[str] = None
+    is_running: bool = False
+    last_health_check: Optional[str] = None
+    last_error: Optional[str] = None
+    auto_start: bool = True
+    enabled: bool = True
 
     class Config:
         from_attributes = True
@@ -93,11 +95,11 @@ async def list_services(
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    query = db.query(AthenaService)
+    query = db.query(RagService)
     if service_type:
-        query = query.filter(AthenaService.service_type == service_type)
+        query = query.filter(RagService.service_type == service_type)
 
-    services = query.order_by(AthenaService.service_type, AthenaService.display_name).all()
+    services = query.order_by(RagService.service_type, RagService.display_name).all()
     return [ServiceResponse(**s.to_dict()) for s in services]
 
 
@@ -107,11 +109,22 @@ async def refresh_all_service_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Trigger health check refresh for all services."""
+    """Trigger an immediate health-poll cycle for all services.
+
+    Phase 4 reconcile (ian HIGH / xander HIGH-1, ATHENA-1): the previous
+    implementation called check_all_services_health which had its own httpx
+    loop with legacy status vocabulary ('online'/'degraded'/'offline') and no
+    SSRF guard.  Redirected to the Phase 4 poller so status vocabulary and
+    SSRF protection are consistent.  Background-task semantics preserved:
+    caller gets immediate 200, poll runs asynchronously.
+    """
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    background_tasks.add_task(check_all_services_health, db)
+    from app.services.health_poller import _poll_all_services
+    import asyncio as _asyncio
+    semaphore = _asyncio.Semaphore(get_config().health_poll_concurrency)
+    background_tasks.add_task(_poll_all_services, semaphore)
 
     return {"message": "Health check refresh started", "status": "pending"}
 
@@ -126,7 +139,7 @@ async def start_service(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    service = db.query(AthenaService).filter(AthenaService.service_name == service_name).first()
+    service = db.query(RagService).filter(RagService.name == service_name).first()
     if not service:
         raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
 
@@ -157,7 +170,7 @@ async def stop_service(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    service = db.query(AthenaService).filter(AthenaService.service_name == service_name).first()
+    service = db.query(RagService).filter(RagService.name == service_name).first()
     if not service:
         raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
 
@@ -187,7 +200,7 @@ async def restart_service(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    service = db.query(AthenaService).filter(AthenaService.service_name == service_name).first()
+    service = db.query(RagService).filter(RagService.name == service_name).first()
     if not service:
         raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
 
@@ -211,6 +224,9 @@ async def get_containers_status(
     """Get real-time status of Athena containers from Control Agent."""
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not get_config().control_agent_enabled:
+        logger.info("control_agent_disabled", route="containers_status")
+        return []
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -227,7 +243,10 @@ async def get_containers_status(
     except httpx.ConnectError:
         raise HTTPException(
             status_code=503,
-            detail="Control Agent not reachable. Start it on Mac Studio."
+            detail=(
+                "Control Agent not reachable. Set CONTROL_AGENT_URL to the correct "
+                "host or set CONTROL_AGENT_ENABLED=false to disable."
+            ),
         )
     except Exception as e:
         logger.error("container_status_failed", error=str(e))
@@ -358,16 +377,16 @@ async def unload_ollama_model(
 
 
 # Helper Functions
-async def execute_service_action(service: AthenaService, action: str) -> Tuple[bool, str]:
+async def execute_service_action(service: RagService, action: str) -> Tuple[bool, str]:
     """Execute start/stop/restart action on a service."""
     if service.control_method == "docker":
         return await docker_service_action(service.container_name, action)
     elif service.control_method == "process":
         return await process_service_action(service.port, action)
     elif service.control_method == "launchd":
-        return await launchd_service_action(service.service_name, action)
+        return await launchd_service_action(service.name, action)
     elif service.control_method == "none":
-        return False, f"Service '{service.service_name}' does not support control actions"
+        return False, f"Service '{service.name}' does not support control actions"
     else:
         return False, f"Unknown control method: {service.control_method}"
 
@@ -379,6 +398,8 @@ async def docker_service_action(container_name: str, action: str) -> Tuple[bool,
     Control Agent provides
     HTTP endpoints for secure Docker container management.
     """
+    if not get_config().control_agent_enabled:
+        return False, "Control Agent disabled"
     try:
         async with httpx.AsyncClient(timeout=65.0) as client:
             # Map action to Control Agent endpoint
@@ -396,7 +417,7 @@ async def docker_service_action(container_name: str, action: str) -> Tuple[bool,
 
     except httpx.ConnectError:
         logger.warning("control_agent_unreachable", container=container_name, action=action)
-        return False, f"Control Agent not reachable. Start it on Mac Studio: python -m control_agent.main"
+        return False, "Control Agent not reachable. Set CONTROL_AGENT_URL to the correct host or set CONTROL_AGENT_ENABLED=false to disable."
     except httpx.TimeoutException:
         return False, "Control Agent request timed out"
     except Exception as e:
@@ -411,6 +432,8 @@ async def process_service_action(port: int, action: str) -> Tuple[bool, str]:
     Control Agent provides
     HTTP endpoints for managing Python/uvicorn processes by port.
     """
+    if not get_config().control_agent_enabled:
+        return False, "Control Agent disabled"
     try:
         async with httpx.AsyncClient(timeout=65.0) as client:
             # Map action to Control Agent process endpoint
@@ -428,7 +451,7 @@ async def process_service_action(port: int, action: str) -> Tuple[bool, str]:
 
     except httpx.ConnectError:
         logger.warning("control_agent_unreachable", port=port, action=action)
-        return False, f"Control Agent not reachable. Start it on Mac Studio: python -m control_agent.main"
+        return False, "Control Agent not reachable. Set CONTROL_AGENT_URL to the correct host or set CONTROL_AGENT_ENABLED=false to disable."
     except httpx.TimeoutException:
         return False, "Control Agent request timed out"
     except Exception as e:
@@ -442,6 +465,8 @@ async def launchd_service_action(service_name: str, action: str) -> Tuple[bool, 
 
     Supports Ollama service start/stop/restart on macOS via brew services.
     """
+    if not get_config().control_agent_enabled:
+        return False, "Control Agent disabled"
     # For Ollama, map to the specific endpoint
     if "ollama" in service_name.lower():
         try:
@@ -465,35 +490,13 @@ async def launchd_service_action(service_name: str, action: str) -> Tuple[bool, 
 
         except httpx.ConnectError:
             logger.warning("control_agent_unreachable", service=service_name, action=action)
-            return False, f"Control Agent not reachable. Start it on Mac Studio: python -m control_agent.main"
+            return False, "Control Agent not reachable. Set CONTROL_AGENT_URL to the correct host or set CONTROL_AGENT_ENABLED=false to disable."
         except Exception as e:
             logger.error("launchd_action_failed", service=service_name, action=action, error=str(e))
             return False, f"Launchd control failed: {str(e)}"
 
     return False, f"Launchd control not implemented for service: {service_name}"
 
-
-async def check_all_services_health(db: Session):
-    """Background task to check health of all services."""
-    services = db.query(AthenaService).filter(AthenaService.enabled == True).all()
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        for service in services:
-            try:
-                url = f"http://{service.host}:{service.port}{service.health_endpoint}"
-                response = await client.get(url)
-
-                service.is_running = response.status_code == 200
-                service.last_error = None if service.is_running else f"HTTP {response.status_code}"
-                service.last_health_check = datetime.utcnow()
-
-            except Exception as e:
-                service.is_running = False
-                service.last_error = str(e)[:500]  # Truncate long errors
-                service.last_health_check = datetime.utcnow()
-
-    db.commit()
-    logger.info("service_health_check_complete", checked=len(services))
 
 
 # Ollama Health Response Model
@@ -519,6 +522,16 @@ async def get_ollama_health(
     """
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not get_config().control_agent_enabled:
+        return OllamaHealthResponse(
+            healthy=False,
+            status="control_agent_disabled",
+            api_reachable=False,
+            models_loaded=0,
+            version=None,
+            timestamp=datetime.utcnow().isoformat(),
+            host=None,
+        )
 
     # Get centralized Ollama URL for display
     ollama_url = get_ollama_url(db)

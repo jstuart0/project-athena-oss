@@ -7,13 +7,15 @@ fallback.
 
 Open Source Compatible - No vendor lock-in.
 """
-import os
+import asyncio
 import httpx
 import time
 from typing import Dict, Any, Optional, List
 from enum import Enum
 from collections import deque
 import structlog
+from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -41,6 +43,13 @@ def _strip_think_tags(text: str) -> str:
         parts = text.split("</think>")
         cleaned = parts[-1].strip()
     return cleaned
+
+
+# Retry once on httpx.ReadTimeout in _generate_ollama / _generate_ollama_with_tools (ATHENA-31).
+# Tool-calling and synthesis are idempotent at the LLM call layer, so retrying after a transient
+# read timeout is safe. The backoff gives Mac Studio's Ollama a moment to finish a stalled
+# request that was about to complete.
+OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S = 2.0
 
 
 class BackendType(str, Enum):
@@ -88,7 +97,7 @@ class LLMRouter:
     Routes LLM requests to configured backends.
 
     Usage:
-        router = LLMRouter(admin_url="https://athena-admin.xmojo.net")
+        router = LLMRouter()  # admin_url resolved via ADMIN_API_URL env var
         response = await router.generate(
             model="phi3:mini",
             prompt="Hello world",
@@ -112,10 +121,7 @@ class LLMRouter:
             metrics_window_size: Number of recent requests to track for metrics
             persist_metrics: Whether to persist metrics to database via Admin API
         """
-        self.admin_url = admin_url or os.getenv(
-            "ADMIN_API_URL",
-            "https://athena-admin.xmojo.net"
-        )
+        self.admin_url = admin_url or get_admin_url()
         self._admin_url_base = self.admin_url
         self.client = httpx.AsyncClient(timeout=120.0)
         self._backend_cache: Dict[str, Dict[str, Any]] = {}
@@ -218,7 +224,7 @@ class LLMRouter:
                 )
                 config = {
                     "backend_type": "ollama",
-                    "endpoint_url": os.getenv("OLLAMA_URL", "http://localhost:11434"),
+                    "endpoint_url": get_config().ollama_url,
                     "max_tokens": 2048,
                     "temperature_default": 0.7,
                     "timeout_seconds": 60,
@@ -240,7 +246,7 @@ class LLMRouter:
             # Fall back to Ollama on Mac Studio
             return {
                 "backend_type": "ollama",
-                "endpoint_url": os.getenv("OLLAMA_URL", "http://localhost:11434"),
+                "endpoint_url": get_config().ollama_url,
                 "max_tokens": 2048,
                 "temperature_default": 0.7,
                 "timeout_seconds": 60,
@@ -394,7 +400,7 @@ class LLMRouter:
                         error=str(e)
                     )
                     # Fall back to Ollama on Mac Studio
-                    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+                    ollama_url = get_config().ollama_url
                     response = await self._generate_ollama(
                         ollama_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options,
                         system_prompt=system_prompt
@@ -578,7 +584,9 @@ class LLMRouter:
                 )
             elif backend == "ollama":
                 response = await self._generate_ollama_with_tools(
-                    model, messages, tools, temperature, max_tokens, request_id, keep_alive
+                    model, messages, tools, temperature, max_tokens, request_id,
+                    timeout=config.get("timeout_seconds", 60),
+                    keep_alive=keep_alive,
                 )
             elif backend == "mlx":
                 if tools:
@@ -967,6 +975,7 @@ class LLMRouter:
         temperature: Optional[float],
         max_tokens: Optional[int],
         request_id: Optional[str],
+        timeout: int = 60,
         keep_alive: int = -1
     ) -> Dict[str, Any]:
         """
@@ -974,8 +983,11 @@ class LLMRouter:
 
         Uses Ollama's native tool calling support (for models like llama3.1:8b).
         """
-        endpoint_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-        client = httpx.AsyncClient(base_url=endpoint_url, timeout=60.0)
+        endpoint_url = get_config().ollama_url
+        client = httpx.AsyncClient(
+            base_url=endpoint_url,
+            timeout=httpx.Timeout(connect=10.0, read=float(timeout), write=10.0, pool=10.0),
+        )
 
         # Build payload
         payload = {
@@ -999,7 +1011,21 @@ class LLMRouter:
 
         try:
             # Call Ollama with tools
-            response = await client.post("/api/chat", json=payload)
+            try:
+                response = await client.post("/api/chat", json=payload)
+            except httpx.ReadTimeout:
+                logger.warning(
+                    "ollama_read_timeout_retrying",
+                    model=model,
+                    timeout=timeout,
+                    backoff_s=OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S,
+                )
+                await asyncio.sleep(OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S)
+                response = await client.post("/api/chat", json=payload)
+                logger.info(
+                    "ollama_read_timeout_retry_succeeded",
+                    model=model,
+                )
 
             response.raise_for_status()
             data = response.json()
@@ -1067,7 +1093,10 @@ class LLMRouter:
             ollama_options: Additional Ollama options (num_ctx, num_batch, mirostat, etc.)
             system_prompt: Optional system prompt (e.g., "/no_think" for Qwen3)
         """
-        client = httpx.AsyncClient(base_url=endpoint_url, timeout=timeout)
+        client = httpx.AsyncClient(
+            base_url=endpoint_url,
+            timeout=httpx.Timeout(connect=10.0, read=float(timeout), write=10.0, pool=10.0),
+        )
 
         # Prepend system prompt if provided (e.g., "/no_think" for Qwen3 models)
         if system_prompt:
@@ -1103,14 +1132,45 @@ class LLMRouter:
         # -1 = keep forever, 0 = unload immediately, >0 = seconds
         payload["keep_alive"] = keep_alive
 
+        # Disable thinking mode for qwen3 models. Without `think: false`,
+        # qwen3 emits internal reasoning that consumes the num_predict budget
+        # and leaves `response` empty. Mirrors the with-tools handler at
+        # _generate_ollama_with_tools (line ~995). The /no_think system
+        # prompt is also injected upstream, but Ollama's API-level flag is
+        # what actually disables the thinking generation.
+        if "qwen3" in model.lower():
+            payload["think"] = False
+            logger.info("ollama_think_disabled", model=model)
+
         try:
-            response = await client.post("/api/generate", json=payload)
+            try:
+                response = await client.post("/api/generate", json=payload)
+            except httpx.ReadTimeout:
+                logger.warning(
+                    "ollama_read_timeout_retrying",
+                    model=model,
+                    timeout=timeout,
+                    backoff_s=OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S,
+                )
+                await asyncio.sleep(OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S)
+                response = await client.post("/api/generate", json=payload)
+                logger.info(
+                    "ollama_read_timeout_retry_succeeded",
+                    model=model,
+                )
 
             response.raise_for_status()
             data = response.json()
 
+            # Defense-in-depth: strip any <think>...</think> blocks that may
+            # have leaked through (e.g., older Ollama versions that don't
+            # honor `think: false`). The `_strip_think_tags` helper handles
+            # incomplete (no closing tag) and complete blocks.
+            raw_response = data.get("response") or ""
+            cleaned_response = _strip_think_tags(raw_response)
+
             return {
-                "response": data.get("response"),
+                "response": cleaned_response,
                 "backend": "ollama",
                 "model": model,
                 "done": data.get("done", True),

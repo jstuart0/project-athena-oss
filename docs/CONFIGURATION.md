@@ -17,6 +17,51 @@ Complete reference for all configuration options in Project Athena.
 
 ---
 
+## Centralized Configuration via AthenaConfig
+
+`AthenaConfig` (`src/shared/config.py`) is the canonical pydantic-settings `BaseSettings` object for Athena. It centralizes 11 high-leverage env vars migrated in Campaign 4 (ATHENA-7). The remaining ~220 env vars in the codebase continue to use direct `os.getenv` and are migrated per-PR — see `CONTRIBUTING.md` for the extension pattern.
+
+### Reading config in code
+
+```python
+from shared.config import get_config
+
+config = get_config()
+config.ollama_url      # OLLAMA_URL
+config.redis_url       # REDIS_URL
+config.database_url    # DATABASE_URL
+```
+
+`get_config()` is an `lru_cache`-backed factory — `AthenaConfig` is instantiated exactly once per process. Tests reset it via `_clear_cache_for_tests()`.
+
+### Centralized env vars
+
+| Env var | AthenaConfig field | Default |
+|---|---|---|
+| `OLLAMA_URL` | `ollama_url` | `http://localhost:11434` |
+| `LLM_SERVICE_URL` | `llm_service_url` | `""` |
+| `REDIS_URL` | `redis_url` | `redis://redis:6379/0` (in-cluster DNS; local-dev: set to `redis://localhost:6379`) |
+| `DATABASE_URL` | `database_url` | `""` |
+| `SERVICE_API_KEY` | `service_api_key` | `""` |
+| `DEFAULT_TIMEZONE` | `default_timezone` | `UTC` |
+| `DEFAULT_CITY` | `default_city` | `""` |
+| `OIDC_ISSUER` | `oidc_issuer` | `""` |
+| `OIDC_CLIENT_ID` | `oidc_client_id` | `""` |
+| `DEMO_MODE` | `demo_mode` | `false` |
+| `DEV_MODE` | `dev_mode` | `false` |
+
+There is also a `llm_endpoint` computed property that returns `LLM_SERVICE_URL or OLLAMA_URL` — the dominant precedence used by the orchestrator and gateway.
+
+### admin_url — not env-loadable
+
+`config.admin_url` is a `@computed_field` that delegates to `get_admin_url()` (Campaign 3, `src/shared/admin_url.py`). Setting an `ADMIN_URL` env var has no effect. See the `ADMIN_API_URL` resolution order in [Required Settings](#required-settings).
+
+### Extending AthenaConfig
+
+See `CONTRIBUTING.md` — Configuration Guidelines — for the step-by-step pattern to add a new field.
+
+---
+
 ## Configuration Methods
 
 Configuration can be set via (in priority order):
@@ -59,7 +104,7 @@ These MUST be set before starting services. Services will fail fast if missing.
 | Variable | Description | Generate With |
 |----------|-------------|---------------|
 | `ATHENA_DB_PASSWORD` | PostgreSQL password | `openssl rand -base64 24 \| tr -d '/+='` |
-| `ADMIN_API_URL` | Admin backend URL | Set to your admin server |
+| `ADMIN_API_URL` | Admin backend URL (see resolution order below) | Set to your admin server |
 | `ENCRYPTION_KEY` | API key encryption | `openssl rand -base64 32` |
 | `ENCRYPTION_SALT` | Encryption salt | `openssl rand -base64 16` |
 | `SESSION_SECRET_KEY` | Session signing | `openssl rand -base64 32` |
@@ -74,6 +119,14 @@ ENCRYPTION_SALT=xyz789...
 SESSION_SECRET_KEY=secret123...
 JWT_SECRET=jwtsecret...
 ```
+
+**`ADMIN_API_URL` resolution order** (`src/shared/admin_url.py`):
+1. `ADMIN_API_URL` — canonical; set this in all deployments
+2. `ADMIN_BACKEND_URL` — accepted alias for backward compatibility
+3. `ADMIN_INTERNAL_URL` — **DEPRECATED** alias; will be removed in a future release
+4. `LOCAL_DEV=true` — resolves to `http://localhost:8080` (local-dev escape hatch when no env var is set)
+5. K8s in-cluster (`KUBERNETES_SERVICE_HOST` set) — resolves to `http://athena-admin-backend:8080`
+6. Empty string + warning log — callers will receive connection errors
 
 ---
 
@@ -157,9 +210,10 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REDIS_HOST` | `localhost` | Redis host |
-| `REDIS_PORT` | `6379` | Redis port |
-| `REDIS_URL` | `redis://localhost:6379/0` | Full URL (overrides host/port) |
+| `REDIS_HOST` | `localhost` | Redis host (deprecated for RAG services — use `REDIS_URL` instead) |
+| `REDIS_PORT` | `6379` | Redis port (deprecated for RAG services — kubelet auto-injects this name for K8s Services) |
+| `REDIS_URL` | `redis://localhost:6379/0` | Full Redis URL used by all services. DB index encoded in path. |
+| `COMMUNITY_EVENTS_REDIS_URL` | `redis://localhost:6379/1` | Redis URL for the community_events RAG service (uses DB 1 to isolate its event cache). Must encode the DB in the URL path. |
 
 ### Qdrant (Vector Database)
 
@@ -309,6 +363,44 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 | `AUTHENTIK_CLIENT_SECRET` | Authentik OAuth client secret |
 | `AUTHENTIK_ISSUER_URL` | Authentik issuer URL |
 
+### OIDC / SSO Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OIDC_ISSUER` | `""` | IdP issuer URL. In production: must be non-empty and not the `CONFIGURE_ME` placeholder. Must match the `iss` claim in issued ID tokens exactly. Startup exits if invalid. |
+| `OIDC_CLIENT_ID` | `""` | Client ID registered with your IdP. Rejected values (all cause `SystemExit` at startup in production): `""`, `"demo-mode"`, `"CONFIGURE_ME_OIDC_CLIENT_ID"`. |
+| `OIDC_CLIENT_SECRET` | `""` | Client secret from your IdP. |
+| `OIDC_REDIRECT_URI` | `""` | Callback URL registered with your IdP. |
+| `OIDC_SCOPES` | `openid profile email` | Requested OIDC scopes. |
+| `OIDC_USERINFO_URL` | *(derived)* | Override for the OIDC userinfo endpoint. Auto-derived from discovery doc when unset. |
+
+### DEV_MODE and DEMO_MODE
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEV_MODE` | `false` | Development mode: uses SQLite in-memory, skips OIDC gates, auto-creates a `dev-admin` owner account on unauthenticated requests. **Never set `true` in production.** If `DEV_MODE=true` and `DATABASE_URL` points to a non-SQLite database, the backend exits at startup (xander:6 — the auto-owner-creation would silently run against a real DB). |
+| `DEMO_MODE` | `false` | Demo mode: pre-seeded data and demo-user bypass in `auth_login`. Rejected at startup if `DEV_MODE=false` — running `DEMO_MODE=true` in production bypasses the authentication path via the demo-user branch (xander:16). To use demo mode, also set `DEV_MODE=true`. |
+| `DATABASE_URL` | `""` | SQLAlchemy connection string. When `DEV_MODE=true`, this value is ignored by `database.py` (SQLite in-memory is used), but the startup gate checks it first and will exit if the value is a non-SQLite URL. Set to `sqlite:///:memory:` or leave empty for local dev with `DEV_MODE=true`. |
+
+### FRONTEND_URL
+
+`FRONTEND_URL` controls the redirect target after a successful OIDC callback and after a `DEMO_MODE` login. The backend appends `?logged_in=1` to this URL. Do not set `FRONTEND_URL` to a value that already contains a query string — a value like `http://example.com?foo=bar` would produce a malformed double-query-string redirect (`http://example.com?foo=bar?logged_in=1`).
+
+### Admin-backend startup security gates (ATHENA-12)
+
+The admin-backend enforces fail-closed checks in `startup_event()`. All of these raise `SystemExit` before the service accepts connections:
+
+| Condition | Error |
+|-----------|-------|
+| `DEV_MODE=true` + non-SQLite `DATABASE_URL` | `FATAL: DEV_MODE=true is set, but DATABASE_URL points to a non-SQLite database` |
+| `DEMO_MODE=true` + `DEV_MODE=false` | `FATAL: DEMO_MODE=true requires DEV_MODE=true` |
+| `OIDC_CLIENT_ID` is `""`, `"demo-mode"`, or `"CONFIGURE_ME_OIDC_CLIENT_ID"` in production | `insecure_default_secret_detected` |
+| `OIDC_ISSUER` empty or `CONFIGURE_ME`-prefixed in production | `insecure_default_secret_detected` |
+| IdP unreachable or `.well-known/openid-configuration` missing `issuer` | `FATAL: OIDC discovery metadata fetch failed` |
+| DB-loaded runtime issuer empty or placeholder after `configure_oauth_client()` | `FATAL: OIDC runtime issuer is empty or placeholder` |
+
+The `DEV_MODE=true` condition bypasses all OIDC gates; the other gates run in both dev and production (except where noted by the `in production` qualifier above, which means `DEV_MODE=false`).
+
 ---
 
 ## Advanced Settings
@@ -428,9 +520,9 @@ ATHENA_DB_HOST=postgres.athena.svc.cluster.local
 ATHENA_DB_PORT=5432
 
 # Service Discovery
-ADMIN_API_URL=http://athena-admin-backend.athena.svc.cluster.local:8080
-ORCHESTRATOR_URL=http://athena-orchestrator.athena.svc.cluster.local:8001
-GATEWAY_URL=http://athena-gateway.athena.svc.cluster.local:8000
+ADMIN_API_URL=http://athena-admin-backend:8080
+ORCHESTRATOR_URL=http://athena-orchestrator.athena-prod.svc.cluster.local:8001
+GATEWAY_URL=http://athena-gateway.athena-prod.svc.cluster.local:8000
 
 # Infrastructure
 REDIS_URL=redis://redis.athena.svc.cluster.local:6379/0

@@ -38,6 +38,7 @@ from bs4 import BeautifulSoup
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
 from shared.cache import CacheClient
+from shared.config import get_config
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
 
@@ -47,7 +48,7 @@ logger = configure_logging("transportation-rag")
 SERVICE_NAME = "transportation-rag"
 
 # Environment variables
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = get_config().redis_url
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8025"))
 
 # GTFS Feed Configuration

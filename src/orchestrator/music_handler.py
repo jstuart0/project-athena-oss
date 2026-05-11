@@ -23,6 +23,7 @@ from enum import Enum
 
 from shared.ha_client import HomeAssistantClient
 from shared.admin_config import AdminConfigClient
+from shared.admin_url import get_admin_url
 from orchestrator.follow_me_audio import get_most_recent_room
 
 logger = structlog.get_logger()
@@ -261,7 +262,7 @@ async def get_room_configs() -> Dict[str, Dict[str, Any]]:
     if _room_config_cache and (time.time() - _room_config_cache_time) < ROOM_CONFIG_CACHE_TTL:
         return _room_config_cache
 
-    admin_url = os.getenv("ADMIN_API_URL", "http://localhost:8080")
+    admin_url = get_admin_url()
 
     try:
         async with httpx.AsyncClient(timeout=5.0, verify=False) as client:

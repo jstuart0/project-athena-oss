@@ -9,6 +9,7 @@ import structlog
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, SiteScraperConfig
+from app.utils.service_auth import verify_service_api_key
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/site-scraper", tags=["site-scraper"])
@@ -54,10 +55,13 @@ def get_or_create_config(db: Session) -> SiteScraperConfig:
     return config
 
 
-# Public endpoint for services
+# Service endpoint — requires X-Service-Key (xander:36)
 @router.get("/config/public", response_model=SiteScraperConfigResponse)
-async def get_config_public(db: Session = Depends(get_db)):
-    """Get site scraper configuration (public, no auth)."""
+async def get_config_public(
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_service_api_key),
+):
+    """Get site scraper configuration (service-to-service auth required)."""
     config = get_or_create_config(db)
     return SiteScraperConfigResponse(**config.to_dict())
 

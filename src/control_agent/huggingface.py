@@ -17,6 +17,12 @@ import structlog
 
 logger = structlog.get_logger()
 
+# NOTE: SERVICE_API_KEY auth on the progress-callback endpoint is deferred.
+# The progress endpoint (/internal/{id}/progress) intentionally does not require
+# X-Service-Key while the Control Agent runs out-of-cluster. When xander:2 is
+# addressed (secret distribution to the Ollama host), add SERVICE_API_KEY here
+# and re-enable Depends(verify_service_api_key) on the progress route.
+
 # Download directory on Mac Studio
 MODELS_DIR = Path.home() / "dev" / "project-athena" / "models" / "downloads"
 

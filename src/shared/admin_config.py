@@ -4,11 +4,12 @@ Admin Configuration Client
 Allows services to fetch configuration and secrets from the admin API.
 Uses service-to-service authentication with API key.
 """
-import os
 import time
 import httpx
 from typing import Optional, Dict, Any, List
 import structlog
+from shared.admin_url import get_admin_url
+from shared.config import get_config as _get_athena_config  # local async get_config(key) below shadows this name; alias to keep both available
 
 logger = structlog.get_logger()
 
@@ -28,14 +29,19 @@ class AdminConfigClient:
             admin_url: Admin API URL (defaults to ADMIN_API_URL env var)
             api_key: Service API key (defaults to SERVICE_API_KEY env var)
         """
-        self.admin_url = admin_url or os.getenv(
-            "ADMIN_API_URL",
-            "https://athena-admin.xmojo.net"  # Production Admin API
-        )
-        self.api_key = api_key or os.getenv(
-            "SERVICE_API_KEY",
-            "dev-service-key-change-in-production"
-        )
+        self.admin_url = admin_url or get_admin_url()
+        if not self.admin_url:
+            logger.warning(
+                "admin_url_unconfigured",
+                message="ADMIN_URL is empty; service-to-admin callbacks will fail.",
+            )
+        self.api_key = api_key or _get_athena_config().service_api_key
+        if not self.api_key:
+            logger.warning(
+                "service_api_key_empty",
+                message="SERVICE_API_KEY is not set; calls to authenticated admin endpoints "
+                        "will receive 503. Set SERVICE_API_KEY in the service environment.",
+            )
         # Reduced timeout from 10s to 3s - config/room calls should be fast
         # Critical paths like music playback compound multiple API calls
         self.client = httpx.AsyncClient(
@@ -694,7 +700,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/tool-calling/tools/public?enabled_only=true"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
 
             if response.status_code == 200:
                 tools = response.json()
@@ -1119,7 +1125,13 @@ class AdminConfigClient:
                 "session_id": session_id
             }
 
-            response = await self.client.post(url, json=payload)
+            # X-Service-Key required: Phase 1 reconcile (ATHENA-14) gated this
+            # endpoint with verify_service_api_key.  The shared httpx client sends
+            # X-API-Key (legacy), not X-Service-Key, so metrics writes returned 422
+            # → tool usage analytics silently stopped recording.  codex-r2:3.
+            response = await self.client.post(
+                url, json=payload, headers={"X-Service-Key": self.api_key}
+            )
 
             if response.status_code in (200, 201):
                 logger.debug(
@@ -2003,7 +2015,7 @@ class AdminConfigClient:
         """
         try:
             url = f"{self.admin_url}/api/internal/service-usage/{service_name}"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
 
             if response.status_code == 200:
                 return response.json()
@@ -2038,7 +2050,9 @@ class AdminConfigClient:
         """
         try:
             url = f"{self.admin_url}/api/internal/service-usage/{service_name}/increment"
-            response = await self.client.post(url, params={"count": count})
+            response = await self.client.post(
+                url, params={"count": count}, headers={"X-Service-Key": self.api_key}
+            )
 
             if response.status_code == 200:
                 result = response.json()

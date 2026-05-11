@@ -10,7 +10,6 @@ COPY auth.js /usr/share/nginx/html/admin-auth.js
 COPY refresh-manager.js /usr/share/nginx/html/
 
 # Phase 1-7: UI Components
-COPY router.js /usr/share/nginx/html/
 COPY status-bar.js /usr/share/nginx/html/
 COPY icons.js /usr/share/nginx/html/
 COPY skeleton.js /usr/share/nginx/html/

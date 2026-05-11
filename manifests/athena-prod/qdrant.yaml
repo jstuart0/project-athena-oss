@@ -1,3 +1,30 @@
+# =============================================================================
+# REQUIRED: Set storageClassName below before applying.
+#   Run: kubectl get storageclass
+#   Then replace YOUR_STORAGE_CLASS with the name that fits your cluster.
+#   Common values: standard, gp2, local-path, longhorn, ceph-block
+#
+# WARNING — PVC immutability: storageClassName is immutable on an existing PVC.
+# If you have already applied this file and have a bound qdrant-storage PVC,
+# you MUST delete the PVC before re-applying (data will be lost — back up first):
+#   kubectl -n athena-prod delete pvc qdrant-storage
+#   kubectl apply -f manifests/athena-prod/qdrant.yaml
+# =============================================================================
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qdrant-storage
+  namespace: athena-prod
+  labels:
+    app: qdrant
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: YOUR_STORAGE_CLASS  # REQUIRED: set to your cluster's StorageClass (run: kubectl get storageclass)
+  resources:
+    requests:
+      storage: 20Gi
 ---
 # Qdrant Vector Database for Athena Memory System
 # Provides semantic search capabilities for memory retrieval
@@ -56,8 +83,13 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 5
       volumes:
+      # Production (default): persistent storage via PVC
       - name: qdrant-storage
-        emptyDir: {}
+        persistentVolumeClaim:
+          claimName: qdrant-storage
+      # Development / ephemeral testing alternative (uncomment and remove the PVC reference above to use):
+      # - name: qdrant-storage
+      #   emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -76,18 +108,3 @@ spec:
   - name: grpc
     port: 6334
     targetPort: 6334
----
-# Optional: PersistentVolumeClaim for production use
-# Uncomment and configure based on your storage class
-# apiVersion: v1
-# kind: PersistentVolumeClaim
-# metadata:
-#   name: qdrant-storage
-#   namespace: athena-prod
-# spec:
-#   accessModes:
-#     - ReadWriteOnce
-#   resources:
-#     requests:
-#       storage: 10Gi
-#   storageClassName: your-storage-class

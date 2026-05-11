@@ -23,6 +23,23 @@ This guide covers installing Project Athena from scratch, including all deployme
 
 ---
 
+## Deployment Prerequisites Checklist
+
+Before running `deploy.sh` or `kubectl apply`, confirm each item:
+
+- [ ] **Storage class** — a default storage class exists in your cluster (`kubectl get storageclass`)
+- [ ] **OIDC provider** — you have an OIDC provider (Authentik, Keycloak, Google, etc.) and have registered the redirect URI
+- [ ] **Secrets configured** — `create-secrets.sh` has been run and the required secrets exist in the target namespace: `athena-db-credentials`, `athena-encryption`, `athena-oidc`
+- [ ] **`SERVICE_API_KEY` set** — the shared service-to-service key is in your secrets/env; it must be the same value across all services
+- [ ] **`ALLOWED_CALLBACK_HOSTS` set** — if using the Control Agent for model downloads, this is non-empty
+- [ ] **Manifest placeholders substituted** — manifests in `manifests/athena-prod/` contain `YOUR_REGISTRY` and similar placeholders; substitute them before applying
+- [ ] **Container images built and pushed** — run `scripts/build-and-push.sh` to build all images for `linux/amd64` and push to your registry
+- [ ] **HA token reviewed** — if upgrading from a deployment that used the Jetson edge module, revoke the Home Assistant token that was in git history at commit `794096b`
+
+The `deploy.sh` script enforces items 3 through 5 automatically: it will abort with an actionable error if the namespace or required secrets are missing.
+
+---
+
 ## Prerequisites
 
 ### Hardware Requirements
@@ -78,15 +95,18 @@ JWT_SECRET=$(openssl rand -base64 32)
 ADMIN_API_URL=http://localhost:8080
 ```
 
+> **Admin URL resolution order** (`src/shared/admin_url.py`): `ADMIN_API_URL` → `ADMIN_BACKEND_URL` → `ADMIN_INTERNAL_URL` (deprecated) → `LOCAL_DEV=true` → K8s in-cluster auto-discovery → empty + warning. Set `ADMIN_API_URL` explicitly in all deployments. `ADMIN_INTERNAL_URL` is accepted as a low-priority fallback for backward compatibility but is deprecated and will be removed in a future release.
+>
+> **Upgrade note (2026-05-06)**: If you previously set `ADMIN_INTERNAL_URL` specifically to override `ADMIN_API_URL` for jarvis-web internal calls, set `ADMIN_API_URL` directly instead. The variable is still accepted as a low-priority fallback but will be removed in a future release.
+
 ### 3. Start with Docker Compose
 
 ```bash
-# Minimal deployment (core services only)
+# Start the core services (orchestrator + gateway)
 docker compose up -d
-
-# Or with specific modules
-docker compose --profile home-assistant --profile weather up -d
 ```
+
+> **Note:** The `docker-compose.yml` is a minimal 2-service file (orchestrator + gateway). For a full local setup including PostgreSQL, Redis, and the admin backend, run those services manually per step 4 below, or see `docs/CONFIGURATION.md` and `CONTRIBUTING.md` for guidance.
 
 ### 4. Access the Admin UI
 
@@ -153,6 +173,30 @@ ENCRYPTION_KEY=your-32-char-base64-key
 ENCRYPTION_SALT=your-16-char-base64-salt
 SESSION_SECRET_KEY=your-32-char-base64-key
 JWT_SECRET=your-32-char-base64-key
+
+# Service-to-service authentication (REQUIRED in production)
+# All internal services send this as the X-Service-Key header.
+# Generate: openssl rand -base64 32
+SERVICE_API_KEY=your-service-key
+
+# OIDC / SSO (REQUIRED in production for admin UI login)
+# The admin backend hard-fails at startup if OIDC_ISSUER is empty or
+# set to a placeholder value when ENVIRONMENT != development.
+OIDC_ISSUER=https://auth.example.com/application/o/athena-admin/
+OIDC_CLIENT_ID=your-oidc-client-id
+OIDC_CLIENT_SECRET=your-oidc-client-secret
+OIDC_REDIRECT_URI=https://athena.example.com/auth/callback
+
+# Control Agent callback allowlist (REQUIRED if using model downloads via Control Agent)
+# Comma-separated hostnames. Empty = fail-closed (all callbacks rejected).
+# Local dev: ALLOWED_CALLBACK_HOSTS=localhost
+# Kubernetes in-cluster: ALLOWED_CALLBACK_HOSTS=athena-admin-backend.athena-prod.svc.cluster.local
+ALLOWED_CALLBACK_HOSTS=
+
+# Location defaults (OPTIONAL — leave blank for no default)
+DEFAULT_CITY=
+DEFAULT_STATE=
+DEFAULT_TIMEZONE=UTC
 ```
 
 ### Service Location Configuration
@@ -182,6 +226,26 @@ OLLAMA_URL=http://gpu-server:11434
 QDRANT_URL=http://vector-db:6333
 REDIS_URL=redis://cache-server:6379/0
 ```
+
+### OIDC Configuration and Startup Gates
+
+The admin-backend enforces fail-closed startup behavior for OIDC. If any of the checks below fail, the process exits before accepting connections.
+
+**Requirements for a production deployment:**
+
+1. `OIDC_ISSUER` must be a non-empty URL that is not the `CONFIGURE_ME_OIDC_ISSUER` placeholder. The value must exactly match the `iss` claim that your IdP puts in issued ID tokens — mismatches will cause token validation failures after the OIDC callback.
+2. `OIDC_CLIENT_ID` must be your IdP's real client ID. The values `""`, `"demo-mode"`, and `"CONFIGURE_ME_OIDC_CLIENT_ID"` are rejected at startup.
+3. The IdP must be reachable at startup. The backend fetches `<OIDC_ISSUER>/.well-known/openid-configuration` during `startup_event()`. If the fetch fails or the document does not contain an `issuer` field, the process exits with `FATAL: OIDC discovery metadata fetch failed`. Sequence the admin-backend pod to start after the IdP is available (init container or readiness gate).
+
+**If you are upgrading from a release prior to ATHENA-12:** OIDC `iss`/`aud`/`exp` token validation was previously disabled via a `claims_options` override. That override has been removed. Tokens with an `iss` claim that does not match `OIDC_ISSUER` will now be rejected. Verify your IdP's issuer URL matches `OIDC_ISSUER` before upgrading.
+
+**For local development:** set `DEV_MODE=true`. The backend uses SQLite in-memory and skips all OIDC startup gates.
+
+**Post-OIDC-callback URL contract:** the backend redirects to `<FRONTEND_URL>?logged_in=1` after a successful OIDC callback. The admin frontend reads this signal, clears any stale `localStorage.auth_token`, and fetches the JWT from `/api/auth/session-token`. `FRONTEND_URL` must not include a query string — a `FRONTEND_URL` that already ends in `?foo=bar` would produce a malformed double-query-string redirect.
+
+**Deferred:** the WebSocket connection to admin-jarvis uses `?token=<jwt>` in the upgrade URL. This is a distinct exposure (backend contract change required) tracked separately and not addressed in this release.
+
+---
 
 ### Cross-Service Communication
 
@@ -334,6 +398,60 @@ FLIGHTAWARE_API_KEY=your-key
 
 ---
 
+## Control Agent (optional)
+
+The Control Agent is a lightweight HTTP server that runs **on the same host as Ollama** (or alongside any Docker / launchd services you want to manage). It gives Athena's admin backend the ability to start, stop, and restart Ollama, query Docker container status, and manage download of Hugging Face models to the host filesystem.
+
+**When you'd want it:**
+- Mac Studio / bare-metal deployments where Ollama runs as a local process (brew service or launchd)
+- Any deployment that uses the admin UI's Model Downloads or Mission Control panels
+- Hosts where you want Athena to auto-restart the gateway process via the orchestrator keepalive
+
+**When you don't need it:**
+- Pure Kubernetes deployments where Ollama runs inside the cluster (`ollama` deployment in the same namespace)
+- Read-only or chat-only deployments with no model management via the admin UI
+
+### Enabling the Control Agent
+
+Set two environment variables in your `.env` or private kubeconfig overlay:
+
+```bash
+CONTROL_AGENT_ENABLED=true
+CONTROL_AGENT_URL=http://your-control-agent-host:8099
+```
+
+The public `manifests/athena-prod/config.yaml` deliberately does **not** enable the Control Agent — it is host-specific infrastructure. Add these vars to your private overlay rather than editing the public manifest.
+
+### Starting the Control Agent
+
+On the host that runs Ollama:
+
+```bash
+cd path/to/project-athena/src/control_agent
+nohup python3 -m uvicorn main:app --host 0.0.0.0 --port 8099 > /tmp/control_agent.log 2>&1 &
+```
+
+Verify it is reachable:
+
+```bash
+curl http://your-host:8099/health
+curl http://your-host:8099/ollama/health
+```
+
+### Disabled-path behavior
+
+When `CONTROL_AGENT_ENABLED=false` (the default), all admin-backend routes and orchestrator startup that would normally contact the Control Agent short-circuit cleanly:
+
+- **Debug Logs panel** — shows "Control Agent is disabled" instead of trying to connect
+- **Model Downloads** — `create` / `retry` return HTTP 503 (no ghost DB rows); `delete` returns 503 when an on-host file would need cleanup; record-only deletes succeed
+- **Service Control containers** — returns an empty list (no 500 errors)
+- **Ollama health** — returns `status: control_agent_disabled`, `host: null`
+- **Orchestrator gateway keepalive** — logs `gateway_keepalive_skipped` and continues startup normally
+
+Valid values for `CONTROL_AGENT_ENABLED`: `true` / `false` / `1` / `0`. Do not set to a blank string.
+
+---
+
 ## Deployment Options
 
 ### Local Development
@@ -347,11 +465,14 @@ source venv/bin/activate  # or `venv\Scripts\activate` on Windows
 pip install -r requirements.txt
 
 # 2. Start infrastructure (PostgreSQL, Redis)
-docker compose up -d postgres redis
+# Run PostgreSQL and Redis locally or via separate containers.
+# The project docker-compose.yml contains only the orchestrator and gateway services;
+# start PostgreSQL and Redis independently (e.g., via Homebrew, system packages, or
+# docker run) and set ATHENA_DB_HOST / REDIS_HOST in your .env accordingly.
 
 # 3. Run database migrations
 cd admin/backend
-alembic upgrade head
+alembic upgrade 053  # use 053, not head — repo has two alembic heads
 cd ../..
 
 # 4. Start services (in separate terminals)
@@ -375,22 +496,6 @@ cd src/rag/weather && uvicorn main:app --host 0.0.0.0 --port 8010
 ```bash
 # Start all core services
 docker compose up -d
-```
-
-#### With Module Profiles
-
-```bash
-# Core + Home Assistant module
-docker compose --profile home-assistant up -d
-
-# Core + All RAG services
-docker compose --profile rag-all up -d
-
-# Full deployment
-docker compose --profile full up -d
-
-# Custom selection
-docker compose --profile home-assistant --profile weather --profile news up -d
 ```
 
 #### Building Images
@@ -417,22 +522,63 @@ docker compose build --no-cache
 
 #### Namespace Setup
 
-```bash
-# Create namespace
-kubectl create namespace athena
+Use the provided `create-secrets.sh` script, which is idempotent: running it multiple times against a cluster that already has the secrets will skip any secret that already has all required keys rather than rotating them.
 
-# Create secrets
-kubectl -n athena create secret generic athena-db-credentials \
+```bash
+# Populate config.env or .env.secrets with your values, then:
+./scripts/create-secrets.sh
+```
+
+To create secrets manually:
+
+```bash
+kubectl create namespace athena-prod
+
+kubectl -n athena-prod create secret generic athena-db-credentials \
   --from-literal=password=your-db-password
 
-kubectl -n athena create secret generic athena-encryption \
+kubectl -n athena-prod create secret generic athena-encryption \
   --from-literal=encryption-key=your-encryption-key \
   --from-literal=encryption-salt=your-salt \
   --from-literal=session-secret=your-session-secret \
   --from-literal=jwt-secret=your-jwt-secret
+
+kubectl -n athena-prod create secret generic athena-oidc \
+  --from-literal=oidc-client-id=your-client-id \
+  --from-literal=oidc-client-secret=your-client-secret \
+  --from-literal=oidc-issuer=https://auth.example.com/application/o/athena-admin/
 ```
 
+#### Qdrant Persistent Storage
+
+Qdrant uses a PersistentVolumeClaim by default. Before applying `manifests/athena-prod/`, edit `qdrant.yaml` and replace `YOUR_STORAGE_CLASS` with your cluster's StorageClass:
+
+```bash
+kubectl get storageclass
+# Common values: standard, gp2, local-path, longhorn, ceph-block
+```
+
+**Migrating from emptyDir** (existing deployments): conversation memory and embeddings stored on emptyDir are lost when Qdrant pods restart. Migrating to PVC starts fresh — this is a one-time data loss for previously-running deployments. To preserve current memory: snapshot Qdrant collections via the API before applying, then restore after the new PVC mounts.
+
 #### Deploy Core Services
+
+`deploy.sh` runs a pre-flight check before applying manifests. It verifies that the `athena-prod` namespace exists and that the required secrets (`athena-db-credentials`, `athena-encryption`, `athena-oidc`) are present. If any are missing it aborts with an error pointing you to `create-secrets.sh`.
+
+#### First-time deployment (initial setup)
+
+On your first cluster deployment, pass `--first-run` to apply the one-shot Ollama model-pull Job and wait for it to complete before continuing. Without this, Ollama starts with no models loaded and LLM calls will fail with "model not found".
+
+```bash
+# First-time deployment — includes the one-shot model-pull Job
+./scripts/deploy.sh deploy --first-run
+
+# Subsequent deploys (after initial setup)
+./scripts/deploy.sh deploy
+```
+
+> **Model note:** The first-run Job pulls `qwen3:4b` (smaller variant) for fast initial deployment; the runtime default in `manifests/athena-prod/config.yaml` is `qwen3:4b-instruct-2507-q4_K_M` (longer-context Q4 quant). Reconciling the two is tracked as a deferred follow-up — for now, the Admin Backend's `ATHENA_AUTO_PULL_MODELS` will pull the configured default on startup if it is not already available.
+
+Or apply manifests directly (no pre-flight):
 
 ```bash
 # Apply core manifests
@@ -455,7 +601,7 @@ kubectl apply -f manifests/athena-prod/
 kubectl apply -f manifests/athena-prod/jarvis-web.yaml
 ```
 
-> **Note:** Additional modules (Home Assistant, Guest Mode, Notifications) are configured via Docker Compose profiles or environment variables. See [Module Configuration Guide](./MODULES.md) for details.
+> **Note:** Additional modules (Home Assistant, Guest Mode, Notifications) are configured via environment variables. See [Module Configuration Guide](./MODULES.md) for details.
 
 #### Deploy RAG Services
 
@@ -473,7 +619,7 @@ apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
   name: athena-ingress
-  namespace: athena
+  namespace: athena-prod
 spec:
   entryPoints:
     - websecure
@@ -587,22 +733,22 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: athena-config
-  namespace: athena
+  namespace: athena-prod
 data:
   # Admin Backend location
-  ADMIN_API_URL: "http://athena-admin-backend.athena.svc.cluster.local:8080"
+  ADMIN_API_URL: "http://athena-admin-backend.athena-prod.svc.cluster.local:8080"
 
   # Gateway/Orchestrator on compute nodes
-  GATEWAY_URL: "http://athena-gateway.athena.svc.cluster.local:8000"
-  ORCHESTRATOR_URL: "http://athena-orchestrator.athena.svc.cluster.local:8001"
+  GATEWAY_URL: "http://athena-gateway.athena-prod.svc.cluster.local:8000"
+  ORCHESTRATOR_URL: "http://athena-orchestrator.athena-prod.svc.cluster.local:8001"
 
   # Ollama on GPU-enabled nodes
   OLLAMA_URL: "http://ollama.gpu-workloads.svc.cluster.local:11434"
 
   # Infrastructure services
-  ATHENA_DB_HOST: "postgres.athena.svc.cluster.local"
-  REDIS_HOST: "redis.athena.svc.cluster.local"
-  QDRANT_HOST: "qdrant.athena.svc.cluster.local"
+  ATHENA_DB_HOST: "postgres.athena-prod.svc.cluster.local"
+  REDIS_HOST: "redis.athena-prod.svc.cluster.local"
+  QDRANT_HOST: "qdrant.athena-prod.svc.cluster.local"
 ```
 
 ### Service Discovery Patterns
@@ -630,7 +776,7 @@ services:
 
 env:
   - name: ORCHESTRATOR_URL
-    value: "http://athena-orchestrator.athena.svc.cluster.local:8001"
+    value: "http://athena-orchestrator.athena-prod.svc.cluster.local:8001"
 ```
 
 ---
@@ -706,7 +852,7 @@ psql -h $ATHENA_DB_HOST -U athena -d athena -c "SELECT 1"
 docker compose logs -f orchestrator
 
 # Kubernetes
-kubectl -n athena logs -f deployment/athena-orchestrator
+kubectl -n athena-prod logs -f deployment/athena-orchestrator
 ```
 
 ### Module Not Working
@@ -764,15 +910,34 @@ ATHENA_SEED_DEFAULTS=true
 **Run migrations:**
 ```bash
 cd admin/backend
-alembic upgrade head
+alembic upgrade 053
 ```
+
+> **Note — two alembic heads:** this repo has a pre-existing divergence between the `004a` legacy branch and the primary chain. Running `alembic upgrade head` will fail with "Multiple head revisions are present" because there is no single head. Always target the primary chain explicitly with `alembic upgrade 053`. Merging/retiring the `004a` legacy branch is tracked as a separate follow-up campaign.
+
+#### Migration 053 — clear legacy maintainer IPs from gateway_config (post-ATHENA-11)
+
+If you deployed Athena before commit `4f6b159` and your `gateway_config` table
+still contains rows with `http://192.168.10.167:*` (the maintainer's homelab IPs
+left over from old column defaults), run:
+
+```bash
+cd admin/backend
+alembic upgrade 053
+```
+
+The migration sets `orchestrator_url` and `ollama_fallback_url` to empty strings
+for any row whose value matches the legacy IPs (exact match or trailing-slash
+variant). Deployer-set values are unaffected. Use `alembic upgrade 053` (not
+`head`) — the repo has a pre-existing two-head divergence (`004a` legacy +
+primary chain) and `head` is ambiguous.
 
 **Reset database (development only):**
 ```bash
 # Drop and recreate
 dropdb athena
 createdb athena
-alembic upgrade head
+alembic upgrade 053  # use 053, not head — repo has two alembic heads
 ```
 
 ### Network Issues (Distributed Deployment)
@@ -799,12 +964,41 @@ curl http://compute-server:8001/health
 
 ---
 
+## Production Hardening Checklist {#production-hardening-checklist}
+
+The default manifests in `manifests/athena-prod/` are tuned for fast iteration, not production stability. Before running traffic at scale, address these items.
+
+### imagePullPolicy
+
+All manifests currently set `imagePullPolicy: Always`. This forces a registry round-trip on every pod restart.
+
+**Risk in production:** if your container registry is unreachable during a node drain or rolling restart, Kubernetes cannot pull the image and the pod will not start — even if the image is already cached on the node.
+
+**Operator action:**
+1. Pin all image tags to a specific digest or version (replace `:latest` with e.g. `:2026-05-06` or `@sha256:...`).
+2. Flip `imagePullPolicy: Always` to `imagePullPolicy: IfNotPresent` in every manifest under `manifests/athena-prod/`.
+3. Do steps 1 and 2 together — `IfNotPresent` with `:latest` will never re-pull even when you push a new image.
+
+### Image tags
+
+The Ollama Deployment (`ollama.yaml`) uses `ollama/ollama:latest` and the model-pull Job (`ollama-model-pull-job.yaml`) uses `curlimages/curl:latest`. Pin both to specific tags before running in production.
+
+### Model-pull Job backoffLimit
+
+`ollama-model-pull-job.yaml` does not set `backoffLimit`, so Kubernetes defaults to 6 retries. Consider setting `spec.backoffLimit: 2` or `3` for a cleaner failure signal if the initial pull fails.
+
+### Model divergence (Job vs. ConfigMap default)
+
+The first-run Job pulls `qwen3:4b` and `phi3:mini` (smaller, faster startup). The runtime ConfigMap default is `qwen3:4b-instruct-2507-q4_K_M` (longer-context Q4 quant). The two are intentionally different for fast first-run, but should be reconciled in a follow-up once the deployment is stable.
+
+---
+
 ## Next Steps
 
 - [Module Configuration Guide](./MODULES.md) - Detailed module setup
 - [Configuration Reference](./CONFIGURATION.md) - All environment variables
-- [API Documentation](./API.md) - REST API reference
-- [Development Guide](./DEVELOPMENT.md) - Contributing to Athena
+- REST API reference — visit `http://localhost:8080/docs` (FastAPI Swagger UI) after starting the admin backend
+- [Contributing to Athena](../CONTRIBUTING.md) - Development setup and contribution guidelines
 
 ---
 

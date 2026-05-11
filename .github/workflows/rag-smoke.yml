@@ -1,0 +1,35 @@
+name: RAG Image Smoke Test
+
+on:
+  pull_request:
+    paths:
+      - "src/rag/**"
+      - "src/shared/**"
+      - "scripts/smoke-rag-images.sh"
+      - "scripts/service-defs.sh"         # service list — smoke enumerates from here
+      - "scripts/generate-rag-dockerfiles.py"  # generator changes affect Dockerfiles
+      - "scripts/build-and-push.sh"       # build-behavior changes
+      - ".github/workflows/rag-smoke.yml"
+
+# Non-fork PRs get cache-write perms for faster layer caching.
+# Fork PRs run with read-only token; the smoke script detects this automatically
+# (ACTIONS_CACHE_URL is unset) and falls back to plain buildx with no cache flags.
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  smoke:
+    name: RAG import smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run RAG smoke tests
+        run: bash scripts/smoke-rag-images.sh

@@ -26,13 +26,11 @@ from fastapi.responses import JSONResponse
 
 from shared.cache import cached
 from shared.service_registry import register_service, unregister_service
-from shared.logging_config import setup_logging
+from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
 
-# Configure logging
-setup_logging(service_name="websearch-rag")
-logger = structlog.get_logger()
+logger = configure_logging("websearch-rag")
 
 SERVICE_NAME = "websearch"
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8018"))

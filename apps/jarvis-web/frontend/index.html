@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="theme-color" content="#0f172a">
@@ -1876,11 +1876,12 @@
                         </svg>
                     </button>
                 </div>
-                <div class="voice-status" id="voice-status">Hold the microphone to speak</div>
+                <div class="voice-status" id="voice-status" aria-live="polite" aria-atomic="true">Hold the microphone to speak</div>
                 <div class="voice-panel-content">
                     <!-- Speaker Toggle -->
                     <div class="voice-side-control">
-                        <button class="speaker-button active" id="speaker-button" title="Toggle voice responses">
+                        <!-- aria-pressed toggled by JS when speaker is muted/unmuted -->
+                        <button class="speaker-button active" id="speaker-button" title="Toggle voice responses" aria-pressed="false">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                 <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
                                 <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
@@ -1890,7 +1891,8 @@
                         <span class="voice-side-control-label">Speaker</span>
                     </div>
                     <!-- Main Microphone Button -->
-                    <button class="voice-button" id="voice-button" title="Hold to speak">
+                    <!-- aria-label updated by JS to "Recording — release to stop" during active recording -->
+                    <button class="voice-button" id="voice-button" title="Hold to speak" aria-label="Hold to record voice message">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
                             <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>

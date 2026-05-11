@@ -28,7 +28,6 @@ Usage:
     status = client.get_health_status()
 """
 import asyncio
-import os
 from typing import Any, Dict, Optional
 from dataclasses import dataclass
 import httpx
@@ -44,20 +43,12 @@ from orchestrator.rate_limiter import (
 )
 from orchestrator.http_pool import get_http_pool
 from orchestrator.utils.constants import RAG_SERVICE_URL_MAP
+from shared.admin_url import get_admin_url
 
 logger = structlog.get_logger()
 
-# Admin backend URL for service registry
-def _get_admin_url() -> str:
-    """Determine the correct Admin API URL based on environment."""
-    explicit_url = os.getenv("ADMIN_BACKEND_URL") or os.getenv("ADMIN_API_URL")
-    if explicit_url:
-        return explicit_url
-    if os.getenv("KUBERNETES_SERVICE_HOST"):
-        return "http://athena-admin-backend.athena-admin.svc.cluster.local:8080"
-    return "http://localhost:8080"
-
-ADMIN_BACKEND_URL = _get_admin_url()
+# Admin backend URL (resolved by shared.admin_url.get_admin_url)
+ADMIN_BACKEND_URL = get_admin_url()
 
 
 async def fetch_service_urls_from_registry() -> Dict[str, str]:

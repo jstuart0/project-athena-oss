@@ -26,6 +26,7 @@ from contextlib import asynccontextmanager
 sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
 from shared.cache import CacheClient, cached
+from shared.config import get_config
 from shared.service_registry import startup_service, unregister_service
 from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
@@ -37,7 +38,7 @@ logger = configure_logging("amtrak-rag")
 SERVICE_NAME = "amtrak-rag"
 
 # Environment variables
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = get_config().redis_url
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8027"))
 
 # GTFS data directory
@@ -45,8 +46,10 @@ DATA_DIR = Path(__file__).parent / "data"
 GTFS_DIR = DATA_DIR / "gtfs"
 GTFS_URL = "https://content.amtrak.com/content/gtfs/GTFS.zip"
 
-# Timezone
-EASTERN = ZoneInfo("America/New_York")
+# Timezone — configurable via DEFAULT_TIMEZONE env var (default: UTC).
+# Set DEFAULT_TIMEZONE=America/New_York (or your local zone) in .env.
+DEFAULT_TIMEZONE = get_config().default_timezone
+EASTERN = ZoneInfo(DEFAULT_TIMEZONE)
 
 # Default origin (Baltimore Penn Station)
 DEFAULT_ORIGIN = "BAL"
@@ -153,7 +156,7 @@ def load_gtfs():
         for row in reader:
             _gtfs_cache['stops'][row['stop_id']] = {
                 'name': row['stop_name'],
-                'timezone': row.get('stop_timezone', 'America/New_York'),
+                'timezone': row.get('stop_timezone', DEFAULT_TIMEZONE),
                 'lat': float(row['stop_lat']) if row.get('stop_lat') else None,
                 'lon': float(row['stop_lon']) if row.get('stop_lon') else None
             }

@@ -524,13 +524,13 @@ function showCreateEscalationPresetModal() {
             <h3 class="text-lg font-semibold text-white mb-4">Create New Preset</h3>
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Name</label>
+                    <label for="new-preset-name" class="block text-sm text-gray-400 mb-1">Name</label>
                     <input type="text" id="new-preset-name"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                            placeholder="My Custom Preset">
                 </div>
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Description</label>
+                    <label for="new-preset-description" class="block text-sm text-gray-400 mb-1">Description</label>
                     <textarea id="new-preset-description"
                               class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                               rows="2" placeholder="Describe when to use this preset..."></textarea>
@@ -585,7 +585,7 @@ function showCloneEscalationPresetModal(presetId, presetName) {
         <div class="bg-dark-card border border-dark-border rounded-lg p-6 w-full max-w-md">
             <h3 class="text-lg font-semibold text-white mb-4">Clone "${presetName}"</h3>
             <div>
-                <label class="block text-sm text-gray-400 mb-1">New Name</label>
+                <label for="clone-preset-name" class="block text-sm text-gray-400 mb-1">New Name</label>
                 <input type="text" id="clone-preset-name"
                        class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                        value="${presetName} (Copy)">
@@ -638,12 +638,12 @@ function showAddRuleModal(presetId) {
             <h3 class="text-lg font-semibold text-white mb-4">Add Rule</h3>
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Rule Name</label>
+                    <label for="rule-name" class="block text-sm text-gray-400 mb-1">Rule Name</label>
                     <input type="text" id="rule-name"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Trigger Type</label>
+                    <label for="rule-trigger-type" class="block text-sm text-gray-400 mb-1">Trigger Type</label>
                     <select id="rule-trigger-type" onchange="updateTriggerPatternsUI()"
                             class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                         <option value="clarification">Clarification (response patterns)</option>
@@ -664,7 +664,7 @@ function showAddRuleModal(presetId) {
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Escalate To</label>
+                        <label for="rule-target" class="block text-sm text-gray-400 mb-1">Escalate To</label>
                         <select id="rule-target"
                                 class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                             <option value="complex">Complex</option>
@@ -672,18 +672,18 @@ function showAddRuleModal(presetId) {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Duration (turns)</label>
+                        <label for="rule-duration" class="block text-sm text-gray-400 mb-1">Duration (turns)</label>
                         <input type="number" id="rule-duration" value="5" min="1" max="999"
                                class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                     </div>
                 </div>
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Priority (higher = checked first)</label>
+                    <label for="rule-priority" class="block text-sm text-gray-400 mb-1">Priority (higher = checked first)</label>
                     <input type="number" id="rule-priority" value="100" min="1" max="1000"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Description</label>
+                    <label for="rule-description" class="block text-sm text-gray-400 mb-1">Description</label>
                     <input type="text" id="rule-description"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
@@ -716,7 +716,7 @@ function updateTriggerPatternsUI() {
         case 'explicit_request':
             container.innerHTML = `
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Patterns (one per line)</label>
+                    <label for="rule-patterns" class="block text-sm text-gray-400 mb-1">Patterns (one per line)</label>
                     <textarea id="rule-patterns" rows="4"
                               class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white font-mono text-sm"
                               placeholder="could you clarify\nwhat do you mean\ncan you specify"></textarea>
@@ -745,7 +745,7 @@ function updateTriggerPatternsUI() {
                         Trigger on error
                     </label>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Consecutive failures</label>
+                        <label for="consecutive-failures" class="block text-sm text-gray-400 mb-1">Consecutive failures</label>
                         <input type="number" id="consecutive-failures" value="1" min="1"
                                class="w-20 bg-dark-bg border border-dark-border rounded px-2 py-1 text-white">
                     </div>
@@ -755,7 +755,7 @@ function updateTriggerPatternsUI() {
         case 'short_response':
             container.innerHTML = `
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Max response length (chars)</label>
+                    <label for="max-length" class="block text-sm text-gray-400 mb-1">Max response length (chars)</label>
                     <input type="number" id="max-length" value="50" min="1"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
@@ -764,7 +764,7 @@ function updateTriggerPatternsUI() {
         case 'short_query':
             container.innerHTML = `
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Max query words</label>
+                    <label for="max-words" class="block text-sm text-gray-400 mb-1">Max query words</label>
                     <input type="number" id="max-words" value="3" min="1"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
@@ -773,7 +773,7 @@ function updateTriggerPatternsUI() {
         case 'long_query':
             container.innerHTML = `
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Min query words</label>
+                    <label for="min-words" class="block text-sm text-gray-400 mb-1">Min query words</label>
                     <input type="number" id="min-words" value="40" min="5"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                     <p class="text-xs text-gray-500 mt-1">Queries with this many words or more will trigger escalation. 40+ words suggests complex multi-part questions.</p>
@@ -783,7 +783,7 @@ function updateTriggerPatternsUI() {
         case 'repeated_query':
             container.innerHTML = `
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Similarity threshold (0.0-1.0)</label>
+                    <label for="similarity-threshold" class="block text-sm text-gray-400 mb-1">Similarity threshold (0.0-1.0)</label>
                     <input type="number" id="similarity-threshold" value="0.8" min="0" max="1" step="0.1"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                     <p class="text-xs text-gray-500 mt-1">Higher = more similar queries required to trigger. 0.8 is recommended.</p>
@@ -911,12 +911,12 @@ function showEditRuleModal(ruleId) {
             <h3 class="text-lg font-semibold text-white mb-4">Edit Rule: ${rule.rule_name}</h3>
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Rule Name</label>
+                    <label for="edit-rule-name" class="block text-sm text-gray-400 mb-1">Rule Name</label>
                     <input type="text" id="edit-rule-name" value="${rule.rule_name}"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Trigger Type</label>
+                    <label for="edit-rule-trigger-type" class="block text-sm text-gray-400 mb-1">Trigger Type</label>
                     <select id="edit-rule-trigger-type" onchange="updateEditTriggerPatternsUI()"
                             class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                         <option value="clarification" ${rule.trigger_type === 'clarification' ? 'selected' : ''}>Clarification (response patterns)</option>
@@ -937,7 +937,7 @@ function showEditRuleModal(ruleId) {
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Escalate To</label>
+                        <label for="edit-rule-target" class="block text-sm text-gray-400 mb-1">Escalate To</label>
                         <select id="edit-rule-target"
                                 class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                             <option value="complex" ${rule.escalation_target === 'complex' ? 'selected' : ''}>Complex</option>
@@ -945,18 +945,18 @@ function showEditRuleModal(ruleId) {
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Duration (turns)</label>
+                        <label for="edit-rule-duration" class="block text-sm text-gray-400 mb-1">Duration (turns)</label>
                         <input type="number" id="edit-rule-duration" value="${rule.escalation_duration || 5}" min="1" max="999"
                                class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                     </div>
                 </div>
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Priority (higher = checked first)</label>
+                    <label for="edit-rule-priority" class="block text-sm text-gray-400 mb-1">Priority (higher = checked first)</label>
                     <input type="number" id="edit-rule-priority" value="${rule.priority || 100}" min="1" max="1000"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Description</label>
+                    <label for="edit-rule-description" class="block text-sm text-gray-400 mb-1">Description</label>
                     <input type="text" id="edit-rule-description" value="${rule.description || ''}"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
@@ -996,7 +996,7 @@ function updateEditTriggerPatternsUI() {
             const patterns = existingPatterns.patterns || [];
             container.innerHTML = `
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Patterns (one per line)</label>
+                    <label for="edit-rule-patterns" class="block text-sm text-gray-400 mb-1">Patterns (one per line)</label>
                     <textarea id="edit-rule-patterns" rows="4"
                               class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white font-mono text-sm"
                               placeholder="could you clarify\nwhat do you mean\ncan you specify">${patterns.join('\n')}</textarea>
@@ -1025,7 +1025,7 @@ function updateEditTriggerPatternsUI() {
                         Trigger on error
                     </label>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">Consecutive failures</label>
+                        <label for="edit-consecutive-failures" class="block text-sm text-gray-400 mb-1">Consecutive failures</label>
                         <input type="number" id="edit-consecutive-failures" value="${existingPatterns.consecutive_failures || 1}" min="1"
                                class="w-20 bg-dark-bg border border-dark-border rounded px-2 py-1 text-white">
                     </div>
@@ -1035,7 +1035,7 @@ function updateEditTriggerPatternsUI() {
         case 'short_response':
             container.innerHTML = `
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Max response length (chars)</label>
+                    <label for="edit-max-length" class="block text-sm text-gray-400 mb-1">Max response length (chars)</label>
                     <input type="number" id="edit-max-length" value="${existingPatterns.max_length || 50}" min="1"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
@@ -1044,7 +1044,7 @@ function updateEditTriggerPatternsUI() {
         case 'short_query':
             container.innerHTML = `
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Max query words</label>
+                    <label for="edit-max-words" class="block text-sm text-gray-400 mb-1">Max query words</label>
                     <input type="number" id="edit-max-words" value="${existingPatterns.max_words || 3}" min="1"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
@@ -1053,7 +1053,7 @@ function updateEditTriggerPatternsUI() {
         case 'long_query':
             container.innerHTML = `
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Min query words</label>
+                    <label for="edit-min-words" class="block text-sm text-gray-400 mb-1">Min query words</label>
                     <input type="number" id="edit-min-words" value="${existingPatterns.min_words || 40}" min="5"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                     <p class="text-xs text-gray-500 mt-1">Queries with this many words or more will trigger escalation.</p>
@@ -1063,7 +1063,7 @@ function updateEditTriggerPatternsUI() {
         case 'repeated_query':
             container.innerHTML = `
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Similarity threshold (0.0-1.0)</label>
+                    <label for="edit-similarity-threshold" class="block text-sm text-gray-400 mb-1">Similarity threshold (0.0-1.0)</label>
                     <input type="number" id="edit-similarity-threshold" value="${existingPatterns.similarity_threshold || 0.8}" min="0" max="1" step="0.1"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                     <p class="text-xs text-gray-500 mt-1">Higher = more similar queries required to trigger</p>
@@ -1280,12 +1280,12 @@ function showEditEscalationPresetModal(presetId) {
             <h3 class="text-lg font-semibold text-white mb-4">Edit Preset: ${preset.name}</h3>
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Name</label>
+                    <label for="edit-preset-name" class="block text-sm text-gray-400 mb-1">Name</label>
                     <input type="text" id="edit-preset-name" value="${preset.name}"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Description</label>
+                    <label for="edit-preset-description" class="block text-sm text-gray-400 mb-1">Description</label>
                     <textarea id="edit-preset-description"
                               class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
                               rows="2">${preset.description || ''}</textarea>
@@ -1297,7 +1297,7 @@ function showEditEscalationPresetModal(presetId) {
 
                     <div class="space-y-3">
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">User Mode</label>
+                            <label for="edit-preset-user-mode" class="block text-sm text-gray-400 mb-1">User Mode</label>
                             <select id="edit-preset-user-mode"
                                     class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                                 <option value="" ${!autoConditions.user_mode ? 'selected' : ''}>None (don't auto-activate by mode)</option>
@@ -1309,13 +1309,13 @@ function showEditEscalationPresetModal(presetId) {
 
                         <div class="grid grid-cols-2 gap-3">
                             <div>
-                                <label class="block text-sm text-gray-400 mb-1">Time Start (HH:MM)</label>
+                                <label for="edit-preset-time-start" class="block text-sm text-gray-400 mb-1">Time Start (HH:MM)</label>
                                 <input type="time" id="edit-preset-time-start"
                                        value="${autoConditions.time_range?.start || ''}"
                                        class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                             </div>
                             <div>
-                                <label class="block text-sm text-gray-400 mb-1">Time End (HH:MM)</label>
+                                <label for="edit-preset-time-end" class="block text-sm text-gray-400 mb-1">Time End (HH:MM)</label>
                                 <input type="time" id="edit-preset-time-end"
                                        value="${autoConditions.time_range?.end || ''}"
                                        class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
@@ -1462,14 +1462,14 @@ function showCreateOverrideModal() {
             <h3 class="text-lg font-semibold text-white mb-4">Create Manual Override</h3>
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Session ID</label>
+                    <label for="override-session-id" class="block text-sm text-gray-400 mb-1">Session ID</label>
                     <input type="text" id="override-session-id"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white font-mono"
                            placeholder="e.g., jarvis-web-abc123 or * for all sessions">
                     <p class="text-xs text-gray-500 mt-1">Use * to apply override globally to all new sessions</p>
                 </div>
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Force Model</label>
+                    <label for="override-target" class="block text-sm text-gray-400 mb-1">Force Model</label>
                     <select id="override-target"
                             class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                         <option value="simple">Simple (fastest, basic)</option>
@@ -1478,7 +1478,7 @@ function showCreateOverrideModal() {
                     </select>
                 </div>
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">Duration Type</label>
+                    <label for="override-duration-type" class="block text-sm text-gray-400 mb-1">Duration Type</label>
                     <select id="override-duration-type" onchange="updateOverrideDurationUI()"
                             class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                         <option value="turns">Number of turns</option>
@@ -1487,7 +1487,7 @@ function showCreateOverrideModal() {
                     </select>
                 </div>
                 <div id="override-duration-container">
-                    <label class="block text-sm text-gray-400 mb-1">Turns</label>
+                    <label for="override-duration-value" class="block text-sm text-gray-400 mb-1">Turns</label>
                     <input type="number" id="override-duration-value" value="10" min="1" max="999"
                            class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
                 </div>
@@ -1513,13 +1513,13 @@ function updateOverrideDurationUI() {
 
     if (type === 'turns') {
         container.innerHTML = `
-            <label class="block text-sm text-gray-400 mb-1">Number of Turns</label>
+            <label for="override-duration-value" class="block text-sm text-gray-400 mb-1">Number of Turns</label>
             <input type="number" id="override-duration-value" value="10" min="1" max="999"
                    class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
         `;
     } else if (type === 'time') {
         container.innerHTML = `
-            <label class="block text-sm text-gray-400 mb-1">Duration (minutes)</label>
+            <label for="override-duration-value" class="block text-sm text-gray-400 mb-1">Duration (minutes)</label>
             <input type="number" id="override-duration-value" value="30" min="1" max="1440"
                    class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white">
         `;

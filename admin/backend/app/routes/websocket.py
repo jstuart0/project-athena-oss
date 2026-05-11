@@ -15,6 +15,7 @@ from typing import Set, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 import jwt
 import structlog
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -117,7 +118,7 @@ async def admin_jarvis_websocket(
     # Handle missing token
     if not token:
         # In dev mode, allow connection without token
-        if os.getenv("DEV_MODE", "false").lower() == "true":
+        if get_config().dev_mode:
             user_id = "dev-user"
             logger.info("websocket_dev_mode", message="Allowing unauthenticated connection in dev mode")
         else:

@@ -4,6 +4,7 @@ Settings management API routes.
 Provides endpoints for managing application settings including OIDC configuration
 and Athena assistant profile / guardrails. Settings are stored in the database.
 """
+import os
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, Secret, SystemSetting
 from app.utils.encryption import encrypt_value, decrypt_value
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -828,7 +830,7 @@ async def get_ollama_url(
         ).first()
 
         # Fallback to environment variable if not in DB
-        ollama_url = setting.value if setting else os.getenv("OLLAMA_URL", "http://localhost:11434")
+        ollama_url = setting.value if setting else get_config().ollama_url
 
         # Check if Ollama is reachable
         is_reachable = False
@@ -855,7 +857,7 @@ async def get_ollama_url(
     except Exception as e:
         logger.error("failed_to_get_ollama_url", error=str(e))
         return OllamaUrlResponse(
-            ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+            ollama_url=get_config().ollama_url,
             is_reachable=False,
             error=str(e)
         )
@@ -962,12 +964,12 @@ async def get_ollama_url_internal(
             SystemSetting.key == "ollama_url"
         ).first()
 
-        url = setting.value if setting else os.getenv("OLLAMA_URL", "http://localhost:11434")
+        url = setting.value if setting else get_config().ollama_url
         return {"ollama_url": url}
 
     except Exception as e:
         logger.error("failed_to_get_ollama_url_internal", error=str(e))
-        return {"ollama_url": os.getenv("OLLAMA_URL", "http://localhost:11434")}
+        return {"ollama_url": get_config().ollama_url}
 
 
 # ============================================================================

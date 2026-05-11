@@ -75,12 +75,17 @@ build_image() {
     log_info "Building Docker image for linux/amd64..."
     log_info "Image: ${FULL_IMAGE}"
 
-    # Build for x86_64 (thor cluster architecture)
+    # Build context must be repo root: the Dockerfile (Phase 5a, admin URL
+    # consolidation 2026-05-06) references src/shared/admin_url.py which lives
+    # outside apps/jarvis-web/.  The central build script (scripts/build-and-push.sh)
+    # already uses repo-root context; this standalone script now matches.
+    REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
     docker buildx build \
         --platform linux/amd64 \
         -t "${FULL_IMAGE}" \
         --push \
-        .
+        -f "${SCRIPT_DIR}/Dockerfile" \
+        "${REPO_ROOT}"
 
     log_success "Image built and pushed: ${FULL_IMAGE}"
 }

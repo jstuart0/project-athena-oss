@@ -236,7 +236,7 @@ function renderFollowMeUI() {
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     <!-- Enable/Disable -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Status</label>
+                        <p class="block text-sm font-medium text-gray-300 mb-2">Status</p>
                         <div class="flex items-center gap-3">
                             <button onclick="updateFollowMeConfig({enabled: ${!followMeConfig?.enabled}})"
                                 class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${followMeConfig?.enabled ? 'bg-blue-600' : 'bg-gray-600'}">
@@ -250,8 +250,8 @@ function renderFollowMeUI() {
 
                     <!-- Mode Selection -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Mode</label>
-                        <select onchange="updateFollowMeConfig({mode: this.value})"
+                        <label for="follow-me-mode" class="block text-sm font-medium text-gray-300 mb-2">Mode</label>
+                        <select id="follow-me-mode" onchange="updateFollowMeConfig({mode: this.value})"
                             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
                             <option value="off" ${followMeConfig?.mode === 'off' ? 'selected' : ''}>Off</option>
                             <option value="single" ${followMeConfig?.mode === 'single' ? 'selected' : ''}>Single User</option>
@@ -265,8 +265,8 @@ function renderFollowMeUI() {
 
                     <!-- Debounce Time -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Debounce (seconds)</label>
-                        <input type="number" min="1" max="30" step="0.5" value="${followMeConfig?.debounce_seconds || 5}"
+                        <label for="follow-me-debounce" class="block text-sm font-medium text-gray-300 mb-2">Debounce (seconds)</label>
+                        <input type="number" id="follow-me-debounce" min="1" max="30" step="0.5" value="${followMeConfig?.debounce_seconds || 5}"
                             onchange="updateFollowMeConfig({debounce_seconds: parseFloat(this.value)})"
                             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">Minimum time between room transfers</p>
@@ -274,8 +274,8 @@ function renderFollowMeUI() {
 
                     <!-- Grace Period -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Grace Period (seconds)</label>
-                        <input type="number" min="5" max="120" step="5" value="${followMeConfig?.grace_period_seconds || 30}"
+                        <label for="follow-me-grace-period" class="block text-sm font-medium text-gray-300 mb-2">Grace Period (seconds)</label>
+                        <input type="number" id="follow-me-grace-period" min="5" max="120" step="5" value="${followMeConfig?.grace_period_seconds || 30}"
                             onchange="updateFollowMeConfig({grace_period_seconds: parseFloat(this.value)})"
                             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">Keep playing after motion clears</p>
@@ -283,8 +283,8 @@ function renderFollowMeUI() {
 
                     <!-- Min Motion Duration -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Min Motion Duration (seconds)</label>
-                        <input type="number" min="0.5" max="10" step="0.5" value="${followMeConfig?.min_motion_duration_seconds || 2}"
+                        <label for="follow-me-min-motion" class="block text-sm font-medium text-gray-300 mb-2">Min Motion Duration (seconds)</label>
+                        <input type="number" id="follow-me-min-motion" min="0.5" max="10" step="0.5" value="${followMeConfig?.min_motion_duration_seconds || 2}"
                             onchange="updateFollowMeConfig({min_motion_duration_seconds: parseFloat(this.value)})"
                             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">Ignore brief motion events</p>
@@ -292,7 +292,7 @@ function renderFollowMeUI() {
 
                     <!-- Quiet Hours -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Quiet Hours</label>
+                        <p class="block text-sm font-medium text-gray-300 mb-2">Quiet Hours</p>
                         <div class="flex items-center gap-2">
                             <input type="number" min="0" max="23" value="${followMeConfig?.quiet_hours_start ?? 23}"
                                 onchange="updateFollowMeConfig({quiet_hours_start: parseInt(this.value)})"
@@ -408,19 +408,19 @@ function showAddRoomSensorModal() {
 
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Room Name</label>
+                        <label for="sensor-room-name" class="block text-sm font-medium text-gray-300 mb-2">Room Name</label>
                         <input type="text" id="sensor-room-name" placeholder="e.g., living_room"
                             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Motion Entity ID</label>
+                        <label for="sensor-entity-id" class="block text-sm font-medium text-gray-300 mb-2">Motion Entity ID</label>
                         <input type="text" id="sensor-entity-id" placeholder="e.g., binary_sensor.living_room_motion"
                             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Priority</label>
+                        <label for="sensor-priority" class="block text-sm font-medium text-gray-300 mb-2">Priority</label>
                         <input type="number" id="sensor-priority" value="5" min="0" max="100"
                             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
                         <p class="text-xs text-gray-500 mt-1">Higher priority rooms preferred when multiple have motion</p>
@@ -458,19 +458,19 @@ function showEditRoomSensorModal(roomName, entityId, enabled, priority) {
 
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Room Name</label>
+                        <label for="sensor-room-name" class="block text-sm font-medium text-gray-300 mb-2">Room Name</label>
                         <input type="text" id="sensor-room-name" value="${escapeHtml(roomName)}" readonly
                             class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-gray-400 cursor-not-allowed">
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Motion Entity ID</label>
+                        <label for="sensor-entity-id" class="block text-sm font-medium text-gray-300 mb-2">Motion Entity ID</label>
                         <input type="text" id="sensor-entity-id" value="${escapeHtml(entityId)}"
                             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Priority</label>
+                        <label for="sensor-priority" class="block text-sm font-medium text-gray-300 mb-2">Priority</label>
                         <input type="number" id="sensor-priority" value="${priority}" min="0" max="100"
                             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
@@ -533,13 +533,13 @@ function showAddExcludedRoomModal() {
 
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Room Name</label>
+                        <label for="excluded-room-name" class="block text-sm font-medium text-gray-300 mb-2">Room Name</label>
                         <input type="text" id="excluded-room-name" placeholder="e.g., guest_bedroom"
                             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>
 
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Reason (optional)</label>
+                        <label for="excluded-room-reason" class="block text-sm font-medium text-gray-300 mb-2">Reason (optional)</label>
                         <input type="text" id="excluded-room-reason" placeholder="e.g., Guest privacy"
                             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
                     </div>

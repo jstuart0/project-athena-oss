@@ -10,25 +10,15 @@ Architecture:
     (No direct database access from orchestrator)
 """
 
-import os
 import structlog
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from shared.admin_url import get_admin_url
 
 logger = structlog.get_logger()
 
-# Admin API configuration - follows config_loader.py pattern
-ADMIN_API_URL = os.getenv(
-    "ADMIN_API_URL",
-    os.getenv("ADMIN_BACKEND_URL", "http://localhost:8080")
-)
-
-# Fallback to internal cluster URL
-if os.getenv("IN_CLUSTER", "false").lower() == "true":
-    ADMIN_API_URL = os.getenv(
-        "ADMIN_API_URL",
-        "http://athena-admin-backend.athena-admin.svc.cluster.local:8080"
-    )
+# Admin API URL (resolved by shared.admin_url.get_admin_url)
+ADMIN_API_URL = get_admin_url()
 
 
 class MemoryManager:

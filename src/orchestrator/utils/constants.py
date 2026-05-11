@@ -7,6 +7,8 @@ Service URLs, model configurations, and other constants used throughout the orch
 import os
 from typing import Dict
 
+from shared.config import get_config
+
 # ============================================================================
 # RAG Service URLs
 # ============================================================================
@@ -31,7 +33,7 @@ DIRECTIONS_SERVICE_URL = os.getenv("RAG_DIRECTIONS_URL", "http://localhost:8022"
 MODE_SERVICE_URL = os.getenv("MODE_SERVICE_URL", "http://localhost:8021")
 
 # LLM (supports multiple env var names for flexibility)
-OLLAMA_URL = os.getenv("LLM_SERVICE_URL") or os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL = get_config().llm_endpoint
 
 # URL map for RAG service lookup
 RAG_SERVICE_URL_MAP: Dict[str, str] = {
@@ -54,7 +56,7 @@ RAG_SERVICE_URL_MAP: Dict[str, str] = {
 # ============================================================================
 
 # Default model for portable deployments (override via ATHENA_DEFAULT_MODEL)
-_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b")
+_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
 
 # Fallback model values if database unavailable
 # These can be overridden via environment variables: ATHENA_FALLBACK_MODEL_<COMPONENT_NAME>
@@ -72,9 +74,11 @@ FALLBACK_MODELS: Dict[str, str] = {
 # Location Configuration
 # ============================================================================
 
-DEFAULT_CITY = "Baltimore"
-DEFAULT_STATE = "MD"
-DEFAULT_LOCATION = f"{DEFAULT_CITY}, {DEFAULT_STATE}"
+DEFAULT_CITY = get_config().default_city
+DEFAULT_STATE = os.getenv("DEFAULT_STATE", "")
+DEFAULT_LOCATION = ", ".join(p for p in (DEFAULT_CITY, DEFAULT_STATE) if p)
+# OSS-First: empty default; set DEFAULT_TIMEZONE in env for local time awareness.
+DEFAULT_TIMEZONE = get_config().default_timezone
 
 # City to state mapping (used in multiple places)
 CITY_STATE_MAP: Dict[str, str] = {

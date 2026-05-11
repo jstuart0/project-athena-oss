@@ -22,7 +22,6 @@ Usage:
 
 import asyncio
 import json
-import os
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -31,6 +30,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
 
 import structlog
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -260,7 +260,7 @@ class RedisEventBridge:
     """
 
     def __init__(self, redis_url: str = None):
-        self.redis_url = redis_url or os.getenv('REDIS_URL', 'redis://localhost:6379')
+        self.redis_url = redis_url or get_config().redis_url
         self._redis: Optional[Any] = None
         self._pubsub: Optional[Any] = None
         self._listener_task: Optional[asyncio.Task] = None

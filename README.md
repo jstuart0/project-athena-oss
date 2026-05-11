@@ -10,11 +10,29 @@ Commercial AI assistants route your data through cloud servers, add latency, and
 - **No backend lock-in** — use local models (Ollama, MLX), cloud APIs (OpenAI, Anthropic, any OpenAI-compatible endpoint), or a mix — per pipeline stage, your call
 - **Local-first by default** — can run 100% on your hardware with zero cloud dependencies, but cloud is always an option
 - **Built-in chat interface** — Jarvis Web provides streaming text chat, push-to-talk voice, and smart home widgets from any browser
-- **LangGraph state machine** — an 11,000+ line orchestrator with intent classification, complexity-aware model routing, and multi-intent query decomposition
+- **LangGraph state machine** — orchestrator with intent classification, complexity-aware model routing, and multi-intent query decomposition; pipeline core in `main.py` plus 12 sibling modules under `src/orchestrator/`
 - **23 RAG services** — specialized microservices for weather, sports, dining, flights, directions, news, stocks, recipes, and more
 - **Anti-hallucination pipeline** — 4-layer validation checks LLM responses against source data before delivery
 - **Smart home control** — deep Home Assistant integration with 70+ command patterns for lights, locks, thermostats, and more
 - **OpenAI-compatible API** — works with Home Assistant, custom apps, or any OpenAI client library
+
+## Security & OSS-First
+
+Project Athena is designed for any deployment, not just the maintainer's setup. A few properties to be aware of before deploying:
+
+**No secrets in code.** As of the 2026-05-06 audit (ATHENA-2, commits `9f4c40e`–`5830a71`), deployment-specific values — domain names, location defaults, and credentials — have been removed from source. All configurable values come from environment variables. See `.env.example` for the full list.
+
+**Required vars in production.** Several variables that previously had silent defaults now hard-fail at startup in production mode:
+- `SERVICE_API_KEY` — shared secret for service-to-service auth
+- `OIDC_ISSUER` — OIDC provider issuer URL (startup aborts if empty or placeholder)
+- `OIDC_CLIENT_ID` — must not be the literal string `demo-mode`
+- `ALLOWED_CALLBACK_HOSTS` — allowlist for Control Agent callback URLs (fail-closed when empty)
+
+**Start from `.env.example`.** Copy it, fill in the REQUIRED section, and review the RECOMMENDED section before your first deployment. The file is the canonical reference for deployers.
+
+**One action required for upgraders:** if you had a previous deployment that used the Jetson edge module, revoke the Home Assistant long-lived access token that was hardcoded in `src/jetson/` — it appears in git history at commit `794096b`. See `CHANGELOG.md` for details.
+
+---
 
 ## Interfaces
 
@@ -45,6 +63,17 @@ Wake-word-activated voice control through dedicated hardware. Say "Hey Jarvis" a
 
 Best for: hands-free operation, whole-home coverage, smart home control.
 
+### Chat Embed
+
+A lightweight CORS-relay proxy that lets any website embed an Athena-backed chatbot without browser CORS errors. It does NOT render UI itself — it sits between your website's own chat widget and the jarvis-web `/api/chat` endpoint, and fetches the assistant profile and persona from the admin backend at startup so embedders don't need direct access to the admin API.
+
+- **CORS relay** — exposes `/api/chat` and `/api/chat/stream` with configurable `CORS_ORIGINS` so any origin can embed the chatbot
+- **Rate limiting** — per-IP sliding-window rate limiting (`RATE_LIMIT_RPM`, default 30 req/min)
+- **Profile endpoint** — `/api/profile` returns the assistant name and identity fetched from the admin backend, letting your widget display the correct persona
+- **Source tagging** — marks all relayed requests with a `SOURCE_TAG` for analytics attribution
+
+Best for: embedding Athena on external websites, kiosks, or third-party apps without exposing your core infrastructure.
+
 ### API
 
 OpenAI-compatible REST endpoints for building custom integrations, connecting to Home Assistant, or building your own frontend.
@@ -70,6 +99,7 @@ Best for: Home Assistant integration, custom applications, automation scripts.
                      │          Interfaces           │
                      │                               │
                      │  Jarvis Web  (text / voice)   │
+                     │  Chat Embed  (website widget) │
                      │  Wyoming     (voice hardware) │
                      │  API         (programmatic)   │
                      └──────────────┬────────────────┘
@@ -154,11 +184,12 @@ Deep Home Assistant integration (4,500+ lines) with:
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - PostgreSQL database
 - Ollama (or any OpenAI-compatible LLM API)
 - Redis (optional, for session caching)
 - Home Assistant (optional, for smart home control)
+- Control Agent (optional, for host-level Ollama / Docker / launchd management — set `CONTROL_AGENT_ENABLED=true` + `CONTROL_AGENT_URL`; see [docs/INSTALLATION.md](docs/INSTALLATION.md))
 
 ### Chat-Only Setup
 
@@ -192,7 +223,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # Terminal 1: Admin backend
-cd admin/backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8080
+cd admin/backend && python -m uvicorn main:app --host 0.0.0.0 --port 8080
 
 # Terminal 2: Orchestrator
 cd src/orchestrator && python -m uvicorn main:app --host 0.0.0.0 --port 8001
@@ -245,20 +276,35 @@ See [docs/INSTALLATION.md](docs/INSTALLATION.md) for detailed setup instructions
 
 ### Configuration
 
-All configuration is via environment variables with sensible defaults:
+All configuration is via environment variables. Copy `.env.example` to `.env` and fill in the REQUIRED section before starting services.
 
 ```bash
-# Required
+# REQUIRED — services fail fast if missing
 ATHENA_DB_PASSWORD=your-db-password
 ADMIN_API_URL=http://localhost:8080
 ENCRYPTION_KEY=your-encryption-key
+ENCRYPTION_SALT=your-encryption-salt
 SESSION_SECRET_KEY=your-session-key
 JWT_SECRET=your-jwt-secret
+SERVICE_API_KEY=your-service-to-service-key  # required in production
+
+# REQUIRED in production — admin backend hard-fails at startup without these
+OIDC_ISSUER=https://auth.example.com/application/o/athena-admin/
+OIDC_CLIENT_ID=your-oidc-client-id
+OIDC_REDIRECT_URI=https://athena.example.com/auth/callback
+
+# REQUIRED if using the Control Agent (model downloads)
+ALLOWED_CALLBACK_HOSTS=localhost  # comma-separated; empty = fail-closed
 
 # Recommended
 OLLAMA_URL=http://localhost:11434
 HA_URL=http://your-home-assistant:8123
 HA_TOKEN=your-long-lived-access-token
+
+# Location defaults for RAG queries (leave blank if not needed)
+DEFAULT_CITY=
+DEFAULT_STATE=
+DEFAULT_TIMEZONE=UTC
 
 # Module toggles
 MODULE_HOME_ASSISTANT=true
@@ -305,8 +351,8 @@ python -m uvicorn main:app --host 0.0.0.0 --port 3001
 **Docker:**
 
 ```bash
-cd apps/jarvis-web
-docker build -t jarvis-web .
+# Build context is repo root (Dockerfile copies src/shared/admin_url.py)
+docker build -f apps/jarvis-web/Dockerfile -t jarvis-web .
 docker run -p 3001:8000 \
   -e ORCHESTRATOR_URL=http://host.docker.internal:8001 \
   -e GATEWAY_URL=http://host.docker.internal:8000 \
@@ -325,7 +371,7 @@ kubectl apply -f apps/jarvis-web/k8s/deployment.yaml
 |----------|---------|-------------|
 | `ORCHESTRATOR_URL` | `http://localhost:8001` | Orchestrator endpoint |
 | `GATEWAY_URL` | `http://localhost:8000` | Gateway endpoint (for LiveKit proxy) |
-| `ADMIN_BACKEND_URL` | `http://localhost:8080` | Admin API (for guest mode) |
+| `ADMIN_API_URL` | (see `src/shared/admin_url.py` resolver) | Admin API URL — set `LOCAL_DEV=true` for `http://localhost:8080` fallback |
 | `HA_URL` | — | Home Assistant URL (for smart home widgets) |
 | `HA_TOKEN` | — | Home Assistant long-lived access token |
 | `VOICE_API_URL` | — | STT/TTS endpoint (for push-to-talk voice) |
@@ -382,7 +428,7 @@ curl -X POST http://localhost:8001/query \
 ```
 project-athena/
 ├── src/
-│   ├── orchestrator/        # LangGraph state machine (11,500+ lines)
+│   ├── orchestrator/        # LangGraph state machine; main.py + 12 sibling modules + nodes/
 │   │   ├── main.py          # Core orchestration graph
 │   │   ├── smart_home_controller.py  # HA integration
 │   │   ├── music_handler.py # Music/audio control
@@ -417,10 +463,11 @@ project-athena/
 │   │   └── app/routes/      # 62 route modules
 │   └── frontend/            # Admin web UI (58 JS modules)
 ├── apps/
-│   └── jarvis-web/          # Chat interface with text, voice, and smart home widgets
-│       ├── backend/         # FastAPI proxy to orchestrator and Home Assistant
-│       ├── frontend/        # Single-page app (HTML + JS)
-│       └── k8s/             # Kubernetes deployment manifests
+│   ├── jarvis-web/          # Chat interface with text, voice, and smart home widgets
+│   │   ├── backend/         # FastAPI proxy to orchestrator and Home Assistant
+│   │   ├── frontend/        # Single-page app (HTML + JS)
+│   │   └── k8s/             # Kubernetes deployment manifests
+│   └── chat-embed/          # CORS-relay proxy for embedding Athena chat on external sites
 ├── manifests/
 │   └── athena-prod/         # Kubernetes deployment manifests
 ├── scripts/                 # Build, deploy, and setup automation
@@ -458,7 +505,7 @@ The optional admin backend provides a web UI for runtime configuration without c
 | **Separate validation model** | A dedicated smaller model fact-checks the response model's output against source data |
 | **Microservice RAG** | Each data domain has different caching, rate limits, and failure modes — monolithic RAG would be fragile |
 | **OpenAI-compatible gateway** | Drop-in compatibility with Home Assistant and any OpenAI client library |
-| **Environment-variable configuration** | Zero hardcoded values — fully configurable for any deployment |
+| **Environment-variable configuration** | Environment-variable driven — configuration is centralized by convention; a small number of deployment-specific defaults are being removed as part of ongoing OSS cleanup |
 | **Standalone chat interface** | Jarvis Web runs independently — use it without voice hardware, Wyoming devices, or Home Assistant |
 
 ## Hardware Requirements
