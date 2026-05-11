@@ -626,6 +626,7 @@ function renderRagServiceRow(service) {
                 ${healthMessage}
             </td>
             <td class="px-4 py-3"
+                aria-live="polite"
                 aria-label="${escapeHtml(ariaLabel)}"
                 data-status-item="${safeName}">
                 ${statusBadge}

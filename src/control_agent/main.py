@@ -234,8 +234,9 @@ async def _upsert_all_services(admin_url: str, service_key: str) -> tuple[int, i
     count_ok = 0
     count_skip = 0
 
+    items = list(PROCESS_SERVICES.items())
     async with httpx.AsyncClient(timeout=10.0) as client:
-        for port, config in PROCESS_SERVICES.items():
+        for idx, (port, config) in enumerate(items):
             service_name: str = config["name"]
             endpoint_url = f"http://{ca_host}:{port}"
             # Derive service_type: names containing "-rag" are RAG services;
@@ -263,7 +264,10 @@ async def _upsert_all_services(admin_url: str, service_key: str) -> tuple[int, i
                     # log the remaining services as skipped and break — they'll be
                     # picked up on the next sync_registry_loop iteration after the
                     # rate-limit window resets.
-                    remaining_count = sum(1 for p in PROCESS_SERVICES if p > port)
+                    # Use enumerate index so the count is exact regardless of
+                    # PROCESS_SERVICES insertion order (ports 8028/8029 are inserted
+                    # after 8033, so a port-comparison sum would undercount).
+                    remaining_count = len(items) - idx - 1
                     count_skip += 1 + remaining_count
                     logger.warning(
                         "registry_upsert_rate_limited",
