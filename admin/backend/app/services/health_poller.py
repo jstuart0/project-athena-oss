@@ -1,30 +1,37 @@
-"""Background health poller for the service registry.
+"""Background health poller for the service registry with Redis leader election.
 
-Phase 4 (ATHENA-1): replaces the per-request inline ping loop with an
-async background task that polls every enabled RagService on a configurable
-interval and caches results into health_status / last_health_check /
-last_response_time_ms / last_error / health_message columns.
+Phase 4 (ATHENA-1): replaces the per-request inline ping loop with an async
+background task that polls every enabled RagService on a configurable interval
+and caches results into health_status / last_health_check / last_response_time_ms
+/ last_error / health_message columns. Phase 1 (ATHENA-18): adds Redis SETNX
+leader election so only one pod polls and writes per cycle when admin-backend
+runs with replicas: 2. Each iteration of health_poll_loop attempts to acquire
+or renew a Redis lease via SET NX EX (acquire) or a Lua check-and-set (atomic
+renewal) keyed at LEASE_KEY ("athena:health_poll_lease"). LEASE_TTL_SECONDS=40
+must exceed health_poll_interval_seconds (default 30); start_health_polling
+raises SystemExit at startup if this invariant is violated. HOLDER_ID is
+seeded from the HOSTNAME env var (the pod name in Kubernetes) or a random
+uuid4 — it identifies the current lease holder for logging but is NOT an auth
+token. Lease integrity depends on Redis access control; any process with Redis
+write access can overwrite the key. HEARTBEAT_INTERVAL_SECONDS=20 governs a
+per-cycle background asyncio.Task that renews the lease mid-poll so a slow
+cycle (many services + timeouts) cannot outlive the TTL. If the heartbeat
+cannot renew the lease (strict-abort policy), it cancels the in-flight
+_poll_all_services task before any further DB writes, ensuring no replica
+writes to health columns after lease loss. On-demand poll endpoints
+(/poll-now, /status/all, /refresh-status) call _poll_all_services directly
+and are intentionally not gated — operators must be able to force a refresh
+from either replica. redis_client=None (DEV_MODE or test paths) is treated as
+"always leader, skip lease entirely" so the existing dev loop behavior is
+unchanged.
 
-Phase 1 (ATHENA-18): adds Redis SETNX leader election so only one pod polls
-when admin-backend runs with replicas: 2.  The lease helpers, heartbeat task,
-and strict-abort race pattern keep the leader invariant even across slow poll
-cycles that approach LEASE_TTL_SECONDS.
-
-Pattern source: admin/backend/app/services/calendar_sync.py:236-299
-(librarian #2 from plan r1).
-
-Column ownership (dexter D2 / D7):
-- This module WRITES: health_status, last_health_check, last_response_time_ms,
-  last_error, health_message.
-- This module NEVER WRITES: is_running (owned by service_control.py),
-  updated_at (config-change audit signal; synchronize_session=False bypasses
-  ORM onupdate so it is not bumped during bulk writes).
-
-SSRF allowlist: add HEALTH_POLL_ALLOWED_PRIVATE_HOSTS (comma-separated CIDRs
-or hostnames) to permit RFC1918/loopback targets. Default empty = fail-closed
-for OSS deployers whose services are on the public internet. Jay's homelab:
-set to "192.168.10.0/24" (or the specific pod CIDR) so the poller can reach
-cluster services.
+Column ownership (dexter D2 / D7): this module WRITES health_status,
+last_health_check, last_response_time_ms, last_error, health_message. It
+NEVER WRITES is_running (owned by service_control.py) or updated_at
+(config-change audit signal; synchronize_session=False bypasses ORM onupdate
+so it is not bumped during bulk writes). SSRF allowlist: set
+HEALTH_POLL_ALLOWED_PRIVATE_HOSTS (comma-separated CIDRs or hostnames) to
+permit RFC1918/loopback targets; default empty = fail-closed.
 """
 
 import asyncio
