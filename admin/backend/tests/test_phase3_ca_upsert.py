@@ -261,3 +261,125 @@ async def test_upsert_payload_shape_matches_route_contract():
     assert parsed.scheme == "http"
     assert parsed.hostname == FAKE_CA_HOST
     assert parsed.port is not None
+
+
+# ---------------------------------------------------------------------------
+# Test 7 (ATHENA-49): 429 mid-loop aborts cleanly
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_upsert_all_services_429_aborts_cleanly():
+    """429 mid-loop: stops posting, counts correctly, logs registry_upsert_rate_limited."""
+    import structlog.testing
+
+    total = len(ca_main.PROCESS_SERVICES)
+    # 429 fires on the 3rd call (index 2); first two are successes.
+    N = 2
+
+    def _make_resp(status_code: int, text: str = '{"action": "created"}') -> MagicMock:
+        r = MagicMock()
+        r.status_code = status_code
+        r.text = text
+        return r
+
+    side_effects = [_make_resp(200)] * N + [_make_resp(429, '{"detail": "rate limited"}')]
+
+    client_mock = AsyncMock()
+    client_mock.post = AsyncMock(side_effect=side_effects)
+
+    ctx_mock = MagicMock()
+    ctx_mock.__aenter__ = AsyncMock(return_value=client_mock)
+    ctx_mock.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.dict(os.environ, {"CONTROL_AGENT_URL": FAKE_CA_URL}):
+        with patch("control_agent.main.httpx.AsyncClient", return_value=ctx_mock):
+            with structlog.testing.capture_logs() as captured:
+                count_ok, count_skip = await ca_main._upsert_all_services(
+                    FAKE_ADMIN_URL, FAKE_SERVICE_KEY
+                )
+
+    assert count_ok == N
+    assert count_skip == total - N
+    assert client_mock.post.call_count == N + 1  # no further POSTs after 429
+
+    # The log line must carry remaining_skipped == (total - N - 1) services after
+    # the one that actually got the 429.
+    expected_remaining = total - N - 1
+    rl_events = [e for e in captured if e.get("event") == "registry_upsert_rate_limited"]
+    assert rl_events, "expected 'registry_upsert_rate_limited' log event"
+    assert rl_events[0]["log_level"] == "warning"
+    assert rl_events[0]["remaining_skipped"] == expected_remaining
+
+
+# ---------------------------------------------------------------------------
+# Test 8 (ATHENA-49): sync_registry_loop iterates again after 429 abort
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_sync_registry_loop_retries_after_429():
+    """sync_registry_loop calls _upsert_all_services again on the next iteration."""
+    env_overrides = {
+        "ADMIN_API_URL": FAKE_ADMIN_URL,
+        "SERVICE_API_KEY": FAKE_SERVICE_KEY,
+    }
+
+    call_results = [(2, len(ca_main.PROCESS_SERVICES) - 2), asyncio.CancelledError()]
+
+    async def _side_effect(*args, **kwargs):
+        result = call_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    with patch.dict(os.environ, env_overrides, clear=False):
+        with patch.object(ca_main, "REGISTRY_SYNC_INTERVAL", 0):
+            with patch("control_agent.main._upsert_all_services", side_effect=_side_effect) as mock_upsert:
+                with patch("asyncio.sleep", new_callable=AsyncMock):
+                    with pytest.raises(asyncio.CancelledError):
+                        await ca_main.sync_registry_loop()
+
+    assert mock_upsert.call_count >= 2
+
+
+# ---------------------------------------------------------------------------
+# Test 9 (ATHENA-49, optional): 429 on final service → remaining_skipped == 0
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_upsert_429_on_last_service_remaining_skipped_zero():
+    """429 on the very last service means remaining_skipped == 0 (off-by-one check)."""
+    import structlog.testing
+
+    total = len(ca_main.PROCESS_SERVICES)
+
+    def _make_resp(status_code: int, text: str = '{"action": "created"}') -> MagicMock:
+        r = MagicMock()
+        r.status_code = status_code
+        r.text = text
+        return r
+
+    # All succeed except the final one
+    side_effects = [_make_resp(200)] * (total - 1) + [_make_resp(429, '{"detail": "rate limited"}')]
+
+    client_mock = AsyncMock()
+    client_mock.post = AsyncMock(side_effect=side_effects)
+
+    ctx_mock = MagicMock()
+    ctx_mock.__aenter__ = AsyncMock(return_value=client_mock)
+    ctx_mock.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.dict(os.environ, {"CONTROL_AGENT_URL": FAKE_CA_URL}):
+        with patch("control_agent.main.httpx.AsyncClient", return_value=ctx_mock):
+            with structlog.testing.capture_logs() as captured:
+                count_ok, count_skip = await ca_main._upsert_all_services(
+                    FAKE_ADMIN_URL, FAKE_SERVICE_KEY
+                )
+
+    assert count_ok == total - 1
+    assert count_skip == 1  # only the service that got the 429
+    assert client_mock.post.call_count == total  # every service was attempted
+
+    # remaining_skipped must be 0 — no services were skipped beyond the one that got 429
+    rl_events = [e for e in captured if e.get("event") == "registry_upsert_rate_limited"]
+    assert rl_events, "expected registry_upsert_rate_limited log event"
+    assert rl_events[0]["remaining_skipped"] == 0
