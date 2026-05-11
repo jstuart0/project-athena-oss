@@ -1182,23 +1182,10 @@ function showError(containerId, message) {
 }
 
 function showToast(message, type = 'info') {
-    // Simple toast notification (can be enhanced)
-    const colors = {
-        success: 'bg-green-600',
-        error: 'bg-red-600',
-        info: 'bg-blue-600'
-    };
-
-    const toast = document.createElement('div');
-    toast.className = `fixed bottom-4 right-4 ${colors[type]} text-white px-6 py-3 rounded-lg shadow-lg z-50 transition-opacity`;
-    toast.textContent = message;
-
-    document.body.appendChild(toast);
-
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        setTimeout(() => toast.remove(), 300);
-    }, 3000);
+    const T = window.Athena?.components?.Toast;
+    if (T) return (T[type] || T.info)(message);
+    // toast.js loads before this script per index.html — this path means a misconfig
+    console.warn('[showToast] Toast component not available; dropped:', type, message);
 }
 
 // ============================================================================

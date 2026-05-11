@@ -95,6 +95,9 @@ async function loadServices() {
 // Module-level flag: populated on first loadRagServicesFromRegistry() call.
 let controlAgentEnabled = false;
 
+// Status-change tracking for ATHENA-48 toast announcements.
+const _lastStatusByService = new Map();
+
 async function loadRagServicesFromRegistry() {
     try {
         const response = await apiRequest('/api/service-registry/services');
@@ -482,6 +485,32 @@ function renderRagServicesTable() {
             </div>
         `;
         return;
+    }
+
+    // Status-change announcements (ATHENA-48): one toast per flip, batched if >3 flips in a tick.
+    const flips = [];
+    for (const s of ragServices) {
+        const name = s.name;
+        if (!name) continue;
+        const current = String(s.status ?? (s.is_running ? 'healthy' : 'unhealthy'));
+        const prev = _lastStatusByService.get(name);
+        if (prev !== undefined && prev !== current) {
+            flips.push({ name, from: prev, to: current });
+        }
+        _lastStatusByService.set(name, current);
+    }
+    if (flips.length > 0 && window.Athena?.components?.Toast) {
+        const Toast = window.Athena.components.Toast;
+        const typeFor = (to) => (to === 'healthy' || to === 'running' || to === 'online')
+            ? 'success'
+            : (to === 'error' || to === 'unreachable' || to === 'down') ? 'error' : 'warning';
+        if (flips.length <= 3) {
+            for (const f of flips) {
+                Toast[typeFor(f.to)](`${f.name}: ${f.from} → ${f.to}`, { duration: 6000 });
+            }
+        } else {
+            Toast.warning(`${flips.length} services changed status`, { duration: 8000 });
+        }
     }
 
     container.innerHTML = `
