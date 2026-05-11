@@ -69,7 +69,7 @@ class BaseRAGService:
             async with self.db_pool.acquire() as conn:
                 # Load service configuration
                 service_row = await conn.fetchrow("""
-                    SELECT * FROM rag_services
+                    SELECT * FROM athena_service_registry
                     WHERE name = $1 AND enabled = true
                 """, self.service_name)
 
@@ -282,7 +282,7 @@ class BaseRAGService:
         try:
             async with self.db_pool.acquire() as conn:
                 await conn.execute("""
-                    UPDATE rag_services
+                    UPDATE athena_service_registry
                     SET health_status = $1,
                         last_health_check = CURRENT_TIMESTAMP
                     WHERE name = $2
