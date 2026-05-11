@@ -12,8 +12,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-# Model configuration from environment (defaults to qwen3:4b for portability)
-_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b")
+# Model configuration from environment (defaults to qwen3:4b-instruct-2507-q4_K_M for portability)
+_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
 
 
 # Intent categories

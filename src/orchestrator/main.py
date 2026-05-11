@@ -613,7 +613,7 @@ from orchestrator.urls import (
 from orchestrator.state import IntentCategory, ModelTier, ConversationContext
 
 # Default model for portable deployments (override via ATHENA_DEFAULT_MODEL)
-_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b")
+_DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
 
 
 # Fallback model values if database unavailable

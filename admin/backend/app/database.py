@@ -312,7 +312,7 @@ def seed_oss_defaults():
     """
     Seed OSS default configuration for LLM backends and component assignments.
 
-    This ensures a working out-of-the-box experience with qwen3:4b as the default model.
+    This ensures a working out-of-the-box experience with qwen3:4b-instruct-2507-q4_K_M as the default model.
     Called during production startup to ensure configuration exists.
     """
     from datetime import datetime

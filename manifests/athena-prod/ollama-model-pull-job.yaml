@@ -10,7 +10,7 @@
 #   - Replace curlimages/curl:latest with a pinned tag.
 #   - Add backoffLimit to bound retries on pull failure (default is 6;
 #     consider 2-3 for a cleaner failure signal).
-#   - Reconcile hardcoded models (qwen3:4b, phi3:mini) with the runtime
+#   - Reconcile hardcoded models (qwen3:4b-instruct-2507-q4_K_M, phi3:mini) with the runtime
 #     ConfigMap default (qwen3:4b-instruct-2507-q4_K_M). The Job pulls
 #     supplementary fast-startup models; the divergence is intentional for
 #     fast first-run but should be documented or aligned in a follow-up.
@@ -34,8 +34,8 @@ spec:
         - |
           echo "Waiting for Ollama to be ready..."
           sleep 30
-          echo "Pulling qwen3:4b..."
-          curl -X POST http://ollama:11434/api/pull -d '{"name": "qwen3:4b"}'
+          echo "Pulling qwen3:4b-instruct-2507-q4_K_M..."
+          curl -X POST http://ollama:11434/api/pull -d '{"name": "qwen3:4b-instruct-2507-q4_K_M"}'
           echo "Pulling phi3:mini..."
           curl -X POST http://ollama:11434/api/pull -d '{"name": "phi3:mini"}'
           echo "Models pulled successfully"

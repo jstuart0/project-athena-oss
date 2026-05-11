@@ -69,7 +69,7 @@ _component_model_cache_time: float = 0.0
 COMPONENT_MODEL_CACHE_TTL: int = 300  # 5 minutes
 
 # Default model + fallback table (mirrors main.py verbatim)
-_DEFAULT_MODEL: str = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b")
+_DEFAULT_MODEL: str = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
 FALLBACK_MODELS: Dict[str, str] = {
     "intent_classifier": os.getenv("ATHENA_FALLBACK_MODEL_INTENT_CLASSIFIER", _DEFAULT_MODEL),
     "tool_calling_simple": os.getenv("ATHENA_FALLBACK_MODEL_TOOL_CALLING_SIMPLE", _DEFAULT_MODEL),
