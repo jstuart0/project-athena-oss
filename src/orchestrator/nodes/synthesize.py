@@ -432,6 +432,7 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
     except Exception as e:
         logger.error(f"Synthesis error: {e}", exc_info=True)
         state.answer = "I apologize, but I'm having trouble generating a response. Please try again."
+        state.is_fallback = True
         state.error = f"Synthesis failed: {str(e)}"
 
     synthesize_duration = time.time() - start

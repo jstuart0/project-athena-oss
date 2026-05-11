@@ -6709,6 +6709,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         should_cache = (
             response.answer
             and not final_state.get("is_fallback", False)
+            and not _looks_like_fallback(response.answer)
             and final_state.get("validation_passed", True)
             and response.confidence >= 0.3
             and response.intent != "unknown"
@@ -7362,6 +7363,30 @@ def _get_analytics_source() -> Optional[str]:
     if os.getenv("ATHENA_DEBUG_MODE", "false").lower() == "true":
         return "debug"
     return None
+
+
+# Fallback / error-response markers used to defend the semantic cache against
+# storing responses that should never be replayed (ATHENA-32). The is_fallback
+# state flag is the primary signal; this is a belt-and-suspenders pattern check
+# for fallback sites that may not have set the flag.
+_FALLBACK_RESPONSE_MARKERS = (
+    "i'm not sure how to help",
+    "i'm not confident in my response",
+    "i don't have current information to answer",
+    "i encountered an issue processing",
+    "i apologize, but i'm having trouble generating",
+    "i'm having trouble updating your notification preferences",
+    "i'm sorry, i couldn't send the text",
+    "i'm having trouble sending the text",
+)
+
+
+def _looks_like_fallback(answer: str) -> bool:
+    """Lowercase-substring match against known fallback markers (ATHENA-32 belt-and-suspenders)."""
+    if not answer:
+        return True  # empty answer is always non-cacheable
+    lower = answer.lower()
+    return any(marker in lower for marker in _FALLBACK_RESPONSE_MARKERS)
 
 
 async def _should_capture_analytics(debug_source: Optional[str]) -> Optional[str]:

@@ -126,6 +126,7 @@ async def notification_pref_node(state: OrchestratorState) -> OrchestratorState:
                         state.answer = "I couldn't find that notification rule. The proactive notification system may still be setting up."
                     else:
                         state.answer = "I'm having trouble updating your notification preferences right now. Please try again later."
+                        state.is_fallback = True
             else:  # opt-in
                 if successful:
                     if "morning_greeting" in [r["rule"] for r in successful]:
@@ -140,6 +141,7 @@ async def notification_pref_node(state: OrchestratorState) -> OrchestratorState:
                         state.answer = "I couldn't find that notification rule. The proactive notification system may still be setting up."
                     else:
                         state.answer = "I'm having trouble updating your notification preferences right now. Please try again later."
+                        state.is_fallback = True
 
             logger.info(
                 "notification_pref_complete",

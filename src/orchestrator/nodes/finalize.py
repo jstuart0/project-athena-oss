@@ -112,10 +112,13 @@ async def finalize_node(state: OrchestratorState) -> OrchestratorState:
         if "hallucination" in state.validation_reason.lower():
             # Hallucination detected - provide helpful fallback
             state.answer = f"I don't have current information to answer that accurately. I recommend checking reliable sources for up-to-date information about {state.query.lower()}."
+            state.is_fallback = True
         elif state.error:
             state.answer = "I encountered an issue processing your request. Please try rephrasing your question."
+            state.is_fallback = True
         else:
             state.answer = "I'm not confident in my response. Could you please rephrase your question?"
+            state.is_fallback = True
 
     # Safety net: never return an empty answer
     if not state.answer:

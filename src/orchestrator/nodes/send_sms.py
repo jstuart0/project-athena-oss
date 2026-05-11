@@ -75,10 +75,12 @@ async def send_sms_node(state: OrchestratorState) -> OrchestratorState:
             state.answer = result.get("answer", "What phone number should I send it to?")
         else:
             state.answer = result.get("answer", "I'm sorry, I couldn't send the text right now. Please try again.")
+            state.is_fallback = True
 
     except Exception as e:
         logger.error(f"SMS send error: {e}", exc_info=True)
         state.answer = "I'm having trouble sending the text. Please try again later."
+        state.is_fallback = True
         state.error = f"SMS send failed: {str(e)}"
 
     send_sms_duration = time.time() - start
