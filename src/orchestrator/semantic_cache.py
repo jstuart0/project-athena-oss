@@ -550,9 +550,29 @@ def is_cacheable(category: str, query: str) -> bool:
     return True
 
 
-def get_cache_key(normalized_query: str, room: str = None, mode: str = None, location_override: dict = None) -> str:
-    """Generate cache key with optional room/mode/location context."""
+def get_cache_key(
+    normalized_query: str,
+    raw_query: str,
+    room: str = None,
+    mode: str = None,
+    location_override: dict = None,
+) -> str:
+    """Generate cache key with optional room/mode/location context.
+
+    Cross-talk guard (ATHENA-46): includes a short hash of raw_query so two
+    structurally-different queries cannot collide on the same Redis slot even
+    if extract_semantic_intent maps them to the same normalized_query
+    fingerprint (e.g., "what's in the news today" and "search the web for AI
+    news" both contain "news" and would otherwise share athena_semantic:news_current).
+    """
     key_parts = ["athena_semantic", normalized_query]
+
+    # ATHENA-46 entropy: lowercase + strip before hashing so trivial surface
+    # variants (trailing whitespace, leading/trailing newlines, mixed case)
+    # still share the cache. Substantive differences in word choice produce
+    # different hashes and therefore different cache slots.
+    query_hash = hashlib.md5(raw_query.lower().strip().encode()).hexdigest()[:8]
+    key_parts.append(query_hash)
 
     # Include location_override in cache key for location-sensitive queries (directions, dining, etc.)
     # This ensures different origins get different cache entries
@@ -590,7 +610,7 @@ async def get_cached_response(query: str, room: str = None, mode: str = None, lo
         logger.debug("semantic_cache_skip", category=category, reason="not_cacheable")
         return None
 
-    cache_key = get_cache_key(normalized_query, room, mode, location_override)
+    cache_key = get_cache_key(normalized_query, query, room, mode, location_override)
     cache = get_cache_client()
 
     try:
@@ -641,7 +661,7 @@ async def cache_response(
 
     # Get TTL for this category
     ttl = CACHE_TTL_CONFIG.get(category, CACHE_TTL_CONFIG["general"])
-    cache_key = get_cache_key(normalized_query, room, mode, location_override)
+    cache_key = get_cache_key(normalized_query, query, room, mode, location_override)
     cache = get_cache_client()
 
     try:
