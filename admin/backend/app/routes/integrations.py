@@ -181,7 +181,7 @@ def get_rag_service_from_registry(
 ) -> Optional[Dict[str, Any]]:
     """Return display info for a single RAG service from the admin registry.
 
-    Synchronous — uses SQLAlchemy against the admin DB's rag_services table.
+    Synchronous — uses SQLAlchemy against the admin DB's athena_service_registry table.
     Replaced the asyncpg connection to the legacy athena DB. (ian I-H5 / ATHENA-1 Phase 2)
     """
     try:

@@ -132,7 +132,7 @@ data:
   # Health Poller Configuration (ATHENA-1 Phase 4)
   # ==========================================================================
   # Background task that polls each enabled RAG service's /health endpoint on
-  # a schedule and caches results in rag_services.health_status + related
+  # a schedule and caches results in athena_service_registry.health_status + related
   # columns. The admin UI reads cached values instead of inline-pinging.
   #
   # HEALTH_POLL_INTERVAL_SECONDS: seconds between full poll cycles. Default 30.
