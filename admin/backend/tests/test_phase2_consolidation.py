@@ -643,8 +643,9 @@ class TestFkCountAndIdentity:
     """
     Simulate the migration's FK-remap logic in Python to assert the invariant:
     - All mappable connectors (whose service_registry.service_name has a
-      matching rag_services.name) get a valid service_id pointing at rag_services.
-    - Unmappable connectors (no matching rag_services.name) get service_id=NULL.
+      matching athena_service_registry.name) get a valid service_id pointing at
+      athena_service_registry.
+    - Unmappable connectors (no matching athena_service_registry.name) get service_id=NULL.
     - No mappable connector gets accidentally nulled.
     - No unmappable connector gets accidentally mapped.
     """
