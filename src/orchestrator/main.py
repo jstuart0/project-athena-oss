@@ -1082,6 +1082,38 @@ async def lifespan(app: FastAPI):
     _runtime.set_llm_router(llm_router)
     logger.info(f"LLM Router initialized with admin API: {llm_router.admin_url}")
 
+    # ATHENA-47: pre-warm Ollama models in background so the first user query
+    # doesn't pay cold-load cost (avoids the saturation cascade observed when
+    # multiple queries hit cold models simultaneously).
+    async def _do_prewarm():
+        try:
+            # Fetch configured model names from admin public endpoint
+            async with httpx.AsyncClient(timeout=10.0) as _prewarm_http:
+                resp = await _prewarm_http.get(f"{admin_client.admin_url}/api/component-models/public")
+                resp.raise_for_status()
+                components = resp.json()
+            unique_models = sorted({
+                c["model_name"]
+                for c in components
+                if c.get("backend_type") == "ollama" and c.get("enabled")
+            })
+            if not unique_models:
+                logger.info("ollama_prewarm_skipped", reason="no enabled ollama components")
+                return
+            logger.info("ollama_prewarm_starting", model_count=len(unique_models), models=unique_models)
+            from shared.llm_router import prewarm_ollama_models
+            results = await prewarm_ollama_models(unique_models)
+            successes = sum(1 for v in results.values() if v)
+            logger.info(
+                "ollama_prewarm_complete",
+                total=len(results),
+                succeeded=successes,
+                failed=len(results) - successes,
+            )
+        except Exception as e:
+            logger.warning("ollama_prewarm_outer_failed", error_type=type(e).__name__, error=str(e)[:200])
+    asyncio.create_task(_do_prewarm())
+
     # Initialize entity manager for dynamic HA entity discovery
     if ha_token:
         entity_manager = HAEntityManager(ha_url=ha_url, ha_token=ha_token)

@@ -50,6 +50,56 @@ def _strip_think_tags(text: str) -> str:
 # read timeout is safe. The backoff gives Mac Studio's Ollama a moment to finish a stalled
 # request that was about to complete.
 OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S = 2.0
+# ATHENA-47: Don't retry if the first attempt already consumed >50% of the
+# timeout budget — a second attempt that would push past the upstream gateway
+# timeout is doomed and just amplifies user-visible latency.
+OLLAMA_READ_TIMEOUT_RETRY_BUDGET_THRESHOLD = 0.5
+
+
+async def prewarm_ollama_models(model_names: List[str]) -> Dict[str, bool]:
+    """ATHENA-47: pre-warm Ollama by firing a tiny generation per configured model.
+
+    Loads model weights into Ollama's memory at startup so the first user query
+    doesn't pay cold-load cost. Best-effort: per-model failures are logged but
+    do not raise. Called from orchestrator lifespan as a background task so it
+    does NOT block readiness.
+
+    Returns: {model_name: success_bool}
+    """
+    if not model_names:
+        return {}
+    endpoint_url = get_config().ollama_url
+    results: Dict[str, bool] = {}
+    timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
+    async with httpx.AsyncClient(base_url=endpoint_url, timeout=timeout) as client:
+        for model in model_names:
+            t0 = time.monotonic()
+            try:
+                resp = await client.post(
+                    "/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": ".",
+                        "stream": False,
+                        "options": {"num_predict": 1},
+                        "keep_alive": -1,
+                    },
+                )
+                resp.raise_for_status()
+                elapsed = round(time.monotonic() - t0, 2)
+                results[model] = True
+                logger.info("ollama_model_prewarmed", model=model, elapsed_s=elapsed)
+            except Exception as e:
+                elapsed = round(time.monotonic() - t0, 2)
+                results[model] = False
+                logger.warning(
+                    "ollama_prewarm_failed",
+                    model=model,
+                    elapsed_s=elapsed,
+                    error_type=type(e).__name__,
+                    error=str(e)[:200],
+                )
+    return results
 
 
 class BackendType(str, Enum):
@@ -1011,13 +1061,25 @@ class LLMRouter:
 
         try:
             # Call Ollama with tools
+            start_time = time.monotonic()
             try:
                 response = await client.post("/api/chat", json=payload)
             except httpx.ReadTimeout:
+                elapsed = time.monotonic() - start_time
+                if elapsed >= timeout * OLLAMA_READ_TIMEOUT_RETRY_BUDGET_THRESHOLD:
+                    logger.warning(
+                        "ollama_read_timeout_retry_skipped_budget_exhausted",
+                        model=model,
+                        timeout_s=timeout,
+                        elapsed_s=round(elapsed, 2),
+                        note="not retrying — first attempt consumed >50% of budget, doomed retry would push past upstream gateway timeout (ATHENA-47)",
+                    )
+                    raise
                 logger.warning(
                     "ollama_read_timeout_retrying",
                     model=model,
                     timeout=timeout,
+                    elapsed_s=round(elapsed, 2),
                     backoff_s=OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S,
                 )
                 await asyncio.sleep(OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S)
@@ -1143,13 +1205,25 @@ class LLMRouter:
             logger.info("ollama_think_disabled", model=model)
 
         try:
+            start_time = time.monotonic()
             try:
                 response = await client.post("/api/generate", json=payload)
             except httpx.ReadTimeout:
+                elapsed = time.monotonic() - start_time
+                if elapsed >= timeout * OLLAMA_READ_TIMEOUT_RETRY_BUDGET_THRESHOLD:
+                    logger.warning(
+                        "ollama_read_timeout_retry_skipped_budget_exhausted",
+                        model=model,
+                        timeout_s=timeout,
+                        elapsed_s=round(elapsed, 2),
+                        note="not retrying — first attempt consumed >50% of budget, doomed retry would push past upstream gateway timeout (ATHENA-47)",
+                    )
+                    raise
                 logger.warning(
                     "ollama_read_timeout_retrying",
                     model=model,
                     timeout=timeout,
+                    elapsed_s=round(elapsed, 2),
                     backoff_s=OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S,
                 )
                 await asyncio.sleep(OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S)
