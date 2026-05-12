@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `thoughts/shared/plans/active-2026-05-11-deliver-rag-services-table-rename.md`
+> **Ticket:** [ATHENA-17](https://plane.xmojo.net)
+
+### Rename `rag_services` table to `athena_service_registry` (ATHENA-17)
+
+- **Changed** (`ATHENA-17`): Alembic migration `057_rename_rag_services_to_athena_service_registry.py` renames the `rag_services` table to `athena_service_registry`. No data loss; downgrade restores the original name. SQLAlchemy model `RagService` updated to `__tablename__ = "athena_service_registry"`. All ORM queries, route docstrings, and YAML comments updated to reference the new table name.
+
+---
+
+## [Unreleased]
+
 > **Plan:** `thoughts/shared/plans/2026-05-09-deliver-validator-fix-general-info.md`
 > **Ticket:** [ATHENA-39](https://plane.xmojo.net)
 

@@ -553,7 +553,7 @@ async def startup_event():
                     from sqlalchemy import inspect as _sa_inspect
                     from app.database import engine as _engine
                     _inspector = _sa_inspect(_engine)
-                    _cols = {c['name'] for c in _inspector.get_columns('rag_services')}
+                    _cols = {c['name'] for c in _inspector.get_columns('athena_service_registry')}
                     _required = {
                         'host', 'port', 'protocol', 'health_endpoint',
                         'control_method', 'is_running', 'last_response_time_ms',
@@ -563,7 +563,7 @@ async def startup_event():
                     _missing = _required - _cols
                     if _missing:
                         raise RuntimeError(
-                            f"Admin-backend startup aborted: rag_services table is missing "
+                            f"Admin-backend startup aborted: athena_service_registry table is missing "
                             f"columns {sorted(_missing)}. "
                             f"Run `alembic upgrade head` before starting admin-backend."
                         )

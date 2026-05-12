@@ -512,7 +512,7 @@ class RAGConnector(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(64), nullable=False, unique=True, index=True)
     connector_type = Column(String(32), nullable=False)  # "external_api", "vector_db", "cache", "custom"
-    service_id = Column(Integer, ForeignKey('rag_services.id'))
+    service_id = Column(Integer, ForeignKey('athena_service_registry.id'))
     enabled = Column(Boolean, default=True)
     config = Column(JSONB)  # Connector-specific config (API endpoints, parameters, etc.)
     cache_config = Column(JSONB)  # Cache settings (TTL, size limits, eviction policy)
@@ -2281,7 +2281,7 @@ class RagService(Base):
     - Admin UI / POST upsert: everything else
     - ``updated_at`` tracks **config changes only** — the health poller MUST NOT touch it.
     """
-    __tablename__ = 'rag_services'
+    __tablename__ = 'athena_service_registry'
 
     id = Column(Integer, primary_key=True)
     name = Column(String(64), unique=True, nullable=False, index=True)
@@ -2329,9 +2329,9 @@ class RagService(Base):
     rag_connectors = relationship('RAGConnector', back_populates='service')
 
     __table_args__ = (
-        Index('idx_rag_services_name', 'name'),
-        Index('idx_rag_services_enabled', 'enabled'),
-        Index('idx_rag_services_service_type', 'service_type'),
+        Index('idx_athena_service_registry_name', 'name'),
+        Index('idx_athena_service_registry_enabled', 'enabled'),
+        Index('idx_athena_service_registry_service_type', 'service_type'),
     )
 
     @property

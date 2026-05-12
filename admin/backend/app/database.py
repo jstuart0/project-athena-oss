@@ -747,7 +747,7 @@ def seed_oss_service_registry():
         for name, display_name, host, port, protocol, cache_ttl, enabled in OSS_SERVICE_REGISTRY:
             endpoint_url = f"{protocol}://{host}:{port}"
             result = db.execute(text("""
-                INSERT INTO rag_services (
+                INSERT INTO athena_service_registry (
                     name, display_name, service_type,
                     host, port, protocol, endpoint_url,
                     headers, cache_ttl, timeout, rate_limit,

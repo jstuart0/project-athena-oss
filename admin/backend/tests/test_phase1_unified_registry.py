@@ -133,7 +133,10 @@ class TestRagServiceModel:
     def test_column_set_matches_d2(self, db):
         """RagService table has all D2-spec columns."""
         inspector = inspect(engine)
-        col_names = {c["name"] for c in inspector.get_columns("rag_services")}
+        col_names = {c["name"] for c in inspector.get_columns("athena_service_registry")}
+        assert "rag_services" not in set(inspector.get_table_names()), (
+            "Legacy table rag_services still exists — migration 057 may not have run."
+        )
 
         required = {
             "id", "name", "display_name", "description", "service_type",
@@ -175,7 +178,7 @@ class TestRagServiceModel:
 
 class TestRAGConnectorFK:
     def test_connector_links_to_rag_service(self, db, rag_connector, rag_service):
-        """RAGConnector.service_id FK points at rag_services.id."""
+        """RAGConnector.service_id FK points at athena_service_registry.id."""
         conn = db.query(RAGConnector).filter(RAGConnector.id == rag_connector.id).first()
         assert conn.service_id == rag_service.id
         assert conn.service is not None

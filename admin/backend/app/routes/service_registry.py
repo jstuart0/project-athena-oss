@@ -1,7 +1,7 @@
 """Service Registry API routes.
 
 Phase 2 (ATHENA-1): asyncpg client replaced with SQLAlchemy ORM against the
-admin DB's rag_services table.  Health pings are no longer inlined on the GET
+admin DB's athena_service_registry table.  Health pings are no longer inlined on the GET
 list — callers receive the cached health_status + last_health_check written by
 the Phase 4 background poller.  Between Phase 2 and Phase 4, those columns
 will be NULL / unknown — that is the documented transient state.
@@ -60,7 +60,7 @@ async def get_all_services(
 ) -> Dict[str, Any]:
     """Return all service registry entries with cached health status.
 
-    Health is read from rag_services.health_status / last_health_check, NOT
+    Health is read from athena_service_registry.health_status / last_health_check, NOT
     from a live ping.  The Phase 4 background poller keeps those columns fresh.
     Between Phase 2 and Phase 4 they will be NULL — callers should treat NULL
     as 'pending' (not alarming).  (ATHENA-1 transient state documented in plan)

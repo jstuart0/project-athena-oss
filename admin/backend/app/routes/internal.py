@@ -459,7 +459,7 @@ async def get_rag_service_urls(db: Session = Depends(get_db)) -> Dict[str, str]:
     """Return enabled service URL map for orchestrator startup.
 
     Response shape: {name: url} — matches rag_client.py:65-91 consumer.
-    Reads from the admin DB's rag_services table (ORM) instead of the legacy
+    Reads from the admin DB's athena_service_registry table (ORM) instead of the legacy
     asyncpg connection to the athena DB.  (ian I-C1 / ATHENA-1 Phase 2)
     """
     try:
