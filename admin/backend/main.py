@@ -613,7 +613,11 @@ async def startup_event():
     start_background_sync()
 
     # Start background health poll task (Phase 4 / ATHENA-1)
-    start_health_polling()
+    # DEV_MODE has no Redis client; production passes redis_client for leader election.
+    if DEV_MODE:
+        start_health_polling()
+    else:
+        start_health_polling(redis_client=redis_client)
 
 
 async def ensure_default_model():

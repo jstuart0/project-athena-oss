@@ -9,12 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Plan:** `thoughts/shared/plans/active-2026-05-11-deliver-rag-services-table-rename.md`
-> **Ticket:** [ATHENA-17](https://plane.xmojo.net)
+> **Plans:** `thoughts/shared/plans/active-2026-05-11-deliver-rag-services-table-rename.md`, `thoughts/shared/plans/active-2026-05-11-deliver-health-poller-leader-election.md`
+> **Tickets:** [ATHENA-17](https://plane.xmojo.net), [ATHENA-18](https://plane.xmojo.net)
 
 ### Rename `rag_services` table to `athena_service_registry` (ATHENA-17)
 
 - **Changed** (`ATHENA-17`): Alembic migration `057_rename_rag_services_to_athena_service_registry.py` renames the `rag_services` table to `athena_service_registry`. No data loss; downgrade restores the original name. SQLAlchemy model `RagService` updated to `__tablename__ = "athena_service_registry"`. All ORM queries, route docstrings, and YAML comments updated to reference the new table name.
+
+### Health-poller leader election (ATHENA-18)
+
+- **Added** (`ATHENA-18`): Redis SETNX-based leader election in `admin/backend/app/services/health_poller.py`. With `replicas: 2`, only one replica polls and writes health columns per cycle; the non-leader yields the iteration. A strict-abort per-cycle heartbeat task (every `HEARTBEAT_INTERVAL_SECONDS=20`) renews the lease atomically via Lua check-and-set and cancels the in-flight `_poll_all_services` task if the lease cannot be renewed, preventing any replica from writing after lease loss. No new env vars — leader election uses the existing `REDIS_URL`. `HEALTH_POLL_INTERVAL_SECONDS` must remain < 40s (`LEASE_TTL_SECONDS`); startup raises `SystemExit FATAL` if this invariant is violated.
 
 ---
 
