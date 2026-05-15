@@ -148,6 +148,33 @@ def validate_endpoint_url(v: str) -> str:
     return v
 
 
+def is_local_host(hostname: str | None) -> bool:
+    """True iff hostname is loopback or RFC1918 or ULA, AND the process is not in a K8s pod.
+
+    Returns False when KUBERNETES_SERVICE_HOST is set in the environment,
+    regardless of hostname — K8s pods are never a "local dev" environment
+    even if cluster service IPs fall in RFC1918 ranges (xander M4).
+
+    Link-local (169.254/16, fe80::/10) is intentionally excluded — APIPA
+    addresses are not legitimate database targets (bob M1).
+    """
+    import os
+
+    if os.getenv("KUBERNETES_SERVICE_HOST"):
+        return False
+    if not hostname:
+        return False
+    if hostname in ("localhost", "::1"):
+        return True
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if ip.is_link_local:
+        return False
+    return ip.is_loopback or ip.is_private
+
+
 def parse_endpoint_url(endpoint_url: str) -> dict:
     """Parse endpoint_url into host/port/protocol/health_endpoint components.
 

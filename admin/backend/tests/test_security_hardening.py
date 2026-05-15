@@ -1470,14 +1470,14 @@ class TestPhase1DevModePostgresGate:
                     os.environ[k] = orig_v
             get_config.cache_clear()
 
-    def test_phase1_dev_mode_postgres_raises_system_exit(self):
-        """DEV_MODE=true + postgresql DATABASE_URL must abort startup (xander:6)."""
+    def test_phase1_dev_mode_remote_postgres_raises_system_exit(self):
+        """DEV_MODE=true + non-local postgresql DATABASE_URL must abort startup (xander:6)."""
         result = self._run_startup_subprocess({
             "DEV_MODE": "true",
-            "DATABASE_URL": "postgresql://user:pass@localhost/testdb",
+            "DATABASE_URL": "postgresql://user:pass@db.example.com/testdb",
         })
         assert result.returncode != 0, (
-            "Startup must exit non-zero when DEV_MODE=true and DATABASE_URL is non-SQLite; "
+            "Startup must exit non-zero when DEV_MODE=true and DATABASE_URL is non-SQLite remote; "
             f"returncode={result.returncode}, stderr={result.stderr!r}"
         )
         combined = result.stdout + result.stderr
@@ -1520,6 +1520,83 @@ class TestPhase1DevModePostgresGate:
         assert "DEV_MODE=true is incompatible" not in combined, (
             "xander:6 DEV_MODE gate must NOT fire when DEV_MODE=false; "
             f"got output: {combined!r}"
+        )
+
+    import pytest as _pytest
+
+    @_pytest.mark.parametrize("local_host,url_host", [
+        ("127.0.0.1", "127.0.0.1"),
+        ("localhost", "localhost"),
+        ("192.168.1.5", "192.168.1.5"),
+        ("10.0.0.5", "10.0.0.5"),
+        ("172.16.0.5", "172.16.0.5"),
+        # IPv6 addresses must be bracketed in URLs per RFC 3986
+        ("::1", "[::1]"),
+        ("fd00::1", "[fd00::1]"),
+    ])
+    def test_phase1_dev_mode_local_postgres_continues_with_warning(self, local_host, url_host):
+        """DEV_MODE=true + non-SQLite DATABASE_URL on a local/private host must warn and continue.
+
+        Each loopback, RFC1918, and ULA address is a valid developer-machine target.
+        Startup must NOT exit; the dev_mode_with_local_non_sqlite_database warning must appear.
+        IPv6 addresses are bracketed per RFC 3986 (urlparse requires brackets to parse hostname).
+        """
+        result = self._run_startup_subprocess({
+            "DEV_MODE": "true",
+            "DATABASE_URL": f"postgresql://user:pass@{url_host}/testdb",
+            "KUBERNETES_SERVICE_HOST": None,  # ensure not in K8s
+        })
+        combined = result.stdout + result.stderr
+        # Must not SystemExit on a local host
+        assert result.returncode == 0, (
+            f"Startup must NOT exit for DEV_MODE + local host {local_host!r}; "
+            f"returncode={result.returncode}, output={combined!r}"
+        )
+        assert "dev_mode_with_local_non_sqlite_database" in combined or \
+               "local/private host" in combined, (
+            f"Warning about local non-SQLite DB must appear in output for {local_host!r}; "
+            f"got: {combined!r}"
+        )
+
+    def test_phase1_dev_mode_k8s_guard_blocks_even_local_host(self):
+        """DEV_MODE=true inside a K8s pod must always SystemExit even when the DB host is local.
+
+        KUBERNETES_SERVICE_HOST is auto-injected in every K8s pod.  A deployer who
+        copy-pastes DEV_MODE=true into their cluster config would have ClusterIPs
+        (RFC1918) auto-classified as local; the guard closes that attack chain (xander M4).
+        """
+        result = self._run_startup_subprocess({
+            "DEV_MODE": "true",
+            "DATABASE_URL": "postgresql://user:pass@10.96.0.5/testdb",
+            "KUBERNETES_SERVICE_HOST": "10.96.0.1",
+        })
+        assert result.returncode != 0, (
+            "Startup must exit non-zero when DEV_MODE=true inside a K8s pod; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "FATAL" in combined, (
+            f"Startup output must contain 'FATAL' for K8s DEV_MODE guard; got: {combined!r}"
+        )
+
+    def test_phase1_dev_mode_link_local_address_raises(self):
+        """DEV_MODE=true + link-local DB host (169.254.x.x) must SystemExit.
+
+        Link-local (APIPA) addresses are not legitimate database targets and are
+        intentionally excluded from the local-host carve-out (bob M1).
+        """
+        result = self._run_startup_subprocess({
+            "DEV_MODE": "true",
+            "DATABASE_URL": "postgresql://user:pass@169.254.1.1/testdb",
+            "KUBERNETES_SERVICE_HOST": None,  # not in K8s
+        })
+        assert result.returncode != 0, (
+            "Startup must exit non-zero for DEV_MODE + link-local host 169.254.1.1; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "FATAL" in combined, (
+            f"Startup output must contain 'FATAL' for link-local address; got: {combined!r}"
         )
 
 

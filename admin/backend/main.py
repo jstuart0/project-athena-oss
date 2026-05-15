@@ -346,6 +346,21 @@ async def _init_rate_limiter(redis_conn) -> None:
         # LIMITER_ACTIVE stays False; login dep no-ops; lockout layer still defends.
 
 
+def _is_local_database_url(url: str) -> bool:
+    """Return True if url is non-SQLite but points at a host on a loopback/private subnet.
+
+    Delegates the host classification to is_local_host() in url_validators, which also
+    returns False when KUBERNETES_SERVICE_HOST is set (K8s pods are never local-dev).
+    """
+    from urllib.parse import urlparse
+    from app.utils.url_validators import is_local_host
+    try:
+        host = urlparse(url).hostname
+    except Exception:
+        return False
+    return is_local_host(host)
+
+
 # Startup event: Initialize database and check connections
 @app.on_event("startup")
 async def startup_event():
@@ -379,17 +394,47 @@ async def startup_event():
         # prefix-check is sufficient for the legitimate-misconfig case (see plan D-tradeoff).
         _db_url = get_config().database_url
         if _db_url and not _db_url.startswith("sqlite"):
-            logger.critical(
-                "dev_mode_with_real_database",
-                database_url_kind=_db_url.split("://", 1)[0],  # scheme only, NOT credentials
-                message="DEV_MODE=true with a non-SQLite DATABASE_URL is a deploy-shape mismatch (xander:6).",
-            )
-            raise SystemExit(
-                "FATAL: DEV_MODE=true is incompatible with a non-SQLite DATABASE_URL. "
-                "DEV_MODE auto-creates an unauthenticated owner admin (oidc.py:401-421); pairing it "
-                "with a real database grants owner-level API access without credentials. "
-                "Set DEV_MODE=false for production, or use a SQLite DATABASE_URL for local dev."
-            )
+            if os.getenv("KUBERNETES_SERVICE_HOST"):
+                # Running inside a K8s pod — never treat any address as "local dev."
+                # A deployer who copy-pastes DEV_MODE=true into their cluster config
+                # would otherwise have RFC1918 ClusterIPs auto-classified as local,
+                # seed_dev_data() would create an owner admin in the production DB (xander M4).
+                logger.critical(
+                    "dev_mode_in_kubernetes_pod",
+                    database_url_kind=_db_url.split("://", 1)[0],
+                    message="DEV_MODE=true is not permitted in a Kubernetes pod (xander:6).",
+                )
+                raise SystemExit(
+                    "FATAL: DEV_MODE=true is not permitted in a Kubernetes pod. "
+                    "DEV_MODE auto-creates an unauthenticated owner admin (oidc.py:401-421); "
+                    "running it inside a cluster with a real database grants owner-level API "
+                    "access without credentials. Set DEV_MODE=false for production."
+                )
+            elif _is_local_database_url(_db_url):
+                # Non-SQLite but on loopback/RFC1918/ULA — likely a developer running
+                # a local Postgres instance.  Warn loudly and continue.
+                logger.warning(
+                    "dev_mode_with_local_non_sqlite_database",
+                    database_url_kind=_db_url.split("://", 1)[0],
+                    host_classification="local",
+                    message=(
+                        "DEV_MODE=true with a non-SQLite DATABASE_URL on a local/private host. "
+                        "Continuing startup; ensure this is a developer machine. "
+                        "An unauthenticated owner admin will be created (see oidc.py:401-421)."
+                    ),
+                )
+            else:
+                logger.critical(
+                    "dev_mode_with_real_database",
+                    database_url_kind=_db_url.split("://", 1)[0],  # scheme only, NOT credentials
+                    message="DEV_MODE=true with a non-SQLite DATABASE_URL is a deploy-shape mismatch (xander:6).",
+                )
+                raise SystemExit(
+                    "FATAL: DEV_MODE=true is incompatible with a non-SQLite DATABASE_URL. "
+                    "DEV_MODE auto-creates an unauthenticated owner admin (oidc.py:401-421); pairing it "
+                    "with a real database grants owner-level API access without credentials. "
+                    "Set DEV_MODE=false for production, or use a SQLite DATABASE_URL for local dev."
+                )
 
         # Initialize database schema
         try:
