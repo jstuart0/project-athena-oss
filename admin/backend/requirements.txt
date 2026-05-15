@@ -45,6 +45,8 @@ fastembed>=0.2.0
 
 # test-only (Phase 3 OIDC fixture issuer; ATHENA-12)
 pytest-httpserver>=1.0.8
+# test-only (Phase 5b regression-guard HTML label check; ATHENA-11 C1)
+beautifulsoup4>=4.12,<5
 
 # Campaign 3 / ATHENA-14 — rate limiter for /local-login
 fastapi-limiter==0.1.6

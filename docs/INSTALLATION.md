@@ -472,7 +472,7 @@ pip install -r requirements.txt
 
 # 3. Run database migrations
 cd admin/backend
-alembic upgrade 053  # use 053, not head — repo has two alembic heads
+alembic upgrade 058  # use 058, not head — repo has two alembic heads
 cd ../..
 
 # 4. Start services (in separate terminals)
@@ -910,10 +910,10 @@ ATHENA_SEED_DEFAULTS=true
 **Run migrations:**
 ```bash
 cd admin/backend
-alembic upgrade 053
+alembic upgrade 058
 ```
 
-> **Note — two alembic heads:** this repo has a pre-existing divergence between the `004a` legacy branch and the primary chain. Running `alembic upgrade head` will fail with "Multiple head revisions are present" because there is no single head. Always target the primary chain explicitly with `alembic upgrade 053`. Merging/retiring the `004a` legacy branch is tracked as a separate follow-up campaign.
+> **Note — two alembic heads:** this repo has a pre-existing divergence between the `004a` legacy branch and the primary chain. Running `alembic upgrade head` will fail with "Multiple head revisions are present" because there is no single head. Always target the primary chain explicitly with `alembic upgrade 058`. Merging/retiring the `004a` legacy branch is tracked as a separate follow-up campaign.
 
 #### Migration 053 — clear legacy maintainer IPs from gateway_config (post-ATHENA-11)
 
@@ -923,12 +923,12 @@ left over from old column defaults), run:
 
 ```bash
 cd admin/backend
-alembic upgrade 053
+alembic upgrade 058
 ```
 
 The migration sets `orchestrator_url` and `ollama_fallback_url` to empty strings
 for any row whose value matches the legacy IPs (exact match or trailing-slash
-variant). Deployer-set values are unaffected. Use `alembic upgrade 053` (not
+variant). Deployer-set values are unaffected. Use `alembic upgrade 058` (not
 `head`) — the repo has a pre-existing two-head divergence (`004a` legacy +
 primary chain) and `head` is ambiguous.
 
@@ -937,7 +937,7 @@ primary chain) and `head` is ambiguous.
 # Drop and recreate
 dropdb athena
 createdb athena
-alembic upgrade 053  # use 053, not head — repo has two alembic heads
+alembic upgrade 058  # use 058, not head — repo has two alembic heads
 ```
 
 ### Network Issues (Distributed Deployment)
