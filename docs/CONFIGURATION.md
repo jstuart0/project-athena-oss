@@ -378,7 +378,7 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEV_MODE` | `false` | Development mode: uses SQLite in-memory, skips OIDC gates, auto-creates a `dev-admin` owner account on unauthenticated requests. **Never set `true` in production.** If `DEV_MODE=true` and `DATABASE_URL` points to a non-SQLite database, the backend exits at startup (xander:6 — the auto-owner-creation would silently run against a real DB). |
+| `DEV_MODE` | `false` | Development mode: uses SQLite in-memory, skips OIDC gates, auto-creates a `dev-admin` owner account on unauthenticated requests. **Never set `true` in production.** If `DEV_MODE=true` and `DATABASE_URL` points to a non-SQLite database, the startup gate applies a three-arm check (xander:6): (1) K8s pod (`KUBERNETES_SERVICE_HOST` set, or `IN_CLUSTER=true`) → **FATAL** — ClusterIPs are RFC1918 but are never a safe local-dev environment; (2) local host (loopback, RFC1918, ULA) → **WARNING** and continue — valid for a developer running a local Postgres instance; (3) remote host → **FATAL** — pairing DEV_MODE with a remote DB grants owner-level access without credentials. `IN_CLUSTER=true` is treated identically to `KUBERNETES_SERVICE_HOST` for the K8s guard (arm 1). |
 | `DEMO_MODE` | `false` | Demo mode: pre-seeded data and demo-user bypass in `auth_login`. Rejected at startup if `DEV_MODE=false` — running `DEMO_MODE=true` in production bypasses the authentication path via the demo-user branch (xander:16). To use demo mode, also set `DEV_MODE=true`. |
 | `DATABASE_URL` | `""` | SQLAlchemy connection string. When `DEV_MODE=true`, this value is ignored by `database.py` (SQLite in-memory is used), but the startup gate checks it first and will exit if the value is a non-SQLite URL. Set to `sqlite:///:memory:` or leave empty for local dev with `DEV_MODE=true`. |
 
@@ -392,7 +392,9 @@ The admin-backend enforces fail-closed checks in `startup_event()`. All of these
 
 | Condition | Error |
 |-----------|-------|
-| `DEV_MODE=true` + non-SQLite `DATABASE_URL` | `FATAL: DEV_MODE=true is set, but DATABASE_URL points to a non-SQLite database` |
+| `DEV_MODE=true` + non-SQLite `DATABASE_URL` in K8s pod (`KUBERNETES_SERVICE_HOST` or `IN_CLUSTER=true` set) | `FATAL: DEV_MODE=true is not permitted in a Kubernetes pod` |
+| `DEV_MODE=true` + non-SQLite `DATABASE_URL` on a **remote** host | `FATAL: DEV_MODE=true is incompatible with a non-SQLite DATABASE_URL` |
+| `DEV_MODE=true` + non-SQLite `DATABASE_URL` on a **local/private** host (loopback, RFC1918, ULA) | WARNING logged; startup continues |
 | `DEMO_MODE=true` + `DEV_MODE=false` | `FATAL: DEMO_MODE=true requires DEV_MODE=true` |
 | `OIDC_CLIENT_ID` is `""`, `"demo-mode"`, or `"CONFIGURE_ME_OIDC_CLIENT_ID"` in production | `insecure_default_secret_detected` |
 | `OIDC_ISSUER` empty or `CONFIGURE_ME`-prefixed in production | `insecure_default_secret_detected` |

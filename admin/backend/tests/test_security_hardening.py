@@ -1579,6 +1579,29 @@ class TestPhase1DevModePostgresGate:
             f"Startup output must contain 'FATAL' for K8s DEV_MODE guard; got: {combined!r}"
         )
 
+    def test_phase1_dev_mode_in_cluster_env_guard_blocks_even_local_host(self):
+        """DEV_MODE=true inside a pod signalled by IN_CLUSTER=true must SystemExit.
+
+        IN_CLUSTER=true is recognized as equivalent to KUBERNETES_SERVICE_HOST
+        (mirrors admin_url.py:94 and url_validators.py:163).  A deployer using a
+        custom operator that sets IN_CLUSTER instead of the auto-injected
+        KUBERNETES_SERVICE_HOST variable must still be blocked (xander M4 / ian Med).
+        """
+        result = self._run_startup_subprocess({
+            "DEV_MODE": "true",
+            "DATABASE_URL": "postgresql://user:pass@10.0.0.5/testdb",
+            "IN_CLUSTER": "true",
+            "KUBERNETES_SERVICE_HOST": None,  # absent — IN_CLUSTER alone must trigger the guard
+        })
+        assert result.returncode != 0, (
+            "Startup must exit non-zero when DEV_MODE=true and IN_CLUSTER=true; "
+            f"returncode={result.returncode}, stderr={result.stderr!r}"
+        )
+        combined = result.stdout + result.stderr
+        assert "FATAL" in combined, (
+            f"Startup output must contain 'FATAL' for IN_CLUSTER DEV_MODE guard; got: {combined!r}"
+        )
+
     def test_phase1_dev_mode_link_local_address_raises(self):
         """DEV_MODE=true + link-local DB host (169.254.x.x) must SystemExit.
 

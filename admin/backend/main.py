@@ -394,11 +394,13 @@ async def startup_event():
         # prefix-check is sufficient for the legitimate-misconfig case (see plan D-tradeoff).
         _db_url = get_config().database_url
         if _db_url and not _db_url.startswith("sqlite"):
-            if os.getenv("KUBERNETES_SERVICE_HOST"):
+            if os.getenv("KUBERNETES_SERVICE_HOST") or os.getenv("IN_CLUSTER", "").lower() == "true":
                 # Running inside a K8s pod — never treat any address as "local dev."
                 # A deployer who copy-pastes DEV_MODE=true into their cluster config
                 # would otherwise have RFC1918 ClusterIPs auto-classified as local,
                 # seed_dev_data() would create an owner admin in the production DB (xander M4).
+                # IN_CLUSTER=true is recognized as equivalent to KUBERNETES_SERVICE_HOST
+                # (mirrors admin_url.py:94 and url_validators.py:163).
                 logger.critical(
                     "dev_mode_in_kubernetes_pod",
                     database_url_kind=_db_url.split("://", 1)[0],

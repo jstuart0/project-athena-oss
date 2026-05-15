@@ -160,7 +160,7 @@ def is_local_host(hostname: str | None) -> bool:
     """
     import os
 
-    if os.getenv("KUBERNETES_SERVICE_HOST"):
+    if os.getenv("KUBERNETES_SERVICE_HOST") or os.getenv("IN_CLUSTER", "").lower() == "true":
         return False
     if not hostname:
         return False

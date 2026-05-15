@@ -123,13 +123,8 @@ def _row_count(engine, service_name: str) -> int:
 def _reload_encryption_module():
     """Force-reload encryption.py so module-level ENCRYPTION_KEY capture
     picks up the current environment value in tests that mutate os.environ."""
-    mod_name = "app.utils.encryption"
-    if mod_name in sys.modules:
-        del sys.modules[mod_name]
-    # Also reload any parent package caches that might hold a stale reference.
-    for key in list(sys.modules.keys()):
-        if key.startswith("app.utils") or key == "app":
-            del sys.modules[key]
+    for k in ["app.utils.encryption", "app.utils", "app"]:
+        sys.modules.pop(k, None)
 
 
 # ── tests ────────────────────────────────────────────────────────────────────
@@ -310,6 +305,39 @@ class TestMigration058:
         assert "✓ Cleared 1 legacy OIDC secret rows" in captured.out
         # Bad row still present; good row gone.
         assert _row_count(engine, "oidc_redirect_uri") == 1
+        assert _row_count(engine, "oidc_provider_url") == 0
+
+    def test_migration_058_clears_legacy_provider_url_without_trailing_slash(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A row with oidc_provider_url stored WITHOUT a trailing slash is deleted.
+
+        _matches() covers three forms: exact, stripped, and stripped+slash.
+        LEGACY_PROVIDER ends with '/', so branch 2 (decrypted == legacy.rstrip("/"))
+        handles the no-trailing-slash variant.
+        """
+        enc_key = "test-key-for-migration-058"
+        engine, db_url = _make_engine(tmp_path)
+
+        # Store the value without the trailing slash.
+        no_slash_value = LEGACY_PROVIDER.rstrip("/")
+        encrypted = _encrypt_with_key(no_slash_value, enc_key)
+        with engine.begin() as conn:
+            conn.execute(
+                text("INSERT INTO secrets (service_name, encrypted_value) VALUES ('oidc_provider_url', :v)"),
+                {"v": encrypted},
+            )
+
+        assert _row_count(engine, "oidc_provider_url") == 1
+
+        monkeypatch.setenv("ENCRYPTION_KEY", enc_key)
+        monkeypatch.delenv("ENCRYPTION_SALT", raising=False)
+        _reload_encryption_module()
+
+        _run_upgrade(monkeypatch, db_url, env_overrides={"ENCRYPTION_KEY": enc_key})
+
+        captured = capsys.readouterr()
+        assert "✓ Cleared 1 legacy OIDC secret rows" in captured.out
         assert _row_count(engine, "oidc_provider_url") == 0
 
     def test_migration_058_imports_from_app(self, monkeypatch):

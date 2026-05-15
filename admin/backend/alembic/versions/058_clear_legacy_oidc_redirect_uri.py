@@ -45,6 +45,8 @@ import os
 import sys
 from pathlib import Path
 
+from cryptography.fernet import InvalidToken
+
 # sys.path bootstrap (bob H2):
 # Migration 058 is the FIRST migration to import from app.*. Alembic runs the
 # migration file directly; `app.*` is only resolvable if admin/backend is on
@@ -106,7 +108,7 @@ def upgrade() -> None:
     for row in rows:
         try:
             plaintext = decrypt_value(row.encrypted_value)
-        except Exception:
+        except (InvalidToken, ValueError):
             # Decryption failure: key rotated or value corrupted — leave alone.
             # Log at DEBUG level so operators can identify skipped rows if needed.
             print(

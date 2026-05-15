@@ -915,7 +915,7 @@ alembic upgrade 058
 
 > **Note — two alembic heads:** this repo has a pre-existing divergence between the `004a` legacy branch and the primary chain. Running `alembic upgrade head` will fail with "Multiple head revisions are present" because there is no single head. Always target the primary chain explicitly with `alembic upgrade 058`. Merging/retiring the `004a` legacy branch is tracked as a separate follow-up campaign.
 
-#### Migration 053 — clear legacy maintainer IPs from gateway_config (post-ATHENA-11)
+#### Migrations 053 + 058 — legacy maintainer defaults cleanup (post-ATHENA-11)
 
 If you deployed Athena before commit `4f6b159` and your `gateway_config` table
 still contains rows with `http://192.168.10.167:*` (the maintainer's homelab IPs
@@ -931,6 +931,25 @@ for any row whose value matches the legacy IPs (exact match or trailing-slash
 variant). Deployer-set values are unaffected. Use `alembic upgrade 058` (not
 `head`) — the repo has a pre-existing two-head divergence (`004a` legacy +
 primary chain) and `head` is ambiguous.
+
+**Migration 058 — clear legacy maintainer OIDC secrets**
+
+Migration 058 also clears stale `oidc_redirect_uri` and `oidc_provider_url` rows
+in the `secrets` table that were seeded with the maintainer's xmojo.net values
+prior to commit `5403a8a`. It decrypts each matching row and deletes only those
+whose plaintext equals the known legacy literals (exact match, with or without
+trailing slash).
+
+- **Requires** `ENCRYPTION_KEY` env var to be set in the migration runtime. If
+  `ENCRYPTION_KEY` is unset, the migration prints a `WARNING` and skips cleanly —
+  no rows are deleted, no error is raised. Re-run after setting the key.
+- **Optional rehearsal**: set `DRY_RUN_058=true` to print `[DRY-RUN] Would delete row id=...`
+  for each matched row without deleting anything. Safe to run against production
+  data before the destructive run.
+- **No-op on fresh deployments**: fresh deployments have no pre-existing `secrets`
+  rows and see `✓ Cleared 0 legacy OIDC secret rows`.
+- After running, re-save OIDC settings via the admin UI if your deployment
+  legitimately uses the xmojo.net values.
 
 **Reset database (development only):**
 ```bash

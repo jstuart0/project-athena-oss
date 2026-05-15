@@ -69,8 +69,8 @@ _HTML_FILES = list(_ADMIN_FRONTEND.glob("*.html"))
 # until that phase lands. Jackson will remove the xfail marker when Phase 4 is
 # complete and the test passes.
 @pytest.mark.xfail(
-    reason="Phase 4 (ruby:1 form-label associations) not yet implemented",
-    strict=False,
+    reason="Phase 4 (ruby:1 form-label associations) not yet implemented — remove marker when labels are fixed",
+    strict=True,
 )
 @pytest.mark.skipif(
     not _BS4_AVAILABLE,
