@@ -332,20 +332,31 @@ RAG (Retrieval-Augmented Generation) services provide domain-specific data for q
 
 ### Available RAG Services
 
-| Service | Port | API Key Required | Free Tier |
-|---------|------|-----------------|-----------|
-| Weather | 8010 | `OPENWEATHER_API_KEY` | 1,000/day |
-| Airports | 8011 | None | N/A |
-| Sports | 8017 | `THESPORTSDB_API_KEY` | Yes |
-| Flights | 8013 | `FLIGHTAWARE_API_KEY` | Paid only |
-| Events | 8014 | `TICKETMASTER_API_KEY` | 5,000/day |
-| Streaming | 8015 | `TMDB_API_KEY` | 1M/month |
-| News | 8016 | `NEWSAPI_KEY` | 100/day |
-| Stocks | 8012 | `ALPHA_VANTAGE_API_KEY` | 500/day |
-| WebSearch | 8018 | `BRAVE_API_KEY` | 2,000/month |
-| Dining | 8019 | `YELP_API_KEY` | 5,000/day |
-| Recipes | 8020 | `SPOONACULAR_API_KEY` | 150/day |
-| Directions | 8030 | None | N/A |
+| Service | Port | API Key Required | Free Tier | Description |
+|---------|------|------------------|-----------|-------------|
+| Weather | 8010 | `OPENWEATHER_API_KEY` | 1,000/day ([OpenWeather](https://openweathermap.org/api)) | Current weather and forecast lookups |
+| Airports | 8011 | `FLIGHTAWARE_API_KEY` | Paid only ([FlightAware AeroAPI](https://www.flightaware.com/commercial/aeroapi/)) | Airport status, delays, and flight-oriented airport data |
+| Stocks | 8012 | `ALPHA_VANTAGE_API_KEY` | 500/day ([Alpha Vantage](https://www.alphavantage.co/support/#api-key)) | Stock quotes, company overview, and market data |
+| Flights | 8013 | `FLIGHTAWARE_API_KEY` | Paid only ([FlightAware AeroAPI](https://www.flightaware.com/commercial/aeroapi/)) | Flight status and tracking data |
+| Events | 8014 | `TICKETMASTER_API_KEY` | 5,000/day ([Ticketmaster](https://developer.ticketmaster.com/)) | Ticketmaster event search |
+| Streaming | 8015 | `TMDB_API_KEY` | 1M/month ([TMDB](https://www.themoviedb.org/settings/api)) | Movie and TV streaming recommendations |
+| News | 8016 | None | N/A | News aggregation and summaries |
+| Sports | 8017 | `THESPORTSDB_API_KEY` | Yes ([TheSportsDB](https://www.thesportsdb.com/api.php)) | Sports teams, schedules, scores, and league data |
+| WebSearch | 8018 | `BRAVE_API_KEY` | 2,000/month ([Brave Search API](https://brave.com/search/api/)) | General web search fallback |
+| Dining | 8019 | `GOOGLE_PLACES_API_KEY` | Varies ([Google Places](https://developers.google.com/maps/documentation/places/web-service/overview)) | Restaurant and place search |
+| Recipes | 8020 | `SPOONACULAR_API_KEY` | 150/day ([Spoonacular](https://spoonacular.com/food-api)) | Recipe search and food data |
+| OneCall | 8021 | `OPENWEATHER_API_KEY` | 1,000/day ([OpenWeather One Call](https://openweathermap.org/api/one-call-3)) | OpenWeather One Call 3.0 current, hourly, daily, and alert data |
+| SeatGeek Events | 8024 | `SEATGEEK_CLIENT_ID`, `SEATGEEK_CLIENT_SECRET` | Varies ([SeatGeek](https://platform.seatgeek.com/)) | SeatGeek event search and local event discovery |
+| Transportation | 8025 | None | N/A | Baltimore transit routes, nearby stops, departures, and water transit |
+| Community Events | 8026 | None | N/A | Local community event aggregation with optional Redis cache |
+| Amtrak | 8027 | None | N/A | Amtrak station and schedule lookups from GTFS data |
+| Tesla | 8028 | `TESLAMATE_ENABLED=true` plus `TESLAMATE_DB_*` | Self-hosted TeslaMate | TeslaMate vehicle metrics, drives, charging, battery, and efficiency data |
+| Media | 8029 | `OVERSEERR_API_KEY` | Self-hosted Overseerr | Overseerr media search and request management |
+| Directions | 8030 | `GOOGLE_DIRECTIONS_API_KEY` or `GOOGLE_PLACES_API_KEY` | Varies ([Google Maps Platform](https://developers.google.com/maps/documentation/directions)) | Route and directions lookup |
+| Site Scraper | 8031 | `BRAVE_API_KEY` | 2,000/month ([Brave Search API](https://brave.com/search/api/)) | Website search and content extraction |
+| SerpAPI Events | 8032 | `SERPAPI_API_KEY` | Varies ([SerpAPI](https://serpapi.com/)) | Google Events search through SerpAPI |
+| Price Compare | 8033 | None | N/A | Product search and price comparison across providers |
+| Bright Data | 8040 | `BRIGHT_DATA_API_TOKEN`, `BRIGHT_DATA_ZONE` | Paid ([Bright Data](https://brightdata.com/)) | Web Unlocker scraping and batch scraping |
 
 ### Enable RAG Services
 
