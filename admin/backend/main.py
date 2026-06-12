@@ -701,6 +701,12 @@ async def startup_event():
     else:
         start_health_polling(redis_client=redis_client)
 
+    # ATHENA-55 Phase 3: wire the Redis client into the WebSocket layer for
+    # single-use jti enforcement.  DEV_MODE has no Redis client; the websocket
+    # module uses an in-memory fallback when configure_redis is not called.
+    if not DEV_MODE:
+        websocket.configure_redis(redis_client)
+
 
 async def ensure_default_model():
     """

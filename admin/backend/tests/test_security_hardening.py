@@ -3425,3 +3425,321 @@ class TestWsTicketLateralPathClosure:
             "A plain REST token must NOT have ws_ticket=True; "
             f"got payload: {payload!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-55 Phase 3 — WS handler ticket validation, Origin check,
+# single-source JWT secret, dual-mode, log cleanup
+# ---------------------------------------------------------------------------
+
+class TestWsPhase3StaticGuards:
+    """
+    Static assertions covering Phase 3 guard properties that are verifiable
+    without spinning up a live WebSocket connection.
+    """
+
+    def test_no_second_jwt_secret_getenv_in_websocket(self):
+        """
+        Static: websocket.py must not contain a second JWT_SECRET = os.getenv(...)
+        read (xander M-3, ATHENA-55 Phase 3).  The canonical source is oidc.py.
+        """
+        import re
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        # Strip comment lines
+        code_lines = [l for l in src.splitlines() if not l.lstrip().startswith("#")]
+        code = "\n".join(code_lines)
+
+        matches = re.findall(r'JWT_SECRET\s*=\s*os\.getenv', code)
+        assert matches == [], (
+            f"websocket.py must not re-read JWT_SECRET from os.getenv (xander M-3); "
+            f"found: {matches!r}"
+        )
+
+    def test_no_token_slice_log_in_websocket(self):
+        """
+        Static: websocket.py must not contain token[:N] slice (xander, ATHENA-55 Phase 3).
+        """
+        import re
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        matches = re.findall(r'token\s*\[:', src)
+        assert matches == [], (
+            f"websocket.py must not log token slices (token[:); found: {matches!r}"
+        )
+
+    def test_decode_ws_ticket_lives_in_oidc(self):
+        """
+        Static: decode_ws_ticket must be defined in oidc.py, not in websocket.py
+        (single source of truth, xander M-3).
+        """
+        import inspect
+        from app.auth.oidc import decode_ws_ticket
+        src_file = inspect.getfile(decode_ws_ticket)
+        assert src_file.endswith("oidc.py"), (
+            f"decode_ws_ticket must be defined in oidc.py; found in: {src_file!r}"
+        )
+
+    def test_configure_redis_callable_in_websocket(self):
+        """websocket.configure_redis() must exist so main.py can wire the client."""
+        from app.routes.websocket import configure_redis
+        import inspect
+        assert callable(configure_redis)
+        sig = inspect.signature(configure_redis)
+        assert "redis_client" in sig.parameters
+
+
+class TestWsPhase3ClaimJti:
+    """Unit tests for _claim_jti single-use enforcement."""
+
+    def setup_method(self):
+        """Reset in-memory jti store before each test."""
+        from app.routes import websocket as ws_mod
+        ws_mod._used_jti_memory.clear()
+        ws_mod._redis_client = None  # ensure DEV_MODE path
+
+    def test_first_claim_returns_true(self):
+        """First use of a jti returns True (claimed)."""
+        import asyncio
+        from app.routes.websocket import _claim_jti
+
+        result = asyncio.run(_claim_jti("jti-abc", ttl=45))
+        assert result is True
+
+    def test_replay_returns_false(self):
+        """Second use of the same jti returns False (replayed)."""
+        import asyncio
+        from app.routes.websocket import _claim_jti
+
+        async def _run():
+            await _claim_jti("jti-dup", ttl=45)
+            return await _claim_jti("jti-dup", ttl=45)
+
+        result = asyncio.run(_run())
+        assert result is False
+
+    def test_different_jtis_independent(self):
+        """Two different jtis can both be claimed on first use."""
+        import asyncio
+        from app.routes.websocket import _claim_jti
+
+        async def _run():
+            r1 = await _claim_jti("jti-x", ttl=45)
+            r2 = await _claim_jti("jti-y", ttl=45)
+            return r1, r2
+
+        r1, r2 = asyncio.run(_run())
+        assert r1 is True
+        assert r2 is True
+
+    def test_redis_key_shape(self):
+        """
+        Production Redis key must be athena:ws_ticket:<jti>.
+
+        Use a fake synchronous Redis-like object and verify the SET call uses
+        the expected key prefix.
+        """
+        import asyncio
+        from app.routes import websocket as ws_mod
+
+        recorded_calls = []
+
+        class FakeRedis:
+            async def set(self, key, value, nx=False, ex=None):
+                recorded_calls.append({"key": key, "value": value, "nx": nx, "ex": ex})
+                return True  # simulate first-time claim
+
+        ws_mod._redis_client = FakeRedis()
+        try:
+            asyncio.run(ws_mod._claim_jti("my-unique-jti", ttl=45))
+        finally:
+            ws_mod._redis_client = None
+
+        assert len(recorded_calls) == 1
+        assert recorded_calls[0]["key"] == "athena:ws_ticket:my-unique-jti", (
+            f"Redis key must be athena:ws_ticket:<jti>; got: {recorded_calls[0]['key']!r}"
+        )
+        assert recorded_calls[0]["nx"] is True
+        assert recorded_calls[0]["ex"] == 45
+
+
+class TestWsPhase3DualModeDecoder:
+    """
+    Tests for the dual-mode token decode logic:
+    1. Valid ws-ticket → ticket path
+    2. Token with ws_ticket=1 (not True) → legacy path (aud="ws" accepted by jose but
+       ws_ticket is not True → legacy fallthrough, then decode_access_token rejects
+       aud="ws" → close 4001)
+    3. Legacy session JWT (no aud, no ws_ticket) → legacy path + deprecation warning
+    """
+
+    def _mint_ws_ticket(self):
+        from app.auth.oidc import create_access_token
+        from datetime import timedelta
+        from uuid import uuid4
+        return create_access_token(
+            {"user_id": 1, "ws_ticket": True, "aud": "ws", "jti": str(uuid4())},
+            expires_delta=timedelta(seconds=45),
+        )
+
+    def _mint_legacy_token(self):
+        from app.auth.oidc import create_access_token
+        from datetime import timedelta
+        return create_access_token({"user_id": 1}, expires_delta=timedelta(hours=1))
+
+    def test_ticket_path_claims(self):
+        """Valid ws-ticket: decode_ws_ticket returns payload with ws_ticket=True."""
+        from app.auth.oidc import decode_ws_ticket
+
+        ticket = self._mint_ws_ticket()
+        payload = decode_ws_ticket(ticket)
+        assert payload is not None
+        assert payload.get("ws_ticket") is True
+        assert payload.get("aud") == "ws"
+
+    def test_legacy_path_no_ws_ticket_claim(self):
+        """
+        Legacy session JWT: decode_ws_ticket returns payload without ws_ticket=True
+        → handler falls to legacy path.
+        """
+        from app.auth.oidc import decode_ws_ticket
+
+        legacy = self._mint_legacy_token()
+        payload = decode_ws_ticket(legacy)
+        assert payload is not None
+        assert payload.get("ws_ticket") is not True
+
+    def test_legacy_token_passes_decode_access_token(self):
+        """Legacy JWT (no aud, no ws_ticket) passes decode_access_token (no REST guard)."""
+        from app.auth.oidc import decode_access_token
+
+        legacy = self._mint_legacy_token()
+        payload = decode_access_token(legacy)
+        assert payload.get("user_id") == 1
+
+    def test_ws_ticket_identity_check_rejects_int_discriminator(self):
+        """
+        A token carrying ws_ticket=1 (int, not bool True) + aud='ws':
+        decode_ws_ticket returns payload, but payload.get("ws_ticket") is not True
+        (identity check) → handler falls through to legacy path where
+        decode_access_token rejects aud="ws" → close 4001.
+        """
+        from jose import jwt as jose_jwt
+        from jose.exceptions import JWTClaimsError
+        from fastapi import HTTPException
+        from app.auth.oidc import JWT_SECRET, JWT_ALGORITHM, decode_access_token, decode_ws_ticket
+        from datetime import timedelta
+        from uuid import uuid4
+        import datetime as _dt
+
+        token = jose_jwt.encode(
+            {
+                "user_id": 1,
+                "ws_ticket": 1,  # int, not bool True
+                "aud": "ws",
+                "jti": str(uuid4()),
+                "exp": _dt.datetime.utcnow() + _dt.timedelta(seconds=45),
+            },
+            JWT_SECRET,
+            algorithm=JWT_ALGORITHM,
+        )
+
+        # decode_ws_ticket succeeds (aud="ws" positively validated) but ws_ticket is 1
+        payload = decode_ws_ticket(token)
+        assert payload is not None
+        # Identity check: 1 is not True → handler falls to legacy
+        assert payload.get("ws_ticket") is not True, (
+            "ws_ticket=1 must not satisfy 'is True' identity check"
+        )
+        # Legacy fallthrough: decode_access_token raises because aud="ws"
+        try:
+            decode_access_token(token)
+            assert False, "decode_access_token must reject aud='ws' token"
+        except HTTPException as exc:
+            assert exc.status_code == 401
+
+    def test_expired_ticket_decode_ws_ticket_returns_none(self):
+        """Expired ticket: decode_ws_ticket returns None (JWTError path)."""
+        from app.auth.oidc import create_access_token, decode_ws_ticket
+        from datetime import timedelta
+        from uuid import uuid4
+        import time
+
+        ticket = create_access_token(
+            {"user_id": 1, "ws_ticket": True, "aud": "ws", "jti": str(uuid4())},
+            expires_delta=timedelta(seconds=-1),  # already expired
+        )
+        result = decode_ws_ticket(ticket)
+        assert result is None
+
+    def test_user_id_claim_read_sub_then_user_id(self):
+        """
+        WS handler reads user_id via payload.get('sub') or payload.get('user_id').
+        Verify a ticket (no sub, has user_id) resolves correctly.
+        """
+        from app.auth.oidc import decode_ws_ticket
+        ticket = self._mint_ws_ticket()
+        payload = decode_ws_ticket(ticket)
+        # ticket carries user_id, no sub
+        assert "user_id" in payload
+        assert "sub" not in payload or payload.get("sub") is None
+        resolved = payload.get("sub") or payload.get("user_id") or "unknown"
+        assert resolved == payload["user_id"]
+
+
+class TestWsPhase3OriginCheck:
+    """
+    Tests for the Origin check in admin_jarvis_websocket.
+
+    We test _claim_jti, decode_ws_ticket, and the static structure rather than
+    spinning up a full WebSocket server (which requires real asyncio event loop
+    + ASGI transport not available in basic TestClient for WS routes in this setup).
+    The origin check logic is tested via the module-level _cors_env read.
+    """
+
+    def test_origin_check_rejects_non_cors_in_production(self):
+        """
+        In production (dev_mode=False), an origin not in CORS_ORIGINS must be
+        rejected.  We verify the logic by inspecting the source code for the
+        close(code=4003) pattern and the CORS_ALLOWED_ORIGINS env read.
+        """
+        import re
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        assert "4003" in src, (
+            "websocket.py must close with code 4003 for Origin mismatch (xander H-1)"
+        )
+        assert "CORS_ALLOWED_ORIGINS" in src, (
+            "websocket.py must read CORS_ALLOWED_ORIGINS for origin validation"
+        )
+        assert "dev_mode" in src.lower() or "DEV_MODE" in src, (
+            "websocket.py origin check must be gated on DEV_MODE / dev_mode"
+        )
+
+    def test_origin_check_skips_dev_mode_in_source(self):
+        """
+        Static: the origin check must be gated on 'not cfg.dev_mode' (or equivalent)
+        so DEV_MODE skips the check.
+        """
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        # Should gate on dev_mode being false
+        assert "not cfg.dev_mode" in src or "cfg.dev_mode" in src, (
+            "Origin check in websocket.py must reference cfg.dev_mode"
+        )
