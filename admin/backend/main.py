@@ -270,23 +270,38 @@ async def _enforce_oidc_runtime_gates() -> None:
     _config_issuer = _runtime_issuer.rstrip("/")
     _doc_issuer = _discovery_metadata["issuer"].rstrip("/")
     if _doc_issuer != _config_issuer:
-        logger.critical(
-            "oidc_discovery_issuer_mismatch",
-            configured=_config_issuer,
-            discovered=_doc_issuer,
-            message="Discovery doc issuer != configured OIDC_ISSUER — token validation would silently fail (MED-E).",
+        # Branch (d) — issuer mismatch.  Default (oidc_validate_iss=True): fail-closed
+        # SystemExit.  When OIDC_VALIDATE_ISS=false (opt-out escape valve for deployers
+        # with a deliberately mismatched issuer URL): soften to a warning only.
+        # Branches (a)/(b)/(c) and the early env gate stay SystemExit regardless.
+        if get_config().oidc_validate_iss:
+            logger.critical(
+                "oidc_discovery_issuer_mismatch",
+                configured=_config_issuer,
+                discovered=_doc_issuer,
+                message="Discovery doc issuer != configured OIDC_ISSUER — token validation would silently fail (MED-E).",
+            )
+            raise SystemExit(
+                f"FATAL: OIDC discovery doc returns issuer={_doc_issuer!r} but "
+                f"OIDC_ISSUER is configured as {_config_issuer!r}. "
+                "Token iss validation would silently fail. Align your IdP configuration."
+            )
+        else:
+            logger.warning(
+                "oidc_iss_validation_disabled_by_flag",
+                configured=_config_issuer,
+                discovered=_doc_issuer,
+                message=(
+                    "Issuer mismatch detected but OIDC_VALIDATE_ISS=false — "
+                    "issuer check suppressed by operator opt-out (branch d)."
+                ),
+            )
+    else:
+        logger.info(
+            "oidc_discovery_issuer_verified",
+            issuer=_doc_issuer,
+            message="Discovery doc issuer matches configured OIDC_ISSUER (MED-E gate passed).",
         )
-        raise SystemExit(
-            f"FATAL: OIDC discovery doc returns issuer={_doc_issuer!r} but "
-            f"OIDC_ISSUER is configured as {_config_issuer!r}. "
-            "Token iss validation would silently fail. Align your IdP configuration."
-        )
-
-    logger.info(
-        "oidc_discovery_issuer_verified",
-        issuer=_doc_issuer,
-        message="Discovery doc issuer matches configured OIDC_ISSUER (MED-E gate passed).",
-    )
 
 
 async def _ip_identifier(request: Request) -> str:
@@ -642,6 +657,22 @@ async def startup_event():
         # regardless of DB reachability.  Running them inside `if check_db_connection():`
         # made the service fail-open when the DB was transiently unreachable at boot —
         # neither gate would execute and the service would start without OIDC validation.
+
+        # OIDC_VALIDATE_ISS escape valve — emit one loud startup warning when disabled so
+        # the operator has a clear signal in the boot log.  Per xander M-4: the flag state
+        # is also exposed on GET /api/auth/methods for runtime observability.
+        if not get_config().oidc_validate_iss:
+            logger.warning(
+                "oidc_iss_validation_disabled",
+                message=(
+                    "OIDC issuer-mismatch validation is DISABLED (OIDC_VALIDATE_ISS=false). "
+                    "This relaxes branch (d) of _enforce_oidc_runtime_gates() only — "
+                    "branches (a)/(b)/(c) and the early env gate remain fatal. "
+                    "Enable OIDC_VALIDATE_ISS=true (default) unless your IdP deliberately "
+                    "returns a mismatched issuer URL."
+                ),
+            )
+
         await _enforce_oidc_runtime_gates()
         await _init_rate_limiter(redis_client)  # Campaign 3 / ATHENA-14 — Phase 3
 
@@ -812,7 +843,16 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
         # override that disabled these checks has been removed (xander:3 / Phase 3).
         # A startup gate (MED-E) asserts the discovery doc contains "issuer" so that
         # authlib's conditional iss validation is never silently skipped.
-        token = await oauth.authentik.authorize_access_token(request)
+        #
+        # OIDC_VALIDATE_ISS escape valve (ATHENA-55 Phase 1): when the flag is false,
+        # pass claims_options={"iss": {"essential": False}} so authlib's own iss check
+        # is relaxed in step with the startup gate's branch (d) softening.  Without this,
+        # the operator relaxes the boot gate but authlib still rejects the mismatched
+        # token at callback — an incoherent escape valve.
+        _oidc_token_kwargs: dict = {}
+        if not get_config().oidc_validate_iss:
+            _oidc_token_kwargs["claims_options"] = {"iss": {"essential": False}}
+        token = await oauth.authentik.authorize_access_token(request, **_oidc_token_kwargs)
         access_token = token.get('access_token')
         logger.debug("token_exchange_complete", has_access_token=bool(access_token))
 
@@ -887,6 +927,9 @@ async def get_auth_methods():
         "oidc_enabled": oidc_enabled,
         "local_enabled": True,
         "demo_mode": demo_mode,
+        # ATHENA-55 Phase 1: expose the OIDC_VALIDATE_ISS flag state so operators
+        # and monitoring can observe it without parsing boot logs (xander M-4).
+        "oidc_iss_validation": get_config().oidc_validate_iss,
     }
 
 

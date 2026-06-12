@@ -1814,6 +1814,35 @@ class TestPhase3RuntimeIssuerAndDiscoveryGate:
         assert "FATAL" in combined, f"Expected 'FATAL' in SystemExit message; got: {combined!r}"
         assert "OIDC_ISSUER" in combined, f"Expected 'OIDC_ISSUER' in message; got: {combined!r}"
 
+    def test_phase1_oidc_validate_iss_escape_valve_static(self):
+        """
+        ATHENA-55 Phase 1 static guard: OIDC_VALIDATE_ISS escape valve wiring keys
+        must all be present in main.py.  A future refactor that removes or renames
+        these identifiers would fail here before the direct-call tests catch it.
+
+        Keys asserted:
+        - 'oidc_validate_iss'       — config field access
+        - 'oidc_iss_validation_disabled'       — startup warning event
+        - 'oidc_iss_validation_disabled_by_flag' — branch (d) per-callback warning
+        - '_oidc_token_kwargs'       — claims_options kwargs dict
+        - 'oidc_iss_validation'     — GET /api/auth/methods response field
+        """
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with open(os.path.join(backend_dir, "main.py")) as f:
+            src = f.read()
+
+        for key in (
+            "oidc_validate_iss",
+            "oidc_iss_validation_disabled",
+            "oidc_iss_validation_disabled_by_flag",
+            "_oidc_token_kwargs",
+            "oidc_iss_validation",
+        ):
+            assert key in src, (
+                f"ATHENA-55 Phase 1 identifier {key!r} not found in main.py — "
+                "escape valve may have been removed or renamed."
+            )
+
 
 # -------------------------------------------------------------------
 # Phase 4 — xander:4 — JWT removed from OIDC/DEMO_MODE redirect URL
