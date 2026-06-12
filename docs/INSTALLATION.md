@@ -243,7 +243,55 @@ The admin-backend enforces fail-closed startup behavior for OIDC. If any of the 
 
 **Post-OIDC-callback URL contract:** the backend redirects to `<FRONTEND_URL>?logged_in=1` after a successful OIDC callback. The admin frontend reads this signal, clears any stale `localStorage.auth_token`, and fetches the JWT from `/api/auth/session-token`. `FRONTEND_URL` must not include a query string — a `FRONTEND_URL` that already ends in `?foo=bar` would produce a malformed double-query-string redirect.
 
-**Deferred:** the WebSocket connection to admin-jarvis uses `?token=<jwt>` in the upgrade URL. This is a distinct exposure (backend contract change required) tracked separately and not addressed in this release.
+#### `OIDC_VALIDATE_ISS` — issuer-mismatch escape valve (ATHENA-55)
+
+**Default: `true` (validation on).** Set to `false` only if your IdP's `iss` claim deliberately does not match `OIDC_ISSUER` (e.g. a reverse-proxy strips a path prefix, or two IdP environments share a client but use different issuer URLs).
+
+**Scope is narrow — read this before disabling:**
+
+- `OIDC_VALIDATE_ISS=false` softens the issuer-**mismatch** gate (branch (d) of `_enforce_oidc_runtime_gates`) from `SystemExit` to a `logger.warning`, and passes `claims_options={"iss": {"essential": False}}` to authlib's `authorize_access_token` so the mismatch is not re-raised at callback time.
+- It does **not** let the service boot with an empty or placeholder issuer — that gate fires before this flag is checked and always stays fatal.
+- It does **not** bypass an unreachable IdP — if `<OIDC_ISSUER>/.well-known/openid-configuration` is unreachable or returns a non-200, the process still exits with `FATAL: OIDC discovery metadata fetch failed`.
+- It does **not** bypass a discovery document that is missing the `issuer` field entirely — that also remains fatal.
+- It does **not** affect `aud` or `exp` validation — those continue to be enforced by authlib regardless of this flag.
+
+When `OIDC_VALIDATE_ISS=false` is set, the backend emits a `[warning] oidc_iss_validation_disabled` log line at startup and exposes `"oidc_iss_validation": false` on `GET /api/auth/methods` for runtime observability. The per-callback warning (`oidc_iss_validation_disabled_by_flag`) fires each time a mismatched token is accepted, so the disabled state is visible in both startup logs and ongoing traffic logs.
+
+#### WebSocket authentication — short-lived ticket flow (ATHENA-55)
+
+The admin-jarvis WebSocket connection previously used `?token=<jwt>` in the upgrade URL, exposing the session JWT to reverse-proxy access logs, browser history, and Referer headers. This is replaced with a short-lived single-use ticket.
+
+**New flow:**
+
+1. The frontend POSTs `/api/auth/ws-ticket` (with `Authorization: Bearer <session-token>`) immediately before each WebSocket connect or reconnect. The endpoint returns `{"ticket": "<jwt>", "ws_ticket_supported": true}`. The ticket is valid for 45 seconds and is single-use (Redis-backed `jti` claim; DEV_MODE uses an in-memory fallback).
+2. The frontend uses the returned ticket in `?token=<ticket>` on the WS upgrade URL. It never caches the URL — every reconnect mints a fresh ticket.
+3. The WS handler validates the ticket's `aud="ws"` claim and `ws_ticket: true` discriminator, then consumes the `jti` via Redis to prevent replay.
+
+**Deprecation window (one release):** the WS handler accepts both ticket JWTs and legacy session JWTs during this release. Old frontend code sending a session JWT in `?token=` continues to work with a `websocket_legacy_token_auth_deprecated` warning. Legacy acceptance will be removed in the next release (Phase 6, tracked as follow-up).
+
+**Deploy ordering (ATHENA-55):** because backend and frontend roll as independent Kubernetes Deployments (no `sessionAffinity`), deploy the admin backend to the ticket-aware image first and verify it is fully rolled out before promoting the new frontend image:
+
+```bash
+# 1. Roll the backend
+kubectl set image deployment/athena-admin-backend \
+  admin-backend=<new-image> -n athena-prod
+kubectl rollout status deployment/athena-admin-backend -n athena-prod
+
+# 2. Only then roll the frontend
+kubectl set image deployment/athena-admin-frontend \
+  admin-frontend=<new-image> -n athena-prod
+kubectl rollout status deployment/athena-admin-frontend -n athena-prod
+```
+
+The frontend's capability fallback (retry with legacy token on WS close 4001 when the mint returned 200) covers the residual window where a backend pod restarts after the frontend is already serving ticket-minting JS. Backend-before-frontend ordering keeps that window near-zero.
+
+**Uvicorn access-log redaction (xander M-1):** the ticket still transits the URL as `?token=<ticket>` for ≤ 45 seconds, so `?token=` will appear in uvicorn access logs for that window. Recommended mitigation for production: run uvicorn with `--no-access-log` for the admin backend, or configure a log filter to strip the query string. Example:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8080 --no-access-log
+```
+
+If access logs are required for audit purposes, use a structured log processor (e.g. Fluent Bit Lua filter) to redact the `?token=` query parameter before the log is written to the audit sink.
 
 ---
 

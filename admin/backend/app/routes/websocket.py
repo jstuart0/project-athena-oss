@@ -2,7 +2,7 @@
 WebSocket endpoint for Admin Jarvis real-time events.
 
 Handles:
-- JWT authentication on connection
+- JWT authentication on connection (ticket or legacy session JWT)
 - Event subscription
 - Heartbeat/ping-pong
 - Rate limiting
@@ -10,23 +10,43 @@ Handles:
 
 import asyncio
 import time
-import os
 from typing import Set, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-import jwt
 import structlog
+from jose.exceptions import JWTClaimsError
 from shared.config import get_config
 
 logger = structlog.get_logger()
 
 router = APIRouter(tags=["websocket"])
 
-# JWT secret for token validation
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-in-production")
-JWT_ALGORITHM = "HS256"
+# JWT secret and algorithm come exclusively from oidc.py (xander M-3, ATHENA-55 Phase 3).
+# Do NOT re-read JWT_SECRET / JWT_ALGORITHM from os.getenv here.
+# Import the module-level primitives so there is exactly one signing-secret source.
+from app.auth.oidc import decode_access_token, decode_ws_ticket
+
+# Module-level redis client — wired by main.py during startup (same pattern as
+# start_health_polling).  None in DEV_MODE; in that case the in-memory fallback is used.
+_redis_client = None
+
+# In-memory single-use set for DEV_MODE (single-process — no shared state needed).
+# Each entry is (jti, expiry_timestamp); entries are cleaned lazily on insert.
+_used_jti_memory: dict = {}  # jti -> expiry_ts
 
 # Connected clients
 admin_jarvis_clients: Set[WebSocket] = set()
+
+
+def configure_redis(redis_client) -> None:
+    """
+    Wire the module-level redis client for single-use jti tracking.
+
+    Called by main.py during startup (same pattern as start_health_polling).
+    In DEV_MODE this is never called; _redis_client stays None and the
+    in-memory fallback (_used_jti_memory) is used instead.
+    """
+    global _redis_client
+    _redis_client = redis_client
 
 
 class WebSocketManager:
@@ -76,17 +96,39 @@ class WebSocketManager:
 ws_manager = WebSocketManager()
 
 
-def validate_jwt_token(token: str) -> Optional[dict]:
-    """Validate JWT token and return payload."""
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload
-    except jwt.ExpiredSignatureError:
-        logger.warning("jwt_expired")
-        return None
-    except jwt.InvalidTokenError as e:
-        logger.warning("jwt_invalid", error=str(e))
-        return None
+async def _claim_jti(jti: str, ttl: int) -> bool:
+    """
+    Atomically claim a jti for single-use enforcement (ATHENA-55 Phase 3).
+
+    Production (redis_client set): Redis SET NX EX — returns True on first claim,
+    False if already consumed (replay).  Key: athena:ws_ticket:<jti>.
+
+    DEV_MODE (redis_client None): in-memory dict with lazy TTL eviction.
+
+    Args:
+        jti: The JWT ID claim from the ticket.
+        ttl: TTL in seconds (must be >= ticket exp, i.e. >= 45).
+
+    Returns:
+        True if this is the first use, False if replayed.
+    """
+    if _redis_client is not None:
+        key = f"athena:ws_ticket:{jti}"
+        result = await _redis_client.set(key, "", nx=True, ex=ttl)
+        return result is not None  # truthy on first claim, None on replay
+
+    # DEV_MODE in-memory fallback — evict expired entries lazily
+    now = time.time()
+    # Lazy eviction: remove expired entries
+    expired = [k for k, exp in list(_used_jti_memory.items()) if exp < now]
+    for k in expired:
+        _used_jti_memory.pop(k, None)
+
+    if jti in _used_jti_memory:
+        return False  # replay
+
+    _used_jti_memory[jti] = now + ttl
+    return True
 
 
 @router.websocket("/ws/admin-jarvis")
@@ -97,7 +139,14 @@ async def admin_jarvis_websocket(
     """
     WebSocket endpoint for Admin Jarvis real-time events.
 
-    Requires JWT token as query parameter for authentication.
+    Authentication (ATHENA-55 Phase 3 dual-mode):
+    1. Ticket path: token is a ws-ticket (aud="ws", ws_ticket=True) —
+       validated via decode_ws_ticket, single-use jti check, identity check.
+    2. Legacy path (deprecation window): token is a plain session JWT —
+       validated via decode_access_token, accepted with a deprecation warning.
+    3. DEV_MODE: unauthenticated connection allowed.
+
+    Origin check: production rejects non-CORS_ORIGINS origins with close 4003.
 
     Message types:
     - ping: Client heartbeat (responds with pong)
@@ -110,15 +159,47 @@ async def admin_jarvis_websocket(
     - event: Pipeline event
     - error: Error message
     """
-    logger.info("websocket_connection_attempt",
-                token_provided=bool(token),
-                token_prefix=token[:20] if token else None,
-                headers=dict(websocket.headers) if hasattr(websocket, 'headers') else None)
+    cfg = get_config()
+    origin = websocket.headers.get("origin")
+
+    # ATHENA-55 Phase 3: Origin check before accept (xander H-1).
+    # CORSMiddleware does NOT cover WebSocket scope — we enforce it here.
+    # Read CORS_ORIGINS from the same env var as main.py (CORS_ALLOWED_ORIGINS).
+    # DEV_MODE skips the check (no origin enforcement in local dev).
+    #
+    # POLICY (xander M-1): absent Origin (origin is None) is ALLOWED.
+    # Non-browser clients (curl, scripts, monitors) have no CSRF surface — the
+    # Origin header only exists in browser-initiated requests.  Origin checks
+    # defend against *browser-based* cross-origin upgrade attacks.  Rejecting
+    # absent-Origin would break all non-browser WS clients for zero security gain.
+    # Only a PRESENT-but-mismatched Origin is rejected with 4003.
+    if not cfg.dev_mode and origin is not None:
+        import os
+        _cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+        CORS_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()] or ["http://localhost:8080"]
+        if origin not in CORS_ORIGINS:
+            logger.warning(
+                "websocket_origin_rejected",
+                origin=origin,
+                allowed=CORS_ORIGINS,
+            )
+            await websocket.close(code=4003, reason="Origin not allowed")
+            return
+        # Log accepted browser-origin connections for audit visibility.
+        logger.info("websocket_origin_accepted", origin=origin)
+    elif not cfg.dev_mode:
+        # Absent Origin — non-browser client, no CSRF surface.  Allowed.
+        logger.info("websocket_origin_absent_allowed")
+
+    logger.info(
+        "websocket_connection_attempt",
+        token_provided=bool(token),
+        origin=origin,
+    )
 
     # Handle missing token
     if not token:
-        # In dev mode, allow connection without token
-        if get_config().dev_mode:
+        if cfg.dev_mode:
             user_id = "dev-user"
             logger.info("websocket_dev_mode", message="Allowing unauthenticated connection in dev mode")
         else:
@@ -126,15 +207,63 @@ async def admin_jarvis_websocket(
             await websocket.close(code=4001, reason="Token required")
             return
     else:
-        # Validate JWT token
-        payload = validate_jwt_token(token)
-        if not payload:
-            logger.warning("websocket_invalid_token", message="Token validation failed")
-            await websocket.close(code=4001, reason="Invalid token")
-            return
+        user_id = None
 
-        user_id = payload.get('sub') or payload.get('user_id') or 'unknown'
-        logger.info("websocket_token_validated", user_id=user_id)
+        # --- Ticket path (ATHENA-55 Phase 3) ---
+        try:
+            payload = decode_ws_ticket(token)
+        except JWTClaimsError:
+            # Wrong/missing audience — fall through to legacy decode.
+            # NOTE: this branch is entered on ANY decode failure that raises
+            # JWTClaimsError, not only on aud mismatch.  It is also entered for
+            # tokens that carry no aud claim at all (python-jose raises
+            # InvalidAudienceError when audience= is specified but the token has
+            # no aud field on some versions).  The legacy path below re-validates
+            # the token independently via decode_access_token, which rejects
+            # aud="ws" tokens, so the fallthrough is safe regardless of the
+            # exact reason decode_ws_ticket raised.
+            payload = None
+
+        if payload is not None and payload.get("ws_ticket") is True:
+            # Ticket path: aud="ws" validated positively + ws_ticket identity check.
+            jti = payload.get("jti")
+            if not jti:
+                logger.warning("websocket_ticket_missing_jti")
+                await websocket.close(code=4001, reason="Invalid token")
+                return
+
+            # Single-use claim — ttl must be >= ticket exp (45s); use 90s for safety
+            claimed = await _claim_jti(jti, ttl=90)
+            if not claimed:
+                logger.warning("websocket_ticket_replayed", jti=jti)
+                await websocket.close(code=4001, reason="Invalid token")
+                return
+
+            user_id = payload.get("sub") or payload.get("user_id") or "unknown"
+            logger.info("websocket_ticket_validated", user_id=user_id)
+
+        else:
+            # --- Legacy path: plain session JWT (no aud / no ws_ticket flag) ---
+            # decode_access_token accepts any valid signed JWT without aud="ws".
+            # A legacy session JWT carries neither, so it passes the REST guard.
+            try:
+                from fastapi import HTTPException
+                legacy_payload = decode_access_token(token)
+            except Exception:
+                logger.warning("websocket_invalid_token", message="Token validation failed")
+                await websocket.close(code=4001, reason="Invalid token")
+                return
+
+            logger.warning(
+                "websocket_legacy_token_auth_deprecated",
+                message=(
+                    "WebSocket authenticated via legacy session JWT in ?token=. "
+                    "This path will be removed in the next release. "
+                    "Clients should use POST /api/auth/ws-ticket instead."
+                ),
+            )
+            user_id = legacy_payload.get("sub") or legacy_payload.get("user_id") or "unknown"
+            logger.info("websocket_token_validated", user_id=user_id)
 
     # Accept connection
     await ws_manager.connect(websocket, str(user_id))

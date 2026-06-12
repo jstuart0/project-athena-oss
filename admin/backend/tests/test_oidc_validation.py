@@ -618,3 +618,414 @@ class TestPhase3CallbackPathValidatesIdToken:
         )
         assert isinstance(result, UserInfo)
         assert result.get("sub") == "user-sub-1"
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-55 Phase 1 — OIDC_VALIDATE_ISS escape valve tests
+# ---------------------------------------------------------------------------
+
+class TestPhase1OIDCValidateIss:
+    """
+    ATHENA-55 Phase 1: OIDC_VALIDATE_ISS escape valve.
+
+    Verifies:
+    - Config default is True.
+    - Flag false → branch (d) warns instead of SystemExit.
+    - Flag false → branches (a)/(b)/(c) and early env gate STILL SystemExit.
+    - Flag false → authorize_access_token receives claims_options={"iss": {"essential": False}}.
+    - Flag false → startup emits oidc_iss_validation_disabled warning.
+    - GET /api/auth/methods exposes oidc_iss_validation.
+    """
+
+    # ------------------------------------------------------------------
+    # 1. Config default
+    # ------------------------------------------------------------------
+
+    def test_config_oidc_validate_iss_defaults_true(self):
+        """oidc_validate_iss must default to True — no env var override."""
+        import importlib, sys
+        from shared.config import _clear_cache_for_tests
+
+        _clear_cache_for_tests()
+        saved = os.environ.pop("OIDC_VALIDATE_ISS", None)
+        try:
+            from shared.config import get_config as _gc
+            cfg = _gc()
+            assert cfg.oidc_validate_iss is True, (
+                f"Expected oidc_validate_iss=True by default, got {cfg.oidc_validate_iss!r}"
+            )
+        finally:
+            if saved is not None:
+                os.environ["OIDC_VALIDATE_ISS"] = saved
+            _clear_cache_for_tests()
+
+    # ------------------------------------------------------------------
+    # 2. Branch (d): flag false → warning, not SystemExit
+    # ------------------------------------------------------------------
+
+    def test_branch_d_flag_false_warns_not_exits(self):
+        """
+        When OIDC_VALIDATE_ISS=false and discovery doc issuer != configured issuer,
+        _enforce_oidc_runtime_gates() must NOT raise SystemExit; it must log a warning
+        with key 'oidc_iss_validation_disabled_by_flag'.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        mismatch_metadata = {
+            "issuer": "https://different-idp.example.com",
+            "authorization_endpoint": "https://different-idp.example.com/authorize",
+        }
+
+        from shared.config import _clear_cache_for_tests
+        _clear_cache_for_tests()
+        os.environ["OIDC_VALIDATE_ISS"] = "false"
+        try:
+            import main as _main
+
+            warning_events: list = []
+
+            class _CapturingLogger:
+                def warning(self, event, **kw):
+                    warning_events.append(event)
+                def info(self, event, **kw):
+                    pass
+                def critical(self, event, **kw):
+                    pass
+
+            with (
+                patch("main.oidc_auth") as mock_oidc_auth,
+                patch("main.oauth") as mock_oauth,
+                patch("main.logger", _CapturingLogger()),
+            ):
+                mock_oidc_auth.OIDC_ISSUER = "https://configured-issuer.example.com"
+                mock_oauth.authentik.load_server_metadata = AsyncMock(
+                    return_value=mismatch_metadata
+                )
+                # Must NOT raise
+                asyncio.run(_main._enforce_oidc_runtime_gates())
+
+            assert "oidc_iss_validation_disabled_by_flag" in warning_events, (
+                f"Expected warning 'oidc_iss_validation_disabled_by_flag', "
+                f"got events: {warning_events}"
+            )
+        finally:
+            os.environ.pop("OIDC_VALIDATE_ISS", None)
+            _clear_cache_for_tests()
+
+    # ------------------------------------------------------------------
+    # 3a. Branch (a): empty/placeholder runtime issuer → still SystemExit when flag false
+    # ------------------------------------------------------------------
+
+    def test_branch_a_still_exits_when_flag_false(self):
+        """
+        Branch (a): empty/CONFIGURE_ME runtime issuer must remain SystemExit
+        regardless of OIDC_VALIDATE_ISS=false.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from shared.config import _clear_cache_for_tests
+        _clear_cache_for_tests()
+        os.environ["OIDC_VALIDATE_ISS"] = "false"
+        try:
+            import main as _main
+
+            with (
+                patch("main.oidc_auth") as mock_oidc_auth,
+                patch("main.oauth") as mock_oauth,
+            ):
+                mock_oidc_auth.OIDC_ISSUER = ""  # empty → branch (a)
+                mock_oauth.authentik.load_server_metadata = AsyncMock(return_value={})
+
+                with pytest.raises(SystemExit):
+                    asyncio.run(_main._enforce_oidc_runtime_gates())
+        finally:
+            os.environ.pop("OIDC_VALIDATE_ISS", None)
+            _clear_cache_for_tests()
+
+    def test_branch_a_configure_me_still_exits_when_flag_false(self):
+        """
+        Branch (a): CONFIGURE_ME-prefixed runtime issuer must remain SystemExit
+        regardless of OIDC_VALIDATE_ISS=false.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from shared.config import _clear_cache_for_tests
+        _clear_cache_for_tests()
+        os.environ["OIDC_VALIDATE_ISS"] = "false"
+        try:
+            import main as _main
+
+            with (
+                patch("main.oidc_auth") as mock_oidc_auth,
+                patch("main.oauth") as mock_oauth,
+            ):
+                mock_oidc_auth.OIDC_ISSUER = "CONFIGURE_ME_placeholder"
+                mock_oauth.authentik.load_server_metadata = AsyncMock(return_value={})
+
+                with pytest.raises(SystemExit):
+                    asyncio.run(_main._enforce_oidc_runtime_gates())
+        finally:
+            os.environ.pop("OIDC_VALIDATE_ISS", None)
+            _clear_cache_for_tests()
+
+    # ------------------------------------------------------------------
+    # 3b. Branch (b): discovery fetch failure → still SystemExit when flag false
+    # ------------------------------------------------------------------
+
+    def test_branch_b_still_exits_when_flag_false(self):
+        """
+        Branch (b): discovery metadata fetch failure must remain SystemExit
+        regardless of OIDC_VALIDATE_ISS=false.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from shared.config import _clear_cache_for_tests
+        _clear_cache_for_tests()
+        os.environ["OIDC_VALIDATE_ISS"] = "false"
+        try:
+            import main as _main
+
+            with (
+                patch("main.oidc_auth") as mock_oidc_auth,
+                patch("main.oauth") as mock_oauth,
+            ):
+                mock_oidc_auth.OIDC_ISSUER = "https://configured-issuer.example.com"
+                mock_oauth.authentik.load_server_metadata = AsyncMock(
+                    side_effect=ConnectionError("unreachable")
+                )
+
+                with pytest.raises(SystemExit):
+                    asyncio.run(_main._enforce_oidc_runtime_gates())
+        finally:
+            os.environ.pop("OIDC_VALIDATE_ISS", None)
+            _clear_cache_for_tests()
+
+    # ------------------------------------------------------------------
+    # 3c. Branch (c): missing issuer field in discovery doc → still SystemExit when flag false
+    # ------------------------------------------------------------------
+
+    def test_branch_c_still_exits_when_flag_false(self):
+        """
+        Branch (c): discovery doc missing 'issuer' field must remain SystemExit
+        regardless of OIDC_VALIDATE_ISS=false.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from shared.config import _clear_cache_for_tests
+        _clear_cache_for_tests()
+        os.environ["OIDC_VALIDATE_ISS"] = "false"
+        try:
+            import main as _main
+
+            bad_metadata = {
+                "authorization_endpoint": "https://idp.example.com/authorize",
+                "token_endpoint": "https://idp.example.com/token",
+            }  # no "issuer" key
+
+            with (
+                patch("main.oidc_auth") as mock_oidc_auth,
+                patch("main.oauth") as mock_oauth,
+            ):
+                mock_oidc_auth.OIDC_ISSUER = "https://configured-issuer.example.com"
+                mock_oauth.authentik.load_server_metadata = AsyncMock(
+                    return_value=bad_metadata
+                )
+
+                with pytest.raises(SystemExit):
+                    asyncio.run(_main._enforce_oidc_runtime_gates())
+        finally:
+            os.environ.pop("OIDC_VALIDATE_ISS", None)
+            _clear_cache_for_tests()
+
+    # ------------------------------------------------------------------
+    # 3d. Early env gate still exits when flag false
+    # ------------------------------------------------------------------
+
+    def test_early_env_gate_still_exits_when_flag_false(self):
+        """
+        The early env gate at main.py (empty/CONFIGURE_ME oidc_issuer in config)
+        must remain SystemExit regardless of OIDC_VALIDATE_ISS=false.
+        This gate runs before configure_oauth_client() and is independent of the flag.
+        """
+        import subprocess
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [_SRC_PATH, _BACKEND_PATH, env.get("PYTHONPATH", "")])
+        )
+        env.update({
+            "DEV_MODE": "false",
+            "OIDC_VALIDATE_ISS": "false",
+            "OIDC_ISSUER": "",           # triggers the early env gate
+            "OIDC_CLIENT_ID": "real-client-id",
+            "SESSION_SECRET_KEY": "a" * 64,
+            "JWT_SECRET": "b" * 64,
+            "SERVICE_API_KEY": "c" * 64,
+        })
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "from fastapi.testclient import TestClient; "
+             "from main import app; "
+             "TestClient(app).__enter__()"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=_BACKEND_PATH,
+        )
+        assert result.returncode != 0, (
+            "Startup must exit non-zero when OIDC_ISSUER='' even with OIDC_VALIDATE_ISS=false"
+        )
+
+    # ------------------------------------------------------------------
+    # 4. Flag false → authorize_access_token receives claims_options
+    # ------------------------------------------------------------------
+
+    def test_callback_passes_claims_options_when_flag_false(self):
+        """
+        When OIDC_VALIDATE_ISS=false, authorize_access_token must be called with
+        claims_options={"iss": {"essential": False}} (static/mock assert on main.py callback).
+        """
+        import main as _main
+        from shared.config import _clear_cache_for_tests
+
+        _clear_cache_for_tests()
+        os.environ["OIDC_VALIDATE_ISS"] = "false"
+        try:
+            # Re-read get_config() to pick up the env change
+            _clear_cache_for_tests()
+            cfg = _main.get_config()
+            assert cfg.oidc_validate_iss is False, "Config should have picked up OIDC_VALIDATE_ISS=false"
+
+            # Verify the code path: when oidc_validate_iss is False, _oidc_token_kwargs
+            # must include claims_options={"iss": {"essential": False}}.
+            # We test by reading the source statically (same pattern as xander:3 tests).
+            with open(os.path.join(_BACKEND_PATH, "main.py")) as f:
+                src = f.read()
+
+            assert 'claims_options' in src, "claims_options kwarg not found in main.py"
+            assert '"iss"' in src or "'iss'" in src, "'iss' key not found in claims_options block"
+            assert '"essential": False' in src or "'essential': False" in src, (
+                "claims_options {\"iss\": {\"essential\": False}} not found in main.py"
+            )
+            assert '_oidc_token_kwargs' in src, "_oidc_token_kwargs variable not found in main.py"
+            assert 'oidc_validate_iss' in src, "oidc_validate_iss guard not found in main.py"
+        finally:
+            os.environ.pop("OIDC_VALIDATE_ISS", None)
+            _clear_cache_for_tests()
+
+    # ------------------------------------------------------------------
+    # 5. Startup warning when flag false
+    # ------------------------------------------------------------------
+
+    def test_startup_warning_emitted_when_flag_false(self):
+        """
+        When OIDC_VALIDATE_ISS=false, startup must emit 'oidc_iss_validation_disabled'
+        warning before calling _enforce_oidc_runtime_gates().
+        Static check: key present in main.py startup path.
+        """
+        with open(os.path.join(_BACKEND_PATH, "main.py")) as f:
+            src = f.read()
+
+        assert "oidc_iss_validation_disabled" in src, (
+            "'oidc_iss_validation_disabled' warning key not found in main.py startup"
+        )
+        # Confirm it is a logger.warning, not logger.critical
+        # Find the surrounding context
+        idx = src.index("oidc_iss_validation_disabled")
+        context = src[max(0, idx - 150):idx + 50]
+        assert "logger.warning" in context, (
+            f"Expected logger.warning for 'oidc_iss_validation_disabled', "
+            f"found context: {context!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # 6. GET /api/auth/methods exposes oidc_iss_validation
+    # ------------------------------------------------------------------
+
+    def test_get_auth_methods_exposes_oidc_iss_validation_true(self):
+        """GET /api/auth/methods must return oidc_iss_validation=true by default."""
+        from fastapi.testclient import TestClient
+        from shared.config import _clear_cache_for_tests
+        import importlib, main as _main
+
+        _clear_cache_for_tests()
+        os.environ.pop("OIDC_VALIDATE_ISS", None)
+        _clear_cache_for_tests()
+
+        client = TestClient(_main.app, raise_server_exceptions=False)
+        resp = client.get("/api/auth/methods")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "oidc_iss_validation" in data, (
+            f"oidc_iss_validation not in /api/auth/methods response: {data}"
+        )
+        assert data["oidc_iss_validation"] is True, (
+            f"Expected oidc_iss_validation=True (default), got {data['oidc_iss_validation']!r}"
+        )
+
+    def test_get_auth_methods_exposes_oidc_iss_validation_false(self):
+        """GET /api/auth/methods must return oidc_iss_validation=false when OIDC_VALIDATE_ISS=false."""
+        from fastapi.testclient import TestClient
+        from shared.config import _clear_cache_for_tests
+        import main as _main
+
+        _clear_cache_for_tests()
+        os.environ["OIDC_VALIDATE_ISS"] = "false"
+        _clear_cache_for_tests()
+        try:
+            client = TestClient(_main.app, raise_server_exceptions=False)
+            resp = client.get("/api/auth/methods")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "oidc_iss_validation" in data
+            assert data["oidc_iss_validation"] is False, (
+                f"Expected oidc_iss_validation=False, got {data['oidc_iss_validation']!r}"
+            )
+        finally:
+            os.environ.pop("OIDC_VALIDATE_ISS", None)
+            _clear_cache_for_tests()
+
+    # ------------------------------------------------------------------
+    # 7. Default true → existing branch (d) behaviour preserved
+    # ------------------------------------------------------------------
+
+    def test_branch_d_flag_true_still_exits(self):
+        """
+        Flag true (default): branch (d) issuer mismatch must still raise SystemExit.
+        This guards the existing behaviour — no regression from the escape valve.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from shared.config import _clear_cache_for_tests
+        _clear_cache_for_tests()
+        os.environ.pop("OIDC_VALIDATE_ISS", None)  # default = True
+        _clear_cache_for_tests()
+        try:
+            import main as _main
+
+            mismatch_metadata = {
+                "issuer": "https://different-idp.example.com",
+                "authorization_endpoint": "https://different-idp.example.com/authorize",
+            }
+
+            with (
+                patch("main.oidc_auth") as mock_oidc_auth,
+                patch("main.oauth") as mock_oauth,
+            ):
+                mock_oidc_auth.OIDC_ISSUER = "https://configured-issuer.example.com"
+                mock_oauth.authentik.load_server_metadata = AsyncMock(
+                    return_value=mismatch_metadata
+                )
+
+                with pytest.raises(SystemExit) as exc_info:
+                    asyncio.run(_main._enforce_oidc_runtime_gates())
+
+            assert "FATAL" in str(exc_info.value)
+        finally:
+            _clear_cache_for_tests()

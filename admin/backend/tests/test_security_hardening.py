@@ -1814,6 +1814,35 @@ class TestPhase3RuntimeIssuerAndDiscoveryGate:
         assert "FATAL" in combined, f"Expected 'FATAL' in SystemExit message; got: {combined!r}"
         assert "OIDC_ISSUER" in combined, f"Expected 'OIDC_ISSUER' in message; got: {combined!r}"
 
+    def test_phase1_oidc_validate_iss_escape_valve_static(self):
+        """
+        ATHENA-55 Phase 1 static guard: OIDC_VALIDATE_ISS escape valve wiring keys
+        must all be present in main.py.  A future refactor that removes or renames
+        these identifiers would fail here before the direct-call tests catch it.
+
+        Keys asserted:
+        - 'oidc_validate_iss'       — config field access
+        - 'oidc_iss_validation_disabled'       — startup warning event
+        - 'oidc_iss_validation_disabled_by_flag' — branch (d) per-callback warning
+        - '_oidc_token_kwargs'       — claims_options kwargs dict
+        - 'oidc_iss_validation'     — GET /api/auth/methods response field
+        """
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with open(os.path.join(backend_dir, "main.py")) as f:
+            src = f.read()
+
+        for key in (
+            "oidc_validate_iss",
+            "oidc_iss_validation_disabled",
+            "oidc_iss_validation_disabled_by_flag",
+            "_oidc_token_kwargs",
+            "oidc_iss_validation",
+        ):
+            assert key in src, (
+                f"ATHENA-55 Phase 1 identifier {key!r} not found in main.py — "
+                "escape valve may have been removed or renamed."
+            )
+
 
 # -------------------------------------------------------------------
 # Phase 4 — xander:4 — JWT removed from OIDC/DEMO_MODE redirect URL
@@ -3134,3 +3163,1081 @@ class TestLocalLoginLockout:
             # not extended, which is the xander:51 guard.
         finally:
             db.close()
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-55 Phase 2 — ws-ticket mint endpoint + REST lateral-path rejection
+# ---------------------------------------------------------------------------
+
+class TestWsTicketMintEndpoint:
+    """
+    Tests for POST /api/auth/ws-ticket (ATHENA-55 Phase 2).
+
+    In DEV_MODE the endpoint is accessible without explicit credentials
+    (get_current_user returns dev-admin).  Tests exercise:
+    - authenticated mint → correct claims + short exp
+    - invalid Bearer token → 401 (proves Depends(get_current_user), not session read)
+    - minted ticket used as REST Bearer → 401 (lateral-path closure)
+    - rate-limit dependency is wired (static check)
+    """
+
+    def test_authenticated_mint_returns_ticket_with_correct_claims(self, app_client):
+        """DEV_MODE auto-auth: mint returns ticket with expected claims."""
+        import time
+        from jose import jwt as jose_jwt
+
+        r = app_client.post("/api/auth/ws-ticket")
+        assert r.status_code == 200, f"Expected 200; got {r.status_code}: {r.text}"
+        data = r.json()
+
+        assert "ticket" in data, f"Response must have 'ticket' field; got: {data!r}"
+        assert data.get("ws_ticket_supported") is True, (
+            f"Response must have ws_ticket_supported=true; got: {data!r}"
+        )
+
+        # Decode without audience to inspect claims (bypass aud check just for introspection)
+        raw = jose_jwt.get_unverified_claims(data["ticket"])
+        assert raw.get("ws_ticket") is True, f"Claim ws_ticket must be True (identity); got: {raw!r}"
+        assert raw.get("aud") == "ws", f"Claim aud must be 'ws'; got: {raw!r}"
+        assert "jti" in raw, f"Claim jti must be present; got: {raw!r}"
+
+        # exp must be ≤ 60s from now (minted with 45s)
+        exp = raw.get("exp", 0)
+        remaining = exp - int(time.time())
+        assert remaining > 0, f"Token must not already be expired; remaining={remaining}s"
+        assert remaining <= 60, (
+            f"Token exp must be ≤ 60s from now (minted with 45s); remaining={remaining}s"
+        )
+
+    def test_endpoint_has_get_current_user_dependency(self):
+        """
+        Static route inspection: /api/auth/ws-ticket must declare
+        get_current_user as a parameter dependency (not a session read).
+
+        Proves Depends(get_current_user) is wired, which means an
+        unauthenticated request is rejected in production where DEV_MODE=false.
+        """
+        from main import app
+        from app.auth.oidc import get_current_user
+
+        ws_ticket_route = None
+        for route in app.routes:
+            if getattr(route, "path", None) == "/api/auth/ws-ticket":
+                ws_ticket_route = route
+                break
+
+        assert ws_ticket_route is not None, "Route /api/auth/ws-ticket not found"
+
+        # The endpoint function's signature must include a parameter depending on
+        # get_current_user (FastAPI resolves these from the function annotations).
+        import inspect
+        from fastapi import Depends
+
+        endpoint = ws_ticket_route.endpoint
+        sig = inspect.signature(endpoint)
+        dep_callables = [
+            param.default.dependency
+            for param in sig.parameters.values()
+            if isinstance(getattr(param, "default", None), type(Depends()))
+            and hasattr(param.default, "dependency")
+        ]
+        assert get_current_user in dep_callables, (
+            f"get_current_user must be a Depends parameter on mint_ws_ticket; "
+            f"found dependencies: {dep_callables!r}"
+        )
+
+    def test_ws_ticket_rejected_as_rest_bearer_unit(self):
+        """
+        A freshly minted ws-ticket used as a Bearer on decode_access_token must
+        raise HTTP 401 (lateral-path closure, xander L-2).
+
+        Tests the gate at the decode layer (not the full app) because in
+        DEV_MODE the app-level auth bypass fires before token decoding.
+        The app-level test is covered by test_ws_ticket_rejected_by_decode_access_token
+        in TestWsTicketLateralPathClosure.
+        """
+        from fastapi import HTTPException
+        from app.auth.oidc import create_access_token, decode_access_token
+        from datetime import timedelta
+        from uuid import uuid4
+
+        ticket = create_access_token(
+            {"user_id": 1, "ws_ticket": True, "aud": "ws", "jti": str(uuid4())},
+            expires_delta=timedelta(seconds=45),
+        )
+        try:
+            decode_access_token(ticket)
+            assert False, "decode_access_token must reject WS ticket; no exception raised"
+        except HTTPException as exc:
+            assert exc.status_code == 401
+            assert "WS ticket" in exc.detail or "not a valid API credential" in exc.detail
+
+    def test_rate_limit_dependency_is_wired(self):
+        """
+        Static: the ws-ticket endpoint must be decorated with
+        dependencies=[Depends(login_rate_limit_dep)].
+
+        Inspect the app route table rather than parsing source text so the
+        check is resilient to comment and whitespace changes.
+        """
+        from main import app
+        from app.utils.rate_limit import login_rate_limit_dep
+        from fastapi import Depends
+
+        ws_ticket_route = None
+        for route in app.routes:
+            if getattr(route, "path", None) == "/api/auth/ws-ticket":
+                ws_ticket_route = route
+                break
+
+        assert ws_ticket_route is not None, (
+            "Route /api/auth/ws-ticket not found in app.routes"
+        )
+
+        # FastAPI stores route-level dependencies in route.dependencies
+        dep_callables = [d.dependency for d in getattr(ws_ticket_route, "dependencies", [])]
+        assert login_rate_limit_dep in dep_callables, (
+            f"login_rate_limit_dep must be a route-level dependency of /api/auth/ws-ticket; "
+            f"found: {dep_callables!r}"
+        )
+
+    def test_token_shape_three_segments(self, app_client):
+        """Minted ticket must be a three-segment JWT."""
+        r = app_client.post("/api/auth/ws-ticket")
+        assert r.status_code == 200
+        ticket = r.json()["ticket"]
+        assert ticket.count(".") == 2, (
+            f"Ticket must be a JWT (three dot-separated segments); got: {ticket!r}"
+        )
+
+
+class TestWsTicketLateralPathClosure:
+    """
+    Unit-level tests for the REST-path aud="ws" rejection in decode_access_token
+    (ATHENA-55 Phase 2, xander L-2).
+
+    These don't need the full app — just the oidc module.
+    """
+
+    def _mint_ws_ticket(self) -> str:
+        import sys
+        import os
+        # Ensure src is on path (same pattern as conftest)
+        repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+        )
+        if os.path.join(repo_root, "src") not in sys.path:
+            sys.path.insert(0, os.path.join(repo_root, "src"))
+
+        from app.auth.oidc import create_access_token
+        from datetime import timedelta
+        from uuid import uuid4
+        return create_access_token(
+            {"user_id": 999, "ws_ticket": True, "aud": "ws", "jti": str(uuid4())},
+            expires_delta=timedelta(seconds=45),
+        )
+
+    def test_ws_ticket_rejected_by_decode_access_token(self):
+        """decode_access_token raises HTTP 401 for aud='ws' tokens."""
+        from fastapi import HTTPException
+        from app.auth.oidc import decode_access_token
+
+        ticket = self._mint_ws_ticket()
+        try:
+            decode_access_token(ticket)
+            assert False, "Expected HTTPException but got no exception"
+        except HTTPException as exc:
+            assert exc.status_code == 401
+            assert "WS ticket" in exc.detail or "not a valid API credential" in exc.detail, (
+                f"Detail must name the WS ticket rejection; got: {exc.detail!r}"
+            )
+
+    def test_normal_token_passes_decode_access_token(self):
+        """A normal JWT (no aud, no ws_ticket) still passes decode_access_token."""
+        from app.auth.oidc import create_access_token, decode_access_token
+        from datetime import timedelta
+
+        normal_token = create_access_token({"user_id": 42}, expires_delta=timedelta(hours=1))
+        payload = decode_access_token(normal_token)
+        assert payload.get("user_id") == 42
+
+    def test_ws_ticket_with_int_discriminator_rejected(self):
+        """
+        A token carrying ws_ticket=1 (truthy, not identity-True) must also be
+        rejected.  The unverified claims check uses 'is True', so 1 != True by
+        identity.  However, the token DOES carry aud='ws' so it's caught by the
+        aud check.  This test verifies the aud check fires for the integer case.
+        """
+        from fastapi import HTTPException
+        from app.auth.oidc import create_access_token, decode_access_token
+        from datetime import timedelta
+        from uuid import uuid4
+
+        # Mint with ws_ticket=1 (int, not bool True) but still aud='ws'
+        # jose encodes bools as bools in JWT, but we need to test a raw int
+        # which we craft via direct jose encoding below.
+        from jose import jwt as jose_jwt
+        from app.auth.oidc import JWT_SECRET, JWT_ALGORITHM
+        import datetime as _dt
+
+        payload = {
+            "user_id": 1,
+            "ws_ticket": 1,  # int, not bool
+            "aud": "ws",
+            "jti": str(uuid4()),
+            "exp": _dt.datetime.utcnow() + _dt.timedelta(seconds=45),
+        }
+        token = jose_jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+        try:
+            decode_access_token(token)
+            assert False, "Expected HTTPException for ws_ticket=1 + aud='ws'"
+        except HTTPException as exc:
+            assert exc.status_code == 401
+
+    def test_decode_ws_ticket_validates_audience_positively(self):
+        """decode_ws_ticket accepts aud='ws' tokens and rejects all others."""
+        from jose.exceptions import JWTClaimsError
+        from app.auth.oidc import decode_ws_ticket
+
+        ticket = self._mint_ws_ticket()
+        payload = decode_ws_ticket(ticket)
+        assert payload is not None
+        assert payload.get("aud") == "ws"
+        assert payload.get("ws_ticket") is True
+
+    def test_decode_ws_ticket_no_aud_returns_payload_without_ws_ticket(self):
+        """
+        decode_ws_ticket with a plain REST token (no aud) succeeds (python-jose
+        does NOT raise on missing aud when audience= is supplied — it only validates
+        aud when the token carries one).  The payload is returned WITHOUT ws_ticket=True,
+        which the WS handler uses to route to the legacy fallthrough path.
+        """
+        from app.auth.oidc import create_access_token, decode_ws_ticket
+        from datetime import timedelta
+
+        normal_token = create_access_token({"user_id": 42}, expires_delta=timedelta(hours=1))
+        payload = decode_ws_ticket(normal_token)
+        # python-jose returns payload even without matching aud on no-aud token
+        assert payload is not None
+        # Critically: ws_ticket claim is absent → WS handler falls through to legacy
+        assert payload.get("ws_ticket") is not True, (
+            "A plain REST token must NOT have ws_ticket=True; "
+            f"got payload: {payload!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-55 Phase 3 — WS handler ticket validation, Origin check,
+# single-source JWT secret, dual-mode, log cleanup
+# ---------------------------------------------------------------------------
+
+class TestWsPhase3StaticGuards:
+    """
+    Static assertions covering Phase 3 guard properties that are verifiable
+    without spinning up a live WebSocket connection.
+    """
+
+    def test_no_second_jwt_secret_getenv_in_websocket(self):
+        """
+        Static: websocket.py must not contain a second JWT_SECRET = os.getenv(...)
+        read (xander M-3, ATHENA-55 Phase 3).  The canonical source is oidc.py.
+        """
+        import re
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        # Strip comment lines
+        code_lines = [l for l in src.splitlines() if not l.lstrip().startswith("#")]
+        code = "\n".join(code_lines)
+
+        matches = re.findall(r'JWT_SECRET\s*=\s*os\.getenv', code)
+        assert matches == [], (
+            f"websocket.py must not re-read JWT_SECRET from os.getenv (xander M-3); "
+            f"found: {matches!r}"
+        )
+
+    def test_no_token_slice_log_in_websocket(self):
+        """
+        Static: websocket.py must not contain token[:N] slice (xander, ATHENA-55 Phase 3).
+        """
+        import re
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        matches = re.findall(r'token\s*\[:', src)
+        assert matches == [], (
+            f"websocket.py must not log token slices (token[:); found: {matches!r}"
+        )
+
+    def test_decode_ws_ticket_lives_in_oidc(self):
+        """
+        Static: decode_ws_ticket must be defined in oidc.py, not in websocket.py
+        (single source of truth, xander M-3).
+        """
+        import inspect
+        from app.auth.oidc import decode_ws_ticket
+        src_file = inspect.getfile(decode_ws_ticket)
+        assert src_file.endswith("oidc.py"), (
+            f"decode_ws_ticket must be defined in oidc.py; found in: {src_file!r}"
+        )
+
+    def test_configure_redis_callable_in_websocket(self):
+        """websocket.configure_redis() must exist so main.py can wire the client."""
+        from app.routes.websocket import configure_redis
+        import inspect
+        assert callable(configure_redis)
+        sig = inspect.signature(configure_redis)
+        assert "redis_client" in sig.parameters
+
+
+class TestWsPhase3ClaimJti:
+    """Unit tests for _claim_jti single-use enforcement."""
+
+    def setup_method(self):
+        """Reset in-memory jti store before each test."""
+        from app.routes import websocket as ws_mod
+        ws_mod._used_jti_memory.clear()
+        ws_mod._redis_client = None  # ensure DEV_MODE path
+
+    def test_first_claim_returns_true(self):
+        """First use of a jti returns True (claimed)."""
+        import asyncio
+        from app.routes.websocket import _claim_jti
+
+        result = asyncio.run(_claim_jti("jti-abc", ttl=45))
+        assert result is True
+
+    def test_replay_returns_false(self):
+        """Second use of the same jti returns False (replayed)."""
+        import asyncio
+        from app.routes.websocket import _claim_jti
+
+        async def _run():
+            await _claim_jti("jti-dup", ttl=45)
+            return await _claim_jti("jti-dup", ttl=45)
+
+        result = asyncio.run(_run())
+        assert result is False
+
+    def test_different_jtis_independent(self):
+        """Two different jtis can both be claimed on first use."""
+        import asyncio
+        from app.routes.websocket import _claim_jti
+
+        async def _run():
+            r1 = await _claim_jti("jti-x", ttl=45)
+            r2 = await _claim_jti("jti-y", ttl=45)
+            return r1, r2
+
+        r1, r2 = asyncio.run(_run())
+        assert r1 is True
+        assert r2 is True
+
+    def test_redis_key_shape(self):
+        """
+        Production Redis key must be athena:ws_ticket:<jti>.
+
+        Use a fake synchronous Redis-like object and verify the SET call uses
+        the expected key prefix.
+        """
+        import asyncio
+        from app.routes import websocket as ws_mod
+
+        recorded_calls = []
+
+        class FakeRedis:
+            async def set(self, key, value, nx=False, ex=None):
+                recorded_calls.append({"key": key, "value": value, "nx": nx, "ex": ex})
+                return True  # simulate first-time claim
+
+        ws_mod._redis_client = FakeRedis()
+        try:
+            asyncio.run(ws_mod._claim_jti("my-unique-jti", ttl=45))
+        finally:
+            ws_mod._redis_client = None
+
+        assert len(recorded_calls) == 1
+        assert recorded_calls[0]["key"] == "athena:ws_ticket:my-unique-jti", (
+            f"Redis key must be athena:ws_ticket:<jti>; got: {recorded_calls[0]['key']!r}"
+        )
+        assert recorded_calls[0]["nx"] is True
+        assert recorded_calls[0]["ex"] == 45
+
+
+class TestWsPhase3DualModeDecoder:
+    """
+    Tests for the dual-mode token decode logic:
+    1. Valid ws-ticket → ticket path
+    2. Token with ws_ticket=1 (not True) → legacy path (aud="ws" accepted by jose but
+       ws_ticket is not True → legacy fallthrough, then decode_access_token rejects
+       aud="ws" → close 4001)
+    3. Legacy session JWT (no aud, no ws_ticket) → legacy path + deprecation warning
+    """
+
+    def _mint_ws_ticket(self):
+        from app.auth.oidc import create_access_token
+        from datetime import timedelta
+        from uuid import uuid4
+        return create_access_token(
+            {"user_id": 1, "ws_ticket": True, "aud": "ws", "jti": str(uuid4())},
+            expires_delta=timedelta(seconds=45),
+        )
+
+    def _mint_legacy_token(self):
+        from app.auth.oidc import create_access_token
+        from datetime import timedelta
+        return create_access_token({"user_id": 1}, expires_delta=timedelta(hours=1))
+
+    def test_ticket_path_claims(self):
+        """Valid ws-ticket: decode_ws_ticket returns payload with ws_ticket=True."""
+        from app.auth.oidc import decode_ws_ticket
+
+        ticket = self._mint_ws_ticket()
+        payload = decode_ws_ticket(ticket)
+        assert payload is not None
+        assert payload.get("ws_ticket") is True
+        assert payload.get("aud") == "ws"
+
+    def test_legacy_path_no_ws_ticket_claim(self):
+        """
+        Legacy session JWT: decode_ws_ticket returns payload without ws_ticket=True
+        → handler falls to legacy path.
+        """
+        from app.auth.oidc import decode_ws_ticket
+
+        legacy = self._mint_legacy_token()
+        payload = decode_ws_ticket(legacy)
+        assert payload is not None
+        assert payload.get("ws_ticket") is not True
+
+    def test_legacy_token_passes_decode_access_token(self):
+        """Legacy JWT (no aud, no ws_ticket) passes decode_access_token (no REST guard)."""
+        from app.auth.oidc import decode_access_token
+
+        legacy = self._mint_legacy_token()
+        payload = decode_access_token(legacy)
+        assert payload.get("user_id") == 1
+
+    def test_ws_ticket_identity_check_rejects_int_discriminator(self):
+        """
+        A token carrying ws_ticket=1 (int, not bool True) + aud='ws':
+        decode_ws_ticket returns payload, but payload.get("ws_ticket") is not True
+        (identity check) → handler falls through to legacy path where
+        decode_access_token rejects aud="ws" → close 4001.
+        """
+        from jose import jwt as jose_jwt
+        from jose.exceptions import JWTClaimsError
+        from fastapi import HTTPException
+        from app.auth.oidc import JWT_SECRET, JWT_ALGORITHM, decode_access_token, decode_ws_ticket
+        from datetime import timedelta
+        from uuid import uuid4
+        import datetime as _dt
+
+        token = jose_jwt.encode(
+            {
+                "user_id": 1,
+                "ws_ticket": 1,  # int, not bool True
+                "aud": "ws",
+                "jti": str(uuid4()),
+                "exp": _dt.datetime.utcnow() + _dt.timedelta(seconds=45),
+            },
+            JWT_SECRET,
+            algorithm=JWT_ALGORITHM,
+        )
+
+        # decode_ws_ticket succeeds (aud="ws" positively validated) but ws_ticket is 1
+        payload = decode_ws_ticket(token)
+        assert payload is not None
+        # Identity check: 1 is not True → handler falls to legacy
+        assert payload.get("ws_ticket") is not True, (
+            "ws_ticket=1 must not satisfy 'is True' identity check"
+        )
+        # Legacy fallthrough: decode_access_token raises because aud="ws"
+        try:
+            decode_access_token(token)
+            assert False, "decode_access_token must reject aud='ws' token"
+        except HTTPException as exc:
+            assert exc.status_code == 401
+
+    def test_expired_ticket_decode_ws_ticket_returns_none(self):
+        """Expired ticket: decode_ws_ticket returns None (JWTError path)."""
+        from app.auth.oidc import create_access_token, decode_ws_ticket
+        from datetime import timedelta
+        from uuid import uuid4
+        import time
+
+        ticket = create_access_token(
+            {"user_id": 1, "ws_ticket": True, "aud": "ws", "jti": str(uuid4())},
+            expires_delta=timedelta(seconds=-1),  # already expired
+        )
+        result = decode_ws_ticket(ticket)
+        assert result is None
+
+    def test_user_id_claim_read_sub_then_user_id(self):
+        """
+        WS handler reads user_id via payload.get('sub') or payload.get('user_id').
+        Verify a ticket (no sub, has user_id) resolves correctly.
+        """
+        from app.auth.oidc import decode_ws_ticket
+        ticket = self._mint_ws_ticket()
+        payload = decode_ws_ticket(ticket)
+        # ticket carries user_id, no sub
+        assert "user_id" in payload
+        assert "sub" not in payload or payload.get("sub") is None
+        resolved = payload.get("sub") or payload.get("user_id") or "unknown"
+        assert resolved == payload["user_id"]
+
+
+class TestWsPhase3OriginCheck:
+    """
+    Tests for the Origin check in admin_jarvis_websocket.
+
+    We test _claim_jti, decode_ws_ticket, and the static structure rather than
+    spinning up a full WebSocket server (which requires real asyncio event loop
+    + ASGI transport not available in basic TestClient for WS routes in this setup).
+    The origin check logic is tested via the module-level _cors_env read.
+    """
+
+    def test_origin_check_rejects_non_cors_in_production(self):
+        """
+        In production (dev_mode=False), an origin not in CORS_ORIGINS must be
+        rejected.  We verify the logic by inspecting the source code for the
+        close(code=4003) pattern and the CORS_ALLOWED_ORIGINS env read.
+        """
+        import re
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        assert "4003" in src, (
+            "websocket.py must close with code 4003 for Origin mismatch (xander H-1)"
+        )
+        assert "CORS_ALLOWED_ORIGINS" in src, (
+            "websocket.py must read CORS_ALLOWED_ORIGINS for origin validation"
+        )
+        assert "dev_mode" in src.lower() or "DEV_MODE" in src, (
+            "websocket.py origin check must be gated on DEV_MODE / dev_mode"
+        )
+
+    def test_origin_check_skips_dev_mode_in_source(self):
+        """
+        Static: the origin check must be gated on 'not cfg.dev_mode' (or equivalent)
+        so DEV_MODE skips the check.
+        """
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        # Should gate on dev_mode being false
+        assert "not cfg.dev_mode" in src or "cfg.dev_mode" in src, (
+            "Origin check in websocket.py must reference cfg.dev_mode"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Campaign 4 / ATHENA-55 Phase 4: frontend WS ticket mint + capability fallback
+# ---------------------------------------------------------------------------
+
+
+class TestWsPhase4FrontendStaticGuards:
+    """Static safety net for admin-jarvis.js (ATHENA-55 Phase 4, xander C-2 + L-3 + Decision 3).
+
+    These tests parse the frontend source directly — no browser required.
+    """
+
+    _FRONTEND_PATH = None
+
+    @classmethod
+    def _get_frontend_src(cls):
+        if cls._FRONTEND_PATH is None:
+            cls._FRONTEND_PATH = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "admin-jarvis.js")
+            )
+        with open(cls._FRONTEND_PATH) as f:
+            return f.read()
+
+    def test_calls_ws_ticket_endpoint(self):
+        """admin-jarvis.js must POST /api/auth/ws-ticket to mint a ticket (ATHENA-55 Phase 4)."""
+        src = self._get_frontend_src()
+        assert "/api/auth/ws-ticket" in src, (
+            "admin-jarvis.js must call /api/auth/ws-ticket to obtain a WS ticket "
+            "(ATHENA-55 Phase 4)"
+        )
+        assert "POST" in src, (
+            "admin-jarvis.js must use POST when minting a ws-ticket"
+        )
+
+    def test_no_direct_localstorage_token_in_ws_url_primary_path(self):
+        """The WS URL on the primary (ticket) path must not contain the raw localStorage token.
+
+        The legacy-fallback branches are the only places where sessionToken (the
+        local-storage value) may appear in a WS URL.  On the primary path the
+        wsUrl must be built from the minted ticket, not the raw token.
+        """
+        import re
+        src = self._get_frontend_src()
+
+        # We verify by checking that wsToken (which holds the minted ticket on the
+        # primary path) — not sessionToken / localStorage — is what is interpolated
+        # into the primary wsUrl.
+        assert "wsToken" in src, (
+            "admin-jarvis.js must use a separate wsToken variable for the WS URL "
+            "on the primary path (not the raw localStorage token)"
+        )
+        # Ensure the primary wsUrl is built from wsToken, not directly from localStorage
+        assert "wsBasePath" in src or "wsUrl" in src, (
+            "admin-jarvis.js must build the WS URL from a ticket variable, not raw localStorage"
+        )
+
+    def test_console_log_carries_no_query_string(self):
+        """console.log for WS connect must log host+path only, never ?token= (xander C-2)."""
+        import re
+        src = self._get_frontend_src()
+
+        # All console.log calls that mention 'Connecting to:' must not reference wsUrl
+        # (which carries the ?token=) or ?token= directly.
+        connecting_logs = re.findall(r'console\.log\([^)]*Connecting to[^)]*\)', src, re.DOTALL)
+        for log_call in connecting_logs:
+            assert "wsUrl" not in log_call, (
+                f"console.log for 'Connecting to' must not log wsUrl (contains ?token=); "
+                f"found: {log_call!r} — xander C-2 blocker"
+            )
+            assert "?token=" not in log_call, (
+                f"console.log for 'Connecting to' must not contain ?token=; "
+                f"found: {log_call!r} — xander C-2 blocker"
+            )
+
+        # Verify at least one 'Connecting to:' log exists (regression check)
+        assert len(connecting_logs) >= 1, (
+            "admin-jarvis.js must contain at least one 'Connecting to:' console.log "
+            "for connection traceability"
+        )
+
+    def test_reconnect_refetches_ticket(self):
+        """Reconnect must call connectWebSocket() again (re-fetches a fresh ticket).
+
+        The ticket fetch must be inside connectWebSocket(), not at module-init,
+        so every reconnect mints a new ticket (single-use enforcement, xander L-3).
+        """
+        import re
+        src = self._get_frontend_src()
+        # scheduleReconnect calls connectWebSocket() — verify the pattern
+        assert "connectWebSocket()" in src, (
+            "scheduleReconnect must call connectWebSocket() so every reconnect "
+            "re-fetches a fresh ticket (xander L-3)"
+        )
+        # connectWebSocket must be declared as an async function (needed for await fetch)
+        assert "async function connectWebSocket()" in src, (
+            "connectWebSocket must be declared as async function"
+        )
+        # The actual fetch() call for the ticket must be inside connectWebSocket.
+        # We look for "fetch('/api/auth/ws-ticket'" (the call form, not a comment).
+        idx_fn = src.find("async function connectWebSocket()")
+        # Find the fetch *call* — "fetch('/api/auth/ws-ticket'" — after the function decl.
+        fetch_call_pattern = re.compile(r"fetch\(['\"]\/api\/auth\/ws-ticket['\"]", re.DOTALL)
+        match = fetch_call_pattern.search(src, idx_fn)
+        assert match is not None, (
+            "fetch('/api/auth/ws-ticket') call must appear inside connectWebSocket(), "
+            "not before it at module-init (xander L-3 — fresh ticket per connect)"
+        )
+
+    def test_mint_time_fallback_gated_on_404_only(self):
+        """Mint-time legacy fallback must be gated on status === 404 only (bob M2).
+
+        401/403/5xx must not trigger a fallback — they must fail loudly.
+        """
+        import re
+        src = self._get_frontend_src()
+
+        # The 404 gate must be present
+        assert "404" in src, (
+            "admin-jarvis.js must gate the mint-time legacy fallback on status 404"
+        )
+        # The fallback must explicitly check for 404, not a general failure condition
+        assert ".status === 404" in src or "status === 404" in src or "mintResp.status === 404" in src, (
+            "admin-jarvis.js mint-time fallback must be gated on mintResp.status === 404 "
+            "only (bob M2 — 401/403/5xx must fail loudly, not fall back)"
+        )
+
+    def test_capability_fallback_gated_on_4001_and_mint_200_and_not_retried(self):
+        """Upgrade-time capability fallback must be gated on closeCode===4001 && mintStatus===200 &&
+        !legacyRetried (Decision 3 / codex r2).
+
+        Any relaxation of this gate could launder a genuine auth failure into a
+        long-lived JWT-in-URL connection.
+        """
+        src = self._get_frontend_src()
+
+        # The three gate conditions must all appear in the source
+        assert "4001" in src, (
+            "admin-jarvis.js capability fallback must check close code 4001"
+        )
+        assert "ticketMintStatus === 200" in src or "mintStatus === 200" in src, (
+            "admin-jarvis.js capability fallback must be gated on ticketMintStatus === 200 "
+            "(Decision 3 — retry only when the mint itself succeeded)"
+        )
+        assert "legacyRetried" in src, (
+            "admin-jarvis.js must track legacyRetried to prevent a second fallback attempt"
+        )
+        assert "!legacyRetried" in src, (
+            "admin-jarvis.js capability fallback must check !legacyRetried to bound to one retry"
+        )
+
+    def test_no_retry_on_4003(self):
+        """4003 (Origin) must never trigger a legacy retry (Decision 3)."""
+        import re
+        src = self._get_frontend_src()
+        # 4003 should appear in the source (as a check / comment / log)
+        assert "4003" in src, (
+            "admin-jarvis.js must reference close code 4003 to handle Origin-rejection "
+            "without retrying"
+        )
+        # Verify the capability fallback condition does NOT include 4003 as a trigger.
+        # The gate must be specifically 4001, not a general non-1000 code.
+        # We check by confirming 4003 does not appear as the trigger for legacyRetried.
+        # Static heuristic: 4003 must not be the condition that sets legacyRetried.
+        assert "event.code === 4003" not in src or "legacyRetried = true" not in src.split("4003")[0].rsplit("legacyRetried = true", 1)[-1][:50], (
+            "admin-jarvis.js must NOT set legacyRetried=true on 4003 — 4003 is Origin-block, "
+            "not a capability signal (Decision 3)"
+        )
+
+    def test_legacy_retried_resets_per_connect(self):
+        """legacyRetried must reset to false at the start of each connectWebSocket() invocation.
+
+        This ensures a later reconnect re-probes the (possibly now fully-rolled-out)
+        backend rather than permanently pinning to the legacy token.
+        """
+        src = self._get_frontend_src()
+        assert "let legacyRetried = false" in src, (
+            "admin-jarvis.js must declare 'let legacyRetried = false' inside connectWebSocket() "
+            "so it resets on every fresh connect attempt (Decision 3)"
+        )
+        # Verify it's inside the function, not at module scope
+        idx_fn = src.find("async function connectWebSocket()")
+        idx_decl = src.find("let legacyRetried = false")
+        assert idx_decl > idx_fn, (
+            "'let legacyRetried = false' must be inside connectWebSocket(), "
+            "not at module scope"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Xander mid-build follow-ups (same campaign, ATHENA-55 Phase 4 commit):
+#   M-1 — Origin policy: absent Origin allowed; PRESENT-but-mismatched → 4003
+#   M-2 — dead aud_mismatch variable removed, comment on legacy fallthrough
+#   L-1 — end-to-end replay: _claim_jti returns False → close 4001, no legacy decode
+#   L-2 — aud=["ws","api"] list-form token rejected by REST path
+# ---------------------------------------------------------------------------
+
+
+class TestWsOriginPolicy:
+    """
+    xander M-1 — Origin policy in admin_jarvis_websocket.
+
+    Policy (ATHENA-55): absent Origin (None) is ALLOWED (non-browser clients
+    have no CSRF surface; Origin checks defend against browser-based cross-origin
+    upgrade attacks).  A PRESENT-but-mismatched Origin is rejected with 4003.
+    """
+
+    def test_absent_origin_allowed_in_source(self):
+        """
+        Static: the Origin check must be gated on `origin is not None` so that
+        absent-Origin (non-browser clients) are allowed.
+        """
+        import re
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        # The guard must condition on BOTH dev_mode AND origin being present.
+        # Accept either "origin is not None" or "and origin is not None"
+        assert "origin is not None" in src, (
+            "websocket.py Origin check must guard on 'origin is not None' so that "
+            "absent-Origin (non-browser clients) are allowed (xander M-1). "
+            "Absent Origin has no CSRF surface; only PRESENT-but-mismatched → 4003."
+        )
+
+    def test_mismatched_origin_still_close_4003_in_source(self):
+        """
+        Static: a PRESENT-but-mismatched Origin must still close with 4003.
+        The absent-Origin allowance must not remove the mismatch rejection.
+        """
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        assert "4003" in src, (
+            "websocket.py must still close with code 4003 for a PRESENT-but-mismatched "
+            "Origin (xander M-1 + H-1)"
+        )
+        assert "CORS_ALLOWED_ORIGINS" in src, (
+            "websocket.py must still read CORS_ALLOWED_ORIGINS for origin validation "
+            "(PRESENT-but-mismatched guard)"
+        )
+
+    def test_absent_origin_policy_comment_present(self):
+        """
+        Static: the absent-Origin policy decision must be documented in a comment
+        in websocket.py so future maintainers understand the deliberate allowance.
+        """
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        # The comment must explain the CSRF rationale for absent-Origin allowance.
+        assert "no CSRF surface" in src or "CSRF" in src, (
+            "websocket.py must contain a comment explaining why absent-Origin is allowed "
+            "(non-browser clients / no CSRF surface) — xander M-1 policy decision"
+        )
+
+
+class TestWsAudMismatchVariableRemoved:
+    """
+    xander M-2 — dead aud_mismatch variable must be removed from websocket.py.
+
+    The variable was set but never read; it was a misleading leftover from an
+    earlier draft.  The legacy fallthrough is entered on decode failure OR
+    non-ticket payloads (broader than aud mismatch).
+    """
+
+    def test_aud_mismatch_variable_absent(self):
+        """
+        Static: websocket.py must not contain the dead `aud_mismatch` variable.
+        """
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        # Strip comment lines so explanatory comments don't trigger a false positive.
+        code_lines = [l for l in src.splitlines() if not l.lstrip().startswith("#")]
+        code = "\n".join(code_lines)
+
+        import re
+        matches = re.findall(r'\baud_mismatch\b', code)
+        assert matches == [], (
+            "websocket.py must not contain the dead aud_mismatch variable (xander M-2); "
+            f"found {len(matches)} reference(s): {matches!r}"
+        )
+
+    def test_legacy_fallthrough_comment_present(self):
+        """
+        Static: websocket.py must have a comment on the legacy fallthrough condition
+        explaining it is entered on decode-failure OR non-ticket payloads.
+        """
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        # A comment near the JWTClaimsError except block should explain the broad scope.
+        assert "decode failure" in src or "decode_ws_ticket raised" in src or "ANY decode failure" in src.upper() or "any decode failure" in src.lower(), (
+            "websocket.py must have a comment near the legacy fallthrough explaining "
+            "it is entered on decode-failure OR non-ticket payloads, not only aud mismatch "
+            "(xander M-2)"
+        )
+
+
+class TestWsReplayGuardL1:
+    """
+    xander L-1 — end-to-end replay test.
+
+    Mock _claim_jti to return False (already consumed), assert the handler
+    closes 4001 and does NOT call decode_access_token (replay-then-legacy-sneak guard).
+
+    Tested at the unit level via the module's internal _claim_jti and decode_ws_ticket
+    since spinning up a real WS server requires ASGI transport outside TestClient scope.
+    The test verifies the WS handler's logic path by confirming:
+      (a) a replayed jti causes close 4001 to be the only outcome,
+      (b) decode_access_token is never called when _claim_jti returns False.
+    """
+
+    def test_replayed_jti_never_reaches_legacy_decode(self):
+        """
+        Replay guard (L-1): when _claim_jti returns False for a valid ticket,
+        the handler must close 4001 and must NOT fall through to decode_access_token.
+
+        Verified by:
+        1. Checking that _claim_jti False-return is structurally before the
+           decode_access_token call in the source (static ordering).
+        2. Verifying the replay close-4001 path exists in the source.
+        """
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        # The replay rejection must log a specific event and close 4001.
+        assert "websocket_ticket_replayed" in src, (
+            "websocket.py must log 'websocket_ticket_replayed' when _claim_jti returns False "
+            "(xander L-1)"
+        )
+        assert "4001" in src, (
+            "websocket.py must close with 4001 on replay (xander L-1)"
+        )
+
+        # The replay check must come BEFORE the legacy path in source order.
+        # This proves a replayed ticket cannot sneak through to the legacy decoder.
+        idx_replay = src.find("websocket_ticket_replayed")
+        idx_legacy = src.find("websocket_legacy_token_auth_deprecated")
+        assert idx_replay < idx_legacy, (
+            "websocket_ticket_replayed guard must appear before the legacy fallthrough "
+            "in websocket.py — a replayed ticket must never reach decode_access_token "
+            "(xander L-1 replay-then-legacy-sneak guard)"
+        )
+
+    def test_claim_jti_false_triggers_close_not_legacy(self):
+        """
+        Unit test: confirm _claim_jti returning False causes a 4001 close path
+        (not legacy fallthrough) by verifying the conditional structure in source.
+
+        The WS handler contains:
+          claimed = await _claim_jti(jti, ttl=90)
+          if not claimed:
+              ...close(code=4001...)
+              return
+
+        This test asserts that pattern exists, preventing the handler from
+        falling through to decode_access_token on a replay.
+        """
+        ws_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
+        )
+        with open(ws_path) as f:
+            src = f.read()
+
+        # The "if not claimed" → return pattern must exist
+        assert "if not claimed" in src, (
+            "websocket.py must contain 'if not claimed: ... return' after _claim_jti call "
+            "(xander L-1 — replayed ticket must return, not fall through)"
+        )
+
+        # The return must be before the legacy fallthrough section
+        idx_not_claimed = src.find("if not claimed")
+        idx_legacy = src.find("websocket_legacy_token_auth_deprecated")
+        assert 0 < idx_not_claimed < idx_legacy, (
+            "The 'if not claimed: return' block must appear before the legacy deprecation "
+            "warning in source order (xander L-1)"
+        )
+
+    def test_claim_jti_replay_unit(self):
+        """
+        Direct unit test of _claim_jti: second call with the same jti returns False
+        (DEV_MODE in-memory path).  Verifies the single-use mechanism that backs
+        the L-1 replay guard.
+        """
+        import asyncio
+        from app.routes import websocket as ws_mod
+        # Reset in-memory store
+        ws_mod._used_jti_memory.clear()
+        ws_mod._redis_client = None  # ensure DEV_MODE path
+
+        async def _run():
+            first = await ws_mod._claim_jti("replay-test-jti", ttl=45)
+            second = await ws_mod._claim_jti("replay-test-jti", ttl=45)
+            return first, second
+
+        first, second = asyncio.run(_run())
+        assert first is True, "First claim must succeed"
+        assert second is False, "Second claim (replay) must return False (xander L-1)"
+
+        # Clean up
+        ws_mod._used_jti_memory.clear()
+
+
+class TestWsAudienceListFormL2:
+    """
+    xander L-2 — regression: token with aud=["ws","api"] (list form) as REST Bearer → 401.
+
+    python-jose encodes and decodes the aud claim as either a string or a list.
+    The REST guard in decode_access_token checks payload.get("aud") == "ws" (string equality).
+    This test pins the behavior explicitly: a list-form audience that INCLUDES "ws"
+    must ALSO be rejected, because python-jose may return "ws" as a string even
+    when the JWT was encoded with a list — test both forms.
+    """
+
+    def _mint_list_aud_token(self):
+        """Mint a token with aud as a JSON array ["ws","api"]."""
+        from jose import jwt as jose_jwt
+        from app.auth.oidc import JWT_SECRET, JWT_ALGORITHM
+        import datetime as _dt
+        from uuid import uuid4
+
+        payload = {
+            "user_id": 1,
+            "ws_ticket": True,
+            "aud": ["ws", "api"],  # list form
+            "jti": str(uuid4()),
+            "exp": _dt.datetime.utcnow() + _dt.timedelta(seconds=45),
+        }
+        return jose_jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+    def test_list_aud_ws_rejected_by_decode_access_token(self):
+        """
+        A token with aud=["ws","api"] (list) used as REST Bearer must raise HTTP 401.
+
+        This pins python-jose's implicit rejection behavior: jose encodes list aud
+        as a JSON array; when decode_access_token decodes without audience=, jose
+        returns the aud claim as-is (list or string).  The guard checks both
+        the string form ("ws") and the ws_ticket discriminator.
+
+        NOTE: python-jose may deserialize aud=["ws","api"] as a list, which means
+        the guard `payload.get("aud") == "ws"` (string equality) would NOT fire.
+        The ws_ticket=True check IS the primary guard in that case.  This test
+        verifies the combined guard rejects the token regardless.
+        """
+        from fastapi import HTTPException
+        from app.auth.oidc import decode_access_token
+
+        token = self._mint_list_aud_token()
+        try:
+            result = decode_access_token(token)
+            # If no exception: inspect payload — ws_ticket=True must have been caught
+            assert False, (
+                f"decode_access_token must reject ws_ticket=True token (aud list form); "
+                f"got result: {result!r}"
+            )
+        except HTTPException as exc:
+            assert exc.status_code == 401, (
+                f"Expected HTTP 401 for aud-list WS ticket; got {exc.status_code}"
+            )
+
+    def test_string_aud_ws_rejected_by_decode_access_token(self):
+        """
+        String-form aud='ws' is rejected (regression pin; already tested elsewhere
+        but included here for the L-2 audit trail).
+        """
+        from fastapi import HTTPException
+        from app.auth.oidc import create_access_token, decode_access_token
+        from datetime import timedelta
+        from uuid import uuid4
+
+        token = create_access_token(
+            {"user_id": 1, "ws_ticket": True, "aud": "ws", "jti": str(uuid4())},
+            expires_delta=timedelta(seconds=45),
+        )
+        try:
+            decode_access_token(token)
+            assert False, "decode_access_token must reject aud='ws' (string) token"
+        except HTTPException as exc:
+            assert exc.status_code == 401

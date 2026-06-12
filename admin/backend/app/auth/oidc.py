@@ -20,6 +20,7 @@ from authlib.integrations.starlette_client import OAuth
 from fastapi import Request, HTTPException, status, Depends, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
+from jose.exceptions import JWTClaimsError
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine
 import structlog
@@ -228,6 +229,9 @@ def decode_access_token(token: str) -> Dict[str, Any]:
     """
     Decode and validate a JWT access token.
 
+    Rejects tokens carrying aud="ws" or ws_ticket=True — WS tickets must never
+    authenticate REST requests (ATHENA-55 Phase 2, xander L-2).
+
     Args:
         token: JWT token string
 
@@ -235,8 +239,26 @@ def decode_access_token(token: str) -> Dict[str, Any]:
         Dictionary of decoded claims
 
     Raises:
-        HTTPException: If token is invalid or expired
+        HTTPException: If token is invalid, expired, or is a WS-scoped ticket
     """
+    # Pre-decode unverified claim check: reject WS-audience tokens before
+    # attempting full decode.  python-jose raises JWTClaimsError on aud mismatch
+    # (no audience= supplied), but we surface a clearer diagnostic here.
+    try:
+        unverified = jwt.get_unverified_claims(token)
+        if unverified.get("aud") == "ws" or unverified.get("ws_ticket") is True:
+            logger.warning("ws_ticket_used_as_rest_bearer")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="WS ticket is not a valid API credential",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        # get_unverified_claims failed (malformed token) — let full decode handle it
+        pass
+
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         return payload
@@ -247,6 +269,36 @@ def decode_access_token(token: str) -> Dict[str, Any]:
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def decode_ws_ticket(token: str) -> Optional[Dict[str, Any]]:
+    """
+    Decode a WS-scoped ticket, validating aud="ws" positively.
+
+    Used exclusively by the WebSocket handler.  Returns the payload dict on
+    success, or None if the token is invalid/expired.  Raises JWTClaimsError
+    (a JWTError subclass) when the token carries the wrong/missing audience —
+    the WS handler catches that to fall through to legacy-token acceptance.
+
+    Args:
+        token: JWT token string expected to carry aud="ws"
+
+    Returns:
+        Decoded payload dict, or None on signature/expiry failure
+
+    Raises:
+        JWTClaimsError: When the token does not carry aud="ws" (missing or wrong
+            audience) — caller should fall through to legacy decode path.
+    """
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], audience="ws")
+        return payload
+    except JWTClaimsError:
+        # Wrong/missing aud — re-raise so the WS handler can fall through to legacy
+        raise
+    except JWTError as e:
+        logger.warning("ws_ticket_decode_failed", error=str(e))
+        return None
 
 
 def get_or_create_user(db: Session, userinfo: Dict[str, Any]) -> User:

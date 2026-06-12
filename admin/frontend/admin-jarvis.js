@@ -46,37 +46,132 @@ function toggleWebSocketConnection() {
 
 /**
  * Connect to the Admin Jarvis WebSocket endpoint.
+ *
+ * Auth flow (per ATHENA-55 Phase 4):
+ *  1. POST /api/auth/ws-ticket with Bearer token → use returned ticket in WS URL.
+ *  2. Mint-time fallback: if the mint endpoint returns 404 (old backend), fall
+ *     back to the legacy session JWT in ?token=. 401/403/5xx → fail loudly.
+ *  3. Upgrade-time capability fallback: if the WS closes with code 4001 AND the
+ *     ticket mint returned 200 AND no legacy retry has happened yet for this
+ *     connect attempt → retry once with the legacy session JWT. A second 4001,
+ *     a 4003, or a mint status != 200 → fail loudly (no downgrade).
+ *
+ * Console redaction (xander C-2): log host+path only, never the query string.
+ * Fresh ticket on every connect (xander L-3): never cache wsUrl.
  */
-function connectWebSocket() {
+async function connectWebSocket() {
     if (adminJarvisWs && adminJarvisWs.readyState === WebSocket.OPEN) {
         console.log('[AdminJarvis] Already connected');
         return;
     }
 
-    // Build WebSocket URL - use same host as page, switch to WSS for HTTPS
+    // Reset per-connect fallback state (xander L-3 / Decision 3).
+    // Must be at the top of connectWebSocket() so a later reconnect re-probes.
+    let ticketMintStatus = null;
+    let legacyRetried = false;
+
+    // Build WebSocket base URL - use same host as page, switch to WSS for HTTPS
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
 
-    // Get auth token if available (stored as 'auth_token' by app.js)
-    const token = localStorage.getItem('auth_token') || '';
+    // Redacted base path for logging (xander C-2 — never log the query string)
+    const wsBasePath = `${protocol}//${host}/ws/admin-jarvis`;
 
-    // WebSocket endpoint on admin backend
-    const wsUrl = `${protocol}//${host}/ws/admin-jarvis${token ? `?token=${token}` : ''}`;
-
-    console.log('[AdminJarvis] Connecting to:', wsUrl);
     updateWsStatus('connecting');
 
-    try {
-        adminJarvisWs = new WebSocket(wsUrl);
+    // --- Determine the token to use for the WS upgrade ---
+    let wsToken = '';
+    const sessionToken = localStorage.getItem('auth_token') || '';
 
-        adminJarvisWs.onopen = handleWsOpen;
-        adminJarvisWs.onclose = handleWsClose;
-        adminJarvisWs.onerror = handleWsError;
-        adminJarvisWs.onmessage = handleWsMessage;
-    } catch (error) {
-        console.error('[AdminJarvis] WebSocket creation error:', error);
-        updateWsStatus('error');
+    if (sessionToken) {
+        // Attempt to mint a short-lived, single-use ws-ticket (ATHENA-55 Phase 4).
+        // Fresh fetch on every call — never reuse a cached ticket or wsUrl.
+        try {
+            const mintResp = await fetch('/api/auth/ws-ticket', {
+                method: 'POST',
+                headers: { Authorization: 'Bearer ' + sessionToken }
+            });
+            ticketMintStatus = mintResp.status;
+
+            if (mintResp.ok) {
+                // New backend: use the single-use aud=ws ticket.
+                const mintData = await mintResp.json();
+                wsToken = mintData.ticket || '';
+            } else if (mintResp.status === 404) {
+                // Old backend has no ticket endpoint → fall back to session JWT.
+                // This is the only mint-time fallback; 401/403/5xx → fail loudly.
+                console.warn('[AdminJarvis] ws-ticket endpoint not found (old backend); using legacy token');
+                wsToken = sessionToken;
+            } else {
+                // 401 / 403 / 5xx — real auth or server failure, do not connect.
+                console.error('[AdminJarvis] ws-ticket mint failed with status', mintResp.status, '— aborting connect');
+                updateWsStatus('error');
+                return;
+            }
+        } catch (err) {
+            // Network-level failure fetching the mint endpoint.
+            console.error('[AdminJarvis] ws-ticket mint network error:', err);
+            updateWsStatus('error');
+            return;
+        }
     }
+    // DEV_MODE / no token: wsToken stays '' so the WS URL carries no ?token= param.
+
+    // Build the WS URL with the resolved token (ticket or legacy fallback).
+    // Never log wsUrl — log host+path only (xander C-2).
+    const wsUrl = wsToken ? `${wsBasePath}?token=${wsToken}` : wsBasePath;
+
+    console.log('[AdminJarvis] Connecting to:', wsBasePath);
+
+    /**
+     * Open the WebSocket and wire close-code handling for the capability
+     * fallback (Decision 3, codex r2): a 4001 close on a freshly minted ticket
+     * means an old backend pod rejected the aud=ws ticket — retry once with the
+     * legacy session JWT to cover the mixed-rollout window.
+     */
+    function openWs(url) {
+        try {
+            adminJarvisWs = new WebSocket(url);
+            adminJarvisWs.onopen = handleWsOpen;
+            adminJarvisWs.onmessage = handleWsMessage;
+            adminJarvisWs.onerror = handleWsError;
+
+            adminJarvisWs.onclose = function(event) {
+                // Capability-handshake retry (Decision 3 / Phase 4):
+                // 4001 + fresh mint (200) + first attempt only → retry with legacy JWT.
+                if (
+                    event.code === 4001 &&
+                    ticketMintStatus === 200 &&
+                    !legacyRetried &&
+                    sessionToken
+                ) {
+                    legacyRetried = true;
+                    console.warn(
+                        '[AdminJarvis] Ticket rejected by old backend pod (4001); ' +
+                        'retrying once with legacy session JWT (capability fallback)'
+                    );
+                    const legacyUrl = `${wsBasePath}?token=${sessionToken}`;
+                    openWs(legacyUrl);
+                    return;
+                }
+
+                // 4003 (origin), second 4001, mint != 200, or no sessionToken → fail loudly.
+                if (event.code === 4001 && legacyRetried) {
+                    console.error('[AdminJarvis] Legacy JWT also rejected (4001); genuine auth failure — not retrying');
+                } else if (event.code === 4003) {
+                    console.error('[AdminJarvis] WebSocket closed with 4003 (Origin not allowed) — not retrying');
+                }
+
+                // Hand off to the normal close handler for reconnect scheduling.
+                handleWsClose(event);
+            };
+        } catch (error) {
+            console.error('[AdminJarvis] WebSocket creation error:', error);
+            updateWsStatus('error');
+        }
+    }
+
+    openWs(wsUrl);
 }
 
 /**

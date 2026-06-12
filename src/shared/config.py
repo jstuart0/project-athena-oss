@@ -148,6 +148,14 @@ class AthenaConfig(BaseSettings):
     # a module-level direct env read for OIDC_ISSUER).
     oidc_issuer: str = Field(default="")
     oidc_client_id: str = Field(default="")
+    # Opt-out escape valve for deployers whose IdP returns a deliberately
+    # mismatched issuer URL.  Default true (validation active).  When false,
+    # only branch (d) of _enforce_oidc_runtime_gates() is softened to a
+    # warning; branches (a), (b), (c) and the early env gate remain fatal.
+    # Setting OIDC_VALIDATE_ISS=false also passes claims_options={"iss":
+    # {"essential": False}} to authlib at the callback so the relaxation is
+    # coherent end-to-end.  State is exposed on GET /api/auth/methods.
+    oidc_validate_iss: bool = Field(default=True)
 
     @field_validator("oidc_issuer", "oidc_client_id", mode="before")
     @classmethod
