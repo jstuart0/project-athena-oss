@@ -15,7 +15,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### auth-deferred-hardening (ATHENA-55)
 
-- **Added**: `OIDC_VALIDATE_ISS` env flag (default `true`, opt-out). When set to `false`, the issuer-**mismatch** startup gate (branch (d) in `_enforce_oidc_runtime_gates`) is softened from `SystemExit` to `logger.warning`, and authlib's own `iss` check is relaxed via `claims_options={"iss": {"essential": False}}` on the OIDC callback at `main.py:815`. **Scope is deliberately narrow**: the flag relaxes issuer *mismatch* only — it does **not** let the service boot with an empty/placeholder issuer, an unreachable IdP, or a discovery doc missing the `issuer` field (those branches remain fatal `SystemExit` regardless of the flag). Startup emits `oidc_iss_validation_disabled` warning when the flag is false; flag state is exposed on `GET /api/auth/methods` as `"oidc_iss_validation"` for runtime observability. **python-jose / authlib audience semantics note**: authlib (which this codebase uses for the OIDC callback) follows RFC 7519 — the `aud` claim is validated as an exact match against `OIDC_CLIENT_ID` when present; `OIDC_VALIDATE_ISS=false` has no effect on audience validation.
+- **Added**: `OIDC_VALIDATE_ISS` env flag (default `true`, opt-out). When set to `false`, the issuer-**mismatch** startup gate (branch (d) in `_enforce_oidc_runtime_gates`) is softened from `SystemExit` to `logger.warning`, and authlib's own `iss` check is relaxed via `claims_options={"iss": {"essential": False}}` on the OIDC callback at `main.py:815`. **Scope is deliberately narrow**: the flag relaxes issuer *mismatch* only — it does **not** let the service boot with an empty/placeholder issuer, an unreachable IdP, or a discovery doc missing the `issuer` field (those branches remain fatal `SystemExit` regardless of the flag). Startup emits `oidc_iss_validation_disabled` warning when the flag is false; flag state is exposed on `GET /api/auth/methods` as `"oidc_iss_validation"` for runtime observability. **Audience validation note**: authlib (which this codebase uses for the OIDC callback) validates the `aud` claim via `IDToken.validate_azp` against the registered `OIDC_CLIENT_ID`; `OIDC_VALIDATE_ISS=false` has no effect on audience validation.
 
 - **Added**: `POST /api/auth/ws-ticket` — authenticated, rate-limited endpoint that mints a short-lived (45 s) single-use WS ticket. Ticket claims: `{user_id, ws_ticket: true, aud: "ws", jti: <uuid4>, exp: now+45s}`. Authentication via `Depends(get_current_user)` (not a session read). Rate-limited via `Depends(login_rate_limit_dep)`. Response shape: `{"ticket": "<jwt>", "ws_ticket_supported": true}`. The `ws_ticket_supported` marker is the capability signal the frontend uses; an old backend without this endpoint returns 404.
 
@@ -100,6 +100,26 @@ content only.  To restore: set `CONTENT_FETCHER_ALLOW_BROWSER_FETCH=true`
 The `http://192.168.10.168:8123` fallback in `music_config.py` is gone.  Deployments
 that relied on the default must set `HA_URL` explicitly in their env/ConfigMap.
 An unset `HA_URL` now logs a startup warning and returns HTTP 503 on music requests.
+
+---
+
+## [Unreleased]
+
+> **Ticket:** ATHENA-57
+> **Commits:** `67075c1` (Phases 1/1b — observability), `a780bfa` (Phase 2 — harness), `d6213a8` (codex r2 + valerie reconciliation)
+
+### Orchestrator benchmark observability + tool-calling harness (ATHENA-57)
+
+- **Added** (`ATHENA-57`): `skip_semantic_cache` field on `POST /query` request body (`OrchestratorState`). When `true`, the semantic-cache lookup and write are both skipped for that request. This prevents cached responses from contaminating repeated benchmark runs. The field is also included in `QueryResponse.metadata` so callers can confirm it was honoured.
+- **Added** (`ATHENA-57`): `metadata.model_component_used` — the actual model tag used by the tool-calling node for the turn (e.g. `"qwen3:4b"`). Populated from the component model assignment resolved at query time; falls back to `null` when the tool-call node was not reached.
+- **Added** (`ATHENA-57`): `metadata.model_component_name` — the component-model config name resolved by the router (e.g. `"tool_calling_simple"`). Separate from `model_component_used` to distinguish the router's component decision from the actual model tag.
+- **Fixed** (`ATHENA-57`): helper-cache invalidation in the tool-calling node — a stale cache entry could return the prior turn's component assignment after a model config change. Cache is now keyed on the component name so config changes are picked up on the next turn.
+- **Added** (`ATHENA-57`): `scripts/bench_tool_calling.py` — benchmark harness for A/B tool-calling trials. Sends each query from `bench/query_set.yaml` N times against a live orchestrator (`--n` runs per query, default 20), records per-turn JSONL rows, and writes results to `bench/results/`. Key bindings per run: `temperature=0.1`, `skip_semantic_cache=true`. Pass `--self-test` to validate query-set, scoring logic, and fallback attribution without a live host.
+- **Added** (`ATHENA-57`): `scripts/bench_report.py` — aggregates one or two JSONL result files into a human-readable per-component and per-cell summary (correct-tool rate, false-positive rate, p50/p90 latency). Pass one file for a single-cell summary; pass two for an A/B diff.
+- **Added** (`ATHENA-57`): `bench/query_set.yaml` — 40-query synthetic benchmark set covering all tool-calling components (simple, complex, super-complex) plus none-tagged turns for false-positive measurement. No real user data.
+- **Added** (`ATHENA-57`): `bench/README.md` — JSONL schema, decision gates (Gate 1: correct-tool rate +5pp; Gate 2: FP rate ≤ 15% absolute and ≤ qwen3+5pp relative; Gate 3: p90 latency ≤ incumbent × 1.10), environment contract, attribution-fallback rule, and committed-results policy.
+
+**Status:** harness and observability fields are live; no benchmark run has been executed yet (user-gated pending model availability).
 
 ---
 

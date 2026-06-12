@@ -470,6 +470,7 @@ project-athena/
 │   └── chat-embed/          # CORS-relay proxy for embedding Athena chat on external sites
 ├── manifests/
 │   └── athena-prod/         # Kubernetes deployment manifests
+├── bench/                   # Tool-calling benchmark query set, harness scripts, and results
 ├── scripts/                 # Build, deploy, and setup automation
 ├── tests/                   # Unit, integration, and E2E tests
 ├── docs/
