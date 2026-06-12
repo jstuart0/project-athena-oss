@@ -129,7 +129,7 @@ so the operator can see the degraded state.  Check logs on first startup after u
 - **Added** (`ATHENA-57`): `bench/query_set.yaml` — 40-query synthetic benchmark set covering all tool-calling components (simple, complex, super-complex) plus none-tagged turns for false-positive measurement. No real user data.
 - **Added** (`ATHENA-57`): `bench/README.md` — JSONL schema, decision gates (Gate 1: correct-tool rate +5pp; Gate 2: FP rate ≤ 15% absolute and ≤ qwen3+5pp relative; Gate 3: p90 latency ≤ incumbent × 1.10), environment contract, attribution-fallback rule, and committed-results policy.
 
-**Status:** harness and observability fields are live; no benchmark run has been executed yet (user-gated pending model availability).
+**Status:** Benchmark executed 2026-06-12. Decision: **NO-SWAP** — gemma4 QAT challengers failed all three gates; qwen3:4b-instruct-2507-q4_K_M remains on all tool-calling components; config unchanged. See [`bench/results/ATHENA-57-DECISION.md`](bench/results/ATHENA-57-DECISION.md).
 
 ---
 
