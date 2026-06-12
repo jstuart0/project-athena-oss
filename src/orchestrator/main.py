@@ -159,6 +159,7 @@ from orchestrator.helpers import (
     store_conversation_context,
     get_model_for_component,
     get_component_config,
+    invalidate_component_model_cache,
     _component_system_prompt,
     _normalized_general_info_query,
     _direct_general_info_response,
@@ -4901,6 +4902,13 @@ If the user is asking to repeat, search again, or modify the previous request, u
             llm_backend = component_config["backend_type"]
             logger.info(f"Using {llm_model} ({llm_backend}) for super complex query: {state.query[:50]}")
 
+        # Benchmark observability (ATHENA-57 Phase 1b — Changes 1 & 2):
+        # Record the resolved model tag and component name ACTUALLY used by the tool-call node.
+        # Note: complexity may differ from state.model_component when the chat simple→complex
+        # upgrade fires (line above) — we record the post-upgrade value so stratification is exact.
+        state.model_component_used = llm_model
+        state.model_component_name = component_config.get("component_name") or f"tool_calling_{complexity}"
+
         # Honor DB-configured max_tokens for this component when no user-intent override fired.
         # is_continue_query / is_story_query (set above) take precedence — those are explicit
         # per-query overrides and should win over the per-component cap.
@@ -4940,6 +4948,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
         tool_calls = llm_response.get("tool_calls")
 
         # VALIDATION: Filter out hallucinated tools that don't exist in our tools list
+        _filtered_invalid_calls: list = []  # benchmark observability — collects dropped calls
         if tool_calls:
             valid_tool_names = {t["function"]["name"] for t in tools}
             original_count = len(tool_calls)
@@ -4950,10 +4959,20 @@ If the user is asking to repeat, search again, or modify the previous request, u
                     valid_tool_calls.append(tc)
                 else:
                     logger.warning(f"Filtered hallucinated tool call: {fn_name} (not in {valid_tool_names})")
+                    _filtered_invalid_calls.append({"name": fn_name, "malformed": False})
 
             if len(valid_tool_calls) < original_count:
                 logger.info(f"Filtered {original_count - len(valid_tool_calls)} invalid tool calls")
             tool_calls = valid_tool_calls if valid_tool_calls else None
+
+        # Benchmark observability (ATHENA-57 Phase 1b — Change 3):
+        # Serialize emitted tool calls into state so response_metadata can surface them.
+        # Present-but-empty for no-tool turns — that's the false-positive signal.
+        state.tool_calls_emitted = [
+            {"name": tc["function"]["name"], "arguments": tc["function"].get("arguments", {})}
+            for tc in (tool_calls or [])
+        ]
+        state.tool_calls_filtered_invalid = _filtered_invalid_calls
 
         # FORCED TOOL CALLING: For directions intent, force get_directions tool if LLM bypassed it
         # This prevents the LLM from giving generic directions from training data
@@ -5973,6 +5992,7 @@ class QueryRequest(BaseModel):
     interruption_context: Optional[Dict[str, Any]] = Field(None, description="Context when user interrupted previous response (previous_query, interrupted_response, audio_position_ms)")
     source: Optional[str] = Field(None, description="Interface origin for analytics: 'chatbot', 'jarvis', 'voice', 'ha', etc.")
     chat_history: Optional[List[Dict[str, str]]] = Field(None, description="Prior conversation turns to inject when no live session exists (role/content pairs)")
+    skip_semantic_cache: bool = Field(False, description="When True, bypass both the semantic cache read and write (benchmark use — prevents cache poisoning across repeated turns)")
 
 class QueryResponse(BaseModel):
     """Response model for query endpoint."""
@@ -6267,12 +6287,16 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             strong_intent_result = detect_strong_intent(request.query)
             detected_strong_intent = strong_intent_result.get("detected_intent") if strong_intent_result.get("has_strong_intent") else None
 
-            cached_response = await get_cached_response(
-                query=request.query,
-                room=request.room,
-                mode=current_mode,
-                location_override=location_override
-            )
+            # Benchmark flag: skip semantic cache entirely (prevents poisoning N≥20 repeats)
+            if request.skip_semantic_cache:
+                cached_response = None
+            else:
+                cached_response = await get_cached_response(
+                    query=request.query,
+                    room=request.room,
+                    mode=current_mode,
+                    location_override=location_override
+                )
 
             # Skip cache if strong intent doesn't match cached intent
             if cached_response and detected_strong_intent:
@@ -6708,7 +6732,14 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             "tokens": final_state.get("llm_tokens", 0),
             "tokens_per_second": final_state.get("llm_tokens_per_second", 0.0),
             "tool_exec_time": tool_exec_time,
-            "was_truncated": final_state.get("was_truncated", False)
+            "was_truncated": final_state.get("was_truncated", False),
+            # Benchmark observability (ATHENA-57 Phase 1b)
+            "model_component_used": final_state.get("model_component_used"),
+            "model_component_name": final_state.get("model_component_name"),
+            "tool_calls_emitted": {
+                "calls": final_state.get("tool_calls_emitted") or [],
+                "filtered_invalid": final_state.get("tool_calls_filtered_invalid") or [],
+            },
         }
 
         # Add browser_playback and music_intent from retrieved_data if present
@@ -6738,8 +6769,11 @@ async def process_query(request: QueryRequest) -> QueryResponse:
 
         # SEMANTIC QUERY CACHING: Store successful response for future cache hits
         # Only cache responses that actually succeeded — not fallbacks or errors
+        # skip_semantic_cache=True (benchmark flag) also suppresses the write so repeated turns
+        # don't poison the cache for concurrent real traffic.
         should_cache = (
-            response.answer
+            not request.skip_semantic_cache
+            and response.answer
             and not final_state.get("is_fallback", False)
             and not _looks_like_fallback(response.answer)
             and final_state.get("validation_passed", True)
@@ -8547,10 +8581,19 @@ async def invalidate_model_cache():
     """
     Invalidate component model cache.
     Called by admin backend when model assignments are changed.
+
+    Clears TWO caches so a model swap takes effect immediately:
+      1. The admin-client cache (was the only one cleared previously).
+      2. The helper runtime dict + TTL timestamp (ATHENA-57 Phase 1b, Change 4b).
+    Without (2), get_component_config/get_model_for_component in helpers.py can
+    serve the pre-swap model for up to COMPONENT_MODEL_CACHE_TTL (300 s).
     """
     try:
         admin_client = get_admin_client()
         admin_client.invalidate_component_model_cache()
+        # Also clear the helper-level runtime cache so tool selection sees the new
+        # model immediately rather than waiting out the 300 s TTL.
+        invalidate_component_model_cache()
         logger.info("component_model_cache_invalidated_via_api")
         return {"status": "success", "message": "Cache invalidated"}
     except Exception as e:

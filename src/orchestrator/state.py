@@ -103,6 +103,12 @@ class OrchestratorState(BaseModel):
     model_component: Optional[str] = None  # Component name for model lookup
     model_used: Optional[str] = None  # Actual model name used for synthesis (e.g. mlx path or ollama tag)
 
+    # Benchmark observability (ATHENA-57 Phase 1b)
+    model_component_used: Optional[str] = None  # Resolved model tag for the tool-calling component (e.g. "qwen3:4b-instruct-2507-q4_K_M")
+    model_component_name: Optional[str] = None  # Resolved component name actually used (may differ from model_component after chat upgrade)
+    tool_calls_emitted: Optional[List[Dict[str, Any]]] = None  # [{name, arguments}] for every emitted tool call; [] for no-tool turns
+    tool_calls_filtered_invalid: Optional[List[Dict[str, Any]]] = None  # [{name, malformed}] for calls dropped by validity filter
+
     # Retrieved data
     retrieved_data: Dict[str, Any] = Field(default_factory=dict)
     data_source: Optional[str] = None

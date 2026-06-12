@@ -39,6 +39,7 @@ from orchestrator.helpers import (
     get_post_synthesis_fallback_config,
     get_rag_service_url,
     get_weather_provider_mode,
+    invalidate_component_model_cache,
     maybe_post_synthesis_fallback,
     store_conversation_context,
     summarize_conversation_history,
@@ -381,3 +382,52 @@ def test_fallback_to_web_search_no_search_engine_exits_gracefully():
     asyncio.run(_fallback_to_web_search(state, "test_rag", "connection refused"))
     # state.retrieved_data set to {} on error path
     assert state.retrieved_data == {} or state.retrieved_data is None
+
+
+# ===========================================================================
+# ATHENA-57 Phase 1b — invalidate_component_model_cache (Change 4b)
+# ===========================================================================
+
+def test_invalidate_component_model_cache_clears_dict():
+    """invalidate_component_model_cache clears the runtime cache dict."""
+    import time
+    import orchestrator.helpers as _h
+
+    # Prepopulate cache with a fake entry and a non-zero timestamp
+    cache = _runtime.get_component_model_cache()
+    cache["tool_calling_simple"] = {
+        "component_name": "tool_calling_simple",
+        "model_name": "old-model:4b",
+        "enabled": True,
+    }
+    _h._component_model_cache_time = time.time()
+
+    invalidate_component_model_cache()
+
+    assert len(cache) == 0, "cache dict should be empty after invalidation"
+    assert _h._component_model_cache_time == 0.0, "cache timestamp should be reset to 0"
+
+
+def test_invalidate_component_model_cache_forces_refresh_on_next_call():
+    """After invalidation, get_model_for_component triggers a cache refresh (admin lookup)."""
+    import time
+    import orchestrator.helpers as _h
+
+    # Prepopulate cache and set timestamp well into the future (simulates warm cache)
+    cache = _runtime.get_component_model_cache()
+    cache["tool_calling_simple"] = {
+        "component_name": "tool_calling_simple",
+        "model_name": "stale-model:4b",
+        "enabled": True,
+    }
+    _h._component_model_cache_time = time.time() + 9999
+
+    # Invalidate — resets timestamp to 0
+    invalidate_component_model_cache()
+
+    # Now the cache is empty and timestamp is 0 — next get_model_for_component will
+    # attempt a refresh (admin API is unreachable in tests → falls back to FALLBACK_MODELS)
+    result = asyncio.run(get_model_for_component("tool_calling_simple"))
+    # Result must be a non-empty string from FALLBACK_MODELS, NOT "stale-model:4b"
+    assert isinstance(result, str) and len(result) > 0
+    assert result != "stale-model:4b", "stale cached value should not be returned after invalidation"

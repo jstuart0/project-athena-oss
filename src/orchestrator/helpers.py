@@ -586,6 +586,23 @@ def _cleanup_expired_memory_contexts(memory_context: Dict[str, Any]) -> None:
 # Component model helpers (Pattern 1 — uses _runtime.get_component_model_cache())
 # =============================================================================
 
+
+def invalidate_component_model_cache() -> None:
+    """Clear the helper-level component-model runtime cache immediately.
+
+    The orchestrator's /admin/invalidate-model-cache endpoint previously only
+    cleared the admin-client cache, leaving the helper dict populated for up to
+    COMPONENT_MODEL_CACHE_TTL (300 s).  Calling this function alongside the
+    admin-client invalidation makes a swap take effect on the very next request
+    (ATHENA-57 Phase 1b, Change 4b).
+    """
+    global _component_model_cache_time
+    component_model_cache = _runtime.get_component_model_cache()
+    component_model_cache.clear()
+    _component_model_cache_time = 0.0
+    logger.info("helper_component_model_cache_invalidated")
+
+
 async def get_model_for_component(component_name: str) -> str:
     """Get model for a component with caching to reduce database calls.
 
