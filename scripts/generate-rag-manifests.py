@@ -3,6 +3,13 @@
 Generate Kubernetes manifests for all RAG services.
 Run: python3 scripts/generate-rag-manifests.py > manifests/athena-prod/rag-services.yaml
 
+NOTE: Unlike generate-rag-dockerfiles.py (which has a CI drift-check in
+.github/workflows/rag-generator-drift.yml), this generator has NO automated
+CI drift-check. After any template edit in this file, you MUST manually re-run
+the generator and diff the output against the committed rag-services.yaml to
+confirm no unintended changes were introduced. Failing to do this will silently
+diverge the generated manifest from the template.
+
 Environment variables:
   REGISTRY  Container registry prefix (default: YOUR_REGISTRY).
             Example: REGISTRY=registry.example.com:5000 python3 scripts/generate-rag-manifests.py

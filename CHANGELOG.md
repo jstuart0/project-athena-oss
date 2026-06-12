@@ -92,7 +92,7 @@ An unset `HA_URL` now logs a startup warning and returns HTTP 503 on music reque
 
 ### Health-poller leader election (ATHENA-18)
 
-- **Added** (`ATHENA-18`): Redis SETNX-based leader election in `admin/backend/app/services/health_poller.py`. With `replicas: 2`, only one replica polls and writes health columns per cycle; the non-leader yields the iteration. A strict-abort per-cycle heartbeat task (every `HEARTBEAT_INTERVAL_SECONDS=20`) renews the lease atomically via Lua check-and-set and cancels the in-flight `_poll_all_services` task if the lease cannot be renewed, preventing any replica from writing after lease loss. No new env vars — leader election uses the existing `REDIS_URL`. `HEALTH_POLL_INTERVAL_SECONDS` must remain < 40s (`LEASE_TTL_SECONDS`); startup raises `SystemExit FATAL` if this invariant is violated.
+- **Added** (`ATHENA-18`): Redis SETNX-based leader election in `admin/backend/app/services/health_poller.py`. With `replicas: 2`, only one replica polls and writes health columns per cycle; the non-leader yields the iteration. A strict-abort per-cycle heartbeat task (every `HEARTBEAT_INTERVAL_SECONDS=20`) renews the lease atomically via Lua check-and-set and cancels the in-flight `_poll_all_services` task if the lease cannot be renewed, preventing any replica from writing after lease loss. New env var: `ATHENA_NAMESPACE` (default `athena-prod`, introduced by ATHENA-59 Phase 1 via downward API injection) — the Redis lease key is namespaced using this value so concurrent deployments in different namespaces do not share a lease. Leader election otherwise uses the existing `REDIS_URL`. `HEALTH_POLL_INTERVAL_SECONDS` must remain < 40s (`LEASE_TTL_SECONDS`); startup raises `SystemExit FATAL` if this invariant is violated.
 
 ---
 
