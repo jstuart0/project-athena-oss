@@ -10,7 +10,9 @@ import httpx
 import socket
 import subprocess
 import base64
+from datetime import timedelta
 from typing import Dict, List, Any
+from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -32,7 +34,9 @@ from app.auth.oidc import (
     create_access_token,
     get_or_create_user,
     get_current_user,
+    decode_ws_ticket,
 )
+from app.utils.rate_limit import login_rate_limit_dep
 from app.auth import oidc as oidc_auth
 from app.models import User
 
@@ -952,6 +956,36 @@ async def get_session_token(request: Request):
         )
 
     return {"token": access_token}
+
+
+@app.post(
+    "/api/auth/ws-ticket",
+    dependencies=[Depends(login_rate_limit_dep)],
+)
+async def mint_ws_ticket(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Mint a short-lived, single-use, audience-scoped WebSocket ticket.
+
+    Returns a 45-second JWT with aud="ws" and ws_ticket=True for use as
+    the token query parameter on the /ws/admin-jarvis upgrade.  This ticket
+    is rejected on all normal REST endpoints (xander L-2, ATHENA-55 Phase 2).
+
+    The ws_ticket_supported: true field is a capability marker for the frontend
+    to detect that the backend understands ticket-based WS auth.
+    """
+    ticket = create_access_token(
+        {
+            "user_id": current_user.id,
+            "ws_ticket": True,
+            "aud": "ws",
+            "jti": str(uuid4()),
+        },
+        expires_delta=timedelta(seconds=45),
+    )
+    return {"ticket": ticket, "ws_ticket_supported": True}
 
 
 class ServiceStatus(BaseModel):
