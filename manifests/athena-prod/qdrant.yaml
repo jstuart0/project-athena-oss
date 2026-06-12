@@ -47,7 +47,26 @@ spec:
     spec:
       containers:
       - name: qdrant
-        image: qdrant/qdrant:v1.12.1
+        # Pinned 2026-06-12: v1.18.2 is the current stable release (Docker Hub, June 3 2026).
+        #
+        # *** UPGRADE WARNING — IRREVERSIBLE ON-DISK MIGRATIONS ***
+        # The 1.12→1.18 jump triggers two one-way storage format migrations:
+        #   • v1.15.4: shard-key format change (qdrant PR #7110)
+        #   • v1.16.1: RocksDB backend replaced by Gridstore (qdrant PR #7551)
+        # Both migrations run automatically on first successful start at the new version
+        # and cannot be undone by reverting the image tag alone. Reverting the tag after
+        # a successful v1.18.2 start will crash-loop the container (incompatible on-disk
+        # format). ROLLBACK REQUIRES RESTORING THE PVC FROM A PRE-UPGRADE SNAPSHOT.
+        #
+        # Before applying this manifest to an existing cluster:
+        #   1. Snapshot the qdrant-storage PVC (e.g. via VolumeSnapshot or storage-class backup)
+        #   2. Verify the snapshot is restorable
+        #   3. Only then apply; the migration runs during pod startup (startupProbe provides grace)
+        # Review release notes: https://github.com/qdrant/qdrant/releases/tag/v1.18.2
+        #
+        # NOTE: This is a single-replica Deployment. "Upgrade" means stop-then-start — there
+        # is no rolling upgrade; the pod is replaced in full.
+        image: qdrant/qdrant:v1.18.2
         ports:
         - name: http
           containerPort: 6333
@@ -68,11 +87,21 @@ spec:
         volumeMounts:
         - name: qdrant-storage
           mountPath: /qdrant/storage
+        # startupProbe gates both liveness and readiness until Qdrant is ready.
+        # failureThreshold*periodSeconds = 120 s of grace covers the one-time
+        # Gridstore migration that runs on first start at v1.18.x.
+        startupProbe:
+          httpGet:
+            path: /readyz
+            port: 6333
+          failureThreshold: 12
+          periodSeconds: 10
+          timeoutSeconds: 5
         livenessProbe:
           httpGet:
             path: /healthz
             port: 6333
-          initialDelaySeconds: 10
+          # No initialDelaySeconds — startupProbe gates liveness until pod is ready.
           periodSeconds: 30
           timeoutSeconds: 5
         readinessProbe:

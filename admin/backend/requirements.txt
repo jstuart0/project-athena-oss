@@ -37,7 +37,11 @@ twilio>=9.0.0
 icalendar>=5.0.0
 
 # Qdrant vector database client
-qdrant-client>=1.7.0
+# Pin to match server version in manifests/athena-prod/qdrant.yaml (server v1.18.2).
+# Client minor must be <= server minor (client 1.18.x is compatible with server 1.18.x).
+# Verified latest: qdrant-client 1.18.0 on PyPI (https://pypi.org/project/qdrant-client/).
+# When the server image is bumped, update this pin in the same commit.
+qdrant-client~=1.18.0
 
 # FastEmbed for lightweight embeddings (used by memory system)
 # Much lighter than sentence-transformers (~100MB vs ~3GB)

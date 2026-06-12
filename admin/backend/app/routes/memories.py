@@ -613,8 +613,6 @@ async def search_memories(
     # Search Qdrant using query_points API (qdrant-client 1.7+)
     qdrant = get_qdrant()
     try:
-        from qdrant_client.models import QueryRequest
-
         # Use query_points with the new API
         search_result = qdrant.query_points(
             collection_name=COLLECTION_NAME,
@@ -1353,29 +1351,43 @@ async def promote_memory(
     qdrant = get_qdrant()
     if qdrant:
         try:
+            # with_vectors=True is required: qdrant-client 1.10+ defaults to
+            # with_vectors=False, so omitting it returns None for .vector and
+            # would silently upsert a null vector (data corruption).
             original = qdrant.retrieve(
                 collection_name=COLLECTION_NAME,
-                ids=[memory.vector_id]
+                ids=[memory.vector_id],
+                with_vectors=True
             )
 
-            if original:
-                from qdrant_client.models import PointStruct
-                qdrant.upsert(
-                    collection_name=COLLECTION_NAME,
-                    points=[
-                        PointStruct(
-                            id=new_vector_id,
-                            vector=original[0].vector,
-                            payload={
-                                **original[0].payload,
-                                "scope": target_scope,
-                                "guest_session_id": None,
-                                "expires_at": None,
-                                "promoted_from_id": memory_id
-                            }
-                        )
-                    ]
+            if not original:
+                raise ValueError(
+                    f"promote_memory: vector_id {memory.vector_id!r} not found in Qdrant"
                 )
+
+            if original[0].vector is None:
+                raise ValueError(
+                    f"promote_memory: retrieved point for vector_id {memory.vector_id!r} "
+                    "has no vector — refusing to upsert null vector"
+                )
+
+            from qdrant_client.models import PointStruct
+            qdrant.upsert(
+                collection_name=COLLECTION_NAME,
+                points=[
+                    PointStruct(
+                        id=new_vector_id,
+                        vector=original[0].vector,
+                        payload={
+                            **original[0].payload,
+                            "scope": target_scope,
+                            "guest_session_id": None,
+                            "expires_at": None,
+                            "promoted_from_id": memory_id
+                        }
+                    )
+                ]
+            )
         except Exception as e:
             logger.error("qdrant_promotion_failed", error=str(e))
 
