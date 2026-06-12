@@ -1,0 +1,205 @@
+# Benchmark query set for ATHENA-57 Gemma4 QAT A/B trial.
+#
+# Every expected_tool name is verified against get_all_tool_names()
+# (src/orchestrator/rag_tools.py:854) by the Phase 2 pytest gate.
+#
+# expected_component is ADVISORY — the binding stratification key is the
+# observed model_component_name from the response.  Mismatches are recorded
+# and re-tagged to the observed component; queries are never discarded.
+#
+# Scoring uses correct_tools_all (all expected tools present) as metric B
+# headline.  correct_tools_partial (|expected ∩ emitted| / |expected|) is
+# reported alongside for multi-intent turns.
+#
+# none-tagged queries: verified NOT intercepted by _direct_general_info_response
+# (helpers.py:1034).  The Phase 2 pytest gate re-asserts this against the
+# live normalization predicate (_normalized_general_info_query).
+
+queries:
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Category 1: single-intent, single-tool (8 queries)
+  # ────────────────────────────────────────────────────────────────────────
+
+  - id: single_01
+    query: "What's the weather in Baltimore?"
+    expected_tools: [get_weather]
+    expected_component: tool_calling_simple
+
+  - id: single_02
+    query: "When's the next flight from BWI to Denver?"
+    expected_tools: [search_flights]
+    expected_component: tool_calling_simple
+
+  - id: single_03
+    query: "What's the score of the Ravens game?"
+    expected_tools: [get_sports_scores]
+    expected_component: tool_calling_simple
+
+  - id: single_04
+    query: "Any news about the election?"
+    expected_tools: [get_news]
+    expected_component: tool_calling_simple
+
+  - id: single_05
+    query: "What's Tesla stock at?"
+    expected_tools: [get_stock_info]
+    expected_component: tool_calling_simple
+
+  - id: single_06
+    query: "Find me a good Italian restaurant nearby"
+    expected_tools: [search_restaurants]
+    expected_component: tool_calling_simple
+
+  - id: single_07
+    query: "What's playing on streaming right now?"
+    expected_tools: [search_streaming]
+    expected_component: tool_calling_simple
+
+  - id: single_08
+    query: "Give me a recipe for carbonara"
+    expected_tools: [search_recipes]
+    expected_component: tool_calling_simple
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Category 2: multi-intent (4 queries)
+  # Two tools in one turn.  Scored with correct_tools_all as the headline;
+  # correct_tools_partial reported alongside.
+  # ────────────────────────────────────────────────────────────────────────
+
+  - id: multi_01
+    query: "What's the weather and any flights to Chicago?"
+    expected_tools: [get_weather, search_flights]
+    expected_component: tool_calling_complex
+
+  - id: multi_02
+    query: "Ravens score and Tesla stock?"
+    expected_tools: [get_sports_scores, get_stock_info]
+    expected_component: tool_calling_complex
+
+  - id: multi_03
+    query: "News on the storm and restaurants open near me?"
+    expected_tools: [get_news, search_restaurants]
+    expected_component: tool_calling_complex
+
+  - id: multi_04
+    query: "Weather tomorrow and what's on streaming tonight?"
+    expected_tools: [get_weather, search_streaming]
+    expected_component: tool_calling_complex
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Category 3: super-complex / multi-tool planning (6 queries)
+  # Targets tool_calling_super_complex (12B cell).  Each chains ≥2–3 tools
+  # or multi-step reasoning.  At runtime the harness records the observed
+  # model_component_name; rows that route lower are re-tagged to their
+  # observed component rather than discarded.
+  # ────────────────────────────────────────────────────────────────────────
+
+  - id: super_01
+    query: "Plan a trip to Denver next weekend — find flights from BWI, check the weather there, and suggest a couple restaurants"
+    expected_tools: [search_flights, get_weather, search_restaurants]
+    expected_component: tool_calling_super_complex
+
+  - id: super_02
+    query: "What's the Ravens score, and if they won, find me sports bars nearby showing the game"
+    expected_tools: [get_sports_scores, search_restaurants]
+    expected_component: tool_calling_super_complex
+
+  - id: super_03
+    query: "Compare Tesla and the latest market news, then tell me if it's a good day to check stock"
+    expected_tools: [get_stock_info, get_news]
+    expected_component: tool_calling_super_complex
+
+  - id: super_04
+    query: "I'm flying into BWI tonight — what's the airport status, the weather, and transit options to downtown?"
+    expected_tools: [get_airport_info, get_weather, search_transit]
+    expected_component: tool_calling_super_complex
+
+  - id: super_05
+    query: "Find a recipe for dinner, then check if the grocery stores nearby are still open and what the weather's like for a walk there"
+    expected_tools: [search_recipes, search_restaurants, get_weather]
+    expected_component: tool_calling_super_complex
+
+  - id: super_06
+    query: "What events are happening this weekend, and how do I get there by train?"
+    expected_tools: [search_events, get_train_schedule]
+    expected_component: tool_calling_super_complex
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Category 4: HA control (4 queries)
+  # Must route to control intent — NOT a RAG tool call.
+  # Feeds the false-positive gate (Gate 2).
+  # ────────────────────────────────────────────────────────────────────────
+
+  - id: ha_01
+    query: "Turn off the bedroom lights"
+    expected_tools: []
+    expected_component: null
+
+  - id: ha_02
+    query: "Set the thermostat to 70"
+    expected_tools: []
+    expected_component: null
+
+  - id: ha_03
+    query: "Lock the front door"
+    expected_tools: []
+    expected_component: null
+
+  - id: ha_04
+    query: "Dim the living room to 30 percent"
+    expected_tools: []
+    expected_component: null
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Category 5: no-tool conversational (8 queries)
+  # Must NOT emit a tool call.  Feeds the false-positive gate.
+  #
+  # Interception-ineligible: each query was checked against
+  # _normalized_general_info_query → _direct_general_info_response
+  # (helpers.py:1046, 1051).  Intercepted originals are shown as comments
+  # with INTERCEPTED markers; replacements verified NOT in the direct map.
+  # ────────────────────────────────────────────────────────────────────────
+
+  # INTERCEPTED: "What time is it?" → normalizes to "what time is it" (time map)
+  - id: notool_01
+    query: "What's the meaning of the word 'serendipity'?"
+    expected_tools: []
+    expected_component: null
+
+  - id: notool_02
+    query: "Tell me a joke"
+    expected_tools: []
+    expected_component: null
+
+  # INTERCEPTED: "How are you doing today?" → normalizes to "how are you" (direct map)
+  - id: notool_03
+    query: "What's a good book to read this weekend?"
+    expected_tools: []
+    expected_component: null
+
+  - id: notool_04
+    query: "What can you help me with?"
+    expected_tools: []
+    expected_component: null
+
+  # INTERCEPTED: "Thanks, that's all" → "thanks" is in the direct map
+  - id: notool_05
+    query: "Can you explain how photosynthesis works?"
+    expected_tools: []
+    expected_component: null
+
+  - id: notool_06
+    query: "Repeat that please"
+    expected_tools: []
+    expected_component: null
+
+  - id: notool_07
+    query: "What did I just ask you?"
+    expected_tools: []
+    expected_component: null
+
+  - id: notool_08
+    query: "Never mind"
+    expected_tools: []
+    expected_component: null
