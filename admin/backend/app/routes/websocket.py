@@ -166,7 +166,14 @@ async def admin_jarvis_websocket(
     # CORSMiddleware does NOT cover WebSocket scope — we enforce it here.
     # Read CORS_ORIGINS from the same env var as main.py (CORS_ALLOWED_ORIGINS).
     # DEV_MODE skips the check (no origin enforcement in local dev).
-    if not cfg.dev_mode:
+    #
+    # POLICY (xander M-1): absent Origin (origin is None) is ALLOWED.
+    # Non-browser clients (curl, scripts, monitors) have no CSRF surface — the
+    # Origin header only exists in browser-initiated requests.  Origin checks
+    # defend against *browser-based* cross-origin upgrade attacks.  Rejecting
+    # absent-Origin would break all non-browser WS clients for zero security gain.
+    # Only a PRESENT-but-mismatched Origin is rejected with 4003.
+    if not cfg.dev_mode and origin is not None:
         import os
         _cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
         CORS_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()] or ["http://localhost:8080"]
@@ -178,6 +185,11 @@ async def admin_jarvis_websocket(
             )
             await websocket.close(code=4003, reason="Origin not allowed")
             return
+        # Log accepted browser-origin connections for audit visibility.
+        logger.info("websocket_origin_accepted", origin=origin)
+    elif not cfg.dev_mode:
+        # Absent Origin — non-browser client, no CSRF surface.  Allowed.
+        logger.info("websocket_origin_absent_allowed")
 
     logger.info(
         "websocket_connection_attempt",
@@ -201,11 +213,16 @@ async def admin_jarvis_websocket(
         try:
             payload = decode_ws_ticket(token)
         except JWTClaimsError:
-            # Wrong/missing audience — fall through to legacy decode
+            # Wrong/missing audience — fall through to legacy decode.
+            # NOTE: this branch is entered on ANY decode failure that raises
+            # JWTClaimsError, not only on aud mismatch.  It is also entered for
+            # tokens that carry no aud claim at all (python-jose raises
+            # InvalidAudienceError when audience= is specified but the token has
+            # no aud field on some versions).  The legacy path below re-validates
+            # the token independently via decode_access_token, which rejects
+            # aud="ws" tokens, so the fallthrough is safe regardless of the
+            # exact reason decode_ws_ticket raised.
             payload = None
-            aud_mismatch = True
-        else:
-            aud_mismatch = False
 
         if payload is not None and payload.get("ws_ticket") is True:
             # Ticket path: aud="ws" validated positively + ws_ticket identity check.

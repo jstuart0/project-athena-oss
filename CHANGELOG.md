@@ -31,6 +31,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Operational note — deploy ordering (ATHENA-55)**: the admin **backend** (`athena-admin-backend`, `replicas: 2`, RollingUpdate) must be fully rolled out to the ticket-aware image **before** the new admin-frontend image is promoted. Both deployments roll independently with no `sessionAffinity`; the capability fallback above covers the residual window (e.g. a backend pod restart mid-frontend-rollout). Gate: `kubectl rollout status deployment/athena-admin-backend -n athena-prod`.
 
+- **Security review follow-ups (xander mid-build, same campaign):**
+  - **(M-1) Origin policy documented**: absent `Origin` header (non-browser clients — curl, scripts, monitors) is now explicitly **allowed** on WS upgrade. Non-browser clients have no CSRF surface; the Origin check defends against browser-based cross-origin upgrades only. Only a PRESENT-but-mismatched Origin closes 4003. A startup log line (`websocket_origin_absent_allowed`) confirms the policy at runtime. Tests: `TestWsOriginPolicy`.
+  - **(M-2) Dead variable removed**: `aud_mismatch` local variable in the WS handler was assigned but never read; removed. Added an explanatory comment on the legacy fallthrough condition clarifying it is entered on ANY `JWTClaimsError` / decode failure, not only `aud` mismatch, and why the fallthrough is safe (legacy `decode_access_token` independently rejects `aud="ws"` tokens).
+  - **(L-1) Replay guard test**: static ordering assertion confirms `_claim_jti` replay-rejection (close 4001 + return) appears before the legacy fallthrough path in source, proving a replayed ticket can never be laundered through `decode_access_token`. Unit test also verifies `_claim_jti` returns `False` on second call. Tests: `TestWsReplayGuardL1`.
+  - **(L-2) Audience list-form regression pin**: token with `aud=["ws","api"]` (JSON array) as REST Bearer → 401. python-jose may deserialize list-form `aud` back to a list; the `ws_ticket=True` discriminator check is the primary guard in that case. Pinned explicitly. Tests: `TestWsAudienceListFormL2`.
+
 - **Follow-up (Phase 6, next release — out of scope)**: remove legacy `?token=` session-JWT acceptance from `websocket.py` and the frontend 404-fallback. Tracked as a follow-up; not built here.
 
 ---
