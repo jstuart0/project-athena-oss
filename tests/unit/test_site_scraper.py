@@ -1,13 +1,32 @@
 """Unit tests for Site Scraper RAG service."""
 
+import importlib.util
+import os
+import sys
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-import sys
-import os
 
-# Add path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src/rag/site_scraper'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src'))
+# ---------------------------------------------------------------------------
+# Load the site_scraper main module via importlib so that the bare name 'main'
+# in sys.modules (which admin/backend/tests also populate with a different
+# main.py) never interferes.  All tests reference _scraper_main directly.
+# ---------------------------------------------------------------------------
+_SCRAPER_MAIN_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), '../../src/rag/site_scraper/main.py')
+)
+# Also ensure src/ is on the path so the scraper's own imports (shared.*) resolve.
+_SRC_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), '../../src'))
+if _SRC_PATH not in sys.path:
+    sys.path.insert(0, _SRC_PATH)
+
+def _load_scraper_main():
+    spec = importlib.util.spec_from_file_location('_scraper_site_scraper_main', _SCRAPER_MAIN_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+_scraper_main = _load_scraper_main()
 
 
 class TestIsUrlAllowed:
@@ -15,10 +34,9 @@ class TestIsUrlAllowed:
 
     def test_owner_mode_allows_any_url(self):
         """Owner mode should allow any URL by default."""
-        from main import is_url_allowed
+        is_url_allowed = _scraper_main.is_url_allowed
 
-        # Mock config
-        with patch('main.config', {
+        with patch.object(_scraper_main, 'config', {
             'owner_mode_any_url': True,
             'guest_mode_any_url': False,
             'allowed_domains': [],
@@ -29,9 +47,9 @@ class TestIsUrlAllowed:
 
     def test_guest_mode_restricts_by_default(self):
         """Guest mode should restrict URLs by default."""
-        from main import is_url_allowed
+        is_url_allowed = _scraper_main.is_url_allowed
 
-        with patch('main.config', {
+        with patch.object(_scraper_main, 'config', {
             'owner_mode_any_url': True,
             'guest_mode_any_url': False,
             'allowed_domains': ['whitelisted.com'],
@@ -43,9 +61,9 @@ class TestIsUrlAllowed:
 
     def test_guest_mode_allows_whitelisted_domain(self):
         """Guest mode should allow whitelisted domains."""
-        from main import is_url_allowed
+        is_url_allowed = _scraper_main.is_url_allowed
 
-        with patch('main.config', {
+        with patch.object(_scraper_main, 'config', {
             'owner_mode_any_url': True,
             'guest_mode_any_url': False,
             'allowed_domains': ['whitelisted.com'],
@@ -56,9 +74,9 @@ class TestIsUrlAllowed:
 
     def test_blocked_domains_apply_to_all_modes(self):
         """Blocked domains should block all users."""
-        from main import is_url_allowed
+        is_url_allowed = _scraper_main.is_url_allowed
 
-        with patch('main.config', {
+        with patch.object(_scraper_main, 'config', {
             'owner_mode_any_url': True,
             'guest_mode_any_url': True,
             'allowed_domains': [],
@@ -72,9 +90,9 @@ class TestIsUrlAllowed:
 
     def test_invalid_url_returns_false(self):
         """Invalid URLs should not be allowed."""
-        from main import is_url_allowed
+        is_url_allowed = _scraper_main.is_url_allowed
 
-        with patch('main.config', {
+        with patch.object(_scraper_main, 'config', {
             'owner_mode_any_url': True,
             'guest_mode_any_url': True,
             'allowed_domains': [],
@@ -93,10 +111,11 @@ class TestHealthCheck:
     async def test_health_returns_healthy(self):
         """Health check should return healthy status."""
         from fastapi.testclient import TestClient
-        from main import app
+
+        app = _scraper_main.app
 
         # Use TestClient for sync testing of FastAPI
-        with patch('main.BRAVE_API_KEY', 'test-key'):
+        with patch.object(_scraper_main, 'BRAVE_API_KEY', 'test-key'):
             client = TestClient(app)
             # Note: Lifespan events won't run in TestClient
             # For full integration tests, use async client
@@ -127,10 +146,8 @@ class TestSearchAndScrapeEndpoint:
 class TestDomainMatches:
     """Tests for _domain_matches helper (xander H-1 SSRF fix in sitescraper)."""
 
-    @pytest.fixture(autouse=True)
-    def _import(self):
-        from main import _domain_matches
-        self._fn = _domain_matches
+    def setup_method(self):
+        self._fn = _scraper_main._domain_matches
 
     def test_exact_match(self):
         assert self._fn("evil.com", "evil.com") is True
@@ -166,14 +183,14 @@ class TestIsUrlAllowedWithDomainMatching:
     """Integration tests for is_url_allowed with exact-host/suffix matching."""
 
     def test_blocked_exact_domain(self):
-        from main import is_url_allowed
-        with patch('main.config', {
+        is_url_allowed = _scraper_main.is_url_allowed
+        with patch.object(_scraper_main, 'config', {
             'owner_mode_any_url': True,
             'guest_mode_any_url': True,
             'allowed_domains': [],
             'blocked_domains': ['blocked.com'],
         }):
-            with patch('main.get_config') as mock_cfg:
+            with patch.object(_scraper_main, 'get_config') as mock_cfg:
                 mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
                 with patch('shared.url_safety.validate_url_not_private') as mock_val:
                     mock_val.return_value = MagicMock(allowed=True)
@@ -181,14 +198,14 @@ class TestIsUrlAllowedWithDomainMatching:
                     assert allowed is False
 
     def test_blocked_subdomain(self):
-        from main import is_url_allowed
-        with patch('main.config', {
+        is_url_allowed = _scraper_main.is_url_allowed
+        with patch.object(_scraper_main, 'config', {
             'owner_mode_any_url': True,
             'guest_mode_any_url': True,
             'allowed_domains': [],
             'blocked_domains': ['blocked.com'],
         }):
-            with patch('main.get_config') as mock_cfg:
+            with patch.object(_scraper_main, 'get_config') as mock_cfg:
                 mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
                 with patch('shared.url_safety.validate_url_not_private') as mock_val:
                     mock_val.return_value = MagicMock(allowed=True)
@@ -197,14 +214,14 @@ class TestIsUrlAllowedWithDomainMatching:
 
     def test_suffix_bypass_not_blocked(self):
         """notblocked.com should NOT be blocked by pattern 'blocked.com'."""
-        from main import is_url_allowed
-        with patch('main.config', {
+        is_url_allowed = _scraper_main.is_url_allowed
+        with patch.object(_scraper_main, 'config', {
             'owner_mode_any_url': True,
             'guest_mode_any_url': True,
             'allowed_domains': [],
             'blocked_domains': ['blocked.com'],
         }):
-            with patch('main.get_config') as mock_cfg:
+            with patch.object(_scraper_main, 'get_config') as mock_cfg:
                 mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
                 with patch('shared.url_safety.validate_url_not_private') as mock_val:
                     mock_val.return_value = MagicMock(allowed=True)
@@ -212,14 +229,14 @@ class TestIsUrlAllowedWithDomainMatching:
                     assert allowed is True
 
     def test_guest_allowed_domain_exact(self):
-        from main import is_url_allowed
-        with patch('main.config', {
+        is_url_allowed = _scraper_main.is_url_allowed
+        with patch.object(_scraper_main, 'config', {
             'owner_mode_any_url': True,
             'guest_mode_any_url': False,
             'allowed_domains': ['whitelisted.com'],
             'blocked_domains': [],
         }):
-            with patch('main.get_config') as mock_cfg:
+            with patch.object(_scraper_main, 'get_config') as mock_cfg:
                 mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
                 with patch('shared.url_safety.validate_url_not_private') as mock_val:
                     mock_val.return_value = MagicMock(allowed=True)
@@ -227,14 +244,14 @@ class TestIsUrlAllowedWithDomainMatching:
                     assert allowed is True
 
     def test_guest_allowed_domain_subdomain(self):
-        from main import is_url_allowed
-        with patch('main.config', {
+        is_url_allowed = _scraper_main.is_url_allowed
+        with patch.object(_scraper_main, 'config', {
             'owner_mode_any_url': True,
             'guest_mode_any_url': False,
             'allowed_domains': ['whitelisted.com'],
             'blocked_domains': [],
         }):
-            with patch('main.get_config') as mock_cfg:
+            with patch.object(_scraper_main, 'get_config') as mock_cfg:
                 mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
                 with patch('shared.url_safety.validate_url_not_private') as mock_val:
                     mock_val.return_value = MagicMock(allowed=True)
@@ -243,14 +260,14 @@ class TestIsUrlAllowedWithDomainMatching:
 
     def test_guest_suffix_bypass_not_allowed(self):
         """notwhitelisted.com must not pass when allowlist only has 'whitelisted.com'."""
-        from main import is_url_allowed
-        with patch('main.config', {
+        is_url_allowed = _scraper_main.is_url_allowed
+        with patch.object(_scraper_main, 'config', {
             'owner_mode_any_url': True,
             'guest_mode_any_url': False,
             'allowed_domains': ['whitelisted.com'],
             'blocked_domains': [],
         }):
-            with patch('main.get_config') as mock_cfg:
+            with patch.object(_scraper_main, 'get_config') as mock_cfg:
                 mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
                 with patch('shared.url_safety.validate_url_not_private') as mock_val:
                     mock_val.return_value = MagicMock(allowed=True)
