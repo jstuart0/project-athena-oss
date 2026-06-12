@@ -16,6 +16,8 @@ spec:
       labels:
         app: athena-gateway
     spec:
+      serviceAccountName: athena-gateway
+      automountServiceAccountToken: false
       containers:
       - name: gateway
         image: YOUR_REGISTRY/athena-gateway:latest

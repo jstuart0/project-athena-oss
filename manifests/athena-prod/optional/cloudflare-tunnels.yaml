@@ -38,6 +38,19 @@ kind: Namespace
 metadata:
   name: cloudflare
 ---
+# cloudflared ServiceAccount — defined HERE (not in serviceaccounts.yaml) so that
+# namespace→SA→Deployment ordering is guaranteed within this single optional file
+# (D10). The central serviceaccounts.yaml is athena-prod-scoped; a namespace:
+# cloudflare SA there would fail if applied before this Namespace exists.
+# automountServiceAccountToken: false on both the SA and both Deployment pod
+# templates (D3 — defense-in-depth).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloudflared
+  namespace: cloudflare
+automountServiceAccountToken: false
+---
 # Athena Admin Portal Tunnel
 apiVersion: v1
 kind: ConfigMap
@@ -77,6 +90,8 @@ spec:
       labels:
         app: athena-tunnel
     spec:
+      serviceAccountName: cloudflared
+      automountServiceAccountToken: false
       containers:
       - name: cloudflared
         image: cloudflare/cloudflared:latest
@@ -153,6 +168,8 @@ spec:
       labels:
         app: chat-tunnel
     spec:
+      serviceAccountName: cloudflared
+      automountServiceAccountToken: false
       containers:
       - name: cloudflared
         image: cloudflare/cloudflared:latest

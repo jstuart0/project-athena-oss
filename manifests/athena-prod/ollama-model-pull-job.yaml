@@ -24,6 +24,11 @@ spec:
   ttlSecondsAfterFinished: 300
   template:
     spec:
+      # Intentionally separate from the `ollama` Deployment SA — the Job and
+      # Deployment have independent lifecycles; a distinct SA keeps their
+      # (currently empty) permission profiles severable (1.4 rationale).
+      serviceAccountName: ollama-model-pull
+      automountServiceAccountToken: false
       restartPolicy: OnFailure
       containers:
       - name: model-puller

@@ -1,5 +1,5 @@
 # Auto-generated RAG Services Manifests
-# Generated: 2026-05-05T04:04:52.964463
+# Generated: 2026-06-12T13:08:17.383384
 # Total services: 23
 # Registry: YOUR_REGISTRY  (set REGISTRY env var to override)
 # Tag: latest  (set TAG env var to override)
@@ -26,6 +26,8 @@ spec:
         app: athena-rag-weather
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-weather
         image: YOUR_REGISTRY/athena-rag-weather:latest
@@ -103,6 +105,8 @@ spec:
         app: athena-rag-airports
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-airports
         image: YOUR_REGISTRY/athena-rag-airports:latest
@@ -175,6 +179,8 @@ spec:
         app: athena-rag-stocks
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-stocks
         image: YOUR_REGISTRY/athena-rag-stocks:latest
@@ -252,6 +258,8 @@ spec:
         app: athena-rag-flights
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-flights
         image: YOUR_REGISTRY/athena-rag-flights:latest
@@ -329,6 +337,8 @@ spec:
         app: athena-rag-events
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-events
         image: YOUR_REGISTRY/athena-rag-events:latest
@@ -406,6 +416,8 @@ spec:
         app: athena-rag-streaming
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-streaming
         image: YOUR_REGISTRY/athena-rag-streaming:latest
@@ -483,6 +495,8 @@ spec:
         app: athena-rag-news
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-news
         image: YOUR_REGISTRY/athena-rag-news:latest
@@ -560,6 +574,8 @@ spec:
         app: athena-rag-sports
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-sports
         image: YOUR_REGISTRY/athena-rag-sports:latest
@@ -637,6 +653,8 @@ spec:
         app: athena-rag-websearch
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-websearch
         image: YOUR_REGISTRY/athena-rag-websearch:latest
@@ -714,6 +732,8 @@ spec:
         app: athena-rag-dining
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-dining
         image: YOUR_REGISTRY/athena-rag-dining:latest
@@ -791,6 +811,8 @@ spec:
         app: athena-rag-recipes
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-recipes
         image: YOUR_REGISTRY/athena-rag-recipes:latest
@@ -868,6 +890,8 @@ spec:
         app: athena-rag-onecall
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-onecall
         image: YOUR_REGISTRY/athena-rag-onecall:latest
@@ -945,6 +969,8 @@ spec:
         app: athena-rag-seatgeek
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-seatgeek
         image: YOUR_REGISTRY/athena-rag-seatgeek:latest
@@ -1022,6 +1048,8 @@ spec:
         app: athena-rag-transportation
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-transportation
         image: YOUR_REGISTRY/athena-rag-transportation:latest
@@ -1094,6 +1122,8 @@ spec:
         app: athena-rag-community
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-community
         image: YOUR_REGISTRY/athena-rag-community:latest
@@ -1166,6 +1196,8 @@ spec:
         app: athena-rag-amtrak
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-amtrak
         image: YOUR_REGISTRY/athena-rag-amtrak:latest
@@ -1238,6 +1270,8 @@ spec:
         app: athena-rag-tesla
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-tesla
         image: YOUR_REGISTRY/athena-rag-tesla:latest
@@ -1260,8 +1294,6 @@ spec:
             secretKeyRef:
               name: athena-api-keys
               key: TESLA_API_KEY
-        - name: TESLAMATE_ENABLED
-          value: "false"
         resources:
           requests:
             memory: "64Mi"
@@ -1317,6 +1349,8 @@ spec:
         app: athena-rag-media
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-media
         image: YOUR_REGISTRY/athena-rag-media:latest
@@ -1389,6 +1423,8 @@ spec:
         app: athena-rag-directions
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-directions
         image: YOUR_REGISTRY/athena-rag-directions:latest
@@ -1466,6 +1502,8 @@ spec:
         app: athena-rag-sitescraper
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-sitescraper
         image: YOUR_REGISTRY/athena-rag-sitescraper:latest
@@ -1538,6 +1576,8 @@ spec:
         app: athena-rag-serpapi
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-serpapi
         image: YOUR_REGISTRY/athena-rag-serpapi:latest
@@ -1615,6 +1655,8 @@ spec:
         app: athena-rag-pricecompare
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-pricecompare
         image: YOUR_REGISTRY/athena-rag-pricecompare:latest
@@ -1687,6 +1729,8 @@ spec:
         app: athena-rag-brightdata
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-brightdata
         image: YOUR_REGISTRY/athena-rag-brightdata:latest

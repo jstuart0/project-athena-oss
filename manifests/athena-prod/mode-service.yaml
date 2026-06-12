@@ -16,6 +16,8 @@ spec:
       labels:
         app: athena-mode-service
     spec:
+      serviceAccountName: athena-mode-service
+      automountServiceAccountToken: false
       containers:
       - name: mode-service
         image: YOUR_REGISTRY/athena-mode-service:latest

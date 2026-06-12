@@ -80,6 +80,8 @@ spec:
         app: athena-rag-{name}
         component: rag
     spec:
+      serviceAccountName: athena-rag
+      automountServiceAccountToken: false
       containers:
       - name: rag-{name}
         image: {REGISTRY}/athena-rag-{name}:{TAG}

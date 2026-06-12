@@ -16,6 +16,8 @@ spec:
       labels:
         app: athena-orchestrator
     spec:
+      serviceAccountName: athena-orchestrator
+      automountServiceAccountToken: false
       containers:
       - name: orchestrator
         image: YOUR_REGISTRY/athena-orchestrator:latest

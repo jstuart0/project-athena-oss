@@ -45,6 +45,8 @@ spec:
       labels:
         app: qdrant
     spec:
+      serviceAccountName: qdrant
+      automountServiceAccountToken: false
       containers:
       - name: qdrant
         # Pinned 2026-06-12: v1.18.2 is the current stable release (Docker Hub, June 3 2026).

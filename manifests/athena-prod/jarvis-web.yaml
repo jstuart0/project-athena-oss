@@ -16,6 +16,8 @@ spec:
       labels:
         app: athena-jarvis-web
     spec:
+      serviceAccountName: athena-jarvis-web
+      automountServiceAccountToken: false
       containers:
       - name: jarvis-web
         image: YOUR_REGISTRY/athena-jarvis-web:latest

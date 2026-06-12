@@ -16,6 +16,8 @@ spec:
       labels:
         app: athena-admin-frontend
     spec:
+      serviceAccountName: athena-admin-frontend
+      automountServiceAccountToken: false
       containers:
       - name: admin-frontend
         image: YOUR_REGISTRY/athena-admin-frontend:latest

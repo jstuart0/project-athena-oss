@@ -7,7 +7,9 @@ and caches results into health_status / last_health_check / last_response_time_m
 leader election so only one pod polls and writes per cycle when admin-backend
 runs with replicas: 2. Each iteration of health_poll_loop attempts to acquire
 or renew a Redis lease via SET NX EX (acquire) or a Lua check-and-set (atomic
-renewal) keyed at LEASE_KEY ("athena:health_poll_lease"). LEASE_TTL_SECONDS=40
+renewal) keyed at LEASE_KEY (f"{ATHENA_NAMESPACE}:health_poller:leader" where
+ATHENA_NAMESPACE = os.getenv("ATHENA_NAMESPACE", "athena-prod"); the key
+therefore defaults to "athena-prod:health_poller:leader"). LEASE_TTL_SECONDS=40
 must exceed health_poll_interval_seconds (default 30); start_health_polling
 raises SystemExit at startup if this invariant is violated. HOLDER_ID is
 seeded from the HOSTNAME env var (the pod name in Kubernetes) or a random
@@ -60,7 +62,7 @@ _poll_task: Optional[asyncio.Task] = None
 # Leader-election constants (ATHENA-18)
 # ---------------------------------------------------------------------------
 
-LEASE_KEY = "athena:health_poller:leader"
+LEASE_KEY = f"{os.getenv('ATHENA_NAMESPACE', 'athena-prod')}:health_poller:leader"
 LEASE_TTL_SECONDS = 40
 # Must be > health_poll_interval_seconds (default 30s). Enforced at
 # start_health_polling() via a startup assertion. Promote to AthenaConfig
