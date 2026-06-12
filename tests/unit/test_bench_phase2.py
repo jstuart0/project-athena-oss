@@ -966,3 +966,396 @@ def test_gates_fire_correctly_with_exactly_2_cells(tmp_path):
     assert "NO-SWAP" in report or "SWAP RECOMMENDED" in report or "NON-DECISION-GRADE" in report
     # Must NOT fall back to the old "requires exactly 2" error path
     assert "gate comparison requires exactly 2" not in report
+
+
+# ---------------------------------------------------------------------------
+# Micro-probe transport tests (ATHENA-57 Option B)
+# ---------------------------------------------------------------------------
+
+from bench_tool_calling import (
+    _build_ollama_payload,
+    _parse_ollama_tool_calls,
+    _load_tool_schemas,
+)
+
+_ORACLE_FULL = frozenset([
+    "get_weather", "get_news", "get_sports_scores", "search_flights",
+    "get_stock_info", "search_restaurants", "search_streaming",
+    "search_recipes", "get_airport_info", "search_transit",
+    "get_train_schedule", "search_events", "get_sports_standings",
+    "get_directions", "scrape_website", "scrape_webpage_bright",
+    "compare_prices", "get_tesla_metrics", "request_media", "search_web",
+])
+
+_DUMMY_SCHEMAS = [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]
+
+
+# --- _build_ollama_payload: think-suppression parity ---
+
+def test_build_ollama_payload_qwen3_has_think_false():
+    """qwen3 model → think:False injected (mirrors llm_router.py:1057-1059)."""
+    payload = _build_ollama_payload(
+        "qwen3:4b-instruct-2507-q4_K_M", "What's the weather?", _DUMMY_SCHEMAS
+    )
+    assert payload.get("think") is False
+
+
+def test_build_ollama_payload_qwen3_upper_case_also_suppressed():
+    """qwen3 detection is case-insensitive."""
+    payload = _build_ollama_payload("Qwen3:8B", "test", _DUMMY_SCHEMAS)
+    assert payload.get("think") is False
+
+
+def test_build_ollama_payload_gemma_no_think_key():
+    """gemma model → NO think key (matches prod behaviour, no branch in llm_router)."""
+    payload = _build_ollama_payload("gemma4:e4b-it-qat", "What's the weather?", _DUMMY_SCHEMAS)
+    assert "think" not in payload
+
+
+def test_build_ollama_payload_gemma_12b_no_think_key():
+    payload = _build_ollama_payload("gemma4:12b-it-qat", "test", _DUMMY_SCHEMAS)
+    assert "think" not in payload
+
+
+def test_build_ollama_payload_temperature_pinned():
+    """Temperature is always 0.1 regardless of model."""
+    for model in ["qwen3:4b-instruct-2507-q4_K_M", "gemma4:e4b-it-qat"]:
+        payload = _build_ollama_payload(model, "test", _DUMMY_SCHEMAS)
+        assert payload["options"]["temperature"] == 0.1, f"temperature must be 0.1 for {model}"
+
+
+def test_build_ollama_payload_tools_array_present():
+    """Tool schemas must be present in the payload under the 'tools' key."""
+    payload = _build_ollama_payload("gemma4:e4b-it-qat", "test", _DUMMY_SCHEMAS)
+    assert "tools" in payload
+    assert payload["tools"] is _DUMMY_SCHEMAS
+    assert len(payload["tools"]) == 1
+
+
+def test_build_ollama_payload_stream_false():
+    payload = _build_ollama_payload("gemma4:e4b-it-qat", "test", _DUMMY_SCHEMAS)
+    assert payload["stream"] is False
+
+
+def test_build_ollama_payload_message_format():
+    """messages must be a single user-role entry with the query text."""
+    payload = _build_ollama_payload("gemma4:e4b-it-qat", "my query", _DUMMY_SCHEMAS)
+    assert payload["messages"] == [{"role": "user", "content": "my query"}]
+
+
+# --- _parse_ollama_tool_calls: parsing correctness ---
+
+def test_parse_ollama_normal_call():
+    """Normal tool call with dict args is parsed into tools_emitted."""
+    resp = {"message": {"tool_calls": [
+        {"function": {"name": "get_weather", "arguments": {"location": "Baltimore"}}}
+    ]}}
+    emitted, filtered, err = _parse_ollama_tool_calls(resp, _ORACLE_FULL)
+    assert len(emitted) == 1
+    assert emitted[0] == {"name": "get_weather", "arguments": {"location": "Baltimore"}}
+    assert filtered == []
+    assert err is None
+
+
+def test_parse_ollama_no_tool_calls_key():
+    """Response with no tool_calls → empty lists, no error."""
+    resp = {"message": {"content": "I'll answer directly."}}
+    emitted, filtered, err = _parse_ollama_tool_calls(resp, _ORACLE_FULL)
+    assert emitted == []
+    assert filtered == []
+    assert err is None
+
+
+def test_parse_ollama_null_tool_calls():
+    """tool_calls: null → empty lists, no error."""
+    resp = {"message": {"tool_calls": None}}
+    emitted, filtered, err = _parse_ollama_tool_calls(resp, _ORACLE_FULL)
+    assert emitted == []
+    assert filtered == []
+    assert err is None
+
+
+def test_parse_ollama_hallucinated_name_to_filtered_invalid():
+    """Tool name not in oracle → filtered_invalid, not in tools_emitted."""
+    resp = {"message": {"tool_calls": [
+        {"function": {"name": "get_unicorn_prices", "arguments": {}}}
+    ]}}
+    emitted, filtered, err = _parse_ollama_tool_calls(resp, _ORACLE_FULL)
+    assert emitted == []
+    assert len(filtered) == 1
+    assert filtered[0]["name"] == "get_unicorn_prices"
+    assert filtered[0]["malformed"] is False
+    assert err is None  # hallucination ≠ malformed_json
+
+
+def test_parse_ollama_malformed_args_string_not_json():
+    """String args that fail json.loads → filtered_invalid + malformed_json error."""
+    resp = {"message": {"tool_calls": [
+        {"function": {"name": "get_weather", "arguments": "not-valid-json"}}
+    ]}}
+    emitted, filtered, err = _parse_ollama_tool_calls(resp, _ORACLE_FULL)
+    assert emitted == []
+    assert len(filtered) == 1
+    assert filtered[0]["malformed"] is True
+    assert err == "malformed_json"
+
+
+def test_parse_ollama_string_args_that_parse_to_dict():
+    """String args that json.loads to a dict → normalised, placed in tools_emitted."""
+    resp = {"message": {"tool_calls": [
+        {"function": {"name": "get_weather", "arguments": '{"location": "Denver"}'}}
+    ]}}
+    emitted, filtered, err = _parse_ollama_tool_calls(resp, _ORACLE_FULL)
+    assert len(emitted) == 1
+    assert emitted[0]["arguments"] == {"location": "Denver"}
+    assert filtered == []
+    assert err is None
+
+
+def test_parse_ollama_string_args_that_parse_to_non_dict():
+    """String args that json.loads to a list (not dict) → filtered_invalid."""
+    resp = {"message": {"tool_calls": [
+        {"function": {"name": "get_weather", "arguments": '["Baltimore"]'}}
+    ]}}
+    emitted, filtered, err = _parse_ollama_tool_calls(resp, _ORACLE_FULL)
+    assert emitted == []
+    assert len(filtered) == 1
+    assert filtered[0]["malformed"] is True
+    assert err == "malformed_json"
+
+
+def test_parse_ollama_mixed_valid_and_hallucinated():
+    """Mixed: one valid call and one hallucinated name in the same response."""
+    resp = {"message": {"tool_calls": [
+        {"function": {"name": "get_weather", "arguments": {"location": "NYC"}}},
+        {"function": {"name": "get_unicorn_prices", "arguments": {}}},
+    ]}}
+    emitted, filtered, err = _parse_ollama_tool_calls(resp, _ORACLE_FULL)
+    assert len(emitted) == 1
+    assert emitted[0]["name"] == "get_weather"
+    assert len(filtered) == 1
+    assert filtered[0]["name"] == "get_unicorn_prices"
+    assert err is None
+
+
+def test_parse_ollama_empty_oracle_allows_all():
+    """Empty oracle (frozenset()) → no hallucination check; all calls admitted."""
+    resp = {"message": {"tool_calls": [
+        {"function": {"name": "anything_goes", "arguments": {"x": 1}}}
+    ]}}
+    emitted, filtered, err = _parse_ollama_tool_calls(resp, frozenset())
+    assert len(emitted) == 1
+    assert filtered == []
+    assert err is None
+
+
+# --- micro-probe build_turn_result integration ---
+
+def _micro_probe_response(
+    tool_name: str = "get_weather",
+    arguments: Any = None,
+    model: str = "gemma4:e4b-it-qat",
+    tokens_per_second: float = 72.5,
+) -> Dict:
+    """Build a synthetic micro-probe response (mimics _post_ollama return value)."""
+    if arguments is None:
+        arguments = {"location": "Baltimore"}
+    return {
+        "metadata": {
+            "tool_calls_emitted": {
+                "calls": [{"name": tool_name, "arguments": arguments}],
+                "filtered_invalid": [],
+            },
+            "model_component_name": "micro_probe",
+            "model_component_used": model,
+            "tokens_per_second": tokens_per_second,
+            "node_timings": {},
+            "cache_hit": False,
+            "model_used": None,
+        }
+    }
+
+
+def test_micro_probe_row_model_component_name_is_micro_probe():
+    """micro-probe rows must have model_component_name='micro_probe'."""
+    row = build_turn_result(
+        _entry(["get_weather"]),
+        _micro_probe_response(),
+        800.0,
+        _ORACLE_FULL,
+    )
+    assert row["model_component_name"] == "micro_probe"
+
+
+def test_micro_probe_row_model_component_used_is_model_tag():
+    """model_component_used must equal the pinned model tag."""
+    row = build_turn_result(
+        _entry(["get_weather"]),
+        _micro_probe_response(model="gemma4:e4b-it-qat"),
+        800.0,
+        _ORACLE_FULL,
+    )
+    assert row["model_component_used"] == "gemma4:e4b-it-qat"
+
+
+def test_micro_probe_row_scores_correctly():
+    """micro-probe correct call scores correct_tools_all=True, valid_structural=True."""
+    row = build_turn_result(
+        _entry(["get_weather"]),
+        _micro_probe_response("get_weather", {"location": "Baltimore"}),
+        800.0,
+        _ORACLE_FULL,
+    )
+    assert row["correct_tools_all"] is True
+    assert row["valid_structural"] is True
+    assert row["error"] is None
+    assert row["llm_tokens_per_second"] == 72.5
+
+
+def test_micro_probe_row_hallucinated_name_scores_invalid():
+    """Hallucinated tool name: valid_structural=False (no oracle hit)."""
+    resp = {
+        "metadata": {
+            "tool_calls_emitted": {
+                "calls": [],  # hallucinated → moved to filtered_invalid before here
+                "filtered_invalid": [{"name": "get_unicorn_prices", "malformed": False}],
+            },
+            "model_component_name": "micro_probe",
+            "model_component_used": "gemma4:e4b-it-qat",
+            "tokens_per_second": 60.0,
+            "node_timings": {},
+            "cache_hit": False,
+            "model_used": None,
+        }
+    }
+    row = build_turn_result(
+        _entry(["get_weather"]),
+        resp,
+        800.0,
+        _ORACLE_FULL,
+    )
+    assert row["correct_tools_all"] is False
+    assert row["valid_structural"] is False
+    assert len(row["tools_filtered_invalid"]) == 1
+
+
+def test_micro_probe_row_malformed_args_scores_invalid():
+    """Malformed args in the tools_emitted list: valid_structural=False."""
+    resp = {
+        "metadata": {
+            "tool_calls_emitted": {
+                "calls": [{"name": "get_weather", "arguments": "not-a-dict"}],
+                "filtered_invalid": [],
+            },
+            "model_component_name": "micro_probe",
+            "model_component_used": "qwen3:4b-instruct-2507-q4_K_M",
+            "tokens_per_second": 50.0,
+            "node_timings": {},
+            "cache_hit": False,
+            "model_used": None,
+        }
+    }
+    row = build_turn_result(
+        _entry(["get_weather"]),
+        resp,
+        300.0,
+        _ORACLE_FULL,
+    )
+    assert row["valid_structural"] is False
+    assert row["correct_args"] is False
+
+
+# --- report pairing on micro_probe rows ---
+
+def test_report_pairs_micro_probe_cells(tmp_path):
+    """build_report pairs qwen3_4b_baseline vs gemma4_e4b for micro_probe component."""
+
+    def _mp_rows(model_tag: str, cell_label: str, n_correct: int, n_wrong: int = 0) -> List[Dict]:
+        rows = []
+        for _ in range(n_correct):
+            rows.append({
+                "query": "What's the weather?",
+                "expected_tools": ["get_weather"],
+                "correct_tools_all": True, "correct_tools_partial": 1.0,
+                "valid_structural": True, "correct_args": True,
+                "is_false_positive": False, "total_latency_ms": 350.0,
+                "llm_tokens_per_second": 72.0,
+                "model_component_name": "micro_probe",
+                "model_component_used": model_tag,
+                "error": None, "cache_hit": False,
+                "cell_label": cell_label, "transport": "ollama",
+            })
+        for _ in range(n_wrong):
+            rows.append({
+                "query": "What's the weather?",
+                "expected_tools": ["get_weather"],
+                "correct_tools_all": False, "correct_tools_partial": 0.0,
+                "valid_structural": False, "correct_args": False,
+                "is_false_positive": False, "total_latency_ms": 320.0,
+                "llm_tokens_per_second": 65.0,
+                "model_component_name": "micro_probe",
+                "model_component_used": model_tag,
+                "error": None, "cache_hit": False,
+                "cell_label": cell_label, "transport": "ollama",
+            })
+        return rows
+
+    rows_qwen3 = _mp_rows("qwen3:4b-instruct-2507-q4_K_M", "qwen3_4b_baseline", n_correct=20)
+    rows_gemma = _mp_rows("gemma4:e4b-it-qat", "gemma4_e4b", n_correct=20)
+
+    f_qwen3 = tmp_path / "qwen3_4b_baseline.jsonl"
+    f_gemma = tmp_path / "gemma4_e4b.jsonl"
+    for fpath, rows in [(f_qwen3, rows_qwen3), (f_gemma, rows_gemma)]:
+        with open(fpath, "w") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    report = build_report([f_qwen3, f_gemma])
+
+    # micro_probe component section must be present
+    assert "micro_probe" in report
+    # Incumbent (qwen3) and Challenger (gemma4) must be identified
+    assert "Incumbent:" in report
+    assert "Challenger:" in report
+    # A verdict must be produced
+    assert "NO-SWAP" in report or "SWAP RECOMMENDED" in report or "NON-DECISION-GRADE" in report
+
+
+def test_micro_probe_decision_grade_at_min_n():
+    """micro_probe component is decision-grade when effective_n ≥ MIN_EFFECTIVE_N."""
+    rows = [
+        {
+            "query": "test", "expected_tools": ["get_weather"],
+            "correct_tools_all": True, "correct_tools_partial": 1.0,
+            "valid_structural": True, "correct_args": True,
+            "is_false_positive": False, "total_latency_ms": 300.0,
+            "llm_tokens_per_second": 70.0,
+            "model_component_name": "micro_probe",
+            "model_component_used": "gemma4:e4b-it-qat",
+            "error": None, "cache_hit": False,
+        }
+        for _ in range(MIN_EFFECTIVE_N)
+    ]
+    cells = aggregate(rows)
+    cell = cells[("micro_probe", "gemma4:e4b-it-qat")]
+    assert cell.is_decision_grade
+
+
+def test_micro_probe_not_decision_grade_below_min_n():
+    """micro_probe component is NOT decision-grade when effective_n < MIN_EFFECTIVE_N."""
+    rows = [
+        {
+            "query": "test", "expected_tools": ["get_weather"],
+            "correct_tools_all": True, "correct_tools_partial": 1.0,
+            "valid_structural": True, "correct_args": True,
+            "is_false_positive": False, "total_latency_ms": 300.0,
+            "llm_tokens_per_second": 70.0,
+            "model_component_name": "micro_probe",
+            "model_component_used": "gemma4:e4b-it-qat",
+            "error": None, "cache_hit": False,
+        }
+        for _ in range(MIN_EFFECTIVE_N - 1)
+    ]
+    cells = aggregate(rows)
+    cell = cells[("micro_probe", "gemma4:e4b-it-qat")]
+    assert not cell.is_decision_grade

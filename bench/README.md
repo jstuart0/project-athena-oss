@@ -20,13 +20,16 @@ python scripts/bench_tool_calling.py \
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--host` | `http://localhost:8001` | Orchestrator base URL |
+| `--host` | `http://localhost:8001` | Base URL. For `--transport query`: orchestrator URL. For `--transport ollama`: Ollama host (e.g. `http://localhost:11434`). |
 | `--cell` | `unnamed` | Cell identifier written into the output filename and every row (`cell_label`). Use a descriptive name like `qwen3_baseline` or `gemma4_e4b`. |
 | `--n` | `20` | Runs per query. Use ≥20 for decision-grade results. |
 | `--query-set` | `bench/query_set.yaml` | Path to query set YAML. |
 | `--results-dir` | `bench/results` | Output directory for JSONL files. |
-| `--timeout` | `60.0` | Per-request timeout in seconds. |
-| `--self-test` | (flag) | Run in-process smoke tests without a live host and exit. Verifies query set validity, scoring logic, and fallback attribution. |
+| `--timeout` | `60.0` | Per-request timeout in seconds. Ollama transport often needs 120+. |
+| `--transport` | `query` | Transport: `query` (POST /query, default) or `ollama` (micro-probe, plan Option B). |
+| `--model` | (none) | Pinned model tag. Required for `--transport ollama`. Written to `model_component_used` in every row (e.g. `gemma4:e4b-it-qat`). |
+| `--self-test` | (flag) | Run in-process smoke tests without a live host and exit. Verifies query set validity, scoring logic, fallback attribution, and micro-probe payload/parsing. |
+| `--dump-tools` | (flag) | Print the 20 OpenAI-format tool schemas sourced from `get_rag_tools()` and exit. Requires PYTHONPATH to include `src/`. |
 
 ### Self-test mode
 
@@ -130,6 +133,106 @@ would make denominators smaller and correct-tool rates look better than reality.
 synthetic queries (no real user data), so committing results is appropriate and
 provides a reproducible audit trail for the decision. Do not add `bench/results/`
 to `.gitignore`.
+
+---
+
+## Micro-probe transport (`--transport ollama`)
+
+The micro-probe transport is the plan's documented **Option B fallback**, used
+when the `/query` Phase 1b observability surfaces (`metadata.tool_calls_emitted`,
+`skip_semantic_cache`, etc.) cannot land in production. It bypasses the
+orchestrator entirely and posts directly to Ollama.
+
+### When to use it
+
+Use `--transport ollama` when:
+- Phase 1b is not yet deployed and you need tool-calling quality numbers now.
+- You want to isolate the tool-choice decision from routing/caching noise
+  (useful for early model screening before investing in a full Phase 3 run).
+- Production has zero fallback triggers configured and `/query` skips tool
+  selection entirely ("No fallback triggers configured, skipping tool calling").
+
+Do NOT use it as a substitute for the full `/query` run once Phase 1b is live —
+it does not measure end-to-end turn latency (TTFT-sensitive), does not exercise
+the intent router, and does not test the production cache path.
+
+### What it measures vs `/query`
+
+| Dimension | `/query` (transport=query) | Micro-probe (transport=ollama) |
+|-----------|---------------------------|-------------------------------|
+| Tool-choice correctness | Yes (with Phase 1b) | Yes |
+| End-to-end turn latency | Yes (TTFT-sensitive) | No — model-level only |
+| Intent routing / complexity stratification | Yes | No |
+| Semantic cache behaviour | Yes (skip_semantic_cache) | Not applicable |
+| Component attribution | metadata.model_component_name | Always "micro_probe" |
+
+### Think-suppression parity
+
+The micro-probe replicates `llm_router.py:1057-1059` exactly:
+
+```python
+if "qwen3" in model.lower():
+    payload["think"] = False
+```
+
+- qwen3 models: `"think": false` is injected into the Ollama payload.
+- gemma / other models: no `think` key (matches prod behaviour — no branch
+  exists in `llm_router._generate_ollama_with_tools` for non-qwen3 models).
+
+### Latency caveat
+
+`total_latency_ms` in micro-probe rows is the wall-clock time of a single
+Ollama `/api/chat` POST (model-level latency). It is **NOT** comparable to
+`/query` latency, which includes intent classification, routing, synthesis, and
+all other orchestrator overhead. Gate 3 (`p90 ≤ incumbent × 1.10`) is valid
+only when comparing cells **on the same transport** — never cross-transport.
+
+### JSONL difference
+
+Micro-probe rows carry one additional field:
+
+| Field | Value |
+|-------|-------|
+| `transport` | `"ollama"` |
+| `model_component_name` | `"micro_probe"` (constant) |
+| `model_component_used` | pinned model tag (e.g. `"gemma4:e4b-it-qat"`) |
+
+`bench_report.py` treats `"micro_probe"` as the single component for a
+micro-probe cell. The per-component minimum-N logic fires against the full
+cell's effective N, not a stratified sub-population (because no router
+stratification exists for a pinned-model direct call). The incumbent/challenger
+gate pairing heuristic works identically — it keys on the cell label (e.g.
+`qwen3_4b_baseline` vs `gemma4_e4b`), not the component name.
+
+### Running the micro-probe
+
+```bash
+# Baseline cell (qwen3:4b)
+python scripts/bench_tool_calling.py \
+    --transport ollama \
+    --host http://localhost:11434 \
+    --model qwen3:4b-instruct-2507-q4_K_M \
+    --cell qwen3_4b_baseline \
+    --n 20
+
+# Challenger cell (gemma4:e4b)
+python scripts/bench_tool_calling.py \
+    --transport ollama \
+    --host http://localhost:11434 \
+    --model gemma4:e4b-it-qat \
+    --cell gemma4_e4b \
+    --n 20
+
+# Inspect the 20 tool schemas that are sent to Ollama
+python scripts/bench_tool_calling.py --dump-tools
+```
+
+PYTHONPATH must include `src/` so `get_rag_tools` is importable:
+
+```bash
+PYTHONPATH=/path/to/os-project-athena/src \
+    python scripts/bench_tool_calling.py --transport ollama ...
+```
 
 ---
 

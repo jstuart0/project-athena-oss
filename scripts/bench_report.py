@@ -23,6 +23,17 @@ response carries no model_component_name / model_component_used.  The harness
 label).  These fallback-attributed rows count in the denominator of their
 target cell so that errors/timeouts are never silently excluded.
 
+Micro-probe transport (transport="ollama")
+------------------------------------------
+Rows from the micro-probe transport have model_component_name="micro_probe"
+(a constant) and model_component_used=<pinned model tag>.  The micro-probe
+cell IS the model — there is no router stratification.  The per-component
+minimum-N logic treats "micro_probe" as the single component for every row
+in an ollama-transport run, so the effective-N flag fires against the full
+cell rather than a per-component sub-population.  The gate pairing heuristic
+(incumbent/challenger detection by label keywords) works identically regardless
+of whether the component is "tool_calling_simple" or "micro_probe".
+
 Gate selection (multi-file reports)
 -------------------------------------
 Decision gates compare the BASELINE cell (incumbent model on a component) vs
