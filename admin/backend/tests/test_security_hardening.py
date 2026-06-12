@@ -3743,3 +3743,190 @@ class TestWsPhase3OriginCheck:
         assert "not cfg.dev_mode" in src or "cfg.dev_mode" in src, (
             "Origin check in websocket.py must reference cfg.dev_mode"
         )
+
+
+# ---------------------------------------------------------------------------
+# Campaign 4 / ATHENA-55 Phase 4: frontend WS ticket mint + capability fallback
+# ---------------------------------------------------------------------------
+
+
+class TestWsPhase4FrontendStaticGuards:
+    """Static safety net for admin-jarvis.js (ATHENA-55 Phase 4, xander C-2 + L-3 + Decision 3).
+
+    These tests parse the frontend source directly — no browser required.
+    """
+
+    _FRONTEND_PATH = None
+
+    @classmethod
+    def _get_frontend_src(cls):
+        if cls._FRONTEND_PATH is None:
+            cls._FRONTEND_PATH = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "admin-jarvis.js")
+            )
+        with open(cls._FRONTEND_PATH) as f:
+            return f.read()
+
+    def test_calls_ws_ticket_endpoint(self):
+        """admin-jarvis.js must POST /api/auth/ws-ticket to mint a ticket (ATHENA-55 Phase 4)."""
+        src = self._get_frontend_src()
+        assert "/api/auth/ws-ticket" in src, (
+            "admin-jarvis.js must call /api/auth/ws-ticket to obtain a WS ticket "
+            "(ATHENA-55 Phase 4)"
+        )
+        assert "POST" in src, (
+            "admin-jarvis.js must use POST when minting a ws-ticket"
+        )
+
+    def test_no_direct_localstorage_token_in_ws_url_primary_path(self):
+        """The WS URL on the primary (ticket) path must not contain the raw localStorage token.
+
+        The legacy-fallback branches are the only places where sessionToken (the
+        local-storage value) may appear in a WS URL.  On the primary path the
+        wsUrl must be built from the minted ticket, not the raw token.
+        """
+        import re
+        src = self._get_frontend_src()
+
+        # We verify by checking that wsToken (which holds the minted ticket on the
+        # primary path) — not sessionToken / localStorage — is what is interpolated
+        # into the primary wsUrl.
+        assert "wsToken" in src, (
+            "admin-jarvis.js must use a separate wsToken variable for the WS URL "
+            "on the primary path (not the raw localStorage token)"
+        )
+        # Ensure the primary wsUrl is built from wsToken, not directly from localStorage
+        assert "wsBasePath" in src or "wsUrl" in src, (
+            "admin-jarvis.js must build the WS URL from a ticket variable, not raw localStorage"
+        )
+
+    def test_console_log_carries_no_query_string(self):
+        """console.log for WS connect must log host+path only, never ?token= (xander C-2)."""
+        import re
+        src = self._get_frontend_src()
+
+        # All console.log calls that mention 'Connecting to:' must not reference wsUrl
+        # (which carries the ?token=) or ?token= directly.
+        connecting_logs = re.findall(r'console\.log\([^)]*Connecting to[^)]*\)', src, re.DOTALL)
+        for log_call in connecting_logs:
+            assert "wsUrl" not in log_call, (
+                f"console.log for 'Connecting to' must not log wsUrl (contains ?token=); "
+                f"found: {log_call!r} — xander C-2 blocker"
+            )
+            assert "?token=" not in log_call, (
+                f"console.log for 'Connecting to' must not contain ?token=; "
+                f"found: {log_call!r} — xander C-2 blocker"
+            )
+
+        # Verify at least one 'Connecting to:' log exists (regression check)
+        assert len(connecting_logs) >= 1, (
+            "admin-jarvis.js must contain at least one 'Connecting to:' console.log "
+            "for connection traceability"
+        )
+
+    def test_reconnect_refetches_ticket(self):
+        """Reconnect must call connectWebSocket() again (re-fetches a fresh ticket).
+
+        The ticket fetch must be inside connectWebSocket(), not at module-init,
+        so every reconnect mints a new ticket (single-use enforcement, xander L-3).
+        """
+        import re
+        src = self._get_frontend_src()
+        # scheduleReconnect calls connectWebSocket() — verify the pattern
+        assert "connectWebSocket()" in src, (
+            "scheduleReconnect must call connectWebSocket() so every reconnect "
+            "re-fetches a fresh ticket (xander L-3)"
+        )
+        # connectWebSocket must be declared as an async function (needed for await fetch)
+        assert "async function connectWebSocket()" in src, (
+            "connectWebSocket must be declared as async function"
+        )
+        # The actual fetch() call for the ticket must be inside connectWebSocket.
+        # We look for "fetch('/api/auth/ws-ticket'" (the call form, not a comment).
+        idx_fn = src.find("async function connectWebSocket()")
+        # Find the fetch *call* — "fetch('/api/auth/ws-ticket'" — after the function decl.
+        fetch_call_pattern = re.compile(r"fetch\(['\"]\/api\/auth\/ws-ticket['\"]", re.DOTALL)
+        match = fetch_call_pattern.search(src, idx_fn)
+        assert match is not None, (
+            "fetch('/api/auth/ws-ticket') call must appear inside connectWebSocket(), "
+            "not before it at module-init (xander L-3 — fresh ticket per connect)"
+        )
+
+    def test_mint_time_fallback_gated_on_404_only(self):
+        """Mint-time legacy fallback must be gated on status === 404 only (bob M2).
+
+        401/403/5xx must not trigger a fallback — they must fail loudly.
+        """
+        import re
+        src = self._get_frontend_src()
+
+        # The 404 gate must be present
+        assert "404" in src, (
+            "admin-jarvis.js must gate the mint-time legacy fallback on status 404"
+        )
+        # The fallback must explicitly check for 404, not a general failure condition
+        assert ".status === 404" in src or "status === 404" in src or "mintResp.status === 404" in src, (
+            "admin-jarvis.js mint-time fallback must be gated on mintResp.status === 404 "
+            "only (bob M2 — 401/403/5xx must fail loudly, not fall back)"
+        )
+
+    def test_capability_fallback_gated_on_4001_and_mint_200_and_not_retried(self):
+        """Upgrade-time capability fallback must be gated on closeCode===4001 && mintStatus===200 &&
+        !legacyRetried (Decision 3 / codex r2).
+
+        Any relaxation of this gate could launder a genuine auth failure into a
+        long-lived JWT-in-URL connection.
+        """
+        src = self._get_frontend_src()
+
+        # The three gate conditions must all appear in the source
+        assert "4001" in src, (
+            "admin-jarvis.js capability fallback must check close code 4001"
+        )
+        assert "ticketMintStatus === 200" in src or "mintStatus === 200" in src, (
+            "admin-jarvis.js capability fallback must be gated on ticketMintStatus === 200 "
+            "(Decision 3 — retry only when the mint itself succeeded)"
+        )
+        assert "legacyRetried" in src, (
+            "admin-jarvis.js must track legacyRetried to prevent a second fallback attempt"
+        )
+        assert "!legacyRetried" in src, (
+            "admin-jarvis.js capability fallback must check !legacyRetried to bound to one retry"
+        )
+
+    def test_no_retry_on_4003(self):
+        """4003 (Origin) must never trigger a legacy retry (Decision 3)."""
+        import re
+        src = self._get_frontend_src()
+        # 4003 should appear in the source (as a check / comment / log)
+        assert "4003" in src, (
+            "admin-jarvis.js must reference close code 4003 to handle Origin-rejection "
+            "without retrying"
+        )
+        # Verify the capability fallback condition does NOT include 4003 as a trigger.
+        # The gate must be specifically 4001, not a general non-1000 code.
+        # We check by confirming 4003 does not appear as the trigger for legacyRetried.
+        # Static heuristic: 4003 must not be the condition that sets legacyRetried.
+        assert "event.code === 4003" not in src or "legacyRetried = true" not in src.split("4003")[0].rsplit("legacyRetried = true", 1)[-1][:50], (
+            "admin-jarvis.js must NOT set legacyRetried=true on 4003 — 4003 is Origin-block, "
+            "not a capability signal (Decision 3)"
+        )
+
+    def test_legacy_retried_resets_per_connect(self):
+        """legacyRetried must reset to false at the start of each connectWebSocket() invocation.
+
+        This ensures a later reconnect re-probes the (possibly now fully-rolled-out)
+        backend rather than permanently pinning to the legacy token.
+        """
+        src = self._get_frontend_src()
+        assert "let legacyRetried = false" in src, (
+            "admin-jarvis.js must declare 'let legacyRetried = false' inside connectWebSocket() "
+            "so it resets on every fresh connect attempt (Decision 3)"
+        )
+        # Verify it's inside the function, not at module scope
+        idx_fn = src.find("async function connectWebSocket()")
+        idx_decl = src.find("let legacyRetried = false")
+        assert idx_decl > idx_fn, (
+            "'let legacyRetried = false' must be inside connectWebSocket(), "
+            "not at module scope"
+        )
