@@ -157,5 +157,27 @@ data:
   #
   # HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: ""
 
+  # ==========================================================================
+  # SSRF guard — ATHENA-59 Phase 0
+  # ==========================================================================
+
+  # SITESCRAPER_ALLOWED_PRIVATE_HOSTS: comma-separated hostnames or CIDRs that
+  # the SSRF guard (validate_url_not_private) will permit for sitescraper,
+  # iCal, and MCP Class-1 URL fetch paths.  Default empty = fail-closed.
+  # Homelab operators whose iCal servers or MCP endpoints are on private IPs
+  # MUST set this; public-internet deployments leave it empty.
+  # Example: SITESCRAPER_ALLOWED_PRIVATE_HOSTS: "192.168.10.0/24,my-ical.local"
+  #
+  # SITESCRAPER_ALLOWED_PRIVATE_HOSTS: ""
+
+  # CONTENT_FETCHER_ALLOW_BROWSER_FETCH: set to "true" to re-enable the
+  # Playwright headless-browser fallback in ContentFetcher for JS-rendered pages.
+  # Default false (disabled) — the browser path cannot be per-hop SSRF guarded
+  # until egress NetworkPolicy lands (R3 residual, ATHENA-59).
+  # Only enable if you accept the residual risk and have deployed Playwright.
+  # Example: CONTENT_FETCHER_ALLOW_BROWSER_FETCH: "true"
+  #
+  # CONTENT_FETCHER_ALLOW_BROWSER_FETCH: "false"
+
   # Logging
   LOG_LEVEL: "INFO"

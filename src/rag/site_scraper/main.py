@@ -90,9 +90,11 @@ def _domain_matches(domain: str, pattern: str) -> bool:
     Example: domain="evil.com", pattern="evil.com" → True
              domain="notevil.com.attacker.net", pattern="evil.com" → False  (xander H-1 fix)
              domain="sub.evil.com", pattern="evil.com" → True
+             domain="evil.com.", pattern="evil.com" → True  (M-3: trailing-dot stripped)
     """
-    domain = domain.lower()
-    pattern = pattern.lower()
+    # M-3: strip trailing dots so "evil.com." cannot bypass the match check.
+    domain = domain.lower().rstrip(".")
+    pattern = pattern.lower().rstrip(".")
     return domain == pattern or domain.endswith("." + pattern)
 
 
@@ -100,7 +102,18 @@ def is_url_allowed(url: str, mode: str) -> Tuple[bool, str]:
     """
     Check if URL is allowed for the given mode.
 
-    Includes SSRF guard via validate_url_not_private (ATHENA-59 Phase 0).
+    M-1 design note (ATHENA-59 gate fix):
+    This function is **sync** and called from async route handlers.  It must NOT
+    call socket.getaddrinfo (blocking) on the event loop.  The DNS-resolving SSRF
+    guard (validate_url_not_private) is intentionally NOT called here; it runs in
+    the async fetch path via safe_get / scrape_url (which wraps the validator with
+    run_in_executor).  Defense-in-depth is preserved: any caller that bypasses
+    scrape_url will hit the guard inside safe_get on the actual fetch.
+
+    This function performs the non-blocking pre-checks only:
+    - Scheme validation
+    - Literal-IP checks (ipaddress — no DNS)
+    - Domain blocklist / allowlist matching (pattern matching only)
 
     Args:
         url: URL to check
@@ -109,23 +122,34 @@ def is_url_allowed(url: str, mode: str) -> Tuple[bool, str]:
     Returns:
         Tuple of (allowed: bool, reason: str)
     """
-    from shared.url_safety import validate_url_not_private
+    import ipaddress as _ipaddress
+    from shared.url_safety import _ip_is_private
 
     try:
         parsed = urlparse(url)
         # netloc includes port (e.g. "evil.com:8080"); use hostname for matching.
         domain = (parsed.hostname or parsed.netloc).lower()
 
-        # SSRF guard — reject URLs resolving to private/loopback/link-local IPs.
-        # Pass the per-consumer allowlist in; the validator never reads env (D9).
-        ssrf_result = validate_url_not_private(
-            url,
-            allowed_private_hosts=get_config().sitescraper_allowed_private_hosts.split(",")
-            if get_config().sitescraper_allowed_private_hosts
-            else [],
-        )
-        if not ssrf_result.allowed:
-            return False, f"SSRF guard: {ssrf_result.reason}"
+        # Scheme check (non-blocking).
+        if parsed.scheme not in ("http", "https"):
+            return False, f"Scheme not allowed: {parsed.scheme!r}"
+
+        # Literal-IP SSRF pre-check (no DNS — uses ipaddress module only).
+        # Catches http://127.0.0.1/, http://[fc00::1]/, etc. without blocking.
+        # The full DNS-resolving guard fires later inside safe_get / scrape_url.
+        host_for_ip_check = domain.strip("[]")  # strip IPv6 brackets
+        try:
+            _ipaddress.ip_address(host_for_ip_check)  # raises if not a literal IP
+            cfg_obj = get_config()
+            allowlist = (
+                [h.strip() for h in cfg_obj.sitescraper_allowed_private_hosts.split(",") if h.strip()]
+                if cfg_obj.sitescraper_allowed_private_hosts
+                else []
+            )
+            if _ip_is_private(host_for_ip_check) and host_for_ip_check not in allowlist:
+                return False, f"Literal private IP rejected: {host_for_ip_check}"
+        except ValueError:
+            pass  # Not a literal IP — defer to DNS-resolving guard in safe_get.
 
         # Check blocked domains (applies to all modes).
         # FIX (xander H-1): use exact-host/suffix match, not substring.
@@ -233,13 +257,18 @@ setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 async def health_check():
     """Health check endpoint."""
     from shared.content_fetcher import HAS_PLAYWRIGHT
+    from shared.config import get_config as _get_config
+    _cfg = _get_config()
+    _browser_gate_open = getattr(_cfg, "content_fetcher_allow_browser_fetch", False)
     return JSONResponse(
         status_code=200,
         content={
             "status": "healthy",
             "service": "site-scraper-rag",
             "brave_api_configured": bool(BRAVE_API_KEY),
-            "browser_rendering": HAS_PLAYWRIGHT
+            # True only when Playwright is installed AND the
+            # CONTENT_FETCHER_ALLOW_BROWSER_FETCH gate is enabled.
+            "browser_rendering": HAS_PLAYWRIGHT and _browser_gate_open
         }
     )
 

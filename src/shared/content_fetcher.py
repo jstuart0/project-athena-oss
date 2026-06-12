@@ -90,8 +90,11 @@ class ContentFetcher:
         """
         self.timeout = timeout
         self.max_concurrent = max_concurrent
-        # Retained for any operator-trusted (Class 3) fetch path.
-        # The user/admin-supplied URL path now routes through safe_get (0.3b).
+        # L-3: self.client is retained for the close() lifecycle (aclose() below)
+        # and for any future operator-trusted (Class 3) fetch path.  No committed
+        # code path currently issues requests through self.client — all
+        # user/admin-supplied URL fetches go through safe_get (0.3b).  If a Class-3
+        # path is added later, document it here with the URL source classification.
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
             headers={

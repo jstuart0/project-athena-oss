@@ -374,7 +374,8 @@ def _build_pinned_transport(resolved_ips: list[str]) -> httpx.AsyncHTTPTransport
     transport = httpx.AsyncHTTPTransport()
     # Replace the pool with one that routes through our pinned backend.
     # httpcore.AsyncConnectionPool accepts network_backend= as a public arg.
-    transport._pool = httpcore.AsyncConnectionPool(network_backend=backend)
+    # httpx 0.28 private API — re-verify on upgrade  # noqa: SLF001
+    transport._pool = httpcore.AsyncConnectionPool(network_backend=backend)  # noqa: SLF001
     return transport
 
 
@@ -464,30 +465,36 @@ async def safe_request(
         # --- build transport pinned to validated IP ---
         transport = _build_pinned_transport(result.resolved_ips)
 
-        # --- issue request (no auto-redirects) ---
+        # --- issue request and stream body (no auto-redirects) ---
+        # H-1 gate fix: stream-and-abort inside the client context so the
+        # connection is still open for aiter_bytes.  Never call aread() on the
+        # full body first — that defeats the size cap.
         async with httpx.AsyncClient(
             transport=transport,
             follow_redirects=False,
             timeout=httpx.Timeout(timeout),
         ) as client:
-            response = await client.request(
+            async with client.stream(
                 current_method,
                 current_url,
                 **current_kwargs,
-            )
-
-        # --- size cap ---
-        # For non-redirect responses we stream the body; for redirect responses
-        # we don't need the body at all.
-        if response.status_code not in (301, 302, 303, 307, 308):
-            body_bytes = await response.aread()
-            if len(body_bytes) > max_bytes:
-                raise SsrfBlockedError(
-                    f"Response body exceeds max_bytes ({max_bytes}): "
-                    f"got {len(body_bytes)} bytes"
-                )
-            # Re-wrap as a completed response with the body already read.
-            return response
+            ) as response:
+                if response.status_code not in (301, 302, 303, 307, 308):
+                    # Non-redirect: stream body and enforce size cap.
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise SsrfBlockedError(
+                                f"Response body exceeds max_bytes ({max_bytes}): "
+                                f"already received >{max_bytes} bytes"
+                            )
+                        chunks.append(chunk)
+                    # Patch internal buffer so callers can read .content / .text.
+                    response._content = b"".join(chunks)  # noqa: SLF001 — httpx 0.28 private attr
+                    return response
+                # Redirect: we only need the headers; body is not consumed.
 
         # --- redirect handling ---
         location = response.headers.get("location", "")

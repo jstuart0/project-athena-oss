@@ -1245,12 +1245,17 @@ async def discover_mcp_tools(
     import os
     from app.models import FeatureFlag
 
+    # H-3 fix: read N8N_MCP_URL exactly once to avoid a read-then-classify mismatch
+    # (the env var could change between two os.getenv() calls — same local used for
+    # both URL resolution and Class-1/Class-3 classification).
+    n8n_mcp_url_env = os.getenv("N8N_MCP_URL")
+
     # Get MCP URL from request, environment, or feature flag config
     mcp_url = None
     if request and request.mcp_url:
         mcp_url = request.mcp_url
     else:
-        mcp_url = os.getenv("N8N_MCP_URL")
+        mcp_url = n8n_mcp_url_env
         if not mcp_url:
             # Check feature flag config
             flag = db.query(FeatureFlag).filter(FeatureFlag.name == 'mcp_integration').first()
@@ -1270,10 +1275,11 @@ async def discover_mcp_tools(
     # Three-source split (xander r4 finding 3, D6):
     # mcp_url_is_operator_env=True → Class 3 (N8N_MCP_URL env), NOT fail-closed-guarded.
     # mcp_url_is_operator_env=False → Class 1 (request body or feature-flag DB row), GUARDED.
+    # Uses n8n_mcp_url_env read above — same snapshot for URL resolution and classification.
     mcp_url_is_operator_env = False
     if request and request.mcp_url:
         pass  # Class 1 — request body
-    elif os.getenv("N8N_MCP_URL"):
+    elif n8n_mcp_url_env:
         mcp_url_is_operator_env = True  # Class 3 — operator env
     else:
         pass  # Class 1 — feature-flag DB row

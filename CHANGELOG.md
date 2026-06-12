@@ -27,6 +27,45 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Added** (`ATHENA-59`): `src/shared/config.py` — `sitescraper_allowed_private_hosts` (str, default `""`), `content_fetcher_allow_browser_fetch` (bool, default `false`).
 - **Added** (`ATHENA-59`): `tests/unit/test_url_safety.py` — 69 tests covering all SSRF guard contracts, IP-pinning PoC, POST redirect semantics, safe_request/safe_get/safe_post wrappers.
 - **Fixed** (`ATHENA-59`): Health poller `TestSSRFGuard` tests updated to `asyncio.run()` for async `_validate_service_url`; `test_phase4_reconcile.py` and `test_codex_r2_reconcile.py` updated similarly.
+- **Fixed** (`ATHENA-59`): Streaming size cap in `safe_request` now iterates `aiter_bytes()` and aborts before buffering the full body (H-1 gate fix — previous `aread()`-then-check defeated the cap).
+- **Fixed** (`ATHENA-59`): `discover_mcp_tools` reads `N8N_MCP_URL` env exactly once into a local before URL resolution and Class-1/Class-3 classification to prevent mismatch (H-3 gate fix).
+- **Fixed** (`ATHENA-59`): `_domain_matches` in `site_scraper/main.py` strips trailing dots on both domain and pattern (M-3 gate fix — trailing dot previously bypassed exact-match).
+- **Fixed** (`ATHENA-59`): `is_url_allowed` in `site_scraper/main.py` no longer calls blocking `socket.getaddrinfo` synchronously from async handlers; DNS-resolving guard lives only in the async `safe_get` fetch path (M-1 gate fix).
+- **Fixed** (`ATHENA-59`): `/health` endpoint `browser_rendering` field now reflects `HAS_PLAYWRIGHT AND CONTENT_FETCHER_ALLOW_BROWSER_FETCH` gate (IAN-9).
+- **Added** (`ATHENA-59`): TLS SNI PoC tests prove `_PinnedNetworkBackend` dials the pinned IP and the httpcore pool uses the original hostname for SNI (H-2 gate fix).
+- **Added** (`ATHENA-59`): IPv6 ULA URL-form parametrized tests (`http://[fc00::1]/`, `http://[fd00::1]/`) confirm ULA addresses are blocked (M-4 gate fix).
+- **Added** (`ATHENA-59`): Tool registry localhost:5678 default fail-closed test — asserts `SsrfBlockedError` is caught, `_mcp_tools` stays empty, and `mcp_tool_registry_ssrf_blocked` log fires (IAN item 10).
+
+#### Deployer migration guide (ATHENA-59 Phase 0)
+
+**Behavior changes from this release — action required before upgrading:**
+
+**(a) Implicit `localhost:5678` MCP default is now fail-closed.**
+`tool_registry._load_mcp_tools` falls back to `http://localhost:5678/mcp` when
+`N8N_MCP_URL` is unset and no feature-flag row is configured.  Loopback is in the
+blocked CIDR, so this default now silently returns an empty MCP tool list.
+To restore previous behavior: set `N8N_MCP_URL=http://localhost:5678/mcp` (Class-3
+env — unguarded) **or** add `localhost` to `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`
+(Class-1 allowlist, kept guarded).
+
+**(b) `http://` and private-IP iCal sources are now rejected.**
+`fetch_ical_data` requires HTTPS on every redirect hop
+(`allowed_schemes=frozenset({"https"})`).  iCal sources served over plain HTTP or
+pointing at private-IP hosts will return HTTP 422.
+Migration: migrate sources to HTTPS; for private-network iCal servers add their
+hostname/CIDR to `SITESCRAPER_ALLOWED_PRIVATE_HOSTS` AND change the URL to HTTPS.
+
+**(c) Playwright browser fallback is now default-off.**
+Content fetcher's Playwright path is disabled by default
+(`CONTENT_FETCHER_ALLOW_BROWSER_FETCH` defaults to `false`).  JS-rendered pages
+that previously relied on the headless browser fallback will now return plain-HTTP
+content only.  To restore: set `CONTENT_FETCHER_ALLOW_BROWSER_FETCH=true`
+(accepts the R3 residual — no per-hop SSRF guard inside Playwright).
+
+**(d) `music_config` `HA_URL` hardcoded default removed.**
+The `http://192.168.10.168:8123` fallback in `music_config.py` is gone.  Deployments
+that relied on the default must set `HA_URL` explicitly in their env/ConfigMap.
+An unset `HA_URL` now logs a startup warning and returns HTTP 503 on music requests.
 
 ---
 
