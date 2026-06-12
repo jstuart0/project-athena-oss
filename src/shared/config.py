@@ -226,6 +226,38 @@ class AthenaConfig(BaseSettings):
     health_poll_allowed_private_hosts: str = Field(default='')
 
     # ------------------------------------------------------------------
+    # SSRF guard — user/admin-supplied URL fetch surfaces (ATHENA-59)
+    # ------------------------------------------------------------------
+    # sitescraper_allowed_private_hosts: comma-separated CIDRs or hostnames
+    #   that override the RFC1918/loopback/ULA block for the sitescraper,
+    #   fetch_ical_data, and ContentFetcher fetch surfaces. Default empty =
+    #   fail-closed for OSS deployers (correct posture).
+    #
+    #   ⚠️  WIDE-CIDR WARNING (xander H-3): a wide CIDR entry (e.g.
+    #   ``10.0.0.0/8`` or ``192.168.0.0/16``) re-opens the entire RFC1918
+    #   range to SSRF and defeats the guard. Allowlist entries MUST be
+    #   specific hosts or the tightest possible prefix (ideally /32 or a
+    #   narrow /24). Avoid entries wider than /24 — they provide near-zero
+    #   security benefit and a wide attack surface.
+    #
+    #   This allowlist is passed INTO ``validate_url_not_private`` per-call
+    #   (D9); the validator never reads env directly.
+    #   health_poller keeps its own separate ``HEALTH_POLL_ALLOWED_PRIVATE_HOSTS``
+    #   — the two allowlists are independent and never merged.
+    sitescraper_allowed_private_hosts: str = Field(default='')
+
+    # content_fetcher_allow_browser_fetch: when False (default), the Playwright
+    #   headless-browser fallback in ContentFetcher is disabled for
+    #   user/admin-supplied URLs (e.g. sitescraper targets). This is the safe
+    #   default because Playwright handles redirects internally and cannot be
+    #   SSRF-guarded at the URL-validator layer until network egress policy
+    #   lands. Set CONTENT_FETCHER_ALLOW_BROWSER_FETCH=true only if you need
+    #   JS-rendered content AND accept the documented Playwright SSRF residual
+    #   (R3, ATHENA-59): Playwright navigation/subresource SSRF remains
+    #   unguarded at both app and network layers under flannel.
+    content_fetcher_allow_browser_fetch: bool = Field(default=False)
+
+    # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern
     # ------------------------------------------------------------------
     # Fields below are NOT yet migrated to AthenaConfig.  They are listed

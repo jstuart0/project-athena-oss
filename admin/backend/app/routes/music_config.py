@@ -23,7 +23,12 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/music-config", tags=["music"])
 
 # Home Assistant configuration for artist search
-HA_URL = os.getenv("HA_URL", "http://192.168.10.168:8123")
+# HA_URL intentionally has no hardcoded default — a bare IP would bypass the
+# SSRF guard scope (Class-3 operator-env) but expose a private host at
+# module-import time.  Set HA_URL in the environment before starting the server.
+HA_URL = os.getenv("HA_URL", "")
+if not HA_URL:
+    logger.warning("HA_URL is not set; Home Assistant artist-search endpoints will fail")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
 
 

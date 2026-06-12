@@ -131,42 +131,50 @@ def _classify_and_sanitize(
 # SSRF guard (xander HIGH-1 / round-2 H1)
 # ---------------------------------------------------------------------------
 
-def _validate_service_url(host: str, port: int, path: str) -> tuple[bool, str]:
+async def _validate_service_url(host: str, port: int, path: str) -> tuple[bool, str]:
     """SSRF allowlist guard for the health poller.
 
-    Mirrors ``_PRIVATE_NETS`` in src/control_agent/url_validator.py:21-30
-    verbatim (8 ranges). Both lists MUST stay byte-for-byte aligned until the
-    consolidation follow-up ticket (see Phase 5 deliverables).
+    Consolidated onto ``src/shared/url_safety.validate_url_not_private``
+    (ATHENA-59 Phase 0 / 0.5).  The local ``_PRIVATE_NETS`` duplicate and the
+    "Both lists MUST stay byte-for-byte aligned" comment are retired.
 
-    Allowlist override: HEALTH_POLL_ALLOWED_PRIVATE_HOSTS env var
-    (comma-separated hostnames or CIDRs) lets deployers running services on
-    RFC1918 ranges opt-in. Default empty — fail-closed for OSS deployers.
+    Preserves ALL three behaviours required by xander r4 finding 4:
 
-    Path validation (round-2 H1): rejects paths containing CRLF, NUL, or
-    traversal segments to prevent header injection when the path is
-    concatenated into a URL.
+    1. **k8s control-plane hostname block** (`:182-187` in the old impl):
+       ``kubernetes.default.svc``, ``*.cluster.local``, ``*.svc`` are
+       rejected BEFORE delegating to the shared validator, because their
+       ClusterIP may not be in any RFC1918 range.
+
+    2. **Path validation** (round-2 H1): CRLF, NUL, traversal ``..``
+       rejection happens here (before URL construction and DNS), not in the
+       shared validator.
+
+    3. **Allowlist pass-through (D9)**: delegates with the health-poller's OWN
+       ``HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`` allowlist — the shared validator
+       never reads this env var.  This preserves RFC1918 service-registry
+       targets for in-cluster health checks.
+
+    Now **async** (bob r4 finding 7): wraps the blocking ``getaddrinfo`` in
+    ``loop.run_in_executor`` via the shared validator so it does not stall the
+    event loop on the ``async def _poll_one`` path (`:358`).
 
     Returns (allowed: bool, reason: str). reason is non-empty on block.
     """
-    import socket
-    from ipaddress import ip_address, ip_network
+    import asyncio
+    import sys
+    import os
 
-    # MUST mirror src/control_agent/url_validator.py:21-30 verbatim.
-    _PRIVATE_NETS = [
-        ip_network('10.0.0.0/8'),
-        ip_network('172.16.0.0/12'),
-        ip_network('192.168.0.0/16'),
-        ip_network('169.254.0.0/16'),   # link-local (AWS metadata etc.)
-        ip_network('127.0.0.0/8'),      # loopback
-        ip_network('::1/128'),           # IPv6 loopback
-        ip_network('fc00::/7'),          # IPv6 unique-local (RFC-4193)
-        ip_network('fe80::/10'),         # IPv6 link-local
-    ]
+    # Resolve shared/ module path for the admin-backend process.
+    _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
+    _shared_dir = os.path.join(_repo_root, 'src')
+    if _shared_dir not in sys.path:
+        sys.path.insert(0, _shared_dir)
+    from shared.url_safety import validate_url_not_private
 
     if not host:
         return False, 'empty host'
 
-    # Path sanitization (round-2 H1).
+    # Path sanitization (round-2 H1) — preserved verbatim.
     if path is None:
         path = ''
     if '\r' in path or '\n' in path:
@@ -176,9 +184,7 @@ def _validate_service_url(host: str, port: int, path: str) -> tuple[bool, str]:
     if '..' in path:
         return False, 'path contains traversal segments'
 
-    # Block k8s control-plane hostnames explicitly. kubernetes.default.svc
-    # resolves to a ClusterIP that may not be in any _PRIVATE_NETS range, so
-    # the IP-based check below would miss it.
+    # Block k8s control-plane hostnames explicitly — preserved verbatim.
     if (
         host == 'kubernetes.default.svc'
         or host.endswith('.cluster.local')
@@ -186,39 +192,29 @@ def _validate_service_url(host: str, port: int, path: str) -> tuple[bool, str]:
     ):
         return False, 'k8s control-plane hostname blocked'
 
+    # Build allowlist from health_poller's own env var (D9).
     cfg = get_config()
     raw_allow = (cfg.health_poll_allowed_private_hosts or '').strip()
-    allow_hosts: set[str] = set()
-    allow_nets: list = []
-    if raw_allow:
-        for entry in (e.strip() for e in raw_allow.split(',') if e.strip()):
-            if '/' in entry:
-                try:
-                    allow_nets.append(ip_network(entry, strict=False))
-                except ValueError:
-                    continue
-            else:
-                allow_hosts.add(entry.lower())
+    allowlist = [e.strip() for e in raw_allow.split(',') if e.strip()] if raw_allow else []
 
-    if host.lower() in allow_hosts:
-        return True, ''
+    # Construct the URL the shared validator expects.
+    scheme = 'http'  # health poller only needs IP-check; scheme doesn't matter here
+    # IPv6 bare addresses need to be bracketed in URLs (RFC 2732).
+    _host_in_url = f'[{host}]' if ':' in host and not host.startswith('[') else host
+    url_for_check = f'{scheme}://{_host_in_url}:{port}{path}'
 
-    try:
-        resolved = ip_address(socket.gethostbyname(host))
-    except Exception as e:
-        return False, f'cannot resolve: {type(e).__name__}'
-
-    for net in allow_nets:
-        if resolved in net:
-            return True, ''
-
-    for net in _PRIVATE_NETS:
-        if resolved in net:
-            return False, (
-                f'address {resolved} in blocked range {net}; '
-                'set HEALTH_POLL_ALLOWED_PRIVATE_HOSTS to opt-in'
-            )
-
+    # Delegate to the shared validator (wraps blocking getaddrinfo in executor).
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: validate_url_not_private(
+            url_for_check,
+            allowed_schemes=frozenset({'http', 'https'}),
+            allowed_private_hosts=allowlist,
+        ),
+    )
+    if not result.allowed:
+        return False, result.reason
     return True, ''
 
 
@@ -355,7 +351,8 @@ async def _poll_one(
     that pre-date the protocol column (codex r2 M-4).
     """
     # SSRF guard — must precede every outbound HTTP request. (xander HIGH-1)
-    ok, reason = _validate_service_url(host, port, path)
+    # Now async (bob r4 finding 7): avoids blocking the event loop on getaddrinfo.
+    ok, reason = await _validate_service_url(host, port, path)
     if not ok:
         logger.warning('poll_blocked_by_ssrf_guard', service=name, reason=reason)
         # last_error stores categorical value per MED-1 spec.

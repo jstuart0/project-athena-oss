@@ -242,18 +242,48 @@ async def fetch_lodgify_reservations(
 
 
 async def fetch_ical_data(url: str, timeout: float = 30.0) -> str:
-    """Fetch iCal data from a URL."""
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
+    """Fetch iCal data from a URL.
+
+    Security (ATHENA-59 Phase 0 / 0.3a):
+    - HTTPS-only at intake (D4) and on every redirect hop (per-hop ``allowed_schemes``).
+    - Per-hop SSRF re-validation via ``safe_get`` (xander Blocker 1).
+    - ~10MB response-size cap via safe_get's max_bytes.
+    - Caller-owned allowlist passed in; validator never reads env (D9).
+    """
+    import sys as _sys
+    import os as _os
+    # Resolve shared/ for both in-tree and installed layouts.
+    _shared = _os.path.join(_os.path.dirname(__file__), '..', '..', '..', '..', 'src', 'shared')
+    if _os.path.isdir(_shared) and _shared not in _sys.path:
+        _sys.path.insert(0, _os.path.dirname(_shared))
+    from shared.url_safety import safe_get, SsrfBlockedError
+    from shared.config import get_config
+    from urllib.parse import urlparse as _urlparse
+
+    # D4: Reject non-HTTPS URLs at intake before any network activity.
+    if _urlparse(url).scheme.lower() != "https":
+        raise HTTPException(status_code=400, detail="iCal URL must use https://")
+
+    cfg = get_config()
+    allowlist = (
+        [h for h in cfg.sitescraper_allowed_private_hosts.split(",") if h.strip()]
+        if cfg.sitescraper_allowed_private_hosts
+        else []
+    )
+
+    try:
+        response = await safe_get(
             url,
+            allowed_schemes=frozenset({"https"}),  # enforce HTTPS on every hop
+            allowed_private_hosts=allowlist,
             timeout=timeout,
-            follow_redirects=True,
-            headers={
-                "User-Agent": "Athena-Calendar-Sync/1.0"
-            }
+            headers={"User-Agent": "Athena-Calendar-Sync/1.0"},
         )
-        response.raise_for_status()
-        return response.text
+    except SsrfBlockedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    response.raise_for_status()
+    return response.text
 
 
 def parse_ical_events(ical_data: str, source_type: str) -> List[dict]:

@@ -9,6 +9,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `thoughts/shared/plans/active/2026-06-12-deliver-rbac-ssrf-partial.md` (r4)
+> **Ticket:** ATHENA-59 (Phase 0 — shared SSRF guard)
+
+### SSRF guard: shared safe_request helper wired into user/admin URL fetch chokepoints (ATHENA-59 Phase 0)
+
+- **Added** (`ATHENA-59`): `src/shared/url_safety.py` — canonical SSRF guard module. Exports `validate_url_not_private` (sync, never-raises, never-reads-env), `safe_request`/`safe_get`/`safe_post` (async, IP-pinned transport, per-hop revalidation, ~10 MB cap), `SsrfBlockedError`, `UrlSafetyResult` (frozen dataclass). DNS-rebinding mitigated via `_PinnedNetworkBackend` that dials the validated IP while httpcore's TLS layer preserves SNI hostname. POST 301/302/303 redirects downgrade to GET and strip body/credential headers on cross-origin hops; POST 307/308 redirects are refused.
+- **Changed** (`ATHENA-59`): `src/rag/site_scraper/main.py` — `is_url_allowed` now delegates to `validate_url_not_private` (Class-1 guard). `blocked_domains` and `allowed_domains` substring matching replaced with exact-host/suffix matching (`_domain_matches`) to close attacker bypass via `evil.com.attacker.net` (xander H-1).
+- **Changed** (`ATHENA-59`): `admin/backend/app/routes/calendar_sources.py` — `fetch_ical_data` now uses `safe_get(allowed_schemes=frozenset({"https"}))` — enforces HTTPS on every redirect hop.
+- **Changed** (`ATHENA-59`): `src/shared/content_fetcher.py` — default client changed to `follow_redirects=False`; all HTTP fetches on user-supplied URLs route through `safe_get`; Playwright paths gated behind `CONTENT_FETCHER_ALLOW_BROWSER_FETCH` (default `false`).
+- **Changed** (`ATHENA-59`): `admin/backend/app/routes/tool_calling.py` — MCP discovery POST for Class-1 sources (request body / feature-flag DB rows) replaced with `safe_post`; Class-3 (N8N_MCP_URL env) kept exempt.
+- **Changed** (`ATHENA-59`): `src/shared/tool_registry.py` — MCP POST for Class-1 feature-flag rows replaced with `safe_post`; Class-3 (N8N_MCP_URL env) kept exempt.
+- **Changed** (`ATHENA-59`): `admin/backend/app/services/health_poller.py` — `_validate_service_url` promoted to `async def`; local `_PRIVATE_NETS` duplicate retired; IPv6 bare addresses bracketed before URL construction; delegates to shared `validate_url_not_private`.
+- **Changed** (`ATHENA-59`): `admin/backend/app/routes/services.py` — all 5 `aiohttp.ClientSession.get()` calls in connector health checks set `allow_redirects=False`; missing `await` on Redis SSRF guard call fixed.
+- **Changed** (`ATHENA-59`): `admin/backend/app/routes/rag_connectors.py` — all 6 `session.get()` calls set `allow_redirects=False`.
+- **Changed** (`ATHENA-59`): `admin/backend/app/routes/music_config.py` — `HA_URL` hardcoded fallback `http://192.168.10.168:8123` removed; empty default with startup log warning (OSS-First rule).
+- **Added** (`ATHENA-59`): `src/shared/config.py` — `sitescraper_allowed_private_hosts` (str, default `""`), `content_fetcher_allow_browser_fetch` (bool, default `false`).
+- **Added** (`ATHENA-59`): `tests/unit/test_url_safety.py` — 69 tests covering all SSRF guard contracts, IP-pinning PoC, POST redirect semantics, safe_request/safe_get/safe_post wrappers.
+- **Fixed** (`ATHENA-59`): Health poller `TestSSRFGuard` tests updated to `asyncio.run()` for async `_validate_service_url`; `test_phase4_reconcile.py` and `test_codex_r2_reconcile.py` updated similarly.
+
+---
+
+## [Unreleased]
+
 > **Plan:** `thoughts/shared/plans/2026-05-15-deliver-audit-deferred-cleanup-batch.md`
 > **Tickets:** ATHENA-11 (C1 cleanup-batch — Phase 2 + Phase 5 reconciliation)
 

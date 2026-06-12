@@ -203,8 +203,12 @@ def get_service_url(db: Session, service_name: str, fallback_key: str = None) ->
     return ENV_FALLBACKS.get(key, "")
 
 
-def _ssrf_check_url(url: str, health_path: str = "/health") -> Optional[dict]:
+async def _ssrf_check_url(url: str, health_path: str = "/health") -> Optional[dict]:
     """Apply the SSRF allowlist guard to a URL before an outbound request.
+
+    Now **async** (ATHENA-59 / bob r4 finding 7): _validate_service_url is
+    async (wraps blocking getaddrinfo in run_in_executor).  All 6 quick-check
+    callers must ``await _ssrf_check_url(...)``.
 
     Returns a dict suitable for returning directly as the endpoint response if
     the URL is blocked, or None if the URL is allowed.  Callers MUST check the
@@ -224,7 +228,7 @@ def _ssrf_check_url(url: str, health_path: str = "/health") -> Optional[dict]:
     except Exception:
         return {"status": "ssrf_blocked", "error": "malformed URL"}
 
-    allowed, reason = _validate_service_url(host, port, health_path)
+    allowed, reason = await _validate_service_url(host, port, health_path)
     if not allowed:
         logger.warning("quick_check_ssrf_blocked", url=url, reason=reason)
         return {"status": "ssrf_blocked", "error": f"SSRF guard: {reason}"}
@@ -244,7 +248,7 @@ async def check_gateway_health(
     if not url:
         return {"status": "not_configured", "error": "Gateway not found in database"}
 
-    blocked = _ssrf_check_url(url, "/health")
+    blocked = await _ssrf_check_url(url, "/health")
     if blocked:
         return blocked
 
@@ -257,6 +261,7 @@ async def check_gateway_health(
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(
                 f"{url}/health",
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=3)
             ) as resp:
                 elapsed = int((time.time() - start) * 1000)
@@ -293,7 +298,7 @@ async def check_orchestrator_health(
     if not url:
         return {"status": "not_configured", "error": "Orchestrator not found in database"}
 
-    blocked = _ssrf_check_url(url, "/health")
+    blocked = await _ssrf_check_url(url, "/health")
     if blocked:
         return blocked
 
@@ -306,6 +311,7 @@ async def check_orchestrator_health(
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(
                 f"{url}/health",
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=3)
             ) as resp:
                 elapsed = int((time.time() - start) * 1000)
@@ -342,7 +348,7 @@ async def check_ollama_health(
     if not url:
         return {"status": "not_configured", "error": "Ollama not found in database"}
 
-    blocked = _ssrf_check_url(url, "/api/tags")
+    blocked = await _ssrf_check_url(url, "/api/tags")
     if blocked:
         return blocked
 
@@ -356,6 +362,7 @@ async def check_ollama_health(
             # Ollama uses /api/tags to check if running
             async with session.get(
                 f"{url}/api/tags",
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=3)
             ) as resp:
                 elapsed = int((time.time() - start) * 1000)
@@ -402,7 +409,7 @@ async def check_redis_health(
 
     # SSRF guard (codex r2 H-3): Redis uses a raw socket; guard the host/port
     # directly since there is no URL to pass to _ssrf_check_url.
-    redis_allowed, redis_block_reason = _validate_service_url(redis_host, redis_port, "/")
+    redis_allowed, redis_block_reason = await _validate_service_url(redis_host, redis_port, "/")
     if not redis_allowed:
         logger.warning("quick_check_ssrf_blocked", service="redis", reason=redis_block_reason)
         return {"status": "ssrf_blocked", "error": f"SSRF guard: {redis_block_reason}"}
@@ -460,7 +467,7 @@ async def check_qdrant_health(
     if not qdrant_url:
         return {"status": "not_configured", "error": "Qdrant not found in database"}
 
-    blocked = _ssrf_check_url(qdrant_url, "/healthz")
+    blocked = await _ssrf_check_url(qdrant_url, "/healthz")
     if blocked:
         return blocked
 
@@ -473,6 +480,7 @@ async def check_qdrant_health(
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(
                 f"{qdrant_url}/healthz",
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=3)
             ) as resp:
                 elapsed = int((time.time() - start) * 1000)
@@ -509,7 +517,7 @@ async def check_mlx_health(
     if not mlx_url:
         return {"status": "not_configured", "error": "MLX not found in database or MLX_URL not set"}
 
-    blocked = _ssrf_check_url(mlx_url, "/v1/models")
+    blocked = await _ssrf_check_url(mlx_url, "/v1/models")
     if blocked:
         return blocked
 
@@ -523,6 +531,7 @@ async def check_mlx_health(
             # MLX-LM uses OpenAI-compatible API, check /v1/models endpoint
             async with session.get(
                 f"{mlx_url}/v1/models",
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=3)
             ) as resp:
                 elapsed = int((time.time() - start) * 1000)

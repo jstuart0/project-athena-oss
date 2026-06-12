@@ -326,7 +326,7 @@ async def test_weather_connector(connector: RAGConnector, test_query: str = None
 
     start = time.time()
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             elapsed = time.time() - start
             if resp.status == 200:
                 data = await resp.json()
@@ -348,7 +348,7 @@ async def test_airports_connector(connector: RAGConnector, test_query: str = Non
 
     start = time.time()
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             elapsed = time.time() - start
             if resp.status == 200:
                 data = await resp.json()
@@ -370,7 +370,7 @@ async def test_sports_connector(connector: RAGConnector, test_query: str = None)
 
     start = time.time()
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             elapsed = time.time() - start
             if resp.status == 200:
                 data = await resp.json()
@@ -391,11 +391,11 @@ async def test_qdrant_connector(connector: RAGConnector):
 
     start = time.time()
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+        async with session.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=5)) as resp:
             elapsed = time.time() - start
             if resp.status == 200:
                 # Get collections
-                async with session.get(f"{url}collections") as coll_resp:
+                async with session.get(f"{url}collections", allow_redirects=False) as coll_resp:
                     collections = await coll_resp.json() if coll_resp.status == 200 else {}
 
                 return {
@@ -443,7 +443,7 @@ async def test_generic_connector(connector: RAGConnector):
 
     start = time.time()
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+        async with session.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=5)) as resp:
             elapsed = time.time() - start
             if resp.status == 200:
                 return {

@@ -1267,58 +1267,145 @@ async def discover_mcp_tools(
 
     logger.info("mcp_discovery_started", mcp_url=mcp_url, user=current_user.username)
 
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
+    # Three-source split (xander r4 finding 3, D6):
+    # mcp_url_is_operator_env=True → Class 3 (N8N_MCP_URL env), NOT fail-closed-guarded.
+    # mcp_url_is_operator_env=False → Class 1 (request body or feature-flag DB row), GUARDED.
+    mcp_url_is_operator_env = False
+    if request and request.mcp_url:
+        pass  # Class 1 — request body
+    elif os.getenv("N8N_MCP_URL"):
+        mcp_url_is_operator_env = True  # Class 3 — operator env
+    else:
+        pass  # Class 1 — feature-flag DB row
+
+    if not mcp_url_is_operator_env:
+        # Class 1: guard via safe_post before any fetch.
+        import sys as _sys
+        import os as _os
+        _shared = _os.path.join(_os.path.dirname(__file__), '..', '..', '..', '..', 'src', 'shared')
+        if _os.path.isdir(_shared) and _shared not in _sys.path:
+            _sys.path.insert(0, _os.path.dirname(_shared))
+        from shared.url_safety import safe_post, SsrfBlockedError
+        from shared.config import get_config as _get_config
+        cfg = _get_config()
+        allowlist = (
+            [h for h in cfg.sitescraper_allowed_private_hosts.split(",") if h.strip()]
+            if cfg.sitescraper_allowed_private_hosts
+            else []
+        )
+        try:
+            response = await safe_post(
                 f"{mcp_url}/mcp/tools/list",
                 json={},
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
+                allowed_private_hosts=allowlist,
+                timeout=30.0,
+            )
+        except SsrfBlockedError as exc:
+            logger.warning("mcp_discovery_ssrf_blocked",
+                           mcp_url=mcp_url, reason=str(exc),
+                           user=current_user.username)
+            return MCPDiscoveryResult(
+                success=False,
+                discovered_count=0,
+                tools=[],
+                mcp_url=mcp_url,
+                error=f"MCP URL blocked: {exc}",
+            )
+        except Exception as e:
+            error_msg = str(e)
+            logger.error("mcp_discovery_error",
+                        mcp_url=mcp_url,
+                        error=error_msg,
+                        user=current_user.username)
+            return MCPDiscoveryResult(
+                success=False,
+                discovered_count=0,
+                tools=[],
+                mcp_url=mcp_url,
+                error=error_msg,
             )
 
-            if response.status_code == 200:
-                data = response.json()
-                tools = data.get('tools', [])
-
-                logger.info("mcp_discovery_success",
-                           mcp_url=mcp_url,
-                           discovered_count=len(tools),
-                           user=current_user.username)
-
-                return MCPDiscoveryResult(
-                    success=True,
-                    discovered_count=len(tools),
-                    tools=tools,
-                    mcp_url=mcp_url
+        if response.status_code == 200:
+            data = response.json()
+            tools = data.get('tools', [])
+            logger.info("mcp_discovery_success",
+                       mcp_url=mcp_url,
+                       discovered_count=len(tools),
+                       user=current_user.username)
+            return MCPDiscoveryResult(
+                success=True,
+                discovered_count=len(tools),
+                tools=tools,
+                mcp_url=mcp_url,
+            )
+        else:
+            error_msg = f"MCP endpoint returned status {response.status_code}"
+            logger.warning("mcp_discovery_failed",
+                          mcp_url=mcp_url,
+                          status_code=response.status_code,
+                          user=current_user.username)
+            return MCPDiscoveryResult(
+                success=False,
+                discovered_count=0,
+                tools=[],
+                mcp_url=mcp_url,
+                error=error_msg,
+            )
+    else:
+        # Class 3: operator-env target, direct fetch (unguarded per plan).
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{mcp_url}/mcp/tools/list",
+                    json={},
+                    headers={"Content-Type": "application/json"}
                 )
-            else:
-                error_msg = f"MCP endpoint returned status {response.status_code}"
-                logger.warning("mcp_discovery_failed",
-                              mcp_url=mcp_url,
-                              status_code=response.status_code,
-                              user=current_user.username)
 
-                return MCPDiscoveryResult(
-                    success=False,
-                    discovered_count=0,
-                    tools=[],
-                    mcp_url=mcp_url,
-                    error=error_msg
-                )
+                if response.status_code == 200:
+                    data = response.json()
+                    tools = data.get('tools', [])
 
-    except Exception as e:
-        error_msg = str(e)
-        logger.error("mcp_discovery_error",
-                    mcp_url=mcp_url,
-                    error=error_msg,
-                    user=current_user.username)
+                    logger.info("mcp_discovery_success",
+                               mcp_url=mcp_url,
+                               discovered_count=len(tools),
+                               user=current_user.username)
 
-        return MCPDiscoveryResult(
-            success=False,
-            discovered_count=0,
-            tools=[],
-            mcp_url=mcp_url,
-            error=error_msg
-        )
+                    return MCPDiscoveryResult(
+                        success=True,
+                        discovered_count=len(tools),
+                        tools=tools,
+                        mcp_url=mcp_url
+                    )
+                else:
+                    error_msg = f"MCP endpoint returned status {response.status_code}"
+                    logger.warning("mcp_discovery_failed",
+                                  mcp_url=mcp_url,
+                                  status_code=response.status_code,
+                                  user=current_user.username)
+
+                    return MCPDiscoveryResult(
+                        success=False,
+                        discovered_count=0,
+                        tools=[],
+                        mcp_url=mcp_url,
+                        error=error_msg
+                    )
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error("mcp_discovery_error",
+                        mcp_url=mcp_url,
+                        error=error_msg,
+                        user=current_user.username)
+
+            return MCPDiscoveryResult(
+                success=False,
+                discovered_count=0,
+                tools=[],
+                mcp_url=mcp_url,
+                error=error_msg
+            )
 
 
 @router.get("/mcp/status")

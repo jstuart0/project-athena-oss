@@ -300,18 +300,20 @@ class TestDeadConfigFieldRemoved:
 
     def test_loopback_still_blockable_without_removed_field(self):
         """Loopback must still be blocked via the SSRF guard (field removal has no side-effect)."""
+        import asyncio
         from app.services.health_poller import _validate_service_url
-        ok, reason = _validate_service_url('127.0.0.1', 8080, '/health')
+        ok, reason = asyncio.run(_validate_service_url('127.0.0.1', 8080, '/health'))
         assert not ok, "Loopback must remain blocked after removing health_poll_allow_loopback"
 
     def test_loopback_still_optable_via_allowed_private_hosts(self):
         """Loopback opt-in via HEALTH_POLL_ALLOWED_PRIVATE_HOSTS=127.0.0.0/8 still works."""
+        import asyncio
         from shared.config import get_config
         os.environ["HEALTH_POLL_ALLOWED_PRIVATE_HOSTS"] = "127.0.0.0/8"
         get_config.cache_clear()
         try:
             from app.services.health_poller import _validate_service_url
-            ok, reason = _validate_service_url('127.0.0.1', 8080, '/health')
+            ok, reason = asyncio.run(_validate_service_url('127.0.0.1', 8080, '/health'))
             assert ok, (
                 f"Loopback opt-in via HEALTH_POLL_ALLOWED_PRIVATE_HOSTS=127.0.0.0/8 failed: {reason}"
             )

@@ -66,6 +66,18 @@ class ContentFetcher:
 
     Fetches 1-2 high-value URLs in parallel and extracts structured content
     using the fastest appropriate method (JSON-LD, tables, or article text).
+
+    SSRF guard (ATHENA-59 Phase 0 / 0.3b):
+    ``fetch_structured_content`` routes its HTTP fetch through the shared
+    ``safe_get`` helper (per-hop SSRF re-validation, size cap, pinned
+    transport).  The self.client is no longer used for user/admin-supplied
+    URLs; it is retained only for any future operator-trusted fetch path.
+
+    Playwright gate (0.3d):
+    The browser fallback is disabled by default (``CONTENT_FETCHER_ALLOW_
+    BROWSER_FETCH=false``).  Playwright handles redirects internally and
+    cannot be SSRF-guarded at the URL-validator layer until egress policy
+    lands.  Set the env var to ``true`` to opt-in (accepts the R3 residual).
     """
 
     def __init__(self, timeout: float = 2.0, max_concurrent: int = 2):
@@ -78,6 +90,8 @@ class ContentFetcher:
         """
         self.timeout = timeout
         self.max_concurrent = max_concurrent
+        # Retained for any operator-trusted (Class 3) fetch path.
+        # The user/admin-supplied URL path now routes through safe_get (0.3b).
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
             headers={
@@ -87,8 +101,7 @@ class ContentFetcher:
                 "Accept-Encoding": "gzip, deflate",
                 "DNT": "1"
             },
-            follow_redirects=True,
-            max_redirects=3
+            follow_redirects=False,  # safe_get handles redirects with per-hop validation
         )
 
         # Playwright browser (lazy-initialized on first JS-render request)
@@ -97,6 +110,18 @@ class ContentFetcher:
         self._browser_context: Optional[Any] = None
         self._browser_lock = asyncio.Lock()
         self._browser_semaphore = asyncio.Semaphore(2)  # Max 2 concurrent browser pages
+
+    def _browser_fetch_allowed(self) -> bool:
+        """Return True iff the Playwright browser fallback is explicitly enabled.
+
+        Default False (CONTENT_FETCHER_ALLOW_BROWSER_FETCH env var unset / "false").
+        See class docstring and 0.3d.
+        """
+        try:
+            from .config import get_config
+            return get_config().content_fetcher_allow_browser_fetch
+        except Exception:
+            return False
 
     async def fetch_structured_content(
         self,
@@ -107,11 +132,11 @@ class ContentFetcher:
         Fetch and extract content from URL.
 
         Flow:
-        1. httpx GET to fetch raw HTML
+        1. safe_get (SSRF-guarded, per-hop-validated) to fetch raw HTML
         2. Check if HTML is a JS shell (SPA mount point + empty body)
-        3. If JS shell: try JSON-LD from <head>, then browser render
+        3. If JS shell: try JSON-LD from <head>, then browser render (if allowed)
         4. If real HTML: try extractors (JSON-LD → Tables → Article)
-        5. If extractors fail: try browser render as last resort
+        5. If extractors fail: try browser render as last resort (if allowed)
 
         Args:
             url: URL to fetch
@@ -127,18 +152,47 @@ class ContentFetcher:
                 "rendered": True  # only if browser-rendered
             }
         """
+        from .url_safety import safe_get, SsrfBlockedError
+        from .config import get_config
+
         start_time = time.time()
 
         try:
             logger.info(f"Fetching content from {url} (hint: {extraction_hint})")
 
-            # Fetch the page
-            response = await self.client.get(url)
+            cfg = get_config()
+            allowlist = (
+                [h for h in cfg.sitescraper_allowed_private_hosts.split(",") if h.strip()]
+                if cfg.sitescraper_allowed_private_hosts
+                else []
+            )
+
+            # Fetch the page via the SSRF-guarded helper (0.3b).
+            try:
+                response = await safe_get(
+                    url,
+                    allowed_private_hosts=allowlist,
+                    timeout=self.timeout,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Athena/1.0; +https://your-domain.com/bot)",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Accept-Encoding": "gzip, deflate",
+                        "DNT": "1",
+                    },
+                )
+            except SsrfBlockedError as exc:
+                logger.warning(f"SSRF guard blocked fetch for {url}: {exc}")
+                return None
+
             response.raise_for_status()
             html = response.text
 
             fetch_time = (time.time() - start_time) * 1000
             logger.debug(f"Fetch completed in {fetch_time:.0f}ms ({len(html)} chars)")
+
+            # 0.3d: Playwright gate — only allow browser rendering when explicitly enabled.
+            browser_ok = self._browser_fetch_allowed() and HAS_PLAYWRIGHT
 
             # Check if this looks like a JS-rendered shell page
             if self._is_js_shell(html):
@@ -158,7 +212,7 @@ class ContentFetcher:
 
                 # No JSON-LD in shell — skip table/article extractors (they need body content),
                 # go straight to browser rendering
-                if HAS_PLAYWRIGHT:
+                if browser_ok:
                     logger.info(f"JS shell detected, using browser rendering for {url}")
                     browser_html = await self._fetch_with_browser(url)
                     if browser_html:
@@ -170,6 +224,17 @@ class ContentFetcher:
                         logger.warning(f"Browser rendered HTML but extraction still failed for {url}")
                     else:
                         logger.warning(f"Browser fetch failed for JS shell page {url}")
+                elif HAS_PLAYWRIGHT and not self._browser_fetch_allowed():
+                    logger.info(
+                        f"JS shell detected but browser fetch is disabled "
+                        f"(CONTENT_FETCHER_ALLOW_BROWSER_FETCH=false) for {url}; "
+                        "trying extractors on shell HTML as fallback"
+                    )
+                    result = await self._run_extraction_pipeline(
+                        html, url, extraction_hint, start_time, rendered=False
+                    )
+                    if result:
+                        return result
                 else:
                     # Playwright not available — fall back to running full extraction pipeline
                     # on the shell HTML as a last resort (unlikely to find much, but not a regression)
@@ -190,8 +255,8 @@ class ContentFetcher:
             if result:
                 return result
 
-            # All extractors failed on real HTML — try browser as last resort
-            if HAS_PLAYWRIGHT:
+            # All extractors failed on real HTML — try browser as last resort (if allowed).
+            if browser_ok:
                 logger.info(f"Extractors failed on real HTML, trying browser fallback for {url}")
                 browser_html = await self._fetch_with_browser(url)
                 if browser_html:

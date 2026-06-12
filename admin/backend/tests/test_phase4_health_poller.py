@@ -130,12 +130,14 @@ class TestSSRFGuard:
     """
 
     def _validate(self, host, port=8010, path='/health', allowed=''):
-        """Helper: set env + clear cache, then call the validator."""
+        """Helper: set env + clear cache, then call the (now async) validator."""
         from shared.config import get_config
         os.environ["HEALTH_POLL_ALLOWED_PRIVATE_HOSTS"] = allowed
         get_config.cache_clear()
         from app.services.health_poller import _validate_service_url
-        return _validate_service_url(host, port, path)
+        # _validate_service_url is async (bob r4 finding 7); run it synchronously
+        # inside tests by driving the coroutine directly.
+        return asyncio.run(_validate_service_url(host, port, path))
 
     # --- Loopback (127/8) ---
     @pytest.mark.parametrize("path", ['/health', '/api/v1/status', '/metrics'])
@@ -203,7 +205,14 @@ class TestSSRFGuard:
     def test_unresolvable_host_blocked(self):
         ok, reason = self._validate('nonexistent-host-xyz-athena-test.invalid')
         assert not ok
-        assert 'cannot resolve' in reason or 'resolve' in reason.lower()
+        # The shared validator returns "DNS resolution failed: ..." or the old
+        # "cannot resolve ..." message from the health-poller's own path check.
+        reason_lc = reason.lower()
+        assert (
+            'cannot resolve' in reason_lc
+            or 'resolv' in reason_lc
+            or 'dns' in reason_lc
+        ), f"Unexpected reason: {reason}"
 
     # --- Path injection (round-2 H1) ---
     def test_path_crlf_blocked(self):

@@ -190,21 +190,38 @@ class UnifiedToolRegistry:
             logger.warning(f"Failed to load static tools: {e}")
 
     async def _load_mcp_tools(self):
-        """Discover tools from n8n via MCP protocol."""
-        # Check environment variable first
-        mcp_url = os.getenv("N8N_MCP_URL")
+        """Discover tools from n8n via MCP protocol.
+
+        Three-source split (xander r4 finding 1, D6/0.3e):
+        - N8N_MCP_URL env → Class 3 (operator-env), NOT fail-closed-guarded.
+        - feature-flag DB row mcp_url → Class 1 (admin-editable), GUARDED via safe_post.
+        - hardcoded "http://localhost:5678/mcp" default → Class 1-equivalent (loopback
+          is in blocked range → fail-closed with empty allowlist).  Deployers relying on
+          this default MUST add "localhost" to SITESCRAPER_ALLOWED_PRIVATE_HOSTS or set
+          N8N_MCP_URL explicitly.
+
+        The existing _is_domain_allowed check is retained as defense-in-depth (string
+        allowlist/blocklist) and runs before the SSRF guard.
+        """
+        from .url_safety import safe_post, SsrfBlockedError
+        from .config import get_config
+
+        # Check environment variable first — Class 3 (operator-env, unguarded).
+        mcp_url_from_env = os.getenv("N8N_MCP_URL")
+        mcp_url = mcp_url_from_env
+        mcp_url_is_operator_env = bool(mcp_url_from_env)
 
         if not mcp_url:
-            # Try to get from feature flag config
+            # Try to get from feature flag config — Class 1 (admin-editable DB row).
             flag_config = await self._get_flag_config('mcp_integration')
             mcp_url = flag_config.get('mcp_url') if flag_config else None
 
         if not mcp_url:
-            # Default to Thor's central n8n service
+            # Default to localhost:5678 — Class 1-equivalent (loopback, fail-closed).
             mcp_url = "http://localhost:5678/mcp"
             logger.debug("Using default Thor n8n MCP URL")
 
-        # Security: Check if MCP URL domain is allowed
+        # Security: Check if MCP URL domain is allowed (existing string check, defense-in-depth).
         mcp_security = await self._get_mcp_security()
         if not self._is_domain_allowed(mcp_url, mcp_security):
             logger.warning(
@@ -214,6 +231,76 @@ class UnifiedToolRegistry:
             )
             return
 
+        # SSRF guard for Class-1 sources (feature-flag DB row + hardcoded localhost default).
+        # Class-3 (N8N_MCP_URL env) is exempt — operator-trusted, unguarded.
+        if not mcp_url_is_operator_env:
+            cfg = get_config()
+            allowlist = (
+                [h for h in cfg.sitescraper_allowed_private_hosts.split(",") if h.strip()]
+                if cfg.sitescraper_allowed_private_hosts
+                else []
+            )
+            try:
+                response = await safe_post(
+                    f"{mcp_url}/mcp/tools/list",
+                    json={},
+                    allowed_private_hosts=allowlist,
+                    timeout=10.0,
+                )
+            except SsrfBlockedError as exc:
+                logger.warning(
+                    "mcp_tool_registry_ssrf_blocked",
+                    mcp_url=mcp_url,
+                    reason=str(exc),
+                )
+                return
+            except Exception as e:
+                logger.debug(f"MCP discovery skipped: {e}")
+                return
+
+            if response.status_code == 200:
+                data = response.json()
+                mcp_tools = data.get('tools', [])
+
+                self._mcp_tools = {}
+                blocked_count = 0
+
+                for t in mcp_tools:
+                    tool_name = t.get('name', '')
+                    webhook_url = t.get('webhook_url')
+
+                    # Security: Check if tool webhook domain is allowed
+                    if webhook_url and not self._is_domain_allowed(webhook_url, mcp_security):
+                        logger.warning(
+                            "mcp_tool_blocked",
+                            tool_name=tool_name,
+                            webhook_url=webhook_url,
+                            reason="Webhook domain not in allowlist"
+                        )
+                        blocked_count += 1
+                        continue
+
+                    self._mcp_tools[tool_name] = Tool(
+                        name=tool_name,
+                        display_name=t.get('description', tool_name)[:50],
+                        description=t.get('description', ''),
+                        function_schema=self._mcp_to_openai_schema(t),
+                        service_url=webhook_url,
+                        source=ToolSource.MCP,
+                        priority=ToolSource.MCP.priority,
+                        guest_mode_allowed=True,  # MCP tools default to guest-safe
+                        metadata={'mcp_raw': t},
+                    )
+
+                logger.info(
+                    f"Discovered {len(self._mcp_tools)} MCP tools from n8n",
+                    blocked_count=blocked_count
+                )
+            else:
+                logger.warning(f"MCP discovery failed: {response.status_code}")
+            return
+
+        # Class 3: operator-env (N8N_MCP_URL) — direct fetch, unguarded.
         try:
             import httpx
             async with httpx.AsyncClient(timeout=10.0) as client:

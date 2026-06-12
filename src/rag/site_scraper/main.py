@@ -84,9 +84,23 @@ async def load_config():
         logger.warning("config_load_failed_using_defaults", error=str(e))
 
 
+def _domain_matches(domain: str, pattern: str) -> bool:
+    """Return True if *domain* is exactly *pattern* or a subdomain of it.
+
+    Example: domain="evil.com", pattern="evil.com" → True
+             domain="notevil.com.attacker.net", pattern="evil.com" → False  (xander H-1 fix)
+             domain="sub.evil.com", pattern="evil.com" → True
+    """
+    domain = domain.lower()
+    pattern = pattern.lower()
+    return domain == pattern or domain.endswith("." + pattern)
+
+
 def is_url_allowed(url: str, mode: str) -> Tuple[bool, str]:
     """
     Check if URL is allowed for the given mode.
+
+    Includes SSRF guard via validate_url_not_private (ATHENA-59 Phase 0).
 
     Args:
         url: URL to check
@@ -95,13 +109,29 @@ def is_url_allowed(url: str, mode: str) -> Tuple[bool, str]:
     Returns:
         Tuple of (allowed: bool, reason: str)
     """
+    from shared.url_safety import validate_url_not_private
+
     try:
         parsed = urlparse(url)
-        domain = parsed.netloc.lower()
+        # netloc includes port (e.g. "evil.com:8080"); use hostname for matching.
+        domain = (parsed.hostname or parsed.netloc).lower()
 
-        # Check blocked domains (applies to all modes)
+        # SSRF guard — reject URLs resolving to private/loopback/link-local IPs.
+        # Pass the per-consumer allowlist in; the validator never reads env (D9).
+        ssrf_result = validate_url_not_private(
+            url,
+            allowed_private_hosts=get_config().sitescraper_allowed_private_hosts.split(",")
+            if get_config().sitescraper_allowed_private_hosts
+            else [],
+        )
+        if not ssrf_result.allowed:
+            return False, f"SSRF guard: {ssrf_result.reason}"
+
+        # Check blocked domains (applies to all modes).
+        # FIX (xander H-1): use exact-host/suffix match, not substring.
+        # Old: ``blocked.lower() in domain`` matched "evil.com" in "notevil.com.attacker.net".
         for blocked in config.get("blocked_domains", []):
-            if blocked.lower() in domain:
+            if _domain_matches(domain, blocked.strip()):
                 return False, f"Domain {domain} is blocked"
 
         # Owner mode - check if any URL allowed
@@ -113,11 +143,12 @@ def is_url_allowed(url: str, mode: str) -> Tuple[bool, str]:
         # Guest mode - check if any URL allowed
         if mode == "guest":
             if not config.get("guest_mode_any_url", False):
-                # Check against allowed domains whitelist
+                # Check against allowed domains whitelist.
+                # FIX (xander H-1): use exact-host/suffix match (was substring).
                 allowed = config.get("allowed_domains", [])
                 if allowed:
                     for allowed_domain in allowed:
-                        if allowed_domain.lower() in domain:
+                        if _domain_matches(domain, allowed_domain.strip()):
                             return True, f"Domain {domain} is whitelisted"
                     return False, f"Domain {domain} not in allowed list for guest mode"
                 # Empty whitelist = all domains allowed
@@ -218,6 +249,10 @@ async def scrape_url(url: str, extraction_hint: str = "auto") -> Dict[str, Any]:
     """
     Fetch and extract content from a URL.
 
+    Defense-in-depth SSRF re-check (ATHENA-59 Phase 0 / 0.3): validates the
+    URL before fetching even if the caller bypassed is_url_allowed.  The actual
+    HTTP fetch goes through ContentFetcher which routes through safe_get.
+
     Args:
         url: URL to scrape
         extraction_hint: Extraction method hint ("jsonld", "table", "article", "auto")
@@ -225,6 +260,17 @@ async def scrape_url(url: str, extraction_hint: str = "auto") -> Dict[str, Any]:
     Returns:
         Extracted content dictionary
     """
+    from shared.url_safety import validate_url_not_private
+
+    ssrf_result = validate_url_not_private(
+        url,
+        allowed_private_hosts=get_config().sitescraper_allowed_private_hosts.split(",")
+        if get_config().sitescraper_allowed_private_hosts
+        else [],
+    )
+    if not ssrf_result.allowed:
+        raise ValueError(f"SSRF guard: {ssrf_result.reason}")
+
     result = await content_fetcher.fetch_structured_content(url, extraction_hint)
 
     if not result:

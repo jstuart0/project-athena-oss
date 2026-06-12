@@ -118,3 +118,141 @@ class TestSearchAndScrapeEndpoint:
     async def test_search_no_results_returns_404(self):
         """Search with no results should return 404."""
         pass  # Requires more setup with mocked dependencies
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-59 Phase 0: exact-host/suffix domain matching (xander H-1 fix)
+# ---------------------------------------------------------------------------
+
+class TestDomainMatches:
+    """Tests for _domain_matches helper (xander H-1 SSRF fix in sitescraper)."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from main import _domain_matches
+        self._fn = _domain_matches
+
+    def test_exact_match(self):
+        assert self._fn("evil.com", "evil.com") is True
+
+    def test_subdomain_match(self):
+        assert self._fn("sub.evil.com", "evil.com") is True
+
+    def test_deep_subdomain_match(self):
+        assert self._fn("a.b.evil.com", "evil.com") is True
+
+    def test_suffix_not_domain_not_matched(self):
+        # "notevil.com" should NOT match pattern "evil.com" (old substring bug)
+        assert self._fn("notevil.com", "evil.com") is False
+
+    def test_attacker_suffix_bypass_blocked(self):
+        # Classic bypass: attacker hosts "evil.com.attacker.net"
+        assert self._fn("evil.com.attacker.net", "evil.com") is False
+
+    def test_case_insensitive(self):
+        assert self._fn("EVIL.COM", "evil.com") is True
+        assert self._fn("evil.com", "EVIL.COM") is True
+
+    def test_empty_pattern_matches_nothing(self):
+        # empty pattern after strip — should not crash, and should not match
+        # any real domain unless domain is also empty
+        assert self._fn("evil.com", "") is False
+
+    def test_unrelated_domain_not_matched(self):
+        assert self._fn("example.com", "evil.com") is False
+
+
+class TestIsUrlAllowedWithDomainMatching:
+    """Integration tests for is_url_allowed with exact-host/suffix matching."""
+
+    def test_blocked_exact_domain(self):
+        from main import is_url_allowed
+        with patch('main.config', {
+            'owner_mode_any_url': True,
+            'guest_mode_any_url': True,
+            'allowed_domains': [],
+            'blocked_domains': ['blocked.com'],
+        }):
+            with patch('main.get_config') as mock_cfg:
+                mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
+                with patch('shared.url_safety.validate_url_not_private') as mock_val:
+                    mock_val.return_value = MagicMock(allowed=True)
+                    allowed, reason = is_url_allowed("https://blocked.com/page", "owner")
+                    assert allowed is False
+
+    def test_blocked_subdomain(self):
+        from main import is_url_allowed
+        with patch('main.config', {
+            'owner_mode_any_url': True,
+            'guest_mode_any_url': True,
+            'allowed_domains': [],
+            'blocked_domains': ['blocked.com'],
+        }):
+            with patch('main.get_config') as mock_cfg:
+                mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
+                with patch('shared.url_safety.validate_url_not_private') as mock_val:
+                    mock_val.return_value = MagicMock(allowed=True)
+                    allowed, reason = is_url_allowed("https://sub.blocked.com/page", "owner")
+                    assert allowed is False
+
+    def test_suffix_bypass_not_blocked(self):
+        """notblocked.com should NOT be blocked by pattern 'blocked.com'."""
+        from main import is_url_allowed
+        with patch('main.config', {
+            'owner_mode_any_url': True,
+            'guest_mode_any_url': True,
+            'allowed_domains': [],
+            'blocked_domains': ['blocked.com'],
+        }):
+            with patch('main.get_config') as mock_cfg:
+                mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
+                with patch('shared.url_safety.validate_url_not_private') as mock_val:
+                    mock_val.return_value = MagicMock(allowed=True)
+                    allowed, reason = is_url_allowed("https://notblocked.com/page", "owner")
+                    assert allowed is True
+
+    def test_guest_allowed_domain_exact(self):
+        from main import is_url_allowed
+        with patch('main.config', {
+            'owner_mode_any_url': True,
+            'guest_mode_any_url': False,
+            'allowed_domains': ['whitelisted.com'],
+            'blocked_domains': [],
+        }):
+            with patch('main.get_config') as mock_cfg:
+                mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
+                with patch('shared.url_safety.validate_url_not_private') as mock_val:
+                    mock_val.return_value = MagicMock(allowed=True)
+                    allowed, reason = is_url_allowed("https://whitelisted.com/page", "guest")
+                    assert allowed is True
+
+    def test_guest_allowed_domain_subdomain(self):
+        from main import is_url_allowed
+        with patch('main.config', {
+            'owner_mode_any_url': True,
+            'guest_mode_any_url': False,
+            'allowed_domains': ['whitelisted.com'],
+            'blocked_domains': [],
+        }):
+            with patch('main.get_config') as mock_cfg:
+                mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
+                with patch('shared.url_safety.validate_url_not_private') as mock_val:
+                    mock_val.return_value = MagicMock(allowed=True)
+                    allowed, reason = is_url_allowed("https://sub.whitelisted.com/page", "guest")
+                    assert allowed is True
+
+    def test_guest_suffix_bypass_not_allowed(self):
+        """notwhitelisted.com must not pass when allowlist only has 'whitelisted.com'."""
+        from main import is_url_allowed
+        with patch('main.config', {
+            'owner_mode_any_url': True,
+            'guest_mode_any_url': False,
+            'allowed_domains': ['whitelisted.com'],
+            'blocked_domains': [],
+        }):
+            with patch('main.get_config') as mock_cfg:
+                mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
+                with patch('shared.url_safety.validate_url_not_private') as mock_val:
+                    mock_val.return_value = MagicMock(allowed=True)
+                    allowed, reason = is_url_allowed("https://notwhitelisted.com/page", "guest")
+                    assert allowed is False

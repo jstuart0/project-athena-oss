@@ -155,6 +155,47 @@ Then add a unit test in `tests/unit/test_config.py` mirroring the existing field
 | `dev_mode` | `DEV_MODE` | `false` | |
 | `demo_mode` | `DEMO_MODE` | `false` | |
 | `control_agent_enabled` | `CONTROL_AGENT_ENABLED` | `false` | Opt-in; set `true` only if a Control Agent runs on a host alongside Ollama. Valid values: `true`/`false`/`1`/`0`. Do not set to a blank string. |
+| `sitescraper_allowed_private_hosts` | `SITESCRAPER_ALLOWED_PRIVATE_HOSTS` | `""` | Comma-separated CIDRs/hostnames allowed through the sitescraper SSRF guard. Scope narrowly — wide CIDRs like `10.0.0.0/8` bypass the guard for all RFC-1918 addresses. |
+| `content_fetcher_allow_browser_fetch` | `CONTENT_FETCHER_ALLOW_BROWSER_FETCH` | `false` | Enable Playwright browser fetching in ContentFetcher. Playwright paths bypass the SSRF guard; only enable in isolated/controlled deployments. |
+
+## Fetching user-supplied or admin-supplied URLs (SSRF guard)
+
+**Any code path that fetches a URL from an untrusted source (request body, database row, feature-flag config, admin UI input) MUST use the shared SSRF guard.**
+
+### Three-way URL classification (mandatory checklist for every new fetch site)
+
+Before adding a new HTTP fetch, classify the URL source:
+
+| Class | Description | Required guard |
+|-------|-------------|----------------|
+| **Class 1** | User/admin-supplied URL: request body field, stored DB record, feature-flag config row, search-result URL, MCP discovery URL, admin-editable config | MUST use `safe_get`/`safe_post`/`safe_request` from `src/shared/url_safety.py` |
+| **Class 2** | Operator-trusted infra URL: connector/service health-check target stored in the service registry (admin-stored host, not user-controlled) | Disable auto-redirects (`follow_redirects=False` / `allow_redirects=False`); per-hop revalidation only; do NOT fail-closed-guard |
+| **Class 3** | Operator-env service URL: env var at deploy time (`OVERSEERR_URL`, `HA_URL`, `N8N_MCP_URL`, fixed deployment-config endpoints) | Exempt — do NOT guard |
+
+**The classification must be documented in a comment at the call site.**
+
+### Using the guard
+
+```python
+from shared.url_safety import safe_get, safe_post, SsrfBlockedError
+
+# Class 1 — user-supplied URL
+try:
+    response = await safe_get(
+        user_supplied_url,
+        allowed_private_hosts=get_config().sitescraper_allowed_private_hosts.split(","),
+    )
+except SsrfBlockedError as exc:
+    raise HTTPException(status_code=400, detail=str(exc))
+```
+
+`safe_get`/`safe_post` never follow redirects automatically — each hop is re-validated against `validate_url_not_private` and the TCP connect is IP-pinned to the validated address (DNS-rebinding mitigation). POST 307/308 redirects are refused. POST 301/302/303 redirects downgrade to GET and strip the body and credential headers on cross-origin hops.
+
+### Do not
+
+- Call `httpx.AsyncClient` directly for a Class-1 URL.
+- Pass `allowed_private_hosts` from env without naming it in a comment (D9: the validator never reads env — the caller decides the allowlist).
+- Use `validate_url_not_private` with undocumented CIDR allowlists in a Class-1 path.
 
 ## Module Development
 
