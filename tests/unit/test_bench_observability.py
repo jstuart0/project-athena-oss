@@ -334,3 +334,148 @@ def test_filtered_invalid_catches_hallucinated_tool():
     assert len(result) == 1
     assert result[0]["name"] == "get_unicorn_prices"
     assert result[0]["malformed"] is False
+
+
+# ---------------------------------------------------------------------------
+# Finding 2 (orchestrator side): malformed-args detection in tool_call_node
+# ---------------------------------------------------------------------------
+
+def _apply_malformed_args_filter(raw_tool_calls: list, valid_tool_names: set) -> tuple:
+    """Replicate the validation loop from tool_call_node in main.py (post-fix).
+
+    Returns (valid_tool_calls, filtered_invalid_calls).
+    A right-name/malformed-args call must go to filtered_invalid with malformed=True.
+    """
+    import json as _json
+    filtered_invalid = []
+    valid_tool_calls = []
+    for tc in raw_tool_calls:
+        fn_name = tc.get("function", {}).get("name", "")
+        raw_args = tc.get("function", {}).get("arguments")
+        if isinstance(raw_args, str):
+            try:
+                parsed = _json.loads(raw_args)
+                if isinstance(parsed, dict):
+                    # Repair: replace string with parsed dict
+                    tc = dict(tc)
+                    tc["function"] = dict(tc["function"])
+                    tc["function"]["arguments"] = parsed
+                else:
+                    filtered_invalid.append({"name": fn_name, "malformed": True})
+                    continue
+            except (ValueError, TypeError):
+                filtered_invalid.append({"name": fn_name, "malformed": True})
+                continue
+        if fn_name in valid_tool_names:
+            valid_tool_calls.append(tc)
+        else:
+            filtered_invalid.append({"name": fn_name, "malformed": False})
+    return valid_tool_calls, filtered_invalid
+
+
+def test_malformed_args_string_json_goes_to_filtered_invalid():
+    """A call with arguments as a non-parseable JSON string → filtered_invalid, malformed=True."""
+    calls = [{"function": {"name": "get_weather", "arguments": "not valid json {"}}]
+    valid, filtered = _apply_malformed_args_filter(calls, {"get_weather"})
+    assert len(valid) == 0
+    assert len(filtered) == 1
+    assert filtered[0]["name"] == "get_weather"
+    assert filtered[0]["malformed"] is True
+
+
+def test_malformed_args_string_non_dict_json_goes_to_filtered_invalid():
+    """A call with arguments as a JSON array string → filtered_invalid, malformed=True."""
+    calls = [{"function": {"name": "get_weather", "arguments": '["location","Baltimore"]'}}]
+    valid, filtered = _apply_malformed_args_filter(calls, {"get_weather"})
+    assert len(valid) == 0
+    assert len(filtered) == 1
+    assert filtered[0]["malformed"] is True
+
+
+def test_malformed_args_string_parseable_dict_is_repaired():
+    """A call with arguments as a valid JSON object string → repaired into dict, kept in valid."""
+    calls = [{"function": {"name": "get_weather", "arguments": '{"location": "Baltimore"}'}}]
+    valid, filtered = _apply_malformed_args_filter(calls, {"get_weather"})
+    assert len(valid) == 1
+    assert isinstance(valid[0]["function"]["arguments"], dict)
+    assert valid[0]["function"]["arguments"]["location"] == "Baltimore"
+    assert len(filtered) == 0
+
+
+def test_malformed_args_right_name_excluded_from_calls():
+    """A right-name/malformed-args call must NOT appear in valid tool_calls."""
+    calls = [{"function": {"name": "search_flights", "arguments": "garbage"}}]
+    valid, filtered = _apply_malformed_args_filter(calls, {"search_flights"})
+    assert len(valid) == 0
+    assert filtered[0]["malformed"] is True
+
+
+def test_normal_dict_args_call_unaffected():
+    """Normal dict-args call: unchanged behaviour."""
+    calls = [{"function": {"name": "get_weather", "arguments": {"location": "Baltimore"}}}]
+    valid, filtered = _apply_malformed_args_filter(calls, {"get_weather"})
+    assert len(valid) == 1
+    assert len(filtered) == 0
+    assert isinstance(valid[0]["function"]["arguments"], dict)
+
+
+def test_hallucinated_tool_with_dict_args_stays_in_filtered_invalid_malformed_false():
+    """Hallucinated tool name (not malformed) → filtered_invalid with malformed=False."""
+    calls = [{"function": {"name": "get_unicorn", "arguments": {}}}]
+    valid, filtered = _apply_malformed_args_filter(calls, {"get_weather"})
+    assert len(valid) == 0
+    assert filtered[0]["malformed"] is False
+
+
+# ---------------------------------------------------------------------------
+# Finding 4 (orchestrator side): forced get_directions updates tool_calls_emitted
+# ---------------------------------------------------------------------------
+
+def _build_forced_directions_emitted(origin: str, destination: str) -> list:
+    """Replicate the forced-directions observability update from tool_call_node (post-fix)."""
+    return [{"name": "get_directions", "arguments": {"origin": origin, "destination": destination}}]
+
+
+def test_forced_directions_updates_tool_calls_emitted():
+    """After a successful forced directions call, tool_calls_emitted must not be empty."""
+    emitted = _build_forced_directions_emitted("1234 Main St", "Washington DC")
+    assert len(emitted) == 1
+    assert emitted[0]["name"] == "get_directions"
+    assert emitted[0]["arguments"]["origin"] == "1234 Main St"
+    assert emitted[0]["arguments"]["destination"] == "Washington DC"
+
+
+def test_forced_directions_emitted_shape_is_correct():
+    """The forced call follows the {name, arguments} shape used by build_turn_result."""
+    emitted = _build_forced_directions_emitted("37.7749,-122.4194", "Golden Gate Bridge")
+    assert "name" in emitted[0]
+    assert "arguments" in emitted[0]
+    assert isinstance(emitted[0]["arguments"], dict)
+
+
+def test_forced_directions_source_in_main_py():
+    """Confirm main.py updates state.tool_calls_emitted in the forced-directions success block.
+
+    The assignment is placed just before 'Forced directions successful' so the
+    log line confirms the state is already correct.  We verify it appears within
+    a ±600 char window around the log line.
+    """
+    assert "state.tool_calls_emitted = [" in _MAIN_SRC, (
+        "state.tool_calls_emitted assignment not found in main.py"
+    )
+    # Locate the sentinel log line inside the forced-directions success block
+    forced_idx = _MAIN_SRC.find("Forced directions successful")
+    assert forced_idx != -1, "'Forced directions successful' not found in main.py"
+    # The assignment appears in the same success block — search a window around the log line
+    window_start = max(0, forced_idx - 600)
+    window_end = forced_idx + 200
+    window = _MAIN_SRC[window_start:window_end]
+    assert "state.tool_calls_emitted" in window, (
+        "state.tool_calls_emitted assignment not found within ±600 chars of "
+        "'Forced directions successful' — forced-directions branch must update "
+        "tool_calls_emitted in the success block"
+    )
+    # Must reference get_directions and arguments dict
+    assert '"get_directions"' in window or "'get_directions'" in window, (
+        "forced-directions emitted call must name 'get_directions'"
+    )

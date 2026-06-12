@@ -31,7 +31,25 @@ Fields: query, expected_tools, expected_component, tools_emitted,
 tools_filtered_invalid, valid_structural, correct_tools_all,
 correct_tools_partial, correct_args, is_false_positive, total_latency_ms,
 node_timings, model_component_name, model_component_used, cache_hit,
-llm_tokens_per_second, temperature, skip_semantic_cache, error, model_used.
+llm_tokens_per_second, temperature, skip_semantic_cache, error, model_used,
+run_index (int, 1-based run number within the query),
+query_id (str, the id field from query_set.yaml),
+cell_label (str, the --cell argument used for this run).
+
+Attribution-fallback rule (error rows)
+---------------------------------------
+For http_non_200, timeout, malformed_json, and cache_hit rows the live
+response carries no model_component_name / model_component_used (the
+orchestrator never reached the tool-call node).  To keep these rows in the
+correct per-component cell for denominator counting, build_turn_result accepts
+optional cell_target_component and cell_target_model keyword arguments and
+uses them as fallback attribution when the response fields are absent.  The
+fallback is populated from:
+  - cell_target_component: query_entry["expected_component"] (advisory; the
+    observed component from a successful response may differ)
+  - cell_target_model: the --cell argument (the harness-operator-supplied
+    identity of the model under test, e.g. "qwen3_baseline" or "gemma4_e4b")
+bench_report.py documents this rule in its header comment.
 """
 
 from __future__ import annotations
@@ -240,13 +258,20 @@ def _correct_args(
         "request_media": ["query"],
     }
 
-    emitted_by_name: Dict[str, Dict] = {
-        tc["name"]: tc.get("arguments", {}) for tc in tools_emitted if "name" in tc
+    emitted_by_name: Dict[str, Any] = {
+        tc["name"]: tc.get("arguments") for tc in tools_emitted if "name" in tc
     }
     for tool_name in expected_tools:
         if tool_name not in emitted_by_name:
             return False
         args = emitted_by_name[tool_name]
+        # Defensive: malformed-args calls may arrive with a non-dict value
+        # (e.g. a raw JSON string, or None).  Treat non-dict as missing all
+        # required params so malformed calls never incorrectly pass metric C.
+        if not isinstance(args, dict):
+            if _REQUIRED_PARAMS.get(tool_name):
+                return False
+            args = {}
         required = _REQUIRED_PARAMS.get(tool_name, [])
         for param in required:
             val = args.get(param)
@@ -271,11 +296,19 @@ def build_turn_result(
     tool_oracle: frozenset,
     error_type: Optional[str] = None,
     http_status: Optional[int] = None,
+    cell_label: Optional[str] = None,
+    cell_target_component: Optional[str] = None,
+    cell_target_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a single JSONL row from a raw /query response.
 
     For error rows the scoring fields are set to failure values and the
     error field is populated.  Error rows count in all rate denominators.
+
+    cell_label, cell_target_component, cell_target_model are used as fallback
+    attribution when the response does not carry model_component_name /
+    model_component_used (http_non_200, timeout, malformed_json, cache_hit rows).
+    See the module docstring "Attribution-fallback rule" for the full contract.
     """
     expected_tools: List[str] = query_entry.get("expected_tools", [])
     expected_component: Optional[str] = query_entry.get("expected_component")
@@ -302,11 +335,21 @@ def build_turn_result(
         "temperature": 0.1,
         "skip_semantic_cache": True,
         "model_used": None,
+        "cell_label": cell_label,
         "error": error_type,
     }
 
     if error_type is not None:
-        # Error/timeout row: keep failure scoring values, record http_status
+        # Error/timeout row: keep failure scoring values, record http_status.
+        # Apply fallback attribution so the row lands in the correct per-component
+        # denominator in bench_report.py.  cell_target_component comes from
+        # query_entry["expected_component"] (advisory); cell_target_model is the
+        # --cell label passed in by _run_async — it's the operator-declared model
+        # identity for this run (e.g. "qwen3_baseline", "gemma4_e4b").
+        if cell_target_component is not None:
+            row["model_component_name"] = cell_target_component
+        if cell_target_model is not None:
+            row["model_component_used"] = cell_target_model
         if http_status is not None:
             row["http_status"] = http_status
         return row
@@ -461,8 +504,11 @@ async def _run_async(
                         tool_oracle=tool_oracle,
                         error_type=err_type,
                         http_status=http_status,
+                        cell_label=cell,
+                        cell_target_component=entry.get("expected_component"),
+                        cell_target_model=cell,
                     )
-                    # Annotate run index
+                    # Annotate run index / query id (already set via cell_label above)
                     row["run_index"] = run_i
                     row["query_id"] = entry.get("id", f"q{qi}")
 
@@ -634,6 +680,47 @@ def _self_test() -> None:
     )
     assert row6["correct_tools_all"] is False
     assert abs(row6["correct_tools_partial"] - 0.5) < 1e-6
+
+    # malformed-args in tools_emitted: non-dict args must not score as correct
+    row7 = build_turn_result(
+        {"query": "weather?", "expected_tools": ["get_weather"], "expected_component": "tool_calling_simple"},
+        {"metadata": {
+            # The orchestrator would have moved a malformed-args call to filtered_invalid,
+            # so tools_emitted.calls would be empty.  Simulate a call that slipped through.
+            "tool_calls_emitted": {
+                "calls": [{"name": "get_weather", "arguments": "not-a-dict"}],
+                "filtered_invalid": [],
+            },
+            "model_component_name": "tool_calling_simple",
+            "model_component_used": "qwen3:4b",
+            "tokens_per_second": 50.0,
+            "node_timings": {},
+        }},
+        total_latency_ms=300.0,
+        tool_oracle=oracle,
+    )
+    # valid_structural: args is not dict → False (existing behaviour of _valid_structural)
+    assert row7["valid_structural"] is False, "malformed args: valid_structural must be False"
+    # correct_args: non-dict args with required params → False
+    assert row7["correct_args"] is False, "malformed args: correct_args must be False"
+
+    # fallback attribution for error rows
+    row8 = build_turn_result(
+        {"query": "weather?", "expected_tools": ["get_weather"], "expected_component": "tool_calling_simple"},
+        response_json=None,
+        total_latency_ms=60000.0,
+        tool_oracle=oracle,
+        error_type="timeout",
+        cell_label="qwen3_baseline",
+        cell_target_component="tool_calling_simple",
+        cell_target_model="qwen3_baseline",
+    )
+    assert row8["error"] == "timeout"
+    assert row8["model_component_name"] == "tool_calling_simple", \
+        "error row must carry fallback component name"
+    assert row8["model_component_used"] == "qwen3_baseline", \
+        "error row must carry fallback model tag"
+    assert row8["cell_label"] == "qwen3_baseline"
 
     print("[self-test] scoring logic: PASS")
     print("[self-test] ALL PASS")

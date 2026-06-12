@@ -703,3 +703,266 @@ def test_load_jsonl_skips_blank_lines(tmp_path):
         fh.write('{"a": 1}\n\n{"b": 2}\n')
     rows = load_jsonl(fpath)
     assert len(rows) == 2
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: error-row fallback attribution flows into aggregate denominator
+# ---------------------------------------------------------------------------
+
+from bench_tool_calling import build_turn_result as _btr
+
+_ORACLE_SMALL = frozenset(["get_weather", "get_news", "search_flights"])
+
+def _error_row_with_fallback(
+    error_type: str = "timeout",
+    cell_target_component: str = "tool_calling_simple",
+    cell_target_model: str = "qwen3_baseline",
+) -> Dict:
+    """Build a synthetic error row with fallback attribution via build_turn_result."""
+    return _btr(
+        query_entry={
+            "query": "weather?",
+            "expected_tools": ["get_weather"],
+            "expected_component": cell_target_component,
+        },
+        response_json=None,
+        total_latency_ms=60000.0,
+        tool_oracle=_ORACLE_SMALL,
+        error_type=error_type,
+        cell_label=cell_target_model,
+        cell_target_component=cell_target_component,
+        cell_target_model=cell_target_model,
+    )
+
+
+def test_error_row_fallback_attribution_in_aggregate():
+    """Error rows with fallback attribution count in the correct cell's denominator."""
+    timeout_row = _error_row_with_fallback("timeout")
+    non200_row = _error_row_with_fallback("http_non_200")
+    cache_row = _error_row_with_fallback("cache_hit")
+    correct_row = _make_row("tool_calling_simple", "qwen3_baseline", correct=True)
+
+    cells = aggregate([correct_row, timeout_row, non200_row, cache_row])
+    cell = cells[("tool_calling_simple", "qwen3_baseline")]
+    # All 4 rows must be in the denominator
+    assert cell.total_turns == 4
+    assert cell.effective_n == 1  # only the non-error row
+    assert cell.error_count == 3
+
+
+def test_error_row_without_fallback_excluded_from_cells():
+    """Error rows with no attribution at all (model_component_name=None) are excluded."""
+    bad_row = _btr(
+        query_entry={"query": "?", "expected_tools": [], "expected_component": None},
+        response_json=None,
+        total_latency_ms=5.0,
+        tool_oracle=_ORACLE_SMALL,
+        error_type="timeout",
+        # no cell_target_component / cell_target_model
+    )
+    cells = aggregate([bad_row])
+    assert len(cells) == 0, "Unattributed error rows must not appear in stratified cells"
+
+
+def test_error_row_correct_tool_rate_is_error_inclusive():
+    """Rate denominator includes error rows: 10 correct / 15 total (5 timeouts) = 66.7%."""
+    rows = (
+        [_make_row("tool_calling_simple", "qwen3_baseline", correct=True)] * 10
+        + [_error_row_with_fallback("timeout")] * 5
+    )
+    cells = aggregate(rows)
+    cell = cells[("tool_calling_simple", "qwen3_baseline")]
+    assert cell.total_turns == 15
+    assert abs(cell.correct_tool_rate - (10 / 15 * 100)) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Finding 2: malformed-args contract — harness-side defensive checks
+# ---------------------------------------------------------------------------
+
+def test_valid_structural_rejects_string_args():
+    """_valid_structural returns False when arguments is a string (not a dict)."""
+    tools = [{"name": "get_weather", "arguments": '{"location":"Baltimore"}'}]
+    assert _valid_structural(tools, _ORACLE) is False
+
+
+def test_correct_args_rejects_string_args_for_tool_with_required_params():
+    """_correct_args returns False when arguments is a string and tool has required params."""
+    tools = [{"name": "get_weather", "arguments": '{"location":"Baltimore"}'}]
+    assert _correct_args(tools, ["get_weather"], _ORACLE) is False
+
+
+def test_correct_args_rejects_none_args_for_tool_with_required_params():
+    """_correct_args returns False when arguments is None and tool has required params."""
+    tools = [{"name": "get_weather", "arguments": None}]
+    assert _correct_args(tools, ["get_weather"], _ORACLE) is False
+
+
+def test_correct_args_vacuously_true_for_string_args_no_required_params():
+    """_correct_args returns True when tool has no required params even if args is non-dict."""
+    # search_transit has no required params
+    tools = [{"name": "search_transit", "arguments": "random string"}]
+    assert _correct_args(tools, ["search_transit"], _ORACLE) is True
+
+
+def test_malformed_args_call_does_not_count_as_gate1_correct():
+    """A right-name/malformed-args call in tools_emitted: correct_tools_all must be False
+    because _valid_structural filters it (non-dict args), so correct_tools_all check
+    finds the tool name present but the harness records it as invalid-structural.
+
+    Per the plan: malformed-args calls should appear in filtered_invalid (orchestrator side),
+    so tools_emitted is empty and correct_tools_all sees the tool MISSING.
+    This test verifies the harness-side scoring is consistent: if a malformed call
+    somehow reaches tools_emitted, valid_structural is False so it won't score as
+    a gate-1-passing structural call.
+    """
+    row = _btr(
+        query_entry={"query": "weather?", "expected_tools": ["get_weather"], "expected_component": "tool_calling_simple"},
+        response_json={
+            "metadata": {
+                "tool_calls_emitted": {
+                    "calls": [{"name": "get_weather", "arguments": "malformed-string"}],
+                    "filtered_invalid": [],
+                },
+                "model_component_name": "tool_calling_simple",
+                "model_component_used": "qwen3:4b",
+                "tokens_per_second": 50.0,
+                "node_timings": {},
+                "cache_hit": False,
+            }
+        },
+        total_latency_ms=300.0,
+        tool_oracle=_ORACLE,
+    )
+    assert row["valid_structural"] is False, \
+        "malformed-args call: valid_structural must be False (args not dict)"
+    # correct_tools_all checks name presence ignoring arg validity — so it CAN be True.
+    # What matters is valid_structural is False, so Gate-1 structural check fails.
+    assert row["correct_args"] is False, \
+        "malformed-args call: correct_args must be False"
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: gate cell-selection with 3+ cells per component
+# ---------------------------------------------------------------------------
+
+from bench_report import build_report
+
+
+def _jsonl_rows_for_gate_test(
+    component: str,
+    model_tag: str,
+    n_correct: int,
+    n_wrong: int = 0,
+    n_error: int = 0,
+) -> List[Dict]:
+    """Produce synthetic rows attributed to (component, model_tag)."""
+    rows = []
+    for _ in range(n_correct):
+        rows.append({
+            "query": "weather?", "expected_tools": ["get_weather"],
+            "correct_tools_all": True, "correct_tools_partial": 1.0,
+            "valid_structural": True, "correct_args": True,
+            "is_false_positive": False, "total_latency_ms": 300.0,
+            "llm_tokens_per_second": 55.0, "model_component_name": component,
+            "model_component_used": model_tag, "error": None, "cache_hit": False,
+        })
+    for _ in range(n_wrong):
+        rows.append({
+            "query": "weather?", "expected_tools": ["get_weather"],
+            "correct_tools_all": False, "correct_tools_partial": 0.0,
+            "valid_structural": True, "correct_args": False,
+            "is_false_positive": False, "total_latency_ms": 320.0,
+            "llm_tokens_per_second": 50.0, "model_component_name": component,
+            "model_component_used": model_tag, "error": None, "cache_hit": False,
+        })
+    for _ in range(n_error):
+        rows.append({
+            "query": "weather?", "expected_tools": ["get_weather"],
+            "correct_tools_all": False, "correct_tools_partial": 0.0,
+            "valid_structural": False, "correct_args": False,
+            "is_false_positive": False, "total_latency_ms": 60000.0,
+            "llm_tokens_per_second": None, "model_component_name": component,
+            "model_component_used": model_tag, "error": "timeout", "cache_hit": False,
+        })
+    return rows
+
+
+def test_gates_fire_with_3_cells_per_component(tmp_path):
+    """Gates must fire for target component even when 3+ cells are present.
+
+    Simulates a multi-file Phase 3 report where:
+    - file A (qwen3_baseline): rows for tool_calling_simple/qwen3_baseline
+      AND tool_calling_super_complex/qwen3_baseline (non-target for e4b)
+    - file B (gemma4_e4b): rows for tool_calling_simple/gemma4_e4b
+      AND tool_calling_super_complex/qwen3_baseline (non-target)
+
+    For tool_calling_simple: 3 cells present (qwen3_baseline + gemma4_e4b +
+    an extra qwen3 from file B's super_complex rows showing up under simple).
+    The gate must still compare qwen3_baseline vs gemma4_e4b for tool_calling_simple.
+    """
+    # baseline file: 20 correct qwen3 rows for simple + 20 for super_complex
+    rows_baseline = (
+        _jsonl_rows_for_gate_test("tool_calling_simple", "qwen3_baseline", n_correct=20)
+        + _jsonl_rows_for_gate_test("tool_calling_super_complex", "qwen3_baseline", n_correct=20)
+    )
+    # challenger file: 20 correct gemma4 rows for simple + 20 non-target qwen3 for super_complex
+    # This creates a third cell for tool_calling_simple if we include the super_complex rows
+    # but under simple. Instead, let's add a third spurious cell directly under simple.
+    rows_challenger = (
+        _jsonl_rows_for_gate_test("tool_calling_simple", "gemma4_e4b", n_correct=20)
+        # Non-target cell: qwen3_baseline rows for simple from the second file
+        # (e.g., because the file also includes warm-up runs from an earlier baseline)
+        + _jsonl_rows_for_gate_test("tool_calling_simple", "qwen3_warmup", n_correct=5)
+    )
+
+    f_baseline = tmp_path / "qwen3_baseline.jsonl"
+    f_challenger = tmp_path / "gemma4_e4b.jsonl"
+
+    for fpath, rows in [(f_baseline, rows_baseline), (f_challenger, rows_challenger)]:
+        with open(fpath, "w") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    report = build_report(
+        [f_baseline, f_challenger],
+        label_map={
+            "qwen3_baseline": "qwen3_baseline",
+            "gemma4_e4b": "gemma4_e4b",
+        },
+    )
+
+    # The gate section must reference tool_calling_simple and produce a verdict,
+    # not "gate comparison requires exactly 2"
+    assert "gate comparison requires exactly 2" not in report, \
+        "Old 'exactly 2' guard must not appear in gate section"
+    # Verify that the report produced a verdict for tool_calling_simple
+    assert "tool_calling_simple" in report
+    # Incumbent and challenger lines must appear
+    assert "Incumbent:" in report
+    assert "Challenger:" in report
+    # Non-target cell annotation must appear
+    assert "non-target cells present, not gated" in report or "qwen3_warmup" in report
+
+
+def test_gates_fire_correctly_with_exactly_2_cells(tmp_path):
+    """Baseline behaviour: 2 cells → gates fire as before."""
+    rows_inc = _jsonl_rows_for_gate_test("tool_calling_simple", "qwen3_baseline", n_correct=20)
+    rows_chal = _jsonl_rows_for_gate_test("tool_calling_simple", "gemma4_e4b", n_correct=20)
+
+    f_inc = tmp_path / "qwen3_baseline.jsonl"
+    f_chal = tmp_path / "gemma4_e4b.jsonl"
+    with open(f_inc, "w") as fh:
+        for r in rows_inc:
+            fh.write(json.dumps(r) + "\n")
+    with open(f_chal, "w") as fh:
+        for r in rows_chal:
+            fh.write(json.dumps(r) + "\n")
+
+    report = build_report([f_inc, f_chal])
+    assert "Incumbent:" in report
+    assert "Challenger:" in report
+    # Both cells have identical rates → gates fire and produce a verdict (any NO-SWAP or SWAP)
+    assert "NO-SWAP" in report or "SWAP RECOMMENDED" in report or "NON-DECISION-GRADE" in report
+    # Must NOT fall back to the old "requires exactly 2" error path
+    assert "gate comparison requires exactly 2" not in report

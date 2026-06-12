@@ -4947,7 +4947,10 @@ If the user is asking to repeat, search again, or modify the previous request, u
         # Check if LLM wants to call tools
         tool_calls = llm_response.get("tool_calls")
 
-        # VALIDATION: Filter out hallucinated tools that don't exist in our tools list
+        # VALIDATION: Filter out hallucinated tools that don't exist in our tools list.
+        # Also detect malformed-argument calls (arguments is a non-dict, e.g. a raw JSON
+        # string that failed server-side parsing) — those go to filtered_invalid with
+        # malformed=True and are EXCLUDED from calls so they never score as correct.
         _filtered_invalid_calls: list = []  # benchmark observability — collects dropped calls
         if tool_calls:
             valid_tool_names = {t["function"]["name"] for t in tools}
@@ -4955,6 +4958,36 @@ If the user is asking to repeat, search again, or modify the previous request, u
             valid_tool_calls = []
             for tc in tool_calls:
                 fn_name = tc.get("function", {}).get("name", "")
+                raw_args = tc.get("function", {}).get("arguments")
+                # Malformed-args check: if arguments is a string (serialised JSON that
+                # wasn't parsed by the LLM client), try to parse it.  On failure, treat
+                # the call as invalid — a right-name/malformed-args call must NOT count
+                # as Gate-1 correct (it will appear in filtered_invalid, so correct_tools_all
+                # sees the tool as MISSING, which is plan-consistent).
+                if isinstance(raw_args, str):
+                    try:
+                        import json as _json
+                        parsed = _json.loads(raw_args)
+                        if isinstance(parsed, dict):
+                            # Successfully parsed — replace the string with the dict
+                            tc = dict(tc)
+                            tc["function"] = dict(tc["function"])
+                            tc["function"]["arguments"] = parsed
+                        else:
+                            # Parsed but not a dict (e.g. a JSON array) — malformed
+                            logger.warning(
+                                f"Malformed tool call arguments (non-dict after JSON parse) "
+                                f"for {fn_name!r}: {raw_args!r}"
+                            )
+                            _filtered_invalid_calls.append({"name": fn_name, "malformed": True})
+                            continue
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            f"Malformed tool call arguments (JSON parse failure) "
+                            f"for {fn_name!r}: {raw_args!r}"
+                        )
+                        _filtered_invalid_calls.append({"name": fn_name, "malformed": True})
+                        continue
                 if fn_name in valid_tool_names:
                     valid_tool_calls.append(tc)
                 else:
@@ -5057,6 +5090,14 @@ If the user is asking to repeat, search again, or modify the previous request, u
                         state.data_source = "Directions RAG (forced)"
                         state.citations.append("Tool: get_directions")
                         state.retrieved_data = {"directions": directions_result}
+
+                        # Benchmark observability: record the forced call so
+                        # tool_calls_emitted is not silently empty for this path.
+                        # state.tool_calls_emitted was set to [] above (no LLM tool call);
+                        # override it now that we know the forced call succeeded.
+                        state.tool_calls_emitted = [
+                            {"name": "get_directions", "arguments": {"origin": origin, "destination": destination}}
+                        ]
 
                         logger.info(f"Forced directions successful: {distance}, {duration}")
                         state.node_timings["tool_call"] = time.time() - start

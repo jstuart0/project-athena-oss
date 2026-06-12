@@ -14,6 +14,25 @@ Statistical policy (per plan)
   Components below 20 are flagged NON-DECISION-GRADE.
 - Incumbent (qwen3) wins ties.
 
+Attribution-fallback rule (error rows)
+---------------------------------------
+For http_non_200, timeout, malformed_json, and cache_hit rows the live
+response carries no model_component_name / model_component_used.  The harness
+(bench_tool_calling.py) fills those fields with cell_target_component
+(from query_entry["expected_component"]) and cell_target_model (the --cell
+label).  These fallback-attributed rows count in the denominator of their
+target cell so that errors/timeouts are never silently excluded.
+
+Gate selection (multi-file reports)
+-------------------------------------
+Decision gates compare the BASELINE cell (incumbent model on a component) vs
+the SWAPPED cell (target model on that component) regardless of how many other
+cells are present in a multi-file report.  The incumbent cell is identified by
+the heuristic that its key contains "baseline" or "qwen3"; the challenger is the
+remaining cell for that component that contains "gemma4" or "e4b" or "12b".
+Cells that match neither heuristic are reported but never gated.  A component
+with fewer than two identifiable cells emits "INSUFFICIENT DATA".
+
 Usage
 -----
     python scripts/bench_report.py bench/results/20260612T120000Z_qwen3_baseline.jsonl \\
@@ -355,7 +374,9 @@ def build_report(
     lines.append(
         "Statistical policy: denominator = ALL attempted turns (incl. errors/timeouts).  "
         f"Min effective N per component = {MIN_EFFECTIVE_N}.  "
-        "Incumbent wins ties.\n"
+        "Incumbent wins ties.  "
+        "Error rows without live attribution use fallback (cell_target_component / "
+        "cell_target_model from the harness --cell arg) — see bench/README.md.\n"
     )
 
     # Collect all unique (component, model_tag) pairs across files
@@ -416,30 +437,59 @@ def build_report(
                 )
             lines.append("")
 
-    # Decision gate section (requires exactly two cells per component)
+    # Decision gate section.
+    # For each component, identify the BASELINE cell (incumbent model) and the
+    # SWAPPED cell (challenger model) regardless of how many other cells exist.
+    # Non-target cells are reported in the stats table above but never gated.
+    # This is correct for multi-file Phase 3 reports which naturally produce
+    # 3+ (label, component, model) cells because both run files contain rows
+    # from components the other cell did not swap.
     lines.append("## Decision Gates\n")
     lines.append(
-        "Gates applied per component when exactly two cells are present.  "
+        "Incumbent cell identified by key containing 'baseline' or 'qwen3'.  "
+        "Challenger identified by key containing 'gemma4', 'e4b', or '12b'.  "
+        "Non-target cells are reported above but not gated.  "
         "Incumbent wins ties.\n"
     )
 
-    # Heuristic: label containing "baseline" or "qwen3" is the incumbent
     for cname in sorted(components.keys()):
         comp_cells = components[cname]
-        if len(comp_cells) != 2:
+        keys = sorted(comp_cells.keys())
+
+        # Identify incumbent: key contains "baseline" or "qwen3"
+        inc_keys = [k for k in keys if "baseline" in k.lower() or "qwen3" in k.lower()]
+        # Identify challenger: key contains "gemma4", "e4b", or "12b"
+        chal_keys = [k for k in keys if any(
+            x in k.lower() for x in ("gemma4", "e4b", "12b")
+        )]
+
+        if not inc_keys or not chal_keys:
             lines.append(
-                f"**{cname}**: {len(comp_cells)} cell(s) present — "
-                "gate comparison requires exactly 2.\n"
+                f"**{cname}**: could not identify incumbent/challenger pair "
+                f"from {len(comp_cells)} cell(s) — "
+                "key must contain 'baseline'/'qwen3' (incumbent) and "
+                "'gemma4'/'e4b'/'12b' (challenger).  "
+                "INSUFFICIENT DATA.\n"
             )
             continue
 
-        keys = sorted(comp_cells.keys())
-        # Identify incumbent by label heuristic
-        inc_key = next(
-            (k for k in keys if "baseline" in k.lower() or "qwen3" in k.lower()),
-            keys[0],
-        )
-        chal_key = next(k for k in keys if k != inc_key)
+        # If multiple candidates, pick the first (sorted); log if ambiguous
+        inc_key = inc_keys[0]
+        chal_key = chal_keys[0]
+        if inc_key == chal_key:
+            lines.append(
+                f"**{cname}**: incumbent and challenger resolved to the same "
+                f"key `{inc_key}` — INSUFFICIENT DATA.\n"
+            )
+            continue
+
+        non_target = [k for k in keys if k not in (inc_key, chal_key)]
+        if non_target:
+            lines.append(
+                f"**{cname}** (non-target cells present, not gated: "
+                + ", ".join(f"`{k}`" for k in non_target)
+                + ")"
+            )
 
         verdict = _apply_gates(comp_cells[inc_key], comp_cells[chal_key])
         lines.append(f"**{cname}**")
