@@ -273,3 +273,78 @@ class TestIsUrlAllowedWithDomainMatching:
                     mock_val.return_value = MagicMock(allowed=True)
                     allowed, reason = is_url_allowed("https://notwhitelisted.com/page", "guest")
                     assert allowed is False
+
+
+# ---------------------------------------------------------------------------
+# Codex r2 fix 5: scrape_url uses run_in_executor for the sync pre-check
+# ---------------------------------------------------------------------------
+
+class TestScrapeUrlExecutorPrecheck:
+    """Codex r2 fix 5: scrape_url must call validate_url_not_private via
+    run_in_executor so the sync DNS call does not block the event loop."""
+
+    @pytest.mark.asyncio
+    async def test_ssrf_blocked_raises_value_error(self):
+        """When validate_url_not_private blocks the URL, scrape_url raises ValueError."""
+        from shared.url_safety import UrlSafetyResult
+
+        blocked_result = UrlSafetyResult(
+            allowed=False,
+            reason="Hostname resolves to private IP: 192.168.0.1",
+            normalized_url="http://evil.local/",
+            hostname="evil.local",
+        )
+
+        with patch.object(_scraper_main, 'get_config') as mock_cfg:
+            mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
+            with patch('shared.url_safety.validate_url_not_private', return_value=blocked_result):
+                with pytest.raises(ValueError, match="SSRF guard"):
+                    await _scraper_main.scrape_url("http://evil.local/")
+
+    @pytest.mark.asyncio
+    async def test_validate_called_via_executor(self):
+        """validate_url_not_private must be invoked via run_in_executor, not
+        directly on the event loop (call shape: wrapped in executor lambda).
+
+        We call the unwrapped function (bypassing @cached) and patch
+        asyncio.get_running_loop to return a mock whose run_in_executor we
+        control, confirming the SSRF pre-check runs through the executor path.
+        """
+        import asyncio
+        from shared.url_safety import UrlSafetyResult
+
+        allowed_result = UrlSafetyResult(
+            allowed=True, reason="", normalized_url="https://example.com/",
+            hostname="example.com", resolved_ips=["93.184.216.34"],
+        )
+
+        executor_calls = []
+
+        # Build a mock loop whose run_in_executor records the callable and
+        # immediately invokes it so the coroutine can proceed.
+        async def _fake_run_in_executor(executor, fn, *args):
+            executor_calls.append(fn)
+            return fn(*args) if args else fn()
+
+        mock_loop = MagicMock()
+        mock_loop.run_in_executor = _fake_run_in_executor
+
+        mock_cf = MagicMock()
+        mock_cf.fetch_structured_content = AsyncMock(return_value={"type": "article", "data": "x"})
+
+        # __wrapped__ is the unwrapped coroutine under the @cached decorator.
+        unwrapped = _scraper_main.scrape_url.__wrapped__
+
+        with patch.object(_scraper_main, 'get_config') as mock_cfg:
+            mock_cfg.return_value.sitescraper_allowed_private_hosts = ''
+            with patch('shared.url_safety.validate_url_not_private', return_value=allowed_result) as mock_val:
+                with patch.object(_scraper_main, 'content_fetcher', mock_cf):
+                    with patch('asyncio.get_running_loop', return_value=mock_loop):
+                        await unwrapped("https://example.com/")
+
+        # The executor was invoked — SSRF pre-check went through run_in_executor.
+        assert len(executor_calls) >= 1, (
+            "Expected run_in_executor to be called for the sync SSRF pre-check"
+        )
+        # validate_url_not_private was called exactly once (inside the executor lambda).
+        mock_val.assert_called_once()

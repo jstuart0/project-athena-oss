@@ -289,13 +289,20 @@ async def scrape_url(url: str, extraction_hint: str = "auto") -> Dict[str, Any]:
     Returns:
         Extracted content dictionary
     """
+    import asyncio
     from shared.url_safety import validate_url_not_private
 
-    ssrf_result = validate_url_not_private(
-        url,
-        allowed_private_hosts=get_config().sitescraper_allowed_private_hosts.split(",")
+    _allowed_private_hosts = (
+        get_config().sitescraper_allowed_private_hosts.split(",")
         if get_config().sitescraper_allowed_private_hosts
-        else [],
+        else []
+    )
+    # Defense-in-depth pre-check: run the sync DNS-resolving validator in an
+    # executor so it does not block the event loop (codex r2 fix 5).
+    # The actual HTTP fetch via ContentFetcher.safe_get re-validates each hop.
+    ssrf_result = await asyncio.get_running_loop().run_in_executor(
+        None,
+        lambda: validate_url_not_private(url, allowed_private_hosts=_allowed_private_hosts),
     )
     if not ssrf_result.allowed:
         raise ValueError(f"SSRF guard: {ssrf_result.reason}")

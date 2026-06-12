@@ -234,7 +234,10 @@ class TestIpIsPrivate:
     @pytest.mark.parametrize("ip,expected", [
         ("1.1.1.1", False),
         ("8.8.8.8", False),
-        ("203.0.113.1", False),  # TEST-NET
+        # Documentation/TEST-NET ranges (RFC 5737) are NOT globally routable —
+        # is_global=False, so they are blocked.  Codex r2 fix 1 corrects the
+        # prior incorrect expectation that TEST-NET-3 was "False" (not private).
+        ("203.0.113.1", True),   # TEST-NET-3 (RFC 5737) — blocked
         ("127.0.0.1", True),
         ("10.0.0.1", True),
         ("172.16.0.0", True),
@@ -938,6 +941,212 @@ class TestToolRegistryLocalhostFailClosed:
         assert ssrf_events, (
             f"Expected 'mcp_tool_registry_ssrf_blocked' log event, got {log_events}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Codex r2 reconcile — fix 1: non-global literal bypass
+# ---------------------------------------------------------------------------
+
+class TestNonGlobalLiteralBlocking:
+    """Codex r2 fix 1: 0.0.0.0, 0/8, [::], multicast, broadcast, doc ranges."""
+
+    @pytest.mark.parametrize("url,label", [
+        ("http://0/", "zero-host resolves to 0.0.0.0"),
+        ("http://0.0.0.0/", "unspecified v4"),
+        ("http://[::]/", "unspecified v6"),
+        ("http://224.0.0.1/", "multicast v4"),
+        ("http://255.255.255.255/", "broadcast"),
+        ("http://192.0.2.1/", "doc range TEST-NET-1 (RFC 5737)"),
+        ("http://198.51.100.1/", "doc range TEST-NET-2"),
+        ("http://203.0.113.1/", "doc range TEST-NET-3"),
+        ("http://240.0.0.1/", "reserved v4"),
+        ("http://[ff02::1]/", "multicast v6"),
+    ])
+    def test_literal_blocked(self, url, label):
+        result = _vld(url)
+        assert result.allowed is False, (
+            f"Expected {url!r} ({label}) to be blocked, got allowed=True"
+        )
+
+    def test_public_ip_still_allowed(self):
+        """A real public IP should still pass the validator."""
+        result = _vld("http://8.8.8.8/")
+        # 8.8.8.8 is is_global=True and not multicast — must not be blocked by
+        # the new rule itself.  DNS resolution doesn't apply to literal IPs.
+        assert result.allowed is True, (
+            f"8.8.8.8 should be allowed, reason: {result.reason!r}"
+        )
+
+    def test_allowlist_still_works_for_private_ip(self):
+        """An RFC1918 IP explicitly allowlisted must still be allowed."""
+        result = _vld(
+            "http://192.168.1.1/",
+            allowed_private_hosts=["192.168.1.1"],
+        )
+        assert result.allowed is True, (
+            f"Allowlisted 192.168.1.1 should be allowed, reason: {result.reason!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Codex r2 reconcile — fix 3: kwargs hardening in safe_request
+# ---------------------------------------------------------------------------
+
+class TestSafeRequestKwargsHardening:
+    """Codex r2 fix 3: follow_redirects / auth / cookies must be rejected."""
+
+    @pytest.mark.asyncio
+    async def test_follow_redirects_raises_value_error(self):
+        """Passing follow_redirects= must raise ValueError immediately."""
+        with pytest.raises(ValueError, match="follow_redirects"):
+            await safe_get("http://example.com/", follow_redirects=True)
+
+    @pytest.mark.asyncio
+    async def test_follow_redirects_false_also_raises(self):
+        """follow_redirects=False is also forbidden — the helper owns redirects."""
+        with pytest.raises(ValueError, match="follow_redirects"):
+            await safe_get("http://example.com/", follow_redirects=False)
+
+    @pytest.mark.asyncio
+    async def test_auth_raises_value_error(self):
+        """Passing auth= must raise ValueError — cross-origin credential risk."""
+        with pytest.raises(ValueError, match="auth="):
+            await safe_post("http://example.com/", auth=("user", "pass"))
+
+    @pytest.mark.asyncio
+    async def test_cookies_raises_value_error(self):
+        """Passing cookies= must raise ValueError — cross-origin credential risk."""
+        with pytest.raises(ValueError, match="cookies="):
+            await safe_get("http://example.com/", cookies={"session": "abc"})
+
+    @pytest.mark.asyncio
+    async def test_valid_kwargs_still_forwarded(self):
+        """Legitimate kwargs (json=, headers=, params=) must not be rejected."""
+        def _ok_validate(url, *, allowed_schemes, allowed_private_hosts):
+            return UrlSafetyResult(
+                allowed=True, reason="", normalized_url=url,
+                hostname="example.com", resolved_ips=["93.184.216.34"],
+            )
+
+        ok_resp = _make_mock_response(200, body=b"ok")
+        client = _make_streaming_client([ok_resp])
+
+        with patch("shared.url_safety.validate_url_not_private", side_effect=_ok_validate):
+            with patch("shared.url_safety.httpx.AsyncClient", return_value=client):
+                # Should not raise
+                await safe_post(
+                    "http://example.com/api",
+                    json={"key": "val"},
+                    headers={"X-Token": "secret"},
+                    params={"q": "test"},
+                )
+
+
+# ---------------------------------------------------------------------------
+# Codex r2 reconcile — fix 4: malformed-port contract
+# ---------------------------------------------------------------------------
+
+class TestMalformedPortContract:
+    """Codex r2 fix 4: validate_url_not_private and safe_request never raise
+    on malformed ports; they return allowed=False / SsrfBlockedError."""
+
+    def test_oversized_port_returns_allowed_false(self):
+        """http://127.0.0.1:99999/ must return allowed=False, not raise."""
+        result = _vld("http://127.0.0.1:99999/")
+        assert isinstance(result, UrlSafetyResult)
+        assert result.allowed is False
+        assert "port" in result.reason.lower() or "invalid" in result.reason.lower(), (
+            f"Unexpected reason for oversized port: {result.reason!r}"
+        )
+
+    def test_oversized_port_on_public_host_returns_allowed_false(self):
+        """http://example.com:99999/ must return allowed=False (invalid port)."""
+        result = _vld("http://example.com:99999/")
+        assert isinstance(result, UrlSafetyResult)
+        assert result.allowed is False
+
+    @pytest.mark.asyncio
+    async def test_redirect_location_with_bad_port_raises_ssrf_blocked(self):
+        """A redirect Location with port 99999 must raise SsrfBlockedError,
+        not propagate an uncaught ValueError."""
+        def _validate(url, *, allowed_schemes, allowed_private_hosts):
+            if "99999" in url:
+                # validate_url_not_private returns allowed=False for bad port
+                return UrlSafetyResult(
+                    allowed=False,
+                    reason="Invalid port: 99999",
+                    normalized_url=url,
+                    hostname="",
+                )
+            return UrlSafetyResult(
+                allowed=True, reason="", normalized_url=url,
+                hostname="example.com", resolved_ips=["93.184.216.34"],
+            )
+
+        redir_resp = _make_mock_response(302, location="http://example.com:99999/evil")
+        client = _make_streaming_client([redir_resp])
+
+        with patch("shared.url_safety.validate_url_not_private", side_effect=_validate):
+            with patch("shared.url_safety.httpx.AsyncClient", return_value=client):
+                with pytest.raises(SsrfBlockedError):
+                    await safe_get("http://example.com/start")
+
+
+# ---------------------------------------------------------------------------
+# Codex r2 reconcile — fix 2b: _build_pinned_transport runtime fallback
+# ---------------------------------------------------------------------------
+
+class TestBuildPinnedTransportFallback:
+    """Codex r2 fix 2b: graceful fallback when _pool attribute is absent."""
+
+    def test_fallback_when_pool_absent(self):
+        """If httpx.AsyncHTTPTransport has no _pool, return a plain transport
+        and emit the url_safety_pinned_transport_unavailable log."""
+        import httpx as _httpx
+
+        log_warnings = []
+
+        class _NoPoolTransport(_httpx.AsyncHTTPTransport):
+            """Simulates an httpx version where _pool is not present."""
+            def __init__(self, **kw):
+                # Don't call super().__init__() so _pool is never set.
+                pass
+
+        import logging as _logging
+        handler_records = []
+
+        class _CapturingHandler(_logging.Handler):
+            def emit(self, record):
+                handler_records.append(record)
+
+        import shared.url_safety as _url_safety_mod
+        orig_log = _url_safety_mod._log
+        capturing_logger = _logging.getLogger("url_safety_fallback_test")
+        capturing_logger.addHandler(_CapturingHandler())
+        capturing_logger.setLevel(_logging.WARNING)
+        _url_safety_mod._log = capturing_logger
+
+        try:
+            with patch("shared.url_safety.httpx.AsyncHTTPTransport", _NoPoolTransport):
+                result = _build_pinned_transport(["1.2.3.4"])
+        finally:
+            _url_safety_mod._log = orig_log
+
+        # Must return a transport (degraded mode, not a crash)
+        assert isinstance(result, _NoPoolTransport)
+        # Warning must have been emitted
+        assert any("url_safety_pinned_transport_unavailable" in str(r.msg) for r in handler_records), (
+            f"Expected url_safety_pinned_transport_unavailable log, got: {handler_records}"
+        )
+
+    def test_normal_path_sets_pinned_pool(self):
+        """When _pool is present (httpx 0.28), it must be replaced with pinned pool."""
+        import httpcore as _httpcore
+        transport = _build_pinned_transport(["9.9.9.9"])
+        assert hasattr(transport, "_pool")
+        assert isinstance(transport._pool, _httpcore.AsyncConnectionPool)  # noqa: SLF001
+        assert isinstance(transport._pool._network_backend, _PinnedNetworkBackend)  # noqa: SLF001
+        assert transport._pool._network_backend._pinned_ip == "9.9.9.9"  # noqa: SLF001
 
 
 if __name__ == "__main__":

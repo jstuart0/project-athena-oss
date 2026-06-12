@@ -34,11 +34,20 @@ DNS-rebinding mitigation (0.1c):
   hostname-connect (with documented TOCTOU window) is NOT needed at this
   version.  If a future httpx upgrade breaks this, switch to hostname-connect
   and document the residual per the plan's named fallback spec.
+
+  Version requirement: ``_build_pinned_transport`` relies on
+  ``httpx.AsyncHTTPTransport._pool`` (httpx ≥ 0.28).  A runtime guard
+  feature-detects this attribute; if absent the transport falls back to an
+  unmodified (non-pinned) transport and emits a
+  ``url_safety_pinned_transport_unavailable`` structured-log warning.  The
+  fallback preserves per-hop validation but loses the TOCTOU-closing pin.
+  Deployers must use ``httpx~=0.28`` to get the full protection.
 """
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import socket
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -46,6 +55,8 @@ from urllib.parse import urlparse, urlunparse
 
 import httpcore
 import httpx
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Public exception
@@ -82,6 +93,13 @@ class UrlSafetyResult:
 # ---------------------------------------------------------------------------
 
 _BLOCKED_NETS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
+    # Kept for documentation / back-compat reference.  The authoritative block
+    # check in _ip_is_private uses ``not ip.is_global`` (Python stdlib) as the
+    # primary backstop, which covers all of these plus additional ranges
+    # (0.0.0.0/8, ::/128 unspecified, 192.0.2.0/24 doc, 240.0.0.0/4 reserved,
+    # 255.255.255.255 broadcast, CGNAT 100.64.0.0/10, etc.).  Multicast ranges
+    # have ``is_global=True`` on some Python versions, so they are covered by
+    # the explicit ``is_multicast`` check instead.
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
@@ -95,10 +113,21 @@ _BLOCKED_NETS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
 
 
 def _ip_is_private(addr_str: str) -> bool:
-    """Return True if addr_str falls in a blocked range."""
+    """Return True if addr_str must be blocked from user-supplied URLs.
+
+    Primary check: ``not ip.is_global`` (covers RFC1918, loopback, link-local,
+    CGNAT, ULA, unspecified 0.0.0.0/8 and ::/128, broadcast, reserved/doc
+    ranges — all of Python's stdlib ``ip.is_global=False`` set).
+
+    Secondary check: ``ip.is_multicast`` — Python marks multicast ranges as
+    ``is_global=True`` on some versions, so we block them explicitly
+    (e.g. 224.0.0.1, ff02::1).
+
+    Returns True (blocked) for malformed addresses.
+    """
     try:
         addr = ipaddress.ip_address(addr_str)
-        return any(addr in net for net in _BLOCKED_NETS)
+        return (not addr.is_global) or addr.is_multicast
     except ValueError:
         return True  # malformed → treat as blocked
 
@@ -212,9 +241,20 @@ def validate_url_not_private(
         )
 
     # --- strip userinfo from normalized URL ---
+    # parsed.port raises ValueError for out-of-range ports (e.g. 99999).
+    # Catch it here so validate_url_not_private never raises (contract).
+    try:
+        port_val = parsed.port
+    except ValueError as exc:
+        return UrlSafetyResult(
+            allowed=False,
+            reason=f"Invalid port: {exc}",
+            normalized_url=url,
+            hostname="",
+        )
     netloc = parsed.hostname or ""
-    if parsed.port:
-        netloc = f"{netloc}:{parsed.port}"
+    if port_val:
+        netloc = f"{netloc}:{port_val}"
     normalized_url = urlunparse(
         (scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
     )
@@ -366,12 +406,38 @@ def _build_pinned_transport(resolved_ips: list[str]) -> httpx.AsyncHTTPTransport
 
     Falls back to an unmodified transport if ``resolved_ips`` is empty (e.g.
     for plain-hostname Class-2 paths — not used by ``safe_request``).
+
+    Runtime guard (codex r2 fix 2b): feature-detects the ``_pool`` attribute
+    on ``httpx.AsyncHTTPTransport`` before attempting the replacement.  If the
+    attribute is absent (version skew from the required ``httpx~=0.28``), the
+    function falls back gracefully to an unmodified transport and emits a
+    ``url_safety_pinned_transport_unavailable`` structured warning.  The
+    fallback preserves per-hop SSRF validation but loses the DNS-rebinding
+    TOCTOU protection.  Deployers must pin ``httpx~=0.28`` to avoid this.
     """
     if not resolved_ips:
         return httpx.AsyncHTTPTransport()
     pinned_ip = resolved_ips[0]
     backend = _PinnedNetworkBackend(pinned_ip)
     transport = httpx.AsyncHTTPTransport()
+    # Feature-detect _pool before replacing it (codex r2 fix 2b).
+    # This attribute is a private httpx 0.28 API — re-verify on upgrade.  # noqa: SLF001
+    if not hasattr(transport, "_pool"):
+        import httpx as _httpx_mod  # avoid circular if structlog not available
+        _log.warning(
+            "url_safety_pinned_transport_unavailable",
+            extra={
+                "event": "url_safety_pinned_transport_unavailable",
+                "httpx_version": getattr(_httpx_mod, "__version__", "unknown"),
+                "note": (
+                    "httpx.AsyncHTTPTransport._pool not found — "
+                    "IP-pinned TOCTOU protection disabled; "
+                    "per-hop SSRF validation still active. "
+                    "Pin httpx~=0.28 to restore full protection."
+                ),
+            },
+        )
+        return transport
     # Replace the pool with one that routes through our pinned backend.
     # httpcore.AsyncConnectionPool accepts network_backend= as a public arg.
     # httpx 0.28 private API — re-verify on upgrade  # noqa: SLF001
@@ -389,11 +455,23 @@ def _default_port(scheme: str) -> int:
 
 
 def _origins_differ(url_a: str, url_b: str) -> bool:
-    """Return True if (scheme, host, port) differs between the two URLs."""
+    """Return True if (scheme, host, port) differs between the two URLs.
+
+    If either URL contains a malformed port (e.g. 99999), the port is treated
+    as differing so credential stripping always fires for the safe path.
+    The redirect Location with the malformed port is subsequently re-validated
+    by validate_url_not_private, which returns allowed=False.
+    """
     a = urlparse(url_a)
     b = urlparse(url_b)
-    port_a = a.port or _default_port(a.scheme)
-    port_b = b.port or _default_port(b.scheme)
+    try:
+        port_a = a.port or _default_port(a.scheme)
+    except ValueError:
+        return True  # malformed port → treat as different origin (credential-strip side)
+    try:
+        port_b = b.port or _default_port(b.scheme)
+    except ValueError:
+        return True
     return (
         a.scheme.lower() != b.scheme.lower()
         or (a.hostname or "").lower() != (b.hostname or "").lower()
@@ -438,10 +516,40 @@ async def safe_request(
     - All redirects: ``Location`` is re-validated under the same
       ``allowed_schemes`` / ``allowed_private_hosts`` before following.
 
+    Kwargs contract (codex r2 fix 3):
+    - ``follow_redirects`` must NOT be passed — this helper owns redirect
+      handling to enforce per-hop SSRF revalidation.  Passing it raises
+      ``ValueError``.
+    - ``auth=`` must NOT be passed — cross-origin credential survival risk.
+      Raises ``ValueError``.
+    - ``cookies=`` must NOT be passed — cross-origin credential survival risk.
+      Raises ``ValueError``.
+
     Raises:
+        ``ValueError`` — caller passed a forbidden kwarg (``follow_redirects``,
+        ``auth``, or ``cookies``).
         ``SsrfBlockedError`` — URL (or a redirect target) blocked by the guard,
         or a 307/308 redirect on POST is encountered.
     """
+    # --- kwargs hardening (codex r2 fix 3) ---
+    if "follow_redirects" in kwargs:
+        raise ValueError(
+            "safe_request: 'follow_redirects' must not be passed — this helper "
+            "owns redirect handling to enforce per-hop SSRF revalidation. "
+            "Remove 'follow_redirects' from the call site."
+        )
+    if "auth" in kwargs:
+        raise ValueError(
+            "safe_request: 'auth=' must not be passed — cross-origin credential "
+            "survival risk. Use 'headers={\"Authorization\": ...}' instead; the "
+            "helper strips credential headers on cross-origin redirects."
+        )
+    if "cookies" in kwargs:
+        raise ValueError(
+            "safe_request: 'cookies=' must not be passed — cross-origin "
+            "credential survival risk. No current call site requires this kwarg."
+        )
+
     loop = asyncio.get_running_loop()
 
     current_url = url

@@ -49,7 +49,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### SSRF guard: shared safe_request helper wired into user/admin URL fetch chokepoints (ATHENA-59 Phase 0)
 
 - **Added** (`ATHENA-59`): `src/shared/url_safety.py` — canonical SSRF guard module. Exports `validate_url_not_private` (sync, never-raises, never-reads-env), `safe_request`/`safe_get`/`safe_post` (async, IP-pinned transport, per-hop revalidation, ~10 MB cap), `SsrfBlockedError`, `UrlSafetyResult` (frozen dataclass). DNS-rebinding mitigated via `_PinnedNetworkBackend` that dials the validated IP while httpcore's TLS layer preserves SNI hostname. POST 301/302/303 redirects downgrade to GET and strip body/credential headers on cross-origin hops; POST 307/308 redirects are refused.
-- **Changed** (`ATHENA-59`): `src/rag/site_scraper/main.py` — `is_url_allowed` now delegates to `validate_url_not_private` (Class-1 guard). `blocked_domains` and `allowed_domains` substring matching replaced with exact-host/suffix matching (`_domain_matches`) to close attacker bypass via `evil.com.attacker.net` (xander H-1).
+- **Changed** (`ATHENA-59`): `src/rag/site_scraper/main.py` — `is_url_allowed` now performs literal-IP detection and domain allow/block matching (`_domain_matches`); it does NOT call `validate_url_not_private` (DNS-resolving guard lives in the async fetch path via `safe_get` to avoid blocking the event loop). `blocked_domains` and `allowed_domains` substring matching replaced with exact-host/suffix matching (`_domain_matches`) to close attacker bypass via `evil.com.attacker.net` (xander H-1).
 - **Changed** (`ATHENA-59`): `admin/backend/app/routes/calendar_sources.py` — `fetch_ical_data` now uses `safe_get(allowed_schemes=frozenset({"https"}))` — enforces HTTPS on every redirect hop.
 - **Changed** (`ATHENA-59`): `src/shared/content_fetcher.py` — default client changed to `follow_redirects=False`; all HTTP fetches on user-supplied URLs route through `safe_get`; Playwright paths gated behind `CONTENT_FETCHER_ALLOW_BROWSER_FETCH` (default `false`).
 - **Changed** (`ATHENA-59`): `admin/backend/app/routes/tool_calling.py` — MCP discovery POST for Class-1 sources (request body / feature-flag DB rows) replaced with `safe_post`; Class-3 (N8N_MCP_URL env) kept exempt.
@@ -85,7 +85,7 @@ env — unguarded) **or** add `localhost` to `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`
 **(b) `http://` and private-IP iCal sources are now rejected.**
 `fetch_ical_data` requires HTTPS on every redirect hop
 (`allowed_schemes=frozenset({"https"})`).  iCal sources served over plain HTTP or
-pointing at private-IP hosts will return HTTP 422.
+pointing at private-IP hosts will return HTTP **400** (not 422).
 Migration: migrate sources to HTTPS; for private-network iCal servers add their
 hostname/CIDR to `SITESCRAPER_ALLOWED_PRIVATE_HOSTS` AND change the URL to HTTPS.
 
@@ -100,6 +100,16 @@ content only.  To restore: set `CONTENT_FETCHER_ALLOW_BROWSER_FETCH=true`
 The `http://192.168.10.168:8123` fallback in `music_config.py` is gone.  Deployments
 that relied on the default must set `HA_URL` explicitly in their env/ConfigMap.
 An unset `HA_URL` now logs a startup warning and returns HTTP 503 on music requests.
+
+**(e) SSRF IP-pinned transport requires `httpx~=0.28`.**
+`src/shared/url_safety._build_pinned_transport` replaces `httpx.AsyncHTTPTransport._pool`
+(a private httpx 0.28 API) to close the DNS-rebinding TOCTOU window.
+`src/shared/pyproject.toml` and `admin/backend/requirements.txt` are both pinned to
+`httpx~=0.28`.  If a dependency conflict forces an older httpx version at image-build
+time, the helper detects the missing `_pool` attribute at runtime and falls back
+gracefully: per-hop SSRF validation remains active, but the IP-pinned transport is
+disabled and a `url_safety_pinned_transport_unavailable` structured-log warning fires
+so the operator can see the degraded state.  Check logs on first startup after upgrade.
 
 ---
 
