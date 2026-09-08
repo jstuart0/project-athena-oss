@@ -705,6 +705,29 @@ def _component_system_prompt(component_config: Optional[dict]) -> Optional[str]:
     return None
 
 
+def _synthesis_messages(
+    system_context: str,
+    user_prompt: str,
+    component_config: Optional[dict],
+) -> tuple[str, Optional[str]]:
+    """Split the synthesis prompt into (prompt, system_prompt) for the LLM router.
+
+    For MLX backends the static context (assistant profile + base knowledge) is sent as the
+    system message so mlx_lm.server can reuse its cached prompt prefix across requests.
+    Hybrid-attention models (Qwen3.5 / Qwen3.8) cannot trim a cached prefix that lives inside
+    the user message, so the old single-prompt shape re-processed the full context (often
+    ~10k tokens) on every request. Anything that changes per request (time of day, history,
+    the question) must stay in ``user_prompt`` or the cache never hits.
+
+    Other backends keep the original single-prompt shape with the optional ``/no_think`` marker
+    as the system prompt.
+    """
+    marker = _component_system_prompt(component_config)
+    if (component_config or {}).get("backend_type") == "mlx":
+        return user_prompt, system_context + ("\n" + marker if marker else "")
+    return system_context + user_prompt, marker
+
+
 # =============================================================================
 # get_rag_service_url (Pattern 1 — uses sibling-already get_admin_client)
 # =============================================================================

@@ -161,6 +161,7 @@ from orchestrator.helpers import (
     get_component_config,
     invalidate_component_model_cache,
     _component_system_prompt,
+    _synthesis_messages,
     _normalized_general_info_query,
     _direct_general_info_response,
     _strip_hallucinated_continuation,
@@ -7069,7 +7070,7 @@ async def process_query_stream(request: QueryRequest):
                 # Real token streaming: build synthesis prompt, stream tokens from Ollama.
                 # build_synthesis_prompt_for_streaming() returns the FULL assembled prompt:
                 # system_context + history_context + synthesis_prompt — do NOT prepend again.
-                full_prompt, synthesis_model = await build_synthesis_prompt_for_streaming(state)
+                full_prompt, synthesis_model, synthesis_system_prompt = await build_synthesis_prompt_for_streaming(state)
 
                 # Use per-intent max_tokens from component config, same as synthesize_node.
                 synthesis_config = await get_component_config("response_synthesis")
@@ -7088,6 +7089,7 @@ async def process_query_stream(request: QueryRequest):
                     async for chunk in llm.generate_stream(
                         model=synthesis_model,
                         prompt=full_prompt,
+                        system_prompt=synthesis_system_prompt,
                         temperature=request.temperature or 0.7,
                         max_tokens=max_tokens
                     ):
@@ -7599,7 +7601,7 @@ async def _record_conversation_turn(
 # True Streaming with RAG Support
 # ============================================================================
 
-async def build_synthesis_prompt_for_streaming(state: OrchestratorState) -> tuple[str, str]:
+async def build_synthesis_prompt_for_streaming(state: OrchestratorState) -> tuple[str, str, Optional[str]]:
     """
     Build the synthesis prompt for streaming, using the same logic as synthesize_node.
 
@@ -7766,13 +7768,16 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
             history_context += f"{role}: {content}\n"
         history_context += "\n"
 
-    # Combine contexts
-    full_prompt = system_context + history_context + synthesis_prompt
-
     # Get synthesis model
     synthesis_model = await get_model_for_component("response_synthesis")
+    synthesis_config = await get_component_config("response_synthesis")
 
-    return full_prompt, synthesis_model
+    # Combine contexts (static context goes to the system message for MLX backends: cacheable prefix)
+    full_prompt, synthesis_system_prompt = _synthesis_messages(
+        system_context, history_context + synthesis_prompt, synthesis_config
+    )
+
+    return full_prompt, synthesis_model, synthesis_system_prompt
 
 
 async def run_orchestrator_for_streaming(state: OrchestratorState) -> OrchestratorState:
@@ -7987,7 +7992,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     logger.info(f"Session {session.session_id} updated with {len(session.messages)} messages (precomputed)")
                 else:
                     # TRUE STREAMING: Build prompt and stream directly from LLM
-                    full_prompt, synthesis_model = await build_synthesis_prompt_for_streaming(state)
+                    full_prompt, synthesis_model, synthesis_system_prompt = await build_synthesis_prompt_for_streaming(state)
 
                     logger.info(
                         "streaming_llm_started",
@@ -8007,6 +8012,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     async for chunk in llm.generate_stream(
                         model=synthesis_model,
                         prompt=full_prompt,
+                        system_prompt=synthesis_system_prompt,
                         temperature=state.temperature,
                         max_tokens=2048
                     ):

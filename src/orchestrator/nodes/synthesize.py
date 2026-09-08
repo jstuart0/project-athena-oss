@@ -15,6 +15,7 @@ from orchestrator.helpers import (
     _direct_general_info_response,
     get_component_config,
     _component_system_prompt,
+    _synthesis_messages,
     store_conversation_context,
 )
 from orchestrator.utils.constants import DEFAULT_CITY
@@ -275,14 +276,17 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
                 history_context += f"{role}: {content}\n"
             history_context += "\n"
 
-        # Combine system context, history, and synthesis prompt
-        # Place history right before the synthesis prompt so it's closest to the question
-        full_prompt = system_context + history_context + synthesis_prompt
-
         # Get synthesis model from database or use fallback
         synthesis_config = await get_component_config("response_synthesis")
         synthesis_model = synthesis_config["model_name"]
         state.model_used = synthesis_model  # persist for analytics
+
+        # Combine system context, history, and synthesis prompt.
+        # History sits right before the question; the static context goes to the system
+        # message for MLX backends so the server can reuse its cached prompt prefix.
+        full_prompt, synthesis_system_prompt = _synthesis_messages(
+            system_context, history_context + synthesis_prompt, synthesis_config
+        )
 
         # Emit LLM generating event for Admin Jarvis monitoring
         llm_start_time = time.time()
@@ -297,7 +301,7 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
             model=synthesis_model,
             prompt=full_prompt,
             temperature=state.temperature,
-            system_prompt=_component_system_prompt(synthesis_config),
+            system_prompt=synthesis_system_prompt,
             request_id=state.request_id,
             session_id=state.session_id,
             user_id=state.mode,

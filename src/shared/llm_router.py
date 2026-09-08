@@ -1349,7 +1349,8 @@ class LLMRouter:
         temperature: float = 0.7,
         max_tokens: int = 2048,
         timeout: Optional[int] = None,
-        backend: Optional[BackendType] = None
+        backend: Optional[BackendType] = None,
+        system_prompt: Optional[str] = None
     ):
         """
         Generate response with streaming (yields tokens as generated).
@@ -1463,7 +1464,8 @@ class LLMRouter:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
-                mlx_options=model_config.get("mlx_options", {})
+                mlx_options=model_config.get("mlx_options", {}),
+                system_prompt=system_prompt
             ):
                 yield chunk
 
@@ -1476,7 +1478,8 @@ class LLMRouter:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
-                mlx_options=model_config.get("mlx_options", {})
+                mlx_options=model_config.get("mlx_options", {}),
+                system_prompt=system_prompt
             )
             yield {
                 "token": result.get("response", ""),

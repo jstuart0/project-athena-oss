@@ -26,6 +26,7 @@ from orchestrator.nodes import _runtime
 from orchestrator.helpers import (
     _CONTINUATION_PATTERN,
     _component_system_prompt,
+    _synthesis_messages,
     _direct_general_info_response,
     _fallback_to_web_search,
     _normalized_general_info_query,
@@ -431,3 +432,35 @@ def test_invalidate_component_model_cache_forces_refresh_on_next_call():
     # Result must be a non-empty string from FALLBACK_MODELS, NOT "stale-model:4b"
     assert isinstance(result, str) and len(result) > 0
     assert result != "stale-model:4b", "stale cached value should not be returned after invalidation"
+
+
+# --- _synthesis_messages ---
+
+def test_synthesis_messages_mlx_puts_static_context_in_system_prompt():
+    prompt, system_prompt = _synthesis_messages(
+        "STATIC CONTEXT", "Question: hi", {"backend_type": "mlx", "disable_thinking": True}
+    )
+    assert prompt == "Question: hi"
+    assert system_prompt == "STATIC CONTEXT\n/no_think"
+
+
+def test_synthesis_messages_mlx_without_marker():
+    prompt, system_prompt = _synthesis_messages(
+        "STATIC CONTEXT", "Question: hi", {"backend_type": "mlx", "disable_thinking": False}
+    )
+    assert prompt == "Question: hi"
+    assert system_prompt == "STATIC CONTEXT"
+
+
+def test_synthesis_messages_non_mlx_keeps_single_prompt_shape():
+    prompt, system_prompt = _synthesis_messages(
+        "STATIC CONTEXT", "Question: hi", {"backend_type": "ollama", "disable_thinking": True}
+    )
+    assert prompt == "STATIC CONTEXTQuestion: hi"
+    assert system_prompt == "/no_think"
+
+
+def test_synthesis_messages_missing_config_falls_back_to_single_prompt():
+    prompt, system_prompt = _synthesis_messages("STATIC CONTEXT", "Question: hi", None)
+    assert prompt == "STATIC CONTEXTQuestion: hi"
+    assert system_prompt is None
