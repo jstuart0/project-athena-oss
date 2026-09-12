@@ -9,6 +9,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `.mozart/plans/active/2026-09-12-deliver-athena-dependency-remediation.md`
+> **Ticket:** ATHENA-63
+
+### dependency remediation — Phase 1: repair the verification harness (ATHENA-63)
+
+- **Fixed**: `scripts/smoke-rag-images.sh` — the RAG image smoke test that CI already runs on every PR touching `src/rag/**`/`src/shared/**` (`.github/workflows/rag-smoke.yml`) now runs `pip check` after the import smoke, so an unmet or conflicting dependency in a shipped image (not just a missing/broken import) fails the build.
+- **Fixed**: `.github/workflows/rag-generator-drift.yml` — the Dockerfile-generator drift check ran under GitHub's default shell (`bash -e {0}`, no `pipefail`), so `--check | tee drift-summary.txt` always reported success regardless of the generator's own exit code — the repo's only mechanical drift enforcement had not been holding. Added `shell: bash` so the step's exit status is the check's, not `tee`'s.
+- **Fixed**: `scripts/generate-rag-dockerfiles.py` — strict `--check` now treats a missing RAG service directory or Dockerfile as drift; previously a deleted service Dockerfile silently passed as "no drift detected."
+- **Added**: `scripts/smoke-images.sh` — generalizes the RAG-only image smoke harness to all 29 Python images in the repo (the 23 RAG images plus admin-backend, chat-embed, jarvis-web, gateway, mode-service, orchestrator). Supports `--list`, `--list-excluded`, `--service <name>`, `--dry-run`.
+- **Added**: `scripts/lock-requirements.sh` — a single `uv pip compile` wrapper for every image's dependency lock, so no two locks can be produced by a slightly different invocation. `--check` detects a `requirements.in` that was edited without recompiling its lock.
+- **Added**: `scripts/check-build-tooling.py` — asserts the pinned build-tooling triplet (`pip==26.2.1 setuptools==84.0.0 wheel==0.48.0`) precedes every dependency install in a Dockerfile stage. Not yet wired into a CI gate (lands in Phase 6/2 of this campaign).
+- **Added**: `Makefile` targets `smoke-images`, `lock`, `lock-upgrade`, `lock-check` (developer conveniences — CI and other automation should call the underlying `scripts/*.sh` directly, since `make` collapses every non-zero recipe exit code to `2`).
+
+---
+
+## [Unreleased]
+
 > **Plan:** `thoughts/shared/plans/2026-05-15-deliver-auth-deferred-hardening.md` (r2)
 > **Ticket:** [ATHENA-55](https://plane.xmojo.net)
 > **Commits:** `179fd8c` (Phase 1), `77f50d6` (Phase 2), `f956be2` (Phase 3), `9b2926e` (Phase 4)

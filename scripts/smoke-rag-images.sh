@@ -117,18 +117,35 @@ run_smoke() {
     SMOKE_TAGS+=("${smoke_tag}")
 
     # Import smoke test
-    if docker run \
+    if ! docker run \
             --rm \
             --platform linux/amd64 \
             --entrypoint python \
             "${smoke_tag}" \
             -c "import main; print('import OK')" \
             2>&1; then
+        echo -e "${RED}[FAIL]${NC} ${name}: import main failed"
+        FAILED+=("${name} (import failed)")
+        return
+    fi
+
+    # pip check — verifies the image's installed dependency set has no unmet
+    # or conflicting requirements. Added per ATHENA-63 Phase 1 (G4): this is
+    # the check that would have caught admin-backend's ollama/pydantic
+    # conflict, and it must run in the script CI actually invokes
+    # (.github/workflows/rag-smoke.yml), not only in a separate harness.
+    if docker run \
+            --rm \
+            --platform linux/amd64 \
+            --entrypoint python \
+            "${smoke_tag}" \
+            -m pip check \
+            2>&1; then
         echo -e "${GREEN}[PASS]${NC} ${name}"
         PASSED+=("${name}")
     else
-        echo -e "${RED}[FAIL]${NC} ${name}: import main failed"
-        FAILED+=("${name} (import failed)")
+        echo -e "${RED}[FAIL]${NC} ${name}: pip check failed"
+        FAILED+=("${name} (pip check failed)")
     fi
 }
 

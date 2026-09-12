@@ -72,7 +72,7 @@ Before opening a PR that touches `src/rag/<service>/` or `src/shared/`:
 2. If `main.py` does `from foo.bar import X`, the Dockerfile must `COPY rag/<service>/foo /app/foo` so `foo` lands at `/app/foo` (the `WORKDIR`). Use `SERVICE_EXTRA_COPIES` in `scripts/generate-rag-dockerfiles.py` to codify this.
 3. Do not import from `orchestrator/`, `gateway/`, or any non-RAG service module. If you need shared logic, move it to `src/shared/` first.
 4. Do not read `REDIS_HOST` or `REDIS_PORT` directly — kubelet auto-injects `REDIS_PORT=tcp://...` for any K8s Service named `redis`. Use `REDIS_URL` via `get_config().redis_url`, or a service-specific `<SERVICE>_REDIS_URL` env var with the DB index in the URL path.
-5. Add the service to `RAG_SERVICES` in `scripts/service-defs.sh` (sourced by both `build-and-push.sh` and `smoke-rag-images.sh`).
+5. Add the service to `RAG_SERVICES` in `scripts/service-defs.sh` (sourced by `build-and-push.sh`, `smoke-rag-images.sh`, and `smoke-images.sh`).
 6. Run `make smoke-rags SERVICE=<image-name>` locally before opening a PR (e.g. `make smoke-rags SERVICE=athena-rag-sports`). CI enforces this on every PR touching `src/rag/**` or `src/shared/**`.
 
 ## Development Setup

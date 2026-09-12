@@ -140,6 +140,16 @@ def main():
             service_dir = rag_dir / service_name
             dockerfile_path = service_dir / "Dockerfile"
             if not service_dir.exists() or not dockerfile_path.exists():
+                if args.check_advisory:
+                    # Advisory mode reports drift on live mismatches only; a
+                    # missing service is a different signal (deletion, or a
+                    # not-yet-created service) and is deliberately not flagged
+                    # here.
+                    continue
+                # Strict --check treats a missing directory or Dockerfile as
+                # drift rather than silently skipping it — a deleted RAG
+                # service Dockerfile must fail the gate, not pass it.
+                drifted.append(f"{service_name} (missing service dir or Dockerfile)")
                 continue
             expected = generate_dockerfile(service_name, port)
             actual = dockerfile_path.read_text()

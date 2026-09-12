@@ -32,7 +32,10 @@ jobs:
           python-version: "3.11"
 
       - name: Check for Dockerfile drift
+        shell: bash
         run: |
-          python3 scripts/generate-rag-dockerfiles.py --check | tee drift-summary.txt
+          RC=0
+          python3 scripts/generate-rag-dockerfiles.py --check | tee drift-summary.txt || RC=$?
           echo "## RAG Dockerfile Generator Drift" >> "${GITHUB_STEP_SUMMARY}"
           cat drift-summary.txt >> "${GITHUB_STEP_SUMMARY}"
+          exit "$RC"
