@@ -3,10 +3,36 @@ Behavioural tests for admin/frontend/escape-html.js (ATHENA-67).
 
 These run the real production file in a Node subprocess (not a reimplementation)
 so a regression to the shipped file is guaranteed to be caught here.
+
+Node resolution (D3, ATHENA-66 Phase 1)
+----------------------------------------
+The interpreter is resolved once, at import time, as
+`ATHENA_NODE_BIN` env var (set by CI from `actions/setup-node`'s pinned
+exact version) or `shutil.which("node")` (a developer laptop). If neither
+resolves to a WORKING interpreter (`--version` exits 0):
+
+  - `ATHENA_REQUIRE_NODE` set  -> `pytest.fail()` at collection time. CI sets
+    this, so a broken/missing node interpreter is a hard failure, never a
+    silent module-wide skip.
+  - `ATHENA_REQUIRE_NODE` unset -> `pytest.skip()`, naming the env var. This
+    is the ONLY permitted skip in the campaign, and CI can never take it
+    (CI always sets ATHENA_REQUIRE_NODE=1).
+
+As shipped (pre-Phase-1), this module used a bare `skipif` on
+`node --version`'s return code: node PRESENT-BUT-ERRORING (a broken install,
+a stale wrapper) silently skipped the whole module and pytest exited 0,
+having asserted nothing about escape-html.js — catalogue instance 7. This
+harness closes that: the failure mode of a broken interpreter is now
+distinguished from the failure mode of no interpreter at all, and CI's
+`ATHENA_REQUIRE_NODE=1` converts either into a hard failure.
 """
 
+from __future__ import annotations
+
 import json
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -15,10 +41,35 @@ import pytest
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "admin" / "frontend"
 ESCAPE_HTML_JS = FRONTEND_DIR / "escape-html.js"
 
-pytestmark = pytest.mark.skipif(
-    subprocess.run(["node", "--version"], capture_output=True).returncode != 0,
-    reason="node is required to run these tests",
-)
+
+def _resolve_node_bin() -> str | None:
+    candidate = os.environ.get("ATHENA_NODE_BIN") or shutil.which("node")
+    if not candidate:
+        return None
+    try:
+        proc = subprocess.run([candidate, "--version"], capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return candidate if proc.returncode == 0 else None
+
+
+NODE_BIN = _resolve_node_bin()
+
+if NODE_BIN is None:
+    if os.environ.get("ATHENA_REQUIRE_NODE"):
+        pytest.fail(
+            "ATHENA_REQUIRE_NODE is set but no working node interpreter was found "
+            "(checked ATHENA_NODE_BIN, then PATH via shutil.which). This must fail, "
+            "not skip, in CI — a broken interpreter is not evidence escape-html.js works.",
+            pytrace=False,
+        )
+    pytestmark = pytest.mark.skip(
+        reason=(
+            "no working node interpreter found (checked ATHENA_NODE_BIN, then PATH) "
+            "and ATHENA_REQUIRE_NODE is not set. Set ATHENA_REQUIRE_NODE=1 to make a "
+            "missing/broken node interpreter a hard failure instead of a skip."
+        )
+    )
 
 
 def _run_node(js_expr: str) -> str:
@@ -35,7 +86,7 @@ def _run_node(js_expr: str) -> str:
     process.stdout.write(JSON.stringify(result));
     """
     proc = subprocess.run(
-        ["node", "-e", script],
+        [NODE_BIN, "-e", script],
         capture_output=True,
         text=True,
         timeout=15,
@@ -138,7 +189,7 @@ def _js_single_quoted_string_parse(escaped_js: str) -> str:
     const s = '{escaped_js}';
     process.stdout.write(JSON.stringify(s));
     """
-    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=15)
+    proc = subprocess.run([NODE_BIN, "-e", script], capture_output=True, text=True, timeout=15)
     assert proc.returncode == 0, f"node failed to parse JS string literal: {proc.stderr}\nliteral body: {escaped_js!r}"
     return json.loads(proc.stdout)
 
