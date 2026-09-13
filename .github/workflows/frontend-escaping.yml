@@ -159,3 +159,11 @@ jobs:
           else
             python3 scripts/check-frontend-cache-busters.py
           fi
+
+      - name: No unsanctioned test skips added on this branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Set-equality against a pinned list, not a flat ban: Phase 1 step 8 is
+          # REQUIRED to add D3's skip. Exit 2 (could not run) is NOT a pass.
+          python3 scripts/check-no-new-test-skips.py --base "origin/${GITHUB_BASE_REF:-main}"
