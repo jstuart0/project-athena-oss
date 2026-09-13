@@ -232,7 +232,7 @@ cd src/orchestrator && python -m uvicorn main:app --host 0.0.0.0 --port 8001
 cd src/gateway && python -m uvicorn main:app --host 0.0.0.0 --port 8000
 
 # Terminal 4: Jarvis Web interface
-cd apps/jarvis-web/backend && pip install -r requirements.txt
+cd apps/jarvis-web/backend && pip install -r requirements.in  # requirements.txt is the generated x86_64 image lock
 python -m uvicorn main:app --host 0.0.0.0 --port 3001
 ```
 
@@ -344,7 +344,7 @@ The backend proxies chat requests to the Orchestrator and smart home requests to
 
 ```bash
 cd apps/jarvis-web/backend
-pip install -r requirements.txt
+pip install -r requirements.in  # requirements.txt is the generated x86_64 image lock
 python -m uvicorn main:app --host 0.0.0.0 --port 3001
 ```
 
