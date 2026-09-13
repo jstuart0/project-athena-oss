@@ -1,0 +1,61 @@
+name: Admin Frontend Escaping (ATHENA-67)
+
+# Guards the shared HTML/JS escaping helpers in admin/frontend/escape-html.js
+# and their load order in admin/frontend/index.html. A regression here is a
+# live XSS on the authenticated admin surface — see ATHENA-67.
+
+on:
+  pull_request:
+    paths:
+      - "admin/frontend/**"
+      - "tests/unit/test_admin_frontend_escaping.py"
+      - "scripts/check-frontend-escape-load-order.js"
+      - ".github/workflows/frontend-escaping.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-escaping:
+    name: escape-html.js behavior + load-order guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.8.0"
+
+      - name: Echo Node version
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pytest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest
+
+      - name: Run escaping behavioral tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pytest tests/unit/test_admin_frontend_escaping.py -v
+
+      - name: Run load-order guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/check-frontend-escape-load-order.js
