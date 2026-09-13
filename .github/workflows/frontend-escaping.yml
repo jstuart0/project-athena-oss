@@ -24,6 +24,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # merge-base needs real history; the default shallow clone breaks
+          # scripts/check-frontend-cache-busters.py
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -59,3 +63,13 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/check-frontend-escape-load-order.js
+
+      - name: Cache-buster freshness for changed frontend JS
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A changed .js whose ?v= did not move never reaches a warm-cache
+          # browser — nginx serves .js as `public, immutable`, so not even a
+          # user-initiated reload recovers it. Exit 2 means the check could not
+          # run and is NOT a pass.
+          python3 scripts/check-frontend-cache-busters.py --base "origin/${GITHUB_BASE_REF}"
