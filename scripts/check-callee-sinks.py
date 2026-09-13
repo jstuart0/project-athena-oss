@@ -41,7 +41,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FRONTEND_DIR = REPO_ROOT / "admin" / "frontend"
 DEFAULT_ADJUDICATIONS = DEFAULT_FRONTEND_DIR / ".callee-sink-adjudications.json"
 
-SINK_RE = re.compile(r"\.innerHTML\s*=|\.insertAdjacentHTML\s*\(")
+SINK_ASSIGN_RE = re.compile(r"\.innerHTML\s*=(?!=)")
+SINK_INSERT_RE = re.compile(r"\.insertAdjacentHTML\s*\(")
+VAR_DECL_TMPL = r"\b(?:const|let|var)\s+{ident}\s*=\s*"
 
 
 def rel(path: Path) -> str:
@@ -107,23 +109,112 @@ def find_callee_definition(text: str, callee: str) -> tuple[str, list[str], int,
     return callee, params, brace_open, body_end
 
 
+def _extract_backtick_literal(text: str, backtick_idx: int) -> str:
+    """`text[backtick_idx]` is the opening backtick of a template literal.
+    Returns the full literal (including both backticks) by scanning to the
+    matching close via the shared quote-skip primitive — the same mechanism
+    already used to skip nested template literals when parsing call
+    argument lists, so a `${...}` inside it does not confuse the boundary.
+    """
+    end = scan.skip_js_string(text, backtick_idx)
+    return text[backtick_idx:end]
+
+
+def _resolve_rhs_literal(text: str, rhs_start: int, search_floor: int) -> str | None:
+    r"""`rhs_start` points just past a `=` (an `.innerHTML =` RHS) or just
+    past an `insertAdjacentHTML(` argument's own start. If the RHS is a
+    template literal directly, returns it. If it is a bare identifier,
+    resolves the most recent `const|let|var IDENT = \`...\`` assignment to
+    that identifier at or after `search_floor` and before `rhs_start`, and
+    returns that literal. Returns None when the RHS is a call, a property
+    read, a ternary, or otherwise not statically resolvable to a template
+    literal declared in this body — the caller treats that as "no
+    resolvable sink content", never as a violation, matching D9's one-hop
+    scope (it does not chase into a further callee).
+    """
+    i = rhs_start
+    n = len(text)
+    while i < n and text[i] in " \t\r\n":
+        i += 1
+    if i < n and text[i] == "`":
+        return _extract_backtick_literal(text, i)
+    m = re.match(r"[A-Za-z_$][\w$]*", text[i:])
+    if not m:
+        return None
+    ident = m.group(0)
+    decl_re = re.compile(VAR_DECL_TMPL.format(ident=re.escape(ident)))
+    last = None
+    for dm in decl_re.finditer(text, search_floor, rhs_start):
+        last = dm
+    if last is None:
+        return None
+    return _resolve_rhs_literal(text, last.end(), search_floor)
+
+
+def collect_sink_templates(text: str, body_start: int, body_end: int) -> list[str]:
+    """Every template literal in [body_start, body_end) that is actually the
+    argument of a `.innerHTML =` assignment or an `insertAdjacentHTML(...)`
+    call in THIS callee body — directly, or via one `const|let|var` alias.
+
+    This is the connectivity a bare "does `${param}` appear anywhere AND
+    does `.innerHTML =` appear anywhere" co-occurrence check is missing: two
+    independent regex hits in the same function are not evidence that the
+    parameter reaches that particular sink. A callee that interpolates its
+    parameter into a fetch URL or a DOM selector, and separately assigns an
+    unrelated static string to `.innerHTML`, must not be flagged.
+    """
+    templates: list[str] = []
+    for m in SINK_ASSIGN_RE.finditer(text, body_start, body_end):
+        lit = _resolve_rhs_literal(text, m.end(), body_start)
+        if lit is not None:
+            templates.append(lit)
+    for m in SINK_INSERT_RE.finditer(text, body_start, body_end):
+        open_idx = text.index("(", m.start())
+        close_idx = scan.find_matching_paren(text, open_idx)
+        if close_idx == -1:
+            continue
+        args = scan.split_top_level(text[open_idx + 1 : close_idx], seps=",")
+        if len(args) < 2:
+            continue
+        arg = args[1].strip()
+        if arg.startswith("`"):
+            templates.append(_extract_backtick_literal(arg, 0))
+        else:
+            # args[0] plus its trailing separator comma precede args[1] in
+            # the original text (split_top_level's parts are exact,
+            # unstripped slices joined by single-char separators).
+            arg2_offset = open_idx + 1 + len(args[0]) + 1
+            lit = _resolve_rhs_literal(text, arg2_offset, body_start)
+            if lit is not None:
+                templates.append(lit)
+    return templates
+
+
 def param_reaches_unescaped_sink(text: str, body_start: int, body_end: int, param: str) -> str:
-    """Returns 'sink-escaped', 'sink-unescaped', or 'no-sink-found'."""
-    body = text[body_start:body_end]
+    """Returns 'sink-escaped', 'sink-unescaped', or 'no-sink-found'.
+
+    Only considers `${param}` occurrences that fall INSIDE a template
+    literal this function has traced to an actual `.innerHTML =` /
+    `insertAdjacentHTML(` call — see `collect_sink_templates`. A mention of
+    `param` elsewhere in the body (a fetch URL, a DOM selector, a log line)
+    that happens to share the function with an unrelated sink no longer
+    counts.
+    """
     param_re = re.compile(r"\$\{[^}]*\b" + re.escape(param) + r"\b[^}]*\}")
     escaped_re = re.compile(
         r"\$\{\s*(escapeHtml|escapeJsAttr)\s*\(\s*" + re.escape(param) + r"\s*\)\s*\}"
     )
-    param_mentions = list(param_re.finditer(body))
-    if not param_mentions:
+    sink_templates = collect_sink_templates(text, body_start, body_end)
+    if not sink_templates:
         return "no-sink-found"
-    if not SINK_RE.search(body):
-        return "no-sink-found"
-    for m in param_mentions:
-        if escaped_re.match(body, m.start()):
-            continue
-        return "sink-unescaped"
-    return "sink-escaped"
+    found_mention = False
+    for tmpl in sink_templates:
+        for m in param_re.finditer(tmpl):
+            found_mention = True
+            if escaped_re.match(tmpl, m.start()):
+                continue
+            return "sink-unescaped"
+    return "sink-escaped" if found_mention else "no-sink-found"
 
 
 def resolve_site(file: Path, line: int, expr: str, raw_value: str, offset: int, adjudications: dict) -> dict:
@@ -136,19 +227,33 @@ def resolve_site(file: Path, line: int, expr: str, raw_value: str, offset: int, 
     callee, arg_index = resolved
 
     text = file.read_text(encoding="utf-8", errors="ignore")
-    defn = None
+    matches = []
     for path in scan.iter_frontend_js_files(file.parent):
         candidate_text = text if path == file else path.read_text(encoding="utf-8", errors="ignore")
         found = find_callee_definition(candidate_text, callee)
         if found:
-            defn = (path, candidate_text, *found)
-            break
-    if defn is None:
+            matches.append((path, candidate_text, *found))
+    if not matches:
         return _maybe_adjudicated(
             key, file, line, expr, "unresolved", f"callee {callee!r} definition not found", adjudications
         )
+    if len(matches) > 1:
+        # Module-less global namespace (D1): a same-named top-level
+        # `function` in two files is a real runtime possibility (this
+        # codebase has several — `showError`, `formatDate`, `getToken`,
+        # ...), and which one wins at runtime depends on `<script>` tag
+        # load order, which this classifier does not consult. Picking the
+        # alphabetically-first file (the old behaviour) is a silent guess —
+        # exactly the failure mode D9 exists to close. Fail closed instead.
+        other_files = ", ".join(sorted(rel(m[0]) for m in matches))
+        return _maybe_adjudicated(
+            key, file, line, expr, "unresolved",
+            f"ambiguous callee {callee!r}: defined in {len(matches)} files ({other_files}); "
+            "load-order winner cannot be determined statically",
+            adjudications,
+        )
 
-    def_path, def_text, _name, params, body_start, body_end = defn
+    def_path, def_text, _name, params, body_start, body_end = matches[0]
     if arg_index >= len(params):
         return _maybe_adjudicated(
             key, file, line, expr, "unresolved", "argument index has no corresponding parameter", adjudications
@@ -245,6 +350,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--class", dest="klass", choices=["sink-escaped", "sink-unescaped", "unresolved"], default=None)
     ap.add_argument("--check", choices=["coverage"], default=None)
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        help="dump the full table (all three buckets, with per-bucket counts) instead of one --class",
+    )
     ap.add_argument("--scope", default=None, help="e.g. phase3 (unused filter hook, reserved)")
     ap.add_argument("--max", type=int, default=None)
     ap.add_argument("--min-sites", type=int, default=None)
@@ -265,6 +375,13 @@ def main() -> int:
     for file, line, expr, raw_value, offset in sites:
         bucket, detail = resolve_site(file, line, expr, raw_value, offset, adjudications)
         results.setdefault(bucket, []).append(detail)
+
+    if args.all:
+        payload = dict(results)
+        payload["counts"] = {k: len(v) for k, v in results.items()}
+        payload["counts"]["total"] = sum(len(v) for v in results.values())
+        print(json.dumps(payload, separators=(",", ":")) if args.json else payload)
+        return 0
 
     if args.check == "coverage":
         total = sum(len(v) for v in results.values())

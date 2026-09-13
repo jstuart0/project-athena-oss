@@ -308,6 +308,77 @@ def test_callee_sink_unresolved_is_not_silently_dropped(tmp_path):
     assert bucket == "unresolved"
 
 
+def test_callee_sink_ambiguous_same_name_fails_closed_not_guessed(tmp_path):
+    """Two files each declare a top-level `sameName` — a real shape in this
+    codebase (`showError`, `formatDate`, `getToken`, ... all collide across
+    files). Which one wins at runtime depends on `<script>` tag load order,
+    which this classifier does not consult. Picking the alphabetically-first
+    file is a silent guess; the resolver must land this in `unresolved`
+    instead.
+    """
+    (tmp_path / "aaa_widget.js").write_text(
+        "function sameName(value) {\n    return `<div>${value}</div>`;\n}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "caller_widget.js").write_text(
+        "function renderCaller(value) {\n"
+        '    return `<button onclick="sameName(\'${value}\')">Go</button>`;\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "zzz_widget.js").write_text(
+        "function sameName(value) {\n    return `<div>${escapeHtml(value)}</div>`;\n}\n",
+        encoding="utf-8",
+    )
+    sites = callee.collect_sites(tmp_path)
+    assert sites, "fixture setup produced no sites"
+    bucket, detail = callee.resolve_site(*sites[0], {})
+    assert bucket == "unresolved"
+    assert "ambiguous" in detail["reason"]
+
+
+def test_callee_sink_dynamic_dispatch_fails_closed(tmp_path):
+    """`window[handlerName](...)` has no statically visible callee identifier
+    directly followed by `(` — the resolver must not guess a callee and must
+    land the site in `unresolved` rather than silently reporting `sink-escaped`.
+    """
+    (tmp_path / "dynamic_widget.js").write_text(
+        "function renderCaller(value, handlerName) {\n"
+        '    return `<button onclick="window[handlerName](\'${value}\')">Go</button>`;\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    sites = callee.collect_sites(tmp_path)
+    assert sites, "fixture setup produced no sites"
+    bucket, detail = callee.resolve_site(*sites[0], {})
+    assert bucket == "unresolved"
+
+
+def test_callee_sink_does_not_conflate_unrelated_param_mention_with_sink(tmp_path):
+    """A parameter used in a fetch URL / DOM selector, in a callee that
+    SEPARATELY assigns an unrelated static string to `.innerHTML`, must not
+    be flagged. This is the false-positive shape found in five of the ten
+    `sink-unescaped` hits from a bare "both patterns appear somewhere in the
+    body" co-occurrence check (Phase 2 trace): the parameter and the sink
+    exist in the same function but never touch the same template literal.
+    """
+    (tmp_path / "widget.js").write_text(
+        "function checkStatus(serviceName) {\n"
+        "    const el = document.getElementById(`status-${serviceName}`);\n"
+        "    el.innerHTML = '<span>Checking...</span>';\n"
+        "    fetch(`/api/status/${serviceName}`);\n"
+        "}\n"
+        "function renderCaller(name) {\n"
+        '    return `<button onclick="checkStatus(\'${name}\')">Go</button>`;\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    sites = callee.collect_sites(tmp_path)
+    assert sites, "fixture setup produced no sites"
+    bucket, _detail = callee.resolve_site(*sites[0], {})
+    assert bucket == "sink-escaped"
+
+
 # ---------------------------------------------------------------------------
 # C3 — detached_sink: the HTML-template guard keys on template POSITION,
 # not on sink function name. emerging-intents.js:231's sink is three
