@@ -9,7 +9,32 @@ on:
     paths:
       - "admin/frontend/**"
       - "tests/unit/test_admin_frontend_escaping.py"
+      - "tests/unit/test_frontend_guard_scripts.py"
+      - "scripts/_frontend_escape_scan.py"
       - "scripts/check-frontend-escape-load-order.js"
+      - "scripts/check-frontend-cache-busters.py"
+      - "scripts/check-athena67-preconditions.py"
+      - "scripts/check-escape-html-uniqueness.py"
+      - "scripts/check-handler-escaping.py"
+      - "scripts/check-callee-sinks.py"
+      - "scripts/check-html-template-escaping.py"
+      - "scripts/check-frontend-wiring.py"
+      - ".github/workflows/frontend-escaping.yml"
+  push:
+    branches: [main]
+    paths:
+      - "admin/frontend/**"
+      - "tests/unit/test_admin_frontend_escaping.py"
+      - "tests/unit/test_frontend_guard_scripts.py"
+      - "scripts/_frontend_escape_scan.py"
+      - "scripts/check-frontend-escape-load-order.js"
+      - "scripts/check-frontend-cache-busters.py"
+      - "scripts/check-athena67-preconditions.py"
+      - "scripts/check-escape-html-uniqueness.py"
+      - "scripts/check-handler-escaping.py"
+      - "scripts/check-callee-sinks.py"
+      - "scripts/check-html-template-escaping.py"
+      - "scripts/check-frontend-wiring.py"
       - ".github/workflows/frontend-escaping.yml"
 
 permissions:
@@ -34,11 +59,16 @@ jobs:
         with:
           node-version: "24.8.0"
 
-      - name: Echo Node version
+      - name: Resolve Node interpreter (D3 — pinned, not PATH-guessed)
         shell: bash
         run: |
           set -euo pipefail
           node --version
+          echo "ATHENA_NODE_BIN=$(command -v node)" >> "$GITHUB_ENV"
+          # CI must never take the developer-laptop skip path (D3): a
+          # missing/broken node interpreter is a hard failure here, not a
+          # silent module-wide skip (catalogue instance 7).
+          echo "ATHENA_REQUIRE_NODE=1" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -52,17 +82,69 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install pytest
 
-      - name: Run escaping behavioral tests
+      - name: Run escaping behavioral tests (zero skips permitted — ATHENA_REQUIRE_NODE=1)
         shell: bash
         run: |
           set -euo pipefail
           python3 -m pytest tests/unit/test_admin_frontend_escaping.py -v
 
+      - name: Assert escaping contract has zero skips (returncode read first — tessa F1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # rule 7 / rule 10: read the PIPESTATUS of pytest itself, not tee's
+          # exit status, and never let a text-match for "SKIPPED" stand in
+          # for the returncode. A real failure that never prints "SKIPPED"
+          # must still be caught — by the returncode, read first.
+          python3 -m pytest tests/unit/test_admin_frontend_escaping.py -q -rs | tee /tmp/pytest-zero-skips.txt
+          RC="${PIPESTATUS[0]}"
+          if [ "$RC" -ne 0 ]; then
+            echo "FAIL: pytest exited $RC"
+            exit 1
+          fi
+          if grep -q "SKIPPED" /tmp/pytest-zero-skips.txt; then
+            echo "FAIL: a SKIPPED test was reported under ATHENA_REQUIRE_NODE=1 — this must be impossible"
+            exit 1
+          fi
+          echo "PASS: zero skips, pytest returncode 0"
+
+      - name: Run guard-script unit tests (Phase 1 fixtures)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pytest tests/unit/test_frontend_guard_scripts.py -v
+
+      - name: ATHENA-67 preconditions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-athena67-preconditions.py
+
+      - name: Escape-html uniqueness baseline floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-escape-html-uniqueness.py --check baseline-floor \
+            --min-definitions 18 --named-member 'admin/frontend/utils.js:20'
+
+      - name: Handler-text builder set pinned by set-equality (D9b)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-handler-escaping.py --check builder-set \
+            --expect 'admin/frontend/oss-profiles.js:99 actionButton'
+
+      - name: Forbidden sinks stay at absolute zero (C1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-html-template-escaping.py --check forbidden-sink
+
       - name: Run load-order guard
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/check-frontend-escape-load-order.js
+          "$ATHENA_NODE_BIN" scripts/check-frontend-escape-load-order.js
 
       - name: Cache-buster freshness for changed frontend JS
         shell: bash
@@ -72,4 +154,8 @@ jobs:
           # browser — nginx serves .js as `public, immutable`, so not even a
           # user-initiated reload recovers it. Exit 2 means the check could not
           # run and is NOT a pass.
-          python3 scripts/check-frontend-cache-busters.py --base "origin/${GITHUB_BASE_REF}"
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            python3 scripts/check-frontend-cache-busters.py --base "origin/${GITHUB_BASE_REF}"
+          else
+            python3 scripts/check-frontend-cache-busters.py
+          fi
