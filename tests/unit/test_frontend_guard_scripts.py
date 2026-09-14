@@ -339,6 +339,13 @@ def test_ternary_span_with_quotes_does_not_defeat_the_parser():
 
 
 def test_callee_sink_known_instances_are_found():
+    """Phase 3 fixed both real instances in the live tree, so the classifier
+    now resolves them to `sink-escaped` (never `unresolved` — proving
+    resolution still succeeds against the real callees). The CAN-FAIL
+    direction — the classifier reports `sink-unescaped` when either fix is
+    reverted — is proven on synthetic reproductions of the pre-fix shape
+    below, decoupled from the live tree's now-fixed state.
+    """
     sites = callee.collect_sites(FRONTEND_DIR)
     adjudications = callee.load_adjudications(callee.DEFAULT_ADJUDICATIONS)
 
@@ -348,12 +355,51 @@ def test_callee_sink_known_instances_are_found():
         found[(file.name, line)] = (bucket, detail)
 
     reveal_bucket, reveal_detail = found[("app.js", 1180)]
-    assert reveal_bucket == "sink-unescaped"
+    assert reveal_bucket == "sink-escaped"
     assert reveal_detail["callee"] == "revealSecret"
 
     clone_bucket, clone_detail = found[("escalation.js", 330)]
-    assert clone_bucket == "sink-unescaped"
+    assert clone_bucket == "sink-escaped"
     assert clone_detail["callee"] == "showCloneEscalationPresetModal"
+
+
+def test_callee_sink_known_instances_can_fail_if_reverted(tmp_path):
+    (tmp_path / "app.js").write_text(
+        "async function revealSecret(id, name) {\n"
+        "    document.getElementById('modals-container').innerHTML = `\n"
+        '        <h2>Reveal Secret: ${name}</h2>\n'
+        "    `;\n"
+        "}\n"
+        "function renderCaller(secret) {\n"
+        '    return `<button onclick="revealSecret(${secret.id}, \'${secret.name}\')">Reveal</button>`;\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "escalation.js").write_text(
+        "function showCloneEscalationPresetModal(presetId, presetName) {\n"
+        "    const modal = document.createElement('div');\n"
+        "    modal.innerHTML = `\n"
+        '        <h3>Clone "${presetName}"</h3>\n'
+        "    `;\n"
+        "}\n"
+        "function renderPreset(preset) {\n"
+        '    return `<button onclick="showCloneEscalationPresetModal(${preset.id}, \'${preset.name.replace(/\'/g, "\\\\\'")}\')">Clone</button>`;\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    sites = callee.collect_sites(tmp_path)
+    adjudications = {}
+    found = {}
+    for file, line, expr, raw_value, offset in sites:
+        bucket, detail = callee.resolve_site(file, line, expr, raw_value, offset, adjudications)
+        found.setdefault((file.name, detail.get("callee")), bucket)
+
+    assert found[("app.js", "revealSecret")] == "sink-unescaped", (
+        "reverting app.js's sink fix must make the classifier report sink-unescaped again"
+    )
+    assert found[("escalation.js", "showCloneEscalationPresetModal")] == "sink-unescaped", (
+        "reverting escalation.js's sink fix must make the classifier report sink-unescaped again"
+    )
 
 
 def test_callee_sink_unresolved_is_not_silently_dropped(tmp_path):
@@ -441,6 +487,58 @@ def test_callee_sink_does_not_conflate_unrelated_param_mention_with_sink(tmp_pat
     assert sites, "fixture setup produced no sites"
     bucket, _detail = callee.resolve_site(*sites[0], {})
     assert bucket == "sink-escaped"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — service-bypass.js's editBypassConfig sink: `escapeHtml(config.
+# display_name || serviceName)` false-flagged sink-unescaped under the
+# original exact-bare-param regex. A param covered by a whole-interpolation
+# escape wrap is safe regardless of what else the wrapped expression
+# contains; a param mentioned OUTSIDE the wrap is still correctly unsafe.
+# ---------------------------------------------------------------------------
+
+
+def test_callee_sink_param_inside_larger_wrapped_expression_is_escaped(tmp_path):
+    (tmp_path / "widget.js").write_text(
+        "function editThing(serviceName) {\n"
+        "    const config = {};\n"
+        "    document.getElementById('x').innerHTML = `\n"
+        '        <h3>Configure ${escapeHtml(config.display_name || serviceName)}</h3>\n'
+        "    `;\n"
+        "}\n"
+        "function renderCaller(name) {\n"
+        '    return `<button onclick="editThing(\'${name}\')">Go</button>`;\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    sites = callee.collect_sites(tmp_path)
+    assert sites, "fixture setup produced no sites"
+    bucket, _detail = callee.resolve_site(*sites[0], {})
+    assert bucket == "sink-escaped", (
+        "escapeHtml(a || param) must be recognised as escaped -- the escaping "
+        "function receives the entire rendered value, not just a bare param"
+    )
+
+
+def test_callee_sink_param_outside_wrap_in_same_interpolation_is_unescaped(tmp_path):
+    (tmp_path / "widget.js").write_text(
+        "function editThing(serviceName) {\n"
+        "    document.getElementById('x').innerHTML = `\n"
+        '        <h3>${escapeHtml(\'Configure \')}${serviceName}</h3>\n'
+        "    `;\n"
+        "}\n"
+        "function renderCaller(name) {\n"
+        '    return `<button onclick="editThing(\'${name}\')">Go</button>`;\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    sites = callee.collect_sites(tmp_path)
+    assert sites, "fixture setup produced no sites"
+    bucket, _detail = callee.resolve_site(*sites[0], {})
+    assert bucket == "sink-unescaped", (
+        "a param mentioned in a SEPARATE, unwrapped interpolation alongside an "
+        "escaped one must still be flagged -- the wrap must cover ITS OWN ${...}"
+    )
 
 
 # ---------------------------------------------------------------------------

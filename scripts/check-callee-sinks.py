@@ -202,25 +202,39 @@ def collect_sink_templates(text: str, body_start: int, body_end: int) -> list[st
 def param_reaches_unescaped_sink(text: str, body_start: int, body_end: int, param: str) -> str:
     """Returns 'sink-escaped', 'sink-unescaped', or 'no-sink-found'.
 
-    Only considers `${param}` occurrences that fall INSIDE a template
+    Only considers `${...}` interpolations that fall INSIDE a template
     literal this function has traced to an actual `.innerHTML =` /
     `insertAdjacentHTML(` call — see `collect_sink_templates`. A mention of
     `param` elsewhere in the body (a fetch URL, a DOM selector, a log line)
     that happens to share the function with an unrelated sink no longer
     counts.
+
+    A top-level `${...}` mentioning `param` is "escaped" when its ENTIRE
+    interior is a single `escapeHtml(...)`/`escapeJsAttr(...)` call — not
+    only when that call's sole argument is the bare parameter. `escapeHtml
+    (config.display_name || serviceName)` is exactly as safe as `escapeHtml
+    (serviceName)`: the escaping function receives whatever the wrapped
+    expression evaluates to, and that return value is the entire rendered
+    content. Requiring an exact `escapeFn(param)` match (the original,
+    narrower form) false-flagged this shape as unescaped. Uses the SAME
+    balanced-paren whole-expression check `_frontend_escape_scan` applies to
+    a direct handler-span interpolation, so a param merely mentioned
+    ALONGSIDE an escape call that does not cover it — `escapeHtml(a) +
+    param` — is correctly still flagged.
     """
-    param_re = re.compile(r"\$\{[^}]*\b" + re.escape(param) + r"\b[^}]*\}")
-    escaped_re = re.compile(
-        r"\$\{\s*(escapeHtml|escapeJsAttr)\s*\(\s*" + re.escape(param) + r"\s*\)\s*\}"
-    )
+    param_word_re = re.compile(r"\b" + re.escape(param) + r"\b")
     sink_templates = collect_sink_templates(text, body_start, body_end)
     if not sink_templates:
         return "no-sink-found"
     found_mention = False
     for tmpl in sink_templates:
-        for m in param_re.finditer(tmpl):
+        for start, end in scan.find_top_level_dollar_braces(tmpl):
+            inner = tmpl[start + 2 : end - 1]
+            if not param_word_re.search(inner):
+                continue
             found_mention = True
-            if escaped_re.match(tmpl, m.start()):
+            escape_fn, _wrapped = scan._classify_expr(inner)
+            if escape_fn is not None:
                 continue
             return "sink-unescaped"
     return "sink-escaped" if found_mention else "no-sink-found"
