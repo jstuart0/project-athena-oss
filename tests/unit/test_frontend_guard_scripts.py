@@ -902,3 +902,45 @@ def test_hardening_tag_before_is_silent(tmp_path):
     defs = uniqueness.find_definitions(frontend_copy)
     flagged = [d for d in defs if d["name"] == "escapeHtml" and "state.js" in d["file"]]
     assert flagged, "check-escape-html-uniqueness.py must flag the declaration-drift file even though it never throws"
+
+
+# ---------------------------------------------------------------------------
+# D5 / rule 5 (Phase 7) — buster_exit_two_is_not_a_pass: the cache-buster
+# script's could-not-run exit code (2) is intact and distinct from 0/1.
+# ---------------------------------------------------------------------------
+
+
+def test_buster_exit_two_is_not_a_pass():
+    """A --base ref that cannot be resolved is a could-not-run condition,
+    not a clean pass and not a findings-failure -- exit 2, per the same
+    three-valued contract as every other guard script in this campaign
+    (rule 5). Demonstrates the buster script's exit 2 path is reachable and
+    distinct from both 0 (clean) and 1 (findings).
+    """
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR / "check-frontend-cache-busters.py"),
+            "--base",
+            "this-ref-definitely-does-not-exist-anywhere",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 2, (
+        f"an unresolvable --base ref must be exit 2 (could not run), got {proc.returncode}: "
+        f"{proc.stdout}{proc.stderr}"
+    )
+
+    # Sanity: a real, resolvable base against the actual repo passes cleanly (0).
+    proc_ok = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "check-frontend-cache-busters.py"), "--base", "main"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(REPO_ROOT),
+    )
+    assert proc_ok.returncode in (0, 1), (
+        f"a resolvable base must return 0 or 1, never 2: got {proc_ok.returncode}: {proc_ok.stdout}{proc_ok.stderr}"
+    )
