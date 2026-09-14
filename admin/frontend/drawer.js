@@ -306,17 +306,6 @@
     function getElement() {
         return currentDrawer?.element || null;
     }
-
-    /**
-     * Escape HTML to prevent XSS.
-     */
-    function escapeHtml(str) {
-        if (!str) return '';
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
-    }
-
     // Export to Athena namespace
     Athena.components.Drawer = {
         open,
