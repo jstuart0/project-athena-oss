@@ -1,0 +1,8 @@
+-r requirements.in
+
+# Test runner — pinned so ATHENA-60's baseline pass/fail count cannot move
+# without a source change (X2). Constrained by requirements.txt at compile
+# time (-c), so no test dependency can pull a version of anything the
+# production lock already pins.
+pytest==9.1.1
+pytest-asyncio==1.4.0

@@ -93,7 +93,19 @@ compile_pair() {
 }
 
 discover_ins() {
+    # Every "requirements.in" MUST be emitted before any "requirements-test.in"
+    # in the same directory: compile_all compiles the test spec with
+    # `-c requirements.txt` (Phase 4, X2), so the production lock has to be
+    # freshly recompiled in this same invocation before the constrained
+    # compile runs. A single lexical `sort` over both filenames gets this
+    # backwards — ASCII '-' (0x2D) sorts before '.' (0x2E), so
+    # "requirements-test.in" < "requirements.in" — which would constrain the
+    # test lock against a STALE production lock whenever both specs change in
+    # the same edit. Emitted as two separately-sorted passes instead.
     find . -name "requirements.in" \
+        -not -path "./node_modules/*" -not -path "./.git/*" -not -path "./.mozart/*" \
+        | sed 's|^\./||' | sort
+    find . -name "requirements-test.in" \
         -not -path "./node_modules/*" -not -path "./.git/*" -not -path "./.mozart/*" \
         | sed 's|^\./||' | sort
 }
