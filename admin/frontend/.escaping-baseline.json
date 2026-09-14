@@ -4,8 +4,8 @@
     "note": "Every count here is measured against the actual tree, not copied from the plan."
   },
   "callee_sinks": {
-    "sink-escaped": 134,
-    "sink-unescaped": 5,
+    "sink-escaped": 139,
+    "sink-unescaped": 0,
     "unresolved": 0
   },
   "data_bearing_plain_attribute": {
@@ -55,7 +55,7 @@
       "admin/frontend/voice-config.js",
       "admin/frontend/voice-pipelines.js"
     ],
-    "total": 350
+    "total": 349
   },
   "definitions": [
     {
@@ -327,7 +327,7 @@
     "builder_set": [
       "admin/frontend/oss-profiles.js:99 actionButton"
     ],
-    "correct_total": 4,
+    "correct_total": 62,
     "handrolled_escape_sites": [
       {
         "file": "admin/frontend/app.js",
@@ -343,10 +343,6 @@
       },
       {
         "file": "admin/frontend/escalation.js",
-        "line": 330
-      },
-      {
-        "file": "admin/frontend/escalation.js",
         "line": 335
       },
       {
@@ -355,9 +351,9 @@
       }
     ],
     "unescaped_quoted_builder": 14,
-    "unescaped_quoted_total": 83,
-    "wrong_primitive_builder": 6,
-    "wrong_primitive_total": 52
+    "unescaped_quoted_total": 77,
+    "wrong_primitive_builder": 0,
+    "wrong_primitive_total": 0
   },
   "innerhtml_assignments": {
     "files": [
@@ -462,7 +458,7 @@
     ]
   },
   "wiring": {
-    "busterless_count": 33,
+    "busterless_count": 20,
     "busterless_tags": [
       "crud-extensions.js",
       "conversation.js",
@@ -470,7 +466,6 @@
       "analytics.js",
       "features.js",
       "tool-calling.js",
-      "escalation.js",
       "debug-logs.js",
       "base-knowledge.js",
       "guest-mode.js",
@@ -478,25 +473,13 @@
       "llm-components.js",
       "model-config.js",
       "model-downloads.js",
-      "service-bypass.js",
-      "service-control.js",
       "gateway-settings.js",
-      "room-groups.js",
-      "calendar-sources.js",
       "memory-management.js",
-      "directions-settings.js",
       "emerging-intents.js",
-      "music-config.js",
-      "room-audio.js",
-      "room-tv.js",
-      "follow-me.js",
       "admin-jarvis.js",
       "site-scraper.js",
       "system-config.js",
-      "oss-profiles.js",
-      "presets.js",
-      "voice-automations.js",
-      "conversations.js"
+      "presets.js"
     ],
     "dangling": [
       "mode-audit.js",
