@@ -93,7 +93,7 @@ function tooltipBadge(text) {
               title="${escapeHtml(text)}">?</span>
     `;
 }
-
+// `onClick` is JS source, not a string value: escape data INTO it at the call site, never the parameter itself.
 function actionButton(label, className, onClick, tooltip) {
     return `
         <button onclick="${onClick}" class="${className}" title="${escapeHtml(tooltip)}">
@@ -370,8 +370,8 @@ function renderOSSEffectiveConfig(effective) {
                                     </div>
                                     ${canEdit ? `
                                         <div class="flex gap-2">
-                                            ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('ModelConfiguration', '${escapeHtml(model.identifier)}')`, 'Restores all profile-managed settings for this model configuration row.')}
-                                            ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('ModelConfiguration', '${escapeHtml(model.identifier)}')`, 'Stops the active profile from managing this model configuration row.')}
+                                            ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('ModelConfiguration', '${escapeJsAttr(model.identifier)}')`, 'Restores all profile-managed settings for this model configuration row.')}
+                                            ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('ModelConfiguration', '${escapeJsAttr(model.identifier)}')`, 'Stops the active profile from managing this model configuration row.')}
                                         </div>
                                     ` : ''}
                                 </div>
@@ -416,8 +416,8 @@ function renderOSSEffectiveConfig(effective) {
                                     <div class="text-xs text-gray-500">${escapeHtml(row.model_name.source)}</div>
                                     ${canEdit ? `
                                         <div class="mt-2 flex gap-2">
-                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'model_name')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed model assignment for this component.">reset</button>
-                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'model_name')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this field so manual model changes are preserved.">detach</button>
+                                            <button onclick="resetOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'model_name')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed model assignment for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'model_name')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this field so manual model changes are preserved.">detach</button>
                                         </div>
                                     ` : ''}
                                 </td>
@@ -426,8 +426,8 @@ function renderOSSEffectiveConfig(effective) {
                                     <div class="text-xs text-gray-500">${escapeHtml(row.backend_type.source)}</div>
                                     ${canEdit ? `
                                         <div class="mt-2 flex gap-2">
-                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'backend_type')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed backend selection for this component.">reset</button>
-                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'backend_type')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this backend field.">detach</button>
+                                            <button onclick="resetOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'backend_type')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed backend selection for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'backend_type')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this backend field.">detach</button>
                                         </div>
                                     ` : ''}
                                 </td>
@@ -436,8 +436,8 @@ function renderOSSEffectiveConfig(effective) {
                                     <div class="text-xs text-gray-500">${escapeHtml(row.max_tokens.source)}</div>
                                     ${canEdit ? `
                                         <div class="mt-2 flex gap-2">
-                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'max_tokens')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed max token setting for this component.">reset</button>
-                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'max_tokens')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this max token field.">detach</button>
+                                            <button onclick="resetOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'max_tokens')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed max token setting for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'max_tokens')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this max token field.">detach</button>
                                         </div>
                                     ` : ''}
                                 </td>
@@ -446,8 +446,8 @@ function renderOSSEffectiveConfig(effective) {
                                     <div class="text-xs text-gray-500">${escapeHtml(row.temperature.source)}</div>
                                     ${canEdit ? `
                                         <div class="mt-2 flex gap-2">
-                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'temperature')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed temperature for this component.">reset</button>
-                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'temperature')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this temperature field.">detach</button>
+                                            <button onclick="resetOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'temperature')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed temperature for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'temperature')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this temperature field.">detach</button>
                                         </div>
                                     ` : ''}
                                 </td>
@@ -456,8 +456,8 @@ function renderOSSEffectiveConfig(effective) {
                                     <div class="text-xs text-gray-500">${escapeHtml(row.timeout_seconds.source)}</div>
                                     ${canEdit ? `
                                         <div class="mt-2 flex gap-2">
-                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'timeout_seconds')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed timeout for this component.">reset</button>
-                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'timeout_seconds')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this timeout field.">detach</button>
+                                            <button onclick="resetOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'timeout_seconds')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed timeout for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'timeout_seconds')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this timeout field.">detach</button>
                                         </div>
                                     ` : ''}
                                 </td>
@@ -468,8 +468,8 @@ function renderOSSEffectiveConfig(effective) {
                                 <td>
                                     ${canEdit ? `
                                         <div class="flex flex-col gap-2 min-w-[120px]">
-                                            ${actionButton('Reset Record', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}')`, 'Restores all profile-managed fields for this row.')}
-                                            ${actionButton('Detach Record', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}')`, 'Stops the active profile from managing every field in this row.')}
+                                            ${actionButton('Reset Record', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}')`, 'Restores all profile-managed fields for this row.')}
+                                            ${actionButton('Detach Record', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}')`, 'Stops the active profile from managing every field in this row.')}
                                         </div>
                                     ` : '<span class="text-xs text-gray-500">View only</span>'}
                                 </td>
