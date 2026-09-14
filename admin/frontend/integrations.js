@@ -520,17 +520,6 @@
         if (diffMins < 1440) return `${Math.floor(diffMins / 60)}h ago`;
         return `${Math.floor(diffMins / 1440)}d ago`;
     }
-
-    /**
-     * Escape HTML.
-     */
-    function escapeHtml(str) {
-        if (!str) return '';
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
-    }
-
     // Register page controller
     Athena.pages.Integrations = {
         init,
