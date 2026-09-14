@@ -228,9 +228,9 @@ function renderIntentRow(intent) {
                        class="rounded bg-gray-700 border-gray-600 text-purple-500 focus:ring-purple-500">
             </td>
             <td class="px-4 py-3">
-                <div class="font-medium text-white">${intent.display_name || intent.canonical_name}</div>
-                <div class="text-xs text-gray-500 font-mono">${intent.canonical_name}</div>
-                <div class="text-xs text-gray-400 mt-1">${intent.description || ''}</div>
+                <div class="font-medium text-white">${escapeHtml(intent.display_name || intent.canonical_name)}</div>
+                <div class="text-xs text-gray-500 font-mono">${escapeHtml(intent.canonical_name)}</div>
+                <div class="text-xs text-gray-400 mt-1">${escapeHtml(intent.description || '')}</div>
                 ${intent.sample_queries && intent.sample_queries.length > 0 ? `
                     <details class="mt-2">
                         <summary class="text-xs text-purple-400 cursor-pointer">Sample queries (${intent.sample_queries.length})</summary>
@@ -350,7 +350,7 @@ function showPromoteModal(intentId) {
             <div class="bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4 border border-gray-700">
                 <h3 class="text-lg font-semibold text-white mb-4">Promote Intent</h3>
                 <p class="text-gray-400 mb-4">
-                    Promoting <strong class="text-white">${intent.display_name}</strong> will mark it as a known intent category.
+                    Promoting <strong class="text-white">${escapeHtml(intent.display_name)}</strong> will mark it as a known intent category.
                 </p>
                 <div class="mb-4">
                     <label for="promote-target" class="block text-sm text-gray-400 mb-2">Target Intent Category:</label>
@@ -443,7 +443,7 @@ function showRejectModal(intentId) {
             <div class="bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4 border border-gray-700">
                 <h3 class="text-lg font-semibold text-white mb-4">Reject Intent</h3>
                 <p class="text-gray-400 mb-4">
-                    Rejecting <strong class="text-white">${intent.display_name}</strong> marks it as "won't implement".
+                    Rejecting <strong class="text-white">${escapeHtml(intent.display_name)}</strong> marks it as "won't implement".
                 </p>
                 <div class="mb-4">
                     <label for="reject-reason" class="block text-sm text-gray-400 mb-2">Rejection Reason:</label>
@@ -549,7 +549,7 @@ async function mergeSelectedIntents() {
                     <label for="merge-target" class="block text-sm text-gray-400 mb-2">Target Intent (others will merge into this):</label>
                     <select id="merge-target" class="w-full bg-gray-700 text-white rounded px-3 py-2 border border-gray-600">
                         ${selectedItems.map(i => `
-                            <option value="${i.id}">${i.display_name} (${i.occurrence_count} occurrences)</option>
+                            <option value="${i.id}">${escapeHtml(i.display_name)} (${i.occurrence_count} occurrences)</option>
                         `).join('')}
                     </select>
                 </div>

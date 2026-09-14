@@ -548,13 +548,40 @@ def test_callee_sink_param_outside_wrap_in_same_interpolation_is_unescaped(tmp_p
 # ---------------------------------------------------------------------------
 
 
-def test_detached_sink_found_by_position_not_sink_name():
-    items = html_template.collect(FRONTEND_DIR, FRONTEND_DIR / "emerging-intents.js")
-    lines = {i["line"] for i in items if i["bucket"] == "text-node" and not i["escaped"]}
-    assert 231 in lines, (
-        "emerging-intents.js:231 must be found by TEMPLATE POSITION even though its "
-        "sink (container.innerHTML at :82) is three functions away from the interpolation"
+def test_detached_sink_found_by_position_not_sink_name(tmp_path):
+    """Phase 4 (D10/BLOCKER 5) wraps :231 in escapeHtml, closing the live
+    XSS. The capability this fixture proves -- position-based detection
+    despite a sink three functions away -- is demonstrated by mutation:
+    revert the wrap on a temp copy and confirm it is still caught, then
+    confirm the real (fixed) file is no longer flagged (rule 6).
+    """
+    original = (FRONTEND_DIR / "emerging-intents.js").read_text(encoding="utf-8")
+    fixed_line = (
+        '<div class="font-medium text-white">'
+        "${escapeHtml(intent.display_name || intent.canonical_name)}</div>"
     )
+    raw_line = (
+        '<div class="font-medium text-white">'
+        "${intent.display_name || intent.canonical_name}</div>"
+    )
+    assert fixed_line in original, "mutation target string not found -- fixture is stale"
+    mutated = original.replace(fixed_line, raw_line)
+    assert mutated != original
+
+    mutant = tmp_path / "emerging-intents.js"
+    mutant.write_text(mutated, encoding="utf-8")
+
+    mutant_items = html_template.collect(FRONTEND_DIR, mutant)
+    mutant_lines = {i["line"] for i in mutant_items if i["bucket"] == "text-node" and not i["escaped"]}
+    assert 231 in mutant_lines, (
+        "reverting the escapeHtml wrap at :231 must still be found by TEMPLATE POSITION "
+        "even though its sink (container.innerHTML at :82) is three functions away "
+        "from the interpolation"
+    )
+
+    real_items = html_template.collect(FRONTEND_DIR, FRONTEND_DIR / "emerging-intents.js")
+    real_lines = {i["line"] for i in real_items if i["bucket"] == "text-node" and not i["escaped"]}
+    assert 231 not in real_lines, "the real file is fixed -- :231 must no longer be flagged"
 
 
 # ---------------------------------------------------------------------------

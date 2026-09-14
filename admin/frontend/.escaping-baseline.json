@@ -321,7 +321,7 @@
       "name": "escapeHtml"
     }
   ],
-  "emerging_intents_raw_text_node_sites": 24,
+  "emerging_intents_raw_text_node_sites": 19,
   "handler_escaping": {
     "bare_expression_total": 169,
     "builder_set": [
@@ -458,7 +458,7 @@
     ]
   },
   "wiring": {
-    "busterless_count": 20,
+    "busterless_count": 19,
     "busterless_tags": [
       "crud-extensions.js",
       "conversation.js",
@@ -475,7 +475,6 @@
       "model-downloads.js",
       "gateway-settings.js",
       "memory-management.js",
-      "emerging-intents.js",
       "admin-jarvis.js",
       "site-scraper.js",
       "system-config.js",
