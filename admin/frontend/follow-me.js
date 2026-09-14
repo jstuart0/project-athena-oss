@@ -346,9 +346,9 @@ function renderFollowMeUI() {
                                             </span>
                                         </td>
                                         <td class="py-3 px-4 text-right">
-                                            <button onclick="showEditRoomSensorModal('${escapeHtml(sensor.room_name)}', '${escapeHtml(sensor.motion_entity_id)}', ${sensor.enabled}, ${sensor.priority})"
+                                            <button onclick="showEditRoomSensorModal('${escapeJsAttr(sensor.room_name)}', '${escapeJsAttr(sensor.motion_entity_id)}', ${sensor.enabled}, ${sensor.priority})"
                                                 class="text-blue-400 hover:text-blue-300 mr-3">Edit</button>
-                                            <button onclick="deleteRoomSensor('${escapeHtml(sensor.room_name)}')"
+                                            <button onclick="deleteRoomSensor('${escapeJsAttr(sensor.room_name)}')"
                                                 class="text-red-400 hover:text-red-300">Delete</button>
                                         </td>
                                     </tr>
@@ -382,7 +382,7 @@ function renderFollowMeUI() {
                             <div class="flex items-center gap-2 px-3 py-2 bg-gray-800 rounded-lg">
                                 <span class="text-white">${escapeHtml(room.room_name)}</span>
                                 ${room.reason ? `<span class="text-xs text-gray-500">(${escapeHtml(room.reason)})</span>` : ''}
-                                <button onclick="removeExcludedRoom('${escapeHtml(room.room_name)}')"
+                                <button onclick="removeExcludedRoom('${escapeJsAttr(room.room_name)}')"
                                     class="text-gray-400 hover:text-red-400 ml-1">×</button>
                             </div>
                         `).join('')}
@@ -587,17 +587,6 @@ function submitExcludedRoom() {
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
-
-/**
- * Escape HTML to prevent XSS
- */
-function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 /**
  * Show loading state in container
  */

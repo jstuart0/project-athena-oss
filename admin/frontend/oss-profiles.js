@@ -93,7 +93,7 @@ function tooltipBadge(text) {
               title="${escapeHtml(text)}">?</span>
     `;
 }
-
+// `onClick` is JS source, not a string value: escape data INTO it at the call site, never the parameter itself.
 function actionButton(label, className, onClick, tooltip) {
     return `
         <button onclick="${onClick}" class="${className}" title="${escapeHtml(tooltip)}">
@@ -161,7 +161,7 @@ function renderOSSProfileActions(status) {
                 </div>
                 <div class="flex flex-wrap gap-3">
                     ${actionButton('Refresh', 'px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', 'initOSSProfilesPage()', 'Reloads diagnostics and effective config from the live admin API.')}
-                    ${actionButton('Preview', 'px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `previewOSSProfile('${recommended}', 'fill_missing_only')`, 'Shows what Athena would change before you apply the recommended profile.')}
+                    ${actionButton('Preview', 'px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `previewOSSProfile('${escapeJsAttr(recommended)}', 'fill_missing_only')`, 'Shows what Athena would change before you apply the recommended profile.')}
                     ${actionButton('Export Effective Config', 'px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', 'downloadOSSEffectiveConfig()', 'Downloads the resolved runtime config with provenance so you can review or share it.')}
                 </div>
             </div>
@@ -174,17 +174,17 @@ function renderOSSProfileActions(status) {
                 <div class="border border-dark-border rounded-lg p-4">
                     <div class="font-medium text-white mb-2 flex items-center gap-2">Fill Missing Only ${tooltipBadge('Safest mode. Only creates missing rows or fills blank values. Existing operator-set values stay untouched.')}</div>
                     <p class="text-sm text-gray-400 mb-4">Safe first-run action. Creates missing rows and fills blank fields without overriding operator-owned values.</p>
-                    ${canEdit ? actionButton('Apply Recommended Defaults', 'w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${recommended}', 'fill_missing_only')`, 'Applies the recommended profile only where values are currently missing.') : ''}
+                    ${canEdit ? actionButton('Apply Recommended Defaults', 'w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${escapeJsAttr(recommended)}', 'fill_missing_only')`, 'Applies the recommended profile only where values are currently missing.') : ''}
                 </div>
                 <div class="border border-dark-border rounded-lg p-4">
                     <div class="font-medium text-white mb-2 flex items-center gap-2">Reconcile Profile ${tooltipBadge('Updates only fields still managed by the profile. Detached fields remain under operator control.')}</div>
                     <p class="text-sm text-gray-400 mb-4">Updates fields still owned by the active profile and leaves detached user-managed fields alone.</p>
-                    ${canEdit ? actionButton('Reconcile Managed Fields', 'w-full px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${recommended}', 'reconcile_profile')`, 'Refreshes only profile-owned fields to match the selected profile.') : ''}
+                    ${canEdit ? actionButton('Reconcile Managed Fields', 'w-full px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${escapeJsAttr(recommended)}', 'reconcile_profile')`, 'Refreshes only profile-owned fields to match the selected profile.') : ''}
                 </div>
                 <div class="border border-dark-border rounded-lg p-4">
                     <div class="font-medium text-white mb-2 flex items-center gap-2">Overwrite Profile Scope ${tooltipBadge('Most aggressive mode. Reapplies the profile across all managed records, even if they were previously customized.')}</div>
                     <p class="text-sm text-gray-400 mb-4">Force the selected profile back onto every managed backend, model config, assignment, and gateway field.</p>
-                    ${canEdit ? actionButton('Overwrite Managed Scope', 'w-full px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${recommended}', 'overwrite_all')`, 'Forces the selected profile back onto all managed settings in its scope.') : ''}
+                    ${canEdit ? actionButton('Overwrite Managed Scope', 'w-full px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${escapeJsAttr(recommended)}', 'overwrite_all')`, 'Forces the selected profile back onto all managed settings in its scope.') : ''}
                 </div>
             </div>
         </div>
@@ -257,9 +257,9 @@ function renderOSSProfileInventory(status) {
                             </div>
                             <div class="text-xs text-gray-500 mb-3" title="Healthy means the planner can satisfy the profile cleanly. Fallback means it can serve, but not with the preferred model/backend mix.">Plan status: ${escapeHtml(profile.plan?.aggregated_status || 'unknown')}</div>
                             <div class="flex flex-wrap gap-2">
-                                ${actionButton('Preview', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `previewOSSProfile('${profile.name}', 'fill_missing_only')`, 'Shows the component assignment plan and reload impact for this profile.')}
-                                ${canEdit ? actionButton('Initialize', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${profile.name}', 'fill_missing_only')`, 'Seeds this profile without overwriting existing operator-owned values.') : ''}
-                                ${canEdit ? actionButton('Reconcile', 'px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${profile.name}', 'reconcile_profile')`, 'Updates only fields still managed by this profile.') : ''}
+                                ${actionButton('Preview', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `previewOSSProfile('${escapeJsAttr(profile.name)}', 'fill_missing_only')`, 'Shows the component assignment plan and reload impact for this profile.')}
+                                ${canEdit ? actionButton('Initialize', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${escapeJsAttr(profile.name)}', 'fill_missing_only')`, 'Seeds this profile without overwriting existing operator-owned values.') : ''}
+                                ${canEdit ? actionButton('Reconcile', 'px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium', `applyOSSProfile('${escapeJsAttr(profile.name)}', 'reconcile_profile')`, 'Updates only fields still managed by this profile.') : ''}
                             </div>
                         </div>
                     `).join('')}
@@ -298,7 +298,7 @@ function renderOSSProfileInventory(status) {
                                             <div class="flex items-center gap-2">
                                                 ${statusPill(model.status, tone)}
                                                 ${canEdit && backend.supports_install_action && model.installability_state === 'installable' ? `
-                                                    ${actionButton('Install', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `installOSSModel('${model.name}')`, 'Pulls this model onto the backend so the planner can assign it directly.')}
+                                                    ${actionButton('Install', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `installOSSModel('${escapeJsAttr(model.name)}')`, 'Pulls this model onto the backend so the planner can assign it directly.')}
                                                 ` : ''}
                                             </div>
                                         </div>
@@ -370,8 +370,8 @@ function renderOSSEffectiveConfig(effective) {
                                     </div>
                                     ${canEdit ? `
                                         <div class="flex gap-2">
-                                            ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('ModelConfiguration', '${escapeHtml(model.identifier)}')`, 'Restores all profile-managed settings for this model configuration row.')}
-                                            ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('ModelConfiguration', '${escapeHtml(model.identifier)}')`, 'Stops the active profile from managing this model configuration row.')}
+                                            ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('ModelConfiguration', '${escapeJsAttr(model.identifier)}')`, 'Restores all profile-managed settings for this model configuration row.')}
+                                            ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('ModelConfiguration', '${escapeJsAttr(model.identifier)}')`, 'Stops the active profile from managing this model configuration row.')}
                                         </div>
                                     ` : ''}
                                 </div>
@@ -416,8 +416,8 @@ function renderOSSEffectiveConfig(effective) {
                                     <div class="text-xs text-gray-500">${escapeHtml(row.model_name.source)}</div>
                                     ${canEdit ? `
                                         <div class="mt-2 flex gap-2">
-                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'model_name')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed model assignment for this component.">reset</button>
-                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'model_name')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this field so manual model changes are preserved.">detach</button>
+                                            <button onclick="resetOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'model_name')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed model assignment for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'model_name')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this field so manual model changes are preserved.">detach</button>
                                         </div>
                                     ` : ''}
                                 </td>
@@ -426,8 +426,8 @@ function renderOSSEffectiveConfig(effective) {
                                     <div class="text-xs text-gray-500">${escapeHtml(row.backend_type.source)}</div>
                                     ${canEdit ? `
                                         <div class="mt-2 flex gap-2">
-                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'backend_type')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed backend selection for this component.">reset</button>
-                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'backend_type')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this backend field.">detach</button>
+                                            <button onclick="resetOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'backend_type')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed backend selection for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'backend_type')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this backend field.">detach</button>
                                         </div>
                                     ` : ''}
                                 </td>
@@ -436,8 +436,8 @@ function renderOSSEffectiveConfig(effective) {
                                     <div class="text-xs text-gray-500">${escapeHtml(row.max_tokens.source)}</div>
                                     ${canEdit ? `
                                         <div class="mt-2 flex gap-2">
-                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'max_tokens')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed max token setting for this component.">reset</button>
-                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'max_tokens')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this max token field.">detach</button>
+                                            <button onclick="resetOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'max_tokens')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed max token setting for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'max_tokens')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this max token field.">detach</button>
                                         </div>
                                     ` : ''}
                                 </td>
@@ -446,8 +446,8 @@ function renderOSSEffectiveConfig(effective) {
                                     <div class="text-xs text-gray-500">${escapeHtml(row.temperature.source)}</div>
                                     ${canEdit ? `
                                         <div class="mt-2 flex gap-2">
-                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'temperature')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed temperature for this component.">reset</button>
-                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'temperature')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this temperature field.">detach</button>
+                                            <button onclick="resetOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'temperature')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed temperature for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'temperature')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this temperature field.">detach</button>
                                         </div>
                                     ` : ''}
                                 </td>
@@ -456,8 +456,8 @@ function renderOSSEffectiveConfig(effective) {
                                     <div class="text-xs text-gray-500">${escapeHtml(row.timeout_seconds.source)}</div>
                                     ${canEdit ? `
                                         <div class="mt-2 flex gap-2">
-                                            <button onclick="resetOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'timeout_seconds')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed timeout for this component.">reset</button>
-                                            <button onclick="detachOSSField('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}', 'timeout_seconds')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this timeout field.">detach</button>
+                                            <button onclick="resetOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'timeout_seconds')" class="text-xs text-blue-300 hover:text-blue-200" title="Restore the profile-managed timeout for this component.">reset</button>
+                                            <button onclick="detachOSSField('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}', 'timeout_seconds')" class="text-xs text-gray-400 hover:text-gray-200" title="Stop the profile from managing this timeout field.">detach</button>
                                         </div>
                                     ` : ''}
                                 </td>
@@ -468,8 +468,8 @@ function renderOSSEffectiveConfig(effective) {
                                 <td>
                                     ${canEdit ? `
                                         <div class="flex flex-col gap-2 min-w-[120px]">
-                                            ${actionButton('Reset Record', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}')`, 'Restores all profile-managed fields for this row.')}
-                                            ${actionButton('Detach Record', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('${escapeHtml(row.record_type)}', '${escapeHtml(row.identifier)}')`, 'Stops the active profile from managing every field in this row.')}
+                                            ${actionButton('Reset Record', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSRecord('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}')`, 'Restores all profile-managed fields for this row.')}
+                                            ${actionButton('Detach Record', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSRecord('${escapeJsAttr(row.record_type)}', '${escapeJsAttr(row.identifier)}')`, 'Stops the active profile from managing every field in this row.')}
                                         </div>
                                     ` : '<span class="text-xs text-gray-500">View only</span>'}
                                 </td>
@@ -494,8 +494,8 @@ function renderGatewayField(label, field, recordType, identifier, fieldName) {
                 </div>
                 ${canEdit ? `
                     <div class="flex gap-2">
-                        ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSField('${recordType}', '${identifier}', '${fieldName}')`, 'Restore the profile-managed value for this gateway field.')}
-                        ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSField('${recordType}', '${identifier}', '${fieldName}')`, 'Stop the profile from managing this gateway field.')}
+                        ${actionButton('Reset', 'px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium', `resetOSSField('${escapeJsAttr(recordType)}', '${escapeJsAttr(identifier)}', '${escapeJsAttr(fieldName)}')`, 'Restore the profile-managed value for this gateway field.')}
+                        ${actionButton('Detach', 'px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium', `detachOSSField('${escapeJsAttr(recordType)}', '${escapeJsAttr(identifier)}', '${escapeJsAttr(fieldName)}')`, 'Stop the profile from managing this gateway field.')}
                     </div>
                 ` : ''}
             </div>

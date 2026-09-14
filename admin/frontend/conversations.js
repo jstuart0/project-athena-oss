@@ -254,7 +254,7 @@ function renderConversationRow(conv) {
 
     return `
         <div class="bg-dark-card border border-dark-border hover:border-blue-600 rounded-lg p-4 cursor-pointer transition-colors"
-             onclick="showConversationDetail('${escapeHtml(conv.id)}')">
+             onclick="showConversationDetail('${escapeJsAttr(conv.id)}')">
             <div class="flex items-start justify-between">
                 <div class="flex-1 min-w-0">
                     <div class="flex items-center gap-2 text-xs text-gray-400 mb-2 flex-wrap">
@@ -422,7 +422,7 @@ function renderTurnCard(turn) {
             <div class="flex items-center gap-2 flex-wrap">
                 <span class="text-xs text-gray-400 mr-1">Rate:</span>
                 ${[1,2,3,4,5].map(r => `
-                    <button onclick="setRating('${turn.id}', ${r})"
+                    <button onclick="setRating('${escapeJsAttr(turn.id)}', ${r})"
                         id="rating-${turn.id}-${r}"
                         class="px-2 py-1 rounded text-sm transition-colors ${existingEval?.rating === r ? 'bg-yellow-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}"
                         data-turn="${turn.id}" data-rating="${r}">
@@ -433,7 +433,7 @@ function renderTurnCard(turn) {
                     placeholder="Notes (optional)"
                     value="${escapeHtml(existingEval?.notes || '')}"
                     class="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-white placeholder-gray-500 flex-1 min-w-0">
-                <button onclick="submitEvaluation('${turn.id}')"
+                <button onclick="submitEvaluation('${escapeJsAttr(turn.id)}')"
                     class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium">
                     Save
                 </button>
@@ -541,12 +541,3 @@ function getAuthHeaders() {
     return token ? { 'Authorization': `Bearer ${token}` } : {};
 }
 
-function escapeHtml(str) {
-    if (str === null || str === undefined) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}

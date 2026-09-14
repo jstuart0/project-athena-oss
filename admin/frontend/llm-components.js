@@ -325,7 +325,7 @@ function renderComponentRow(component) {
                 <div class="flex items-center gap-2">
                     <select
                         id="model-select-${component.component_name}"
-                        onchange="updateComponentModel('${component.component_name}', this.value)"
+                        onchange="updateComponentModel('${escapeJsAttr(component.component_name)}', this.value)"
                         class="bg-gray-700 border border-gray-600 rounded px-3 py-1 text-sm text-white flex-1 max-w-xs">
                         ${currentModelOption}
                         ${modelOptions}
@@ -341,13 +341,13 @@ function renderComponentRow(component) {
                     min="0"
                     max="2"
                     value="${component.temperature || 0.7}"
-                    onchange="updateComponentTemperature('${component.component_name}', this.value)"
+                    onchange="updateComponentTemperature('${escapeJsAttr(component.component_name)}', this.value)"
                     class="bg-gray-700 border border-gray-600 rounded px-3 py-1 text-sm text-white w-20">
             </td>
             <td class="px-4 py-3">${statusBadge}</td>
             <td class="px-4 py-3">
                 <button
-                    onclick="toggleComponent('${component.component_name}')"
+                    onclick="toggleComponent('${escapeJsAttr(component.component_name)}')"
                     class="text-sm ${component.enabled ? 'text-yellow-400 hover:text-yellow-300' : 'text-green-400 hover:text-green-300'}">
                     ${component.enabled ? 'Disable' : 'Enable'}
                 </button>

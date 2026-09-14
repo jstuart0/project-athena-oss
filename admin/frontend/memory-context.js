@@ -132,8 +132,8 @@
             console.error(`[MemoryContext] Failed to load ${tab}:`, error);
             container.innerHTML = `
                 <div class="text-center py-8">
-                    <p class="text-red-400">Failed to load ${tab} data</p>
-                    <button onclick="Athena.pages.MemoryContext.loadTab('${tab}')"
+                    <p class="text-red-400">Failed to load ${escapeHtml(tab)} data</p>
+                    <button onclick="Athena.pages.MemoryContext.loadTab('${escapeJsAttr(tab)}')"
                             class="mt-2 text-blue-400 hover:text-blue-300 text-sm">
                         Retry
                     </button>
@@ -789,16 +789,6 @@
         } catch {
             return 'Unknown';
         }
-    }
-
-    /**
-     * Escape HTML.
-     */
-    function escapeHtml(str) {
-        if (!str) return '';
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
     }
 
     // Register page controller

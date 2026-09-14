@@ -1,0 +1,199 @@
+{
+  "_meta": {
+    "measured_by": "scripts/measure-frontend-escaping-baseline.py",
+    "note": "Every count here is measured against the actual tree, not copied from the plan."
+  },
+  "callee_sinks": {
+    "sink-escaped": 139,
+    "sink-unescaped": 0,
+    "unresolved": 0
+  },
+  "data_bearing_plain_attribute": {
+    "files": [
+      "admin/frontend/activity-sidebar.js",
+      "admin/frontend/admin-jarvis.js",
+      "admin/frontend/alerts.js",
+      "admin/frontend/app.js",
+      "admin/frontend/athena.js",
+      "admin/frontend/calendar-sources.js",
+      "admin/frontend/cloud-providers.js",
+      "admin/frontend/command-palette.js",
+      "admin/frontend/conversation.js",
+      "admin/frontend/conversations.js",
+      "admin/frontend/crud-extensions.js",
+      "admin/frontend/debug-logs.js",
+      "admin/frontend/directions-settings.js",
+      "admin/frontend/drawer.js",
+      "admin/frontend/emerging-intents.js",
+      "admin/frontend/escalation.js",
+      "admin/frontend/features.js",
+      "admin/frontend/follow-me.js",
+      "admin/frontend/gateway-settings.js",
+      "admin/frontend/guest-mode.js",
+      "admin/frontend/icons.js",
+      "admin/frontend/integrations.js",
+      "admin/frontend/llm-components.js",
+      "admin/frontend/mission-control.js",
+      "admin/frontend/model-config.js",
+      "admin/frontend/model-downloads.js",
+      "admin/frontend/music-config.js",
+      "admin/frontend/oss-profiles.js",
+      "admin/frontend/presets.js",
+      "admin/frontend/room-audio.js",
+      "admin/frontend/room-groups.js",
+      "admin/frontend/room-tv.js",
+      "admin/frontend/routing.js",
+      "admin/frontend/service-bypass.js",
+      "admin/frontend/service-control.js",
+      "admin/frontend/site-scraper.js",
+      "admin/frontend/skeleton.js",
+      "admin/frontend/sms.js",
+      "admin/frontend/system-config.js",
+      "admin/frontend/toast.js",
+      "admin/frontend/tool-calling.js",
+      "admin/frontend/user-api-keys.js",
+      "admin/frontend/voice-config.js",
+      "admin/frontend/voice-pipelines.js"
+    ],
+    "total": 344
+  },
+  "definitions": [
+    {
+      "file": "admin/frontend/escape-html.js",
+      "form": "function-declaration",
+      "line": 63,
+      "name": "escapeHtml"
+    },
+    {
+      "file": "admin/frontend/escape-html.js",
+      "form": "function-declaration",
+      "line": 73,
+      "name": "escapeJsAttr"
+    }
+  ],
+  "definitions_dom_roundtrip_any_name": [],
+  "definitions_entity_map_any_name": [],
+  "emerging_intents_raw_text_node_sites": 19,
+  "handler_escaping": {
+    "bare_expression_total": 169,
+    "builder_set": [
+      "admin/frontend/oss-profiles.js:99 actionButton"
+    ],
+    "correct_total": 139,
+    "handrolled_escape_sites": [],
+    "unescaped_quoted_builder": 0,
+    "unescaped_quoted_total": 0,
+    "wrong_primitive_builder": 0,
+    "wrong_primitive_total": 0
+  },
+  "innerhtml_assignments": {
+    "files": [
+      "admin/frontend/activity-sidebar.js",
+      "admin/frontend/admin-jarvis.js",
+      "admin/frontend/alerts.js",
+      "admin/frontend/analytics.js",
+      "admin/frontend/app.js",
+      "admin/frontend/auth.js",
+      "admin/frontend/base-knowledge.js",
+      "admin/frontend/calendar-sources.js",
+      "admin/frontend/cloud-providers.js",
+      "admin/frontend/command-palette.js",
+      "admin/frontend/conversation.js",
+      "admin/frontend/conversations.js",
+      "admin/frontend/crud-extensions.js",
+      "admin/frontend/debug-logs.js",
+      "admin/frontend/directions-settings.js",
+      "admin/frontend/drawer.js",
+      "admin/frontend/emerging-intents.js",
+      "admin/frontend/escalation.js",
+      "admin/frontend/features.js",
+      "admin/frontend/follow-me.js",
+      "admin/frontend/gateway-settings.js",
+      "admin/frontend/guest-context.js",
+      "admin/frontend/guest-mode.js",
+      "admin/frontend/integrations.js",
+      "admin/frontend/keyboard.js",
+      "admin/frontend/llm-components.js",
+      "admin/frontend/memory-context.js",
+      "admin/frontend/memory-management.js",
+      "admin/frontend/metrics.js",
+      "admin/frontend/mission-control.js",
+      "admin/frontend/model-config.js",
+      "admin/frontend/model-downloads.js",
+      "admin/frontend/music-config.js",
+      "admin/frontend/oss-profiles.js",
+      "admin/frontend/presets.js",
+      "admin/frontend/refresh-manager.js",
+      "admin/frontend/room-audio.js",
+      "admin/frontend/room-groups.js",
+      "admin/frontend/room-tv.js",
+      "admin/frontend/routing.js",
+      "admin/frontend/service-bypass.js",
+      "admin/frontend/service-control.js",
+      "admin/frontend/site-scraper.js",
+      "admin/frontend/skeleton.js",
+      "admin/frontend/sms.js",
+      "admin/frontend/system-config.js",
+      "admin/frontend/toast.js",
+      "admin/frontend/tool-calling.js",
+      "admin/frontend/user-api-keys.js",
+      "admin/frontend/voice-automations.js",
+      "admin/frontend/voice-config.js",
+      "admin/frontend/voice-pipelines.js"
+    ],
+    "total": 442
+  },
+  "insert_adjacent_html": {
+    "files": [
+      "admin/frontend/emerging-intents.js",
+      "admin/frontend/follow-me.js",
+      "admin/frontend/model-config.js",
+      "admin/frontend/model-downloads.js",
+      "admin/frontend/music-config.js",
+      "admin/frontend/service-bypass.js",
+      "admin/frontend/sms.js",
+      "admin/frontend/tool-calling.js",
+      "admin/frontend/user-api-keys.js"
+    ],
+    "total": 21
+  },
+  "mis_context": {
+    "eval-function-settimeout": 0,
+    "href-javascript": 2,
+    "script-body-template": 0,
+    "set-attribute-on": 0,
+    "srcdoc": 0,
+    "style": [
+      "admin/frontend/analytics.js:133",
+      "admin/frontend/app.js:3098",
+      "admin/frontend/cloud-providers.js:524",
+      "admin/frontend/escalation.js:107",
+      "admin/frontend/icons.js:169",
+      "admin/frontend/integrations.js:285",
+      "admin/frontend/metrics.js:304",
+      "admin/frontend/model-downloads.js:558",
+      "admin/frontend/room-audio.js:590",
+      "admin/frontend/room-audio.js:596"
+    ],
+    "style_set": [
+      "admin/frontend/analytics.js:133",
+      "admin/frontend/app.js:3098",
+      "admin/frontend/cloud-providers.js:524",
+      "admin/frontend/escalation.js:107",
+      "admin/frontend/icons.js:169",
+      "admin/frontend/integrations.js:285",
+      "admin/frontend/metrics.js:304",
+      "admin/frontend/model-downloads.js:558",
+      "admin/frontend/room-audio.js:590",
+      "admin/frontend/room-audio.js:596"
+    ]
+  },
+  "wiring": {
+    "busterless_count": 0,
+    "busterless_tags": [],
+    "dangling": [
+      "mode-audit.js",
+      "notifications.js"
+    ]
+  }
+}

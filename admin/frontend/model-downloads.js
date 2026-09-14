@@ -384,7 +384,7 @@ function renderModelDownloadsPage() {
                         ${QUANTIZATION_OPTIONS.slice(0, 3).map(q => `
                             <label class="flex items-center gap-1 cursor-pointer px-2 py-1 rounded border ${currentFilters.quantizations.includes(q.value) ? 'border-blue-500 bg-blue-500/20' : 'border-dark-border'} text-xs">
                                 <input type="checkbox" ${currentFilters.quantizations.includes(q.value) ? 'checked' : ''}
-                                       onchange="toggleQuantization('${q.value}')"
+                                       onchange="toggleQuantization('${escapeJsAttr(q.value)}')"
                                        class="hidden">
                                 <span class="text-gray-300">${q.label}</span>
                             </label>
@@ -418,20 +418,6 @@ function renderModelDownloadsPage() {
 
     container.innerHTML = html;
 }
-
-/**
- * Escape HTML to prevent XSS and template issues
- */
-function escapeHtml(str) {
-    if (str === null || str === undefined) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
-
 /**
  * Render model search results (unique name to avoid conflicts)
  */
@@ -467,7 +453,8 @@ function renderModelSearchResultsHTML() {
     }
 
     const resultsHtml = searchResults.map(model => {
-        const repoId = escapeHtml(model.repo_id || '');
+        const rawRepoId = model.repo_id || '';
+        const repoId = escapeHtml(rawRepoId);
         const downloads = model.downloads || 0;
         const likes = model.likes || 0;
         const updated = model.updated || '';
@@ -496,7 +483,7 @@ function renderModelSearchResultsHTML() {
                             </div>
                         ` : ''}
                     </div>
-                    <button onclick="loadRepoFiles('${repoId}')"
+                    <button onclick="loadRepoFiles('${escapeJsAttr(rawRepoId)}')"
                             class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
                         View Files
                     </button>
@@ -601,7 +588,7 @@ function renderDownloadsHTML() {
                                 ${download.ollama_imported ? `
                                     <span class="px-3 py-1 text-sm text-green-400">&#10003; ${download.ollama_model_name}</span>
                                 ` : ''}
-                                <button onclick="deleteDownload(${download.id}, '${download.filename}')" class="px-3 py-1 text-sm text-gray-400 hover:bg-red-500/20 hover:text-red-400 rounded transition-colors">
+                                <button onclick="deleteDownload(${download.id}, '${escapeJsAttr(download.filename)}')" class="px-3 py-1 text-sm text-gray-400 hover:bg-red-500/20 hover:text-red-400 rounded transition-colors">
                                     Delete
                                 </button>
                             </div>
@@ -622,7 +609,7 @@ function showRepoFilesModal(repoId, files) {
             <div class="bg-dark-card border border-dark-border rounded-xl w-full max-w-2xl max-h-[80vh] overflow-hidden m-4">
                 <div class="p-4 border-b border-dark-border flex items-center justify-between">
                     <div>
-                        <h3 class="text-lg font-semibold text-white">${repoId}</h3>
+                        <h3 class="text-lg font-semibold text-white">${escapeHtml(repoId)}</h3>
                         <p class="text-sm text-gray-400">${files.length} files available</p>
                     </div>
                     <button onclick="closeRepoFilesModal()" class="p-2 hover:bg-dark-bg rounded-lg transition-colors">
@@ -647,7 +634,7 @@ function showRepoFilesModal(repoId, files) {
                                             ${file.quantization ? `<span class="px-2 py-0.5 bg-purple-500/20 text-purple-400 rounded">${file.quantization}</span>` : ''}
                                         </div>
                                     </div>
-                                    <button onclick="startDownload('${repoId}', '${file.filename}', '${file.quantization || ''}')"
+                                    <button onclick="startDownload('${escapeJsAttr(repoId)}', '${escapeJsAttr(file.filename)}', '${escapeJsAttr(file.quantization || '')}')"
                                             class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap ml-4">
                                         Download
                                     </button>

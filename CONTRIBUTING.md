@@ -75,6 +75,10 @@ Before opening a PR that touches `src/rag/<service>/` or `src/shared/`:
 5. Add the service to `RAG_SERVICES` in `scripts/service-defs.sh` (sourced by `build-and-push.sh`, `smoke-rag-images.sh`, and `smoke-images.sh`).
 6. Run `make smoke-rags SERVICE=<image-name>` locally before opening a PR (e.g. `make smoke-rags SERVICE=athena-rag-sports`). CI enforces this on every PR touching `src/rag/**` or `src/shared/**`.
 
+### Adding or editing `admin/frontend/` code that renders untrusted data
+
+Read `admin/frontend/README.md` first — it covers the two escaping primitives, the six contexts `escapeJsAttr` is wrong for, and the "add a new frontend file" checklist. `.github/workflows/frontend-escaping.yml` enforces zero wrong-primitive/unescaped handler sites, a single `escapeHtml`/`escapeJsAttr` definition, and load-order/hardening on every PR touching `admin/frontend/**`.
+
 ## Development Setup
 
 1. **Clone and setup**

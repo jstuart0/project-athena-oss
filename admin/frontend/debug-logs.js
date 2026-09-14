@@ -131,7 +131,7 @@ function renderLogFileList() {
 
     container.innerHTML = debugLogsState.files.map(file => `
         <button
-            onclick="selectLogFile('${file.name}')"
+            onclick="selectLogFile('${escapeJsAttr(file.name)}')"
             class="w-full text-left px-3 py-2 rounded-lg transition-colors ${
                 debugLogsState.selectedFile === file.name
                     ? 'bg-purple-600/30 border border-purple-500/50'
@@ -499,7 +499,7 @@ function showRawLog(lineNumber) {
                 <pre class="text-sm font-mono text-gray-300 whitespace-pre-wrap break-all">${escapeHtml(formattedRaw)}</pre>
             </div>
             <div class="p-4 border-t border-gray-700 bg-gray-800 flex justify-end space-x-3">
-                <button onclick="copyToClipboard(atob('${btoa(entry.raw)}')); showToast('Copied to clipboard', 'success');"
+                <button onclick="copyToClipboard(atob('${escapeJsAttr(btoa(entry.raw))}')); showToast('Copied to clipboard', 'success');"
                     class="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-sm text-white transition-colors">
                     <i data-lucide="copy" class="w-4 h-4 inline mr-2"></i>Copy
                 </button>
@@ -634,12 +634,6 @@ function formatFileSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-}
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
 }
 
 function escapeRegex(string) {

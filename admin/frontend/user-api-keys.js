@@ -71,13 +71,13 @@ function renderUserApiKeys(keys, container) {
             <div class="${statusClass} border rounded-lg p-4 transition-all hover:border-blue-500/50" data-key-id="${key.id}">
                 <div class="flex justify-between items-start mb-3">
                     <div>
-                        <h3 class="text-white font-medium">${escapeHtmlApiKeys(key.name)}</h3>
+                        <h3 class="text-white font-medium">${escapeHtml(key.name)}</h3>
                         <code class="text-gray-400 text-sm font-mono">${key.key_prefix}...</code>
                     </div>
                     <div class="flex items-center gap-2">
                         ${statusBadge}
                         ${!key.revoked ? `
-                            <button onclick="revokeUserApiKey(${key.id}, '${escapeHtmlApiKeys(key.name)}')"
+                            <button onclick="revokeUserApiKey(${key.id}, '${escapeJsAttr(key.name)}')"
                                     class="px-3 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-300 rounded text-sm transition-colors">
                                 Revoke
                             </button>
@@ -85,7 +85,7 @@ function renderUserApiKeys(keys, container) {
                     </div>
                 </div>
                 <div class="flex flex-wrap gap-2 mb-3">
-                    ${key.scopes.map(s => `<span class="px-2 py-1 bg-blue-600/20 text-blue-300 text-xs rounded">${escapeHtmlApiKeys(s)}</span>`).join('')}
+                    ${key.scopes.map(s => `<span class="px-2 py-1 bg-blue-600/20 text-blue-300 text-xs rounded">${escapeHtml(s)}</span>`).join('')}
                 </div>
                 <div class="flex flex-wrap gap-4 text-xs text-gray-500">
                     <span>Created: ${new Date(key.created_at).toLocaleDateString()}</span>
@@ -270,7 +270,7 @@ function showNewKeyModal(keyData) {
 
                 <div class="bg-dark-bg border border-dark-border rounded-lg p-4 mb-4">
                     <div class="flex items-center gap-2">
-                        <code id="new-api-key-value" class="text-green-400 font-mono text-sm flex-grow break-all">${escapeHtmlApiKeys(keyData.api_key)}</code>
+                        <code id="new-api-key-value" class="text-green-400 font-mono text-sm flex-grow break-all">${escapeHtml(keyData.api_key)}</code>
                         <button onclick="copyUserApiKey()"
                                 class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm flex-shrink-0 transition-colors">
                             Copy
@@ -279,14 +279,14 @@ function showNewKeyModal(keyData) {
                 </div>
 
                 <div class="text-sm text-gray-400 space-y-1 mb-4">
-                    <p><strong>Name:</strong> ${escapeHtmlApiKeys(keyData.name)}</p>
+                    <p><strong>Name:</strong> ${escapeHtml(keyData.name)}</p>
                     <p><strong>Scopes:</strong> ${keyData.scopes.join(', ')}</p>
                     <p><strong>Expires:</strong> ${keyData.expires_at ? new Date(keyData.expires_at).toLocaleDateString() : 'Never'}</p>
                 </div>
 
                 <div class="bg-dark-bg border border-dark-border rounded-lg p-4 mb-4">
                     <p class="text-gray-400 text-xs mb-2">Usage Example:</p>
-                    <code class="text-gray-300 text-xs font-mono break-all">curl -H "X-API-Key: ${escapeHtmlApiKeys(keyData.api_key)}" http://localhost:8080/api/devices</code>
+                    <code class="text-gray-300 text-xs font-mono break-all">curl -H "X-API-Key: ${escapeHtml(keyData.api_key)}" http://localhost:8080/api/devices</code>
                 </div>
 
                 <div class="flex justify-end">
@@ -370,16 +370,6 @@ function closeNewKeyModal() {
     const modal = document.getElementById('new-api-key-modal');
     if (modal) modal.remove();
 }
-
-/**
- * Helper: Escape HTML
- */
-function escapeHtmlApiKeys(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 // Initialize when DOM is ready
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initApiKeys);

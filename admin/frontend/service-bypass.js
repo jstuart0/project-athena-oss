@@ -98,12 +98,12 @@ function renderBypassCard(config) {
                         <span class="text-sm text-gray-500">Any cloud provider</span>
                     `}
 
-                    <button onclick="toggleBypass('${config.service_name}')"
+                    <button onclick="toggleBypass('${escapeJsAttr(config.service_name)}')"
                             class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${isEnabled ? 'bg-purple-600' : 'bg-gray-600'}">
                         <span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isEnabled ? 'translate-x-6' : 'translate-x-1'}"></span>
                     </button>
 
-                    <button onclick="editBypassConfig('${config.service_name}')"
+                    <button onclick="editBypassConfig('${escapeJsAttr(config.service_name)}')"
                             class="p-2 hover:bg-gray-700 rounded-lg transition-colors"
                             title="Configure">
                         ⚙️
@@ -115,7 +115,7 @@ function renderBypassCard(config) {
                 <div class="px-4 pb-4">
                     <details class="text-sm">
                         <summary class="text-gray-400 cursor-pointer hover:text-gray-300">View system prompt</summary>
-                        <pre class="mt-2 p-3 bg-dark-bg rounded-lg text-gray-300 whitespace-pre-wrap text-xs">${escapeHtmlBypass(config.system_prompt)}</pre>
+                        <pre class="mt-2 p-3 bg-dark-bg rounded-lg text-gray-300 whitespace-pre-wrap text-xs">${escapeHtml(config.system_prompt)}</pre>
                     </details>
                 </div>
             ` : ''}
@@ -174,11 +174,11 @@ function editBypassConfig(serviceName) {
              onclick="if(event.target.id === 'bypass-config-modal') closeBypassModal()">
             <div class="bg-dark-card border border-dark-border rounded-xl w-full max-w-2xl m-4 max-h-[90vh] overflow-y-auto">
                 <div class="p-6 border-b border-dark-border">
-                    <h3 class="text-xl font-semibold text-white">Configure ${config.display_name || serviceName}</h3>
+                    <h3 class="text-xl font-semibold text-white">Configure ${escapeHtml(config.display_name || serviceName)}</h3>
                     <p class="text-sm text-gray-400 mt-1">Customize how this service uses cloud LLMs</p>
                 </div>
 
-                <form id="bypass-config-form" onsubmit="saveBypassConfig(event, '${serviceName}')" class="p-6 space-y-6">
+                <form id="bypass-config-form" onsubmit="saveBypassConfig(event, '${escapeJsAttr(serviceName)}')" class="p-6 space-y-6">
                     <!-- Cloud Provider -->
                     <div>
                         <label for="bypass-cloud-provider" class="block text-sm font-medium text-gray-300 mb-2">Cloud Provider</label>
@@ -193,7 +193,7 @@ function editBypassConfig(serviceName) {
                     <!-- Cloud Model -->
                     <div>
                         <label for="bypass-cloud-model" class="block text-sm font-medium text-gray-300 mb-2">Model (optional)</label>
-                        <input type="text" id="bypass-cloud-model" name="cloud_model" value="${config.cloud_model || ''}"
+                        <input type="text" id="bypass-cloud-model" name="cloud_model" value="${escapeHtml(config.cloud_model || '')}"
                                placeholder="e.g., gpt-4o, claude-sonnet"
                                class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         <p class="mt-1 text-xs text-gray-500">Leave empty to use provider's default model</p>
@@ -204,7 +204,7 @@ function editBypassConfig(serviceName) {
                         <label for="bypass-system-prompt" class="block text-sm font-medium text-gray-300 mb-2">System Prompt</label>
                         <textarea id="bypass-system-prompt" name="system_prompt" rows="8"
                                   class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white font-mono text-sm"
-                        >${escapeHtmlBypass(config.system_prompt || '')}</textarea>
+                        >${escapeHtml(config.system_prompt || '')}</textarea>
                         <p class="mt-1 text-xs text-gray-500">Instructions for the cloud LLM when handling this service</p>
                     </div>
 
@@ -212,13 +212,13 @@ function editBypassConfig(serviceName) {
                     <div class="grid grid-cols-2 gap-4">
                         <div>
                             <label for="bypass-temperature" class="block text-sm font-medium text-gray-300 mb-2">Temperature</label>
-                            <input type="number" id="bypass-temperature" name="temperature" value="${config.temperature || 0.7}"
+                            <input type="number" id="bypass-temperature" name="temperature" value="${Number(config.temperature) || 0.7}"
                                    min="0" max="2" step="0.1"
                                    class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         </div>
                         <div>
                             <label for="bypass-max-tokens" class="block text-sm font-medium text-gray-300 mb-2">Max Tokens</label>
-                            <input type="number" id="bypass-max-tokens" name="max_tokens" value="${config.max_tokens || 1024}"
+                            <input type="number" id="bypass-max-tokens" name="max_tokens" value="${Number(config.max_tokens) || 1024}"
                                    min="100" max="4096"
                                    class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         </div>
@@ -287,14 +287,6 @@ async function saveBypassConfig(event, serviceName) {
         }
     }
 }
-
-function escapeHtmlBypass(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 // Register tab callback
 window.tabChangeCallbacks = window.tabChangeCallbacks || {};
 window.tabChangeCallbacks['service-bypass'] = initServiceBypassPage;

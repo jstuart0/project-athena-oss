@@ -220,17 +220,6 @@
     function dismissAll() {
         [...activeToasts].forEach(dismiss);
     }
-
-    /**
-     * Escape HTML to prevent XSS.
-     */
-    function escapeHtml(str) {
-        if (!str) return '';
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
-    }
-
     // Convenience methods
     const success = (message, options = {}) => show({ ...options, message, type: 'success' });
     const error = (message, options = {}) => show({ ...options, message, type: 'error' });

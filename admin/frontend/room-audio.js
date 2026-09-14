@@ -292,7 +292,7 @@ function renderRoomCard(config) {
                     <button onclick="editRoomConfig(${config.id})" class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm">
                         Edit
                     </button>
-                    <button onclick="deleteRoomConfig(${config.id}, '${escapeHtml(config.room_name)}')" class="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm">
+                    <button onclick="deleteRoomConfig(${config.id}, '${escapeJsAttr(config.room_name)}')" class="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm">
                         Delete
                     </button>
                 </div>

@@ -387,7 +387,7 @@ function renderVoiceConfig() {
                     <div class="model-list">
                         ${sttModels.map(model => `
                             <div class="model-option ${model.is_active ? 'active' : ''}"
-                                 onclick="setActiveSTT(${model.id}, '${escapeHtml(model.name)}')">
+                                 onclick="setActiveSTT(${model.id}, '${escapeJsAttr(model.name)}')">
                                 <div class="model-header">
                                     <span class="model-name">${escapeHtml(model.display_name)}</span>
                                     <span class="model-size">${model.size_mb} MB</span>
@@ -438,7 +438,7 @@ function renderVoiceConfig() {
                     <div class="voice-list">
                         ${ttsVoices.filter(v => v.voice_id?.includes('en_US')).map(voice => `
                             <div class="model-option ${voice.is_active ? 'active' : ''}"
-                                 onclick="setActiveTTS(${voice.id}, '${escapeHtml(voice.name)}')">
+                                 onclick="setActiveTTS(${voice.id}, '${escapeJsAttr(voice.name)}')">
                                 <div class="model-header">
                                     <span class="model-name">${escapeHtml(voice.display_name)}</span>
                                     <span class="model-quality quality-${voice.quality}" title="${getQualityTooltip(voice.quality)}">${voice.quality}</span>
@@ -454,7 +454,7 @@ function renderVoiceConfig() {
                     <div class="voice-list">
                         ${ttsVoices.filter(v => v.voice_id?.includes('en_GB')).map(voice => `
                             <div class="model-option ${voice.is_active ? 'active' : ''}"
-                                 onclick="setActiveTTS(${voice.id}, '${escapeHtml(voice.name)}')">
+                                 onclick="setActiveTTS(${voice.id}, '${escapeJsAttr(voice.name)}')">
                                 <div class="model-header">
                                     <span class="model-name">${escapeHtml(voice.display_name)}</span>
                                     <span class="model-quality quality-${voice.quality}" title="${getQualityTooltip(voice.quality)}">${voice.quality}</span>
@@ -493,13 +493,6 @@ function renderVoiceConfig() {
 
     // Update health indicators after render
     updateHealthIndicators();
-}
-
-function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
 }
 
 function getQualityTooltip(quality) {

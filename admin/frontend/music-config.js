@@ -294,7 +294,7 @@ function renderPlaybackCard() {
                     <p class="block text-sm text-gray-400 mb-3">Default Provider</p>
                     <div class="grid grid-cols-3 gap-2">
                         ${providers.map(p => `
-                            <button onclick="selectProvider('${p.id}')"
+                            <button onclick="selectProvider('${escapeJsAttr(p.id)}')"
                                 class="provider-btn flex flex-col items-center gap-1 p-3 rounded-lg border transition-all ${provider === p.id ? 'bg-purple-500/20 border-purple-500/50 text-purple-400' : 'bg-dark-bg border-dark-border text-gray-400 hover:border-gray-600'}">
                                 <span class="text-lg">${p.icon}</span>
                                 <span class="text-xs">${p.name}</span>
@@ -363,7 +363,7 @@ function renderAccountsSection() {
                                         <div class="text-xs text-gray-500">${escapeHtml(account.email || 'Spotify Account')}</div>
                                     </div>
                                 </div>
-                                <button onclick="removeSpotifyAccount('${escapeHtml(account.id)}')"
+                                <button onclick="removeSpotifyAccount('${escapeJsAttr(account.id)}')"
                                     class="p-2 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors">
                                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
@@ -445,13 +445,13 @@ function renderGenreCard(genre) {
                     <p class="text-xs text-gray-500">${artistCount} artist${artistCount !== 1 ? 's' : ''}</p>
                 </div>
                 <div class="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button onclick="showEditGenreModal('${escapeHtml(genre.genre_name)}')"
+                    <button onclick="showEditGenreModal('${escapeJsAttr(genre.genre_name)}')"
                         class="p-1.5 text-gray-400 hover:text-orange-400 hover:bg-orange-500/10 rounded-lg transition-colors">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
                         </svg>
                     </button>
-                    <button onclick="deleteGenre('${escapeHtml(genre.genre_name)}')"
+                    <button onclick="deleteGenre('${escapeJsAttr(genre.genre_name)}')"
                         class="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
@@ -1110,7 +1110,7 @@ function renderArtistSuggestions(artists) {
         const name = typeof artist === 'string' ? artist : artist.name;
         return `
             <div class="px-4 py-2.5 hover:bg-orange-500/20 cursor-pointer text-gray-300 hover:text-orange-400 transition-colors"
-                onclick="selectArtist('${escapeHtml(name)}')">
+                onclick="selectArtist('${escapeJsAttr(name)}')">
                 ${escapeHtml(name)}
             </div>
         `;

@@ -13,18 +13,6 @@
 // ============================================================================
 
 /**
- * Escape HTML to prevent XSS attacks
- * @param {string} text - Text to escape
- * @returns {string} Escaped HTML string
- */
-function escapeHtml(text) {
-    if (text === null || text === undefined) return '';
-    const div = document.createElement('div');
-    div.textContent = String(text);
-    return div.innerHTML;
-}
-
-/**
  * Format bytes to human-readable string
  * @param {number} bytes - Number of bytes
  * @param {number} [decimals=1] - Number of decimal places
@@ -528,7 +516,6 @@ function isValidUrl(url) {
 // Create global AthenaUtils namespace
 window.AthenaUtils = {
     // HTML & String
-    escapeHtml,
     formatBytes,
     formatDate,
     formatDuration,
@@ -576,7 +563,6 @@ window.AthenaUtils = {
 
 // Also expose common functions directly on window for maximum backward compatibility
 // These can be removed once all files are migrated to use AthenaUtils or ES6 imports
-window.escapeHtml = escapeHtml;
 window.formatBytes = formatBytes;
 window.showNotification = showNotification;
 window.showSuccess = showSuccess;

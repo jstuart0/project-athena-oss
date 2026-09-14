@@ -127,7 +127,7 @@ function renderSourceCard(source) {
                     <button onclick="editCalendarSource(${source.id})" class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm">
                         Edit
                     </button>
-                    <button onclick="deleteCalendarSource(${source.id}, '${escapeHtml(source.name)}')" class="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm">
+                    <button onclick="deleteCalendarSource(${source.id}, '${escapeJsAttr(source.name)}')" class="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm">
                         Delete
                     </button>
                 </div>

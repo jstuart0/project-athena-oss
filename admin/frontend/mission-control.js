@@ -429,17 +429,6 @@
 
         console.log('[MissionControl] Destroyed');
     }
-
-    /**
-     * Escape HTML.
-     */
-    function escapeHtml(str) {
-        if (!str) return '';
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
-    }
-
     // Register page controller
     Athena.pages.MissionControl = {
         init,

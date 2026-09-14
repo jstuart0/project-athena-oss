@@ -236,7 +236,7 @@
                         ${statusText}
                     </span>
                     ${service ? `
-                        <button onclick="Athena.pages.VoicePipelines.restartComponent('${type}', ${service.port || 0})"
+                        <button onclick="Athena.pages.VoicePipelines.restartComponent('${escapeJsAttr(type)}', ${service.port || 0})"
                                 class="p-2 hover:bg-dark-elevated rounded-lg transition-colors"
                                 title="Restart ${label}">
                             <i data-lucide="refresh-cw" class="w-4 h-4 text-gray-400"></i>
@@ -499,17 +499,6 @@
         if (diffMins < 1440) return `${Math.floor(diffMins / 60)}h ago`;
         return `${Math.floor(diffMins / 1440)}d ago`;
     }
-
-    /**
-     * Escape HTML.
-     */
-    function escapeHtml(str) {
-        if (!str) return '';
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
-    }
-
     // Register page controller
     Athena.pages.VoicePipelines = {
         init,

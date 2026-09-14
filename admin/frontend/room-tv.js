@@ -185,7 +185,7 @@ function renderRoomTVSection() {
                         ${config.enabled ? 'Enabled' : 'Disabled'}
                     </span>
                     <button onclick="editTVConfig(${config.id})" class="text-blue-400 hover:text-blue-300 text-sm">Edit</button>
-                    <button onclick="deleteTVConfig(${config.id}, '${escapeHtml(config.room_name)}')" class="text-red-400 hover:text-red-300 text-sm">Delete</button>
+                    <button onclick="deleteTVConfig(${config.id}, '${escapeJsAttr(config.room_name)}')" class="text-red-400 hover:text-red-300 text-sm">Delete</button>
                 </div>
             </div>
             <div class="text-sm text-gray-400 space-y-1">
@@ -193,13 +193,13 @@ function renderRoomTVSection() {
                 <p><span class="text-gray-500">Remote:</span> ${escapeHtml(config.remote_entity_id)}</p>
             </div>
             <div class="mt-3 pt-3 border-t border-gray-700 flex gap-2">
-                <button onclick="testTVPower('${config.room_name}', 'on')" class="px-3 py-1 bg-green-600/20 text-green-400 rounded text-xs hover:bg-green-600/40">
+                <button onclick="testTVPower('${escapeJsAttr(config.room_name)}', 'on')" class="px-3 py-1 bg-green-600/20 text-green-400 rounded text-xs hover:bg-green-600/40">
                     Power On
                 </button>
-                <button onclick="testTVPower('${config.room_name}', 'off')" class="px-3 py-1 bg-red-600/20 text-red-400 rounded text-xs hover:bg-red-600/40">
+                <button onclick="testTVPower('${escapeJsAttr(config.room_name)}', 'off')" class="px-3 py-1 bg-red-600/20 text-red-400 rounded text-xs hover:bg-red-600/40">
                     Power Off
                 </button>
-                <button onclick="showAppLauncher('${config.room_name}')" class="px-3 py-1 bg-blue-600/20 text-blue-400 rounded text-xs hover:bg-blue-600/40">
+                <button onclick="showAppLauncher('${escapeJsAttr(config.room_name)}')" class="px-3 py-1 bg-blue-600/20 text-blue-400 rounded text-xs hover:bg-blue-600/40">
                     Launch App
                 </button>
             </div>
@@ -290,7 +290,7 @@ function renderFeatureFlagsSection() {
                 <p class="text-sm text-gray-400">${escapeHtml(flag.description || '')}</p>
             </div>
             <label class="relative inline-flex items-center cursor-pointer">
-                <input type="checkbox" ${flag.enabled ? 'checked' : ''} onchange="updateFeatureFlag('${flag.feature_name}', this.checked)" class="sr-only peer">
+                <input type="checkbox" ${flag.enabled ? 'checked' : ''} onchange="updateFeatureFlag('${escapeJsAttr(flag.feature_name)}', this.checked)" class="sr-only peer">
                 <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
             </label>
         </div>
@@ -464,7 +464,7 @@ function showDiscoveryModal(appleTVs) {
             <div>
                 ${tv.already_configured
                     ? '<span class="text-xs text-green-400">Already configured</span>'
-                    : `<button onclick="addAppleTVFromDiscovery('${escapeHtml(tv.entity_id)}', '${escapeHtml(tv.remote_entity_id)}', '${escapeHtml(tv.suggested_room)}')" class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm">Add</button>`
+                    : `<button onclick="addAppleTVFromDiscovery('${escapeJsAttr(tv.entity_id)}', '${escapeJsAttr(tv.remote_entity_id)}', '${escapeJsAttr(tv.suggested_room)}')" class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm">Add</button>`
                 }
             </div>
         </div>

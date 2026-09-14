@@ -401,7 +401,7 @@ function renderOriginPlaceholderSettings(data) {
                     ${patterns.map(pattern => `
                         <span class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 text-white rounded-full text-sm">
                             "${escapeHtml(pattern)}"
-                            <button onclick="removePlaceholderPattern('${escapeHtml(pattern)}')"
+                            <button onclick="removePlaceholderPattern('${escapeJsAttr(pattern)}')"
                                 class="text-gray-400 hover:text-red-400 transition-colors ml-1">
                                 &times;
                             </button>

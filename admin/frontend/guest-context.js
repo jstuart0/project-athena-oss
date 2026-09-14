@@ -237,7 +237,7 @@ function showGuestSelectionModal(guests, deviceId, sessionId) {
     guestList.innerHTML = guests.map(function(guest) {
         const primaryLabel = guest.is_primary ? ' (Primary Guest)' : '';
         return '<button class="w-full bg-dark-bg border border-dark-border text-white py-3 px-4 rounded hover:bg-dark-accent/20 text-left transition-colors" ' +
-               'onclick="selectGuest(' + guest.id + ', \'' + escapeHtmlAttr(guest.name) + '\', \'' + deviceId + '\', \'' + sessionId + '\')">' +
+               'onclick="selectGuest(' + guest.id + ', \'' + escapeJsAttr(guest.name) + '\', \'' + escapeJsAttr(deviceId) + '\', \'' + escapeJsAttr(sessionId) + '\')">' +
                escapeHtml(guest.name) + '<span class="text-gray-400 text-sm">' + primaryLabel + '</span>' +
                '</button>';
     }).join('');
@@ -253,23 +253,6 @@ function showGuestSelectionModal(guests, deviceId, sessionId) {
             showAddGuestModal(deviceId, sessionId);
         };
     }
-}
-
-/**
- * Escape HTML for attribute values (stricter than content escaping).
- */
-function escapeHtmlAttr(str) {
-    if (!str) return '';
-    return str.replace(/[&<>"']/g, function(match) {
-        const escapeMap = {
-            '&': '&amp;',
-            '<': '&lt;',
-            '>': '&gt;',
-            '"': '&quot;',
-            "'": '&#39;'
-        };
-        return escapeMap[match];
-    });
 }
 
 /**

@@ -279,8 +279,11 @@ function renderServiceRow(service) {
     const displayName = service.display_name || service.service_name || 'Unknown';
     const host = service.host || service.ip_address || 'unknown';
     const isRunning = service.is_running ?? (service.status === 'running' || service.status === 'healthy' || service.status === 'online');
-    // escapeHtml guards the single-quoted onclick attrs against XSS (codex r2 M-5).
-    const serviceName = escapeHtml(service.service_name || service.name || '');
+    // Raw value for the handler attrs -- escapeJsAttr escapes it at the call
+    // site; escapeHtml here would be double-escaped by escapeJsAttr and
+    // deliver the wrong identifier to stopService/restartService/startService
+    // (codex r2 F1).
+    const serviceName = service.service_name || service.name || '';
 
     const statusBadge = isRunning
         ? '<span class="px-2 py-1 text-xs rounded bg-green-900 text-green-300">● Running</span>'
@@ -304,16 +307,16 @@ function renderServiceRow(service) {
             <td class="px-4 py-3">
                 <div class="flex gap-2">
                     ${isRunning ? `
-                        <button onclick="stopService('${serviceName}')"
+                        <button onclick="stopService('${escapeJsAttr(serviceName)}')"
                                 class="px-2 py-1 text-xs bg-red-600 hover:bg-red-700 text-white rounded">
                             Stop
                         </button>
-                        <button onclick="restartService('${serviceName}')"
+                        <button onclick="restartService('${escapeJsAttr(serviceName)}')"
                                 class="px-2 py-1 text-xs bg-yellow-600 hover:bg-yellow-700 text-white rounded">
                             Restart
                         </button>
                     ` : `
-                        <button onclick="startService('${serviceName}')"
+                        <button onclick="startService('${escapeJsAttr(serviceName)}')"
                                 class="px-2 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded">
                             Start
                         </button>
@@ -444,12 +447,12 @@ function renderModelRow(model) {
             <td class="px-4 py-3">${statusBadge}</td>
             <td class="px-4 py-3">
                 ${model.loaded ? `
-                    <button onclick="unloadModel('${escapeHtml(model.name)}')"
+                    <button onclick="unloadModel('${escapeJsAttr(model.name)}')"
                             class="px-2 py-1 text-xs bg-yellow-600 hover:bg-yellow-700 text-white rounded">
                         Unload
                     </button>
                 ` : `
-                    <button onclick="loadModel('${escapeHtml(model.name)}')"
+                    <button onclick="loadModel('${escapeJsAttr(model.name)}')"
                             class="px-2 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded">
                         Load
                     </button>
@@ -637,7 +640,11 @@ function renderRagServiceRow(service) {
     );
 
     const isEnabled = service.enabled !== false;
-    const safeName = escapeHtml(service.name || '');
+    // safeName is for display/attribute positions; rawName feeds the handler
+    // attrs below, which escape it themselves at the call site -- wrapping
+    // rawName in escapeHtml first would double-escape it (codex r2 F1).
+    const rawName = service.name || '';
+    const safeName = escapeHtml(rawName);
 
     // Control Agent gate: disable start/stop/restart when CA is unavailable.
     const caDisabled = !controlAgentEnabled;
@@ -663,12 +670,12 @@ function renderRagServiceRow(service) {
             </td>
             <td class="px-4 py-3">
                 <div class="flex gap-2">
-                    <button onclick="toggleRagService('${safeName}')"
+                    <button onclick="toggleRagService('${escapeJsAttr(rawName)}')"
                             class="px-2 py-1 text-xs ${isEnabled ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'} text-white rounded">
                         ${isEnabled ? 'Disable' : 'Enable'}
                     </button>
                     <button id="check-btn-${safeName}"
-                            onclick="checkRagServiceHealth('${safeName}', this)"
+                            onclick="checkRagServiceHealth('${escapeJsAttr(rawName)}', this)"
                             class="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded">
                         Refresh
                     </button>
@@ -966,7 +973,7 @@ function renderMacros() {
         </div>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
             ${SERVICE_MACROS.map(macro => `
-                <button onclick="executeMacro('${macro.id}')"
+                <button onclick="executeMacro('${escapeJsAttr(macro.id)}')"
                         class="p-4 bg-dark-elevated hover:bg-gray-700 rounded-lg border border-dark-border transition-all text-left group">
                     <div class="flex items-center gap-3 mb-2">
                         <div class="p-2 bg-blue-500/20 rounded-lg">
