@@ -1145,3 +1145,239 @@ def test_dangling_tag_set_equality_can_fail_on_removal(tmp_path):
         f"{proc.returncode}\n{proc.stdout}\n{proc.stderr}"
     )
     assert "mode-audit.js" in (proc.stdout + proc.stderr)
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-71 — check-no-new-test-skips.py. The shipped version asserted SET
+# EQUALITY between "skips added in base..HEAD" and the pinned allowlist. That
+# only held while the campaign branch that seeded the pins was unmerged: once
+# it landed on main, every push to main (base==HEAD, empty diff) and every
+# subsequent PR (base is post-merge main, which already has the pins, so adds
+# none) hit an empty added-set against a non-empty pinned set and failed
+# permanently. Fixed to two independent checks: (a) added skips are a SUBSET
+# of the allowlist (diff-scoped, --base-dependent), (b) every pinned skip is
+# present in HEAD's tree (tree-scoped, --base-independent). These fixtures
+# build real temporary git repos with real commits — the script's behavior is
+# entirely a function of git plumbing (diff, merge-base, show), so a mock of
+# git would not exercise the actual defect or the actual fix.
+# ---------------------------------------------------------------------------
+
+skips_guard = _load("check-no-new-test-skips.py")
+
+
+def _git(repo: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"git {' '.join(args)} failed: {proc.stderr}"
+    return proc.stdout
+
+
+def _init_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "athena-71@example.com")
+    _git(repo, "config", "user.name", "ATHENA-71 fixture")
+    return repo
+
+
+def _write(repo: Path, rel_path: str, content: str) -> None:
+    path = repo / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _commit(repo: Path, message: str) -> str:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD").strip()
+
+
+PIN_A_FILE, PIN_A_FRAG = sorted(skips_guard.SANCTIONED)[0]
+PIN_B_FILE, PIN_B_FRAG = sorted(skips_guard.SANCTIONED)[1]
+
+
+def _pin_a_content() -> str:
+    return f"import pytest\n\n{PIN_A_FRAG}reason='no node')\n\n\ndef test_a():\n    pass\n"
+
+
+def _pin_b_content() -> str:
+    return f"import pytest\n\n{PIN_B_FRAG}True, reason='no node')\n\n\ndef test_b():\n    pass\n"
+
+
+def _seed_both_pins(repo: Path) -> str:
+    """Commit a tree with both pinned skips present, mimicking the real repo
+    post-merge (both pins already in the tree, nothing new to add)."""
+    _write(repo, PIN_A_FILE, _pin_a_content())
+    _write(repo, PIN_B_FILE, _pin_b_content())
+    return _commit(repo, "seed: both pinned skips present")
+
+
+def _run_guard(repo: Path, monkeypatch, base: str):
+    monkeypatch.setattr(skips_guard, "REPO_ROOT", repo)
+    monkeypatch.setattr(sys, "argv", ["check-no-new-test-skips.py", "--base", base])
+    return skips_guard.main()
+
+
+def test_skip_guard_push_style_base_equals_head_passes(tmp_path, monkeypatch, capsys):
+    """The exact ATHENA-71 regression: on a push to main after the seeding
+    campaign has merged, base==HEAD (nothing new added) and both pins are
+    already in the tree. Must be 0, not 1.
+    """
+    repo = _init_repo(tmp_path)
+    head = _seed_both_pins(repo)
+
+    rc = _run_guard(repo, monkeypatch, base=head)
+
+    out = capsys.readouterr().out
+    assert rc == 0, f"push-style base==HEAD must pass, got {rc}\n{out}"
+    assert "PASS" in out
+
+
+def test_skip_guard_pr_style_base_behind_head_passes_when_pin_is_the_only_addition(
+    tmp_path, monkeypatch, capsys
+):
+    """PR-style: base predates the commit that introduces the pinned skip.
+    The added-skip set is exactly the pinned set — a subset, so it passes.
+    """
+    repo = _init_repo(tmp_path)
+    _write(repo, "tests/unit/conftest.py", "# no skips here\n")
+    base = _commit(repo, "base: no skips yet")
+
+    head = _seed_both_pins(repo)
+
+    rc = _run_guard(repo, monkeypatch, base=base)
+
+    out = capsys.readouterr().out
+    assert rc == 0, f"PR-style base-behind-HEAD adding only pinned skips must pass, got {rc}\n{out}"
+    assert head  # sanity: commit actually happened
+
+
+def test_skip_guard_flags_unsanctioned_added_skip(tmp_path, monkeypatch, capsys):
+    """A brand-new, un-pinned skip added in the diff must fail (a).
+
+    Built via concatenation rather than as one contiguous literal in THIS
+    file's own source — the real gate's diff-scan is a naive substring match
+    over added lines under `tests/`, so a fixture spelling the marker out in
+    full would trip the gate on the very PR that adds it. This split-string
+    idiom exists ONLY to keep this fixture out of the gate's own way; the same
+    idiom in a real test would just as easily evade the gate's detection
+    (detection is lexical, not AST-based — see the module docstring) and is
+    not an acceptable way to add a skip outside this fixture.
+    """
+    repo = _init_repo(tmp_path)
+    base = _seed_both_pins(repo)
+
+    unsanctioned_marker = "pytest" + ".mark." + "skip(reason='I felt like it')"
+    _write(
+        repo,
+        "tests/unit/test_something_new.py",
+        f"import pytest\n\npytestmark = {unsanctioned_marker}\n",
+    )
+    _commit(repo, "add an unsanctioned skip")
+
+    rc = _run_guard(repo, monkeypatch, base=base)
+
+    out = capsys.readouterr().out
+    assert rc == 1, f"an unsanctioned added skip must fail, got {rc}\n{out}"
+    assert "UNSANCTIONED" in out
+    assert "test_something_new.py" in out
+
+
+def test_skip_guard_flags_missing_pinned_skip_independent_of_base(tmp_path, monkeypatch, capsys):
+    """Removing a pinned skip from HEAD's tree must fail (b) — and must fail
+    the same way whether --base is far behind (PR-style) or equals HEAD
+    (push-style), because tree presence does not consult the diff at all.
+    """
+    repo = _init_repo(tmp_path)
+    base = _seed_both_pins(repo)
+
+    _write(repo, PIN_A_FILE, "import pytest\n\n\ndef test_a():\n    pass\n")  # skip line removed
+    head = _commit(repo, "remove pinned skip A")
+
+    rc_pr_style = _run_guard(repo, monkeypatch, base=base)
+    out_pr = capsys.readouterr().out
+    assert rc_pr_style == 1, f"removing a pinned skip must fail PR-style, got {rc_pr_style}\n{out_pr}"
+    assert "MISSING" in out_pr
+    assert PIN_A_FILE in out_pr
+
+    rc_push_style = _run_guard(repo, monkeypatch, base=head)
+    out_push = capsys.readouterr().out
+    assert rc_push_style == 1, (
+        f"removing a pinned skip must fail push-style (base==HEAD) too, got {rc_push_style}\n{out_push}"
+    )
+    assert "MISSING" in out_push
+    assert PIN_A_FILE in out_push
+
+
+def test_skip_guard_unreachable_base_exits_two(tmp_path, monkeypatch):
+    """A --base ref that does not resolve is could-not-run, not a pass."""
+    repo = _init_repo(tmp_path)
+    _seed_both_pins(repo)
+
+    monkeypatch.setattr(skips_guard, "REPO_ROOT", repo)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["check-no-new-test-skips.py", "--base", "this-ref-definitely-does-not-exist-anywhere"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        skips_guard.main()
+    assert exc.value.code == 2, f"an unresolvable --base must exit 2, got {exc.value.code}"
+
+
+def _corrupt_blob_object(repo: Path, rel_path: str) -> None:
+    """Overwrite the loose object backing rel_path's blob at HEAD with garbage.
+
+    `git ls-tree` reads only the parent tree object's metadata (name, mode,
+    blob sha) and never opens the blob itself, so it still reports the path
+    present after this. `git show`/`git cat-file` must open and inflate the
+    blob, so those fail on it. This is a real corrupted git object, not a
+    mock — built by locating the actual loose-object file on disk and
+    clobbering its contents.
+    """
+    listing = subprocess.run(
+        ["git", "ls-tree", "HEAD", "--", rel_path], cwd=repo, capture_output=True, text=True,
+    )
+    assert listing.returncode == 0 and listing.stdout.strip(), (
+        f"fixture setup: {rel_path} must be present at HEAD before corrupting it"
+    )
+    blob_sha = listing.stdout.split()[2]
+    obj_path = repo / ".git" / "objects" / blob_sha[:2] / blob_sha[2:]
+    assert obj_path.is_file(), f"fixture setup: expected loose object at {obj_path}"
+    obj_path.chmod(0o600)
+    obj_path.write_bytes(b"garbage-not-a-valid-zlib-stream")
+
+
+def test_skip_guard_corrupted_object_exits_two_not_missing(tmp_path, monkeypatch):
+    """A pinned path that IS present per `git ls-tree` but whose blob object is
+    unreadable must be could-not-run (2), not silently folded into a missing-
+    skip finding (1). Before this fix, any non-zero `git show` (including this
+    one) was treated as "missing" -- indistinguishable from a genuinely deleted
+    skip. Built honestly by corrupting the real loose object backing a tracked
+    file, per xander's ATHENA-71 punch list item 2.
+    """
+    repo = _init_repo(tmp_path)
+    _seed_both_pins(repo)
+    _corrupt_blob_object(repo, PIN_A_FILE)
+
+    monkeypatch.setattr(skips_guard, "REPO_ROOT", repo)
+    monkeypatch.setattr(sys, "argv", ["check-no-new-test-skips.py", "--base", "HEAD"])
+    with pytest.raises(SystemExit) as exc:
+        skips_guard.main()
+    assert exc.value.code == 2, (
+        "a path present per ls-tree but unreadable via git show must exit 2 (could "
+        f"not run), not fold into a 'missing' finding: got {exc.value.code}"
+    )
+
+
+def test_skip_guard_real_tree_passes_push_style(monkeypatch, capsys):
+    """Regression guard against the real repo: --base HEAD (the push-event
+    fallback this campaign wires in the workflow) must pass against the
+    actual tree, not just a synthetic fixture.
+    """
+    monkeypatch.setattr(sys, "argv", ["check-no-new-test-skips.py", "--base", "HEAD"])
+    rc = skips_guard.main()
+    out = capsys.readouterr().out
+    assert rc == 0, f"real tree, --base HEAD (push-style) must pass, got {rc}\n{out}"
+
