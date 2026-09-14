@@ -20,6 +20,21 @@
  * escape-html.js.
  *
  * Exits 0 on success, non-zero (with a diagnostic) on failure.
+ *
+ * `--check hardening` (Phase 7, D13) additionally asserts that, after the
+ * real load order runs, `window.escapeHtml` / `window.escapeJsAttr` are
+ * non-writable and non-configurable, and that a runtime reassignment after
+ * load cannot replace the canonical function. This is threat 2 of D13's
+ * three-threat table (runtime overwrite) — the ONE threat `defineProperty`
+ * actually covers. It does not (and cannot) prove anything about threat 1
+ * (declaration drift, guarded by check-escape-html-uniqueness.py) or
+ * threat 3 (tag-order drift, guarded by the identity check above).
+ *
+ * `--index <path>` / `--frontend-dir <path>` override the real
+ * admin/frontend/index.html and admin/frontend/ directory — used by
+ * tests/unit/test_frontend_guard_scripts.py to build isolated temp trees
+ * for the tag-order-drift and declaration-drift CAN-FAIL fixtures without
+ * touching the real tree.
  */
 
 'use strict';
@@ -30,6 +45,16 @@ const vm = require('vm');
 
 const FRONTEND_DIR = path.resolve(__dirname, '..', 'admin', 'frontend');
 const INDEX_HTML = path.join(FRONTEND_DIR, 'index.html');
+
+function parseArgs(argv) {
+    const args = { check: null, index: null, frontendDir: null };
+    for (let i = 0; i < argv.length; i++) {
+        if (argv[i] === '--check') args.check = argv[++i];
+        else if (argv[i] === '--index') args.index = argv[++i];
+        else if (argv[i] === '--frontend-dir') args.frontendDir = argv[++i];
+    }
+    return args;
+}
 
 function extractLocalScriptFiles(indexHtmlPath) {
     const html = fs.readFileSync(indexHtmlPath, 'utf8');
@@ -112,7 +137,11 @@ function makeStubContext() {
 }
 
 function main() {
-    const scriptFiles = extractLocalScriptFiles(INDEX_HTML);
+    const args = parseArgs(process.argv.slice(2));
+    const indexHtmlPath = args.index || INDEX_HTML;
+    const frontendDir = args.frontendDir || FRONTEND_DIR;
+
+    const scriptFiles = extractLocalScriptFiles(indexHtmlPath);
     console.log(`Found ${scriptFiles.length} local <script> tags in index.html, in order:`);
     scriptFiles.forEach((f, i) => console.log(`  ${i + 1}. ${f}`));
 
@@ -121,9 +150,19 @@ function main() {
     let escapeHtmlOwner = null;
     let escapeJsAttrOwner = null;
     const executionErrors = [];
+    // D13 threat 3: once escape-html.js's IIFE has run (and frozen the two
+    // globals), any script tagged AFTER it that throws during load is not a
+    // benign DOM-stub artifact — under load-last, nothing should ever load
+    // after the freeze, and a colliding `function escapeHtml` declaration in
+    // such a file throws a SyntaxError at GlobalDeclarationInstantiation
+    // time (CanDeclareGlobalFunction returns false for a non-configurable,
+    // non-writable property). Tracked separately so it fails the gate
+    // instead of being logged as "not fatal".
+    let freezeApplied = false;
+    const postFreezeErrors = [];
 
     for (const filename of scriptFiles) {
-        const filePath = path.join(FRONTEND_DIR, filename);
+        const filePath = path.join(frontendDir, filename);
         if (!fs.existsSync(filePath)) {
             console.log(`  [skip] ${filename} (not found in admin/frontend/ — likely a non-local or generated asset)`);
             continue;
@@ -133,11 +172,17 @@ function main() {
         const escapeHtmlBefore = context.escapeHtml;
         const escapeJsAttrBefore = context.escapeJsAttr;
 
+        let threw = false;
         try {
             const script = new vm.Script(source, { filename });
             script.runInContext(context, { timeout: 5000 });
         } catch (err) {
-            executionErrors.push({ filename, message: err.message });
+            threw = true;
+            if (freezeApplied) {
+                postFreezeErrors.push({ filename, message: err.message });
+            } else {
+                executionErrors.push({ filename, message: err.message });
+            }
         }
 
         if (context.escapeHtml !== escapeHtmlBefore) {
@@ -145,6 +190,10 @@ function main() {
         }
         if (context.escapeJsAttr !== escapeJsAttrBefore) {
             escapeJsAttrOwner = filename;
+        }
+
+        if (filename === 'escape-html.js' && !threw) {
+            freezeApplied = true;
         }
     }
 
@@ -158,6 +207,15 @@ function main() {
     }
 
     const failures = [];
+
+    for (const e of postFreezeErrors) {
+        failures.push(
+            `"${e.filename}" is tagged AFTER escape-html.js and threw while loading: ${e.message}. ` +
+                'A script positioned after the canonical escaping file must never throw during load — this is ' +
+                'D13 threat 3 (tag-order drift): the frozen escapeHtml/escapeJsAttr reject a colliding global ' +
+                'declaration in this file. Move its <script> tag before escape-html.js\'s.'
+        );
+    }
 
     if (escapeHtmlOwner !== 'escape-html.js') {
         failures.push(
@@ -197,6 +255,55 @@ function main() {
         const out = context.escapeJsAttr("x');alert(1)//");
         if (out !== "x\\&#39;);alert(1)//") {
             failures.push(`window.escapeJsAttr produced unexpected output: ${JSON.stringify(out)}`);
+        }
+    }
+
+    if (args.check === 'hardening' && failures.length === 0) {
+        const descHtml = Object.getOwnPropertyDescriptor(context, 'escapeHtml');
+        const descAttr = Object.getOwnPropertyDescriptor(context, 'escapeJsAttr');
+        if (!descHtml || descHtml.writable !== false || descHtml.configurable !== false) {
+            failures.push(
+                'window.escapeHtml is not frozen (expected writable:false, configurable:false) after load — ' +
+                    'the two Object.defineProperty calls in escape-html.js are missing or were bypassed.'
+            );
+        }
+        if (!descAttr || descAttr.writable !== false || descAttr.configurable !== false) {
+            failures.push(
+                'window.escapeJsAttr is not frozen (expected writable:false, configurable:false) after load.'
+            );
+        }
+        if (failures.length === 0) {
+            const canonicalHtml = context.escapeHtml;
+            const canonicalAttr = context.escapeJsAttr;
+            try {
+                context.escapeHtml = function pwned() {
+                    return 'PWNED';
+                };
+            } catch (e) {
+                // Strict-mode assignment to a non-writable property throws.
+                // Expected and fine — the assertion below is what matters.
+            }
+            try {
+                context.escapeJsAttr = function pwned() {
+                    return 'PWNED';
+                };
+            } catch (e) {
+                // Same as above.
+            }
+            if (context.escapeHtml !== canonicalHtml) {
+                failures.push(
+                    'a runtime reassignment of window.escapeHtml AFTER load was not rejected — the canonical ' +
+                        'function was replaced. D13 threat 2 (runtime overwrite) is unguarded.'
+                );
+            }
+            if (context.escapeJsAttr !== canonicalAttr) {
+                failures.push(
+                    'a runtime reassignment of window.escapeJsAttr AFTER load was not rejected.'
+                );
+            }
+            if (failures.length === 0) {
+                console.log('PASS [hardening]: escapeHtml/escapeJsAttr are frozen and survive a runtime reassignment attempt.');
+            }
         }
     }
 

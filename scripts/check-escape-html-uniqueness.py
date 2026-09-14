@@ -113,7 +113,18 @@ def iter_js_files(directory: Path):
 
 def find_definitions(directory: Path) -> list[dict]:
     """Name-matched definitions of escapeHtml/escapeJsAttr (the 4 real forms,
-    excluding the 2 export-only forms whose RHS is a bare identifier)."""
+    excluding the 2 export-only forms whose RHS is a bare identifier).
+
+    `DEFINE_PROPERTY_RE` is excluded, by path (rule 12), inside the canonical
+    file itself: Phase 7 (D13) hardens escape-html.js's OWN two exports with
+    `Object.defineProperty(global, 'escapeHtml', { value: escapeHtml, ... })`
+    immediately after declaring them -- that is the freeze mechanism, not a
+    rival definition, and must not double-count the file's 2 definitions as
+    4. The forward guard this regex exists for (xander H3 -- a NON-canonical
+    file sneaking in a 21st implementation via defineProperty instead of a
+    `function` declaration) is unaffected: it still fires on every other
+    file.
+    """
     out = []
     for path in iter_js_files(directory):
         text = path.read_text(encoding="utf-8", errors="ignore")
@@ -125,15 +136,22 @@ def find_definitions(directory: Path) -> list[dict]:
             (DEFINE_PROPERTY_RE, "define-property"),
             (COMPUTED_NAME_RE, "computed-name"),
         ):
+            if form == "define-property" and path.name == CANONICAL_FILE:
+                continue
             for m in regex.finditer(text):
                 ln = line_of(text, m.start())
                 key = (ln, m.group(1))
                 if key in seen_lines:
                     continue
                 seen_lines.add(key)
+                rel_file = (
+                    str(path.relative_to(REPO_ROOT))
+                    if REPO_ROOT in path.parents or REPO_ROOT == path.parent
+                    else str(path)
+                )
                 out.append(
                     {
-                        "file": str(path.relative_to(REPO_ROOT)),
+                        "file": rel_file,
                         "line": ln,
                         "name": m.group(1),
                         "form": form,

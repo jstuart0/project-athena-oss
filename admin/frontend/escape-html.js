@@ -89,4 +89,26 @@
 
     global.escapeHtml = escapeHtml;
     global.escapeJsAttr = escapeJsAttr;
+
+    // D13: freeze against RUNTIME overwrite only (a console paste, a
+    // lazily-injected script, a later feature's dynamic <script> tag). This
+    // does NOT guard declaration drift -- under load-last, no script
+    // executes after this IIFE runs, so an earlier `function escapeHtml`
+    // in a file tagged BEFORE this one is a silent no-op at evaluation
+    // time, not a throw; scripts/check-escape-html-uniqueness.py is the
+    // guard for that. It does not guard tag-order drift either -- a
+    // <script> appended AFTER this one is the one case that DOES execute
+    // post-freeze, so it throws here AND trips
+    // scripts/check-frontend-escape-load-order.js. Three threats, three
+    // mechanisms; see admin/frontend/README.md.
+    //
+    // Placed INSIDE the IIFE, using the lexically bound `escapeHtml` /
+    // `escapeJsAttr` locals just assigned above, not appended after the
+    // closing `})(window);` -- an unqualified reference out there would
+    // resolve through the global object record, the exact late-binding
+    // hazard this IIFE exists to eliminate, and a future global lexical
+    // `const escapeHtml` in an earlier script would shadow the property
+    // and freeze the wrong function.
+    Object.defineProperty(global, 'escapeHtml', { value: escapeHtml, writable: false, configurable: false });
+    Object.defineProperty(global, 'escapeJsAttr', { value: escapeJsAttr, writable: false, configurable: false });
 })(window);

@@ -13,6 +13,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -769,3 +770,135 @@ def test_scope_phase3_errors_when_manifest_missing(tmp_path):
         capture_output=True, text=True,
     )
     assert proc.returncode == 2, "a missing scope manifest is could-not-run, never a silent empty-scope pass"
+
+
+# ---------------------------------------------------------------------------
+# D13 (rewritten, Phase 7) — three threats, three mechanisms, three fixtures.
+# Round 2 shipped one fixture asserting a runtime behaviour the runtime does
+# not have; these replace it with fixtures that test what can actually fail.
+# ---------------------------------------------------------------------------
+
+LOAD_ORDER_SCRIPT = SCRIPTS_DIR / "check-frontend-escape-load-order.js"
+
+
+def _copy_frontend_tree(tmp_path):
+    frontend_copy = tmp_path / "frontend"
+    shutil.copytree(FRONTEND_DIR, frontend_copy)
+    return frontend_copy
+
+
+@requires_node
+def test_hardening_real_tree_passes():
+    """GREEN->GREEN sanity: the real tree's freeze holds under --check hardening."""
+    proc = subprocess.run(
+        [NODE_BIN, str(LOAD_ORDER_SCRIPT), "--check", "hardening"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@requires_node
+def test_hardening_runtime_overwrite_can_fail(tmp_path):
+    """D13 threat 2 CAN-FAIL: a mutant escape-html.js missing the
+    Object.defineProperty freeze lets a runtime `window.escapeHtml = ...`
+    reassignment win. --check hardening must catch it, and the real
+    (unmutated) tree must still pass.
+    """
+    frontend_copy = _copy_frontend_tree(tmp_path)
+    real = (FRONTEND_DIR / "escape-html.js").read_text(encoding="utf-8")
+    mutated = re.sub(
+        r"\n *Object\.defineProperty\(global, 'escapeHtml'.*?"
+        r"Object\.defineProperty\(global, 'escapeJsAttr'.*?\);\n",
+        "\n",
+        real,
+        flags=re.DOTALL,
+    )
+    assert mutated != real, "fixture stale: defineProperty hardening block not found"
+    (frontend_copy / "escape-html.js").write_text(mutated, encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            NODE_BIN, str(LOAD_ORDER_SCRIPT),
+            "--check", "hardening",
+            "--frontend-dir", str(frontend_copy),
+            "--index", str(frontend_copy / "index.html"),
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode != 0, (
+        f"hardening check should fail against a mutant missing the freeze: {proc.stdout}{proc.stderr}"
+    )
+
+    proc_real = subprocess.run(
+        [NODE_BIN, str(LOAD_ORDER_SCRIPT), "--check", "hardening"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc_real.returncode == 0, "sanity: the unmutated real tree must still pass"
+
+
+@requires_node
+def test_hardening_tag_after_can_fail(tmp_path):
+    """D13 threat 3 CAN-FAIL: a synthetic tag carrying `function escapeHtml`
+    appended AFTER escape-html.js's tag must throw during load (the frozen
+    global rejects the colliding declaration) AND trip
+    check-frontend-escape-load-order.js's exit code to 1 -- two independent
+    signals on one mutation.
+    """
+    frontend_copy = _copy_frontend_tree(tmp_path)
+    (frontend_copy / "evil-after.js").write_text(
+        "function escapeHtml(v) { return 'EVIL:' + v; }\n", encoding="utf-8"
+    )
+    index_path = frontend_copy / "index.html"
+    text = index_path.read_text(encoding="utf-8")
+    marker = '<script src="/escape-html.js?v=20260913"></script>'
+    assert marker in text, "fixture stale: escape-html.js tag/buster not found in index.html"
+    text = text.replace(marker, marker + '\n    <script src="/evil-after.js"></script>')
+    index_path.write_text(text, encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            NODE_BIN, str(LOAD_ORDER_SCRIPT),
+            "--frontend-dir", str(frontend_copy),
+            "--index", str(index_path),
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 1, f"a tag appended after escape-html.js must trip the load-order gate: {proc.stdout}"
+    combined = proc.stdout + proc.stderr
+    assert "evil-after.js" in combined
+    assert "threw while loading" in combined
+    # Canonical still wins -- the collision is rejected, not silently lost.
+    assert "Final window.escapeHtml was last (re)bound by: escape-html.js" in proc.stdout
+
+
+@requires_node
+def test_hardening_tag_before_is_silent(tmp_path):
+    """D13 threat 1, asserted as a negative (the fixture round 2 got
+    backwards): `function escapeHtml` added to a file tagged BEFORE
+    escape-html.js does NOT throw and the canonical still wins (a classic
+    script's global function declaration is silently overwritten, not
+    rejected) -- but check-escape-html-uniqueness.py's find_definitions DOES
+    flag it. Declaration drift is a static-analysis problem, not a runtime
+    one; this fixture makes that division of labour a tested fact.
+    """
+    frontend_copy = _copy_frontend_tree(tmp_path)
+    with (frontend_copy / "state.js").open("a", encoding="utf-8") as f:
+        f.write("\nfunction escapeHtml(v) { return 'EVIL:' + v; }\n")
+
+    proc = subprocess.run(
+        [
+            NODE_BIN, str(LOAD_ORDER_SCRIPT),
+            "--frontend-dir", str(frontend_copy),
+            "--index", str(frontend_copy / "index.html"),
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"a declaration in a file tagged BEFORE escape-html.js must NOT throw -- it is silently "
+        f"overwritten, per load-last: {proc.stdout}{proc.stderr}"
+    )
+    assert "Final window.escapeHtml was last (re)bound by: escape-html.js" in proc.stdout
+
+    defs = uniqueness.find_definitions(frontend_copy)
+    flagged = [d for d in defs if d["name"] == "escapeHtml" and "state.js" in d["file"]]
+    assert flagged, "check-escape-html-uniqueness.py must flag the declaration-drift file even though it never throws"
