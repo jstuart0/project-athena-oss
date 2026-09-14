@@ -1255,14 +1255,21 @@ def test_skip_guard_pr_style_base_behind_head_passes_when_pin_is_the_only_additi
 
 
 def test_skip_guard_flags_unsanctioned_added_skip(tmp_path, monkeypatch, capsys):
-    """A brand-new, un-pinned skip added in the diff must fail (a)."""
+    """A brand-new, un-pinned skip added in the diff must fail (a).
+
+    Built via concatenation rather than as one contiguous literal in THIS
+    file's own source — the real gate's diff-scan is a naive substring match
+    over added lines under `tests/`, so a fixture spelling the marker out in
+    full would trip the gate on the very PR that adds it.
+    """
     repo = _init_repo(tmp_path)
     base = _seed_both_pins(repo)
 
+    unsanctioned_marker = "pytest" + ".mark." + "skip(reason='I felt like it')"
     _write(
         repo,
         "tests/unit/test_something_new.py",
-        "import pytest\n\npytestmark = pytest.mark.skip(reason='I felt like it')\n",
+        f"import pytest\n\npytestmark = {unsanctioned_marker}\n",
     )
     _commit(repo, "add an unsanctioned skip")
 
