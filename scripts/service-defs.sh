@@ -1,10 +1,14 @@
 # shellcheck shell=bash
-# Sourced by build-and-push.sh and smoke-rag-images.sh — keep side-effect-free.
-# No set -e, no exit, no logging, no top-level execution.
+# Sourced by build-and-push.sh, smoke-rag-images.sh and smoke-images.sh — keep
+# side-effect-free. No set -e, no exit, no logging, no top-level execution.
 #
 # ADMIN_SERVICES uses ${PROJECT_ROOT} which callers must set before sourcing.
-# RAG_SERVICES and CORE_SRC_SERVICES are repo-relative (no PROJECT_ROOT needed).
-# The smoke script only reads RAG_SERVICES.
+# RAG_SERVICES, CORE_SRC_SERVICES, SPECIAL_PYTHON_IMAGES and
+# NON_PYTHON_DOCKERFILES are repo-relative (no PROJECT_ROOT needed).
+# smoke-rag-images.sh reads RAG_SERVICES. smoke-images.sh (all 29 Python
+# images) derives its population from RAG_SERVICES + CORE_SRC_SERVICES (both
+# already "name:src-subdir", src/ context) plus SPECIAL_PYTHON_IMAGES for the
+# three build recipes that shape doesn't cover.
 
 # Admin services (use their own directory as context; requires $PROJECT_ROOT)
 ADMIN_SERVICES=(
@@ -52,4 +56,25 @@ RAG_SERVICES=(
     "athena-rag-serpapi:rag/serpapi_events"
     "athena-rag-pricecompare:rag/price_compare"
     "athena-rag-brightdata:rag/brightdata"
+)
+
+# Non-Python Dockerfiles in the repo, declared so smoke-images.sh's
+# --list-excluded output is an assertable fact rather than an implicit
+# absence from --list. admin/frontend is `FROM nginx:alpine` (static assets
+# behind nginx, no Python dependency environment to smoke).
+NON_PYTHON_DOCKERFILES=(
+    "admin/frontend/Dockerfile"
+)
+
+# Python images whose build recipe isn't "src/ context, name:src-subdir"
+# (RAG_SERVICES and CORE_SRC_SERVICES already cover that shape). Consumed
+# only by smoke-images.sh.
+#   Format: name|dockerfile_relpath|context_relpath|needs_shared_copy
+#   needs_shared_copy=1 replicates build-and-push.sh's admin-backend special
+#   case: `cp -r src/shared <context>/shared` before build, removed after
+#   (see build-and-push.sh's build_push, the athena-admin-backend branch).
+SPECIAL_PYTHON_IMAGES=(
+    "athena-admin-backend|admin/backend/Dockerfile|admin/backend|1"
+    "athena-chat-embed|apps/chat-embed/Dockerfile|apps/chat-embed|0"
+    "athena-jarvis-web|apps/jarvis-web/Dockerfile|.|0"
 )

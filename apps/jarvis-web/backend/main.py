@@ -102,6 +102,16 @@ HA_TOKEN = os.getenv("HA_TOKEN", "")
 VOICE_API_URL = os.getenv("VOICE_API_URL", "http://localhost:10201")
 CLIMATE_ENTITY = os.getenv("CLIMATE_ENTITY", "climate.thermostat")
 
+# Upload limits for POST /api/voice/transcribe (ATHENA-63 Phase 2). This
+# endpoint has no auth dependency, so its multipart body is fully
+# attacker-controlled — a DoS surface at the parser level (large-file
+# handling advisories in both python-multipart and Starlette) independent
+# of which parser version is currently resolved. 25 MB is generous for a
+# browser-recorded voice clip; the timeout bounds a slow/partial body the
+# same way regardless of whether Content-Length was honest or present.
+MAX_AUDIO_UPLOAD_BYTES = int(os.getenv("MAX_AUDIO_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+AUDIO_UPLOAD_READ_TIMEOUT_SECONDS = float(os.getenv("AUDIO_UPLOAD_READ_TIMEOUT_SECONDS", "30"))
+
 # Temperature limits for guest safety
 MIN_TEMP = int(os.getenv("MIN_TEMP", "65"))
 MAX_TEMP = int(os.getenv("MAX_TEMP", "75"))
@@ -113,6 +123,14 @@ app = FastAPI(
 )
 
 # CORS for development
+# KNOWN ISSUE (ATHENA-64, not fixed here): allow_origins=["*"] combined with
+# allow_credentials=True makes Starlette reflect the request Origin header
+# verbatim, defeating same-origin credential protection — any origin can
+# make a credentialed cross-origin request. Deliberately left unchanged by
+# ATHENA-63 (Phase 2): fixing it requires enumerating every legitimate
+# origin that currently embeds this app, which is a consumer audit outside
+# that campaign's scope, and bundling an untested CORS change into a
+# fast-tracked CVE patch risks breaking a real integration. See ATHENA-64.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -2439,15 +2457,51 @@ async def transcribe_audio(request: Request):
 
     start_time = time.time()
 
+    # Reject an oversized upload before the multipart parser ever runs — the
+    # parser's own memory/CPU cost during large-file handling is the DoS
+    # surface here (an unauthenticated endpoint), not just the file content.
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_size = int(content_length)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length header")
+        if declared_size > MAX_AUDIO_UPLOAD_BYTES:
+            logger.warning("audio_upload_rejected_too_large",
+                          declared_bytes=declared_size, limit_bytes=MAX_AUDIO_UPLOAD_BYTES)
+            raise HTTPException(
+                status_code=413,
+                detail=f"Audio upload exceeds {MAX_AUDIO_UPLOAD_BYTES} byte limit",
+            )
+
     try:
-        form = await request.form()
-        audio_file = form.get("audio")
+        # Content-Length can be absent or dishonest (e.g. chunked transfer
+        # encoding) — the read timeout is what bounds those cases, since a
+        # size check alone can't.
+        try:
+            form = await asyncio.wait_for(request.form(), timeout=AUDIO_UPLOAD_READ_TIMEOUT_SECONDS)
+            audio_file = form.get("audio")
 
-        if not audio_file:
-            raise HTTPException(status_code=400, detail="No audio file provided")
+            if not audio_file:
+                raise HTTPException(status_code=400, detail="No audio file provided")
 
-        # Read the audio content
-        audio_content = await audio_file.read()
+            # Read the audio content
+            audio_content = await asyncio.wait_for(
+                audio_file.read(), timeout=AUDIO_UPLOAD_READ_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.warning("audio_upload_read_timeout",
+                          timeout_seconds=AUDIO_UPLOAD_READ_TIMEOUT_SECONDS)
+            raise HTTPException(status_code=408, detail="Audio upload timed out")
+
+        if len(audio_content) > MAX_AUDIO_UPLOAD_BYTES:
+            logger.warning("audio_upload_rejected_too_large_after_read",
+                          actual_bytes=len(audio_content), limit_bytes=MAX_AUDIO_UPLOAD_BYTES)
+            raise HTTPException(
+                status_code=413,
+                detail=f"Audio upload exceeds {MAX_AUDIO_UPLOAD_BYTES} byte limit",
+            )
+
         logger.info("audio_received",
                    size_bytes=len(audio_content),
                    filename=getattr(audio_file, 'filename', 'unknown'))
@@ -2514,6 +2568,15 @@ async def transcribe_audio(request: Request):
             except:
                 pass
 
+    except HTTPException:
+        # Preserve deliberate status codes raised above (400/408/413/502) —
+        # HTTPException is itself an Exception subclass, so without this it
+        # falls through to the generic 503 handler below and every one of
+        # those codes silently becomes "Voice service unavailable". This was
+        # a pre-existing gap (the 400 and 502 raises above had the same
+        # issue); fixed alongside the new 408/413 controls since their
+        # correctness depends on it.
+        raise
     except subprocess.TimeoutExpired:
         logger.error("stt_timeout")
         raise HTTPException(status_code=504, detail="Speech transcription timed out")

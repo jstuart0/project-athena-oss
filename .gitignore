@@ -88,3 +88,9 @@ thoughts/
 
 # Local Claude instructions (contains environment-specific info)
 CLAUDE.md
+
+# mozart campaign artifacts
+.mozart/
+
+# written by rag-generator-drift.yml / local drift checks
+drift-summary.txt
