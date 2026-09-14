@@ -77,7 +77,7 @@ function renderUserApiKeys(keys, container) {
                     <div class="flex items-center gap-2">
                         ${statusBadge}
                         ${!key.revoked ? `
-                            <button onclick="revokeUserApiKey(${key.id}, '${escapeHtmlApiKeys(key.name)}')"
+                            <button onclick="revokeUserApiKey(${key.id}, '${escapeJsAttr(key.name)}')"
                                     class="px-3 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-300 rounded text-sm transition-colors">
                                 Revoke
                             </button>

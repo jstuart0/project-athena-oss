@@ -444,12 +444,12 @@ function renderModelRow(model) {
             <td class="px-4 py-3">${statusBadge}</td>
             <td class="px-4 py-3">
                 ${model.loaded ? `
-                    <button onclick="unloadModel('${escapeHtml(model.name)}')"
+                    <button onclick="unloadModel('${escapeJsAttr(model.name)}')"
                             class="px-2 py-1 text-xs bg-yellow-600 hover:bg-yellow-700 text-white rounded">
                         Unload
                     </button>
                 ` : `
-                    <button onclick="loadModel('${escapeHtml(model.name)}')"
+                    <button onclick="loadModel('${escapeJsAttr(model.name)}')"
                             class="px-2 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded">
                         Load
                     </button>

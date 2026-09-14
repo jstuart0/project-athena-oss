@@ -254,7 +254,7 @@ function renderConversationRow(conv) {
 
     return `
         <div class="bg-dark-card border border-dark-border hover:border-blue-600 rounded-lg p-4 cursor-pointer transition-colors"
-             onclick="showConversationDetail('${escapeHtml(conv.id)}')">
+             onclick="showConversationDetail('${escapeJsAttr(conv.id)}')">
             <div class="flex items-start justify-between">
                 <div class="flex-1 min-w-0">
                     <div class="flex items-center gap-2 text-xs text-gray-400 mb-2 flex-wrap">

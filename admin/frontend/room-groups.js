@@ -97,7 +97,7 @@ function renderGroupCard(group) {
         ? group.aliases.map(alias => `
             <span class="inline-flex items-center gap-1 px-2 py-1 bg-purple-900/50 text-purple-300 rounded text-xs">
                 ${escapeHtml(alias)}
-                <button onclick="removeAlias(${group.id}, '${escapeHtml(alias)}')" class="text-purple-400 hover:text-red-400 ml-1" title="Remove alias">×</button>
+                <button onclick="removeAlias(${group.id}, '${escapeJsAttr(alias)}')" class="text-purple-400 hover:text-red-400 ml-1" title="Remove alias">×</button>
             </span>
         `).join('')
         : '';
@@ -135,7 +135,7 @@ function renderGroupCard(group) {
                     <button onclick="editRoomGroup(${group.id})" class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm">
                         Edit
                     </button>
-                    <button onclick="deleteRoomGroup(${group.id}, '${escapeHtml(group.display_name)}')" class="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm">
+                    <button onclick="deleteRoomGroup(${group.id}, '${escapeJsAttr(group.display_name)}')" class="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm">
                         Delete
                     </button>
                 </div>

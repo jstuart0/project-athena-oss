@@ -117,7 +117,7 @@ async function renderAutomationsPage() {
                                             <span class="text-white font-medium">${escapeHtml(g.name)}</span>
                                             <span class="text-gray-400 text-sm ml-2">${g.count} automation${g.count !== 1 ? 's' : ''}</span>
                                         </div>
-                                        <button onclick="handleGuestDeparture('${escapeHtml(g.name)}')"
+                                        <button onclick="handleGuestDeparture('${escapeJsAttr(g.name)}')"
                                                 class="px-3 py-1 bg-orange-500/20 text-orange-400 rounded hover:bg-orange-500/30 text-sm">
                                             Guest Departed
                                         </button>
@@ -139,7 +139,7 @@ async function renderAutomationsPage() {
                                             <span class="text-white font-medium">${escapeHtml(g.name)}</span>
                                             <span class="text-gray-400 text-sm ml-2">${g.count} archived</span>
                                         </div>
-                                        <button onclick="handleGuestReturn('${escapeHtml(g.name)}')"
+                                        <button onclick="handleGuestReturn('${escapeJsAttr(g.name)}')"
                                                 class="px-3 py-1 bg-green-500/20 text-green-400 rounded hover:bg-green-500/30 text-sm">
                                             Guest Returned
                                         </button>

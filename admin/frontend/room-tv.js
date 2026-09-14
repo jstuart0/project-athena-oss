@@ -185,7 +185,7 @@ function renderRoomTVSection() {
                         ${config.enabled ? 'Enabled' : 'Disabled'}
                     </span>
                     <button onclick="editTVConfig(${config.id})" class="text-blue-400 hover:text-blue-300 text-sm">Edit</button>
-                    <button onclick="deleteTVConfig(${config.id}, '${escapeHtml(config.room_name)}')" class="text-red-400 hover:text-red-300 text-sm">Delete</button>
+                    <button onclick="deleteTVConfig(${config.id}, '${escapeJsAttr(config.room_name)}')" class="text-red-400 hover:text-red-300 text-sm">Delete</button>
                 </div>
             </div>
             <div class="text-sm text-gray-400 space-y-1">
@@ -464,7 +464,7 @@ function showDiscoveryModal(appleTVs) {
             <div>
                 ${tv.already_configured
                     ? '<span class="text-xs text-green-400">Already configured</span>'
-                    : `<button onclick="addAppleTVFromDiscovery('${escapeHtml(tv.entity_id)}', '${escapeHtml(tv.remote_entity_id)}', '${escapeHtml(tv.suggested_room)}')" class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm">Add</button>`
+                    : `<button onclick="addAppleTVFromDiscovery('${escapeJsAttr(tv.entity_id)}', '${escapeJsAttr(tv.remote_entity_id)}', '${escapeJsAttr(tv.suggested_room)}')" class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm">Add</button>`
                 }
             </div>
         </div>
