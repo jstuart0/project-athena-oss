@@ -115,7 +115,7 @@ function renderBypassCard(config) {
                 <div class="px-4 pb-4">
                     <details class="text-sm">
                         <summary class="text-gray-400 cursor-pointer hover:text-gray-300">View system prompt</summary>
-                        <pre class="mt-2 p-3 bg-dark-bg rounded-lg text-gray-300 whitespace-pre-wrap text-xs">${escapeHtmlBypass(config.system_prompt)}</pre>
+                        <pre class="mt-2 p-3 bg-dark-bg rounded-lg text-gray-300 whitespace-pre-wrap text-xs">${escapeHtml(config.system_prompt)}</pre>
                     </details>
                 </div>
             ` : ''}
@@ -204,7 +204,7 @@ function editBypassConfig(serviceName) {
                         <label for="bypass-system-prompt" class="block text-sm font-medium text-gray-300 mb-2">System Prompt</label>
                         <textarea id="bypass-system-prompt" name="system_prompt" rows="8"
                                   class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white font-mono text-sm"
-                        >${escapeHtmlBypass(config.system_prompt || '')}</textarea>
+                        >${escapeHtml(config.system_prompt || '')}</textarea>
                         <p class="mt-1 text-xs text-gray-500">Instructions for the cloud LLM when handling this service</p>
                     </div>
 
@@ -287,14 +287,6 @@ async function saveBypassConfig(event, serviceName) {
         }
     }
 }
-
-function escapeHtmlBypass(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 // Register tab callback
 window.tabChangeCallbacks = window.tabChangeCallbacks || {};
 window.tabChangeCallbacks['service-bypass'] = initServiceBypassPage;
