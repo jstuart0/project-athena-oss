@@ -125,7 +125,15 @@ cleanup() {
             docker rmi "$tag" 2>/dev/null || true
         done
     fi
-    for d in "${SHARED_COPY_DIRS[@]}"; do
+    # Same bash-3.2 `set -u` empty-array gap fixed in audit-images.sh's
+    # cleanup() this round: "${arr[@]}" on a still-empty array is an
+    # unbound-variable error on macOS's stock /bin/bash, not an empty
+    # expansion, which would clobber this script's real exit code with the
+    # trap's. Every image with needs_shared_copy=0 (all RAG services,
+    # gateway, mode_service, orchestrator, chat-embed, jarvis-web) leaves
+    # this array empty, so a single-service run hit this on every one of
+    # them.
+    for d in "${SHARED_COPY_DIRS[@]+"${SHARED_COPY_DIRS[@]}"}"; do
         rm -rf "$d"
     done
 }

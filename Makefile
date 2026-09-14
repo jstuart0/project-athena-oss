@@ -10,6 +10,7 @@
 #   lock-check           Non-mutating: fails if any committed lock no longer matches a fresh compile.
 #   audit-images         Build every Python image and pip-audit it (one allowlisted residual: PYSEC-2026-1325).
 #   audit-images SCOPE=remediated  Only the two images this campaign remediates (athena-admin-backend, athena-jarvis-web).
+#   check-build-tooling  Assert the pinned build-tooling triplet precedes every dependency install, repo-wide.
 #
 # NOTE for CI/gate authors: `make` collapses every non-zero recipe exit code
 # to 2 — it cannot distinguish "findings exist" (e.g. drift detected) from
@@ -19,7 +20,7 @@
 #
 # Prerequisites: docker with buildx support (smoke-*, audit-images); uv >= 0.10 (lock*).
 
-.PHONY: smoke-rags smoke-images lock lock-upgrade lock-check audit-images
+.PHONY: smoke-rags smoke-images lock lock-upgrade lock-check audit-images check-build-tooling
 
 smoke-rags:
 	@if [ -n "$(SERVICE)" ]; then \
@@ -50,3 +51,6 @@ audit-images:
 	else \
 		scripts/audit-images.sh; \
 	fi
+
+check-build-tooling:
+	@python3 scripts/check-build-tooling.py

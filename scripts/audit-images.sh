@@ -19,9 +19,13 @@
 #   PYSEC-2026-1325 (ecdsa, pulled in transitively by python-jose[cryptography]).
 #   Unreachable: this codebase's only python-jose usage is HS256 (symmetric
 #   HMAC) — see admin/backend/app/auth/oidc.py — which never calls ecdsa's
-#   signing API. GUARD: if `algorithms=[...]` is ever widened to an EC
-#   algorithm (ES256/384/512) this exception no longer holds and python-jose
-#   must be replaced. grep -rn "algorithms=\[" admin/backend/app to check.
+#   signing API. GUARD (mechanical, AST-based — not text matching, since a
+#   grep for "algorithms=[" cannot see a call site that omits algorithms=
+#   entirely, which python-jose's jwt.decode() defaults to accepting any alg
+#   the token header claims): scripts/check-jwt-algorithm-guard.py runs
+#   before this allowlist is ever applied. If it fails, the --ignore-vuln
+#   flag is withheld for the whole run — PYSEC-2026-1325 then surfaces as an
+#   unallowlisted finding rather than being silently suppressed.
 
 set -euo pipefail
 
@@ -47,6 +51,24 @@ for service_def in "${RAG_SERVICES[@]}"; do
 done
 
 REMEDIATED_SCOPE=("athena-admin-backend" "athena-jarvis-web")
+
+# Mechanical precondition for the PYSEC-2026-1325 allowlist (see header
+# comment). Runs once, against source on disk — not per image, since it's a
+# property of the app code, not the built artifact. GUARD_RC:
+#   0 — holds; audit_one's ignore_vuln_flag carries the allowlist.
+#   1 — a real finding (the HS256-only assumption doesn't hold, or isn't
+#       statically verifiable); the allowlist is withheld for this run.
+#   2 — the check itself couldn't run; this script cannot safely proceed.
+GUARD_RC=0
+GUARD_OUTPUT="$(python3 "${SCRIPT_DIR}/check-jwt-algorithm-guard.py" --root "${PROJECT_ROOT}" 2>&1)" || GUARD_RC=$?
+echo "${GUARD_OUTPUT}"
+if [[ "${GUARD_RC}" -eq 2 ]]; then
+    echo "TOOL ERROR: JWT algorithm guard could not run — refusing to audit" >&2
+    exit 2
+fi
+if [[ "${GUARD_RC}" -ne 0 ]]; then
+    echo "WARNING: JWT algorithm guard failed — PYSEC-2026-1325 allowlist withheld for this run" >&2
+fi
 
 SCOPE="all"
 FILTER_SERVICE=""
@@ -88,7 +110,14 @@ TOOL_ERRORS=()
 SHARED_COPY_DIRS=()
 
 cleanup() {
-    for d in "${SHARED_COPY_DIRS[@]}"; do
+    # Under `set -u` on bash 3.2 (macOS's stock /bin/bash), expanding
+    # "${arr[@]}" on a still-empty array is an unbound-variable error, not an
+    # empty expansion -- the classic bash-3-vs-4 array gap. An error here
+    # inside an EXIT trap clobbers the script's real exit code with the
+    # trap's, silently turning a real failure (or a real pass) into whatever
+    # this cleanup happened to return. The `+` parameter-expansion form
+    # short-circuits before the array ever gets indexed when it's empty.
+    for d in "${SHARED_COPY_DIRS[@]+"${SHARED_COPY_DIRS[@]}"}"; do
         rm -rf "$d"
     done
 }
@@ -132,33 +161,94 @@ audit_one() {
     local out_dir
     mkdir -p "${HOME}/.athena-audit-images"
     out_dir="$(mktemp -d "${HOME}/.athena-audit-images/audit.XXXXXX")"
-    RC=0
-    docker run --rm --platform linux/amd64 \
-        -v "${out_dir}:/audit-out" --entrypoint sh "${audit_tag}" -c "
+    rm -f "${out_dir}/a.json" "${out_dir}/frozen.txt" "${out_dir}/pip-audit.rc"
+
+    # Fidelity (ian's finding): pip-audit must never be installed INTO the
+    # audited environment -- that mutates it (can upgrade a shared dep to
+    # satisfy pip-audit's own requirements) and adds pip-audit's own
+    # transitive deps to the very site-packages being measured. Instead:
+    # freeze the target environment's installed packages from its own
+    # python (--exclude-editable drops the local `-e /app/shared` entry,
+    # which isn't a pip-audit-resolvable spec and carries no PyPI CVEs of
+    # its own), then audit that frozen list from a throwaway venv that
+    # never touches the target env. pip-audit's exit code is captured to a
+    # sidecar file rather than swallowed with `|| true`, so a tool crash
+    # can't be misread as an empty-but-valid JSON result.
+    local container_name="athena63-p6-audit-${name}"
+    docker rm -f "${container_name}" >/dev/null 2>&1 || true
+    # Passed as a container env var, not interpolated into the script text,
+    # so the single-quoted heredoc-style script below needs no nested
+    # quoting and $? etc. stay literal for the container's own shell.
+    local ignore_vuln_flag=""
+    if [[ "${GUARD_RC}" -eq 0 ]]; then
+        ignore_vuln_flag="--ignore-vuln ${IGNORE_VULN}"
+    fi
+    local docker_rc=0
+    docker run --rm -i --platform linux/amd64 --name "${container_name}" \
+        -e IGNORE_VULN_FLAG="${ignore_vuln_flag}" \
+        -v "${out_dir}:/audit-out" --entrypoint sh "${audit_tag}" -c '
         set -e
-        pip install --no-cache-dir -q pip-audit 2>/dev/null || true
-        pip-audit --format json --ignore-vuln ${IGNORE_VULN} --output /audit-out/a.json || true
-    " || RC=$?
-    if [[ "${RC}" -ne 0 ]]; then
-        echo "TOOL ERROR: ${name}: audit container exited ${RC}"
-        TOOL_ERRORS+=("${name} (container error)")
+        python3 -m pip freeze --all --exclude-editable > /audit-out/frozen.txt
+        python3 -m venv /audit-venv
+        /audit-venv/bin/pip install --no-cache-dir -q --upgrade pip
+        /audit-venv/bin/pip install --no-cache-dir -q pip-audit
+        set +e
+        /audit-venv/bin/pip-audit -r /audit-out/frozen.txt --format json $IGNORE_VULN_FLAG --output /audit-out/a.json
+        echo $? > /audit-out/pip-audit.rc
+        exit 0
+    ' || docker_rc=$?
+    if [[ "${docker_rc}" -ne 0 ]]; then
+        echo "TOOL ERROR: ${name}: audit container exited ${docker_rc} (venv/pip-audit-install step failed, before pip-audit itself ran)"
+        TOOL_ERRORS+=("${name} (container error, rc=${docker_rc})")
         rm -rf "${out_dir}"
         return
     fi
 
+    if [[ ! -s "${out_dir}/pip-audit.rc" ]]; then
+        echo "TOOL ERROR: ${name}: no pip-audit exit-code sidecar written — INCONCLUSIVE, not clean"
+        TOOL_ERRORS+=("${name} (no pip-audit.rc sidecar)")
+        rm -rf "${out_dir}"
+        return
+    fi
+    local pip_audit_rc
+    pip_audit_rc="$(cat "${out_dir}/pip-audit.rc")"
+
     local verdict
-    verdict="$(python3 - "${out_dir}/a.json" "${name}" <<'PY'
+    verdict="$(python3 - "${out_dir}/a.json" "${name}" "${pip_audit_rc}" <<'PY'
 import json, sys
-path, name = sys.argv[1], sys.argv[2]
+path, name, rc_str = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    rc = int(rc_str)
+except ValueError:
+    print(f"TOOL_ERROR {name}: pip-audit exit code sidecar was not an integer: {rc_str!r}")
+    sys.exit(0)
+# pip-audit's own contract: 0 = clean, 1 = vulnerabilities found. Any other
+# code (dependency-resolution crash, network failure, bad args, ...) means
+# the JSON on disk -- if any -- cannot be trusted as a complete result.
+if rc not in (0, 1):
+    print(f"TOOL_ERROR {name}: pip-audit exited {rc} (not 0=clean or 1=findings) -- result not trustworthy")
+    sys.exit(0)
 try:
     with open(path) as f:
         d = json.load(f)
 except Exception as e:
-    print(f"TOOL_ERROR {name}: pip-audit produced no parseable JSON: {e}")
+    print(f"TOOL_ERROR {name}: pip-audit exited {rc} but produced no parseable JSON: {e}")
     sys.exit(0)
+# De-duplicated on (package, version, advisory id): pip-audit's JSON can
+# list the same advisory more than once for one dependency (e.g. the same
+# ID reachable through more than one alias/source in its own vuln record),
+# and/or the same dependency can appear more than once in `dependencies`
+# for a resolver-internal reason. Neither is a second distinct finding —
+# counting them as one each would report N discovered advisories as some
+# multiple of N and make "5 distinct PYSECs" read as 10.
+seen = set()
 found = []
 for dep in d.get("dependencies", []):
     for v in dep.get("vulns", []):
+        key = (dep.get("name"), dep.get("version"), v.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
         found.append(f"{dep.get('name')}=={dep.get('version')}:{v.get('id')}")
 if found:
     print(f"FINDINGS {name}: " + ", ".join(found))
@@ -197,9 +287,14 @@ if [[ "${matched}" == "false" ]]; then
     exit 2
 fi
 
+ALLOWLIST_STATUS="${IGNORE_VULN} (guard held)"
+if [[ "${GUARD_RC}" -ne 0 ]]; then
+    ALLOWLIST_STATUS="none — guard failed, ${IGNORE_VULN} was NOT allowlisted this run"
+fi
+
 echo ""
 echo "══════════════════════════════════════════════════"
-echo "  Image audit summary (scope: ${SCOPE}, allowlist: ${IGNORE_VULN})"
+echo "  Image audit summary (scope: ${SCOPE}, allowlist: ${ALLOWLIST_STATUS})"
 echo "══════════════════════════════════════════════════"
 echo "  Clean: ${#CLEAN[@]}"
 echo "  Findings: ${#FINDINGS[@]}"
