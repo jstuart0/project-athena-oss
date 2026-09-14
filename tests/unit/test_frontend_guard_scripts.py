@@ -197,6 +197,53 @@ def test_fresh_name_entity_map_is_flagged(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# D6 — fresh_name_dom_roundtrip. Phase 5 discovered `--check body-shape`
+# false-positived on 12 unrelated app.js/drawer.js/memory-management.js/
+# room-audio.js/user-api-keys.js/utils.js/voice-config.js functions
+# (showSuccess, showError, open, updateSessionFilter, ...) that legitimately
+# use `document.createElement` + `.textContent =` for DOM building and never
+# read `.innerHTML` back. The two-marker heuristic could never reach zero
+# against real application code. Fixed by requiring the THIRD, defining
+# marker of the escape trick: a `return X.innerHTML` GETTER read. This
+# fixture proves both directions in one place (rule 6): a genuine fresh-name
+# escape implementation is still caught, and the exact false-positive shape
+# that motivated the fix is not.
+# ---------------------------------------------------------------------------
+
+
+def test_fresh_name_dom_roundtrip_is_flagged_but_safe_dom_building_is_not(tmp_path):
+    (tmp_path / "htmlEncode.js").write_text(
+        "function htmlEncode(str) {\n"
+        "    const div = document.createElement('div');\n"
+        "    div.textContent = str;\n"
+        "    return div.innerHTML;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "showSuccess.js").write_text(
+        "function showSuccess(message) {\n"
+        "    const toast = document.createElement('div');\n"
+        "    toast.textContent = message;\n"
+        "    document.body.appendChild(toast);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    excludes = uniqueness.resolve_exclude_paths(tmp_path, None)
+    findings = uniqueness.find_dom_roundtrip_any_name(tmp_path, excludes)
+    flagged = {(Path(f["file"]).name, f["name"]) for f in findings}
+
+    assert ("htmlEncode.js", "htmlEncode") in flagged, (
+        "a genuine fresh-name DOM-round-trip escape implementation (createElement + "
+        "textContent + a return read of .innerHTML) must still be caught"
+    )
+    assert not any(name == "showSuccess" for _file, name in flagged), (
+        "createElement + textContent alone, with no .innerHTML read-back, is safe DOM "
+        "building (a toast helper) -- must NOT be flagged as an escape implementation"
+    )
+
+
+# ---------------------------------------------------------------------------
 # rule 12 — canonical_self_exclusion (path-scoped, not shape-scoped)
 # ---------------------------------------------------------------------------
 

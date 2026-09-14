@@ -60,6 +60,20 @@ ENTITY_REPLACE_RE = re.compile(r"\.replace\(\s*/[^/]*/\s*g?\s*,\s*['\"]&[^'\"]*;
 FUNCTION_BODY_RE = re.compile(r"function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{", re.MULTILINE)
 
 DOM_ROUNDTRIP_MARKERS = ("createElement", "textContent")
+# The escape-trick's third, DEFINING marker: the encoded string is obtained
+# by READING .innerHTML back (a getter), not by SETTING it. `createElement`
+# + `textContent` alone are common, entirely safe DOM-building idioms (a
+# toast helper, a generic element factory) that coincidentally contain both
+# substrings without ever being an escape implementation. Phase 5 (D6):
+# verified false positives on showSuccess/showError (app.js), open
+# (drawer.js), updateSessionFilter/showCreateMemoryModal/showEditMemoryModal
+# (memory-management.js), showCreateRoomModal/showEditRoomModal
+# (room-audio.js), copyUserApiKey (user-api-keys.js), showNotification/
+# createElement (utils.js), injectVoiceConfigStyles (voice-config.js) --
+# none of these ever reads .innerHTML back; all of them only ever WRITE it
+# or never touch it. `(?!\s*=(?!=))` excludes `.innerHTML == ` /
+# `.innerHTML === ` comparisons from being mistaken for an assignment.
+INNERHTML_READ_RE = re.compile(r"\breturn\s+[\w.\[\]'\"]+\.innerHTML\b\s*(?!=(?!=))")
 
 
 def line_of(text: str, index: int) -> int:
@@ -139,7 +153,7 @@ def classify_body_shape(text: str, name_start: int) -> str:
     body = text[brace_open:brace_close]
     if len(ENTITY_REPLACE_RE.findall(body)) >= 3:
         return "entity-map"
-    if all(marker in body for marker in DOM_ROUNDTRIP_MARKERS):
+    if all(marker in body for marker in DOM_ROUNDTRIP_MARKERS) and INNERHTML_READ_RE.search(body):
         return "dom-round-trip"
     return "other"
 
