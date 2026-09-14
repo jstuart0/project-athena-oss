@@ -103,7 +103,7 @@ function renderBypassCard(config) {
                         <span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isEnabled ? 'translate-x-6' : 'translate-x-1'}"></span>
                     </button>
 
-                    <button onclick="editBypassConfig('${config.service_name}')"
+                    <button onclick="editBypassConfig('${escapeJsAttr(config.service_name)}')"
                             class="p-2 hover:bg-gray-700 rounded-lg transition-colors"
                             title="Configure">
                         ⚙️
@@ -174,11 +174,11 @@ function editBypassConfig(serviceName) {
              onclick="if(event.target.id === 'bypass-config-modal') closeBypassModal()">
             <div class="bg-dark-card border border-dark-border rounded-xl w-full max-w-2xl m-4 max-h-[90vh] overflow-y-auto">
                 <div class="p-6 border-b border-dark-border">
-                    <h3 class="text-xl font-semibold text-white">Configure ${config.display_name || serviceName}</h3>
+                    <h3 class="text-xl font-semibold text-white">Configure ${escapeHtml(config.display_name || serviceName)}</h3>
                     <p class="text-sm text-gray-400 mt-1">Customize how this service uses cloud LLMs</p>
                 </div>
 
-                <form id="bypass-config-form" onsubmit="saveBypassConfig(event, '${serviceName}')" class="p-6 space-y-6">
+                <form id="bypass-config-form" onsubmit="saveBypassConfig(event, '${escapeJsAttr(serviceName)}')" class="p-6 space-y-6">
                     <!-- Cloud Provider -->
                     <div>
                         <label for="bypass-cloud-provider" class="block text-sm font-medium text-gray-300 mb-2">Cloud Provider</label>
