@@ -260,7 +260,15 @@ def find_matching_paren(text: str, open_idx: int) -> int:
     return -1
 
 
-ESCAPE_CALL_RE = re.compile(r"^(escapeHtml|escapeJsAttr)\s*\((.*)\)\s*$", re.DOTALL)
+# Any `escapeHtml`-family name (e.g. `escapeHtmlApiKeys`, ATHENA-66 Phase 3
+# reconciliation) is the wrong primitive in handler-span/builder-argument
+# context, not just the literal `escapeHtml`. Pre-fix, a handler span calling
+# a same-shaped sibling escaper (a DOM-round-trip HTML entity-map, just under
+# a different name) fell through to `unescaped-quoted` — the WRONG bucket —
+# because this regex only recognised the exact literal name. Normalised to
+# "escapeHtml" in `_classify_expr` below so `classify()` treats every family
+# member identically.
+ESCAPE_CALL_RE = re.compile(r"^(escapeHtml\w*|escapeJsAttr)\s*\((.*)\)\s*$", re.DOTALL)
 
 
 @dataclass
@@ -285,6 +293,8 @@ def _classify_expr(expr: str) -> tuple[str | None, str]:
     close = find_matching_paren(stripped, open_idx)
     if close != len(stripped) - 1:
         return None, stripped
+    if fn != "escapeJsAttr":
+        fn = "escapeHtml"  # normalise the whole escapeHtml* family
     return fn, inner
 
 

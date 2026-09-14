@@ -4,8 +4,8 @@
     "note": "Every count here is measured against the actual tree, not copied from the plan."
   },
   "callee_sinks": {
-    "sink-escaped": 129,
-    "sink-unescaped": 10,
+    "sink-escaped": 134,
+    "sink-unescaped": 5,
     "unresolved": 0
   },
   "data_bearing_plain_attribute": {
@@ -355,9 +355,9 @@
       }
     ],
     "unescaped_quoted_builder": 14,
-    "unescaped_quoted_total": 84,
+    "unescaped_quoted_total": 83,
     "wrong_primitive_builder": 6,
-    "wrong_primitive_total": 51
+    "wrong_primitive_total": 52
   },
   "innerhtml_assignments": {
     "files": [
