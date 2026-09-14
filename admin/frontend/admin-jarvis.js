@@ -790,15 +790,15 @@ function renderToolProposal(proposal) {
             </div>
 
             <div class="flex gap-2">
-                <button onclick="approveToolProposal('${proposal.proposal_id}')"
+                <button onclick="approveToolProposal('${escapeJsAttr(proposal.proposal_id)}')"
                     class="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-sm">
                     ✓ Approve
                 </button>
-                <button onclick="rejectToolProposal('${proposal.proposal_id}')"
+                <button onclick="rejectToolProposal('${escapeJsAttr(proposal.proposal_id)}')"
                     class="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm">
                     ✗ Reject
                 </button>
-                <button onclick="viewToolProposalDetails('${proposal.proposal_id}')"
+                <button onclick="viewToolProposalDetails('${escapeJsAttr(proposal.proposal_id)}')"
                     class="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white rounded text-sm">
                     View Details
                 </button>

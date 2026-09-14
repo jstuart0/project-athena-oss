@@ -98,7 +98,7 @@ function renderBypassCard(config) {
                         <span class="text-sm text-gray-500">Any cloud provider</span>
                     `}
 
-                    <button onclick="toggleBypass('${config.service_name}')"
+                    <button onclick="toggleBypass('${escapeJsAttr(config.service_name)}')"
                             class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${isEnabled ? 'bg-purple-600' : 'bg-gray-600'}">
                         <span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isEnabled ? 'translate-x-6' : 'translate-x-1'}"></span>
                     </button>

@@ -217,24 +217,24 @@
 
                     <!-- Action dropdown -->
                     <div class="relative">
-                        <button onclick="Athena.pages.Integrations.toggleDropdown('${provider.id}')"
+                        <button onclick="Athena.pages.Integrations.toggleDropdown('${escapeJsAttr(provider.id)}')"
                                 class="p-2 hover:bg-dark-elevated rounded-lg transition-colors">
                             <i data-lucide="more-vertical" class="w-4 h-4 text-gray-400"></i>
                         </button>
                         <div id="dropdown-${provider.id}"
                              class="hidden absolute right-0 top-full mt-1 w-40 bg-dark-elevated border border-dark-border rounded-lg shadow-lg z-20">
-                            <button onclick="Athena.pages.Integrations.configure('${provider.id}')"
+                            <button onclick="Athena.pages.Integrations.configure('${escapeJsAttr(provider.id)}')"
                                     class="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-dark-bg rounded-t-lg transition-colors">
                                 <i data-lucide="settings" class="w-4 h-4 inline mr-2"></i>
                                 Configure
                             </button>
-                            <button onclick="Athena.pages.Integrations.test('${provider.id}')"
+                            <button onclick="Athena.pages.Integrations.test('${escapeJsAttr(provider.id)}')"
                                     class="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-dark-bg transition-colors">
                                 <i data-lucide="play" class="w-4 h-4 inline mr-2"></i>
                                 Test Connection
                             </button>
                             ${isConnected ? `
-                                <button onclick="Athena.pages.Integrations.disconnect('${provider.id}')"
+                                <button onclick="Athena.pages.Integrations.disconnect('${escapeJsAttr(provider.id)}')"
                                         class="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-dark-bg rounded-b-lg transition-colors">
                                     <i data-lucide="unplug" class="w-4 h-4 inline mr-2"></i>
                                     Disconnect

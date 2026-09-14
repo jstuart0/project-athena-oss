@@ -905,7 +905,7 @@ function renderModeSwitcherCard(feature, meta) {
                     const desc = modeDescriptions[mode] || '';
 
                     return `
-                        <button onclick="setAutomationMode('${mode}', ${feature.id})"
+                        <button onclick="setAutomationMode('${escapeJsAttr(mode)}', ${feature.id})"
                                 class="p-4 rounded-lg border-2 transition-all text-left
                                        ${isActive
                                            ? `${color.border} ${color.bg}`

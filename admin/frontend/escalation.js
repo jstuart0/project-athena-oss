@@ -332,7 +332,7 @@ function renderEscalationPresetCard(preset, isActive) {
                         <i data-lucide="copy" class="w-4 h-4"></i>
                     </button>
                     ${!isActive ? `
-                        <button onclick="deleteEscalationPreset(${preset.id}, '${preset.name.replace(/'/g, "\\'")}')"
+                        <button onclick="deleteEscalationPreset(${preset.id}, '${escapeJsAttr(preset.name)}')"
                                 class="p-1.5 text-red-400 hover:text-red-300 hover:bg-dark-bg rounded" title="Delete">
                             <i data-lucide="trash-2" class="w-4 h-4"></i>
                         </button>
@@ -395,7 +395,7 @@ function renderRuleCompact(rule) {
                         class="p-1 text-blue-400 hover:text-blue-300" title="Edit">
                     <i data-lucide="edit-2" class="w-4 h-4"></i>
                 </button>
-                <button onclick="deleteRule(${rule.id}, '${rule.rule_name}')"
+                <button onclick="deleteRule(${rule.id}, '${escapeJsAttr(rule.rule_name)}')"
                         class="p-1 text-red-400 hover:text-red-300" title="Delete">
                     <i data-lucide="trash-2" class="w-4 h-4"></i>
                 </button>
@@ -1216,7 +1216,7 @@ function showAllRulesModal(presetId) {
                                     class="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-dark-card rounded" title="Edit">
                                 <i data-lucide="edit-2" class="w-4 h-4"></i>
                             </button>
-                            <button onclick="deleteRuleFromModal(${rule.id}, '${rule.rule_name.replace(/'/g, "\\'")}', ${presetId})"
+                            <button onclick="deleteRuleFromModal(${rule.id}, '${escapeJsAttr(rule.rule_name)}', ${presetId})"
                                     class="p-1.5 text-red-400 hover:text-red-300 hover:bg-dark-card rounded" title="Delete">
                                 <i data-lucide="trash-2" class="w-4 h-4"></i>
                             </button>
@@ -1441,7 +1441,7 @@ function renderOverridesPanel() {
                                     ${override.expires_at ? `Expires: ${new Date(override.expires_at).toLocaleString()}` : ''}
                                 </div>
                             </div>
-                            <button onclick="cancelOverride('${override.session_id}')"
+                            <button onclick="cancelOverride('${escapeJsAttr(override.session_id)}')"
                                     class="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm">
                                 Cancel
                             </button>

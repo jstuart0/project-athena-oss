@@ -384,7 +384,7 @@ function renderModelDownloadsPage() {
                         ${QUANTIZATION_OPTIONS.slice(0, 3).map(q => `
                             <label class="flex items-center gap-1 cursor-pointer px-2 py-1 rounded border ${currentFilters.quantizations.includes(q.value) ? 'border-blue-500 bg-blue-500/20' : 'border-dark-border'} text-xs">
                                 <input type="checkbox" ${currentFilters.quantizations.includes(q.value) ? 'checked' : ''}
-                                       onchange="toggleQuantization('${q.value}')"
+                                       onchange="toggleQuantization('${escapeJsAttr(q.value)}')"
                                        class="hidden">
                                 <span class="text-gray-300">${q.label}</span>
                             </label>
@@ -482,7 +482,7 @@ function renderModelSearchResultsHTML() {
                             </div>
                         ` : ''}
                     </div>
-                    <button onclick="loadRepoFiles('${repoId}')"
+                    <button onclick="loadRepoFiles('${escapeJsAttr(repoId)}')"
                             class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
                         View Files
                     </button>
@@ -587,7 +587,7 @@ function renderDownloadsHTML() {
                                 ${download.ollama_imported ? `
                                     <span class="px-3 py-1 text-sm text-green-400">&#10003; ${download.ollama_model_name}</span>
                                 ` : ''}
-                                <button onclick="deleteDownload(${download.id}, '${download.filename}')" class="px-3 py-1 text-sm text-gray-400 hover:bg-red-500/20 hover:text-red-400 rounded transition-colors">
+                                <button onclick="deleteDownload(${download.id}, '${escapeJsAttr(download.filename)}')" class="px-3 py-1 text-sm text-gray-400 hover:bg-red-500/20 hover:text-red-400 rounded transition-colors">
                                     Delete
                                 </button>
                             </div>
@@ -633,7 +633,7 @@ function showRepoFilesModal(repoId, files) {
                                             ${file.quantization ? `<span class="px-2 py-0.5 bg-purple-500/20 text-purple-400 rounded">${file.quantization}</span>` : ''}
                                         </div>
                                     </div>
-                                    <button onclick="startDownload('${repoId}', '${file.filename}', '${file.quantization || ''}')"
+                                    <button onclick="startDownload('${escapeJsAttr(repoId)}', '${escapeJsAttr(file.filename)}', '${escapeJsAttr(file.quantization || '')}')"
                                             class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap ml-4">
                                         Download
                                     </button>

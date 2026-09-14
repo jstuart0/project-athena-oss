@@ -294,7 +294,7 @@ function renderPlaybackCard() {
                     <p class="block text-sm text-gray-400 mb-3">Default Provider</p>
                     <div class="grid grid-cols-3 gap-2">
                         ${providers.map(p => `
-                            <button onclick="selectProvider('${p.id}')"
+                            <button onclick="selectProvider('${escapeJsAttr(p.id)}')"
                                 class="provider-btn flex flex-col items-center gap-1 p-3 rounded-lg border transition-all ${provider === p.id ? 'bg-purple-500/20 border-purple-500/50 text-purple-400' : 'bg-dark-bg border-dark-border text-gray-400 hover:border-gray-600'}">
                                 <span class="text-lg">${p.icon}</span>
                                 <span class="text-xs">${p.name}</span>

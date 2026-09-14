@@ -369,7 +369,7 @@ function renderRouting() {
                 <span class="px-3 py-1 rounded-full text-xs font-semibold ${getCategoryBadgeClass(rule.intent_category)}">
                     ${rule.intent_category}
                 </span>
-                <button onclick="deleteRouting('${rule.intent_category}')"
+                <button onclick="deleteRouting('${escapeJsAttr(rule.intent_category)}')"
                     class="text-red-400 hover:text-red-300 text-sm">
                     🗑️
                 </button>
@@ -543,7 +543,7 @@ function renderProviderRouting() {
                 <span class="px-3 py-1 rounded-full text-xs font-semibold ${getCategoryBadgeClass(mapping.intent_category)}">
                     ${mapping.intent_category}
                 </span>
-                <button onclick="deleteProviderRouting('${mapping.intent_category}')"
+                <button onclick="deleteProviderRouting('${escapeJsAttr(mapping.intent_category)}')"
                     class="text-red-400 hover:text-red-300 text-sm">
                     🗑️
                 </button>
@@ -715,7 +715,7 @@ function renderStrategyConfigs() {
                 </span>
             </div>
             <select
-                onchange="updateStrategyConfig('${config.intent_name}', this.value)"
+                onchange="updateStrategyConfig('${escapeJsAttr(config.intent_name)}', this.value)"
                 class="w-full px-2 py-1 bg-dark-card border border-dark-border rounded text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
                 <option value="cascading" ${config.routing_strategy === 'cascading' ? 'selected' : ''}>

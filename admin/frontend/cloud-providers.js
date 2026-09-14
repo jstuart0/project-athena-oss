@@ -154,7 +154,7 @@ async function loadProviderCards(noCache = false) {
                     <div class="mb-4">
                         <label for="default-model-${key}" class="text-sm text-gray-400 block mb-2">Default Model</label>
                         <select id="default-model-${key}"
-                                onchange="updateDefaultModel('${key}')"
+                                onchange="updateDefaultModel('${escapeJsAttr(key)}')"
                                 class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white text-sm"
                                 ${!isConfigured ? 'disabled' : ''}>
                             ${config.models.map(m =>
@@ -169,7 +169,7 @@ async function loadProviderCards(noCache = false) {
                             <label for="rpm-${key}" class="text-xs text-gray-400 block mb-1">RPM Limit</label>
                             <input type="number" id="rpm-${key}"
                                    value="${provider?.rate_limit_rpm || 60}"
-                                   onchange="updateRateLimits('${key}')"
+                                   onchange="updateRateLimits('${escapeJsAttr(key)}')"
                                    class="w-full bg-dark-bg border border-dark-border rounded px-2 py-1 text-white text-sm"
                                    ${!isConfigured ? 'disabled' : ''}>
                         </div>
@@ -177,7 +177,7 @@ async function loadProviderCards(noCache = false) {
                             <label for="tpm-${key}" class="text-xs text-gray-400 block mb-1">TPM Limit</label>
                             <input type="number" id="tpm-${key}"
                                    value="${provider?.rate_limit_tpm || 100000}"
-                                   onchange="updateRateLimits('${key}')"
+                                   onchange="updateRateLimits('${escapeJsAttr(key)}')"
                                    class="w-full bg-dark-bg border border-dark-border rounded px-2 py-1 text-white text-sm"
                                    ${!isConfigured ? 'disabled' : ''}>
                         </div>
@@ -189,7 +189,7 @@ async function loadProviderCards(noCache = false) {
                             ${isConfigured ? 'Checking...' : 'Not available'}
                         </div>
                         ${isConfigured ? `
-                            <button onclick="checkProviderHealth('${key}')"
+                            <button onclick="checkProviderHealth('${escapeJsAttr(key)}')"
                                     class="text-xs ${colors.text} hover:underline">
                                 Test Connection
                             </button>

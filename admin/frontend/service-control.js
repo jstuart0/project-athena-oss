@@ -304,16 +304,16 @@ function renderServiceRow(service) {
             <td class="px-4 py-3">
                 <div class="flex gap-2">
                     ${isRunning ? `
-                        <button onclick="stopService('${serviceName}')"
+                        <button onclick="stopService('${escapeJsAttr(serviceName)}')"
                                 class="px-2 py-1 text-xs bg-red-600 hover:bg-red-700 text-white rounded">
                             Stop
                         </button>
-                        <button onclick="restartService('${serviceName}')"
+                        <button onclick="restartService('${escapeJsAttr(serviceName)}')"
                                 class="px-2 py-1 text-xs bg-yellow-600 hover:bg-yellow-700 text-white rounded">
                             Restart
                         </button>
                     ` : `
-                        <button onclick="startService('${serviceName}')"
+                        <button onclick="startService('${escapeJsAttr(serviceName)}')"
                                 class="px-2 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded">
                             Start
                         </button>
@@ -663,12 +663,12 @@ function renderRagServiceRow(service) {
             </td>
             <td class="px-4 py-3">
                 <div class="flex gap-2">
-                    <button onclick="toggleRagService('${safeName}')"
+                    <button onclick="toggleRagService('${escapeJsAttr(safeName)}')"
                             class="px-2 py-1 text-xs ${isEnabled ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'} text-white rounded">
                         ${isEnabled ? 'Disable' : 'Enable'}
                     </button>
                     <button id="check-btn-${safeName}"
-                            onclick="checkRagServiceHealth('${safeName}', this)"
+                            onclick="checkRagServiceHealth('${escapeJsAttr(safeName)}', this)"
                             class="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded">
                         Refresh
                     </button>
@@ -966,7 +966,7 @@ function renderMacros() {
         </div>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
             ${SERVICE_MACROS.map(macro => `
-                <button onclick="executeMacro('${macro.id}')"
+                <button onclick="executeMacro('${escapeJsAttr(macro.id)}')"
                         class="p-4 bg-dark-elevated hover:bg-gray-700 rounded-lg border border-dark-border transition-all text-left group">
                     <div class="flex items-center gap-3 mb-2">
                         <div class="p-2 bg-blue-500/20 rounded-lg">

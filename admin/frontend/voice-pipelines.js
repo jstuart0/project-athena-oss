@@ -236,7 +236,7 @@
                         ${statusText}
                     </span>
                     ${service ? `
-                        <button onclick="Athena.pages.VoicePipelines.restartComponent('${type}', ${service.port || 0})"
+                        <button onclick="Athena.pages.VoicePipelines.restartComponent('${escapeJsAttr(type)}', ${service.port || 0})"
                                 class="p-2 hover:bg-dark-elevated rounded-lg transition-colors"
                                 title="Restart ${label}">
                             <i data-lucide="refresh-cw" class="w-4 h-4 text-gray-400"></i>

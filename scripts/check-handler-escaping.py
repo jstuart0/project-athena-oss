@@ -306,8 +306,8 @@ def cmd_app3309(args) -> tuple[int, dict]:
     if not spans:
         return 1, {"error": "no handler span at app.js:3309"}
     span = spans[0]
-    if span.quote != "'":
-        return 1, {"error": f"expected single-quoted outer attribute, got {span.quote!r}"}
+    if span.quote != '"':
+        return 1, {"error": f"expected double-quoted outer attribute (Phase 6 switches app.js:3309's delimiter for consistency), got {span.quote!r}"}
     has_escape_html_call = bool(re.search(r"escapeHtml\s*\(\s*JSON\.stringify", span.raw_value))
     has_replace = ".replace(" in span.raw_value and "escapeHtml" in span.raw_value
     if not has_escape_html_call or has_replace:
