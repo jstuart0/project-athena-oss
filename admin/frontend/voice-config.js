@@ -495,13 +495,6 @@ function renderVoiceConfig() {
     updateHealthIndicators();
 }
 
-function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 function getQualityTooltip(quality) {
     switch (quality) {
         case 'low': return '16kHz sample rate, smallest model, fastest synthesis (~50ms)';
