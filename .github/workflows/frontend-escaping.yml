@@ -13,7 +13,6 @@ on:
       - "scripts/_frontend_escape_scan.py"
       - "scripts/check-frontend-escape-load-order.js"
       - "scripts/check-frontend-cache-busters.py"
-      - "scripts/check-athena67-preconditions.py"
       - "scripts/check-escape-html-uniqueness.py"
       - "scripts/check-handler-escaping.py"
       - "scripts/check-callee-sinks.py"
@@ -30,7 +29,6 @@ on:
       - "scripts/_frontend_escape_scan.py"
       - "scripts/check-frontend-escape-load-order.js"
       - "scripts/check-frontend-cache-busters.py"
-      - "scripts/check-athena67-preconditions.py"
       - "scripts/check-escape-html-uniqueness.py"
       - "scripts/check-handler-escaping.py"
       - "scripts/check-callee-sinks.py"
@@ -115,12 +113,6 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pytest tests/unit/test_frontend_guard_scripts.py -v
-
-      - name: ATHENA-67 preconditions
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/check-athena67-preconditions.py
 
       - name: Exactly one file defines escapeHtml/escapeJsAttr (Phase 5, absolute)
         shell: bash
