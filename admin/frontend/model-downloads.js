@@ -418,20 +418,6 @@ function renderModelDownloadsPage() {
 
     container.innerHTML = html;
 }
-
-/**
- * Escape HTML to prevent XSS and template issues
- */
-function escapeHtml(str) {
-    if (str === null || str === undefined) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
-
 /**
  * Render model search results (unique name to avoid conflicts)
  */
