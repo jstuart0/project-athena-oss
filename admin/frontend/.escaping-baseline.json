@@ -79,31 +79,10 @@
     "builder_set": [
       "admin/frontend/oss-profiles.js:99 actionButton"
     ],
-    "correct_total": 62,
-    "handrolled_escape_sites": [
-      {
-        "file": "admin/frontend/app.js",
-        "line": 3254
-      },
-      {
-        "file": "admin/frontend/app.js",
-        "line": 3309
-      },
-      {
-        "file": "admin/frontend/app.js",
-        "line": 3433
-      },
-      {
-        "file": "admin/frontend/escalation.js",
-        "line": 335
-      },
-      {
-        "file": "admin/frontend/escalation.js",
-        "line": 1219
-      }
-    ],
-    "unescaped_quoted_builder": 14,
-    "unescaped_quoted_total": 77,
+    "correct_total": 139,
+    "handrolled_escape_sites": [],
+    "unescaped_quoted_builder": 0,
+    "unescaped_quoted_total": 0,
     "wrong_primitive_builder": 0,
     "wrong_primitive_total": 0
   },
@@ -210,21 +189,17 @@
     ]
   },
   "wiring": {
-    "busterless_count": 16,
+    "busterless_count": 12,
     "busterless_tags": [
       "crud-extensions.js",
       "conversation.js",
       "metrics.js",
       "analytics.js",
-      "features.js",
       "tool-calling.js",
       "base-knowledge.js",
       "guest-mode.js",
       "sms.js",
-      "llm-components.js",
-      "model-config.js",
       "gateway-settings.js",
-      "memory-management.js",
       "site-scraper.js",
       "system-config.js",
       "presets.js"
