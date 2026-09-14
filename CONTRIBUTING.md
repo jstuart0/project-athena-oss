@@ -201,6 +201,10 @@ except SsrfBlockedError as exc:
 - Pass `allowed_private_hosts` from env without naming it in a comment (D9: the validator never reads env — the caller decides the allowlist).
 - Use `validate_url_not_private` with undocumented CIDR allowlists in a Class-1 path.
 
+### httpx version contract
+
+`httpx` is pinned `~=0.28` in every Python service's dependency spec (`src/shared/pyproject.toml`; `admin/backend/requirements.in` carries its own copy of the same comment). `_build_pinned_transport` in `src/shared/url_safety.py` — the SSRF guard's IP-pinning connection layer — relies on `httpx.AsyncHTTPTransport._pool`, a private attribute of `httpx ≥ 0.28`. A version bump that removes or restructures `_pool` silently degrades the SNI/IP-pinning protection (there is a runtime feature-detection guard, but it fails open to an unpinned transport rather than failing the request). **Before upgrading httpx past `0.28.x` anywhere in this repo**, re-verify `_build_pinned_transport` against the new version — see the version-requirement notes at the top of `url_safety.py` and the tests that exercise the real (unmocked) pinned transport: `TestPinnedNetworkBackend`, `TestSniPreservation`, `TestBuildPinnedTransportFallback`.
+
 ## Module Development
 
 When adding new modules or RAG services:

@@ -11,6 +11,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.1.0,<3.0",
+    # Pinned to ~=0.28 for _pool private-API compatibility in url_safety.py.
+    # Re-verify _build_pinned_transport on upgrade (L-2).
     "httpx~=0.28",
     "redis>=5.0.0",
     "structlog>=23.0.0",
