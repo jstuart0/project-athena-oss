@@ -601,16 +601,6 @@ async function executeMerge() {
         safeShowToast(error.message, 'error');
     }
 }
-
-/**
- * Escape HTML to prevent XSS
- */
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 /**
  * Show error state
  */
