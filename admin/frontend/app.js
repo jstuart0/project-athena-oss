@@ -4064,8 +4064,7 @@ function ensureTooltipContainer() {
  */
 function infoIcon(tooltipKey, customText = null) {
     const text = customText || TOOLTIP_CONTENT[tooltipKey] || tooltipKey;
-    const escapedText = text.replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return `<span class="info-icon" tabindex="0" role="button" aria-label="More information" data-tooltip="${escapedText}" onmouseenter="showTooltip(event)" onmouseleave="hideTooltip()" onfocus="showTooltip(event)" onblur="hideTooltip()" onclick="toggleTooltip(event)">i</span>`;
+    return `<span class="info-icon" tabindex="0" role="button" aria-label="More information" data-tooltip="${escapeHtml(text)}" onmouseenter="showTooltip(event)" onmouseleave="hideTooltip()" onfocus="showTooltip(event)" onblur="hideTooltip()" onclick="toggleTooltip(event)">i</span>`;
 }
 
 /**
@@ -4089,7 +4088,7 @@ function showTooltip(event) {
     tooltip.className = 'tooltip';
     tooltip.innerHTML = `
         <div class="tooltip-arrow"></div>
-        <div class="tooltip-content">${text}</div>
+        <div class="tooltip-content">${escapeHtml(text)}</div>
     `;
 
     container.appendChild(tooltip);
