@@ -8,7 +8,6 @@ with guests.
 
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import parse_qs
 import httpx
 import os
 import structlog
@@ -48,12 +47,19 @@ async def validate_twilio_signature(request: Request) -> None:
         logger.warning("twilio_signature_header_missing", url=str(request.url))
         raise HTTPException(status_code=403, detail="Missing Twilio signature")
 
-    # Read and cache body — Starlette caches request._body so Form(...) parsing still works
-    body = await request.body()
-    params = {k: v[0] for k, v in parse_qs(body.decode()).items()}
+    # FastAPI parses Form(...) params before resolving dependencies. Starlette
+    # caches the parsed form on the Request, so request.form() returns the
+    # object the handler's params were bound from. Reading the raw stream
+    # here would raise "Stream consumed".
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if content_type != "application/x-www-form-urlencoded":
+        logger.warning("twilio_webhook_unsupported_content_type")
+        raise HTTPException(status_code=403, detail="Unsupported content type")
+
+    form = await request.form()
 
     validator = RequestValidator(TWILIO_AUTH_TOKEN)
-    if not validator.validate(str(request.url), params, signature):
+    if not validator.validate(str(request.url), form, signature):
         logger.warning("twilio_signature_invalid", url=str(request.url))
         raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
