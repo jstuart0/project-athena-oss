@@ -9,6 +9,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `.mozart/plans/active/2026-09-13-deliver-athena-frontend-escaping.md` (round 3)
+> **Ticket:** [ATHENA-66](https://plane.xmojo.net)
+> **Commits:** `0468035`..`9d12d97`..`7411f6e` (Phase 1 — guards + baseline), `03af3df`..`15a09cd` (Phase 2 — callee/param/sink table), `087a47b`..`0df3ff6`..`2a48323` (Phase 3 — 52 wrong-primitive sites + callee-sink closures), `dd1b30d` (Phase 4 — `emerging-intents.js`), `045b6eb`..`e842149`..`9b328f6` (Phase 5 — 18 definitions deleted), `76384cd`, `1e5e284`, `bd23f40` (Phase 6 — 77 unescaped-quoted sites), `89b03ba`, `d8f4021`, `088ac1e`, `d06e33a`, `8c9245a` (Phase 7 — hardening, `immutable` removal, CI)
+
+### admin-frontend escaping consolidation (ATHENA-66)
+
+- **Added**: `admin/frontend/escape-html.js` is now the **only** file in `admin/frontend/` defining `escapeHtml`/`escapeJsAttr` — 20 definitions (7 closure-local, 2 entity-map, 11 DOM-round-trip) consolidated to 1, enforced by `scripts/check-escape-html-uniqueness.py` at absolute zero (name-matched forms, a body-shape scan for a hand-rolled entity map under any name, getter/`defineProperty`/computed-name forms — all path-scoped-excluding the canonical file itself).
+- **Added**: `Object.defineProperty` freezes `window.escapeHtml`/`window.escapeJsAttr` against runtime overwrite (a console paste, a lazily-injected script) — the one threat static analysis can't see. Declaration drift and tag-order drift remain the uniqueness script's and the load-order harness's jobs respectively; three threats, three mechanisms, documented in `admin/frontend/README.md`.
+- **Fixed**: 52 `on*=` handler sites (46 direct + 6 routed through `oss-profiles.js`'s `actionButton` builder) that called `escapeHtml` — the wrong primitive for a JS-string-literal position inside a handler attribute — now call `escapeJsAttr`, which escapes for the JS-string layer *and* the HTML-attribute layer in the correct order.
+- **Fixed**: 77 `on*=` handler sites (63 direct + 14 builder-routed) with no escaping call at all now call `escapeJsAttr`. Includes 4 hand-rolled `.replace(/'/g, "\'")` escapes deleted in favor of `escapeJsAttr` (replace, never wrap — wrapping renders `O'Brien` as `O\'Brien`), and `app.js:3309`'s special case (`escapeHtml(JSON.stringify(config))`, delimiter switched from `'` to `"`) — a bare JS object-literal argument in the frontend's only single-quoted handler attribute, where `escapeJsAttr` would have produced a `SyntaxError`.
+- **Fixed**: the 2 verified callee-sink defects (`app.js`'s `revealSecret`, `escalation.js`'s `showCloneEscalationPresetModal`) where a handler argument was delivered to a callee that re-rendered it into an unescaped `.innerHTML`. Mechanized via `scripts/check-callee-sinks.py` — a fail-closed classifier over every converted handler argument, with `unresolved` treated as a violation until adjudicated in `admin/frontend/.callee-sink-adjudications.json`.
+- **Fixed**: 6 raw LLM-fed interpolations in `emerging-intents.js` (`display_name`, `canonical_name`, `description`) now `escapeHtml`-wrapped. Provenance: LLM output shaped by user input via prompt injection against the intent classifier, with no CSP backstop (`script-src 'unsafe-inline'`).
+- **Fixed**: `app.js`'s `infoIcon` — a 21st in-tree hand-rolled entity-map implementation whose escaping was undone by a `getAttribute` read-back before reaching `innerHTML`. Escaping moved to the sink.
+- **Changed**: `admin/frontend/nginx.conf` no longer sends `immutable` in `Cache-Control` (kept `public`, `expires 1h`) — `immutable` means a browser does not revalidate even on a user-initiated reload (RFC 8246), which is exactly what made ATHENA-67's hotfix unrecoverable for an hour on warm-cache clients.
+- **Added**: `.github/workflows/frontend-escaping.yml` now runs the full absolute-zero gate set (handler escaping, callee sinks, uniqueness, wiring parity, hardening) plus the D10 wide-population ratchets (`data-attribute` ≤348, `innerhtml-sink` ≤442) on every PR and on push to `main`.
+- **Note**: the wide out-of-scope populations — 348 unescaped data-bearing plain-attribute interpolations (30 files) and 442 `.innerHTML =` assignments (52 files) — are ratcheted at their measured values, not fixed. Escaping in this frontend remains the exception, not the rule; tracked as a follow-up.
+- **Note**: `apps/jarvis-web/` carries the same defect class (including a 22nd definition, unescaped OSM place names, and the same Lodgify `guest_name` reaching an end-user-facing chat surface) and is **not** covered by this campaign's guards. Tracked as ATHENA-68.
+
+---
+
+## [Unreleased]
+
+> **Plan:** `.mozart/plans/active/2026-09-13-deliver-athena-frontend-escaping.md` (carved out of round 1)
+> **Ticket:** [ATHENA-67](https://plane.xmojo.net)
+> **Commits:** `a482635`, `ed8714f`
+
+### admin-frontend guest-name XSS hotfix (ATHENA-67)
+
+- **Fixed**: live reflected-XSS in `guest-context.js` and `memory-context.js` — a Lodgify-sourced guest name reached an `on*=` handler attribute unescaped. Introduced `admin/frontend/escape-html.js` (an IIFE, loaded as the **last** local `<script>` tag) so `window.escapeHtml`/`window.escapeJsAttr` resolve to its implementation regardless of the other files still declaring their own local copies — classic scripts, later tag wins.
+- **Added**: `scripts/check-frontend-escape-load-order.js` — a Node `vm` harness that loads the real `index.html` tag order and asserts `escape-html.js` is the terminal definition.
+- **Added**: `scripts/check-frontend-cache-busters.py` — a changed `.js` file whose `?v=` did not move never reaches a warm-cache browser; three-valued exit (`0` clean, `1` findings, `2` could-not-run). Bumped `guest-context.js` and `memory-context.js`'s busters so the fix in this release actually reaches clients that had already cached the vulnerable version.
+
+---
+
+## [Unreleased]
+
 > **Plan:** `thoughts/shared/plans/2026-05-15-deliver-auth-deferred-hardening.md` (r2)
 > **Ticket:** [ATHENA-55](https://plane.xmojo.net)
 > **Commits:** `179fd8c` (Phase 1), `77f50d6` (Phase 2), `f956be2` (Phase 3), `9b2926e` (Phase 4)
