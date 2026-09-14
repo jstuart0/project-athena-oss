@@ -19,6 +19,7 @@ on:
       - "scripts/check-callee-sinks.py"
       - "scripts/check-html-template-escaping.py"
       - "scripts/check-frontend-wiring.py"
+      - "scripts/check-no-new-test-skips.py"
       - ".github/workflows/frontend-escaping.yml"
   push:
     branches: [main]
@@ -35,6 +36,7 @@ on:
       - "scripts/check-callee-sinks.py"
       - "scripts/check-html-template-escaping.py"
       - "scripts/check-frontend-wiring.py"
+      - "scripts/check-no-new-test-skips.py"
       - ".github/workflows/frontend-escaping.yml"
 
 permissions:
@@ -120,12 +122,25 @@ jobs:
           set -euo pipefail
           python3 scripts/check-athena67-preconditions.py
 
-      - name: Escape-html uniqueness baseline floor
+      - name: Exactly one file defines escapeHtml/escapeJsAttr (Phase 5, absolute)
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/check-escape-html-uniqueness.py --check baseline-floor \
-            --min-definitions 18 --named-member 'admin/frontend/utils.js:20'
+          # Phase 1's original step here was `--check baseline-floor
+          # --min-definitions 18 --named-member 'admin/frontend/utils.js:20'`
+          # -- a ONE-TIME vacuity check against Phase 1's starting population
+          # (18 non-canonical definitions still awaiting deletion). Phase 5
+          # deleted all 18 by design, so that check now permanently fails
+          # (2 < 18) and its named member no longer exists -- a gate that
+          # outlived the state it was written to protect (Phase 7 found
+          # this red on the tree; fixed here rather than left to rot).
+          # Replaced with the actual permanent invariant this campaign
+          # delivers.
+          python3 scripts/check-escape-html-uniqueness.py --check definitions \
+            --expect 2 --in admin/frontend/escape-html.js
+          python3 scripts/check-escape-html-uniqueness.py --check body-shape
+          python3 scripts/check-escape-html-uniqueness.py --check entity-map-shape \
+            --exclude-path admin/frontend/escape-html.js
 
       - name: Handler-text builder set pinned by set-equality (D9b)
         shell: bash
@@ -134,17 +149,84 @@ jobs:
           python3 scripts/check-handler-escaping.py --check builder-set \
             --expect 'admin/frontend/oss-profiles.js:99 actionButton'
 
+      - name: Handler escaping is absolute (Phases 3 and 6) -- wrong-primitive and unescaped-quoted at zero
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-handler-escaping.py --class wrong-primitive --max 0
+          python3 scripts/check-handler-escaping.py --class unescaped-quoted --max 0
+          python3 scripts/check-handler-escaping.py --class bare-expression --max 169
+          python3 scripts/check-handler-escaping.py --check no-nested-replace
+          python3 scripts/check-handler-escaping.py --check no-handrolled-escape
+          python3 scripts/check-handler-escaping.py --check jsattr-confinement
+          python3 scripts/check-handler-escaping.py --check display-shape
+          python3 scripts/check-handler-escaping.py --check app3309
+          python3 scripts/check-handler-escaping.py --check mis-context \
+            --expect-static 'href-javascript=2' \
+            --expect-set-from admin/frontend/.escaping-baseline.json
+
+      - name: Callee-sink table has no unresolved or unescaped sinks (D9)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-callee-sinks.py --class unresolved --max 0
+          python3 scripts/check-callee-sinks.py --class sink-unescaped --max 0
+
+      - name: emerging-intents.js LLM-fed fields stay escaped (Phase 4)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-html-template-escaping.py --check primitive-matches-position \
+            --file admin/frontend/emerging-intents.js
+          # `--class text-node --max 0` (the plan's original phrasing for this
+          # step) is not the right gate: it over-approximates by design (D14)
+          # and this file legitimately has ~19 inert/numeric text-node
+          # interpolations (occurrence counts, ternary branches) that were
+          # never part of the 6 LLM-fed sites this phase closed -- gating the
+          # whole file at zero would be permanently unsatisfiable. Assert the
+          # specific invariant instead: every display_name/canonical_name/
+          # description interpolation in this file is escapeHtml-wrapped,
+          # with a population floor (rule 8) so this can't pass on zero
+          # matches if the fields were ever renamed out from under it.
+          python3 -c 'import re,sys; text=open("admin/frontend/emerging-intents.js",encoding="utf-8").read(); matches=re.findall(r"\$\{([^}]*\b(?:display_name|canonical_name|description)\b[^}]*)\}", text); assert len(matches)>=6, f"population floor not met: expected >= 6, found {len(matches)}"; unescaped=[m for m in matches if not m.strip().startswith("escapeHtml(")]; assert not unescaped, f"raw (non-escapeHtml) interpolation(s): {unescaped}"; print(f"PASS: all {len(matches)} display_name/canonical_name/description interpolations are escapeHtml-wrapped")'
+
       - name: Forbidden sinks stay at absolute zero (C1)
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/check-html-template-escaping.py --check forbidden-sink
 
+      - name: Wide populations are ratcheted, not fixed (D10) -- ceilings, not zeros
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-html-template-escaping.py --class data-attribute --max 348
+          python3 scripts/check-html-template-escaping.py --class innerhtml-sink --max 442
+
+      - name: Three-way wiring parity and buster presence (D7)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-frontend-wiring.py --check three-way
+          python3 scripts/check-frontend-wiring.py --check buster-presence
+
+      - name: nginx no longer sends Cache-Control immutable (D12)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -q 'immutable' admin/frontend/nginx.conf
+
       - name: Run load-order guard
         shell: bash
         run: |
           set -euo pipefail
           "$ATHENA_NODE_BIN" scripts/check-frontend-escape-load-order.js
+
+      - name: escapeHtml/escapeJsAttr are frozen against runtime overwrite (D13)
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ATHENA_NODE_BIN" scripts/check-frontend-escape-load-order.js --check hardening
 
       - name: Cache-buster freshness for changed frontend JS
         shell: bash
