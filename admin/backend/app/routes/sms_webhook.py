@@ -8,6 +8,7 @@ with guests.
 
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlsplit
 import httpx
 import os
 import structlog
@@ -30,6 +31,53 @@ ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
 # If unset, validation is skipped with a warning (allows local dev without Twilio config).
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 
+# Public base URL Twilio actually calls (scheme://host[:port][/prefix]), used
+# to build the URL passed to RequestValidator.validate(). This deliberately
+# ignores the Host header and any forwarded-proto/forwarded-host headers,
+# which this deployment's ingress does not authenticate. Required whenever
+# TWILIO_AUTH_TOKEN is set; see .env.example for the validity rule and
+# format.
+#
+# Note: if an ASGI root_path is ever introduced, whether request.url.path
+# carries that prefix depends on the uvicorn/starlette pairing (measured
+# different between older and newer starlette versions). None is set today;
+# re-verify the prefix rule before adding one.
+TWILIO_WEBHOOK_BASE_URL = os.getenv("TWILIO_WEBHOOK_BASE_URL", "")
+
+
+def _twilio_validation_url(request: Request) -> Optional[str]:
+    """Build the external URL Twilio signed, from the configured base only."""
+    if not _base_url_is_valid(TWILIO_WEBHOOK_BASE_URL):
+        return None
+    parsed = urlsplit(TWILIO_WEBHOOK_BASE_URL)
+    prefix = parsed.path.rstrip("/")
+    url = f"{parsed.scheme}://{parsed.netloc}{prefix}{request.url.path}"
+    if request.url.query:
+        url += "?" + request.url.query
+    return url
+
+
+def _base_url_is_valid(base: str) -> bool:
+    """Scheme http/https, non-empty host, no query/fragment/userinfo, valid port."""
+    if not base or "?" in base or "#" in base:
+        return False
+    parsed = urlsplit(base)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    if not parsed.hostname:
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    try:
+        parsed.port
+    except ValueError:
+        return False
+    return True
+
+
+if TWILIO_AUTH_TOKEN and not _base_url_is_valid(TWILIO_WEBHOOK_BASE_URL):
+    logger.error("twilio_webhook_base_url_not_configured", at="import")
+
 
 async def validate_twilio_signature(request: Request) -> None:
     """
@@ -44,8 +92,13 @@ async def validate_twilio_signature(request: Request) -> None:
 
     signature = request.headers.get("X-Twilio-Signature", "")
     if not signature:
-        logger.warning("twilio_signature_header_missing", url=str(request.url))
+        logger.warning("twilio_signature_header_missing", path=request.url.path)
         raise HTTPException(status_code=403, detail="Missing Twilio signature")
+
+    validation_url = _twilio_validation_url(request)
+    if validation_url is None:
+        logger.error("twilio_webhook_base_url_not_configured")
+        raise HTTPException(status_code=503, detail="SMS webhook not configured")
 
     # FastAPI parses Form(...) params before resolving dependencies. Starlette
     # caches the parsed form on the Request, so request.form() returns the
@@ -59,8 +112,8 @@ async def validate_twilio_signature(request: Request) -> None:
     form = await request.form()
 
     validator = RequestValidator(TWILIO_AUTH_TOKEN)
-    if not validator.validate(str(request.url), form, signature):
-        logger.warning("twilio_signature_invalid", url=str(request.url))
+    if not validator.validate(validation_url, form, signature):
+        logger.warning("twilio_signature_invalid", path=request.url.path)
         raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
 

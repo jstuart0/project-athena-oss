@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `.mozart/plans/active/2026-09-14-deliver-athena-twilio-webhook-signature.md`
+> **Ticket:** ATHENA-72
+> **Commits:** `71d152d` (Phase 1), HEAD of this branch at merge time (Phase 2 — merge and revert as one unit)
+
+### Twilio SMS webhook signature validation (ATHENA-72)
+
+- **Fixed**: signature validation raised `RuntimeError: Stream consumed` (500) on every signed request when `TWILIO_AUTH_TOKEN` was set, and its re-parse dropped blank and repeated params. It now validates the parsed form.
+- **Fixed**: the validation URL was Host-derived `http://…`, which Twilio's validator never matches behind a TLS-terminating proxy.
+- **Added**: `TWILIO_WEBHOOK_BASE_URL`.
+- **Changed**:
+  - Token set with base unset or malformed → 503 plus an error log (per request and once at import).
+  - Non-urlencoded → 403.
+  - Logs carry `path`, not `url`.
+- **Operator note**:
+  - Enabling signature validation needs both variables.
+  - The Admin UI "Auth Token" field isn't persisted (ATHENA-75).
+  - Until a deployment sets both, the webhook still accepts unsigned requests; the post-merge action is ATHENA-76.
+
+---
+
+## [Unreleased]
+
 > **Plan:** `.mozart/plans/active/2026-09-13-deliver-athena-frontend-escaping.md` (round 3)
 > **Ticket:** [ATHENA-66](https://plane.xmojo.net)
 > **Commits:** `0468035`..`9d12d97`..`7411f6e` (Phase 1 — guards + baseline), `03af3df`..`15a09cd` (Phase 2 — callee/param/sink table), `087a47b`..`0df3ff6`..`2a48323` (Phase 3 — 52 wrong-primitive sites + callee-sink closures), `dd1b30d` (Phase 4 — `emerging-intents.js`), `045b6eb`..`e842149`..`9b328f6` (Phase 5 — 18 definitions deleted), `76384cd`, `1e5e284`, `bd23f40` (Phase 6 — 77 unescaped-quoted sites), `89b03ba`, `d8f4021`, `088ac1e`, `d06e33a`, `8c9245a` (Phase 7 — hardening, `immutable` removal, CI)

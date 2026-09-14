@@ -76,6 +76,14 @@ data:
   # Override with your actual domain in production, e.g. https://athena.example.com
   CORS_ALLOWED_ORIGINS: "http://localhost:8080"
 
+  # Twilio SMS webhooks (optional). If TWILIO_AUTH_TOKEN is set (put it in a
+  # Secret, not this ConfigMap), TWILIO_WEBHOOK_BASE_URL is REQUIRED: the public
+  # base Twilio calls, matching the Twilio console URL without
+  # /api/sms/webhook/..., any #fragment, or user:password@. Otherwise the
+  # webhooks answer 503. The Admin UI "Auth Token" field doesn't configure this
+  # (ATHENA-75). See .env.example.
+  # TWILIO_WEBHOOK_BASE_URL: "https://athena.example.com"
+
   # Feature flags
   DEMO_MODE: "false"
   MODULE_HOME_ASSISTANT: "true"

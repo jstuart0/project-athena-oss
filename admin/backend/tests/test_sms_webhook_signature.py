@@ -13,7 +13,11 @@ monkeypatch. Nothing patches `validate_twilio_signature`, `RequestValidator`,
 import asyncio
 import base64
 import hmac
+import os
+import subprocess
+import sys
 from hashlib import sha1
+from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
@@ -28,6 +32,7 @@ from app.database import get_db
 from main import app
 
 TOKEN = "test-twilio-auth-token-not-real"
+BASE = "https://sms.example.test"
 
 INCOMING_PATH = "/api/sms/webhook/incoming"
 STATUS_PATH = "/api/sms/webhook/status"
@@ -57,7 +62,7 @@ TAMPER_FIXTURES = {
 
 def _signing_url(path: str, query: str = "") -> str:
     """Literal string join for test signing — never calls production code."""
-    url = "http://testserver" + path
+    url = BASE + path
     if query:
         url += "?" + query
     return url
@@ -69,6 +74,11 @@ def _sign(url, params, token: str = TOKEN) -> str:
 
 def _encode_form(pairs) -> bytes:
     return urlencode(list(pairs)).encode("utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _default_base_url(monkeypatch):
+    monkeypatch.setattr(sw, "TWILIO_WEBHOOK_BASE_URL", BASE, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -312,3 +322,193 @@ def test_signature_cross_check_against_stdlib_hmac():
         hmac.new(TOKEN.encode("utf-8"), payload.encode("utf-8"), sha1).digest()
     ).decode("utf-8")
     assert library_sig == expected
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: validate against the configured external URL, never the Host
+# header (P2 #1-#19)
+# ---------------------------------------------------------------------------
+
+MALFORMED_BASES = {
+    "no_scheme": "sms.example.test",
+    "ftp_scheme": "ftp://sms.example.test",
+    "has_query": "https://sms.example.test/?x=1",
+    "has_fragment": "https://sms.example.test#rp=5xx",
+    "empty_netloc": "https://",
+    "non_numeric_port": "https://sms.example.test:abc",
+    "port_out_of_range": "https://sms.example.test:99999",
+    "has_userinfo": "https://twilio-user:hunter2-not-real@sms.example.test",
+}
+
+
+def test_validation_url_uses_configured_base_not_host(monkeypatch):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", TOKEN)
+    url = _signing_url(INCOMING_PATH)
+    sig = _sign(url, INCOMING_PARAMS)
+    body = _encode_form(INCOMING_PARAMS.items())
+
+    async def _do():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            headers = {
+                "content-type": "application/x-www-form-urlencoded",
+                "X-Twilio-Signature": sig,
+                "Host": "attacker.example",
+                "X-Forwarded-Proto": "http",
+            }
+            return await client.post(INCOMING_PATH, content=body, headers=headers)
+
+    resp = asyncio.run(_do())
+    assert resp.status_code == 200
+
+
+def test_signature_over_request_url_rejected(monkeypatch):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", TOKEN)
+    request_url = "http://testserver" + INCOMING_PATH
+    sig = _sign(request_url, INCOMING_PARAMS)
+    body = _encode_form(INCOMING_PARAMS.items())
+    resp = post(INCOMING_PATH, body, sig)
+    assert resp.status_code == 403
+
+
+def test_query_string_included(monkeypatch):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", TOKEN)
+    path_with_query = INCOMING_PATH + "?tenant=a"
+    body = _encode_form(INCOMING_PARAMS.items())
+
+    signed_with_query = _sign(_signing_url(INCOMING_PATH, "tenant=a"), INCOMING_PARAMS)
+    resp_ok = post(path_with_query, body, signed_with_query)
+    assert resp_ok.status_code == 200
+
+    signed_without_query = _sign(_signing_url(INCOMING_PATH), INCOMING_PARAMS)
+    resp_rejected = post(path_with_query, body, signed_without_query)
+    assert resp_rejected.status_code == 403
+
+
+BASE_PREFIX_CASES = {
+    "prefix": "https://sms.example.test/athena",
+    "trailing_slash": "https://sms.example.test/",
+}
+
+
+@pytest.mark.parametrize("case", list(BASE_PREFIX_CASES))
+def test_base_url_prefix_and_trailing_slash(case, monkeypatch):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", TOKEN)
+    base = BASE_PREFIX_CASES[case]
+    monkeypatch.setattr(sw, "TWILIO_WEBHOOK_BASE_URL", base)
+    url = base.rstrip("/") + INCOMING_PATH
+    sig = _sign(url, INCOMING_PARAMS)
+    body = _encode_form(INCOMING_PARAMS.items())
+    resp = post(INCOMING_PATH, body, sig)
+    assert resp.status_code == 200
+
+
+def test_base_url_with_port(monkeypatch):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", TOKEN)
+    base = "https://sms.example.test:8443"
+    monkeypatch.setattr(sw, "TWILIO_WEBHOOK_BASE_URL", base)
+    url = base + INCOMING_PATH
+    sig = _sign(url, INCOMING_PARAMS)
+    body = _encode_form(INCOMING_PARAMS.items())
+    resp = post(INCOMING_PATH, body, sig)
+    assert resp.status_code == 200
+
+
+def test_token_set_base_unset_rejects_503(monkeypatch):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", TOKEN)
+    monkeypatch.setattr(sw, "TWILIO_WEBHOOK_BASE_URL", "")
+    url = "http://testserver" + INCOMING_PATH
+    sig = _sign(url, INCOMING_PARAMS)
+    body = _encode_form(INCOMING_PARAMS.items())
+    with structlog.testing.capture_logs() as cap:
+        resp = post(INCOMING_PATH, body, sig)
+    assert resp.status_code == 503
+    events = [e.get("event") for e in cap]
+    assert "twilio_webhook_base_url_not_configured" in events
+
+
+@pytest.mark.parametrize("case", list(MALFORMED_BASES))
+def test_token_set_base_malformed_rejects_503(case, monkeypatch):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", TOKEN)
+    base = MALFORMED_BASES[case]
+    monkeypatch.setattr(sw, "TWILIO_WEBHOOK_BASE_URL", base)
+    # Signed as Phase-1 code would have accepted (Host-derived), so a
+    # regression back to Phase-1 behavior would show as 200, not 503.
+    url = "http://testserver" + INCOMING_PATH
+    sig = _sign(url, INCOMING_PARAMS)
+    body = _encode_form(INCOMING_PARAMS.items())
+    with structlog.testing.capture_logs() as cap:
+        resp = post(INCOMING_PATH, body, sig)
+    assert resp.status_code == 503
+    events = [e.get("event") for e in cap]
+    assert "twilio_webhook_base_url_not_configured" in events
+    for entry in cap:
+        for key, value in entry.items():
+            assert base not in str(key) and base not in str(value)
+    if case == "has_userinfo":
+        for entry in cap:
+            for key, value in entry.items():
+                assert "hunter2-not-real" not in str(key)
+                assert "hunter2-not-real" not in str(value)
+
+
+def test_token_unset_ignores_base_url(monkeypatch):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", "")
+    monkeypatch.setattr(sw, "TWILIO_WEBHOOK_BASE_URL", "")
+    body = _encode_form(INCOMING_PARAMS.items())
+    resp = post(INCOMING_PATH, body, signature=None)
+    assert resp.status_code == 200
+
+
+def test_rejection_logs_use_path_not_url(monkeypatch):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", TOKEN)
+    body = _encode_form(INCOMING_PARAMS.items())
+    wrong_sig = _sign(_signing_url(INCOMING_PATH), INCOMING_PARAMS, token="a-different-token-not-real")
+    with structlog.testing.capture_logs() as cap:
+        resp_missing = post(INCOMING_PATH, body, signature=None)
+        resp_wrong = post(INCOMING_PATH, body, wrong_sig)
+    assert resp_missing.status_code == 403
+    assert resp_wrong.status_code == 403
+    by_event = {e.get("event"): e for e in cap}
+    assert by_event["twilio_signature_header_missing"]["path"] == INCOMING_PATH
+    assert by_event["twilio_signature_invalid"]["path"] == INCOMING_PATH
+    for entry in cap:
+        assert "url" not in entry
+        for value in entry.values():
+            assert "://" not in str(value)
+
+
+IMPORT_MISCONFIG_CASES = {
+    "base_unset": None,
+    "base_valid": "https://sms.example.test",
+}
+
+
+@pytest.mark.parametrize("case", list(IMPORT_MISCONFIG_CASES))
+def test_import_time_misconfig_logged(case):
+    base_env = IMPORT_MISCONFIG_CASES[case]
+    env = dict(os.environ)
+    env["DEV_MODE"] = "true"
+    env["DATABASE_URL"] = "sqlite:///:memory:"
+    env["TWILIO_AUTH_TOKEN"] = TOKEN
+    if base_env is None:
+        env.pop("TWILIO_WEBHOOK_BASE_URL", None)
+    else:
+        env["TWILIO_WEBHOOK_BASE_URL"] = base_env
+
+    backend_dir = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", "import app.routes.sms_webhook"],
+        cwd=str(backend_dir),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0
+    if case == "base_unset":
+        assert "twilio_webhook_base_url_not_configured" in combined
+        assert TOKEN not in combined
+    else:
+        assert "twilio_webhook_base_url_not_configured" not in combined
