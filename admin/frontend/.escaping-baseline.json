@@ -55,57 +55,9 @@
       "admin/frontend/voice-config.js",
       "admin/frontend/voice-pipelines.js"
     ],
-    "total": 349
+    "total": 348
   },
   "definitions": [
-    {
-      "file": "admin/frontend/activity-sidebar.js",
-      "form": "function-declaration",
-      "line": 369,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/admin-jarvis.js",
-      "form": "function-declaration",
-      "line": 888,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/alerts.js",
-      "form": "function-declaration",
-      "line": 167,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/athena.js",
-      "form": "assignment",
-      "line": 177,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/conversations.js",
-      "form": "function-declaration",
-      "line": 544,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/debug-logs.js",
-      "form": "function-declaration",
-      "line": 639,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/drawer.js",
-      "form": "function-declaration",
-      "line": 313,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/emerging-intents.js",
-      "form": "function-declaration",
-      "line": 608,
-      "name": "escapeHtml"
-    },
     {
       "file": "admin/frontend/escape-html.js",
       "form": "function-declaration",
@@ -117,210 +69,10 @@
       "form": "function-declaration",
       "line": 73,
       "name": "escapeJsAttr"
-    },
-    {
-      "file": "admin/frontend/follow-me.js",
-      "form": "function-declaration",
-      "line": 594,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/integrations.js",
-      "form": "function-declaration",
-      "line": 527,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/mission-control.js",
-      "form": "function-declaration",
-      "line": 436,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/model-downloads.js",
-      "form": "function-declaration",
-      "line": 425,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/toast.js",
-      "form": "function-declaration",
-      "line": 227,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/utils.js",
-      "form": "function-declaration",
-      "line": 20,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/voice-config.js",
-      "form": "function-declaration",
-      "line": 498,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "admin/frontend/voice-pipelines.js",
-      "form": "function-declaration",
-      "line": 506,
-      "name": "escapeHtml"
     }
   ],
-  "definitions_dom_roundtrip_any_name": [
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/activity-sidebar.js",
-      "line": 369,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/admin-jarvis.js",
-      "line": 888,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/alerts.js",
-      "line": 167,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/app.js",
-      "line": 2171,
-      "name": "showSuccess"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/app.js",
-      "line": 2182,
-      "name": "showError"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/debug-logs.js",
-      "line": 639,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/drawer.js",
-      "line": 35,
-      "name": "open"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/drawer.js",
-      "line": 313,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/emerging-intents.js",
-      "line": 608,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/follow-me.js",
-      "line": 594,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/integrations.js",
-      "line": 527,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/memory-management.js",
-      "line": 140,
-      "name": "updateSessionFilter"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/memory-management.js",
-      "line": 388,
-      "name": "showCreateMemoryModal"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/memory-management.js",
-      "line": 409,
-      "name": "showEditMemoryModal"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/mission-control.js",
-      "line": 436,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/room-audio.js",
-      "line": 368,
-      "name": "showCreateRoomModal"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/room-audio.js",
-      "line": 519,
-      "name": "showEditRoomModal"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/service-bypass.js",
-      "line": 291,
-      "name": "escapeHtmlBypass"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/toast.js",
-      "line": 227,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/user-api-keys.js",
-      "line": 307,
-      "name": "copyUserApiKey"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/user-api-keys.js",
-      "line": 377,
-      "name": "escapeHtmlApiKeys"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/utils.js",
-      "line": 20,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/utils.js",
-      "line": 101,
-      "name": "showNotification"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/utils.js",
-      "line": 317,
-      "name": "createElement"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/voice-config.js",
-      "line": 498,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/voice-config.js",
-      "line": 667,
-      "name": "injectVoiceConfigStyles"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/voice-pipelines.js",
-      "line": 506,
-      "name": "escapeHtml"
-    }
-  ],
-  "definitions_entity_map_any_name": [
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/app.js",
-      "line": 4065,
-      "name": "infoIcon"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/conversations.js",
-      "line": 544,
-      "name": "escapeHtml"
-    },
-    {
-      "file": "/Users/jaystuart/dev/os-project-athena-worktrees/2026-09-13-deliver-athena-frontend-escaping/admin/frontend/model-downloads.js",
-      "line": 425,
-      "name": "escapeHtml"
-    }
-  ],
+  "definitions_dom_roundtrip_any_name": [],
+  "definitions_entity_map_any_name": [],
   "emerging_intents_raw_text_node_sites": 19,
   "handler_escaping": {
     "bare_expression_total": 169,
@@ -440,7 +192,7 @@
       "admin/frontend/icons.js:169",
       "admin/frontend/integrations.js:285",
       "admin/frontend/metrics.js:304",
-      "admin/frontend/model-downloads.js:571",
+      "admin/frontend/model-downloads.js:557",
       "admin/frontend/room-audio.js:590",
       "admin/frontend/room-audio.js:596"
     ],
@@ -452,13 +204,13 @@
       "admin/frontend/icons.js:169",
       "admin/frontend/integrations.js:285",
       "admin/frontend/metrics.js:304",
-      "admin/frontend/model-downloads.js:571",
+      "admin/frontend/model-downloads.js:557",
       "admin/frontend/room-audio.js:590",
       "admin/frontend/room-audio.js:596"
     ]
   },
   "wiring": {
-    "busterless_count": 19,
+    "busterless_count": 16,
     "busterless_tags": [
       "crud-extensions.js",
       "conversation.js",
@@ -466,16 +218,13 @@
       "analytics.js",
       "features.js",
       "tool-calling.js",
-      "debug-logs.js",
       "base-knowledge.js",
       "guest-mode.js",
       "sms.js",
       "llm-components.js",
       "model-config.js",
-      "model-downloads.js",
       "gateway-settings.js",
       "memory-management.js",
-      "admin-jarvis.js",
       "site-scraper.js",
       "system-config.js",
       "presets.js"
