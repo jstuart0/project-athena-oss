@@ -189,21 +189,8 @@
     ]
   },
   "wiring": {
-    "busterless_count": 12,
-    "busterless_tags": [
-      "crud-extensions.js",
-      "conversation.js",
-      "metrics.js",
-      "analytics.js",
-      "tool-calling.js",
-      "base-knowledge.js",
-      "guest-mode.js",
-      "sms.js",
-      "gateway-settings.js",
-      "site-scraper.js",
-      "system-config.js",
-      "presets.js"
-    ],
+    "busterless_count": 0,
+    "busterless_tags": [],
     "dangling": [
       "mode-audit.js",
       "notifications.js"
