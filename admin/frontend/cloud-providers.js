@@ -143,7 +143,7 @@ async function loadProviderCards(noCache = false) {
                                 ? `<span class="text-green-400 text-sm">••••••••${provider.api_key_masked || '****'}</span>`
                                 : '<span class="text-gray-500 text-sm">Not set</span>'
                             }
-                            <button onclick="openApiKeyModal('${key}')"
+                            <button onclick="openApiKeyModal('${escapeJsAttr(key)}')"
                                     class="ml-auto px-3 py-1 ${colors.button} text-white rounded text-xs">
                                 ${provider?.has_api_key ? 'Update' : 'Configure'}
                             </button>
@@ -236,7 +236,7 @@ function openApiKeyModal(provider) {
                 <h3 class="text-lg font-semibold text-white">Configure ${config.name} API Key</h3>
             </div>
 
-            <form onsubmit="saveApiKey(event, '${provider}')">
+            <form onsubmit="saveApiKey(event, '${escapeJsAttr(provider)}')">
                 <div class="mb-4">
                     <label for="api-key-input" class="text-sm text-gray-400 block mb-2">API Key</label>
                     <input type="password" id="api-key-input"
