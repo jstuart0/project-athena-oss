@@ -9,6 +9,7 @@ rule 6 ("every gate must be demonstrably able to fail").
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
@@ -250,6 +251,69 @@ def test_builder_set_equality_flags_a_synthetic_second_builder(tmp_path):
     # The real script's --check builder-set compares against the EXPECTED
     # set; a found set with an extra member must fail equality.
     assert found != {"oss-profiles.js:99 actionButton"}
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — the population floor must survive the fix it gates. Filtering
+# the floor by --class (the shipped Phase 1 behaviour) made it equal the
+# very count Phase 3 tightens to zero: the wrong-primitive population
+# WITHIN the builder scope is real pre-fix but the floor is checked AFTER
+# --max 0 is achieved, at which point a --class-filtered floor is itself 0
+# and the gate becomes permanently unsatisfiable the moment its own fix
+# ships. Fixed to measure the scope's total population across all classes.
+# ---------------------------------------------------------------------------
+
+
+def test_require_population_seen_floor_survives_full_fix(tmp_path):
+    (tmp_path / "widget.js").write_text(
+        "function builderFn(a, onClick, b) {\n"
+        "    return `<button onclick=\"${onClick}\">${a}${b}</button>`;\n"
+        "}\n"
+        "function renderRow(item) {\n"
+        "    return builderFn(item.id, `doThing('${escapeHtml(item.name)}')`, item.label);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    rc, payload = handler.cmd_class(
+        argparse.Namespace(
+            klass="wrong-primitive", scope="builder", max=0,
+            require_population_seen=1, dir=tmp_path,
+        )
+    )
+    assert rc == 1 and payload["count"] == 1, "fixture setup: one builder-routed wrong-primitive site"
+
+    # Fix it — same scope population (1), zero remaining wrong-primitive.
+    (tmp_path / "widget.js").write_text(
+        "function builderFn(a, onClick, b) {\n"
+        "    return `<button onclick=\"${onClick}\">${a}${b}</button>`;\n"
+        "}\n"
+        "function renderRow(item) {\n"
+        "    return builderFn(item.id, `doThing('${escapeJsAttr(item.name)}')`, item.label);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    rc, payload = handler.cmd_class(
+        argparse.Namespace(
+            klass="wrong-primitive", scope="builder", max=0,
+            require_population_seen=1, dir=tmp_path,
+        )
+    )
+    assert rc == 0 and "error" not in payload, (
+        "the floor must still pass once the fix lands: the builder scope's total "
+        "population (1) has not shrunk, only its classification changed"
+    )
+
+
+def test_require_population_seen_floor_still_fires_when_builders_vanish(tmp_path):
+    (tmp_path / "widget.js").write_text("function noBuildersHere() { return 1; }\n", encoding="utf-8")
+    rc, payload = handler.cmd_class(
+        argparse.Namespace(
+            klass="wrong-primitive", scope="builder", max=0,
+            require_population_seen=1, dir=tmp_path,
+        )
+    )
+    assert rc == 1
+    assert "population floor not met" in payload["error"]
 
 
 # ---------------------------------------------------------------------------

@@ -145,14 +145,29 @@ def cmd_class(args) -> tuple[int, dict]:
         # itself be evaluated against a non-trivial overall population, or a
         # scoped --max 0 could pass vacuously because the builder was never
         # discovered at all (e.g. a regression in `discover_builders`).
-        all_matches = [i for i in interps if classify(i) == args.klass]
-        if len(all_matches) < args.require_population_seen:
+        #
+        # Measured across ALL classes within the scope, not just --class.
+        # Filtering by --klass here would make the floor equal the very
+        # count Phase 3/6 tighten to zero: the wrong-primitive population
+        # WITHIN the builder scope is 6 pre-fix and (correctly) 0 once this
+        # phase lands, so a --klass-filtered floor of 20 would become
+        # permanently unsatisfiable the moment the fix it is meant to gate
+        # actually ships. The builder scope's TOTAL interpolation count (6
+        # wrong-primitive + 14 unescaped-quoted = 20, D9b) does not shrink
+        # when an individual site's escaping is fixed — only its
+        # classification changes — so it is the population `discover_
+        # builders()` regressing to zero would actually zero out.
+        if args.scope:
+            population = [i for i in interps if i["scope"] == args.scope]
+        else:
+            population = [i for i in interps if classify(i) == args.klass]
+        if len(population) < args.require_population_seen:
             return 1, {
                 **payload,
                 "error": (
-                    f"population floor not met: saw {len(all_matches)} total "
-                    f"{args.klass} interpolations (unscoped), expected >= "
-                    f"{args.require_population_seen}"
+                    f"population floor not met: saw {len(population)} total "
+                    f"{'scope=' + args.scope if args.scope else args.klass} "
+                    f"interpolations, expected >= {args.require_population_seen}"
                 ),
             }
 
