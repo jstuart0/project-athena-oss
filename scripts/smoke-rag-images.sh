@@ -102,7 +102,7 @@ run_smoke() {
 
     # Build
     if ! docker buildx build \
-            "${build_args[@]}" \
+            "${build_args[@]+"${build_args[@]}"}" \
             --load \
             --platform linux/amd64 \
             -t "${smoke_tag}" \

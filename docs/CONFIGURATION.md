@@ -120,6 +120,8 @@ SESSION_SECRET_KEY=secret123...
 JWT_SECRET=jwtsecret...
 ```
 
+**`SESSION_SECRET_KEY`/`JWT_SECRET` must be plain random strings, never a copy-pasted key file.** If either value contains a PEM header or an SSH key-type substring, the JWT library mistakes it for asymmetric key material: token minting fails with a `500` and token validation fails with a `401`, instead of authenticating normally. The `openssl rand -base64 32` command above already produces a safe value — this only matters if a secret is set some other way (e.g. pasted from an existing `.pem`/`.pub` file).
+
 **`ADMIN_API_URL` resolution order** (`src/shared/admin_url.py`):
 1. `ADMIN_API_URL` — canonical; set this in all deployments
 2. `ADMIN_BACKEND_URL` — accepted alias for backward compatibility

@@ -88,7 +88,7 @@ compile_pair() {
         --python-platform x86_64-unknown-linux-gnu \
         --generate-hashes \
         --custom-compile-command "make lock" \
-        "${upgrade_args[@]}" \
+        "${upgrade_args[@]+"${upgrade_args[@]}"}" \
         --quiet
 }
 
@@ -177,7 +177,7 @@ case "${MODE}" in
             echo "FAIL: --input requires --output" >&2
             exit 1
         fi
-        compile_pair "${OUTPUT}" "${INPUTS[@]}" "${CONSTRAINTS[@]}"
+        compile_pair "${OUTPUT}" "${INPUTS[@]}" "${CONSTRAINTS[@]+"${CONSTRAINTS[@]}"}"
         ;;
     discover)
         compile_all

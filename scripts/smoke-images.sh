@@ -126,13 +126,16 @@ cleanup() {
         done
     fi
     # Same bash-3.2 `set -u` empty-array gap fixed in audit-images.sh's
-    # cleanup() this round: "${arr[@]}" on a still-empty array is an
-    # unbound-variable error on macOS's stock /bin/bash, not an empty
-    # expansion, which would clobber this script's real exit code with the
-    # trap's. Every image with needs_shared_copy=0 (all RAG services,
-    # gateway, mode_service, orchestrator, chat-embed, jarvis-web) leaves
-    # this array empty, so a single-service run hit this on every one of
-    # them.
+    # cleanup() and (below and at run_smoke's import_env) in this script:
+    # "${arr[@]}" on a still-empty array is an unbound-variable error on
+    # macOS's stock /bin/bash, not an empty expansion — here it would
+    # clobber this trap's own exit code; in run_smoke it aborts the whole
+    # script outright under set -u. Every image with needs_shared_copy=0
+    # (all RAG services, gateway, mode_service, orchestrator, chat-embed,
+    # jarvis-web) leaves SHARED_COPY_DIRS empty, so a single-service run
+    # hit this on every one of them; every image with no import-time env
+    # override (all but admin-backend and chat-embed) leaves import_env
+    # empty and hit the second occurrence.
     for d in "${SHARED_COPY_DIRS[@]+"${SHARED_COPY_DIRS[@]}"}"; do
         rm -rf "$d"
     done
@@ -203,7 +206,7 @@ run_smoke() {
     if ! docker run \
             --rm \
             --platform linux/amd64 \
-            "${import_env[@]}" \
+            "${import_env[@]+"${import_env[@]}"}" \
             --entrypoint python \
             "${smoke_tag}" \
             -c "import main; print('import OK')" \
@@ -217,7 +220,7 @@ run_smoke() {
     if docker run \
             --rm \
             --platform linux/amd64 \
-            "${import_env[@]}" \
+            "${import_env[@]+"${import_env[@]}"}" \
             --entrypoint python \
             "${smoke_tag}" \
             -m pip check \

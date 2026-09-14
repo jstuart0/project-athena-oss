@@ -19,13 +19,19 @@
 #   PYSEC-2026-1325 (ecdsa, pulled in transitively by python-jose[cryptography]).
 #   Unreachable: this codebase's only python-jose usage is HS256 (symmetric
 #   HMAC) — see admin/backend/app/auth/oidc.py — which never calls ecdsa's
-#   signing API. GUARD (mechanical, AST-based — not text matching, since a
-#   grep for "algorithms=[" cannot see a call site that omits algorithms=
-#   entirely, which python-jose's jwt.decode() defaults to accepting any alg
-#   the token header claims): scripts/check-jwt-algorithm-guard.py runs
-#   before this allowlist is ever applied. If it fails, the --ignore-vuln
-#   flag is withheld for the whole run — PYSEC-2026-1325 then surfaces as an
-#   unallowlisted finding rather than being silently suppressed.
+#   signing API. GUARD (mechanical, AST-based — not text matching: it
+#   resolves every python-jose import form to a canonical name, so it also
+#   catches an aliased import, a `getattr`-dispatched call, a call that omits
+#   `algorithms=` entirely — which python-jose's jwt.decode() then accepts
+#   any `alg` the token header claims — and a `JWT_ALGORITHM` reassignment,
+#   none of which a grep for "algorithms=[" can see): runs
+#   scripts/check-jwt-algorithm-guard.py before this allowlist is ever
+#   applied, scanning admin/backend (excluding admin/backend/tests/, where
+#   fixtures legitimately construct dangerous jose calls to prove other code
+#   rejects them) plus src/shared (installed into the admin-backend image).
+#   If the guard fails, the --ignore-vuln flag is withheld for the whole
+#   run — PYSEC-2026-1325 then surfaces as an unallowlisted finding rather
+#   than being silently suppressed.
 
 set -euo pipefail
 
