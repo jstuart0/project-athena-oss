@@ -583,6 +583,133 @@ def discover_builders(directory) -> list[Builder]:
     return builders
 
 
+# --- alias double-escape (codex r2 F1) ---------------------------------
+#
+# `display-shape` catches SYNTACTIC nesting: `escapeJsAttr(escapeHtml(x))`
+# written directly. It cannot see the aliased form that actually shipped:
+#
+#     const safeName = escapeHtml(x);
+#     ... escapeJsAttr(safeName) ...
+#
+# `safeName` is textually a bare identifier at the call site, not a nested
+# call — the value gets HTML-escaped twice (once explicitly, once inside
+# escapeJsAttr) and only HTML-decoded once by the browser's attribute
+# parser, so the callee receives entity text instead of the real value.
+# This is a DATA-FLOW check: find identifiers assigned from one escaping
+# primitive, then flag any call to the OTHER primitive whose sole argument
+# is that identifier, within the same lexical scope. Symmetric: also
+# catches `escapeHtml(<escapeJsAttr-derived identifier>)`.
+#
+# Scope is approximated as the nearest enclosing function-like block
+# (`function name(...) {`, `function (...) {`, `(...) => {`, or
+# `ident => {`) so that an unrelated function reusing a common alias name
+# (`serviceName`, `safeName`) elsewhere in the file is not misclassified as
+# the same binding — the legitimate fixed-up pattern (a `rawX` identifier
+# feeding `escapeHtml` for display and `escapeJsAttr` for the handler,
+# coexisting in one template) is never flagged because `rawX` itself is
+# never assigned from the OTHER primitive.
+
+ALIAS_DECL_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(escapeHtml\w*|escapeJsAttr)\s*\("
+)
+
+_FUNC_LIKE_BLOCK_RE = re.compile(
+    r"(?:"
+    r"function\s*[A-Za-z_$][\w$]*\s*\([^)]*\)"  # function name(...)
+    r"|function\s*\([^)]*\)"  # function (...)
+    r"|\([^()]*\)\s*=>"  # (...) =>
+    r"|\b[A-Za-z_$][\w$]*\s*=>"  # ident =>
+    r")\s*\{"
+)
+
+
+def _enclosing_scope_start(text: str, pos: int) -> int:
+    """Nearest enclosing function-like block containing `pos`, identified by
+    its opening-brace index (a stable, unique scope id). -1 = module scope
+    (no enclosing function-like block found).
+    """
+    candidates = list(_FUNC_LIKE_BLOCK_RE.finditer(text, 0, pos))
+    for m in reversed(candidates):
+        brace_open = m.end() - 1
+        depth = 0
+        i = brace_open
+        n = len(text)
+        while i < n:
+            c = text[i]
+            if c in QUOTE_CHARS:
+                i = skip_js_string(text, i)
+                continue
+            if c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        body_end = i
+        if brace_open <= pos <= body_end:
+            return brace_open
+    return -1
+
+
+def find_alias_double_escapes(directory) -> list[dict]:
+    violations: list[dict] = []
+    for path in iter_frontend_js_files(directory):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+
+        decls = []
+        for m in ALIAS_DECL_RE.finditer(text):
+            name = m.group(1)
+            fn = m.group(2)
+            kind = "jsattr" if fn == "escapeJsAttr" else "html"
+            decls.append(
+                {
+                    "name": name,
+                    "kind": kind,
+                    "pos": m.start(),
+                    "scope": _enclosing_scope_start(text, m.start()),
+                    "line": line_of(text, m.start()),
+                }
+            )
+
+        for m in re.finditer(r"\b(escapeHtml\w*|escapeJsAttr)\s*\(", text):
+            fn = m.group(1)
+            open_idx = m.end() - 1
+            close_idx = find_matching_paren(text, open_idx)
+            if close_idx == -1:
+                continue
+            arg = text[open_idx + 1 : close_idx].strip()
+            if not re.fullmatch(r"[A-Za-z_$][\w$]*", arg):
+                continue  # only a bare identifier is "the alias itself"
+            usage_kind = "jsattr" if fn == "escapeJsAttr" else "html"
+            wanted_kind = "html" if usage_kind == "jsattr" else "jsattr"
+            usage_scope = _enclosing_scope_start(text, m.start())
+            candidates = [
+                d
+                for d in decls
+                if d["name"] == arg
+                and d["kind"] == wanted_kind
+                and d["scope"] == usage_scope
+                and d["pos"] < m.start()
+            ]
+            if not candidates:
+                continue
+            decl = max(candidates, key=lambda d: d["pos"])
+            violations.append(
+                {
+                    "file": path,  # caller relativizes (REPO_ROOT vs tmp_path differ)
+                    "line": line_of(text, m.start()),
+                    "alias": arg,
+                    "declared_line": decl["line"],
+                    "direction": f"{wanted_kind}-then-{usage_kind}",
+                }
+            )
+    return violations
+
+
 def find_calls(text: str, func_name: str) -> list[tuple[int, int, str]]:
     """Find call sites of `func_name(` in `text`, excluding its own
     definition. Returns (call_start, args_start, args_text) triples.

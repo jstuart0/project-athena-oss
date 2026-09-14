@@ -453,7 +453,8 @@ function renderModelSearchResultsHTML() {
     }
 
     const resultsHtml = searchResults.map(model => {
-        const repoId = escapeHtml(model.repo_id || '');
+        const rawRepoId = model.repo_id || '';
+        const repoId = escapeHtml(rawRepoId);
         const downloads = model.downloads || 0;
         const likes = model.likes || 0;
         const updated = model.updated || '';
@@ -482,7 +483,7 @@ function renderModelSearchResultsHTML() {
                             </div>
                         ` : ''}
                     </div>
-                    <button onclick="loadRepoFiles('${escapeJsAttr(repoId)}')"
+                    <button onclick="loadRepoFiles('${escapeJsAttr(rawRepoId)}')"
                             class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
                         View Files
                     </button>
@@ -608,7 +609,7 @@ function showRepoFilesModal(repoId, files) {
             <div class="bg-dark-card border border-dark-border rounded-xl w-full max-w-2xl max-h-[80vh] overflow-hidden m-4">
                 <div class="p-4 border-b border-dark-border flex items-center justify-between">
                     <div>
-                        <h3 class="text-lg font-semibold text-white">${repoId}</h3>
+                        <h3 class="text-lg font-semibold text-white">${escapeHtml(repoId)}</h3>
                         <p class="text-sm text-gray-400">${files.length} files available</p>
                     </div>
                     <button onclick="closeRepoFilesModal()" class="p-2 hover:bg-dark-bg rounded-lg transition-colors">

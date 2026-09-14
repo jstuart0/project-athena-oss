@@ -152,6 +152,7 @@ jobs:
           python3 scripts/check-handler-escaping.py --check no-handrolled-escape
           python3 scripts/check-handler-escaping.py --check jsattr-confinement
           python3 scripts/check-handler-escaping.py --check display-shape
+          python3 scripts/check-handler-escaping.py --check alias-double-escape
           python3 scripts/check-handler-escaping.py --check app3309
           python3 scripts/check-handler-escaping.py --check mis-context \
             --expect-static 'href-javascript=2' \
@@ -192,7 +193,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/check-html-template-escaping.py --class data-attribute --max 348
+          python3 scripts/check-html-template-escaping.py --class data-attribute --max 344
           python3 scripts/check-html-template-escaping.py --class innerhtml-sink --max 442
 
       - name: Three-way wiring parity and buster presence (D7)

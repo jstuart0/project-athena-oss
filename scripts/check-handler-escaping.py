@@ -329,6 +329,23 @@ def cmd_display_shape(args) -> tuple[int, dict]:
     return (1 if violations else 0), {"violations": violations}
 
 
+def cmd_alias_double_escape(args) -> tuple[int, dict]:
+    # codex r2 F1 — display-shape only sees SYNTACTIC nesting
+    # (`escapeJsAttr(escapeHtml(x))`). This is the data-flow counterpart:
+    #
+    #     const safeName = escapeHtml(x);
+    #     ... escapeJsAttr(safeName) ...
+    #
+    # is textually a bare-identifier argument, not a nested call, but the
+    # value is HTML-escaped twice and decoded once — the callee receives
+    # entity text instead of the real identifier. Symmetric in the other
+    # direction too. See _frontend_escape_scan.find_alias_double_escapes
+    # for the scope-aware data-flow analysis.
+    raw = scan.find_alias_double_escapes(args.dir)
+    violations = [{**v, "file": rel(v["file"])} for v in raw]
+    return (1 if violations else 0), {"violations": violations}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -347,6 +364,7 @@ def main() -> int:
             "mis-context",
             "app3309",
             "display-shape",
+            "alias-double-escape",
         ],
         default=None,
     )
@@ -387,6 +405,9 @@ def main() -> int:
         label = args.check
     elif args.check == "display-shape":
         rc, payload = cmd_display_shape(args)
+        label = args.check
+    elif args.check == "alias-double-escape":
+        rc, payload = cmd_alias_double_escape(args)
         label = args.check
     else:
         print("ERROR: one of --class or --check is required", file=sys.stderr)

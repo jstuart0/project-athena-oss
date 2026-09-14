@@ -55,7 +55,7 @@
       "admin/frontend/voice-config.js",
       "admin/frontend/voice-pipelines.js"
     ],
-    "total": 348
+    "total": 344
   },
   "definitions": [
     {
@@ -171,7 +171,7 @@
       "admin/frontend/icons.js:169",
       "admin/frontend/integrations.js:285",
       "admin/frontend/metrics.js:304",
-      "admin/frontend/model-downloads.js:557",
+      "admin/frontend/model-downloads.js:558",
       "admin/frontend/room-audio.js:590",
       "admin/frontend/room-audio.js:596"
     ],
@@ -183,7 +183,7 @@
       "admin/frontend/icons.js:169",
       "admin/frontend/integrations.js:285",
       "admin/frontend/metrics.js:304",
-      "admin/frontend/model-downloads.js:557",
+      "admin/frontend/model-downloads.js:558",
       "admin/frontend/room-audio.js:590",
       "admin/frontend/room-audio.js:596"
     ]

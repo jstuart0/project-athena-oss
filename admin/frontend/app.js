@@ -1380,19 +1380,19 @@ async function showCreateExternalApiKeyModal(serviceName = '') {
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
                             <label for="external-api-key-service-name" class="block text-sm font-medium text-gray-300 mb-1">Service Name</label>
-                            <input type="text" id="external-api-key-service-name" name="service_name" value="${payload.service_name || ''}" ${existing ? 'readonly' : ''}
+                            <input type="text" id="external-api-key-service-name" name="service_name" value="${escapeHtml(payload.service_name || '')}" ${existing ? 'readonly' : ''}
                                 placeholder="api-football" required
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                         </div>
                         <div>
                             <label for="external-api-key-api-name" class="block text-sm font-medium text-gray-300 mb-1">API Name</label>
-                            <input type="text" id="external-api-key-api-name" name="api_name" value="${payload.api_name || ''}" placeholder="API-Football.com" required
+                            <input type="text" id="external-api-key-api-name" name="api_name" value="${escapeHtml(payload.api_name || '')}" placeholder="API-Football.com" required
                                 class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                         </div>
                     </div>
                     <div>
                         <label for="external-api-key-endpoint-url" class="block text-sm font-medium text-gray-300 mb-1">Endpoint URL</label>
-                        <input type="text" id="external-api-key-endpoint-url" name="endpoint_url" value="${payload.endpoint_url || ''}" placeholder="https://v3.football.api-sports.io" required
+                        <input type="text" id="external-api-key-endpoint-url" name="endpoint_url" value="${escapeHtml(payload.endpoint_url || '')}" placeholder="https://v3.football.api-sports.io" required
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">
                     </div>
                     <div>
@@ -1413,7 +1413,7 @@ async function showCreateExternalApiKeyModal(serviceName = '') {
                     </div>
                     <div>
                         <label for="external-api-key-description" class="block text-sm font-medium text-gray-300 mb-1">Description</label>
-                        <textarea id="external-api-key-description" name="description" rows="2" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">${payload.description || ''}</textarea>
+                        <textarea id="external-api-key-description" name="description" rows="2" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white">${escapeHtml(payload.description || '')}</textarea>
                     </div>
                     <div class="flex gap-2 pt-4">
                         <button type="submit" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded">Save</button>
@@ -2345,8 +2345,8 @@ async function loadServices() {
         data.services.sort((a, b) => a.name.localeCompare(b.name));
 
         container.innerHTML = data.services.map(service => {
-            // Escape name for use in single-quoted onclick attrs (codex r2 M-5).
-            const safeName = escapeHtml(service.name || '');
+            // Raw value for onclick attrs -- escapeJsAttr escapes it below (codex r2 F1).
+            const rawName = service.name || '';
             return `
             <div class="bg-dark-card border border-dark-border rounded-lg p-4">
                 <div class="flex justify-between items-start mb-3">
@@ -2388,11 +2388,11 @@ async function loadServices() {
                 </div>
 
                 <div class="flex gap-2">
-                    <button onclick="toggleService('${escapeJsAttr(safeName)}')"
+                    <button onclick="toggleService('${escapeJsAttr(rawName)}')"
                         class="flex-1 px-3 py-1.5 ${service.enabled ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'} text-white rounded text-sm font-medium transition-colors">
                         ${service.enabled ? 'Disable' : 'Enable'}
                     </button>
-                    <button onclick="refreshService('${escapeJsAttr(safeName)}')"
+                    <button onclick="refreshService('${escapeJsAttr(rawName)}')"
                         class="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium transition-colors">
                         Refresh
                     </button>

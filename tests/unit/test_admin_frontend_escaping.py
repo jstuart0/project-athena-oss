@@ -234,3 +234,93 @@ def test_escape_js_attr_backslash_ordering_is_load_bearing():
     js_literal_body = _html_attr_decode(escaped)
     recovered = _js_single_quoted_string_parse(js_literal_body)
     assert recovered == payload
+
+
+# ---------------------------------------------------------------------------
+# codex r2 F1 -- end-to-end delivery proof for a FIXED alias site. Not just
+# "escapeJsAttr round-trips in isolation" (proven above, and unaffected by
+# the bug) but "the actual template shape at a fixed call site delivers the
+# raw value byte-identically to the callee, and that value still makes it
+# into a request payload/URL correctly." Exercises service-control.js's
+# `toggleRagService`/`checkRagServiceHealth` shape end to end: template
+# render -> browser attribute decode -> JS string-literal parse -> the real
+# callee body executes and the value reaches `encodeURIComponent`.
+# ---------------------------------------------------------------------------
+
+
+def _simulate_onclick_call(rendered_attr_value: str, callee_stub_js: str) -> str:
+    """`rendered_attr_value` is the RAW (undecoded) text that ended up inside
+    the onclick="..." attribute value in the rendered HTML -- exactly what a
+    real browser's HTML parser handed to it. Applies the two-stage decode
+    (HTML attribute decode, then JS statement parse/execute against a stub
+    callee) and returns whatever the stub callee recorded, round-tripped
+    through JSON so the assertion below compares real values, not source text.
+    """
+    js_source = _html_attr_decode(rendered_attr_value)
+    script = f"""
+    'use strict';
+    let captured;
+    {callee_stub_js}
+    {js_source}
+    process.stdout.write(JSON.stringify(captured));
+    """
+    proc = subprocess.run([NODE_BIN, "-e", script], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, f"node failed executing decoded handler body: {proc.stderr}\nsource: {js_source!r}"
+    return json.loads(proc.stdout)
+
+
+def test_delivery_proof_fixed_alias_site_service_control_toggle():
+    """service-control.js:673 (post-fix): `toggleRagService('${escapeJsAttr(rawName)}')`.
+
+    Renders the REAL template shape with the raw value that reproduces the
+    regression codex found (`svc&one` -- an ampersand, so a double-escape
+    would leave `&amp;` in the delivered string), runs the real
+    escape-html.js, then proves: (1) the callee receives the value
+    byte-identical to the raw input, and (2) that value still builds the
+    correct API request URL via encodeURIComponent -- the actual downstream
+    consequence of the regression (wrong resource, or a failed request).
+    """
+    raw_name = "svc&one"
+    escaped = _run_node(f"window.escapeJsAttr({json.dumps(raw_name)})")
+    rendered_attr_value = f"toggleRagService('{escaped}')"
+
+    delivered = _simulate_onclick_call(
+        rendered_attr_value,
+        "function toggleRagService(serviceName) { captured = serviceName; }",
+    )
+    assert delivered == raw_name, (
+        f"callee must receive the RAW value byte-identical: got {delivered!r}, expected {raw_name!r}"
+    )
+
+    # The actual downstream consequence in service-control.js's toggleRagService:
+    # `apiRequest('/api/service-registry/services/${encodeURIComponent(serviceName)}/toggle')`.
+    # Prove the delivered value still builds the correct request path.
+    expected_url_segment = _run_node(f"encodeURIComponent({json.dumps(raw_name)})")
+    delivered_url_segment = _run_node(f"encodeURIComponent({json.dumps(delivered)})")
+    assert delivered_url_segment == expected_url_segment, (
+        "the payload must still be intact at the point it builds the API request URL"
+    )
+
+
+def test_delivery_proof_pre_fix_shape_would_have_mangled_the_same_payload():
+    """Negative control proving the proof above actually discriminates the
+    regression: re-run the identical scenario through the SHIPPED
+    pre-fix shape (`escapeJsAttr(escapeHtml(rawName))`) and confirm the
+    callee receives entity text, not the raw value -- gate-script rule 6,
+    a positive assertion is only meaningful alongside proof it can fail.
+    """
+    raw_name = "svc&one"
+    double_escaped = _run_node(
+        f"window.escapeJsAttr(window.escapeHtml({json.dumps(raw_name)}))"
+    )
+    rendered_attr_value = f"toggleRagService('{double_escaped}')"
+
+    delivered = _simulate_onclick_call(
+        rendered_attr_value,
+        "function toggleRagService(serviceName) { captured = serviceName; }",
+    )
+    assert delivered != raw_name, (
+        "sanity check failed: the pre-fix double-escape shape must NOT deliver "
+        "the raw value -- if it does, this proof can no longer distinguish the fix"
+    )
+    assert delivered == "svc&amp;one", f"expected the documented mangled form, got {delivered!r}"

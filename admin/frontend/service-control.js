@@ -279,8 +279,11 @@ function renderServiceRow(service) {
     const displayName = service.display_name || service.service_name || 'Unknown';
     const host = service.host || service.ip_address || 'unknown';
     const isRunning = service.is_running ?? (service.status === 'running' || service.status === 'healthy' || service.status === 'online');
-    // escapeHtml guards the single-quoted onclick attrs against XSS (codex r2 M-5).
-    const serviceName = escapeHtml(service.service_name || service.name || '');
+    // Raw value for the handler attrs -- escapeJsAttr escapes it at the call
+    // site; escapeHtml here would be double-escaped by escapeJsAttr and
+    // deliver the wrong identifier to stopService/restartService/startService
+    // (codex r2 F1).
+    const serviceName = service.service_name || service.name || '';
 
     const statusBadge = isRunning
         ? '<span class="px-2 py-1 text-xs rounded bg-green-900 text-green-300">● Running</span>'
@@ -637,7 +640,11 @@ function renderRagServiceRow(service) {
     );
 
     const isEnabled = service.enabled !== false;
-    const safeName = escapeHtml(service.name || '');
+    // safeName is for display/attribute positions; rawName feeds the handler
+    // attrs below, which escape it themselves at the call site -- wrapping
+    // rawName in escapeHtml first would double-escape it (codex r2 F1).
+    const rawName = service.name || '';
+    const safeName = escapeHtml(rawName);
 
     // Control Agent gate: disable start/stop/restart when CA is unavailable.
     const caDisabled = !controlAgentEnabled;
@@ -663,12 +670,12 @@ function renderRagServiceRow(service) {
             </td>
             <td class="px-4 py-3">
                 <div class="flex gap-2">
-                    <button onclick="toggleRagService('${escapeJsAttr(safeName)}')"
+                    <button onclick="toggleRagService('${escapeJsAttr(rawName)}')"
                             class="px-2 py-1 text-xs ${isEnabled ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'} text-white rounded">
                         ${isEnabled ? 'Disable' : 'Enable'}
                     </button>
                     <button id="check-btn-${safeName}"
-                            onclick="checkRagServiceHealth('${escapeJsAttr(safeName)}', this)"
+                            onclick="checkRagServiceHealth('${escapeJsAttr(rawName)}', this)"
                             class="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded">
                         Refresh
                     </button>

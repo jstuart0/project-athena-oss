@@ -92,6 +92,28 @@ inside the callee body. Three buckets — `sink-escaped` (fine),
 `unresolved` is fail-closed on purpose: a classifier that silently drops
 what it cannot resolve reproduces the exact hole it exists to find.
 
+**This is a documented one-hop limit, not an oversight.** The classifier
+traces the handler argument's own textual identity through exactly one
+callee body. It does not see a **second-order sink**: a callee that uses
+its parameter to *fetch a different record* (an async call, a lookup by
+key) and then renders **fields of that fetched record** — not the
+parameter itself — into a sink. `app.js`'s `showCreateExternalApiKeyModal`
+is the live example: `serviceName` (byte-preserving, correctly delivered)
+is used only as a lookup key for `apiRequest(...)`; the four fields that
+actually reach `.innerHTML =` (`service_name`, `api_name`, `endpoint_url`,
+`description`) come from the fetched `payload`, which has no textual
+derivation from `serviceName` the classifier could follow.
+
+Extending the classifier to cover this would not be "two hops" of the same
+mechanism — it would require tracing an async network response's *shape*
+back through a backend API contract the classifier has no visibility into,
+with no bounded termination condition (a third hop, a fourth, a value
+round-tripped through `localStorage`). That is a materially different and
+open-ended problem, not a deeper version of the one D9 solves. **Fix the
+sink directly** (`escapeHtml()` on each rendered field of the fetched
+record) and audit callees that fetch-then-render by hand; do not expect
+`check-callee-sinks.py` to find this class.
+
 ## The builder rule (D9b)
 
 `oss-profiles.js`'s `actionButton(label, className, onClick, tooltip)` is a

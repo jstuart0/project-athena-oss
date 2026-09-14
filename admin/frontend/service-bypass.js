@@ -193,7 +193,7 @@ function editBypassConfig(serviceName) {
                     <!-- Cloud Model -->
                     <div>
                         <label for="bypass-cloud-model" class="block text-sm font-medium text-gray-300 mb-2">Model (optional)</label>
-                        <input type="text" id="bypass-cloud-model" name="cloud_model" value="${config.cloud_model || ''}"
+                        <input type="text" id="bypass-cloud-model" name="cloud_model" value="${escapeHtml(config.cloud_model || '')}"
                                placeholder="e.g., gpt-4o, claude-sonnet"
                                class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         <p class="mt-1 text-xs text-gray-500">Leave empty to use provider's default model</p>
@@ -212,13 +212,13 @@ function editBypassConfig(serviceName) {
                     <div class="grid grid-cols-2 gap-4">
                         <div>
                             <label for="bypass-temperature" class="block text-sm font-medium text-gray-300 mb-2">Temperature</label>
-                            <input type="number" id="bypass-temperature" name="temperature" value="${config.temperature || 0.7}"
+                            <input type="number" id="bypass-temperature" name="temperature" value="${Number(config.temperature) || 0.7}"
                                    min="0" max="2" step="0.1"
                                    class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         </div>
                         <div>
                             <label for="bypass-max-tokens" class="block text-sm font-medium text-gray-300 mb-2">Max Tokens</label>
-                            <input type="number" id="bypass-max-tokens" name="max_tokens" value="${config.max_tokens || 1024}"
+                            <input type="number" id="bypass-max-tokens" name="max_tokens" value="${Number(config.max_tokens) || 1024}"
                                    min="100" max="4096"
                                    class="w-full px-4 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         </div>

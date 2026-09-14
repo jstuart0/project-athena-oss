@@ -944,3 +944,159 @@ def test_buster_exit_two_is_not_a_pass():
     assert proc_ok.returncode in (0, 1), (
         f"a resolvable base must return 0 or 1, never 2: got {proc_ok.returncode}: {proc_ok.stdout}{proc_ok.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# codex r2 F1 — alias_double_escape. `display-shape` (above the CI wiring)
+# only catches SYNTACTIC nesting (`escapeJsAttr(escapeHtml(x))`). This is
+# the data-flow counterpart that shipped as a real regression:
+#
+#     const safeName = escapeHtml(x);
+#     ... escapeJsAttr(safeName) ...
+#
+# `safeName` is a bare identifier at the call site, not a nested call, so
+# display-shape's regex never sees it — yet the value is HTML-escaped
+# twice and HTML-decoded only once by the browser's attribute parser, so
+# the callee receives entity text instead of the real value.
+# ---------------------------------------------------------------------------
+
+
+def test_alias_double_escape_real_tree_is_clean():
+    """The post-fix tree must report zero alias-double-escape violations."""
+    violations = scan.find_alias_double_escapes(FRONTEND_DIR)
+    assert violations == [], f"unexpected alias double-escape(s) in the real tree: {violations}"
+
+
+def test_alias_double_escape_can_fail_html_then_jsattr(tmp_path):
+    """CAN-FAIL (direction 1): `const safe = escapeHtml(x)` followed by
+    `escapeJsAttr(safe)` in the same scope must be flagged -- this is the
+    exact shape that shipped in app.js/model-downloads.js/service-control.js
+    before this fix.
+    """
+    (tmp_path / "mutant.js").write_text(
+        "function renderRow(service) {\n"
+        "    const safeName = escapeHtml(service.name || '');\n"
+        "    return `<button onclick=\"toggleService('${escapeJsAttr(safeName)}')\">x</button>`;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    violations = scan.find_alias_double_escapes(tmp_path)
+    assert len(violations) == 1
+    v = violations[0]
+    assert v["alias"] == "safeName"
+    assert v["direction"] == "html-then-jsattr"
+    assert v["declared_line"] == 2
+    assert v["line"] == 3
+
+
+def test_alias_double_escape_can_fail_jsattr_then_html(tmp_path):
+    """CAN-FAIL (direction 2, the reverse): `const attrSafe =
+    escapeJsAttr(x)` followed by `escapeHtml(attrSafe)` must also be
+    flagged -- the plan requires both directions, not just the one that
+    shipped.
+    """
+    (tmp_path / "mutant.js").write_text(
+        "function renderRow(service) {\n"
+        "    const attrSafe = escapeJsAttr(service.name || '');\n"
+        "    return `<span>${escapeHtml(attrSafe)}</span>`;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    violations = scan.find_alias_double_escapes(tmp_path)
+    assert len(violations) == 1
+    v = violations[0]
+    assert v["alias"] == "attrSafe"
+    assert v["direction"] == "jsattr-then-html"
+
+
+def test_alias_double_escape_does_not_flag_the_legitimate_raw_and_safe_pattern(tmp_path):
+    """The fix for F1 introduces a `rawX`/`safeX` pair coexisting in one
+    template -- `rawX` feeds `escapeJsAttr` for the handler, `safeX` (=
+    `escapeHtml(rawX)`) feeds display. `rawX` is never itself assigned from
+    `escapeJsAttr`, so this must NOT be flagged. A check that false-positives
+    on its own fix's canonical shape is worse than no check.
+    """
+    (tmp_path / "fixed.js").write_text(
+        "function renderRow(service) {\n"
+        "    const rawName = service.name || '';\n"
+        "    const safeName = escapeHtml(rawName);\n"
+        "    return `<span>${safeName}</span>"
+        "<button onclick=\"toggleService('${escapeJsAttr(rawName)}')\">x</button>`;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    violations = scan.find_alias_double_escapes(tmp_path)
+    assert violations == [], f"legitimate raw/safe pair must not be flagged: {violations}"
+
+
+def test_alias_double_escape_scopes_by_enclosing_function_not_whole_file(tmp_path):
+    """A `repoId` alias declared via `escapeHtml` in one function and a
+    genuinely raw `repoId` PARAMETER of an unrelated function later in the
+    same file (model-downloads.js's loadRepoFiles -> showRepoFilesModal
+    chain) must not cross-contaminate -- the check is scoped per enclosing
+    function-like block, not file-wide identifier matching.
+    """
+    (tmp_path / "scoped.js").write_text(
+        "function renderResult(model) {\n"
+        "    const repoId = escapeHtml(model.repo_id || '');\n"
+        "    return `<button onclick=\"loadRepoFiles('${escapeJsAttr(repoId)}')\">x</button>`;\n"
+        "}\n"
+        "function showRepoFilesModal(repoId, files) {\n"
+        "    return `<button onclick=\"startDownload('${escapeJsAttr(repoId)}')\">x</button>`;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    violations = scan.find_alias_double_escapes(tmp_path)
+    # Only renderResult's own alias-then-jsattr use is a violation; the
+    # unrelated `repoId` parameter in showRepoFilesModal must not be flagged.
+    assert len(violations) == 1
+    assert violations[0]["line"] == 3
+
+
+def test_alias_double_escape_check_wiring_exit_codes(tmp_path):
+    """The `--check alias-double-escape` CLI wiring reads exit 1 on a
+    violation and exit 0 clean -- exercised through the actual script
+    invocation, not just the underlying scan function.
+    """
+    (tmp_path / "mutant.js").write_text(
+        "function renderRow(service) {\n"
+        "    const safeName = escapeHtml(service.name || '');\n"
+        "    return `<button onclick=\"toggleService('${escapeJsAttr(safeName)}')\">x</button>`;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR / "check-handler-escaping.py"),
+            "--check",
+            "alias-double-escape",
+            "--dir",
+            str(tmp_path),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert proc.returncode == 1, f"mutant must fail: {proc.stdout}{proc.stderr}"
+    payload = json.loads(proc.stdout)
+    assert len(payload["violations"]) == 1
+
+    (tmp_path / "mutant.js").unlink()
+    proc_clean = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR / "check-handler-escaping.py"),
+            "--check",
+            "alias-double-escape",
+            "--dir",
+            str(tmp_path),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert proc_clean.returncode == 0
+    assert json.loads(proc_clean.stdout)["violations"] == []
