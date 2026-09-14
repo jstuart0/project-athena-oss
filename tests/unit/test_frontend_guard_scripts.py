@@ -393,3 +393,143 @@ def test_detached_sink_found_by_position_not_sink_name():
         "emerging-intents.js:231 must be found by TEMPLATE POSITION even though its "
         "sink (container.innerHTML at :82) is three functions away from the interpolation"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — `--scope phase3` was "an unused filter hook, reserved" in Phase 1.
+# A `--max 0` gate run against an unimplemented filter is exactly rule 8's
+# vacuity failure: it reads green having filtered to nothing. This proves
+# the implemented filter genuinely NARROWS the population (scoped != all)
+# and genuinely FAILS when an in-scope site still has an unescaped sink.
+# ---------------------------------------------------------------------------
+
+_SCOPED_WIDGET = (
+    "function inScopeCallee(name) {{\n"
+    "    document.getElementById('x').innerHTML = `<div>{name_expr}</div>`;\n"
+    "}}\n"
+    "function renderInScope(name) {{\n"
+    '    return `<button onclick="inScopeCallee(\'${{name}}\')">Go</button>`;\n'
+    "}}\n"
+)
+_UNSCOPED_WIDGET = (
+    "function outOfScopeCallee(label) {\n"
+    "    document.getElementById('y').innerHTML = `<div>${label}</div>`;\n"
+    "}\n"
+    "function renderOutOfScope(label) {\n"
+    '    return `<button onclick="outOfScopeCallee(\'${label}\')">Go</button>`;\n'
+    "}\n"
+)
+
+
+def _write_scope_fixture(tmp_path: Path, in_scope_sink_escaped: bool) -> tuple[Path, Path]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    name_expr = "${escapeHtml(name)}" if in_scope_sink_escaped else "${name}"
+    in_scope_file = tmp_path / "in_scope_widget.js"
+    in_scope_file.write_text(_SCOPED_WIDGET.format(name_expr=name_expr), encoding="utf-8")
+    out_of_scope_file = tmp_path / "out_of_scope_widget.js"
+    out_of_scope_file.write_text(_UNSCOPED_WIDGET, encoding="utf-8")
+
+    # The in-scope call site is `in_scope_widget.js:5` — the `onclick=` line
+    # in renderInScope. Manifest keys are file:line, relative-`rel()`-style;
+    # `check-callee-sinks.rel()` falls back to str(path) outside REPO_ROOT,
+    # so a tmp_path fixture's keys are its own absolute paths.
+    call_line = 5
+    scopes_path = tmp_path / "scopes.json"
+    scopes_path.write_text(
+        json.dumps({"phase3": [f"{in_scope_file}:{call_line}"]}),
+        encoding="utf-8",
+    )
+    return scopes_path, tmp_path
+
+
+def test_scope_phase3_narrows_to_the_pinned_population(tmp_path):
+    scopes_path, frontend_dir = _write_scope_fixture(tmp_path, in_scope_sink_escaped=False)
+
+    unscoped = callee.collect_sites(frontend_dir)
+    adjudications = {}
+    unscoped_violations = [
+        s for s in unscoped
+        if callee.resolve_site(*s, adjudications)[0] == "sink-unescaped"
+    ]
+    assert len(unscoped_violations) == 2, "fixture setup: both callees must start with an unescaped sink"
+
+    scope_keys = callee.load_phase_scope("phase3", scopes_path)
+    scoped = callee.filter_sites_by_scope(unscoped, scope_keys)
+    scoped_violations = [
+        s for s in scoped
+        if callee.resolve_site(*s, adjudications)[0] == "sink-unescaped"
+    ]
+    assert len(scoped_violations) == 1, (
+        "scope=phase3 must narrow to exactly the pinned in-scope site, not the full "
+        "population — a scope that returns the same count as unscoped is not filtering"
+    )
+    assert scoped_violations[0][0].name == "in_scope_widget.js"
+
+
+def test_scope_phase3_can_fail_when_an_in_scope_sink_is_unescaped(tmp_path):
+    # In-scope sink still unescaped: the scoped gate must fail (exit 1).
+    scopes_path, frontend_dir = _write_scope_fixture(tmp_path, in_scope_sink_escaped=False)
+    proc = subprocess.run(
+        [
+            sys.executable, str(SCRIPTS_DIR / "check-callee-sinks.py"),
+            "--dir", str(frontend_dir),
+            "--phase-scopes", str(scopes_path),
+            "--scope", "phase3",
+            "--class", "sink-unescaped",
+            "--max", "0",
+            "--json",
+        ],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 1, f"expected FAIL (in-scope sink still unescaped), got rc={proc.returncode}: {proc.stdout} {proc.stderr}"
+    payload = json.loads(proc.stdout)
+    assert payload["count"] == 1
+    assert payload["matches"][0]["callee"] == "inScopeCallee"
+
+    # Fix only the in-scope sink: the scoped gate goes green even though the
+    # out-of-scope sink is still unescaped — proving the two are genuinely
+    # decoupled, not coincidentally equal.
+    scopes_path2, frontend_dir2 = _write_scope_fixture(tmp_path / "fixed", in_scope_sink_escaped=True)
+    proc_fixed = subprocess.run(
+        [
+            sys.executable, str(SCRIPTS_DIR / "check-callee-sinks.py"),
+            "--dir", str(frontend_dir2),
+            "--phase-scopes", str(scopes_path2),
+            "--scope", "phase3",
+            "--class", "sink-unescaped",
+            "--max", "0",
+            "--json",
+        ],
+        capture_output=True, text=True,
+    )
+    assert proc_fixed.returncode == 0, f"expected PASS once the in-scope sink is escaped: {proc_fixed.stdout} {proc_fixed.stderr}"
+
+    proc_fixed_unscoped = subprocess.run(
+        [
+            sys.executable, str(SCRIPTS_DIR / "check-callee-sinks.py"),
+            "--dir", str(frontend_dir2),
+            "--class", "sink-unescaped",
+            "--max", "0",
+            "--json",
+        ],
+        capture_output=True, text=True,
+    )
+    assert proc_fixed_unscoped.returncode == 1, (
+        "the out-of-scope sink is still unescaped in this fixture — the UNSCOPED "
+        "check must still fail even though the scoped one now passes"
+    )
+
+
+def test_scope_phase3_errors_when_manifest_missing(tmp_path):
+    proc = subprocess.run(
+        [
+            sys.executable, str(SCRIPTS_DIR / "check-callee-sinks.py"),
+            "--dir", str(FRONTEND_DIR),
+            "--phase-scopes", str(tmp_path / "does-not-exist.json"),
+            "--scope", "phase3",
+            "--class", "sink-unescaped",
+            "--max", "0",
+        ],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 2, "a missing scope manifest is could-not-run, never a silent empty-scope pass"
