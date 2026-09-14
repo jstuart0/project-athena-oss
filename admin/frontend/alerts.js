@@ -164,13 +164,6 @@ function formatTimeAgo(dateString) {
     return `${Math.floor(seconds / 86400)}d ago`;
 }
 
-function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 // ============================================================================
 // Alerts Page
 // ============================================================================
