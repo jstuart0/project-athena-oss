@@ -1260,7 +1260,11 @@ def test_skip_guard_flags_unsanctioned_added_skip(tmp_path, monkeypatch, capsys)
     Built via concatenation rather than as one contiguous literal in THIS
     file's own source — the real gate's diff-scan is a naive substring match
     over added lines under `tests/`, so a fixture spelling the marker out in
-    full would trip the gate on the very PR that adds it.
+    full would trip the gate on the very PR that adds it. This split-string
+    idiom exists ONLY to keep this fixture out of the gate's own way; the same
+    idiom in a real test would just as easily evade the gate's detection
+    (detection is lexical, not AST-based — see the module docstring) and is
+    not an acceptable way to add a skip outside this fixture.
     """
     repo = _init_repo(tmp_path)
     base = _seed_both_pins(repo)
@@ -1320,6 +1324,51 @@ def test_skip_guard_unreachable_base_exits_two(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         skips_guard.main()
     assert exc.value.code == 2, f"an unresolvable --base must exit 2, got {exc.value.code}"
+
+
+def _corrupt_blob_object(repo: Path, rel_path: str) -> None:
+    """Overwrite the loose object backing rel_path's blob at HEAD with garbage.
+
+    `git ls-tree` reads only the parent tree object's metadata (name, mode,
+    blob sha) and never opens the blob itself, so it still reports the path
+    present after this. `git show`/`git cat-file` must open and inflate the
+    blob, so those fail on it. This is a real corrupted git object, not a
+    mock — built by locating the actual loose-object file on disk and
+    clobbering its contents.
+    """
+    listing = subprocess.run(
+        ["git", "ls-tree", "HEAD", "--", rel_path], cwd=repo, capture_output=True, text=True,
+    )
+    assert listing.returncode == 0 and listing.stdout.strip(), (
+        f"fixture setup: {rel_path} must be present at HEAD before corrupting it"
+    )
+    blob_sha = listing.stdout.split()[2]
+    obj_path = repo / ".git" / "objects" / blob_sha[:2] / blob_sha[2:]
+    assert obj_path.is_file(), f"fixture setup: expected loose object at {obj_path}"
+    obj_path.chmod(0o600)
+    obj_path.write_bytes(b"garbage-not-a-valid-zlib-stream")
+
+
+def test_skip_guard_corrupted_object_exits_two_not_missing(tmp_path, monkeypatch):
+    """A pinned path that IS present per `git ls-tree` but whose blob object is
+    unreadable must be could-not-run (2), not silently folded into a missing-
+    skip finding (1). Before this fix, any non-zero `git show` (including this
+    one) was treated as "missing" -- indistinguishable from a genuinely deleted
+    skip. Built honestly by corrupting the real loose object backing a tracked
+    file, per xander's ATHENA-71 punch list item 2.
+    """
+    repo = _init_repo(tmp_path)
+    _seed_both_pins(repo)
+    _corrupt_blob_object(repo, PIN_A_FILE)
+
+    monkeypatch.setattr(skips_guard, "REPO_ROOT", repo)
+    monkeypatch.setattr(sys, "argv", ["check-no-new-test-skips.py", "--base", "HEAD"])
+    with pytest.raises(SystemExit) as exc:
+        skips_guard.main()
+    assert exc.value.code == 2, (
+        "a path present per ls-tree but unreadable via git show must exit 2 (could "
+        f"not run), not fold into a 'missing' finding: got {exc.value.code}"
+    )
 
 
 def test_skip_guard_real_tree_passes_push_style(monkeypatch, capsys):

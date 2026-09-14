@@ -39,7 +39,8 @@ So the two obligations are now checked independently:
         push to main, and when re-run locally with no diff in play at all.
 
 Scope note: (a) reads COMMITTED history (`git diff <merge-base>..HEAD`); (b) reads
-HEAD's committed tree (`git show HEAD:<path>`). Both are invisible to uncommitted
+HEAD's committed tree (`git ls-tree` for presence, `git show HEAD:<path>` for
+content). Both are invisible to uncommitted
 working-tree edits by design — so a CAN-FAIL demonstration of this gate must commit the
 injected change, not merely write it to the working tree. (Doing the latter produces a
 false PASS, which is catalogue instance 5 wearing a different hat.)
@@ -69,6 +70,16 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Detection here is LEXICAL, not AST-based: a literal substring match over added
+# diff lines (scan_added_skips) and over HEAD's file content (check_tree_presence).
+# It has no semantic model of Python and can be defeated by anything that doesn't
+# spell `pytest.mark.skip` out as contiguous source text — string concatenation,
+# `getattr(pytest.mark, "skip")`, a conftest.py wrapper, `unittest.skip`,
+# `collect_ignore`, or `-k`/`-m` deselection at collection time all evade it
+# entirely, silently. This is a ratchet against carelessness and accidental
+# regressions, not a control against a motivated bypass — human review at PR
+# time remains the actual backstop for the latter.
+#
 # Pinned sanctioned skips. Keyed by (file, marker-expression-substring) so a move within
 # the file does not spuriously fail, but a change of mechanism does.
 SANCTIONED = {
@@ -143,15 +154,31 @@ def check_tree_presence(pinned: set) -> set:
     """(b) Every pinned (file, fragment) that is NOT found verbatim in HEAD's
     committed tree. Independent of --base by design — holds on a PR, on a direct
     push to main, and with no diff in play at all.
+
+    A path genuinely absent from HEAD's tree is a finding (missing, exit 1). Any
+    other git failure while checking (corrupt object, unreadable repo) is
+    could-not-run (exit 2) — the two are distinguished by return code, not by
+    matching stderr text: `git ls-tree` reads only tree metadata and succeeds
+    with empty output when the path is absent, whereas `git show` must open the
+    blob and fails on a path ls-tree already confirmed exists only if the
+    object itself cannot be read.
     """
     missing = set()
     for (f, frag) in pinned:
+        listing = subprocess.run(
+            ["git", "ls-tree", "HEAD", "--", f], cwd=REPO_ROOT, capture_output=True, text=True,
+        )
+        if listing.returncode != 0:
+            die(f"git ls-tree failed while checking {f}: {listing.stderr.strip()}")
+        if not listing.stdout.strip():
+            missing.add((f, frag))  # genuinely absent at HEAD -- a finding, not a failure
+            continue
+
         show = subprocess.run(
             ["git", "show", f"HEAD:{f}"], cwd=REPO_ROOT, capture_output=True, text=True,
         )
         if show.returncode != 0:
-            missing.add((f, frag))
-            continue
+            die(f"git show failed for {f}, which ls-tree confirmed exists at HEAD: {show.stderr.strip()}")
         if not any(frag in line for line in show.stdout.splitlines() if SKIP_RE_ANY.search(line)):
             missing.add((f, frag))
     return missing
