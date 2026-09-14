@@ -171,6 +171,16 @@ jobs:
           set -euo pipefail
           python3 scripts/check-html-template-escaping.py --check primitive-matches-position \
             --file admin/frontend/emerging-intents.js
+          # Phase 4 step 4's residual ceiling. The measurer records
+          # emerging_intents_raw_text_node_sites=19 but nothing read it, so a NEW
+          # raw LLM-fed interpolation under any OTHER field name (intent.rationale,
+          # intent.example) was caught by nothing: the primitive-matches-position
+          # check above regexes only display_name|canonical_name|description, and
+          # neither data-attribute nor innerhtml-sink covers text position.
+          # Verified by injecting ${intent.rationale}: this ceiling fires, the
+          # other two do not. Found by valerie at final validation.
+          python3 scripts/check-html-template-escaping.py \
+            --file admin/frontend/emerging-intents.js --class text-node --max 19
           # `--class text-node --max 0` (the plan's original phrasing for this
           # step) is not the right gate: it over-approximates by design (D14)
           # and this file legitimately has ~19 inert/numeric text-node

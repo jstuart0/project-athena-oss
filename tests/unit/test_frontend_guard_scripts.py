@@ -365,6 +365,11 @@ def test_require_population_seen_floor_still_fires_when_builders_vanish(tmp_path
 
 
 # ---------------------------------------------------------------------------
+# xander H2 — ternary_span. NOTE: this is a [GREEN->GREEN] regression test, not
+# a [CAN-FAIL] one. It asserts the parser handles the construct correctly; it
+# does not mutate anything and observe a red. Re-labelled at valerie's final
+# validation, which caught it tagged [CAN-FAIL] in the plan with no failing
+# direction ever run -- catalogue instance 5 in miniature.
 # xander H2 — ternary_span: a ternary-with-quotes inside a handler span does
 # not defeat the depth-tracking parser.
 # ---------------------------------------------------------------------------
@@ -1100,3 +1105,43 @@ def test_alias_double_escape_check_wiring_exit_codes(tmp_path):
     )
     assert proc_clean.returncode == 0
     assert json.loads(proc_clean.stdout)["violations"] == []
+
+
+# D7 / rule 8 — the dangling-script-tag set is pinned by SET EQUALITY, not by a
+# subset or a maximum. valerie's final validation found the plan claimed a
+# "recorded mutation, observed exit 1" for this gate with no fixture and no
+# commit-message record backing it. The gate does work -- but nothing pinned
+# that fact, so a future refactor could relax the set-equality to a subset
+# check and no test would notice. That is exactly the shape this campaign
+# exists to prevent, so it gets a fixture.
+def test_dangling_tag_set_equality_can_fail_on_removal(tmp_path):
+    """Removing a pinned dangling tag must FAIL, not silently narrow.
+
+    A narrowing pin stops meaning anything: if the guard accepted any subset of
+    {mode-audit.js, notifications.js}, then deleting both tags would pass while
+    the invariant it encodes -- "these two, and exactly these two, are known
+    dangling" -- had quietly become vacuous.
+    """
+    frontend = tmp_path / "admin" / "frontend"
+    frontend.mkdir(parents=True)
+    real_index = (FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
+    # drop one of the two pinned dangling tags
+    mutated = re.sub(r'[ \t]*<script src="/notifications\.js[^"]*"></script>\n', "", real_index, count=1)
+    assert mutated != real_index, "fixture did not mutate -- the pinned tag was not found"
+    (frontend / "index.html").write_text(mutated, encoding="utf-8")
+    for js in FRONTEND_DIR.glob("*.js"):
+        (frontend / js.name).write_text(js.read_text(encoding="utf-8"), encoding="utf-8")
+    dockerfile = FRONTEND_DIR / "Dockerfile"
+    if dockerfile.is_file():
+        (frontend / "Dockerfile").write_text(dockerfile.read_text(encoding="utf-8"), encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "check-frontend-wiring.py"),
+         "--check", "three-way", "--dir", str(frontend)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 1, (
+        "removing a pinned dangling tag must exit 1 (set equality), got "
+        f"{proc.returncode}\n{proc.stdout}\n{proc.stderr}"
+    )
+    assert "mode-audit.js" in (proc.stdout + proc.stderr)

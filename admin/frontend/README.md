@@ -5,6 +5,40 @@ from `index.html`. There is no bundler, no module system, and no framework —
 every file shares one global `window`. This document is the contract for how
 untrusted data gets into the DOM without becoming script.
 
+## What this does NOT cover — read this before trusting the guards
+
+The guards in this directory enforce **four populations at absolute zero**: wrong-primitive handler
+sites, unescaped handler interpolations, non-canonical `escapeHtml` definitions, and unescaped callee
+sinks. That is not the same as "this frontend is safe from XSS," and anyone who reads it that way will
+make a bad decision.
+
+Measured at the time of writing, still live and deliberately **not** fixed:
+
+| Population | Count | Status |
+|---|---:|---|
+| bare-expression handler interpolations (`${entry.id}`, `${index}`) | **169** | ratcheted at 169, not fixed |
+| unescaped data-bearing plain attributes | **344** (44 files) | ratcheted at 344, not fixed |
+| `.innerHTML =` assignments | **442** (52 files) | ratcheted at 442, not audited |
+| `insertAdjacentHTML` sites | **21** (9 files) | only `emerging-intents.js`'s 6 were fixed |
+| `script-src 'unsafe-inline'` in `nginx.conf` | present | **no CSP backstop** |
+
+**Escaping in this frontend is the exception, not the rule.** Roughly 12% of data interpolations into
+HTML-building files carry an escaping call. A ratchet stops a population growing; it does not clean it.
+
+Two consequences worth stating plainly:
+
+1. **Because there is no CSP backstop, the correctness of this consolidation is load-bearing with no
+   second line of defence.** A single missed call site is a full bypass. That is why every guard here
+   has a fixture proving it can fail, and why `unresolved` is a violation rather than a pass.
+2. **`apps/jarvis-web/` is not covered by any of these guards** — the CI `paths:` filter is scoped to
+   `admin/frontend/**`. That tree has its own quote-unsafe `escapeHtml`, two handler sites using it,
+   unescaped OpenStreetMap place names, and a `music-player.js` with no escaping function at all. It
+   is the *end-user-facing* surface, not an authenticated admin one. Tracked as **ATHENA-68**.
+
+Related, and the same pathology this document exists to prevent: `showError` has **8 definitions with
+two incompatible signatures**, and the global winner has an unescaped `innerHTML` sink that is inert
+today only because callers pass the wrong number of arguments. Tracked as **ATHENA-70**.
+
 ## The two primitives, and which context each is for
 
 Both live in `admin/frontend/escape-html.js`, defined inside an IIFE and
