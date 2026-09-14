@@ -327,7 +327,7 @@ function renderEscalationPresetCard(preset, isActive) {
                             class="px-2 py-1 bg-blue-600 text-white hover:bg-blue-700 rounded text-xs font-bold" title="Edit">
                         Edit
                     </button>
-                    <button onclick="showCloneEscalationPresetModal(${preset.id}, '${preset.name.replace(/'/g, "\\'")}')"
+                    <button onclick="showCloneEscalationPresetModal(${preset.id}, '${escapeJsAttr(preset.name)}')"
                             class="p-1.5 text-purple-400 hover:text-purple-300 hover:bg-dark-bg rounded" title="Clone">
                         <i data-lucide="copy" class="w-4 h-4"></i>
                     </button>
@@ -583,12 +583,12 @@ function showCloneEscalationPresetModal(presetId, presetName) {
     modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
     modal.innerHTML = `
         <div class="bg-dark-card border border-dark-border rounded-lg p-6 w-full max-w-md">
-            <h3 class="text-lg font-semibold text-white mb-4">Clone "${presetName}"</h3>
+            <h3 class="text-lg font-semibold text-white mb-4">Clone "${escapeHtml(presetName)}"</h3>
             <div>
                 <label for="clone-preset-name" class="block text-sm text-gray-400 mb-1">New Name</label>
                 <input type="text" id="clone-preset-name"
                        class="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-white"
-                       value="${presetName} (Copy)">
+                       value="${escapeHtml(presetName)} (Copy)">
             </div>
             <div class="flex justify-end gap-3 mt-6">
                 <button onclick="closeEscalationModal('clone-preset-modal')"
