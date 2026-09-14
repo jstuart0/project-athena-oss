@@ -43,6 +43,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db, OSS_SERVICE_REGISTRY, seed_oss_service_registry
 from app.models import RagService, RAGConnector, User
+from app.routes import integrations
 from main import app
 
 
@@ -831,11 +832,15 @@ class TestPhase2ReconcileRegressions:
 
         from app.routes.integrations import check_rag_service_health
 
-        # Patch RAG_SERVICE_HOST inside the module under test
-        monkeypatch.setattr(
-            "app.routes.integrations.RAG_SERVICE_HOST",
-            "test-rag-host",
-        )
+        # Patch RAG_SERVICE_HOST inside the module under test. Object form,
+        # not a dotted string: test_migration_058.py's
+        # _reload_encryption_module pops app.utils.encryption, app.utils,
+        # and app from sys.modules (but not app.routes), so a later
+        # `import app` yields a fresh module tree with no `.routes`
+        # attribute and the string form's attribute traversal fails
+        # depending on test order (G13). Binding the module object at
+        # import time is immune to that eviction.
+        monkeypatch.setattr(integrations, "RAG_SERVICE_HOST", "test-rag-host")
 
         # Build a mock httpx response that looks like a 200
         mock_response = MagicMock()

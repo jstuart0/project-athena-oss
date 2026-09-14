@@ -1310,9 +1310,7 @@ class TestTwilioSignatureValidation:
             mock_request.headers = {}
 
             # Should not raise — graceful skip when token is not configured
-            asyncio.get_event_loop().run_until_complete(
-                sw.validate_twilio_signature(mock_request)
-            )
+            asyncio.run(sw.validate_twilio_signature(mock_request))
         finally:
             sw.TWILIO_AUTH_TOKEN = original
 
@@ -1333,9 +1331,7 @@ class TestTwilioSignatureValidation:
             mock_request.url = "https://example.com/api/sms/webhook/incoming"
 
             with pytest.raises(HTTPException) as exc_info:
-                asyncio.get_event_loop().run_until_complete(
-                    sw.validate_twilio_signature(mock_request)
-                )
+                asyncio.run(sw.validate_twilio_signature(mock_request))
             assert exc_info.value.status_code == 403
         finally:
             sw.TWILIO_AUTH_TOKEN = original
@@ -1357,9 +1353,7 @@ class TestTwilioSignatureValidation:
             mock_request.url = "https://example.com/api/sms/webhook/incoming"
 
             with pytest.raises(HTTPException) as exc_info:
-                asyncio.get_event_loop().run_until_complete(
-                    sw.validate_twilio_signature(mock_request)
-                )
+                asyncio.run(sw.validate_twilio_signature(mock_request))
             assert exc_info.value.status_code == 403
         finally:
             sw.TWILIO_AUTH_TOKEN = original
