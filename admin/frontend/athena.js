@@ -168,19 +168,6 @@
     Athena.utils.uniqueId = function(prefix = 'athena') {
         return prefix + '_' + Math.random().toString(36).substr(2, 9);
     };
-
-    /**
-     * Escape HTML to prevent XSS.
-     * @param {string} str - String to escape
-     * @returns {string} Escaped string
-     */
-    Athena.utils.escapeHtml = function(str) {
-        if (!str) return '';
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
-    };
-
     /**
      * Get severity color class.
      * @param {string} severity - Severity level (critical, warning, info, success)
