@@ -1177,7 +1177,7 @@ async function loadSecrets() {
                         </div>
                     </div>
                     <div class="flex items-center gap-2">
-                        <button onclick="revealSecret(${secret.id}, '${secret.name}')"
+                        <button onclick="revealSecret(${secret.id}, '${escapeJsAttr(secret.name)}')"
                             class="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white text-xs rounded transition-colors">
                             Reveal
                         </button>
@@ -1277,7 +1277,7 @@ async function revealSecret(id, name) {
     const modal = `
         <div id="reveal-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onclick="if(event.target.id==='reveal-modal') closeModal()">
             <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-2xl w-full mx-4">
-                <h2 class="text-xl font-semibold text-white mb-4">Reveal Secret: ${name}</h2>
+                <h2 class="text-xl font-semibold text-white mb-4">Reveal Secret: ${escapeHtml(name)}</h2>
                 <div class="bg-yellow-900/20 border border-yellow-700/50 rounded-lg p-4 mb-4">
                     <p class="text-yellow-200 text-sm">⚠️ This action will be logged in the audit trail</p>
                 </div>
@@ -1296,7 +1296,7 @@ async function revealSecret(id, name) {
     try {
         const data = await apiRequest(`/api/secrets/${id}/reveal`);
         document.getElementById('secret-value-container').innerHTML = `
-            <pre class="text-white font-mono text-sm overflow-x-auto">${data.value}</pre>
+            <pre class="text-white font-mono text-sm overflow-x-auto">${escapeHtml(data.value)}</pre>
         `;
     } catch (error) {
         document.getElementById('secret-value-container').innerHTML = `
