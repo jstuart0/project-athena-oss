@@ -18,7 +18,11 @@ RUN pip install --no-cache-dir --upgrade pip==26.2.1 setuptools==84.0.0 wheel==0
 
 # Copy and install shared module first (for layer caching)
 COPY shared /app/shared
-RUN pip install --no-cache-dir -e /app/shared
+# --no-deps: shared's 9 dependencies come from the hashed lock below, not an
+# unhashed transitive resolve here. --no-build-isolation: use the pinned
+# setuptools above, not whatever setuptools>=61.0 (shared's own build
+# backend floor) would otherwise resolve fresh.
+RUN pip install --no-cache-dir --no-deps --no-build-isolation -e /app/shared
 
 # Copy and install service requirements
 COPY rag/seatgeek_events/requirements.txt /app/requirements.txt
