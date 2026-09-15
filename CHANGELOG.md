@@ -80,7 +80,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > **Plan:** `.mozart/plans/active/2026-09-12-deliver-athena-dependency-remediation.md`
 > **Ticket:** ATHENA-63
-> **Commits:** `1657900` (Phase 1), `8bd26fd` (Phase 2), `8fb9b7e` (Phase 3), `689fd11`, `657ea56` (Phase 4), `93b2643` (Phase 5), `8c33829` (Phase 5 follow-up), `6814b6f`, `d9ff720`, `c84672c`, `e11e244`, `3e359ee`, `4df47b8` (Phase 6), `39daf6f`, `449bbfe`, `7b07a31` (Phase 7), `ccccd47` (Phase 8), `21a4b45`, `b3b9a9e`, `32df611` (Phase 9), `9f0dacd` (merge into the campaign branch)
+> **Commits:** `1657900` (Phase 1), `8bd26fd` (Phase 2), `8fb9b7e` (Phase 3), `689fd11`, `657ea56` (Phase 4), `93b2643` (Phase 5), `8c33829` (Phase 5 follow-up), `6814b6f`, `d9ff720`, `c84672c`, `e11e244`, `3e359ee`, `4df47b8` (Phase 6), `39daf6f`, `449bbfe`, `7b07a31` (Phase 7), `ccccd47` (Phase 8), `21a4b45`, `b3b9a9e`, `32df611` (Phase 9), `9f0dacd` (merge into the campaign branch), `5b765f5`, `95b4423` (documentation and changelog corrections)
 
 ### dependency remediation (ATHENA-63)
 
