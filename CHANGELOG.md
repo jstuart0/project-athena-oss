@@ -11,7 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > **Plan:** `.mozart/plans/active/2026-09-14-deliver-athena-twilio-webhook-signature.md`
 > **Ticket:** ATHENA-72
-> **Commits:** `71d152d` (Phase 1), HEAD of this branch at merge time (Phase 2 — merge and revert as one unit)
+> **Commits:** `71d152d` (Phase 1), `253f9a1` (Phase 2 — merge and revert as one unit), `ae0396f` (drop the superseded str-mocked test)
 
 ### Twilio SMS webhook signature validation (ATHENA-72)
 
