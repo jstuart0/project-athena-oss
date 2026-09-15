@@ -55,12 +55,12 @@ would make the guard permanently red), plus src/shared, since that package
 is installed into the admin-backend image and the reachability argument
 covers everything the image ships.
 
-Scope note (ian I2b): this repo has no direct PyJWT usage in admin/backend
-or main.py — PyJWT-*named* imports appear only inside admin/backend/tests
-fixtures. Both of the WS-ticket call sites are python-jose end to end:
-main.py:985 mints the ticket via oidc.create_access_token (jose jwt.encode),
-and oidc.py:294 (`decode_ws_ticket`'s underlying call) decodes it back
-(jose jwt.decode). This guard's HS256-only claim is therefore a claim about
+Scope note: this repo has no PyJWT usage anywhere in admin/backend, tests
+included — every JWT call under this tree is python-jose. Both of the
+WS-ticket call sites are python-jose end to end: main.py:985 mints the
+ticket via oidc.create_access_token (jose jwt.encode), and oidc.py:294
+(`decode_ws_ticket`'s underlying call) decodes it back (jose jwt.decode).
+This guard's HS256-only claim is therefore a claim about
 the *only* JWT library this codebase's shipped code calls, not one of two.
 
 Exit codes:
