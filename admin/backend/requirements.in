@@ -24,7 +24,7 @@ itsdangerous==2.1.2
 
 # Session and caching
 redis==5.0.1
-starsessions[redis]==2.1.3
+starsessions[redis]>=2.2.1,<3
 
 # Additional utilities
 python-dotenv>=1.2.3,<2

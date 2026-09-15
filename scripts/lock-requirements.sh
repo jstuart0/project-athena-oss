@@ -15,6 +15,12 @@
 #       Same, but allows existing pins to move (otherwise uv preserves an
 #       existing pin across a recompile — pip-tools semantics).
 #
+#   bash scripts/lock-requirements.sh --upgrade-package NAME [--upgrade-package NAME ...]
+#       Same, but allows only the named package(s) to move — uv's own
+#       scoped-upgrade flag, for the case where a spec change widens a
+#       ceiling (e.g. a dependency's own constraint lifts) but the resolver
+#       won't otherwise touch an already-satisfied pin. Repeatable.
+#
 #   bash scripts/lock-requirements.sh --input FILE [--input FILE ...] \
 #       --output FILE [--constraint FILE ...]
 #       Compile exactly one pair from exactly the given inputs/constraints —
@@ -73,6 +79,7 @@ is_no_shared_dir() {
 }
 
 UPGRADE=""
+UPGRADE_PACKAGES=()
 
 compile_pair() {
     # $1 = output path; remaining args = uv pip compile inputs/constraints
@@ -82,6 +89,9 @@ compile_pair() {
     if [[ -n "${UPGRADE}" ]]; then
         upgrade_args=(--upgrade)
     fi
+    for pkg in "${UPGRADE_PACKAGES[@]+"${UPGRADE_PACKAGES[@]}"}"; do
+        upgrade_args+=(--upgrade-package "${pkg}")
+    done
     uv pip compile "$@" \
         --output-file "${output}" \
         --python-version 3.11 \
@@ -159,6 +169,10 @@ while [[ $# -gt 0 ]]; do
         --upgrade)
             UPGRADE=1
             shift
+            ;;
+        --upgrade-package)
+            UPGRADE_PACKAGES+=("$2")
+            shift 2
             ;;
         --check)
             MODE="check"
