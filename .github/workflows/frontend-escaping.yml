@@ -247,8 +247,31 @@ jobs:
 
       - name: No unsanctioned test skips added on this branch
         shell: bash
+        env:
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          # Set-equality against a pinned list, not a flat ban: Phase 1 step 8 is
+          # Membership against a pinned allowlist, not a flat ban: Phase 1 step 8 is
           # REQUIRED to add D3's skip. Exit 2 (could not run) is NOT a pass.
-          python3 scripts/check-no-new-test-skips.py --base "origin/${GITHUB_BASE_REF:-main}"
+          #
+          # pull_request: diff against the PR's target branch — unchanged from before
+          # ATHENA-71.
+          #
+          # push: diff against the pre-push tip (github.event.before), not
+          # origin/main, so this step verifies what the push actually introduced
+          # instead of a vacuous base==HEAD comparison (ATHENA-71 — that vacuous
+          # comparison is what broke this gate on every push to main once the
+          # ATHENA-66 campaign that seeded the pinned skips had merged). A new
+          # branch's first push reports `before` as the all-zeros SHA; there is no
+          # prior state to diff, so fall back to --base HEAD (an empty added-set,
+          # which is correct — the script's tree-presence check for the pinned
+          # skips still runs regardless of --base).
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            if [ -z "${GITHUB_EVENT_BEFORE:-}" ] || [ "${GITHUB_EVENT_BEFORE}" = "0000000000000000000000000000000000000000" ]; then
+              python3 scripts/check-no-new-test-skips.py --base HEAD
+            else
+              python3 scripts/check-no-new-test-skips.py --base "${GITHUB_EVENT_BEFORE}"
+            fi
+          else
+            python3 scripts/check-no-new-test-skips.py --base "origin/${GITHUB_BASE_REF:-main}"
+          fi

@@ -9,6 +9,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `.mozart/plans/active/2026-09-14-deliver-athena-twilio-webhook-signature.md`
+> **Ticket:** ATHENA-72
+> **Commits:** `71d152d` (Phase 1), `253f9a1` (Phase 2 — merge and revert as one unit), `ae0396f` (drop the superseded str-mocked test)
+
+### Twilio SMS webhook signature validation (ATHENA-72)
+
+- **Fixed**: signature validation raised `RuntimeError: Stream consumed` (500) on every signed request when `TWILIO_AUTH_TOKEN` was set, and its re-parse dropped blank and repeated params. It now validates the parsed form.
+- **Fixed**: the validation URL was Host-derived `http://…`, which Twilio's validator never matches behind a TLS-terminating proxy.
+- **Added**: `TWILIO_WEBHOOK_BASE_URL`.
+- **Changed**:
+  - Token set with base unset or malformed → 503 plus an error log (per request and once at import).
+  - Non-urlencoded → 403.
+  - Logs carry `path`, not `url`.
+- **Operator note**:
+  - Enabling signature validation needs both variables.
+  - The Admin UI "Auth Token" field isn't persisted (ATHENA-75).
+  - Until a deployment sets both, the webhook still accepts unsigned requests; the post-merge action is ATHENA-76.
+
+---
+
+## [Unreleased]
+
+> **Plan:** n/a — TINY tier; ATHENA-71's ticket body is the spec
+> **Ticket:** [ATHENA-71](https://plane.xmojo.net)
+> **Commits:** `4f0e265` (guard semantics), `12bd012` (fixture fixup), `459d6de` (lexical-detection docstring, exit 2 on git read failure)
+
+### skip-guard fix: subset + tree-presence in place of set-equality (ATHENA-71)
+
+- **Fixed**: `scripts/check-no-new-test-skips.py` (added by ATHENA-66) asserted set *equality* between skips added in `base..HEAD` and a pinned allowlist — true only while the originating campaign branch was unmerged. Once merged, every subsequent `base..HEAD` diff added no skips, and an empty added-set can never equal a non-empty pinned set, so the gate went permanently red (CI run 34845479251 on `8302271`). Now enforces two obligations independently: (a) skips added in `base..HEAD` must be a **subset** of the pinned allowlist (diff-scoped); (b) every pinned skip must still be **present in HEAD's tree** via `git ls-tree`/`git show`, checked regardless of `--base` (tree-scoped).
+- **Fixed**: `.github/workflows/frontend-escaping.yml` — on `push`, the guard now diffs against `github.event.before` (falling back to `--base HEAD` for a branch's first push, whose `before` is the all-zeros SHA) instead of `origin/main`, so it verifies what the push actually introduced instead of a vacuous base-equals-HEAD comparison.
+- **Fixed**: `check_tree_presence`'s `git show` failure on a path `git ls-tree` already confirmed exists at HEAD now exits 2 ("could not run"), distinct from exit 1 for a pinned skip genuinely missing from HEAD's tree.
+- **Documented**: the script's docstring now states detection is lexical (substring match, no AST) — a ratchet against carelessness, not a control against a motivated bypass — and spells out how to retire a pinned skip: remove it from `SANCTIONED` in the same change that removes the skip.
+
+---
+
+## [Unreleased]
+
 > **Plan:** `.mozart/plans/active/2026-09-13-deliver-athena-frontend-escaping.md` (round 3)
 > **Ticket:** [ATHENA-66](https://plane.xmojo.net)
 > **Commits:** `0468035`..`9d12d97`..`7411f6e` (Phase 1 — guards + baseline), `03af3df`..`15a09cd` (Phase 2 — callee/param/sink table), `087a47b`..`0df3ff6`..`2a48323` (Phase 3 — 52 wrong-primitive sites + callee-sink closures), `dd1b30d` (Phase 4 — `emerging-intents.js`), `045b6eb`..`e842149`..`9b328f6` (Phase 5 — 18 definitions deleted), `76384cd`, `1e5e284`, `bd23f40` (Phase 6 — 77 unescaped-quoted sites), `89b03ba`, `d8f4021`, `088ac1e`, `d06e33a`, `8c9245a` (Phase 7 — hardening, `immutable` removal, CI)
