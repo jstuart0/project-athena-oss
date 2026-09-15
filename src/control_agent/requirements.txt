@@ -1,3 +1,8 @@
+# DELIBERATELY UNLOCKED: the Control Agent runs on an arm64 macOS host
+# (an operator's Mac with Apple Silicon), not the x86_64-Linux image build
+# platform this repo's other requirements.txt files are compiled and
+# hashed for. A generated x86_64-Linux lock would pin wheels this host
+# can't install. Edit floors here directly.
 fastapi>=0.104.0
 uvicorn>=0.24.0
 structlog>=23.2.0

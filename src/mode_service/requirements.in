@@ -1,0 +1,8 @@
+# Mode Service Dependencies
+fastapi>=0.104.0  # MIT License
+uvicorn[standard]>=0.24.0  # BSD License
+httpx>=0.24.0  # BSD License
+structlog>=23.2.0  # MIT License
+icalendar>=5.0.0  # BSD License - iCal parsing
+pytz>=2023.3  # MIT License - Timezone support
+redis>=5.0.0  # MIT License - Redis async client

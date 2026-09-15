@@ -1,0 +1,5 @@
+# Recipes RAG Service Dependencies
+fastapi>=0.104.0  # MIT License
+uvicorn[standard]>=0.24.0  # BSD License
+httpx>=0.24.0  # BSD License
+structlog>=23.2.0  # MIT License

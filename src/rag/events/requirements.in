@@ -1,0 +1,16 @@
+# Events RAG Service Dependencies
+
+# Web framework
+fastapi>=0.104.0  # MIT License - Fast async API framework
+uvicorn[standard]>=0.24.0  # BSD License - ASGI server
+
+# HTTP client for Ticketmaster API
+httpx>=0.24.0  # BSD License - Async HTTP client
+
+# Logging
+structlog>=23.2.0  # MIT License - Structured logging
+
+# Shared dependencies (from ../../shared/)
+# Note: These are installed via shared package, listed here for reference
+# - redis>=5.0.0  # BSD License - Redis client for caching
+# - python-dotenv>=1.0.0  # BSD License - Environment variable management

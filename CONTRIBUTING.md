@@ -68,7 +68,7 @@ By participating in this project, you agree to maintain a respectful and inclusi
 
 Before opening a PR that touches `src/rag/<service>/` or `src/shared/`:
 
-1. Add every top-level import's package to `src/rag/<service>/requirements.txt`. If `main.py` does `import feedparser`, feedparser must be in that file.
+1. Add every top-level import's package to `src/rag/<service>/requirements.in`, then run `make lock` to recompile `src/rag/<service>/requirements.txt` (a generated, hashed lock — do not hand-edit it). If `main.py` does `import feedparser`, feedparser must be in the `.in` file.
 2. If `main.py` does `from foo.bar import X`, the Dockerfile must `COPY rag/<service>/foo /app/foo` so `foo` lands at `/app/foo` (the `WORKDIR`). Use `SERVICE_EXTRA_COPIES` in `scripts/generate-rag-dockerfiles.py` to codify this.
 3. Do not import from `orchestrator/`, `gateway/`, or any non-RAG service module. If you need shared logic, move it to `src/shared/` first.
 4. Do not read `REDIS_HOST` or `REDIS_PORT` directly — kubelet auto-injects `REDIS_PORT=tcp://...` for any K8s Service named `redis`. Use `REDIS_URL` via `get_config().redis_url`, or a service-specific `<SERVICE>_REDIS_URL` env var with the DB index in the URL path.
@@ -110,7 +110,7 @@ Read `admin/frontend/README.md` first — it covers the two escaping primitives,
 
    Mark tests that require live services with `@pytest.mark.integration`. New tests should be unit tests unless they genuinely require external state.
 
-   **Test-only dependencies:** `pytest-httpserver>=1.0.8` is in `admin/backend/requirements.txt`, annotated `# test-only`. It is used by the OIDC validation tests (`admin/backend/tests/test_oidc_validation.py`) to stand up a minimal fixture issuer that serves `/.well-known/openid-configuration` and a JWKS endpoint, allowing tests to drive authlib's real validator without mocking it. This package is included in the production image as a known trade-off — splitting dev and production requirements is deferred to a future campaign (tracked as HIGH-E in `thoughts/shared/plans/active-2026-05-06-deliver-security-hardening.md`).
+   **Test-only dependencies:** a genuinely test-only dependency belongs in `admin/backend/requirements-test.in` (compiled to `requirements-test.txt` via `make lock`, constrained against the production lock so it can never silently diverge from it) — not the production `admin/backend/requirements.in`. The one existing exception is `pytest-httpserver>=1.0.8`, which predates `requirements-test.in` and still lives in `admin/backend/requirements.in`, annotated `# test-only`. It is used by the OIDC validation tests (`admin/backend/tests/test_oidc_validation.py`) to stand up a minimal fixture issuer that serves `/.well-known/openid-configuration` and a JWKS endpoint, allowing tests to drive authlib's real validator without mocking it. This package ships in the production image as a known, grandfathered trade-off — moving it to `requirements-test.in` is deferred to a future campaign (tracked as HIGH-E in `thoughts/shared/plans/active-2026-05-06-deliver-security-hardening.md`).
 
 ## Code Style
 

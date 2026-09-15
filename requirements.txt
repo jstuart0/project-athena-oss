@@ -1,4 +1,9 @@
 # Project Athena - Dependencies
+# DELIBERATELY UNLOCKED: this file targets a developer's own machine
+# (any OS/architecture running a local checkout), not the x86_64-Linux
+# image build platform every other requirements.txt in this repo is now
+# compiled and hashed for. A generated x86_64-Linux lock would pin wheels
+# a developer's own machine can't install. Edit floors here directly.
 # Install with: pip install -r requirements.txt
 
 # Core Framework
