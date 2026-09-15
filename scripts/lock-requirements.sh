@@ -81,6 +81,20 @@ is_no_shared_dir() {
 UPGRADE=""
 UPGRADE_PACKAGES=()
 
+require_flag_value() {
+    # $1 = flag name (for the message); $2 = "$#" AT THE CALL SITE (current
+    # flag still included, so >=2 means a following token exists); $3 = that
+    # following token, passed as "${2-}" by the caller so a genuinely missing
+    # token never triggers "unbound variable" under set -u. A token starting
+    # with "--" is treated as a missing value too (a flag typo'd/reordered
+    # into another flag's slot must fail loudly, not silently consume it).
+    local flag="$1" nargs="$2" next="${3-}"
+    if [[ "${nargs}" -lt 2 ]] || [[ "${next}" == --* ]]; then
+        echo "FAIL: ${flag} requires a value" >&2
+        exit 1
+    fi
+}
+
 compile_pair() {
     # $1 = output path; remaining args = uv pip compile inputs/constraints
     local output="$1"
@@ -154,15 +168,18 @@ OUTPUT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --input)
+            require_flag_value "--input" "$#" "${2-}"
             INPUTS+=("$2")
             MODE="pair"
             shift 2
             ;;
         --output)
+            require_flag_value "--output" "$#" "${2-}"
             OUTPUT="$2"
             shift 2
             ;;
         --constraint)
+            require_flag_value "--constraint" "$#" "${2-}"
             CONSTRAINTS+=("-c" "$2")
             shift 2
             ;;
@@ -171,6 +188,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --upgrade-package)
+            require_flag_value "--upgrade-package" "$#" "${2-}"
             UPGRADE_PACKAGES+=("$2")
             shift 2
             ;;
@@ -184,6 +202,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "${MODE}" == "check" ]] && { [[ -n "${UPGRADE}" ]] || [[ ${#UPGRADE_PACKAGES[@]} -gt 0 ]]; }; then
+    echo "FAIL: --check cannot be combined with --upgrade/--upgrade-package" >&2
+    exit 1
+fi
 
 case "${MODE}" in
     pair)
