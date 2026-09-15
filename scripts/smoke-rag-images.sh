@@ -187,4 +187,4 @@ if [[ ${#FAILED[@]} -gt 0 ]]; then
     exit 1
 fi
 
-echo -e "  ${GREEN}All RAG images pass import smoke test.${NC}"
+echo -e "  ${GREEN}All RAG images pass import and pip check smoke tests.${NC}"

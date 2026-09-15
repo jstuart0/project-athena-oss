@@ -107,7 +107,7 @@ These MUST be set before starting services. Services will fail fast if missing.
 | `ADMIN_API_URL` | Admin backend URL (see resolution order below) | Set to your admin server |
 | `ENCRYPTION_KEY` | API key encryption | `openssl rand -base64 32` |
 | `ENCRYPTION_SALT` | Encryption salt | `openssl rand -base64 16` |
-| `SESSION_SECRET_KEY` | Session signing | `openssl rand -base64 32` |
+| `SESSION_SECRET_KEY` | Secret used for JWT signing when `JWT_SECRET` is unset; must not be the default in production | `openssl rand -base64 32` |
 | `JWT_SECRET` | JWT token signing | `openssl rand -base64 32` |
 
 **Example:**
@@ -354,7 +354,7 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 
 | Variable | Description |
 |----------|-------------|
-| `SESSION_SECRET_KEY` | Secret for session signing |
+| `SESSION_SECRET_KEY` | Secret used for JWT signing when `JWT_SECRET` is unset; must not be the default in production |
 | `JWT_SECRET` | Secret for JWT tokens |
 
 ### Authentication (Optional)
