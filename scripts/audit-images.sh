@@ -195,11 +195,17 @@ audit_one() {
         -v "${out_dir}:/audit-out" --entrypoint sh "${audit_tag}" -c '
         set -e
         python3 -m pip freeze --all --exclude-editable > /audit-out/frozen.txt
-        python3 -m venv /audit-venv
-        /audit-venv/bin/pip install --no-cache-dir -q --upgrade pip
-        /audit-venv/bin/pip install --no-cache-dir -q pip-audit
+        # /audit-venv at the filesystem root needs write access to /, which a
+        # non-root USER (26 of 29 images set USER athena) does not have.
+        # /tmp carries the sticky bit (drwxrwxrwt) in every base image this
+        # repo uses, so any user -- root or not -- can create a private
+        # scratch dir there without the audited image needing a root user.
+        AUDIT_VENV="$(mktemp -d /tmp/audit-venv.XXXXXX)"
+        python3 -m venv "${AUDIT_VENV}"
+        "${AUDIT_VENV}/bin/pip" install --no-cache-dir -q --upgrade pip
+        "${AUDIT_VENV}/bin/pip" install --no-cache-dir -q pip-audit
         set +e
-        /audit-venv/bin/pip-audit -r /audit-out/frozen.txt --format json $IGNORE_VULN_FLAG --output /audit-out/a.json
+        "${AUDIT_VENV}/bin/pip-audit" -r /audit-out/frozen.txt --format json $IGNORE_VULN_FLAG --output /audit-out/a.json
         echo $? > /audit-out/pip-audit.rc
         exit 0
     ' || docker_rc=$?
