@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `.mozart/plans/active/2026-09-14-deliver-athena-twilio-webhook-signature.md`
+> **Ticket:** ATHENA-72
+> **Commits:** `71d152d` (Phase 1), `253f9a1` (Phase 2 — merge and revert as one unit), `ae0396f` (drop the superseded str-mocked test)
+
+### Twilio SMS webhook signature validation (ATHENA-72)
+
+- **Fixed**: signature validation raised `RuntimeError: Stream consumed` (500) on every signed request when `TWILIO_AUTH_TOKEN` was set, and its re-parse dropped blank and repeated params. It now validates the parsed form.
+- **Fixed**: the validation URL was Host-derived `http://…`, which Twilio's validator never matches behind a TLS-terminating proxy.
+- **Added**: `TWILIO_WEBHOOK_BASE_URL`.
+- **Changed**:
+  - Token set with base unset or malformed → 503 plus an error log (per request and once at import).
+  - Non-urlencoded → 403.
+  - Logs carry `path`, not `url`.
+- **Operator note**:
+  - Enabling signature validation needs both variables.
+  - The Admin UI "Auth Token" field isn't persisted (ATHENA-75).
+  - Until a deployment sets both, the webhook still accepts unsigned requests; the post-merge action is ATHENA-76.
+
+---
+
+## [Unreleased]
+
 > **Plan:** n/a — TINY tier; ATHENA-71's ticket body is the spec
 > **Ticket:** [ATHENA-71](https://plane.xmojo.net)
 > **Commits:** `4f0e265` (guard semantics), `12bd012` (fixture fixup), `459d6de` (lexical-detection docstring, exit 2 on git read failure)
