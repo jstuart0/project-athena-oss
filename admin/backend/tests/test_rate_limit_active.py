@@ -6,8 +6,9 @@ entry and reads route.path.  FastAPI 0.141.1 (Phase 4) wraps every
 app.include_router(...) registration in fastapi.routing._IncludedRouter,
 which has no .path -- so every limiter-protected request crashed with
 AttributeError and returned 500 whenever LIMITER_ACTIVE was True (i.e.
-whenever Redis was reachable at startup: production).  See
-.mozart/plans/active/2026-09-15-athena63-limiter-fix.md for the full design.
+whenever Redis was reachable at startup: production).  See the ATHENA-63
+entry in CHANGELOG.md and app/utils/rate_limit.py's own module docstring
+for the full design.
 
 These tests go through the REAL main.app (every router included, exactly as
 production wires it) with the limiter genuinely active -- fakeredis.aioredis
@@ -500,10 +501,11 @@ class TestNoScriptErrorRecovery:
 
 class TestRateLimiterImplementationGuard:
     """T6: static regression guard -- no module under admin/backend may call
-    fastapi_limiter.depends.RateLimiter again. See
-    .mozart/plans/active/2026-09-15-athena63-limiter-fix.md for why:
-    fastapi-limiter 0.1.6's RateLimiter.__call__ crashes under FastAPI
-    0.141.1's _IncludedRouter routing (no .path)."""
+    fastapi_limiter.depends.RateLimiter again. fastapi-limiter 0.1.6's
+    RateLimiter.__call__ crashes under FastAPI 0.141.1's _IncludedRouter
+    routing (it walks request.app.routes reading .path, which
+    _IncludedRouter doesn't have). See app/utils/rate_limit.py's module
+    docstring for the full design."""
 
     _backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -540,8 +542,7 @@ class TestRateLimiterImplementationGuard:
                     violations.append(f"{path}:{node.lineno}: references bare name RateLimiter")
 
         assert not violations, (
-            "fastapi_limiter.depends.RateLimiter must not be used anywhere under admin/backend "
-            "(it crashes under FastAPI 0.141.1's _IncludedRouter routing -- see "
-            ".mozart/plans/active/2026-09-15-athena63-limiter-fix.md). Violations:\n"
-            + "\n".join(violations)
+            "rate_limit.py must not use fastapi_limiter.depends.RateLimiter: it crashes "
+            "under FastAPI's _IncludedRouter (walks request.app.routes reading .path). "
+            "Violations:\n" + "\n".join(violations)
         )

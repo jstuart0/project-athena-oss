@@ -31,9 +31,8 @@ M9-R1, Critical — found by manual gate M3 on the isolated local stack):
     whenever LIMITER_ACTIVE was True (i.e. whenever Redis was reachable at
     startup: production). fastapi-limiter 0.2.0 has the same unguarded
     loop, so upgrading does not fix it; pinning FastAPI back would reopen
-    the Phase 4/7 version decisions. See
-    .mozart/plans/active/2026-09-15-athena63-limiter-fix.md for the full
-    root-cause writeup and design review.
+    the Phase 4/7 version decisions. See the ATHENA-63 entry in
+    CHANGELOG.md for the product-facing summary.
 
     _enforce() below reimplements RateLimiter.__call__'s Lua-script check
     directly against the FastAPILimiter class state that main.py's
