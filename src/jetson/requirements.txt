@@ -1,3 +1,9 @@
+# DELIBERATELY UNLOCKED: this file targets an aarch64 NVIDIA Jetson edge
+# device, not the x86_64-Linux image build platform this repo's other
+# requirements.txt files are compiled and hashed for. A generated
+# x86_64-Linux lock would pin wheels a Jetson can't install (torch
+# especially ships Jetson-specific aarch64 wheels from NVIDIA's own
+# index, not PyPI's x86_64 build). Edit pins here directly.
 flask==3.0.0
 torch==2.1.0
 transformers==4.35.0

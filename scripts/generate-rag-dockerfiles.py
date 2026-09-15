@@ -81,14 +81,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     curl \\
     && rm -rf /var/lib/apt/lists/*
 
+# Pin the installer before any pip install in this stage — editable or
+# locked — consumes it (Decision 6; A9b asserts the ordering, not just
+# presence). Exact versions are pip-audit-clean and current PyPI HEAD.
+RUN pip install --no-cache-dir --upgrade pip==26.2.1 setuptools==84.0.0 wheel==0.48.0
+
 # Copy and install shared module first (for layer caching)
 COPY shared /app/shared
-RUN pip install --no-cache-dir -e /app/shared
+# --no-deps: shared's 9 dependencies come from the hashed lock below, not an
+# unhashed transitive resolve here. --no-build-isolation: use the pinned
+# setuptools above, not whatever setuptools>=61.0 (shared's own build
+# backend floor) would otherwise resolve fresh.
+RUN pip install --no-cache-dir --no-deps --no-build-isolation -e /app/shared
 
 # Copy and install service requirements
 COPY rag/{service_name}/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir --upgrade pip && \\
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy service code
 {copy_block}

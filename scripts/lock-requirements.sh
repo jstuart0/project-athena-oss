@@ -15,6 +15,12 @@
 #       Same, but allows existing pins to move (otherwise uv preserves an
 #       existing pin across a recompile — pip-tools semantics).
 #
+#   bash scripts/lock-requirements.sh --upgrade-package NAME [--upgrade-package NAME ...]
+#       Same, but allows only the named package(s) to move — uv's own
+#       scoped-upgrade flag, for the case where a spec change widens a
+#       ceiling (e.g. a dependency's own constraint lifts) but the resolver
+#       won't otherwise touch an already-satisfied pin. Repeatable.
+#
 #   bash scripts/lock-requirements.sh --input FILE [--input FILE ...] \
 #       --output FILE [--constraint FILE ...]
 #       Compile exactly one pair from exactly the given inputs/constraints —
@@ -73,6 +79,21 @@ is_no_shared_dir() {
 }
 
 UPGRADE=""
+UPGRADE_PACKAGES=()
+
+require_flag_value() {
+    # $1 = flag name (for the message); $2 = "$#" AT THE CALL SITE (current
+    # flag still included, so >=2 means a following token exists); $3 = that
+    # following token, passed as "${2-}" by the caller so a genuinely missing
+    # token never triggers "unbound variable" under set -u. A token starting
+    # with "--" is treated as a missing value too (a flag typo'd/reordered
+    # into another flag's slot must fail loudly, not silently consume it).
+    local flag="$1" nargs="$2" next="${3-}"
+    if [[ "${nargs}" -lt 2 ]] || [[ "${next}" == --* ]]; then
+        echo "FAIL: ${flag} requires a value" >&2
+        exit 1
+    fi
+}
 
 compile_pair() {
     # $1 = output path; remaining args = uv pip compile inputs/constraints
@@ -82,18 +103,33 @@ compile_pair() {
     if [[ -n "${UPGRADE}" ]]; then
         upgrade_args=(--upgrade)
     fi
+    for pkg in "${UPGRADE_PACKAGES[@]+"${UPGRADE_PACKAGES[@]}"}"; do
+        upgrade_args+=(--upgrade-package "${pkg}")
+    done
     uv pip compile "$@" \
         --output-file "${output}" \
         --python-version 3.11 \
         --python-platform x86_64-unknown-linux-gnu \
         --generate-hashes \
         --custom-compile-command "make lock" \
-        "${upgrade_args[@]}" \
+        "${upgrade_args[@]+"${upgrade_args[@]}"}" \
         --quiet
 }
 
 discover_ins() {
+    # Every "requirements.in" MUST be emitted before any "requirements-test.in"
+    # in the same directory: compile_all compiles the test spec with
+    # `-c requirements.txt` (Phase 4, X2), so the production lock has to be
+    # freshly recompiled in this same invocation before the constrained
+    # compile runs. A single lexical `sort` over both filenames gets this
+    # backwards — ASCII '-' (0x2D) sorts before '.' (0x2E), so
+    # "requirements-test.in" < "requirements.in" — which would constrain the
+    # test lock against a STALE production lock whenever both specs change in
+    # the same edit. Emitted as two separately-sorted passes instead.
     find . -name "requirements.in" \
+        -not -path "./node_modules/*" -not -path "./.git/*" -not -path "./.mozart/*" \
+        | sed 's|^\./||' | sort
+    find . -name "requirements-test.in" \
         -not -path "./node_modules/*" -not -path "./.git/*" -not -path "./.mozart/*" \
         | sed 's|^\./||' | sort
 }
@@ -132,21 +168,29 @@ OUTPUT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --input)
+            require_flag_value "--input" "$#" "${2-}"
             INPUTS+=("$2")
             MODE="pair"
             shift 2
             ;;
         --output)
+            require_flag_value "--output" "$#" "${2-}"
             OUTPUT="$2"
             shift 2
             ;;
         --constraint)
+            require_flag_value "--constraint" "$#" "${2-}"
             CONSTRAINTS+=("-c" "$2")
             shift 2
             ;;
         --upgrade)
             UPGRADE=1
             shift
+            ;;
+        --upgrade-package)
+            require_flag_value "--upgrade-package" "$#" "${2-}"
+            UPGRADE_PACKAGES+=("$2")
+            shift 2
             ;;
         --check)
             MODE="check"
@@ -159,13 +203,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "${MODE}" == "check" ]] && { [[ -n "${UPGRADE}" ]] || [[ ${#UPGRADE_PACKAGES[@]} -gt 0 ]]; }; then
+    echo "FAIL: --check cannot be combined with --upgrade/--upgrade-package" >&2
+    exit 1
+fi
+
 case "${MODE}" in
     pair)
         if [[ -z "${OUTPUT}" || ${#INPUTS[@]} -eq 0 ]]; then
             echo "FAIL: --input requires --output" >&2
             exit 1
         fi
-        compile_pair "${OUTPUT}" "${INPUTS[@]}" "${CONSTRAINTS[@]}"
+        compile_pair "${OUTPUT}" "${INPUTS[@]}" "${CONSTRAINTS[@]+"${CONSTRAINTS[@]}"}"
         ;;
     discover)
         compile_all

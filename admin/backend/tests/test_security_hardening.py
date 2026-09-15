@@ -2372,12 +2372,23 @@ class TestRateLimiterStartup:
 
         fastapi-limiter's Lua script treats times=0 as "allow 1 then 429" — the
         opposite of the documented 'set to 0 to disable' semantics.  The short-circuit
-        guard added in the reconcile commit (ATHENA-14) must return before constructing
-        RateLimiter so that 0 (or negative) truly disables rate limiting while the
+        guard added in the reconcile commit (ATHENA-14) must return before calling
+        _enforce() so that 0 (or negative) truly disables rate limiting while the
         lockout layer and 400 ms constant-time floor still protect /local-login.
+
+        Retargeted from `patch("app.utils.rate_limit.RateLimiter")` (ATHENA-63
+        M9R1-J1): that symbol no longer exists — login_rate_limit_dep now calls
+        a private `_enforce()` helper directly against FastAPILimiter's class
+        state instead of constructing a `fastapi_limiter.depends.RateLimiter`
+        (see rate_limit.py's module docstring for why: 0.1.6's RateLimiter
+        crashes under FastAPI 0.141.1's routing). The seam under test is
+        exactly the same — "does the <=0 guard return before reaching the
+        limiter enforcement call" — the mock target is just renamed to match.
+        A positive control (limit > 0 DOES call _enforce, with budget="login")
+        makes the negative assertion below non-vacuous.
         """
         import asyncio
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
         from shared.config import _clear_cache_for_tests
         from app.utils import rate_limit as rl
 
@@ -2395,16 +2406,32 @@ class TestRateLimiterStartup:
                 _set_limit(limit_val)
                 rl.LIMITER_ACTIVE = True
 
-                with patch("app.utils.rate_limit.RateLimiter") as mock_limiter_cls:
-                    # Invoke the dep multiple times — none should reach RateLimiter.
+                with patch("app.utils.rate_limit._enforce", new_callable=AsyncMock) as mock_enforce:
+                    # Invoke the dep multiple times — none should reach _enforce.
                     for _ in range(3):
                         asyncio.run(rl.login_rate_limit_dep(mock_request, mock_response))
 
-                    assert mock_limiter_cls.call_count == 0, (
-                        f"RateLimiter must not be constructed when "
+                    mock_enforce.assert_not_awaited()
+                    assert mock_enforce.await_count == 0, (
+                        f"_enforce must not be awaited when "
                         f"LOGIN_RATE_LIMIT_PER_MINUTE={limit_val} "
                         f"(short-circuit guard, codex-r2:4 / ATHENA-14)"
                     )
+
+            # Positive control: with a real positive limit, the dep DOES call
+            # _enforce, with the login budget — proves the mock above would
+            # have caught a regression (a negative-only assertion is vacuous
+            # if the code path it guards is never actually exercised).
+            _set_limit("5")
+            rl.LIMITER_ACTIVE = True
+            with patch("app.utils.rate_limit._enforce", new_callable=AsyncMock) as mock_enforce:
+                asyncio.run(rl.login_rate_limit_dep(mock_request, mock_response))
+                mock_enforce.assert_awaited_once()
+                _call_args, call_kwargs = mock_enforce.await_args
+                assert call_kwargs.get("budget") == "login", (
+                    f"login_rate_limit_dep must call _enforce with budget='login', "
+                    f"got kwargs={call_kwargs!r}"
+                )
         finally:
             # Restore env and flag so subsequent tests are unaffected.
             if old_env is None:

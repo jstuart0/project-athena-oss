@@ -107,7 +107,7 @@ These MUST be set before starting services. Services will fail fast if missing.
 | `ADMIN_API_URL` | Admin backend URL (see resolution order below) | Set to your admin server |
 | `ENCRYPTION_KEY` | API key encryption | `openssl rand -base64 32` |
 | `ENCRYPTION_SALT` | Encryption salt | `openssl rand -base64 16` |
-| `SESSION_SECRET_KEY` | Session signing | `openssl rand -base64 32` |
+| `SESSION_SECRET_KEY` | Secret used for JWT signing when `JWT_SECRET` is unset; must not be the default in production | `openssl rand -base64 32` |
 | `JWT_SECRET` | JWT token signing | `openssl rand -base64 32` |
 
 **Example:**
@@ -119,6 +119,8 @@ ENCRYPTION_SALT=xyz789...
 SESSION_SECRET_KEY=secret123...
 JWT_SECRET=jwtsecret...
 ```
+
+**`SESSION_SECRET_KEY`/`JWT_SECRET` must be plain random strings, never a copy-pasted key file.** If either value contains a PEM header or an SSH key-type substring, the JWT library mistakes it for asymmetric key material: both token minting and token validation fail with a `500`, instead of authenticating normally. The `openssl rand -base64 32` command above already produces a safe value — this only matters if a secret is set some other way (e.g. pasted from an existing `.pem`/`.pub` file).
 
 **`ADMIN_API_URL` resolution order** (`src/shared/admin_url.py`):
 1. `ADMIN_API_URL` — canonical; set this in all deployments
@@ -352,7 +354,7 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 
 | Variable | Description |
 |----------|-------------|
-| `SESSION_SECRET_KEY` | Secret for session signing |
+| `SESSION_SECRET_KEY` | Secret used for JWT signing when `JWT_SECRET` is unset; must not be the default in production |
 | `JWT_SECRET` | Secret for JWT tokens |
 
 ### Authentication (Optional)

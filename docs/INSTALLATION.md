@@ -90,6 +90,9 @@ ENCRYPTION_KEY=$(openssl rand -base64 32)
 ENCRYPTION_SALT=$(openssl rand -base64 16)
 SESSION_SECRET_KEY=$(openssl rand -base64 32)
 JWT_SECRET=$(openssl rand -base64 32)
+# Generate these two with the commands above, never by pasting an existing
+# key file - a PEM header or SSH key-type substring in either value makes
+# JWT minting and validation both fail with a 500.
 
 # REQUIRED - Set your admin backend URL
 ADMIN_API_URL=http://localhost:8080

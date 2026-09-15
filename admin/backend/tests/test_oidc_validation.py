@@ -12,9 +12,9 @@ pytest-httpserver starts a local HTTP server; each test registers handler routes
 RSA keypair is generated via cryptography (transitive dep via authlib/python-jose).
 JWTs are signed via authlib.jose.jwt.encode().
 
-Exception namespace: authlib 1.3.0 raises claim errors from authlib.jose.errors.*.
+Exception namespace: authlib raises claim errors from authlib.jose.errors.*.
 We import from joserfc.errors directly with an authlib.jose.errors fallback so the
-tests work correctly against the pinned version (authlib==1.3.0 in requirements.txt).
+tests work correctly against the pinned version (authlib==1.8.0 in requirements.txt).
 
 Marker note: these tests do NOT require a live IdP.  pytest-httpserver IS the IdP.
 Do NOT mark these @pytest.mark.integration — they must run in default CI on every PR

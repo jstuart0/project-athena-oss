@@ -1,0 +1,12 @@
+# Generated dependency locks (uv pip compile --generate-hashes) — keep them
+# out of human review diffs. Do NOT list the three deliberately-unlocked
+# files here: ./requirements.txt, src/control_agent/requirements.txt,
+# src/jetson/requirements.txt (see their own headers for why).
+admin/backend/requirements.txt linguist-generated
+admin/backend/requirements-test.txt linguist-generated
+apps/jarvis-web/backend/requirements.txt linguist-generated
+apps/chat-embed/requirements.txt linguist-generated
+src/gateway/requirements.txt linguist-generated
+src/mode_service/requirements.txt linguist-generated
+src/orchestrator/requirements.txt linguist-generated
+src/rag/*/requirements.txt linguist-generated
