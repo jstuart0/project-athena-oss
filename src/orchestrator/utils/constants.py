@@ -8,29 +8,27 @@ import os
 from typing import Dict
 
 from shared.config import get_config
+from orchestrator.urls import (
+    WEATHER_SERVICE_URL,
+    AIRPORTS_SERVICE_URL,
+    STOCKS_SERVICE_URL,
+    FLIGHTS_SERVICE_URL,
+    EVENTS_SERVICE_URL,
+    STREAMING_SERVICE_URL,
+    NEWS_SERVICE_URL,
+    SPORTS_SERVICE_URL,
+    WEBSEARCH_SERVICE_URL,
+    DINING_SERVICE_URL,
+    RECIPES_SERVICE_URL,
+    DIRECTIONS_SERVICE_URL,
+    MODE_SERVICE_URL,
+)
 
 # ============================================================================
 # RAG Service URLs
 # ============================================================================
-
-# Phase 1 RAG Services
-WEATHER_SERVICE_URL = os.getenv("RAG_WEATHER_URL", "http://localhost:8010")
-AIRPORTS_SERVICE_URL = os.getenv("RAG_AIRPORTS_URL", "http://localhost:8011")
-STOCKS_SERVICE_URL = os.getenv("RAG_STOCKS_URL", "http://localhost:8012")
-
-# Phase 2 RAG Services
-FLIGHTS_SERVICE_URL = os.getenv("RAG_FLIGHTS_URL", "http://localhost:8013")
-EVENTS_SERVICE_URL = os.getenv("RAG_EVENTS_URL", "http://localhost:8014")
-STREAMING_SERVICE_URL = os.getenv("RAG_STREAMING_URL", "http://localhost:8015")
-NEWS_SERVICE_URL = os.getenv("RAG_NEWS_URL", "http://localhost:8016")
-SPORTS_SERVICE_URL = os.getenv("RAG_SPORTS_URL", "http://localhost:8017")
-WEBSEARCH_SERVICE_URL = os.getenv("RAG_WEBSEARCH_URL", "http://localhost:8018")
-DINING_SERVICE_URL = os.getenv("RAG_DINING_URL", "http://localhost:8019")
-RECIPES_SERVICE_URL = os.getenv("RAG_RECIPES_URL", "http://localhost:8020")
-DIRECTIONS_SERVICE_URL = os.getenv("RAG_DIRECTIONS_URL", "http://localhost:8022")
-
-# Phase 2: Mode service
-MODE_SERVICE_URL = os.getenv("MODE_SERVICE_URL", "http://localhost:8021")
+# Resolved by orchestrator.urls (single source of truth, ATHENA-87 F81);
+# re-exported here so existing importers of this module are unaffected.
 
 # LLM (supports multiple env var names for flexibility)
 OLLAMA_URL = get_config().llm_endpoint

@@ -104,7 +104,7 @@ Project Athena is an AI-powered smart home assistant with voice interface, RAG (
 | `state.py` | Canonical definitions for `OrchestratorState`, `IntentCategory`, `ModelTier`, `ConversationContext`. Do not redefine these in `main.py` or elsewhere. |
 | `helpers.py` | 17 stateless helpers. Helpers that need runtime singletons call `_runtime.get_X()` at call time (Pattern 1). |
 | `mode_permission.py` | 6 mode/permission helpers (`get_current_mode`, `detect_owner_mode_command`, `extract_pin_from_query`, `activate_owner_override`, `check_intent_permission`, `check_entity_permission`) plus `OWNER_MODE_PATTERNS`. |
-| `urls.py` | 15 service URL constants (13 RAG + `MODE_SERVICE_URL` + `NOTIFICATIONS_SERVICE_URL`). |
+| `urls.py` | 25 service URL constants (23 RAG + `MODE_SERVICE_URL` + `NOTIFICATIONS_SERVICE_URL`); canonical env spelling `RAG_<NAME>_URL`, legacy `<NAME>_RAG_URL` accepted with a warning. |
 | `metrics.py` | 7 Prometheus metric objects (`request_counter`, `request_duration`, `node_duration`, `tool_call_breakdown`, `validation_counter`, `hallucination_counter`, `validation_layer_duration`). |
 
 **`nodes/` package at `src/orchestrator/nodes/`**

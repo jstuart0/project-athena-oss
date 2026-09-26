@@ -449,6 +449,7 @@ Override these for distributed RAG service deployment:
 | Variable | Default Port | Description |
 |----------|-------------|-------------|
 | `RAG_WEATHER_URL` | 8010 | Weather service |
+| `RAG_ONECALL_URL` | 8021 | OneCall weather provider |
 | `RAG_AIRPORTS_URL` | 8011 | Airports service |
 | `RAG_SPORTS_URL` | 8017 | Sports service |
 | `RAG_FLIGHTS_URL` | 8013 | Flights service |
@@ -460,6 +461,22 @@ Override these for distributed RAG service deployment:
 | `RAG_DINING_URL` | 8019 | Dining service |
 | `RAG_RECIPES_URL` | 8020 | Recipes service |
 | `RAG_DIRECTIONS_URL` | 8030 | Directions service |
+| `RAG_COMMUNITY_URL` | 8026 | Community events provider |
+| `RAG_SERPAPI_URL` | 8032 | SerpAPI events provider |
+| `RAG_SEATGEEK_URL` | 8024 | SeatGeek events provider |
+| `RAG_TRANSPORTATION_URL` | 8025 | Transportation service |
+| `RAG_AMTRAK_URL` | 8027 | Amtrak service |
+| `RAG_SITESCRAPER_URL` | 8031 | Site scraper service |
+| `RAG_PRICECOMPARE_URL` | 8033 | Price comparison service |
+| `RAG_TESLA_URL` | 8028 | Tesla service |
+| `RAG_MEDIA_URL` | 8029 | Media service |
+| `RAG_BRIGHTDATA_URL` | 8040 | BrightData service |
+
+`orchestrator/urls.py` is the single reader of these env vars. Each also
+accepts a deprecated `<NAME>_RAG_URL` alias (e.g. `WEATHER_RAG_URL` for
+`RAG_WEATHER_URL`) for backward compatibility; using it logs a WARNING, and
+the canonical `RAG_<NAME>_URL` name wins if both are set. See
+`.env.example` for the full deprecated-alias list.
 
 ---
 

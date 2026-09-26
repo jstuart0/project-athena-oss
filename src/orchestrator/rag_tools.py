@@ -10,36 +10,35 @@ Each tool maps to a RAG service endpoint and includes:
 - Guest mode permission
 - Timeout configuration
 """
-import os
 from typing import List, Dict, Any, Optional
 import structlog
 
-logger = structlog.get_logger()
+from orchestrator.urls import (
+    WEATHER_SERVICE_URL as WEATHER_URL,
+    AIRPORTS_SERVICE_URL as AIRPORTS_URL,
+    STOCKS_SERVICE_URL as STOCKS_URL,
+    FLIGHTS_SERVICE_URL as FLIGHTS_URL,
+    EVENTS_SERVICE_URL as EVENTS_URL,
+    STREAMING_SERVICE_URL as STREAMING_URL,
+    NEWS_SERVICE_URL as NEWS_URL,
+    SPORTS_SERVICE_URL as SPORTS_URL,
+    WEBSEARCH_SERVICE_URL as WEBSEARCH_URL,
+    DINING_SERVICE_URL as DINING_URL,
+    RECIPES_SERVICE_URL as RECIPES_URL,
+    COMMUNITY_EVENTS_SERVICE_URL as COMMUNITY_EVENTS_URL,
+    SERPAPI_EVENTS_SERVICE_URL as SERPAPI_EVENTS_URL,
+    DIRECTIONS_SERVICE_URL as DIRECTIONS_URL,
+    SEATGEEK_EVENTS_SERVICE_URL as SEATGEEK_EVENTS_URL,
+    TRANSPORTATION_SERVICE_URL as TRANSPORTATION_URL,
+    AMTRAK_SERVICE_URL as AMTRAK_URL,
+    SITE_SCRAPER_SERVICE_URL as SITE_SCRAPER_URL,
+    PRICE_COMPARE_SERVICE_URL as PRICE_COMPARE_URL,
+    TESLA_SERVICE_URL as TESLA_URL,
+    MEDIA_SERVICE_URL as MEDIA_URL,
+    BRIGHTDATA_SERVICE_URL as BRIGHTDATA_URL,
+)
 
-# RAG service base URLs (can be overridden by database config or environment variables)
-# Port assignments for each service - defaults to localhost for development
-WEATHER_URL = os.getenv("WEATHER_RAG_URL", "http://localhost:8010")
-AIRPORTS_URL = os.getenv("AIRPORTS_RAG_URL", "http://localhost:8011")
-STOCKS_URL = os.getenv("STOCKS_RAG_URL", "http://localhost:8012")
-FLIGHTS_URL = os.getenv("FLIGHTS_RAG_URL", "http://localhost:8013")
-EVENTS_URL = os.getenv("EVENTS_RAG_URL", "http://localhost:8014")
-STREAMING_URL = os.getenv("STREAMING_RAG_URL", "http://localhost:8015")
-NEWS_URL = os.getenv("NEWS_RAG_URL", "http://localhost:8016")
-SPORTS_URL = os.getenv("SPORTS_RAG_URL", "http://localhost:8017")
-WEBSEARCH_URL = os.getenv("WEBSEARCH_RAG_URL", "http://localhost:8018")
-DINING_URL = os.getenv("DINING_RAG_URL", "http://localhost:8019")
-RECIPES_URL = os.getenv("RECIPES_RAG_URL", "http://localhost:8020")
-COMMUNITY_EVENTS_URL = os.getenv("COMMUNITY_EVENTS_RAG_URL", "http://localhost:8026")
-SERPAPI_EVENTS_URL = os.getenv("SERPAPI_EVENTS_RAG_URL", "http://localhost:8032")
-DIRECTIONS_URL = os.getenv("DIRECTIONS_RAG_URL", "http://localhost:8030")
-SEATGEEK_EVENTS_URL = os.getenv("SEATGEEK_EVENTS_RAG_URL", "http://localhost:8024")
-TRANSPORTATION_URL = os.getenv("TRANSPORTATION_RAG_URL", "http://localhost:8025")
-AMTRAK_URL = os.getenv("AMTRAK_RAG_URL", "http://localhost:8027")
-SITE_SCRAPER_URL = os.getenv("SITE_SCRAPER_RAG_URL", "http://localhost:8031")
-PRICE_COMPARE_URL = os.getenv("PRICE_COMPARE_RAG_URL", "http://localhost:8033")
-TESLA_URL = os.getenv("TESLA_RAG_URL", "http://localhost:8028")
-MEDIA_URL = os.getenv("MEDIA_RAG_URL", "http://localhost:8029")
-BRIGHTDATA_URL = os.getenv("BRIGHTDATA_RAG_URL", "http://localhost:8040")
+logger = structlog.get_logger()
 
 
 # Tool definitions in OpenAI function calling format
