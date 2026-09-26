@@ -132,15 +132,18 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                     # Call weather service with unified RAG client (includes circuit breaker, rate limiting)
                     # Filter out temporal words/phrases that shouldn't be treated as locations
                     TEMPORAL_WORDS = {'today', 'tomorrow', 'tonight', 'yesterday', 'now', 'morning',
-                                      'afternoon', 'evening', 'night', 'weekend', 'week', 'day', 'hour'}
+                                      'afternoon', 'evening', 'night', 'weekend', 'week', 'day', 'hour',
+                                      'currently', 'later'}
                     TEMPORAL_PHRASES = {
                         'next couple of days', 'next few days', 'next week', 'this week',
                         'this weekend', 'next weekend', 'coming days', 'few days',
                         'couple of days', 'couple days', 'rest of the week', 'rest of the day',
                         'next couple days', 'next several days', 'the week', 'the weekend',
+                        'right now', 'at the moment', 'this morning', 'this afternoon',
+                        'this evening', 'later today',
                     }
                     raw_location = state.entities.get("location", DEFAULT_LOCATION)
-                    raw_lower = raw_location.lower().strip() if raw_location else ""
+                    raw_lower = raw_location.lower().strip().strip(" ?!.,") if raw_location else ""
                     # Use default location if extracted location is actually a temporal word/phrase
                     if raw_lower and (raw_lower in TEMPORAL_WORDS or raw_lower in TEMPORAL_PHRASES):
                         logger.info(f"Filtering temporal expression '{raw_location}' from location, using default: {DEFAULT_LOCATION}")

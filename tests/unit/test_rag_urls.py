@@ -188,7 +188,7 @@ def test_canonical_env_reaches_every_consumer(row):
         assert getattr(constants, constants_attr) == value
 
     marker_events = [
-        e for e in captured if e.get("event") in ("rag_url_legacy_env_name", "rag_url_env_conflict")
+        e for e in captured if str(e.get("event", "")).startswith("rag_url")
     ]
     assert marker_events == []
 
