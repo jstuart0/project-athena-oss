@@ -47,6 +47,8 @@ import sys
 import unittest.mock as mock
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 # Stub heavy deps before any orchestrator import.
 for _mod in ("prometheus_client", "langgraph", "langgraph.graph"):
     if _mod not in sys.modules:
@@ -234,10 +236,12 @@ class TestWeatherIntent:
             patch("orchestrator.nodes.retrieve.get_weather_provider_mode", new_callable=AsyncMock, return_value="standard"),
             patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://weather:8001"),
             patch("orchestrator.nodes.retrieve.validator", v),
+            patch("orchestrator.nodes.retrieve.DEFAULT_LOCATION", "Testville, TS"),
         ):
             result = _run(retrieve_node(state))
         # Should succeed with DEFAULT_LOCATION
         assert result.retrieved_data == weather_data
+        assert rc.get.await_args.kwargs["params"]["location"] == "Testville, TS"
 
     def test_weather_service_url_not_configured_triggers_fallback(self):
         rc = _make_rag_client()
@@ -299,6 +303,60 @@ class TestWeatherIntent:
         ):
             _run(retrieve_node(state))
         mock_fallback.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Temporal-location filter: "right now" and siblings must not be sent as a
+# location to the weather RAG service (ATHENA-87). TEMPORAL_WORDS/
+# TEMPORAL_PHRASES are locals inside retrieve_node's WEATHER branch, not
+# module attributes, so they can only be exercised through a full
+# retrieve_node() call with a WEATHER-intent state.
+# ---------------------------------------------------------------------------
+
+class TestTemporalLocationFilter:
+    def setup_method(self):
+        _runtime.reset_for_test()
+
+    MUST_CHANGE = [
+        "right now", "Right Now", "right now?", "currently", "at the moment",
+        "this morning", "this afternoon", "this evening", "later", "later today",
+    ]
+    REGRESSION = ["today", "tonight", "now", "weekend"]
+
+    @pytest.mark.parametrize(
+        "location_phrase",
+        MUST_CHANGE + REGRESSION,
+        ids=MUST_CHANGE + REGRESSION,
+    )
+    def test_temporal_location_replaced_with_default(self, location_phrase):
+        weather_data = {"temp": 55}
+        rc = _make_rag_client(_make_rag_response(data=weather_data))
+        _runtime.set_rag_client(rc)
+        v = _make_validator(ValidationResult.VALID)
+        state = _make_state(query="what is the weather?", entities={"location": location_phrase})
+        with (
+            patch("orchestrator.nodes.retrieve.get_weather_provider_mode", new_callable=AsyncMock, return_value="standard"),
+            patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://weather:8001"),
+            patch("orchestrator.nodes.retrieve.validator", v),
+            patch("orchestrator.nodes.retrieve.DEFAULT_LOCATION", "Testville, TS"),
+        ):
+            _run(retrieve_node(state))
+        assert rc.get.await_args.kwargs["params"]["location"] == "Testville, TS"
+
+    @pytest.mark.parametrize("real_location", ["Baltimore", "Norwalk"])
+    def test_real_location_passes_through(self, real_location):
+        weather_data = {"temp": 55}
+        rc = _make_rag_client(_make_rag_response(data=weather_data))
+        _runtime.set_rag_client(rc)
+        v = _make_validator(ValidationResult.VALID)
+        state = _make_state(query="what is the weather?", entities={"location": real_location})
+        with (
+            patch("orchestrator.nodes.retrieve.get_weather_provider_mode", new_callable=AsyncMock, return_value="standard"),
+            patch("orchestrator.nodes.retrieve.get_rag_service_url", new_callable=AsyncMock, return_value="http://weather:8001"),
+            patch("orchestrator.nodes.retrieve.validator", v),
+        ):
+            _run(retrieve_node(state))
+        assert rc.get.await_args.kwargs["params"]["location"] == real_location
 
 
 # ---------------------------------------------------------------------------
