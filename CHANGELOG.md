@@ -24,6 +24,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Known limitation (pre-existing, unrelated)**: `tests/unit/test_price_compare.py::TestPriceResult::test_to_dict_includes_all_fields` remains red; untouched by this change.
 - **Operator note**: these are code fixes only. `athena-orchestrator` and `athena-gateway` still need to be rebuilt and rolled by digest to take effect in `athena-prod` — that roll is hank's, under the parent campaign (ATHENA-86).
 
+### Operations — house cutover to athena-prod (ATHENA-86)
+
+- **Operations**: a Home-Assistant-integrated deployment previously running on Docker Compose / launchd
+  was migrated onto this repo's OSS build (Kubernetes, digest-pinned images), carrying forward its
+  database, encrypted API-key data, and Home Assistant conversation-entry configuration. Full record —
+  every change applied, its rollback, the Home-Assistant-side edits, and the standing operational rules —
+  is in `docs/runbooks/house-athena-prod-migration-2026-09.md`.
+- **Config keys that matter for this shape of deployment** (a house/production Home-Assistant-integrated
+  install, illustrated with this migration's own values — not defaults): `DEFAULT_CITY`/`DEFAULT_STATE`/
+  `DEFAULT_TIMEZONE` (e.g. `Baltimore`/`MD`/`America/New_York` — required for any location-dependent RAG
+  service to resolve a fallback location instead of failing on an empty query); `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`
+  and `SITESCRAPER_ALLOWED_PRIVATE_HOSTS` (must list every private host/CIDR the deployment's health poller
+  or site-scraper needs to reach, or those calls are SSRF-blocked); `CONTROL_AGENT_ENABLED`/`CONTROL_AGENT_URL`
+  (only meaningful if a Control Agent process is actually running somewhere reachable); `ATHENA_SEED_DEFAULTS`
+  (set `false` once real configuration exists — `true` UPSERTs OSS default rows over it on every restart).
+
 ---
 
 ## [Unreleased]
