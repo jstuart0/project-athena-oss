@@ -9,6 +9,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Plan:** `.mozart/plans/active/2026-09-26-deliver-athena-post-cutover-defects.md`
+> **Ticket:** [ATHENA-87](https://plane.xmojo.net) (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`)
+> **Commits:** `567b929`/`eb415f4` (Phase 1 — red/fix), `510c1a2`/`d32cc21` (Phase 2 — red/fix), `1134dfd`/`a4c01d6` (Phase 3 — red/fix), `3e92be2`/`cdd6fe1` (Phase 4 — red/fix)
+
+### Post-cutover defects: RAG URL parity, streaming think-disable parity, temporal-location filter, gateway LiveKit deps (ATHENA-87)
+
+- **Fixed**: RAG service URLs were read from three disagreeing env-var spellings across `orchestrator/urls.py`, `rag_tools.py`, and `utils/constants.py` — 10 of the 23 names the live Deployment sets were read by no module at all, so `search_events`'s SerpAPI/SeatGeek/Community sub-providers dialed localhost on every call. `urls.py` is now the single resolver: canonical `RAG_<NAME>_URL` wins; the legacy `<NAME>_RAG_URL` spelling is still accepted (logs `rag_url_legacy_env_name` at WARNING; `rag_url_env_conflict` at WARNING if both are set and differ); a blank value counts as unset. Five default ports were also corrected for local dev with the env unset: flights 8012→8013, events 8013→8014, streaming 8014→8015, news 8015→8016, stocks 8016→8012 — plus `MODE_SERVICE_URL` (8021→8022) and directions (8022→8030).
+- **Fixed**: `LLMRouter`'s Ollama streaming path (`_generate_ollama_stream`) never disabled qwen3 "thinking" or forwarded the `/no_think` prefix, unlike the non-streaming path. Both now build through a shared `_build_ollama_generate_payload`, so a streaming and non-streaming request to `/api/generate` are identical except `stream`. `generate_stream` also now forwards `system_prompt` to the Ollama, OpenAI, Anthropic, and Google streaming branches (previously hard-coded to `None` or omitted on three of the four), matching what non-streaming `generate()` already sent.
+- **Fixed**: the retrieve-node temporal-location filter now excludes "right now", "currently", "at the moment", "this morning/afternoon/evening", "later", and "later today" from being treated as location entities (previously only "today", "tonight", and "now" were filtered) — these phrases now fall back to `DEFAULT_LOCATION` instead of being geocoded and failing.
+- **Fixed**: `src/gateway/livekit_service.py` imports `numpy` and the LiveKit SDK without either declared in `src/gateway/requirements.in`/`.txt`, so `/livekit/*` routes silently 404'd — or, once `numpy` resolved locally but the SDK didn't, silently reported `enabled:false` with no visible error. `numpy`, `livekit`, and `livekit-api` are now declared gateway dependencies; the lock was regenerated with `scripts/lock-requirements.sh` (ATHENA-63's tooling): `numpy==2.4.6`, `livekit==1.1.20`, `livekit-api==1.2.1`, plus transitives, with no pre-existing gateway pin moved. An import failure in either the routes module or the SDK now logs at ERROR (`livekit_routes_import_failed` / `livekit_sdk_import_failed`) once `configure_logging` has run, instead of at INFO before it. `scripts/smoke-images.sh` gained a gateway-only gate that fails the image build if it can't import both.
+- **Follow-up**: `generate_stream` still has no `BackendType.AUTO` branch — non-streaming `generate()` handles AUTO, but the streaming path falls through to the MLX/unknown-backend branch. A separate routing gap, not a parity fix of the request Ollama receives; not fixed here.
+- **Follow-up**: `test_flag_on_startup_logs_sdk_status_before_gated_init` doesn't independently prove the log-before-init ordering (the code implements it in `gateway/main.py`; the aggregate test suite covers the operator-visible behavior). Left for the backlog.
+- **Known limitation (pre-existing, unrelated)**: `tests/unit/test_price_compare.py::TestPriceResult::test_to_dict_includes_all_fields` remains red; untouched by this change.
+- **Operator note**: these are code fixes only. `athena-orchestrator` and `athena-gateway` still need to be rebuilt and rolled by digest to take effect in `athena-prod` — that roll is hank's, under the parent campaign (ATHENA-86).
+
+---
+
+## [Unreleased]
+
 > **Plan:** `.mozart/plans/active/2026-09-14-deliver-athena-twilio-webhook-signature.md`
 > **Ticket:** ATHENA-72
 > **Commits:** `71d152d` (Phase 1), `253f9a1` (Phase 2 — merge and revert as one unit), `ae0396f` (drop the superseded str-mocked test)

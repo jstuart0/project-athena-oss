@@ -44,7 +44,7 @@ A standalone web application with streaming text chat, push-to-talk voice, and s
 
 - **Text chat** with real-time streaming responses and markdown rendering
 - **Push-to-talk voice** — hold a button to speak, release to send (requires STT/TTS service)
-- **LiveKit WebRTC** — optional always-on voice streaming for hands-free browser interaction
+- **LiveKit WebRTC** — optional always-on voice streaming for hands-free browser interaction (the gateway declares its `numpy`/`livekit`/`livekit-api` dependencies in `src/gateway/requirements.in`; a missing or incompatible wheel fails `scripts/smoke-images.sh` at build time rather than 404ing silently at runtime)
 - **Smart home widgets** — climate control, media playback, sensor readings directly in the interface
 - **Owner/Guest mode** — automatic access scoping based on guest bookings
 - **Music integration** — search and play music directly in the browser
