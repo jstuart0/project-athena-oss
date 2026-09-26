@@ -45,6 +45,61 @@ def _strip_think_tags(text: str) -> str:
     return cleaned
 
 
+def _build_ollama_generate_payload(
+    model: str,
+    prompt: str,
+    temperature: float,
+    max_tokens: int,
+    keep_alive: int,
+    ollama_options: Optional[Dict[str, Any]],
+    system_prompt: Optional[str],
+    stream: bool,
+) -> Dict[str, Any]:
+    """Build an Ollama `/api/generate` request payload.
+
+    Shared by `_generate_ollama` (non-streaming) and `_generate_ollama_stream`
+    (streaming, ATHENA-87 F80) so both send byte-identical requests except
+    for `stream`: same prompt composition (the `/no_think` prefix), same
+    options merge (skipping `None` values), and the same qwen3 `think:false`
+    rule. Without `think: false`, qwen3 emits internal reasoning that
+    consumes the num_predict budget and leaves `response` empty. Mirrors the
+    with-tools handler at `_generate_ollama_with_tools`. The `/no_think`
+    system prompt is also injected upstream, but Ollama's API-level flag is
+    what actually disables the thinking generation.
+    """
+    if system_prompt:
+        prompt = f"{system_prompt}\n\n{prompt}"
+
+    options = {
+        "temperature": temperature,
+        "num_predict": max_tokens
+    }
+    if ollama_options:
+        for key, value in ollama_options.items():
+            if value is not None:
+                options[key] = value
+        logger.debug(
+            "applying_ollama_options",
+            model=model,
+            options=list(ollama_options.keys())
+        )
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": stream,
+        "options": options,
+        # -1 = keep forever, 0 = unload immediately, >0 = seconds
+        "keep_alive": keep_alive
+    }
+
+    if "qwen3" in model.lower():
+        payload["think"] = False
+        logger.info("ollama_think_disabled", model=model, stream=stream)
+
+    return payload
+
+
 # Retry once on httpx.ReadTimeout in _generate_ollama / _generate_ollama_with_tools (ATHENA-31).
 # Tool-calling and synthesis are idempotent at the LLM call layer, so retrying after a transient
 # read timeout is safe. The backoff gives Mac Studio's Ollama a moment to finish a stalled
@@ -1160,49 +1215,19 @@ class LLMRouter:
             timeout=httpx.Timeout(connect=10.0, read=float(timeout), write=10.0, pool=10.0),
         )
 
-        # Prepend system prompt if provided (e.g., "/no_think" for Qwen3 models)
-        if system_prompt:
-            prompt = f"{system_prompt}\n\n{prompt}"
-
-        # Build base options
-        options = {
-            "temperature": temperature,
-            "num_predict": max_tokens
-        }
-
-        # Merge in additional Ollama options from model configuration
-        if ollama_options:
-            # Apply all Ollama options (num_ctx, num_batch, mirostat, top_k, top_p, etc.)
-            for key, value in ollama_options.items():
-                if value is not None:
-                    options[key] = value
-            logger.debug(
-                "applying_ollama_options",
-                model=model,
-                options=list(ollama_options.keys())
-            )
-
-        # Build request payload
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": options
-        }
-
-        # Add keep_alive parameter (Ollama uses integer format in seconds)
-        # -1 = keep forever, 0 = unload immediately, >0 = seconds
-        payload["keep_alive"] = keep_alive
-
-        # Disable thinking mode for qwen3 models. Without `think: false`,
-        # qwen3 emits internal reasoning that consumes the num_predict budget
-        # and leaves `response` empty. Mirrors the with-tools handler at
-        # _generate_ollama_with_tools (line ~995). The /no_think system
-        # prompt is also injected upstream, but Ollama's API-level flag is
-        # what actually disables the thinking generation.
-        if "qwen3" in model.lower():
-            payload["think"] = False
-            logger.info("ollama_think_disabled", model=model)
+        # Payload shape (prompt composition, options merge, qwen3 think:false
+        # rule) is built by _build_ollama_generate_payload so this stays in
+        # parity with _generate_ollama_stream (ATHENA-87 F80).
+        payload = _build_ollama_generate_payload(
+            model=model,
+            prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            keep_alive=keep_alive,
+            ollama_options=ollama_options,
+            system_prompt=system_prompt,
+            stream=False,
+        )
 
         try:
             start_time = time.monotonic()
@@ -1264,7 +1289,8 @@ class LLMRouter:
         max_tokens: int,
         timeout: int,
         keep_alive: int = -1,
-        ollama_options: Optional[Dict[str, Any]] = None
+        ollama_options: Optional[Dict[str, Any]] = None,
+        system_prompt: Optional[str] = None
     ):
         """
         Generate using Ollama backend with streaming.
@@ -1280,32 +1306,25 @@ class LLMRouter:
             timeout: Request timeout
             keep_alive: How long to keep model loaded (-1=forever)
             ollama_options: Additional Ollama options
+            system_prompt: Optional system prompt (e.g., "/no_think" for Qwen3)
 
         Yields:
             Dict with 'token' key containing the generated token text
         """
         import json as json_lib
 
-        # Build base options
-        options = {
-            "temperature": temperature,
-            "num_predict": max_tokens
-        }
-
-        # Merge in additional Ollama options from model configuration
-        if ollama_options:
-            for key, value in ollama_options.items():
-                if value is not None:
-                    options[key] = value
-
-        # Build request payload with stream=True
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": True,  # Enable streaming
-            "options": options,
-            "keep_alive": keep_alive
-        }
+        # Payload shape is built by _build_ollama_generate_payload so this
+        # stays in parity with _generate_ollama (ATHENA-87 F80).
+        payload = _build_ollama_generate_payload(
+            model=model,
+            prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            keep_alive=keep_alive,
+            ollama_options=ollama_options,
+            system_prompt=system_prompt,
+            stream=True,
+        )
 
         async with httpx.AsyncClient(base_url=endpoint_url, timeout=timeout) as client:
             async with client.stream("POST", "/api/generate", json=payload) as response:
@@ -1396,7 +1415,8 @@ class LLMRouter:
                 max_tokens=max_tokens,
                 timeout=timeout,
                 keep_alive=keep_alive,
-                ollama_options=ollama_options
+                ollama_options=ollama_options,
+                system_prompt=system_prompt
             ):
                 yield chunk
 
@@ -1412,7 +1432,7 @@ class LLMRouter:
                 prompt=prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                system_prompt=None
+                system_prompt=system_prompt
             ):
                 yield chunk
 
@@ -1428,7 +1448,7 @@ class LLMRouter:
                 prompt=prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                system_prompt=None
+                system_prompt=system_prompt
             ):
                 yield chunk
 
@@ -1444,7 +1464,8 @@ class LLMRouter:
                 model=backend_config.get("model_id", model),
                 prompt=prompt,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                system_prompt=system_prompt
             )
             yield {
                 "token": result.get("response", ""),
