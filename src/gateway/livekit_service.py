@@ -32,13 +32,19 @@ import structlog
 import httpx
 import numpy as np
 
-# LiveKit imports
+# LiveKit imports. Records LIVEKIT_SDK_IMPORT_ERROR on failure but does not
+# log — logging isn't configured yet at this point (main.py imports this
+# module, transitively, before configure_logging("gateway") runs). The
+# gateway logs this at ERROR once logging is up: see
+# gateway.main._log_livekit_startup_status (ATHENA-87 F84).
+LIVEKIT_SDK_IMPORT_ERROR: Optional[str] = None
 try:
     from livekit import api, rtc
     from livekit.api import AccessToken, VideoGrants
     LIVEKIT_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     LIVEKIT_AVAILABLE = False
+    LIVEKIT_SDK_IMPORT_ERROR = f"{type(e).__name__}: {e}"
     api = None
     rtc = None
 

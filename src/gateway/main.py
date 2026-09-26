@@ -45,7 +45,11 @@ from gateway.intent_prerouter import classify_intent, handle_simple_intent
 from gateway.circuit_breaker import CircuitBreaker, CircuitState
 from gateway.rate_limiter import TokenBucketRateLimiter
 
-# LiveKit WebRTC support (optional)
+# LiveKit WebRTC support (optional). Records LIVEKIT_IMPORT_ERROR on
+# failure but does not log — logging isn't configured yet (this import runs
+# before configure_logging("gateway") below). Logged at ERROR once logging
+# is up: see _log_livekit_startup_status (ATHENA-87 F84).
+LIVEKIT_IMPORT_ERROR: Optional[str] = None
 try:
     from gateway.livekit_routes import router as livekit_router
     from gateway.livekit_integration import (
@@ -54,8 +58,9 @@ try:
         get_livekit_integration
     )
     LIVEKIT_ROUTES_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     LIVEKIT_ROUTES_AVAILABLE = False
+    LIVEKIT_IMPORT_ERROR = f"{type(e).__name__}: {e}"
     livekit_router = None
     initialize_livekit_integration = None
     shutdown_livekit_integration = None
@@ -223,6 +228,62 @@ async def kill_port(port: int, service_name: str = "service"):
     except Exception as e:
         logger.warning(f"Error checking port {port}: {e}")
 
+
+def _livekit_sdk_available() -> bool:
+    """Whether the livekit SDK itself imported cleanly.
+
+    Returns False without importing gateway.livekit_service when the routes
+    import already failed — importing here would just re-raise the same
+    ImportError (e.g. the unguarded `numpy` import) that LIVEKIT_ROUTES_AVAILABLE
+    already recorded. Safe to import when the routes import succeeded: that
+    means gateway.livekit_service is already in sys.modules with its own
+    guarded SDK import resolved one way or the other.
+    """
+    if not LIVEKIT_ROUTES_AVAILABLE:
+        return False
+    import gateway.livekit_service as _lks
+    return _lks.LIVEKIT_AVAILABLE
+
+
+def _log_livekit_startup_status(livekit_enabled: bool) -> None:
+    """Log LiveKit's import/config status at ERROR when something's broken.
+
+    Runs after configure_logging("gateway") (unlike the import-time
+    ImportError handlers above, which only record LIVEKIT_IMPORT_ERROR /
+    LIVEKIT_SDK_IMPORT_ERROR because logging isn't configured yet at import
+    time). Fires regardless of the livekit_webrtc feature flag — a declared
+    dependency that won't import, or an SDK that's missing even though the
+    routes mounted, is always a packaging bug worth surfacing (ATHENA-87 F84).
+    """
+    if not LIVEKIT_ROUTES_AVAILABLE:
+        logger.error("livekit_routes_import_failed", error=LIVEKIT_IMPORT_ERROR)
+        return
+
+    import gateway.livekit_service as _lks
+    if not _lks.LIVEKIT_AVAILABLE:
+        logger.error("livekit_sdk_import_failed", error=_lks.LIVEKIT_SDK_IMPORT_ERROR)
+        return
+
+    if not livekit_enabled:
+        logger.info("LiveKit WebRTC disabled via feature flag")
+
+
+async def _start_livekit_integration(livekit_enabled: bool) -> None:
+    """Log LiveKit's startup status, then initialize if fully available.
+
+    Status is always logged first so an operator sees the packaging/SDK
+    problem even when the feature flag is off (ATHENA-87 F84).
+    """
+    _log_livekit_startup_status(livekit_enabled)
+
+    if livekit_enabled and LIVEKIT_ROUTES_AVAILABLE and _livekit_sdk_available() and initialize_livekit_integration:
+        try:
+            await initialize_livekit_integration()
+            logger.info("LiveKit WebRTC integration initialized")
+        except Exception as e:
+            logger.warning(f"LiveKit initialization failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
@@ -337,17 +398,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize LiveKit WebRTC if feature is enabled
     livekit_enabled = await is_feature_enabled("livekit_webrtc")
-    if livekit_enabled and LIVEKIT_ROUTES_AVAILABLE and initialize_livekit_integration:
-        try:
-            await initialize_livekit_integration()
-            logger.info("LiveKit WebRTC integration initialized")
-        except Exception as e:
-            logger.warning(f"LiveKit initialization failed: {e}")
-    else:
-        if not LIVEKIT_ROUTES_AVAILABLE:
-            logger.info("LiveKit routes not available (missing dependencies)")
-        elif not livekit_enabled:
-            logger.info("LiveKit WebRTC disabled via feature flag")
+    await _start_livekit_integration(livekit_enabled)
 
     # Pre-load Music Assistant auth token from admin API
     global _ma_auth_token_cache

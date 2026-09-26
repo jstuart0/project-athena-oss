@@ -216,6 +216,23 @@ run_smoke() {
         return
     fi
 
+    # Gateway-only: LiveKit is a declared dependency (ATHENA-87 F84) — a
+    # broken image (missing/incompatible numpy or livekit wheel) must fail
+    # the build, not just log an ERROR at runtime.
+    if [[ "${name}" == "athena-gateway" ]]; then
+        if ! docker run \
+                --rm \
+                --platform linux/amd64 \
+                --entrypoint python \
+                "${smoke_tag}" \
+                -c "import sys, main, gateway.livekit_service as s; sys.exit(0 if (main.LIVEKIT_ROUTES_AVAILABLE and s.LIVEKIT_AVAILABLE) else 1)" \
+                2>&1; then
+            echo -e "${RED}[FAIL]${NC} ${name}: livekit import failed"
+            FAILED+=("${name} (livekit import failed)")
+            return
+        fi
+    fi
+
     # pip check — the check this campaign exists to make CI enforce.
     if docker run \
             --rm \

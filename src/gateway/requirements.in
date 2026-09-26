@@ -21,3 +21,8 @@ redis>=5.0.0
 
 # Logging
 structlog>=23.2.0
+
+# LiveKit WebRTC voice (gateway/livekit_service.py)
+numpy>=1.26
+livekit>=1.0
+livekit-api>=1.0
