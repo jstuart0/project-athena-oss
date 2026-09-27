@@ -126,12 +126,35 @@ def test_R1_unconfigured_health_and_9_routes_503(monkeypatch):
         ("GET", "/transit/agencies"),
         ("GET", "/transit/free"),
         ("POST", "/transit/refresh"),
+        ("GET", "/transit/query"),
     ]
-    assert len(data_routes) == 9
+    assert len(data_routes) == 10
     for method, path in data_routes:
         resp = client.request(method, path)
         assert resp.status_code == 503, f"{method} {path} -> {resp.status_code}"
         assert "TRANSIT_GTFS_FEEDS" in resp.json()["detail"]
+
+    # Population check (not just a spot check): every route gated by
+    # require_transit_configured must be one of the 10 above, and every one
+    # of the 10 must actually be gated -- a future route that forgets the
+    # Depends() (or the reverse) fails loudly here instead of shipping an
+    # ungated data route.
+    from fastapi.routing import APIRoute
+
+    gated_paths = set()
+    for route in module.app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        deps = getattr(route.dependant, "dependencies", [])
+        if any(dep.call is module.require_transit_configured for dep in deps):
+            gated_paths.add(route.path)
+
+    expected_paths = {
+        "/transit/nearby", "/transit/routes", "/transit/departures",
+        "/transit/route/{route_id}", "/transit/search", "/transit/water",
+        "/transit/agencies", "/transit/free", "/transit/refresh", "/transit/query",
+    }
+    assert gated_paths == expected_paths
 
 
 def test_R1_named_member_transit_free_503(monkeypatch):

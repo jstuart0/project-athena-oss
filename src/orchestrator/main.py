@@ -177,6 +177,7 @@ from orchestrator.helpers import (
     log_continuation_decision,
     query_mentions_location,
     city_phrases,
+    is_transit_query,
 )
 
 # Event system imports for real-time pipeline monitoring
@@ -4252,6 +4253,7 @@ async def execute_tools_parallel(
                 "search_recipes": "/recipes/search",
                 "get_directions": "/directions/route",
                 "get_train_schedule": "/amtrak/schedule",
+                "search_transit": "/transit/query",
                 "scrape_website": "/scrape",
                 "scrape_webpage_bright": "/scrape",
                 "compare_prices": "/search",
@@ -4310,6 +4312,7 @@ async def execute_tools_parallel(
                 "search_recipes": "recipes",
                 "get_directions": "directions",
                 "get_train_schedule": "amtrak",
+                "search_transit": "transportation",
                 "scrape_website": "site-scraper",
                 "scrape_webpage_bright": "brightdata",
                 "compare_prices": "price-compare",
@@ -4328,7 +4331,7 @@ async def execute_tools_parallel(
                 "get_weather", "get_airport_info", "get_stock_info", "get_news",
                 "search_events", "search_flights", "search_web", "search_restaurants",
                 "search_streaming", "search_recipes", "get_directions", "get_train_schedule",
-                "scrape_website", "compare_prices", "get_tesla_metrics"
+                "search_transit", "scrape_website", "compare_prices", "get_tesla_metrics"
             ]
             # PARALLEL SEARCH: For search_web, race Brave + SearXNG simultaneously
             if function_name == "search_web":
@@ -4562,7 +4565,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             "dining": ["search_restaurants", "scrape_website"],  # Can scrape restaurant websites for details
             "recipes": ["search_recipes"],
             "directions": ["get_directions", "search_restaurants"],  # search_restaurants can find EV chargers, gas stations, etc. along routes
-            "transit": ["get_train_schedule", "get_directions"],  # Trains and transit directions
+            "transit": ["get_train_schedule", "get_directions", "search_transit"],  # Trains and transit directions
             "shopping": ["compare_prices", "search_web"],  # Price comparison for shopping queries
             "tesla": ["get_tesla_metrics"],  # Tesla vehicle queries (owner mode only)
             "media": ["request_media"],  # Media requests via Overseerr (owner mode only)
@@ -4671,7 +4674,9 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             logger.info(f"Planning query detected - providing {len(tools)} tools for multi-domain query")
         # Filter tools based on intent
         elif state.intent and state.intent.value in intent_to_tools:
-            relevant_tool_names = intent_to_tools[state.intent.value]
+            relevant_tool_names = list(intent_to_tools[state.intent.value])
+            if state.intent.value == "directions" and is_transit_query(state.query):
+                relevant_tool_names.append("search_transit")
             original_count = len(tools)
             tools = [t for t in tools if t["function"]["name"] in relevant_tool_names]
             logger.info(f"Filtered tools from {original_count} to {len(tools)} based on intent '{state.intent.value}'")

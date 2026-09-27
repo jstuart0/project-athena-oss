@@ -290,6 +290,49 @@ def query_mentions_location(query: Optional[str], location: Optional[str]) -> bo
     return False
 
 
+# H1/D3 (r2): the `directions` intent covers every driving and walking
+# query too, so this predicate gates search_transit onto only the
+# transit-phrased subset (main.py's tool_call_node). Pure -- no I/O -- so
+# it's independently unit-testable (T6a).
+_TRANSIT_QUERY_RE = re.compile(
+    r"\b("
+    r"bus(?:es)?|trains?|light rail|subway|metro"
+    r"|ferry|ferries|water taxi|circulator|shuttle|tram|streetcar"
+    r"|transit|public transport(?:ation)?"
+    r"|departures?|next (?:bus|train|ferry|shuttle|tram)"
+    r"|stops?|stations?"
+    r"|route \d+[a-z]?"
+    r"|(?:bus|train|ferry|route) schedule|schedule for (?:the )?(?:route|bus|train|line)"
+    r"|free ride"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Phrases that would otherwise false-positive on the include list above
+# (a gas/charging station, a non-stop flight, "stop by the store"). Matched
+# spans are stripped before the include search runs, so an include term
+# that only appears inside one of these phrases no longer matches -- but a
+# *separate* include term elsewhere in the query still does.
+_TRANSIT_QUERY_EXCLUDE_RE = re.compile(
+    r"\b(?:gas|charging|ev|fire|police|radio|weather|power) stations?\b"
+    r"|\bnon-?stop\b"
+    r"|\b(?:pit|rest|truck) stop\b"
+    r"|\bstop by\b",
+    re.IGNORECASE,
+)
+
+
+def is_transit_query(query: Optional[str]) -> bool:
+    """True when `query` reads as transit-phrased (buses, trains, stops,
+    departures, ...); False for driving/walking directions and for the
+    excluded near-miss phrases (gas station, non-stop, stop by, ...). No
+    I/O, no state."""
+    if not query:
+        return False
+    scrubbed = _TRANSIT_QUERY_EXCLUDE_RE.sub(" ", query)
+    return bool(_TRANSIT_QUERY_RE.search(scrubbed))
+
+
 def city_phrases(city: Optional[str], templates: Sequence[str]) -> List[str]:
     """Render each `{c}`-style template with `city`, lowercased (3.9). Empty
     city contributes no phrases -- city-derived behaviour must degrade to

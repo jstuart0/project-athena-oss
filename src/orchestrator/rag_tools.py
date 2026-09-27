@@ -456,7 +456,7 @@ TOOL_DEFINITIONS = [
             "type": "function",
             "function": {
                 "name": "search_transit",
-                "description": "Search public transit in the configured region: stops, routes, schedules, departures, and free options.",
+                "description": "Search public transit in the configured region: stops, routes, schedules, departures, and free options. Give stop_id for next departures, query for a stop or route name (add lat/lon to sort by distance), or lat/lon alone for nearby stops.",
                 "parameters": {
                     "type": "object",
                     "properties": {

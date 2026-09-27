@@ -350,6 +350,8 @@ RAG (Retrieval-Augmented Generation) services provide domain-specific data for q
 | Community Events | 8026 | None — region-configured via `COMMUNITY_EVENTS_SOURCES` (see `docs/CONFIGURATION.md`) | N/A (web scraping / REST API sources) |
 | Amtrak | 8027 | None — `DEFAULT_AMTRAK_STATION` sets a default origin (optional) | N/A (public GTFS feed) |
 
+**Transportation's `search_transit` tool** is served by `GET /transit/query`, a single dispatch route in front of the service's 9 other routes. It picks a mode from whichever params are given (`stop_id` > `query` > `lat`/`lon` > `free_only` > none — see `docs/CONFIGURATION.md`), resolves a bare/agency-native `stop_id` against the feed-prefixed ids GTFS actually uses before falling back to a name search, and returns a 503 both when the region is unconfigured and when it's configured but no stops loaded (naming the per-feed fetch error in the latter case).
+
 ### Enable RAG Services
 
 RAG services are enabled by adding their API keys:

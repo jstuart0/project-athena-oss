@@ -9,7 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Plan:** `.mozart/plans/active/2026-09-27-deliver-athena-oss-readiness.md`
+> **Plan:** `.mozart/plans/active/2026-09-27-deliver-athena-transit-and-base-knowledge.md`
+> **Ticket:** [ATHENA-90](https://plane.xmojo.net) + [ATHENA-91](https://plane.xmojo.net)
+> **Commits:** Phase 1 SHA to be backfilled here at Phase 2 (precedent: this file's other multi-phase entries list earlier phases' SHAs, filled in by the following phase's commit).
+
+### Transit tool wiring: `search_transit` reaches a real transportation route (ATHENA-90, Phase 1)
+
+`search_transit` (defined in `rag_tools.py` since an earlier campaign) had no `endpoint_map`/`service_name_map` entry, so a call went out as `POST {transportation}/search` — a route the transportation service has never had. It's now wired to a new dispatch route, gated so it only reaches the LLM on transit-phrased queries, and registered so it can be toggled from the Admin UI.
+
+- **Added — `GET /transit/query`** (`src/rag/transportation/main.py`): a single dispatch route reusing the 9 existing handlers directly (their own behavior is unchanged). Precedence: `stop_id` (resolved as given, then feed-prefixed across configured feeds/static services, then falls back to a name search, then 404) > `query` (name search, sorted by distance when `lat`/`lon` are also given, with an explicit `message` on zero matches rather than a bare empty list) > `lat`/`lon` alone (`nearby`) > `free_only` alone (`free`) > no params (`overview`). A feed that loaded with zero stops now gives a 503 naming the per-feed fetch error, instead of the misleading generic "not loaded yet".
+- **Changed — orchestrator tool wiring** (`src/orchestrator/main.py`): `search_transit` added to `endpoint_map`, `service_name_map`, and the GET-dispatch tool list.
+- **Added — keyword-gated reachability** (`src/orchestrator/helpers.py::is_transit_query`): `search_transit` is offered alongside `get_directions`/`search_restaurants` only when a `directions`-intent query reads as transit-phrased ("next bus", "light rail", "route 15 schedule", ...). A driving/walking query sees exactly the tools it saw before this change.
+- **Added — `tool_registry` seed** (`admin/backend/alembic/versions/059_seed_search_transit_tool.py`): a data-only, `ON CONFLICT DO NOTHING` migration so `search_transit` can be toggled on the Admin UI tools page, matching the pattern already used for the other RAG tools. Run `alembic upgrade head` to apply.
+- **Documentation**: `docs/CONFIGURATION.md`'s Transit section now states the feed `type` vocabulary the tool's `transit_type` filter matches by prefix, and that departures use container-local time.
+
+
 > **Ticket:** [ATHENA-89](https://plane.xmojo.net) (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`)
 > **Commits:** `cea046a` (P0 — leak-gate script), `c23dc27` (P1 — admin-backend/frontend), `ddaf16b` (P2 — region-configurable RAG services), `b16924b` (P3 — gateway/orchestrator session + ingress auth), `13ba5f6` (P3b — gate extension), `88caad4` (P4 — remaining references), `d6825a0` (P5 — CI workflow), `75a5af0` (P7 item 0 — import-cycle fix), `4826214` (P7 items 1–6 — HA entity/room config), `f6e9f51` (P8 — light-group scene fallback, restored satellite name-parse fallback, dropped unused `JARVIS_MEDIA_PLAYERS`)
 

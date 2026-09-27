@@ -794,6 +794,214 @@ async def get_free_transit():
     return {"free_transit_options": free_options}
 
 
+def _matches_transit_type(item_type: Optional[str], transit_type: Optional[str]) -> bool:
+    """Prefix match, per the tool schema's enum (bus/metro/light_rail/rail/
+    ferry/commuter_bus); no filter given means everything passes."""
+    if not transit_type:
+        return True
+    return bool(item_type) and item_type.startswith(transit_type)
+
+
+def _is_free_feed_or_service(feed_id: str) -> bool:
+    """Whether feed_id resolves to a configured feed or static service with
+    free:true. Stops and routes both carry feed_id, so this one lookup
+    serves both."""
+    feed = transit_config.feeds.get(feed_id)
+    if feed is not None:
+        return bool(feed.get("free"))
+    service = transit_config.static_services.get(feed_id)
+    if service is not None:
+        return bool(service.get("free"))
+    return False
+
+
+def _resolve_stop_id(stop_id: str) -> Optional[str]:
+    """M1a: try stop_id as given, then feed-prefixed across every configured
+    feed and static service (config order). Returns None if neither
+    resolves, so the caller can fall through to a name search."""
+    if stop_id in transit_data["stops"]:
+        return stop_id
+    for fid in list(transit_config.feeds.keys()) + list(transit_config.static_services.keys()):
+        candidate = f"{fid}_{stop_id}"
+        if candidate in transit_data["stops"]:
+            return candidate
+    return None
+
+
+def _search_stops_and_routes(
+    query: str, transit_type: Optional[str], free_only: bool, limit: int
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Case-insensitive substring match on stop_name / route names, with the
+    transit_type and free_only filters applied before the result cap (D2:
+    the filters must run before the cap, which is why this isn't a call to
+    the existing /transit/search route). Returns copies, since callers
+    (departures attachment, distance annotation) mutate the returned dicts."""
+    query_lower = query.lower()
+
+    stops: List[Dict[str, Any]] = []
+    for stop in transit_data["stops"].values():
+        if query_lower not in stop["stop_name"].lower():
+            continue
+        if not _matches_transit_type(stop.get("stop_type"), transit_type):
+            continue
+        if free_only and not _is_free_feed_or_service(stop["feed_id"]):
+            continue
+        stops.append(dict(stop))
+        if len(stops) >= limit:
+            break
+
+    routes: List[Dict[str, Any]] = []
+    for route in transit_data["routes"].values():
+        name = f"{route['route_short_name']} {route['route_long_name']}".lower()
+        if query_lower not in name:
+            continue
+        feed = transit_config.feeds.get(route["feed_id"], {})
+        if not _matches_transit_type(feed.get("type"), transit_type):
+            continue
+        if free_only and not feed.get("free"):
+            continue
+        routes.append(dict(route))
+        if len(routes) >= limit:
+            break
+
+    return stops, routes
+
+
+async def _attach_next_departures(stops: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The first 3 stops in a search/nearby result get next_departures, so
+    the synthesizer doesn't have to make a second tool call for the common
+    case. Stops must already be copies (see _search_stops_and_routes /
+    get_nearby_stops), since this mutates each dict in place."""
+    for stop in stops[:3]:
+        try:
+            departures_result = await get_departures(stop_id=stop["stop_id"], limit=3)
+            stop["next_departures"] = departures_result.get("departures", [])
+        except HTTPException:
+            stop["next_departures"] = []
+    return stops
+
+
+@app.get("/transit/query", dependencies=[Depends(require_transit_configured)])
+async def transit_query(
+    query: Optional[str] = Query(None, max_length=200, description="Search query for a stop or route name (empty behaves the same as omitted)"),
+    lat: Optional[float] = Query(None, ge=-90, le=90, description="Latitude"),
+    lon: Optional[float] = Query(None, ge=-180, le=180, description="Longitude"),
+    stop_id: Optional[str] = Query(None, max_length=100, description="Stop ID -- feed-prefixed, agency-native, or as given"),
+    transit_type: Optional[str] = Query(None, description="Filter by type prefix: bus, metro, light_rail, rail, ferry, commuter_bus"),
+    free_only: bool = Query(False, description="Only include free transit options"),
+    radius: int = Query(800, ge=100, le=5000, description="Search radius in meters (nearby mode)"),
+    limit: int = Query(5, ge=1, le=20, description="Maximum results"),
+):
+    """Unified dispatch for the search_transit tool (ATHENA-90/D1-B): calls
+    the existing handlers directly rather than adding a translation layer in
+    the orchestrator (D2), so the 9 existing routes stay byte-identical.
+
+    Precedence: stop_id > query > lat/lon > free_only > overview (D3/T8).
+    """
+    if transit_data["last_updated"] is None:
+        raise HTTPException(status_code=503, detail="Transit data not loaded yet")
+
+    if not transit_data["stops"]:
+        reasons = "; ".join(f"{fid}: {reason}" for fid, reason in fetch_errors.items())
+        raise HTTPException(
+            status_code=503,
+            detail="Transit data unavailable: " + (reasons or "no stops loaded from configured feeds"),
+        )
+
+    if (lat is None) != (lon is None):
+        raise HTTPException(status_code=422, detail="lat and lon must be provided together")
+
+    region = transit_config.region_name or "the configured region"
+
+    if stop_id:
+        resolved = _resolve_stop_id(stop_id)
+        if resolved is not None:
+            departures = await get_departures(stop_id=resolved, limit=limit)
+            return {
+                "mode": "departures",
+                "region": region,
+                "resolved_stop_id": resolved,
+                **departures,
+            }
+
+        stops, routes = _search_stops_and_routes(stop_id, transit_type, free_only, limit)
+        if not stops and not routes:
+            raise HTTPException(status_code=404, detail=f"Stop not found: {stop_id}")
+        stops = await _attach_next_departures(stops)
+        return {
+            "mode": "search",
+            "region": region,
+            "stops": stops,
+            "routes": routes,
+        }
+
+    if query:
+        stops, routes = _search_stops_and_routes(query, transit_type, free_only, limit)
+        if lat is not None and lon is not None:
+            for stop in stops:
+                stop["distance_meters"] = round(haversine_distance(lat, lon, stop["stop_lat"], stop["stop_lon"]))
+            stops.sort(key=lambda s: s["distance_meters"])
+
+        if not stops and not routes:
+            return {
+                "mode": "search",
+                "region": region,
+                "stops": [],
+                "routes": [],
+                "message": f"No stops or routes matched '{query}' in {region}",
+            }
+
+        stops = await _attach_next_departures(stops)
+        return {
+            "mode": "search",
+            "region": region,
+            "stops": stops,
+            "routes": routes,
+        }
+
+    if lat is not None and lon is not None:
+        nearby = await get_nearby_stops(lat=lat, lon=lon, radius=radius, limit=100, transit_type=None)
+        stops = [
+            s for s in nearby["stops"]
+            if _matches_transit_type(s.get("stop_type"), transit_type)
+            and (not free_only or _is_free_feed_or_service(s["feed_id"]))
+        ][:limit]
+
+        if not stops:
+            return {
+                "mode": "nearby",
+                "region": region,
+                "stops": [],
+                "routes": [],
+                "message": f"No stops within {radius} m of the given location in {region}",
+            }
+
+        stops = await _attach_next_departures(stops)
+        return {
+            "mode": "nearby",
+            "region": region,
+            "stops": stops,
+            "routes": [],
+        }
+
+    if free_only:
+        free = await get_free_transit()
+        return {
+            "mode": "free",
+            "region": region,
+            **free,
+        }
+
+    agencies = await get_agencies()
+    free = await get_free_transit()
+    return {
+        "mode": "overview",
+        "region": region,
+        "agencies": agencies["agencies"],
+        "free_transit_options": free["free_transit_options"],
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
 
