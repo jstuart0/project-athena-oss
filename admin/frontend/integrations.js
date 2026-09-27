@@ -108,7 +108,11 @@
                         if (p.category === 'RAG Services') {
                             try {
                                 const ragStatus = await Athena.api('/api/service-registry/services');
-                                const service = ragStatus?.find(s => s.name.toLowerCase().includes(p.id));
+                                // The endpoint returns an envelope ({services, total_services, ...}),
+                                // not a bare array -- ragStatus?.find() silently no-ops to undefined
+                                // against a plain object, so this never resolved "connected" for any
+                                // RAG service. (codex diff review)
+                                const service = (ragStatus?.services || []).find(s => s.name.toLowerCase().includes(p.id));
                                 if (service?.enabled) {
                                     status = { status: 'connected' };
                                 }

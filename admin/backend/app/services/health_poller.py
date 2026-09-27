@@ -349,13 +349,18 @@ async def _tcp_check(
     'tcp_timeout'), matching the categorical-value convention
     _classify_and_sanitize uses for the HTTP path (xander MED-1).
 
-    verify_redis: after connecting, send a Redis PING and require a +PONG
-    reply within the same timeout budget — proves the process on the far end
-    actually speaks Redis, not just that something accepted the socket.
-    _poll_one sets this for any row whose name contains 'redis' (same
-    substring heuristic app.js already uses to group it under "Database
-    Services"). A connect that succeeds but doesn't reply +PONG is
-    'unhealthy' / 'tcp_bad_banner'.
+    verify_redis: after connecting, send a Redis PING and require either a
+    +PONG or a -NOAUTH reply within the same timeout budget — proves the
+    process on the far end actually speaks Redis, not just that something
+    accepted the socket. -NOAUTH counts as healthy (policy decision): a
+    password-protected Redis replying "-NOAUTH Authentication required." is
+    reachable and unambiguously speaking the Redis wire protocol -- the health
+    check's job is "is this Redis up", not "can we authenticate to it"
+    (requiring auth here would mean shipping the Redis password into the
+    health poller's config, a needless secret-handling expansion). Any other
+    reply (-ERR, garbage, empty) is 'unhealthy' / 'tcp_bad_banner'. _poll_one
+    sets verify_redis for any row whose name contains 'redis' (same substring
+    heuristic app.js already uses to group it under "Database Services").
     """
     start = time.monotonic()
     writer = None
@@ -369,8 +374,8 @@ async def _tcp_check(
             await asyncio.wait_for(writer.drain(), timeout=timeout_seconds)
             reply = await asyncio.wait_for(reader.read(64), timeout=timeout_seconds)
             elapsed_ms = int((time.monotonic() - start) * 1000)
-            if not reply.startswith(b'+PONG'):
-                return (svc_id, 'unhealthy', elapsed_ms, 'tcp_bad_banner', 'redis PING did not return +PONG', None)
+            if not (reply.startswith(b'+PONG') or reply.startswith(b'-NOAUTH')):
+                return (svc_id, 'unhealthy', elapsed_ms, 'tcp_bad_banner', 'redis PING did not return +PONG or -NOAUTH', None)
             return (svc_id, 'healthy', elapsed_ms, 'ok', '', None)
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return (svc_id, 'healthy', elapsed_ms, 'ok', '', None)

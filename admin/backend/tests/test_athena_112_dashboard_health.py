@@ -176,3 +176,112 @@ class TestOverallHealthUnitFunction:
     def test_none_healthy_is_unhealthy(self):
         rows = [{'health_status': 'unhealthy'}, {'health_status': 'pending'}]
         assert _overall_health(rows) == 'unhealthy'
+
+
+class TestGetSingleServiceDisabledOverride:
+    """GET /services/{service_name} must apply the same disabled-row override
+    as GET /services -- a disabled row always reports health_status='disabled',
+    never a stale cached value from before it was turned off. (codex diff
+    review, LOW)."""
+
+    def test_disabled_row_reports_disabled_via_single_service_endpoint(self, client, db):
+        _svc(db, "single-disabled-svc", enabled=False, health_status="healthy", port=8010)
+        db.commit()
+
+        resp = client.get('/api/service-registry/services/single-disabled-svc')
+        assert resp.status_code == 200
+        assert resp.json()['health_status'] == 'disabled'
+
+    def test_enabled_row_with_null_status_reports_pending_via_single_service_endpoint(self, client, db):
+        svc = _svc(db, "single-pending-svc", enabled=True, health_status=None, port=8011)
+        db.commit()
+
+        resp = client.get('/api/service-registry/services/single-pending-svc')
+        assert resp.status_code == 200
+        assert resp.json()['health_status'] == 'pending'
+
+
+class TestRegisterServicePartialUpdate:
+    """POST /api/service-registry/services on an EXISTING row must be a
+    partial update: fields omitted from the request are preserved, not reset
+    to defaults. Motivated by the admin UI's row editor calling this same
+    upsert route to change just protocol/host/port/display_name -- before
+    this fix, editing a row silently reset cache_ttl/timeout/rate_limit to
+    defaults and force-re-enabled a disabled row. (codex diff review, HIGH)"""
+
+    def _register(self, client, **params):
+        return client.post(
+            '/api/service-registry/services',
+            params=params,
+            headers={'X-Service-Key': _SERVICE_KEY},
+        )
+
+    def test_edit_on_disabled_row_without_enabled_param_leaves_it_disabled(self, client, db):
+        svc = _svc(
+            db, "partial-update-svc", enabled=False, health_status="unhealthy",
+            host="192.168.1.60", port=9200,
+        )
+        svc.cache_ttl = 111
+        svc.timeout = 2222
+        svc.rate_limit = 7
+        db.commit()
+
+        resp = self._register(
+            client,
+            name="partial-update-svc",
+            protocol="tcp",
+            host="192.168.1.61",
+            port=9201,
+            display_name="Renamed Service",
+        )
+        assert resp.status_code == 200, resp.text
+
+        db.expire_all()
+        row = db.query(RagService).filter(RagService.name == "partial-update-svc").first()
+        assert row.enabled is False, "omitting enabled must never implicitly re-enable a disabled row"
+        assert row.cache_ttl == 111, "cache_ttl must be preserved when omitted"
+        assert row.timeout == 2222, "timeout must be preserved when omitted"
+        assert row.rate_limit == 7, "rate_limit must be preserved when omitted"
+        # The fields actually sent DO apply.
+        assert row.display_name == "Renamed Service"
+        assert row.protocol == "tcp"
+        assert row.host == "192.168.1.61"
+        assert row.port == 9201
+
+    def test_explicit_enabled_false_does_disable(self, client, db):
+        """The partial-update fix must not make `enabled` unsettable -- an
+        explicit enabled=false still disables the row."""
+        _svc(db, "explicit-disable-svc", enabled=True, health_status="healthy", port=9210)
+        db.commit()
+
+        resp = self._register(
+            client,
+            name="explicit-disable-svc",
+            protocol="http",
+            endpoint_url="http://192.168.1.62:9210/health",
+            enabled=False,
+        )
+        assert resp.status_code == 200, resp.text
+
+        db.expire_all()
+        row = db.query(RagService).filter(RagService.name == "explicit-disable-svc").first()
+        assert row.enabled is False
+
+    def test_insert_still_applies_documented_defaults(self, client, db):
+        """A brand-new row created without service_type/cache_ttl/timeout/
+        rate_limit/enabled must still get the documented defaults, not None."""
+        resp = self._register(
+            client,
+            name="fresh-insert-svc",
+            protocol="tcp",
+            host="192.168.1.63",
+            port=9220,
+        )
+        assert resp.status_code == 200, resp.text
+
+        row = db.query(RagService).filter(RagService.name == "fresh-insert-svc").first()
+        assert row.service_type == 'api'
+        assert row.cache_ttl == 300
+        assert row.timeout == 5000
+        assert row.rate_limit == 100
+        assert row.enabled is True

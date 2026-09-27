@@ -85,7 +85,15 @@ def client(db):
 
 
 def _free_closed_port() -> int:
-    """Reserve then release a port so nothing is listening on it."""
+    """Reserve then release a port so nothing is listening on it.
+
+    SO_REUSEADDR is left off (Python's default) so the OS doesn't hand this
+    exact port back out from TIME_WAIT sooner than it otherwise would. There
+    is an inherent (tiny) TOCTOU window between close() here and the caller's
+    connect attempt where some other process could grab the same ephemeral
+    port; callers that need certainty should retry once on an unexpected
+    result rather than treat a single connect as authoritative (codex diff
+    review, LOW)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(('127.0.0.1', 0))
     port = s.getsockname()[1]
@@ -126,8 +134,14 @@ class TestTcpCheckPrimitive:
     async def test_refused_on_closed_port(self):
         from app.services.health_poller import _tcp_check
 
-        port = _free_closed_port()
-        result = await _tcp_check(1, '127.0.0.1', port, timeout_seconds=2.0)
+        # Retry once on an unexpected result: there's a tiny TOCTOU window
+        # between reserving+releasing the port and this connect attempt where
+        # some other process could grab it (codex diff review, LOW).
+        for attempt in range(2):
+            port = _free_closed_port()
+            result = await _tcp_check(1, '127.0.0.1', port, timeout_seconds=2.0)
+            if result[3] == 'tcp_refused':
+                break
         svc_id, status, elapsed_ms, category, detail, health_message = result
         assert status == 'unhealthy'
         assert category == 'tcp_refused'
@@ -159,10 +173,38 @@ class TestTcpCheckPrimitive:
         assert category == 'ok'
 
     @pytest.mark.asyncio
+    async def test_redis_noauth_reply_is_healthy(self):
+        """verify_redis=True: a password-protected Redis replies -NOAUTH to an
+        unauthenticated PING. That reply is itself proof the target is
+        reachable and speaking the Redis protocol -- must count as healthy,
+        not tcp_bad_banner (policy decision, codex diff review)."""
+        from app.services.health_poller import _tcp_check
+
+        async def _noauth_handler(reader, writer):
+            await reader.read(64)
+            writer.write(b'-NOAUTH Authentication required.\r\n')
+            await writer.drain()
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(_noauth_handler, '127.0.0.1', 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            result = await _tcp_check(1, '127.0.0.1', port, timeout_seconds=2.0, verify_redis=True)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        svc_id, status, elapsed_ms, category, detail, health_message = result
+        assert status == 'healthy'
+        assert category == 'ok'
+
+    @pytest.mark.asyncio
     async def test_redis_bad_banner_is_unhealthy(self):
         """verify_redis=True: a connect that succeeds but doesn't reply +PONG
-        (e.g. some other service happens to be listening on that port) must
-        not be reported healthy."""
+        or -NOAUTH (e.g. some other service happens to be listening on that
+        port, or a genuine -ERR) must not be reported healthy."""
         from app.services.health_poller import _tcp_check
 
         async def _wrong_handler(reader, writer):

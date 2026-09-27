@@ -132,12 +132,19 @@ async def get_service(
     service_name: str,
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Return a single service by name with cached health status."""
+    """Return a single service by name with cached health status.
+
+    Applies the same disabled-row override as GET /services (ATHENA-112):
+    a disabled row always reports health_status='disabled', never a stale
+    cached value from before it was turned off. (codex diff review)
+    """
     svc = db.query(RagService).filter(RagService.name == service_name).first()
     if not svc:
         raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
     d = svc.to_dict()
-    if d.get('health_status') is None:
+    if not d.get('enabled'):
+        d['health_status'] = 'disabled'
+    elif d.get('health_status') is None:
         d['health_status'] = 'pending'
     return d
 
@@ -174,13 +181,14 @@ async def register_service(
     name: str = "",
     endpoint_url: str = "",
     display_name: Optional[str] = None,
-    service_type: str = 'api',
-    cache_ttl: int = 300,
-    timeout: int = 5000,
-    rate_limit: int = 100,
+    service_type: Optional[str] = None,
+    cache_ttl: Optional[int] = None,
+    timeout: Optional[int] = None,
+    rate_limit: Optional[int] = None,
     protocol: Optional[str] = None,
     host: Optional[str] = None,
     port: Optional[int] = None,
+    enabled: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Register or update (upsert) a service.
 
@@ -194,6 +202,19 @@ async def register_service(
     endpoint_url -- validate_endpoint_url only accepts http/https schemes and
     would reject a "tcp://" URL.  host still passes through validate_host()
     for the same SSRF protections applied to http(s) rows.
+
+    Partial update on an existing row (codex diff review): service_type,
+    cache_ttl, timeout, rate_limit, and enabled are each applied ONLY if the
+    caller actually passed them; an omitted field keeps the row's current
+    value. Defaults ('api', 300, 5000, 100, True respectively) apply only
+    when INSERTING a new row. This matters because the admin UI's row editor
+    (service-control.js) calls this same upsert route to change just a
+    protocol/host/port/display_name -- before this fix, editing a row's check
+    type silently reset its cache_ttl/timeout/rate_limit to defaults and
+    force-re-enabled it even if an operator had deliberately disabled it.
+    The Control Agent's startup-upsert is unaffected: it always sends all
+    four administrative fields explicitly (test_phase3_ca_upsert.py), so
+    partial-update semantics are a no-op for that caller.
     """
     if not name:
         raise HTTPException(status_code=422, detail="'name' query parameter is required")
@@ -250,11 +271,19 @@ async def register_service(
         existing.health_endpoint = parsed['health_endpoint']
         if display_name is not None:
             existing.display_name = display_name
-        existing.service_type = service_type
-        existing.cache_ttl = cache_ttl
-        existing.timeout = timeout
-        existing.rate_limit = rate_limit
-        existing.enabled = True
+        # Partial update (codex diff review): each of these is applied only
+        # if the caller passed it. Omitting `enabled` in particular must
+        # never implicitly re-enable a row an operator deliberately disabled.
+        if service_type is not None:
+            existing.service_type = service_type
+        if cache_ttl is not None:
+            existing.cache_ttl = cache_ttl
+        if timeout is not None:
+            existing.timeout = timeout
+        if rate_limit is not None:
+            existing.rate_limit = rate_limit
+        if enabled is not None:
+            existing.enabled = enabled
         # Do NOT touch updated_at explicitly — let onupdate handle it so it only
         # advances on this config-change write.
         db.commit()
@@ -269,17 +298,17 @@ async def register_service(
         svc = RagService(
             name=name,
             display_name=display_name or name.replace('-', ' ').title(),
-            service_type=service_type,
+            service_type=service_type or 'api',
             endpoint_url=resolved_endpoint_url,
             host=parsed['host'],
             port=parsed['port'],
             protocol=parsed['protocol'],
             health_endpoint=parsed['health_endpoint'],
             headers={'Content-Type': 'application/json'},
-            cache_ttl=cache_ttl,
-            timeout=timeout,
-            rate_limit=rate_limit,
-            enabled=True,
+            cache_ttl=cache_ttl if cache_ttl is not None else 300,
+            timeout=timeout if timeout is not None else 5000,
+            rate_limit=rate_limit if rate_limit is not None else 100,
+            enabled=enabled if enabled is not None else True,
         )
         db.add(svc)
         db.commit()
