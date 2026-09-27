@@ -293,6 +293,12 @@ class AthenaConfig(BaseSettings):
     # sitescraper_allowed_private_hosts. Default is this repo's own
     # documented pod CIDR (manifests/athena-prod) — override for your
     # cluster's actual pod/service CIDR.
+    # F44 (codex r2b Medium, reconciliation round 2): resolve_client_key
+    # parses X-Forwarded-For right-to-left and returns the nearest hop NOT
+    # in this CIDR set, so a trusted proxy that appends rather than
+    # overwrites the header can't be used to smuggle an attacker-forged
+    # left-most value. Keep this scoped to the actual reverse-proxy
+    # subnet, not a broad cluster-wide default.
     trusted_proxy_cidrs: str = Field(default="10.244.0.0/16")
     # new_conversation_reset_grace_seconds: F38 (codex r2 Medium) — a
     # first-turn fingerprint reset is skipped when a session under the same

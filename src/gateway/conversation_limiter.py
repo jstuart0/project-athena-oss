@@ -135,6 +135,27 @@ class RedisNewConversationLimiter:
         return bool(int(result))
 
 
+def _parse_trusted_networks(trusted_proxy_cidrs: str) -> List[ipaddress._BaseNetwork]:
+    networks: List[ipaddress._BaseNetwork] = []
+    for cidr in trusted_proxy_cidrs.split(","):
+        cidr = cidr.strip()
+        if not cidr:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            continue
+    return networks
+
+
+def _is_trusted_hop(hop: str, networks: List[ipaddress._BaseNetwork]) -> bool:
+    try:
+        addr = ipaddress.ip_address(hop)
+    except ValueError:
+        return False
+    return any(addr in network for network in networks)
+
+
 def resolve_client_key(
     client_host: Optional[str],
     forwarded_for: Optional[str],
@@ -142,12 +163,17 @@ def resolve_client_key(
 ) -> str:
     """Resolve the rate-limiter key for a request.
 
-    Trusts X-Forwarded-For's first (left-most, originating) address only
-    when the immediate TCP peer (`client_host`) falls inside one of the
-    comma-separated CIDRs in `trusted_proxy_cidrs`. An untrusted caller's
-    own X-Forwarded-For header is ignored -- it can't spoof another
-    source's key. Falls back to `client_host` (or "unknown") whenever the
-    peer isn't trusted, the header is absent, or either fails to parse.
+    ATHENA-88 / F44 (codex r2b Medium, reconciliation round 2): a trusted
+    proxy is trusted to correctly report the peer it directly observed --
+    not to have sanitized whatever X-Forwarded-For value that peer already
+    sent it. A non-sanitizing trusted proxy only APPENDS its own observed
+    peer to the header rather than replacing it, so the left-most entry can
+    be attacker-controlled even when the immediate TCP peer is trusted.
+    Parsing right-to-left and returning the nearest hop NOT inside
+    `trusted_proxy_cidrs` finds the value the nearest trusted proxy itself
+    observed, which an upstream attacker cannot forge. Falls back to
+    `client_host` (or "unknown") whenever the peer isn't trusted, the
+    header is absent/unparseable, or every hop in the chain is trusted.
     """
     if not client_host:
         return "unknown"
@@ -160,16 +186,14 @@ def resolve_client_key(
     except ValueError:
         return client_host
 
-    for cidr in trusted_proxy_cidrs.split(","):
-        cidr = cidr.strip()
-        if not cidr:
-            continue
-        try:
-            network = ipaddress.ip_network(cidr, strict=False)
-        except ValueError:
-            continue
-        if peer in network:
-            original = forwarded_for.split(",")[0].strip()
-            return original or client_host
+    networks = _parse_trusted_networks(trusted_proxy_cidrs)
+
+    if not any(peer in network for network in networks):
+        return client_host
+
+    hops = [hop.strip() for hop in forwarded_for.split(",") if hop.strip()]
+    for hop in reversed(hops):
+        if not _is_trusted_hop(hop, networks):
+            return hop
 
     return client_host

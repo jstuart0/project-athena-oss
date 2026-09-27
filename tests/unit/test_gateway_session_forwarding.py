@@ -331,6 +331,41 @@ def test_resolve_client_key_unparseable_peer_falls_back():
     assert key == "not-an-ip"
 
 
+# ---------------------------------------------------------------------------
+# F44 (reconciliation round 2, codex r2b Medium): the left-most X-Forwarded-
+# For hop is attacker-controlled whenever a trusted proxy in the chain
+# forwards an inbound header without sanitizing it -- it only APPENDS its
+# own observed peer to whatever the caller already sent. The nearest hop
+# NOT inside trusted_proxy_cidrs is authoritative; walk right-to-left.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_client_key_ignores_spoofed_leftmost_hop_behind_trusted_proxies():
+    # Attacker-supplied leftmost value ("1.2.3.4") plus a trusted internal
+    # hop, with Traefik (non-sanitizing) appending the attacker's real,
+    # untrusted IP at the end. Old left-most parsing would trust the
+    # attacker's forged value; right-to-left parsing finds the real client.
+    key = resolve_client_key(
+        "10.244.3.7", "1.2.3.4, 10.244.9.1, 203.0.113.9", TRUSTED_CIDR
+    )
+    assert key == "203.0.113.9"
+
+
+def test_resolve_client_key_all_hops_trusted_falls_back_to_peer():
+    # Every hop in the chain is inside the trusted CIDR (e.g. an internal
+    # health check or another in-cluster proxy) -- no untrusted hop exists,
+    # so the immediate peer is the only trustworthy value.
+    key = resolve_client_key("10.244.3.7", "10.244.1.1, 10.244.9.1", TRUSTED_CIDR)
+    assert key == "10.244.3.7"
+
+
+def test_resolve_client_key_single_hop_still_works():
+    # Single-hop chain (one proxy) -- the original common case must be
+    # unaffected by the right-to-left rewrite.
+    key = resolve_client_key("10.244.3.7", "192.168.10.50", TRUSTED_CIDR)
+    assert key == "192.168.10.50"
+
+
 class _FakeRedisForLimiter:
     """Minimal async fake Redis: zadd/zcard/zremrangebyscore/expire/eval.
 
