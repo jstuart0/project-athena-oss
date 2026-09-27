@@ -235,6 +235,7 @@ STALE_RAG_KEY_NAMES = frozenset({
 })
 
 OPERATOR_FACING_DOC_FILES = (
+    ".env.example",
     ".env.secrets.example",
     "config.env.example",
     "docs/INSTALLATION.md",
@@ -247,6 +248,19 @@ OPERATOR_FACING_DOC_FILES = (
 _ENV_DECLARATION_RE = re.compile(r"^\s*#?\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=", re.MULTILINE)
 # A markdown code-span name, e.g. a table cell: `NEWSAPI_KEY`.
 _BACKTICK_NAME_RE = re.compile(r"`([A-Z][A-Z0-9_]*)`")
+# ATHENA-88 / F47 (codex r2b Low, reconciliation round 2): a stale name
+# mentioned in plain prose (no backticks, not a "NAME=" declaration) is
+# just as misleading to an operator skimming the file as one in a table or
+# an active declaration — e.g. "some modules read SerpAPI under
+# SERPAPI_KEY, others under SERPAPI_API_KEY" reads as current guidance
+# long after the drift it describes was fixed. Any line naming a stale key
+# is flagged UNLESS that line is explicitly marked as describing past
+# behavior ("historical"/"historically") -- a legitimate way to document
+# the drift without re-advertising the wrong name as current.
+_HISTORICAL_MARKER_RE = re.compile(r"\bhistorical(?:ly)?\b", re.IGNORECASE)
+_STALE_NAME_WORD_RE = {
+    name: re.compile(rf"\b{re.escape(name)}\b") for name in STALE_RAG_KEY_NAMES
+}
 
 
 def check_stale_doc_references(root: Path) -> list:
@@ -256,8 +270,16 @@ def check_stale_doc_references(root: Path) -> list:
         if not path.exists():
             continue
         text = path.read_text()
-        names_found = set(_ENV_DECLARATION_RE.findall(text)) | set(_BACKTICK_NAME_RE.findall(text))
-        stale = names_found & STALE_RAG_KEY_NAMES
+        stale = set(_ENV_DECLARATION_RE.findall(text)) | set(_BACKTICK_NAME_RE.findall(text))
+        stale &= STALE_RAG_KEY_NAMES
+
+        for line in text.splitlines():
+            if _HISTORICAL_MARKER_RE.search(line):
+                continue
+            for name, name_re in _STALE_NAME_WORD_RE.items():
+                if name_re.search(line):
+                    stale.add(name)
+
         if stale:
             findings.append(f"{rel_path}: stale RAG key name(s) still present: {sorted(stale)}")
     return findings

@@ -429,7 +429,8 @@ def test_checker_flags_stale_name_in_markdown_table(tmp_path):
 
 def test_checker_ignores_prose_mention_of_stale_name(tmp_path):
     """A comment explaining the historical drift (not an active
-    declaration or a documented table value) must not false-positive."""
+    declaration or a documented table value) must not false-positive --
+    the "historically" marker is the explicit past-tense carve-out."""
     root = _copy_real_tree(tmp_path)
     (root / ".env.secrets.example").write_text(
         "# Some modules historically read SerpAPI under SERPAPI_KEY.\n"
@@ -439,6 +440,38 @@ def test_checker_ignores_prose_mention_of_stale_name(tmp_path):
     checker = _load_checker()
     findings = checker.check_stale_doc_references(root)
     assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# F47 (reconciliation round 2, codex r2b Low): a stale name in UNMARKED
+# prose (no "historical" carve-out) reads as current operator guidance and
+# must be flagged, same as a table cell or an active declaration.
+# ---------------------------------------------------------------------------
+
+def test_checker_flags_stale_name_in_unmarked_prose(tmp_path):
+    root = _copy_real_tree(tmp_path)
+    (root / ".env.secrets.example").write_text(
+        "# Some modules read SerpAPI under SERPAPI_KEY, others under "
+        "SERPAPI_API_KEY.\n"
+        "SERPAPI_API_KEY=\n"
+    )
+
+    checker = _load_checker()
+    findings = checker.check_stale_doc_references(root)
+    assert any(".env.secrets.example" in f and "SERPAPI_KEY" in f for f in findings)
+    assert checker.main(["--root", str(root)]) == 1
+
+
+def test_checker_scans_env_example_too(tmp_path):
+    """.env.example wasn't in OPERATOR_FACING_DOC_FILES at all -- a stale
+    name there (as opposed to .env.secrets.example) previously passed
+    silently."""
+    root = _copy_real_tree(tmp_path)
+    (root / ".env.example").write_text("# SERPAPI_KEY=\n")
+
+    checker = _load_checker()
+    findings = checker.check_stale_doc_references(root)
+    assert any(".env.example" in f and "SERPAPI_KEY" in f for f in findings)
 
 
 def test_checker_real_repo_doc_files_clean():
