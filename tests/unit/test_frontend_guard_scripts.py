@@ -1203,20 +1203,24 @@ PIN_A_FILE, PIN_A_FRAG = sorted(skips_guard.SANCTIONED)[0]
 PIN_B_FILE, PIN_B_FRAG = sorted(skips_guard.SANCTIONED)[1]
 
 
-def _pin_a_content() -> str:
-    return f"import pytest\n\n{PIN_A_FRAG}reason='no node')\n\n\ndef test_a():\n    pass\n"
-
-
-def _pin_b_content() -> str:
-    return f"import pytest\n\n{PIN_B_FRAG}True, reason='no node')\n\n\ndef test_b():\n    pass\n"
+def _closing_for(frag: str) -> str:
+    """The trailing tokens needed to turn a SANCTIONED fragment into a
+    syntactically valid statement -- `.skipif(` needs a positional condition
+    before `reason=`, `.skip(` doesn't."""
+    if "skipif(" in frag:
+        return "True, reason='no node')\n\n\ndef test_pin():\n    pass\n"
+    return "reason='no node')\n\n\ndef test_pin():\n    pass\n"
 
 
 def _seed_both_pins(repo: Path) -> str:
-    """Commit a tree with both pinned skips present, mimicking the real repo
-    post-merge (both pins already in the tree, nothing new to add)."""
-    _write(repo, PIN_A_FILE, _pin_a_content())
-    _write(repo, PIN_B_FILE, _pin_b_content())
-    return _commit(repo, "seed: both pinned skips present")
+    """Commit a tree with EVERY currently-sanctioned skip present, mimicking
+    the real repo post-merge (all pins already in the tree, nothing new to
+    add). Loops over skips_guard.SANCTIONED live rather than hardcoding a
+    pair, so a third (or Nth) sanctioned entry added later doesn't silently
+    break this fixture the way ATHENA-113c's new entry did the first time."""
+    for file, frag in sorted(skips_guard.SANCTIONED):
+        _write(repo, file, f"import pytest\n\n{frag}{_closing_for(frag)}")
+    return _commit(repo, "seed: all pinned skips present")
 
 
 def _run_guard(repo: Path, monkeypatch, base: str):
