@@ -92,11 +92,15 @@ COLLISION_TABLE = [
     ("what's on the news today", "news"),
     # Bare "rooftop" was deliberately NOT added (D7) -- no category matches.
     ("what's the view from the rooftop", None),
+    # tessa F32: bare "drinks" was deliberately NOT added (D7) -- must not
+    # collide with dining (only the multi-word "grab drinks"/"place for
+    # drinks"/etc. phrasings were added).
+    ("what should I drink tonight", None),
 ]
 
 
 def test_collision_population_floor():
-    assert len(COLLISION_TABLE) == 11
+    assert len(COLLISION_TABLE) == 12
 
 
 @pytest.mark.parametrize("query,expected", COLLISION_TABLE, ids=[q for q, _ in COLLISION_TABLE])

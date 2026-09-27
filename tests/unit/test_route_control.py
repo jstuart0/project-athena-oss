@@ -604,3 +604,164 @@ class TestErrorHandlingAndMetrics:
                    return_value={"enabled": False}):
             result = _run(route_control_node(state))
         assert isinstance(result.node_timings.get("route_control"), float)
+
+
+class TestContextRefViewGating:
+    """ATHENA-88 / F16 / D13, contract C11: route_control_node reads
+    whatever context_ref_info shape it's given -- these tests prove the
+    reader honours a DECLINED view (no merge, no inquiry answer) exactly as
+    it would honour a raw dict with the flags unset, and that a CONTINUED
+    view still merges/modifier-adjusts as today.
+    """
+
+    def setup_method(self):
+        _runtime.reset_for_test()
+
+    def _setup_basic(self):
+        sc = _make_smart_controller()
+        _runtime.set_smart_controller(sc)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
+        return sc
+
+    def test_declined_view_does_not_merge_previous_context(self):
+        sc = self._setup_basic()
+        sc.extract_intent = AsyncMock(return_value={
+            "device_type": "light", "action": "turn_on", "room": "kitchen",
+        })
+        sc.execute_intent = AsyncMock(return_value="Kitchen lights on.")
+        prev = {
+            "response": "Bedroom lights off.",
+            "entities": {"room": "bedroom", "device_type": "light"},
+            "parameters": {"device_type": "light", "action": "turn_off"},
+            "query": "turn off bedroom lights",
+        }
+        declined_view = {
+            "has_context_ref": False, "is_continuation": False,
+            "is_inquiry": False, "ref_types": [], "anaphora_types": [],
+        }
+        state = _make_state(
+            query="turn on the kitchen lights",
+            prev_context=prev,
+            context_ref_info=declined_view,
+        )
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+            patch("orchestrator.nodes.route_control.store_conversation_context", new_callable=AsyncMock),
+        ):
+            result = _run(route_control_node(state))
+        # extract_intent called with NO prev_query/prev_response context —
+        # a fresh command, not a follow-up merge.
+        call_kwargs = sc.extract_intent.call_args.kwargs
+        assert not call_kwargs.get("prev_query")
+        assert result.answer == "Kitchen lights on."
+
+    def test_declined_view_skips_inquiry_answer(self):
+        sc = self._setup_basic()
+        prev = {
+            "response": "I turned on the lights.",
+            "entities": {"room": "bedroom"},
+            "parameters": {"action": "turn_on"},
+        }
+        declined_view = {
+            "has_context_ref": False, "is_continuation": False,
+            "is_inquiry": False, "ref_types": [], "anaphora_types": [],
+        }
+        state = _make_state(
+            query="turn on the office lights",
+            prev_context=prev,
+            context_ref_info=declined_view,
+        )
+        sc.extract_intent = AsyncMock(return_value={
+            "device_type": "light", "action": "turn_on", "room": "office",
+        })
+        sc.execute_intent = AsyncMock(return_value="Office lights on.")
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+            patch("orchestrator.nodes.route_control.store_conversation_context", new_callable=AsyncMock),
+        ):
+            result = _run(route_control_node(state))
+        # Not answered from prev_context's inquiry branch.
+        assert result.answer == "Office lights on."
+
+    def test_continued_modifier_view_bumps_brightness_by_50(self):
+        """[r3] 'brighter' with prev control (brightness=200) and the
+        continued view -> ref_types has 'modifier', and the
+        route_control.py modifier branch sets action=set_brightness,
+        brightness=250. Pins that D13's view keeps ref_types for continued
+        turns (reader 7 lists ref_types)."""
+        sc = self._setup_basic()
+        sc.extract_intent = AsyncMock(return_value={
+            "device_type": "light", "action": "set_brightness",
+            "room": "office", "parameters": {"brightness": 200},
+        })
+        sc.execute_intent = AsyncMock(return_value="Brighter!")
+        prev = {
+            "response": "Office at 200.",
+            "entities": {"room": "office"},
+            "parameters": {"device_type": "light", "action": "set_brightness", "parameters": {"brightness": 200}},
+            "query": "set office to 200",
+        }
+        continued_view = {"has_context_ref": True, "ref_types": ["modifier"], "is_inquiry": False}
+        state = _make_state(
+            query="brighter",
+            prev_context=prev,
+            context_ref_info=continued_view,
+        )
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+            patch("orchestrator.nodes.route_control.store_conversation_context", new_callable=AsyncMock),
+        ):
+            result = _run(route_control_node(state))
+        call_intent = sc.execute_intent.call_args[0][0]
+        assert call_intent.get("action") == "set_brightness"
+        assert call_intent.get("parameters", {}).get("brightness") == 250
+
+    def test_declined_view_skips_modifier_branch(self):
+        """The same query/prev_context as the continued-modifier row, but
+        with a declined view -- the modifier branch must not fire; a fresh
+        command is extracted instead."""
+        sc = self._setup_basic()
+        sc.extract_intent = AsyncMock(return_value={
+            "device_type": "light", "action": "turn_on", "room": "kitchen",
+        })
+        sc.execute_intent = AsyncMock(return_value="Done")
+        prev = {
+            "response": "Office at 200.",
+            "entities": {"room": "office"},
+            "parameters": {"device_type": "light", "action": "set_brightness", "parameters": {"brightness": 200}},
+            "query": "set office to 200",
+        }
+        declined_view = {
+            "has_context_ref": False, "is_continuation": False,
+            "is_inquiry": False, "ref_types": [], "anaphora_types": [],
+        }
+        state = _make_state(
+            query="brighter",
+            prev_context=prev,
+            context_ref_info=declined_view,
+        )
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+            patch("orchestrator.nodes.route_control.store_conversation_context", new_callable=AsyncMock),
+        ):
+            result = _run(route_control_node(state))
+        call_intent = sc.execute_intent.call_args[0][0]
+        assert call_intent.get("action") == "turn_on"
+        assert call_intent.get("parameters", {}).get("brightness") is None
