@@ -86,8 +86,8 @@ def _get_light_groups() -> Dict[str, str]:
     if _light_groups_cache is not None:
         return _light_groups_cache
 
-    import logging
-    logger = logging.getLogger(__name__)
+    import structlog
+    logger = structlog.get_logger(__name__)
 
     raw = get_config().ha_light_groups
     if not raw:
@@ -103,7 +103,11 @@ def _get_light_groups() -> Dict[str, str]:
             raise ValueError("HA_LIGHT_GROUPS must be a JSON object")
         _light_groups_cache = {str(k).lower(): str(v) for k, v in parsed.items()}
     except Exception as e:
-        logger.error("ha_light_groups_invalid_json", error=str(e))
+        # structlog's logger accepts arbitrary kwargs (error=...); the
+        # stdlib logging.Logger this used to be does not -- passing one
+        # raised TypeError here, outside the try/except this function's
+        # own callers expect to protect them (P9, valerie r3).
+        logger.warning("ha_light_groups_invalid_json", error=str(e))
         _light_groups_cache = {}
     return _light_groups_cache
 
@@ -3978,9 +3982,11 @@ Do NOT mention rooms that have no current or recent motion."""
                     except:
                         pass
                 elif 'home' in query_lower:
-                    # Turn on the office's lights as a fallback (DC17
-                    # item 1: a specific room's group, never "all").
-                    arriving_group = _get_light_groups().get("office")
+                    # Turn on the living room's lights as a fallback (DC17
+                    # item 1: a specific room's group, never "all"; P9
+                    # fixed the room -- the original hardcoded target here
+                    # was light.living_room_all, not light.office_all).
+                    arriving_group = _get_light_groups().get("living_room")
                     if arriving_group:
                         try:
                             await ha_client.call_service("light", "turn_on", {

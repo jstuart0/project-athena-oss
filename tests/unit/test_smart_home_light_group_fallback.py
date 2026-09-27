@@ -34,6 +34,33 @@ def _set_light_groups(monkeypatch, raw: str):
     monkeypatch.setattr(shc, "get_config", lambda: mock.MagicMock(ha_light_groups=raw))
 
 
+def test_invalid_json_yields_empty_dict_and_logs_warning_not_raise(monkeypatch):
+    """P9 (valerie r3): _get_light_groups used a stdlib logging.Logger but
+    called it with a structlog-style error=... kwarg, which stdlib logging
+    doesn't accept -- HA_LIGHT_GROUPS='{not json' raised TypeError outside
+    the try/except this function's callers expect to be protected by.
+    Mirrors tv_handler/music_handler's invalid-JSON tests. _get_light_groups
+    creates its own structlog logger locally (`import structlog;
+    logger = structlog.get_logger(__name__)`), so there's no module-level
+    `shc.logger` to monkeypatch -- stub structlog.get_logger itself."""
+    _set_light_groups(monkeypatch, "{not valid json")
+    calls = []
+
+    class _FakeLogger:
+        def info(self, event, **kw):
+            pass
+
+        def warning(self, event, **kw):
+            calls.append({"event": event, **kw})
+
+    import structlog
+    monkeypatch.setattr(structlog, "get_logger", lambda *a, **kw: _FakeLogger())
+
+    result = shc._get_light_groups()
+    assert result == {}
+    assert calls and calls[0]["event"] == "ha_light_groups_invalid_json"
+
+
 def _failing_ha_client():
     """The scene/script activation call always fails (that's what triggers
     the fallback); any subsequent light/lock call the fallback itself
@@ -112,7 +139,10 @@ def test_configured_good_morning_uses_office_group_not_all(monkeypatch):
     assert "turned on the lights" in result.lower()
 
 
-def test_configured_arriving_home_uses_office_group_not_all(monkeypatch):
+def test_configured_arriving_home_uses_living_room_group_not_all(monkeypatch):
+    """P9: the pre-P7 hardcoded target for this fallback was
+    light.living_room_all (not light.office_all -- that's good_morning's
+    room)."""
     _set_light_groups(monkeypatch, '{"living_room": "light.living_room_all", "office": "light.office_all"}')
     ha_client = _failing_ha_client()
 
@@ -127,5 +157,5 @@ def test_configured_arriving_home_uses_office_group_not_all(monkeypatch):
         if c.args[:2] == ("light", "turn_on")
     ]
     assert len(turn_on_calls) == 1
-    assert turn_on_calls[0].args[2]["entity_id"] == "light.office_all"
+    assert turn_on_calls[0].args[2]["entity_id"] == "light.living_room_all"
     assert "welcome home" in result.lower()
