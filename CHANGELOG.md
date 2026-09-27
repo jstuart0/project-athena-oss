@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Ticket:** [ATHENA-115](https://plane.xmojo.net)
+
+### Fixed: `/ha/conversation` 500'd with NameError AFTER a device command had already executed (ATHENA-115)
+
+- **Fixed — `src/gateway/main.py::ha_conversation`** raised `NameError: name 'HAResponseContent' is not defined` on the `ha_simple_command_fastpath` and `ha_intent_prerouting` (HOME intent) fast paths -- both execute the requested Home Assistant command (e.g. turning on a light) and only fail while formatting the reply, so hank reproduced this live as "light turns on, response 500s". `HAResponseContent`/`HASpeechContent`/`HAPlainSpeech` were never defined anywhere in this codebase (`git log -S` traces them to the initial OSS commit and no later commit ever added them) -- `HAConversationResponse.response` is a plain `Dict[str, Any]`, not a nested pydantic model. New shared `_ha_response_payload(speech_text, language)` helper builds that dict directly, matching the shape the orchestrator-routed success path already built correctly (also refactored onto the same helper, removing the duplication). New tests: `tests/unit/test_gateway_nonstream_continuity.py` (`test_ATHENA_115_*`) drive `/ha/conversation` end-to-end through the fastpath, prerouted-HOME, and mocked-orchestrator-reply paths, asserting a 200 with HA's expected response shape.
+- **Images affected**: gateway (`src/gateway/main.py`).
+
+---
+
+## [Unreleased]
+
 > **Ticket:** [ATHENA-112](https://plane.xmojo.net)
 > **Campaign:** `2026-09-27-deliver-athena-dashboard-health-and-tcp-poller`
 

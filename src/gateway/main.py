@@ -2595,6 +2595,34 @@ async def ha_wake_word_detected(request: dict) -> dict:
     return {"status": "warming", "device_id": device_id}
 
 
+def _ha_response_payload(speech_text: str, language: str) -> Dict[str, Any]:
+    """Build the HA conversation-API response dict (ATHENA-115).
+
+    HAConversationResponse.response is a plain `Dict[str, Any]` (no nested
+    pydantic model) -- HAResponseContent/HASpeechContent/HAPlainSpeech were
+    never defined anywhere in this codebase (git log -S confirms they date
+    to the initial OSS commit and were never added), so every call site that
+    built the response through them raised NameError after the requested
+    action had already executed. Mirrors the shape the orchestrator-routed
+    success path below already builds correctly.
+    """
+    return {
+        "speech": {
+            "plain": {
+                "speech": speech_text,
+                "extra_data": None
+            }
+        },
+        "card": {},
+        "language": language,
+        "response_type": "action_done",
+        "data": {
+            "success": True,
+            "targets": []
+        }
+    }
+
+
 @app.post("/ha/conversation", response_model=HAConversationResponse)
 async def ha_conversation(request: HAConversationRequest):
     """
@@ -2674,11 +2702,7 @@ async def ha_conversation(request: HAConversationRequest):
                     logger.info(f"Fast-path response: {response_text}")
 
                     return HAConversationResponse(
-                        response=HAResponseContent(
-                            speech=HASpeechContent(
-                                plain=HAPlainSpeech(speech=response_text)
-                            )
-                        ),
+                        response=_ha_response_payload(response_text, request.language),
                         conversation_id=request.conversation_id or "fastpath",
                         continue_conversation=False
                     )
@@ -2702,11 +2726,7 @@ async def ha_conversation(request: HAConversationRequest):
                     logger.info(f"Pre-routed SIMPLE response: {response_text[:50]}...")
 
                     return HAConversationResponse(
-                        response=HAResponseContent(
-                            speech=HASpeechContent(
-                                plain=HAPlainSpeech(speech=response_text)
-                            )
-                        ),
+                        response=_ha_response_payload(response_text, request.language),
                         conversation_id=request.conversation_id or "prerouted",
                         continue_conversation=False
                     )
@@ -2728,11 +2748,7 @@ async def ha_conversation(request: HAConversationRequest):
                         logger.info(f"Pre-routed HOME response: {response_text}")
 
                         return HAConversationResponse(
-                            response=HAResponseContent(
-                                speech=HASpeechContent(
-                                    plain=HAPlainSpeech(speech=response_text)
-                                )
-                            ),
+                            response=_ha_response_payload(response_text, request.language),
                             conversation_id=request.conversation_id or "prerouted",
                             continue_conversation=False
                         )
@@ -2783,21 +2799,7 @@ async def ha_conversation(request: HAConversationRequest):
         # Format response for Home Assistant
         # continue_conversation at root level signals Voice PE to keep listening after TTS playback
         ha_response = HAConversationResponse(
-            response={
-                "speech": {
-                    "plain": {
-                        "speech": answer,
-                        "extra_data": None
-                    }
-                },
-                "card": {},
-                "language": request.language,
-                "response_type": "action_done",
-                "data": {
-                    "success": True,
-                    "targets": []
-                }
-            },
+            response=_ha_response_payload(answer, request.language),
             conversation_id=orchestrator_session_id,
             continue_conversation=should_continue
         )

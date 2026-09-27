@@ -520,3 +520,110 @@ def test_DC12_warmup_session_sends_service_key_header(monkeypatch):
 
     assert captured["headers"] == {"X-Service-Key": gw.SERVICE_API_KEY}
     assert captured["url"].endswith("/session/sess-warm-1/warmup")
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-115: /ha/conversation used to raise NameError("HAResponseContent")
+# AFTER a device command had already executed (hank reproduced it live: a
+# light turns on, then the response 500s). HAResponseContent/HASpeechContent/
+# HAPlainSpeech were never defined anywhere in this codebase -- HAConversation
+# Response.response is a plain Dict[str, Any] (see HAConversationResponse's
+# own field type). Fixed by building that dict directly via the shared
+# _ha_response_payload helper, mirroring the shape the orchestrator-routed
+# success path already built correctly.
+# ---------------------------------------------------------------------------
+
+
+def _fake_session_mgr(session_id="sess-ha-1"):
+    session_mgr = mock.MagicMock()
+    session_mgr.get_session_for_device = mock.AsyncMock(return_value=session_id)
+    session_mgr.update_session_for_device = mock.AsyncMock()
+    return session_mgr
+
+
+def test_ATHENA_115_fastpath_command_executes_and_returns_200_with_ha_response_shape(monkeypatch, _fixed_room):
+    """Reproduces hank's exact report: ha_simple_command_fastpath is on, the
+    device command executes successfully (the light turns on), and the
+    endpoint must return 200 with HA's expected response shape -- not a 500
+    from a NameError raised after the command already ran."""
+    async def _flags(flag_name, default=False):
+        return {"ha_simple_command_fastpath": True}.get(flag_name, False)
+
+    monkeypatch.setattr(gw, "get_feature_flag", _flags)
+    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
+    monkeypatch.setattr(gw, "detect_simple_command", mock.AsyncMock(return_value=("light_on", {"room": "kitchen"})))
+    monkeypatch.setattr(gw, "execute_simple_command", mock.AsyncMock(return_value="Turning on the light in the kitchen."))
+
+    client = TestClient(gw.app)
+    resp = client.post("/ha/conversation", json={
+        "text": "turn on the kitchen light",
+        "device_id": "kitchen",
+        "language": "en",
+    })
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["response"]["response_type"] == "action_done"
+    assert body["response"]["speech"]["plain"]["speech"] == "Turning on the light in the kitchen."
+    assert body["response"]["data"] == {"success": True, "targets": []}
+    assert body["response"]["language"] == "en"
+    assert body["continue_conversation"] is False
+
+
+def test_ATHENA_115_prerouted_home_command_returns_200_with_ha_response_shape(monkeypatch, _fixed_room):
+    """Same NameError, reached via the ha_intent_prerouting HOME branch
+    instead of the fastpath branch."""
+    async def _flags(flag_name, default=False):
+        return {"ha_intent_prerouting": True}.get(flag_name, False)
+
+    monkeypatch.setattr(gw, "get_feature_flag", _flags)
+    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
+    monkeypatch.setattr(gw, "classify_intent", mock.AsyncMock(return_value="HOME"))
+    monkeypatch.setattr(gw, "detect_simple_command", mock.AsyncMock(return_value=("light_on", {"room": "office"})))
+    monkeypatch.setattr(gw, "execute_simple_command", mock.AsyncMock(return_value="Turning on the light in the office."))
+
+    client = TestClient(gw.app)
+    resp = client.post("/ha/conversation", json={
+        "text": "turn on the office light",
+        "device_id": "office",
+        "language": "en",
+    })
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["response"]["response_type"] == "action_done"
+    assert body["response"]["speech"]["plain"]["speech"] == "Turning on the light in the office."
+
+
+def test_ATHENA_115_orchestrator_routed_reply_returns_200_with_ha_response_shape(monkeypatch, _fixed_room):
+    """End-to-end with feature-flagged fast paths off: a mocked orchestrator
+    reply must still produce a 200 in HA's expected response shape (the
+    already-working path this refactor must not regress)."""
+    async def _flags(flag_name, default=False):
+        return False
+
+    monkeypatch.setattr(gw, "get_feature_flag", _flags)
+    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
+
+    fake_client = _CapturingClient(_fake_orchestrator_json_response("Turning on the light.", "sess-orch-1"))
+    monkeypatch.setattr(gw, "orchestrator_client", fake_client)
+
+    client = TestClient(gw.app)
+    resp = client.post("/ha/conversation", json={
+        "text": "turn on the light",
+        "device_id": "kitchen",
+        "language": "en",
+    })
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["response"]["response_type"] == "action_done"
+    assert body["response"]["speech"]["plain"]["speech"] == "Turning on the light."
+    assert body["conversation_id"] == "sess-orch-1"
+
+
+def _fake_orchestrator_json_response(answer: str, session_id: str):
+    resp = mock.MagicMock()
+    resp.raise_for_status = mock.MagicMock()
+    resp.json.return_value = {"answer": answer, "session_id": session_id}
+    return resp
