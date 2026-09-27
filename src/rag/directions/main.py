@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                f"{ADMIN_API_URL}/api/base-knowledge/public",
+                f"{ADMIN_API_URL}/api/base-knowledge/public?enabled=true",
                 headers={"X-Service-Key": service_key},
             )
             if response.status_code == 200:
@@ -140,7 +140,14 @@ async def lifespan(app: FastAPI):
                 # default-origin fallback never worked. Accept both shapes
                 # defensively (a future/alternate response shape stays safe).
                 entries = data if isinstance(data, list) else data.get("items", [])
-                BASE_KNOWLEDGE = {item["key"]: item["value"] for item in entries}
+                # Defense in depth alongside the ?enabled=true query param
+                # above: a row this client shouldn't act on stays excluded
+                # even if a server ever fails to honor that filter.
+                BASE_KNOWLEDGE = {
+                    item["key"]: item["value"]
+                    for item in entries
+                    if item.get("enabled", True)
+                }
                 logger.info("base_knowledge_loaded", keys=list(BASE_KNOWLEDGE.keys()))
     except Exception as e:
         logger.warning("base_knowledge_fetch_error", error=str(e))
@@ -220,15 +227,26 @@ async def get_settings():
 
 
 def get_default_origin() -> str:
-    """Get default origin from base knowledge."""
+    """Get default origin from base knowledge.
+
+    P3c: a disabled or empty-value default_location row (?enabled=true
+    still returns whatever the admin API considers "enabled", and the
+    entry's own `value` can independently be an empty/whitespace string --
+    e.g. after a Memory & Context "clear" save) must fall through to the
+    env-configured default exactly as if BASE_KNOWLEDGE had never loaded
+    that key at all, not surface as a blank origin.
+    """
     # Try various keys that might contain address
     for key in ["address", "home_address", "default_location", "location"]:
-        if key in BASE_KNOWLEDGE:
-            return BASE_KNOWLEDGE[key]
+        value = BASE_KNOWLEDGE.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
 
-    # Construct from city/state if available
-    if "city" in BASE_KNOWLEDGE and "state" in BASE_KNOWLEDGE:
-        return f"{BASE_KNOWLEDGE['city']}, {BASE_KNOWLEDGE['state']}"
+    # Construct from city/state if both are present and non-empty
+    city = BASE_KNOWLEDGE.get("city")
+    state = BASE_KNOWLEDGE.get("state")
+    if isinstance(city, str) and city.strip() and isinstance(state, str) and state.strip():
+        return f"{city}, {state}"
 
     # Fallback: use env-configured default location (empty string if unconfigured).
     _city = get_config().default_city

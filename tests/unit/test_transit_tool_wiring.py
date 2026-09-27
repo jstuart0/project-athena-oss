@@ -547,6 +547,8 @@ _TRUE_QUERIES = [
     "water taxi to the harbor",
     "is the commuter rail running today",
     "what's the rail schedule this weekend",
+    "which rail line goes downtown",
+    "where's the nearest rail station",
 ]
 
 _FALSE_QUERIES = [
@@ -600,11 +602,11 @@ def test_T6a_is_transit_query_false_cases(query):
 
 
 def test_T6a_floor_named_members():
-    """Six named members (valerie r2/r3): the original two plus codex's
-    four regex additions (commuter rail / rail schedule|line|station
-    include terms, and the "train (my|the|your|a)" verb-sense exclusion),
-    pinned by literal string so a future table edit can't silently drop
-    any of them."""
+    """Named members (valerie r2/r3): the original two, codex's four regex
+    additions (commuter rail / rail schedule|line|station include terms,
+    and the "train (my|the|your|a)" verb-sense exclusion), and valerie
+    r3's two additional rail cases -- pinned by literal string so a future
+    table edit can't silently drop any of them."""
     helpers_module = _import_helpers_module()
     assert len(_TRUE_QUERIES) > 0
     assert len(_FALSE_QUERIES) > 0
@@ -612,6 +614,8 @@ def test_T6a_floor_named_members():
     assert helpers_module.is_transit_query("when's the next bus at union station") is True
     assert helpers_module.is_transit_query("is the commuter rail running today") is True
     assert helpers_module.is_transit_query("what's the rail schedule this weekend") is True
+    assert helpers_module.is_transit_query("which rail line goes downtown") is True
+    assert helpers_module.is_transit_query("where's the nearest rail station") is True
     assert helpers_module.is_transit_query("I need to train my dog before we leave") is False
     assert helpers_module.is_transit_query("can you train the new hire on safety") is False
 

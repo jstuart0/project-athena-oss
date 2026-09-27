@@ -190,6 +190,94 @@ async def test_C2_directions_parses_real_list_shape_and_populates_default_origin
     try:
         assert directions_module.BASE_KNOWLEDGE.get("default_location") == "Denver, CO"
         assert directions_module.get_default_origin() == "Denver, CO"
+        # P3c: the fetch itself asks the admin API to pre-filter to
+        # enabled rows.
+        public_req = transport.public_requests()[0]
+        assert "enabled=true" in str(public_req.url)
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+async def _run_lifespan_with_public_response(monkeypatch, unique_name: str, public_response):
+    transport = _RecordingTransport(public_response=public_response)
+    _patch_async_client(monkeypatch, transport)
+
+    directions_module = _import_directions_main(unique_name)
+    monkeypatch.setattr(directions_module, "startup_service", AsyncMock())
+    monkeypatch.setattr(directions_module, "unregister_service", AsyncMock())
+    fake_cache = MagicMock()
+    fake_cache.connect = AsyncMock()
+    fake_cache.disconnect = AsyncMock()
+    monkeypatch.setattr(directions_module, "CacheClient", MagicMock(return_value=fake_cache))
+
+    fake_app = MagicMock()
+    ctx = directions_module.lifespan(fake_app)
+    await ctx.__aenter__()
+    return directions_module, ctx, transport
+
+
+@pytest.mark.asyncio
+async def test_P3c_default_origin_falls_back_to_default_city_when_row_disabled(monkeypatch):
+    """A default_location row that's disabled (?enabled=true should have
+    excluded it server-side; this proves the client doesn't trust that
+    alone -- see the `item.get("enabled", True)` filter in lifespan)."""
+    monkeypatch.setenv("DEFAULT_CITY", "Boulder")
+    _clear_cache_for_tests()
+
+    disabled_row = [{
+        "id": 1, "category": "location", "key": "default_location",
+        "value": "Denver, CO", "applies_to": "both", "priority": 0,
+        "extra_metadata": None, "enabled": False, "description": None,
+        "created_at": None, "updated_at": None,
+    }]
+    directions_module, ctx, _ = await _run_lifespan_with_public_response(
+        monkeypatch, "_test_p3c_directions_disabled", disabled_row
+    )
+    try:
+        assert directions_module.get_default_origin() == "Boulder"
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_P3c_default_origin_falls_back_to_default_city_when_row_empty(monkeypatch):
+    """A default_location row that's enabled but whose value is empty (or
+    whitespace-only, e.g. after a Memory & Context 'clear' save) must not
+    surface as a blank origin."""
+    monkeypatch.setenv("DEFAULT_CITY", "Boulder")
+    _clear_cache_for_tests()
+
+    empty_row = [{
+        "id": 1, "category": "location", "key": "default_location",
+        "value": "   ", "applies_to": "both", "priority": 0,
+        "extra_metadata": None, "enabled": True, "description": None,
+        "created_at": None, "updated_at": None,
+    }]
+    directions_module, ctx, _ = await _run_lifespan_with_public_response(
+        monkeypatch, "_test_p3c_directions_empty", empty_row
+    )
+    try:
+        assert directions_module.get_default_origin() == "Boulder"
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_P3c_default_origin_uses_non_empty_enabled_row(monkeypatch):
+    monkeypatch.delenv("DEFAULT_CITY", raising=False)
+    _clear_cache_for_tests()
+
+    good_row = [{
+        "id": 1, "category": "location", "key": "default_location",
+        "value": "Denver, CO", "applies_to": "both", "priority": 0,
+        "extra_metadata": None, "enabled": True, "description": None,
+        "created_at": None, "updated_at": None,
+    }]
+    directions_module, ctx, _ = await _run_lifespan_with_public_response(
+        monkeypatch, "_test_p3c_directions_good", good_row
+    )
+    try:
+        assert directions_module.get_default_origin() == "Denver, CO"
     finally:
         await ctx.__aexit__(None, None, None)
 
