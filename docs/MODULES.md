@@ -335,8 +335,8 @@ RAG (Retrieval-Augmented Generation) services provide domain-specific data for q
 | Service | Port | API Key Required | Free Tier |
 |---------|------|-----------------|-----------|
 | Weather | 8010 | `OPENWEATHER_API_KEY` | 1,000/day |
-| Airports | 8011 | None | N/A |
-| Sports | 8017 | `THESPORTSDB_API_KEY` | Yes |
+| Airports | 8011 | `FLIGHTAWARE_API_KEY` (optional, shared with Flights) | Paid only |
+| Sports | 8017 | `THESPORTSDB_API_KEY` + `API_FOOTBALL_KEY` + `GNEWS_API_KEY` (all optional) | Yes |
 | Flights | 8013 | `FLIGHTAWARE_API_KEY` | Paid only |
 | Events | 8014 | `TICKETMASTER_API_KEY` | 5,000/day |
 | Streaming | 8015 | `TMDB_API_KEY` | 1M/month |
@@ -345,7 +345,7 @@ RAG (Retrieval-Augmented Generation) services provide domain-specific data for q
 | WebSearch | 8018 | `BRAVE_API_KEY` | 2,000/month |
 | Dining | 8019 | `GOOGLE_PLACES_API_KEY` | See pricing |
 | Recipes | 8020 | `SPOONACULAR_API_KEY` | 150/day |
-| Directions | 8030 | None | N/A |
+| Directions | 8030 | `GOOGLE_DIRECTIONS_API_KEY` + `GOOGLE_PLACES_API_KEY` (optional, shared with Dining) | See pricing |
 
 ### Enable RAG Services
 
