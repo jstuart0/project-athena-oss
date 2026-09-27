@@ -60,6 +60,7 @@ import orchestrator.nodes  # noqa: E402,F401
 from orchestrator.helpers import resolve_openai_session, ResolvedSession, session_hmac_secret  # noqa: E402
 
 import orchestrator.main as _main_module  # noqa: E402
+import orchestrator.session_manager as _session_manager_module  # noqa: E402
 from orchestrator.nodes import _runtime  # noqa: E402
 from orchestrator.session_manager import SessionManager  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -451,3 +452,110 @@ def test_non_stream_branch_passes_resolved_session():
     )
     assert session_id_a1 == expected_a.session_id
     assert session_id_b == expected_b.session_id
+
+
+# ---------------------------------------------------------------------------
+# F36 (reconciliation round 1, codex r2 High): streaming branches must
+# persist through SessionManager, not mutate the in-memory
+# ConversationSession directly — a bare session.add_message() is invisible
+# to the next get_or_create_session() call, so the next turn replayed no
+# history despite the "Session ... updated" log claiming otherwise.
+#
+# ConversationSession.to_dict() does not deep-copy "messages" — a memory-
+# mode SessionManager's _memory_sessions dict ends up holding the SAME list
+# object as the live ConversationSession, so a raw session.add_message()
+# mutation is (accidentally) visible on the next memory-mode read even
+# without a save, masking the defect. Redis-backed storage has no such
+# aliasing (a save writes an immutable JSON snapshot), which is what
+# production actually uses, so this test uses a minimal fake Redis to
+# reproduce the real failure mode.
+# ---------------------------------------------------------------------------
+
+class _FakeRedisForSessionPersistence:
+    """Minimal async fake Redis: get/setex (sessions) + zadd/zcard/zpopmin
+    (the oai_index register_bounded_session touches on every request)."""
+
+    def __init__(self):
+        self._store: dict[str, str] = {}
+        self._zset: dict[str, float] = {}
+
+    async def get(self, key):
+        return self._store.get(key)
+
+    async def setex(self, key, ttl, value):
+        self._store[key] = value
+
+    async def delete(self, key):
+        self._store.pop(key, None)
+
+    async def zadd(self, key, mapping):
+        self._zset.update(mapping)
+
+    async def zcard(self, key):
+        return len(self._zset)
+
+    async def zpopmin(self, key):
+        if not self._zset:
+            return []
+        member = min(self._zset, key=lambda m: self._zset[m])
+        score = self._zset.pop(member)
+        return [(member, score)]
+
+
+def test_streaming_endpoint_persists_session_history(monkeypatch):
+    async def _fake_sm_get_config():
+        return SimpleNamespace(
+            get_conversation_settings=mock.AsyncMock(return_value={"session_ttl_seconds": 3600})
+        )
+    monkeypatch.setattr(_session_manager_module, "get_config", _fake_sm_get_config)
+
+    sm = SessionManager()
+    sm.redis_client = _FakeRedisForSessionPersistence()
+    _runtime.set_session_manager(sm)
+    _runtime.set_cache_client(_FakeSessionCacheClient())
+
+    fake_state = SimpleNamespace(
+        answer="Hello there!", intent=SimpleNamespace(value="general_info"), request_id="req-1",
+    )
+    monkeypatch.setattr(
+        _main_module, "run_orchestrator_for_streaming", mock.AsyncMock(return_value=fake_state)
+    )
+    monkeypatch.setattr(
+        _main_module, "get_current_mode", mock.AsyncMock(return_value={"mode": "owner", "permissions": {}})
+    )
+    fake_conv_config = SimpleNamespace(
+        get_conversation_settings=mock.AsyncMock(return_value={"enabled": False})
+    )
+    monkeypatch.setattr(_main_module, "get_config", mock.AsyncMock(return_value=fake_conv_config))
+
+    client = TestClient(_main_module.app)
+    opener = "what's the weather"
+    body = {"model": "m", "messages": [{"role": "user", "content": opener}], "stream": True}
+
+    with client.stream("POST", "/v1/chat/completions", json=body) as response:
+        assert response.status_code == 200
+        for _ in response.iter_lines():
+            pass  # drain the SSE stream
+
+    secret = session_hmac_secret(_shared_config.get_config())
+    resolved = resolve_openai_session(
+        [SimpleNamespace(role="user", content=opener)],
+        top_level_session_id=None, extra_body=None, user=None, room=None,
+        secret=secret,
+    )
+
+    async def _fetch():
+        return await sm.get_session(resolved.session_id)
+
+    persisted = _run_asyncio_test_helper(_fetch())
+    assert persisted is not None, "session was never persisted — the streaming turn's history is lost"
+    assert len(persisted.messages) == 2
+    assert persisted.messages[0]["role"] == "user"
+    assert persisted.messages[0]["content"] == opener
+    assert persisted.messages[1]["role"] == "assistant"
+    assert persisted.messages[1]["content"] == "Hello there!"
+
+
+def _run_asyncio_test_helper(coro):
+    import asyncio
+    return asyncio.run(coro)

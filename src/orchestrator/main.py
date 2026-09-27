@@ -8078,10 +8078,16 @@ async def chat_completions(request: OpenAIChatRequest):
                         yield f"data: {json.dumps(chunk_data)}\n\n"
                         await asyncio.sleep(0.02)
 
-                    # Save conversation to session for follow-up queries
-                    session.add_message(role="user", content=user_message, metadata={"intent": state.intent.value if state.intent else "unknown"})
-                    session.add_message(role="assistant", content=state.answer)
-                    logger.info(f"Session {session.session_id} updated with {len(session.messages)} messages (precomputed)")
+                    # Save conversation to session for follow-up queries.
+                    # ATHENA-88 / F36: must persist through SessionManager,
+                    # not mutate the in-memory ConversationSession directly --
+                    # a bare session.add_message() here is invisible to the
+                    # next get_or_create_session() call (Redis/memory never
+                    # gets the update), so the next turn replays with no
+                    # history despite this log line.
+                    await sm.add_message(session.session_id, role="user", content=user_message, metadata={"intent": state.intent.value if state.intent else "unknown"})
+                    await sm.add_message(session.session_id, role="assistant", content=state.answer)
+                    logger.info(f"Session {session.session_id} updated with {len(session.messages) + 2} messages (precomputed)")
                 else:
                     # TRUE STREAMING: Build prompt and stream directly from LLM
                     full_prompt, synthesis_model, synthesis_system_prompt = await build_synthesis_prompt_for_streaming(state)
@@ -8171,11 +8177,14 @@ async def chat_completions(request: OpenAIChatRequest):
                         tts_normalized=is_voice
                     )
 
-                    # Save conversation to session for follow-up queries
+                    # Save conversation to session for follow-up queries.
+                    # ATHENA-88 / F36: persist through SessionManager (see the
+                    # precomputed branch above for why a bare
+                    # session.add_message() here is silently lost).
                     full_response = "".join(response_tokens)
-                    session.add_message(role="user", content=user_message, metadata={"intent": state.intent.value if state.intent else "unknown"})
-                    session.add_message(role="assistant", content=full_response)
-                    logger.info(f"Session {session.session_id} updated with {len(session.messages)} messages (streaming)")
+                    await sm.add_message(session.session_id, role="user", content=user_message, metadata={"intent": state.intent.value if state.intent else "unknown"})
+                    await sm.add_message(session.session_id, role="assistant", content=full_response)
+                    logger.info(f"Session {session.session_id} updated with {len(session.messages) + 2} messages (streaming)")
 
                     # Record streaming synthesis LLM call for metrics
                     from shared.metrics import LLM_CALL_DURATION, LLM_TOKENS_GENERATED
