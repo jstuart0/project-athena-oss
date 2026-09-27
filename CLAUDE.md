@@ -14,7 +14,7 @@ This is the public OSS repository. All code must be implementation-agnostic:
 4. **Test generalizability** — ask "would this work for someone else deploying Athena from scratch?"
 
 **Examples:**
-- ❌ `ha_url = "http://192.168.10.168:8123"` as a fallback
+- ❌ `ha_url = "http://192.0.2.10:8123"` as a fallback
 - ✅ `ha_url = os.getenv("HA_URL")` with a log warning if missing
 - ❌ Hardcoded service URL in a function body
 - ✅ Service URL from env var or `config.py` constant
@@ -91,7 +91,7 @@ Project Athena is an AI-powered smart home assistant with voice interface, RAG (
 | Jarvis Web backend | 3001 | Chat/voice proxy to orchestrator |
 | Redis | 6379 | Caching |
 | Ollama | 11434 | LLM inference |
-| Control Agent | 8099 | Service control (runs on Mac Studio) |
+| Control Agent | 8099 | Service control (runs on the Control Agent host) |
 
 ### Orchestrator pipeline architecture
 
@@ -167,32 +167,28 @@ When adding a new node, helper, or utility:
 
 ### Control Agent
 
-The Control Agent runs on the Mac Studio (192.168.10.108) where Ollama runs. It provides HTTP endpoints to manage Ollama and other services.
+The Control Agent runs on a host alongside Ollama (e.g., an Apple Silicon Mac or bare-metal node). It provides HTTP endpoints to manage Ollama and other services.
 
-**Location:** `src/control_agent/` (copied to Mac Studio at `~/dev/control_agent/`)
+**Location:** `src/control_agent/` (copied to the control-agent host at `~/<path>/control_agent`)
 
-**Starting the Control Agent on Mac Studio:**
+**Starting the Control Agent on its host:**
 ```bash
-ssh jstuart@192.168.10.108
-cd ~/dev/control_agent
+ssh <ssh-user>@<control-agent-host>
+cd ~/<path>/control_agent
 nohup python3 -m uvicorn main:app --host 0.0.0.0 --port 8099 > /tmp/control_agent.log 2>&1 &
 ```
 
 **Verify it's running:**
 ```bash
-curl http://192.168.10.108:8099/health
-curl http://192.168.10.108:8099/ollama/health
+curl http://192.0.2.10:8099/health
+curl http://192.0.2.10:8099/ollama/health
 ```
 
 **K8s Configuration:**
 The admin-backend needs `CONTROL_AGENT_URL=http://<your-control-agent-host>:8099` environment variable set.
 
 **OSS-First default — opt-in required:**
-The Control Agent is disabled by default (`CONTROL_AGENT_ENABLED=false`). Set `CONTROL_AGENT_ENABLED=true` in your private overlay or `.env` only if a Control Agent process is actually running on a host. OSS deployers without a Control Agent no longer see connection errors from admin-backend or orchestrator startup. For Jay's homelab, add both env vars to the private kubeconfig overlay:
-```env
-CONTROL_AGENT_ENABLED=true
-CONTROL_AGENT_URL=http://192.168.10.108:8099
-```
+The Control Agent is disabled by default (`CONTROL_AGENT_ENABLED=false`). Set `CONTROL_AGENT_ENABLED=true` in your private overlay or `.env` only if a Control Agent process is actually running on a host. OSS deployers without a Control Agent no longer see connection errors from admin-backend or orchestrator startup. Deployment-specific host/IP values (SSH targets, private kubeconfig overlay entries) belong in `CLAUDE.local.md` (untracked; see `.gitignore`), not here.
 
 ## Development Commands
 
@@ -231,6 +227,14 @@ docker build --platform linux/amd64 --no-cache -t YOUR_REGISTRY/athena-orchestra
 kubectl config current-context
 
 # Deploy all manifests
+# WARNING: manifests/athena-prod/ is an OSS template with placeholder
+# values. This command is safe against a FRESH, unconfigured namespace
+# only. Against an already-configured namespace it silently reverts every
+# ConfigMap/Secret key back to the placeholder defaults. To change a
+# running deployment's config, patch or edit the live resource
+# (`kubectl patch`/`kubectl edit`) or apply a private overlay — never
+# `kubectl apply -f manifests/athena-prod/` (or the directory) against a
+# namespace that already has house-specific values.
 kubectl apply -f manifests/athena-prod/
 
 # Check deployment status
@@ -272,10 +276,10 @@ Key configuration in `manifests/athena-prod/config.yaml`:
 - `ATHENA_DEFAULT_MODEL` - Default model for seeding
 - `ATHENA_DOMAIN` / `CHAT_DOMAIN` - Your domain names
 - `ADMIN_API_URL` - Admin backend URL; resolution order (`ADMIN_API_URL` → `ADMIN_BACKEND_URL` → `ADMIN_INTERNAL_URL` [deprecated] → `LOCAL_DEV=true` → K8s auto-discovery → `""`) is centralized in `src/shared/admin_url.py::get_admin_url()` — do not add new `os.getenv("ADMIN_*_URL")` calls outside that module
-- Centralized configuration: 27 env vars (`OLLAMA_URL`, `LLM_SERVICE_URL`, `REDIS_URL`, `DATABASE_URL`, `SERVICE_API_KEY`, `DEFAULT_TIMEZONE`, `DEFAULT_CITY`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `DEMO_MODE`, `DEV_MODE`, `CONTROL_AGENT_ENABLED`, `LOGIN_RATE_LIMIT_PER_MINUTE`, `LOGIN_LOCKOUT_THRESHOLD`, `LOGIN_LOCKOUT_MINUTES`, `LOGIN_MINIMUM_DELAY_MS`, `SERVICE_REGISTRY_WRITE_PER_MINUTE`, `HEALTH_POLL_INTERVAL_SECONDS`, `HEALTH_POLL_TIMEOUT_SECONDS`, `HEALTH_POLL_CONCURRENCY`, `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`, `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`, `CONTENT_FETCHER_ALLOW_BROWSER_FETCH`, `SESSION_MAX_COUNT`, `NEW_CONVERSATION_PER_MINUTE_PER_IP`, `TRUSTED_PROXY_CIDRS`, `NEW_CONVERSATION_RESET_GRACE_SECONDS`) are read via `get_config()` from `src/shared/config.py::AthenaConfig` (pydantic-settings BaseSettings). New env vars: prefer adding fields to `AthenaConfig` over inline `os.getenv` — see `CONTRIBUTING.md`.
+- Centralized configuration: 36 env vars (`OLLAMA_URL`, `LLM_SERVICE_URL`, `REDIS_URL`, `DATABASE_URL`, `SERVICE_API_KEY`, `DEFAULT_TIMEZONE`, `DEFAULT_CITY`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_VALIDATE_ISS`, `DEV_MODE`, `DEMO_MODE`, `CONTROL_AGENT_ENABLED`, `LOGIN_RATE_LIMIT_PER_MINUTE`, `LOGIN_LOCKOUT_THRESHOLD`, `LOGIN_LOCKOUT_MINUTES`, `LOGIN_MINIMUM_DELAY_MS`, `SERVICE_REGISTRY_WRITE_PER_MINUTE`, `HEALTH_POLL_INTERVAL_SECONDS`, `HEALTH_POLL_TIMEOUT_SECONDS`, `HEALTH_POLL_CONCURRENCY`, `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`, `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`, `CONTENT_FETCHER_ALLOW_BROWSER_FETCH`, `SESSION_MAX_COUNT`, `NEW_CONVERSATION_PER_MINUTE_PER_IP`, `TRUSTED_PROXY_CIDRS`, `NEW_CONVERSATION_RESET_GRACE_SECONDS`, `ORCHESTRATOR_INGRESS_AUTH`, `MUSIC_ASSISTANT_URL`, `SEARXNG_BASE_URL`, `TRANSIT_REGION_NAME`, `TRANSIT_GTFS_FEEDS`, `TRANSIT_STATIC_SERVICES`, `COMMUNITY_EVENTS_SOURCES`, `DEFAULT_AMTRAK_STATION`) are read via `get_config()` from `src/shared/config.py::AthenaConfig` (pydantic-settings BaseSettings). New env vars: prefer adding fields to `AthenaConfig` over inline `os.getenv` — see `CONTRIBUTING.md`.
   - `SITESCRAPER_ALLOWED_PRIVATE_HOSTS` — comma-separated CIDRs/hostnames that the sitescraper SSRF guard will allow. Empty by default (all private IPs blocked). Warning: wide CIDRs like `10.0.0.0/8` bypass the guard for the entire RFC-1918 10/8 range; scope narrowly.
   - `CONTENT_FETCHER_ALLOW_BROWSER_FETCH` — `true` to enable Playwright-based browser fetching in ContentFetcher (default `false`). Playwright fetches bypass the SSRF guard for user-supplied URLs; only enable in isolated environments where the sitescraper allowlist is already locked down.
-  - `HA_URL` — Home Assistant base URL for artist-search endpoints in `music_config.py`. No hardcoded default (previously `http://192.168.10.168:8123`). The server logs a warning at startup if unset; HA artist-search endpoints will return errors until this is set.
+  - `HA_URL` — Home Assistant base URL for artist-search endpoints in `music_config.py`. No hardcoded default (previously a hardcoded maintainer IP). The server logs a warning at startup if unset; HA artist-search endpoints will return errors until this is set.
 - **Admin-backend startup gates** (ATHENA-12, Campaign 2): the admin-backend will not start under the following misconfigurations — all raise `SystemExit` before any DB or auth initialization:
   - `DEV_MODE=true` with a non-SQLite `DATABASE_URL` on a **non-private host** or **inside a K8s pod** → `SystemExit` (xander:6). Soft-warning carve-out: if `KUBERNETES_SERVICE_HOST` is unset AND the DB host resolves to loopback/RFC1918/ULA, admin-backend emits `logger.warning("dev_mode_with_local_non_sqlite_database", ...)` and continues — this covers developers running a local Postgres instance. K8s pods always raise SystemExit even when the ClusterIP is RFC1918 (xander M4 guard). Link-local (169.254/16, fe80::/10) is NOT in the carve-out and continues to raise SystemExit. Helper: `is_local_host(hostname)` in `admin/backend/app/utils/url_validators.py`; wrapper `_is_local_database_url(url)` in `admin/backend/main.py`.
   - `DEMO_MODE=true` with `DEV_MODE=false` (xander:16)

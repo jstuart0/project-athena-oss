@@ -48,7 +48,7 @@ class EnhancedIntentClassifier:
     """
 
     def __init__(self):
-        # Control patterns (from Baltimore facades)
+        # Control patterns (from single-city facades)
         self.control_patterns = {
             "basic": ["turn on", "turn off", "toggle", "switch"],
             "dimming": ["dim", "brighten", "set brightness", "darker", "lighter"],
@@ -79,7 +79,7 @@ class EnhancedIntentClassifier:
             "random colors", "different colors", "christmas colors", "ocean"
         ]
 
-        # Information patterns (comprehensive from Baltimore facades)
+        # Information patterns (comprehensive from single-city facades)
         self.info_patterns = {
             IntentCategory.SPORTS: [
                 "ravens", "orioles", "score", "game", "won", "lost", "beat",

@@ -219,7 +219,7 @@ class UnifiedToolRegistry:
         if not mcp_url:
             # Default to localhost:5678 — Class 1-equivalent (loopback, fail-closed).
             mcp_url = "http://localhost:5678/mcp"
-            logger.debug("Using default Thor n8n MCP URL")
+            logger.debug("Using default loopback n8n MCP URL")
 
         # Security: Check if MCP URL domain is allowed (existing string check, defense-in-depth).
         mcp_security = await self._get_mcp_security()

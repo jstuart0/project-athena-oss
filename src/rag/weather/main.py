@@ -139,7 +139,7 @@ async def geocode_location(location: str) -> Dict[str, Any]:
             logger.info(f"Extracted city/state from address: {location}")
 
     # Normalize location format for OpenWeatherMap API
-    # Remove spaces around commas: "Baltimore, MD" -> "Baltimore,MD"
+    # Remove spaces around commas: "Denver, CO" -> "Denver,CO"
     normalized_location = location.replace(", ", ",").replace(" ,", ",")
 
     # Add ,US if location doesn't have a country code and appears to be US format

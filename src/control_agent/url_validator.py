@@ -2,7 +2,7 @@
 SSRF callback-URL validator for the Control Agent.
 
 Placed here (src/control_agent/) rather than src/shared/ because the Control
-Agent runs as standalone Python files copied to the bare Mac Studio host.
+Agent runs as standalone Python files copied to the bare control-agent host.
 Importing from src.shared.* would require PYTHONPATH to include src/, which
 is not guaranteed in the bare-host distribution.
 

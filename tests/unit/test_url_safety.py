@@ -147,15 +147,15 @@ class TestValidateUrlNotPrivate:
 
     def test_literal_hostname_allowlisted(self):
         result = _vld(
-            "http://192.168.10.50/health",
-            allowed_private_hosts=["192.168.10.50"],
+            "http://192.168.1.50/health",
+            allowed_private_hosts=["192.168.1.50"],
         )
         assert result.allowed is True, f"Expected allowed, reason: {result.reason}"
 
     def test_other_private_ip_not_allowlisted(self):
         result = _vld(
-            "http://192.168.10.51/health",
-            allowed_private_hosts=["192.168.10.50"],
+            "http://192.168.1.51/health",
+            allowed_private_hosts=["192.168.1.50"],
         )
         assert result.allowed is False
 

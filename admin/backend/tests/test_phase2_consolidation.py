@@ -807,6 +807,23 @@ class TestPhase2ReconcileRegressions:
             "service-control.js must have a 'pending' case for NULL→'pending' normalization"
         )
 
+    def test_service_control_js_has_unconfigured_case(self):
+        """DC10 (ATHENA-89 Phase 4): service-control.js must have an explicit
+        'unconfigured' case with its own amber badge, distinct from both the
+        green 'healthy' case and the yellow 'unhealthy'/'degraded' case."""
+        path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), '..', '..', '..', 'admin', 'frontend', 'service-control.js')
+        )
+        with open(path) as f:
+            source = f.read()
+        assert "case 'unconfigured':" in source, (
+            "service-control.js must have an 'unconfigured' case (DC10: 200 body with configured: false)"
+        )
+        idx = source.index("case 'unconfigured':")
+        snippet = source[idx: idx + 400]
+        assert "amber" in snippet, "the unconfigured badge must use the amber palette, not green/red/gray"
+        assert "Needs Setup" in snippet
+
     # -----------------------------------------------------------------------
     # xander H-1 — integrations.py healthy path has no MAC_STUDIO_IP reference
     # -----------------------------------------------------------------------

@@ -663,3 +663,116 @@ class TestSSRFIntegration:
         assert row.health_status == 'unhealthy'
         assert row.last_error is not None
         assert 'ssrf_blocked' in (row.last_error or '')
+
+
+# ---------------------------------------------------------------------------
+# DC10: a 200 response with configured=False maps to health_status
+# 'unconfigured', distinct from both 'healthy' and 'unhealthy'.
+# ---------------------------------------------------------------------------
+
+
+class TestDC10UnconfiguredStatus:
+    """_poll_one returns 'unconfigured' for a 200 body with configured: false,
+    the shape transportation/community_events' /health endpoints emit when a
+    RAG service is reachable but missing required config (no feeds, no
+    sources, etc.)."""
+
+    @pytest.mark.asyncio
+    async def test_configured_false_yields_unconfigured_status(self):
+        from app.services import health_poller as hp
+
+        fake_response = mock.MagicMock()
+        fake_response.status_code = 200
+        fake_response.json.return_value = {
+            "status": "healthy",
+            "configured": False,
+            "message": "no transit feeds configured",
+        }
+        fake_client = mock.AsyncMock()
+        fake_client.get = mock.AsyncMock(return_value=fake_response)
+
+        async def _allow(*args, **kwargs):
+            return (True, None)
+
+        with mock.patch.object(hp, "_validate_service_url", _allow):
+            result = await hp._poll_one(
+                fake_client, asyncio.Semaphore(1), 1, "transportation",
+                "athena-rag-transportation", 8000, "/health",
+            )
+
+        svc_id, status, elapsed_ms, category, detail, health_message = result
+        assert status == "unconfigured"
+        assert category == "ok"
+        assert health_message == "no transit feeds configured"
+
+    @pytest.mark.asyncio
+    async def test_configured_true_still_yields_healthy(self):
+        """Sibling case: configured: true (or the key absent) is unaffected --
+        proves the branch is additive, not a regression on the healthy path."""
+        from app.services import health_poller as hp
+
+        fake_response = mock.MagicMock()
+        fake_response.status_code = 200
+        fake_response.json.return_value = {"status": "healthy", "configured": True}
+        fake_client = mock.AsyncMock()
+        fake_client.get = mock.AsyncMock(return_value=fake_response)
+
+        async def _allow(*args, **kwargs):
+            return (True, None)
+
+        with mock.patch.object(hp, "_validate_service_url", _allow):
+            result = await hp._poll_one(
+                fake_client, asyncio.Semaphore(1), 1, "transportation",
+                "athena-rag-transportation", 8000, "/health",
+            )
+
+        assert result[1] == "healthy"
+
+    @pytest.mark.asyncio
+    async def test_dc10_end_to_end_writes_unconfigured_to_db(self, db):
+        """Round trip through _poll_all_services -> DB write, same pattern as
+        TestSSRFIntegration's loopback test below."""
+        import contextlib
+
+        svc = RagService(
+            name="dc10-svc",
+            display_name="DC10 Test Service",
+            host="athena-rag-transportation",
+            port=8000,
+            protocol="http",
+            health_endpoint="/health",
+            service_type="rag",
+            enabled=True,
+        )
+        db.add(svc)
+        db.commit()
+        db.refresh(svc)
+
+        @contextlib.contextmanager
+        def _patched_db_context():
+            yield db
+
+        fake_response = mock.MagicMock()
+        fake_response.status_code = 200
+        fake_response.json.return_value = {"status": "healthy", "configured": False}
+
+        from app.services import health_poller as hp
+
+        async def _allow(*args, **kwargs):
+            return (True, None)
+
+        with mock.patch.object(hp, "get_db_context", _patched_db_context):
+            with mock.patch.object(hp, "_validate_service_url", _allow):
+                with mock.patch("httpx.AsyncClient") as mock_client_cls:
+                    mock_client = mock.AsyncMock()
+                    mock_client.__aenter__ = mock.AsyncMock(return_value=mock_client)
+                    mock_client.__aexit__ = mock.AsyncMock(return_value=False)
+                    mock_client.get = mock.AsyncMock(return_value=fake_response)
+                    mock_client_cls.return_value = mock_client
+
+                    semaphore = asyncio.Semaphore(8)
+                    await hp._poll_all_services(semaphore)
+
+        db.expire_all()
+        row = db.query(RagService).filter(RagService.name == "dc10-svc").first()
+        assert row.health_status == "unconfigured"

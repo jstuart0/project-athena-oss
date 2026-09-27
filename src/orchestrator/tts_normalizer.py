@@ -101,9 +101,9 @@ def expand_street_abbreviations(text: str) -> str:
 def expand_state_abbreviations(text: str) -> str:
     """Expand US state abbreviations."""
     # Pattern: comma + space + two-letter state code (optionally followed by ZIP)
-    # e.g., "Baltimore, MD" -> "Baltimore, Maryland"
-    # e.g., "Baltimore, MD 21201" -> "Baltimore, Maryland 21201"
-    # Also: "Baltimore MD" -> "Baltimore Maryland" (no comma)
+    # e.g., "Denver, CO" -> "Denver, Colorado"
+    # e.g., "Denver, CO 80202" -> "Denver, Colorado 80202"
+    # Also: "Denver CO" -> "Denver Colorado" (no comma)
 
     for abbrev, full in STATE_ABBREVIATIONS.items():
         # Match state abbreviation after comma or at word boundary
@@ -117,7 +117,7 @@ def expand_state_abbreviations(text: str) -> str:
         text = re.sub(pattern, full, text)
 
         # Match state abbreviation after city name (word + space + STATE)
-        # e.g., "Baltimore MD" or "New York NY" -> "Baltimore Maryland"
+        # e.g., "Denver CO" or "New York NY" -> "Denver Colorado"
         # Only match uppercase 2-letter codes after a capitalized word
         pattern = rf'([A-Z][a-z]+)\s+{abbrev}\b'
         text = re.sub(pattern, rf'\1, {full}', text)
@@ -704,11 +704,11 @@ def normalize_for_tts(text: str) -> str:
 # Quick test
 if __name__ == "__main__":
     test_cases = [
-        "Samos Greek Island Grill at 3362 Harford Rd, Baltimore, MD",
-        "Try Ikaros at 4805 Eastern Ave, Baltimore, MD 21224",
+        "Example Diner at 3362 Example Rd, Denver, CO",
+        "Try the cafe at 4805 Example Ave, Denver, CO 80202",
         "Dr. Smith lives at 100 N Main St, Towson, MD",
         "The restaurant is approx. 10 mins away on Hwy 95",
-        "Located at 500 E Pratt St, Baltimore, MD 21202",
+        "Located at 500 E Example St, Denver, CO 80202",
         # Time tests
         "The meeting is at 10:30 AM tomorrow",
         "Store opens at 9AM and closes at 8PM",
@@ -738,8 +738,8 @@ if __name__ == "__main__":
         "Budget option: $ rating",
         "Fine dining at $$$$ prices",
         # ZIP code tests
-        "Located at 100 Main St, Baltimore, MD 21201",
-        "Address: 500 Pratt St, Baltimore, Maryland 21202",
+        "Located at 100 Main St, Denver, CO 80202",
+        "Address: 500 Example St, Denver, Colorado 80202",
         "Visit us at 123 Oak Ave, Towson, MD 21204-5678",
         # Sports score tests
         "The Ravens won 28-14 against the Steelers",
@@ -756,7 +756,7 @@ if __name__ == "__main__":
         "They're 0 - 3 on the road",
         "With a record of 15-2, they lead the division",
         # State abbreviations without comma
-        "Baltimore MD is a great city",
+        "Denver CO is a great city",
         "The weather in Philadelphia PA is nice",
         "Visit New York NY this summer",
         # Timezone abbreviations

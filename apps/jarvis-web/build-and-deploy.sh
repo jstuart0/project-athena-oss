@@ -1,10 +1,12 @@
 #!/bin/bash
-# Build and Deploy Jarvis Web to Thor Cluster
+# Build and Deploy Jarvis Web to your Kubernetes cluster
 #
-# This script builds the Docker image for linux/amd64 (thor cluster architecture)
-# and deploys it to the Kubernetes cluster.
+# This script builds the Docker image for linux/amd64 (adjust if your
+# cluster runs a different architecture) and deploys it to the cluster.
 #
 # Usage: ./build-and-deploy.sh [build|deploy|all]
+# Set KUBE_CONTEXT to the kubectl context name your cluster uses; the
+# script otherwise confirms whatever context is currently active.
 
 set -e
 
@@ -56,16 +58,20 @@ check_prerequisites() {
         exit 1
     fi
 
-    # Check kubectl context
+    # Check kubectl context. Set KUBE_CONTEXT to require a specific context
+    # name; otherwise the current context is just printed for confirmation
+    # before deploying to it.
     CURRENT_CONTEXT=$(kubectl config current-context 2>/dev/null || echo "none")
-    if [[ "$CURRENT_CONTEXT" != *"thor"* ]] && [[ "$CURRENT_CONTEXT" != *"kubernetes-admin"* ]]; then
+    if [[ -n "${KUBE_CONTEXT:-}" ]] && [[ "$CURRENT_CONTEXT" != "$KUBE_CONTEXT" ]]; then
         log_warning "Current kubectl context is '$CURRENT_CONTEXT'"
-        log_warning "Expected 'thor' or 'kubernetes-admin@kubernetes' context"
+        log_warning "Expected '$KUBE_CONTEXT' (set via KUBE_CONTEXT)"
         read -p "Continue anyway? (y/N) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             exit 1
         fi
+    else
+        log_info "Deploying against kubectl context '$CURRENT_CONTEXT'"
     fi
 
     log_success "Prerequisites check passed"

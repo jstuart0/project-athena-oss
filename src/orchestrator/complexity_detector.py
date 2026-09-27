@@ -305,7 +305,7 @@ if __name__ == "__main__":
     test_queries = [
         ("What's the weather?", "weather"),
         ("Turn on the kitchen lights", "control"),
-        ("Compare the weather in Baltimore and New York", "weather"),
+        ("Compare the weather in Denver and New York", "weather"),
         ("Will it rain tomorrow afternoon?", "weather"),
         ("Find me Italian restaurants near me that are open late", "dining"),
         ("What's the best route to the airport if there's traffic?", "directions"),

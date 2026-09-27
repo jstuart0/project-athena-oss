@@ -1,8 +1,9 @@
 """
 Control Agent for Project Athena
 
-Lightweight service running on Mac Studio (192.168.10.167:8099) that provides
-HTTP endpoints to control Docker containers and Python process services.
+Lightweight service running on the control-agent host (e.g. 192.0.2.10:8099)
+that provides HTTP endpoints to control Docker containers and Python
+process services.
 
 This agent enables the admin backend to manage Athena services remotely.
 Supports both Docker containers AND bare Python/uvicorn processes.
@@ -340,7 +341,7 @@ async def lifespan(app):
 
 app = FastAPI(
     title="Athena Control Agent",
-    description="Service control agent for Project Athena on Mac Studio (Docker + Process + Watchdog)",
+    description="Service control agent for Project Athena on the control-agent host (Docker + Process + Watchdog)",
     version="3.0.0",
     lifespan=lifespan,
 )
@@ -669,7 +670,7 @@ ALLOWED_CONTAINERS = {
     "athena-streaming",
     "athena-dining",
     "athena-websearch",
-    # Infrastructure (on Mac mini 192.168.10.181)
+    # Infrastructure (running on a secondary host)
     "qdrant",
     "redis",
 }
@@ -1475,7 +1476,7 @@ async def hf_delete_downloaded(file_path: str):
 # =============================================================================
 # DEBUG LOGS ENDPOINTS
 # =============================================================================
-# Serve debug logs from Mac Studio filesystem
+# Serve debug logs from the control-agent host filesystem
 
 import re
 import json

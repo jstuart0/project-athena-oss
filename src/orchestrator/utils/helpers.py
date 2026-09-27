@@ -156,10 +156,10 @@ def normalize_location(location: str) -> str:
     Normalize a location string by adding state if known city.
 
     Args:
-        location: Location string (e.g., "Baltimore" or "Baltimore, MD")
+        location: Location string (e.g., "Denver" or "Denver, CO")
 
     Returns:
-        Normalized location (e.g., "Baltimore, MD")
+        Normalized location (e.g., "Denver, CO")
     """
     from .constants import CITY_STATE_MAP
 

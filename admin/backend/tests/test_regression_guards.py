@@ -1,6 +1,6 @@
-"""Regression guards for audit Campaign 1 (C1).
+"""Regression guards for audit Campaign 1 (C1), plus ATHENA-89 (D9/D5).
 
-Two guards:
+Three guards:
 
 1. test_no_maintainer_ip_in_model_defaults — ensures no future PR re-introduces
    a maintainer IP (192.168.x.x) or maintainer domain (*.xmojo.net) as a
@@ -16,10 +16,20 @@ Two guards:
    associations) has not yet been implemented. Jackson will flip this to
    expected-pass when Phase 4 lands.
 
+3. test_maintainer_leak_gate_clean (ATHENA-89 Phase 4) — runs
+   scripts/check-maintainer-leaks.py over the whole tree via subprocess and
+   asserts it exits 0. Skipped (not failed) when the repo root has no .git,
+   so the admin-backend suite doesn't take on a hard git-checkout dependency
+   (bob L1, mozart 11) -- e.g. a tarball install or a container image build
+   context with no .git directory.
+
 ATHENA-11 C1 campaign — see thoughts/shared/plans/2026-05-15-deliver-audit-deferred-cleanup-batch.md
+ATHENA-89 — see .mozart/plans/active/2026-09-27-deliver-athena-oss-readiness.md
 """
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -52,6 +62,37 @@ def test_no_maintainer_ip_in_model_defaults():
     assert not bad, (
         f"Maintainer IP/domain found in admin/backend/app/models.py column defaults:\n"
         + "\n".join(bad)
+    )
+
+
+# ── guard 3: maintainer-leak gate stays clean ────────────────────────────────
+
+_REPO_GIT_DIR = _REPO_ROOT / ".git"
+
+
+@pytest.mark.skipif(
+    not _REPO_GIT_DIR.exists(),
+    reason="repo root has no .git checkout (e.g. tarball/container build context); "
+           "the leak gate's stale-allowlist detection needs git",
+)
+def test_maintainer_leak_gate_clean():
+    """scripts/check-maintainer-leaks.py must exit 0 on the whole tree.
+
+    A full-tree run (no --paths) is the CI/Phase-5 gate's own invocation
+    shape; this guard is the admin-backend-suite-local equivalent so a
+    regression is caught without needing the CI workflow to run.
+    """
+    script = _REPO_ROOT / "scripts" / "check-maintainer-leaks.py"
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, (
+        f"check-maintainer-leaks.py exited {result.returncode}, expected 0:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
 

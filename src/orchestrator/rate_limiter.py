@@ -17,7 +17,7 @@ Usage:
     result = await with_rate_limit(
         "weather",
         fetch_weather_data,
-        location="Baltimore"
+        location="Denver"
     )
 
     # Per-session limiting
@@ -528,7 +528,7 @@ async def with_rate_limit(
         result = await with_rate_limit(
             "weather",
             fetch_weather,
-            location="Baltimore"
+            location="Denver"
         )
 
         # Per-session rate limiting

@@ -279,7 +279,7 @@ class SelfBuildingToolsManager:
         n8n_api_key: str = None,
         admin_url: str = None
     ):
-        # Use Thor's central n8n service by default
+        # Use the cluster's central n8n service by default
         self.n8n_url = n8n_url or os.getenv("N8N_URL", "http://localhost:5678")
         self.n8n_api_key = n8n_api_key or os.getenv("N8N_API_KEY", "")
         self.admin_url = admin_url or get_admin_url()

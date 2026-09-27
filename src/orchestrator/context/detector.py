@@ -529,8 +529,8 @@ def is_conversational_reference(query: str, has_context: bool) -> bool:
 # These indicate user wants to change the assumed location
 LOCATION_CORRECTION_PATTERNS = [
     # Explicit corrections
-    r"\bi(?:'m| am) not in (\w+(?:\s+\w+)?)",  # "I'm not in Baltimore"
-    r"\bnot in (\w+(?:\s+\w+)?)\b",  # "not in Baltimore"
+    r"\bi(?:'m| am) not in (\w+(?:\s+\w+)?)",  # "I'm not in Denver"
+    r"\bnot in (\w+(?:\s+\w+)?)\b",  # "not in Denver"
     r"\bi(?:'m| am) in (\w+(?:\s+\w+)?)\b",  # "I'm in Northampton"
     r"\bi(?:'m| am) at (\w+(?:\s+\w+)?)\b",  # "I'm at Northampton"
     r"\bi(?:'m| am) near (\w+(?:\s+\w+)?)\b",  # "I'm near Northampton"

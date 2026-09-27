@@ -370,14 +370,22 @@ async def _poll_one(
             resp = await client.get(url)
             elapsed_ms = int((time.monotonic() - start) * 1000)
             if resp.status_code == 200:
+                configured = True
                 try:
                     data = resp.json()
                     health_message = (
                         data.get('message') or data.get('status') or ''
                     )[:500]
+                    # DC10: a service can be up (200) but not yet configured
+                    # (no API key, no origin station, etc.) -- distinct from
+                    # both "healthy" and "unhealthy" so the admin UI can show
+                    # an amber "needs setup" badge instead of green or red.
+                    if isinstance(data, dict) and data.get('configured') is False:
+                        configured = False
                 except Exception:
                     health_message = ''
-                return (svc_id, 'healthy', elapsed_ms, 'ok', '', health_message)
+                status = 'healthy' if configured else 'unconfigured'
+                return (svc_id, status, elapsed_ms, 'ok', '', health_message)
             cat, detail = _classify_and_sanitize(None, resp.status_code)
             return (svc_id, 'unhealthy', elapsed_ms, cat, detail, None)
         except Exception as e:

@@ -334,7 +334,7 @@ def format_alerts(data: Dict[str, Any], location_info: Dict[str, Any]) -> Dict[s
 
 @app.get("/weather/onecall")
 async def onecall_weather(
-    location: str = Query(..., description="City name (e.g., 'Baltimore, MD')"),
+    location: str = Query(..., description="City name (e.g., 'Denver, CO')"),
     exclude: Optional[str] = Query(None, description="Exclude: minutely,hourly,daily,alerts")
 ):
     """
@@ -377,7 +377,7 @@ async def onecall_weather(
 
 @app.get("/weather/current")
 async def current_weather(
-    location: str = Query(..., description="City name (e.g., 'Baltimore, MD')")
+    location: str = Query(..., description="City name (e.g., 'Denver, CO')")
 ):
     """Get current weather only (compatible with standard weather service)."""
     try:
@@ -409,7 +409,7 @@ async def current_weather(
 
 @app.get("/weather/forecast")
 async def weather_forecast(
-    location: str = Query(..., description="City name (e.g., 'Baltimore, MD')"),
+    location: str = Query(..., description="City name (e.g., 'Denver, CO')"),
     days: int = Query(5, ge=1, le=8, description="Number of days (1-8)")
 ):
     """Get daily forecast (compatible with standard weather service, but up to 8 days)."""
@@ -442,7 +442,7 @@ async def weather_forecast(
 
 @app.get("/weather/hourly")
 async def hourly_forecast(
-    location: str = Query(..., description="City name (e.g., 'Baltimore, MD')"),
+    location: str = Query(..., description="City name (e.g., 'Denver, CO')"),
     hours: int = Query(24, ge=1, le=48, description="Number of hours (1-48)")
 ):
     """Get hourly forecast (up to 48 hours)."""
@@ -475,7 +475,7 @@ async def hourly_forecast(
 
 @app.get("/weather/alerts")
 async def weather_alerts(
-    location: str = Query(..., description="City name (e.g., 'Baltimore, MD')")
+    location: str = Query(..., description="City name (e.g., 'Denver, CO')")
 ):
     """Get current weather alerts for location."""
     try:

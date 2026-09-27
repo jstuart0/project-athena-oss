@@ -23,7 +23,7 @@ logger = structlog.get_logger()
 # addressed (secret distribution to the Ollama host), add SERVICE_API_KEY here
 # and re-enable Depends(verify_service_api_key) on the progress route.
 
-# Download directory on Mac Studio
+# Download directory on the Control Agent host
 MODELS_DIR = Path.home() / "dev" / "project-athena" / "models" / "downloads"
 
 

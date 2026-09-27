@@ -19,7 +19,7 @@ Usage:
     result = await with_circuit_breaker(
         "weather",
         fetch_weather_data,
-        location="Baltimore",
+        location="Denver",
         fallback=lambda: {"error": "Weather service unavailable"}
     )
 
@@ -294,7 +294,7 @@ async def with_circuit_breaker(
         result = await with_circuit_breaker(
             "weather",
             fetch_weather,
-            location="Baltimore",
+            location="Denver",
             fallback=lambda: {"error": "Service unavailable"}
         )
 

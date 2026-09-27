@@ -603,6 +603,14 @@ function renderRagServiceRow(service) {
             statusLabel = `● Degraded${rt}`;
             statusBadge = `<span class="px-2 py-1 text-xs rounded bg-yellow-900 text-yellow-300">${statusLabel}</span>`;
             break;
+        case 'unconfigured':
+            // DC10: service is reachable (200) but reports configured: false
+            // (no feeds/sources/API key set) -- distinct from a real failure,
+            // so it gets its own amber "needs setup" badge rather than
+            // reusing the "Degraded" wording above.
+            statusLabel = `● Needs Setup${rt}`;
+            statusBadge = `<span class="px-2 py-1 text-xs rounded bg-amber-900 text-amber-300" title="Service is running but not configured -- set its required env vars.">${statusLabel}</span>`;
+            break;
         case 'offline':
         case 'error':
         case 'timeout':

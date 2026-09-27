@@ -285,7 +285,7 @@ if __name__ == "__main__":
         {
             "category": "property",
             "key": "address",
-            "value": "912 S Clinton St, Baltimore, MD 21224",
+            "value": "123 Example St, Denver, CO 80202",
             "priority": 100
         },
         {

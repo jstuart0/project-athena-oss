@@ -1420,11 +1420,11 @@ class AdminConfigClient:
                 "model_name": "Whisper Small (English)",
                 "whisper_model": "small.en",
                 "compute_type": "float16",
-                "wyoming_host": "192.168.10.181",
+                "wyoming_host": "192.0.2.20",
                 "wyoming_port": 10300,
-                "wyoming_url": "tcp://192.168.10.181:10300",
+                "wyoming_url": "tcp://192.0.2.20:10300",
                 "service_type": "stt",
-                "service_host": "192.168.10.181",
+                "service_host": "192.0.2.20",
                 "service_port": 10300
             }
         """
@@ -1475,11 +1475,11 @@ class AdminConfigClient:
                 "voice_name": "Lessac (US English)",
                 "piper_voice": "en_US-lessac-medium",
                 "quality": "medium",
-                "wyoming_host": "192.168.10.181",
+                "wyoming_host": "192.0.2.20",
                 "wyoming_port": 10200,
-                "wyoming_url": "tcp://192.168.10.181:10200",
+                "wyoming_url": "tcp://192.0.2.20:10200",
                 "service_type": "tts",
-                "service_host": "192.168.10.181",
+                "service_host": "192.0.2.20",
                 "service_port": 10201
             }
         """

@@ -102,7 +102,7 @@ def _build_ollama_generate_payload(
 
 # Retry once on httpx.ReadTimeout in _generate_ollama / _generate_ollama_with_tools (ATHENA-31).
 # Tool-calling and synthesis are idempotent at the LLM call layer, so retrying after a transient
-# read timeout is safe. The backoff gives Mac Studio's Ollama a moment to finish a stalled
+# read timeout is safe. The backoff gives the Ollama host a moment to finish a stalled
 # request that was about to complete.
 OLLAMA_READ_TIMEOUT_RETRY_BACKOFF_S = 2.0
 # ATHENA-47: Don't retry if the first attempt already consumed >50% of the
@@ -348,7 +348,7 @@ class LLMRouter:
                 model=model,
                 error=str(e)
             )
-            # Fall back to Ollama on Mac Studio
+            # Fall back to the configured Ollama host
             return {
                 "backend_type": "ollama",
                 "endpoint_url": get_config().ollama_url,
@@ -504,7 +504,7 @@ class LLMRouter:
                         "mlx_failed_falling_back_to_ollama",
                         error=str(e)
                     )
-                    # Fall back to Ollama on Mac Studio
+                    # Fall back to the configured Ollama host
                     ollama_url = get_config().ollama_url
                     response = await self._generate_ollama(
                         ollama_url, model, prompt, temperature, max_tokens, timeout, keep_alive, ollama_options,

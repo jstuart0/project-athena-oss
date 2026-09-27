@@ -23,7 +23,7 @@ def test_is_athena_query():
     # Should route to Athena
     athena_messages = [
         ChatMessage(role="user", content="Turn on the office lights"),
-        ChatMessage(role="user", content="What's the weather in Baltimore?"),
+        ChatMessage(role="user", content="What's the weather in Denver?"),
         ChatMessage(role="user", content="Any delays at BWI airport?"),
         ChatMessage(role="user", content="When is the next Ravens game?"),
     ]

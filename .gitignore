@@ -87,7 +87,10 @@ temp/
 thoughts/
 
 # Local Claude instructions (contains environment-specific info)
+# NOTE: CLAUDE.md is tracked; this ignore line is inert for it. Put
+# local/house-specific agent instructions in CLAUDE.local.md instead.
 CLAUDE.md
+CLAUDE.local.md
 
 # mozart campaign artifacts
 .mozart/

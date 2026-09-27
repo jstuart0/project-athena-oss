@@ -23,7 +23,7 @@ from shared.config import get_config as _get_athena_config
 logger = structlog.get_logger()
 
 # Redis connection details
-# Note: Default to false due to Homebrew Python socket issues on Mac Studio
+# Note: Default to false due to Homebrew Python socket issues on some hosts
 # The system gracefully falls back to in-memory storage which works fine
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))

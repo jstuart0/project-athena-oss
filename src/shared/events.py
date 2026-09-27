@@ -16,7 +16,7 @@ Usage:
     # Emit events
     await emitter.emit(EventType.TOOL_SELECTED, session_id, {
         'tool_name': 'get_weather',
-        'args': {'location': 'Baltimore'},
+        'args': {'location': 'Denver'},
     })
 """
 
@@ -122,7 +122,7 @@ class EventEmitter:
         # Emit an event
         await emitter.emit(EventType.TOOL_SELECTED, session_id, {
             'tool_name': 'get_weather',
-            'args': {'location': 'Baltimore'},
+            'args': {'location': 'Denver'},
         })
     """
 

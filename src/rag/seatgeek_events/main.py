@@ -155,7 +155,7 @@ async def search_seatgeek_events(
 
     Args:
         query: Search query (e.g., "concerts", "sports", "comedy")
-        location: Location (e.g., "Baltimore, MD")
+        location: Location (e.g., "Denver, CO")
         date_filter: Date filter ("today", "tomorrow", "this week", "next week", or YYYY-MM-DD)
         num_results: Number of results to return
 
@@ -284,7 +284,7 @@ async def search_local_events(
     Search for local events in a specific location.
 
     Args:
-        location: Location (e.g., "Baltimore, MD")
+        location: Location (e.g., "Denver, CO")
         event_type: Type of event (concerts, sports, comedy, theater, etc.)
         date_filter: Date filter
         num_results: Number of results
@@ -319,7 +319,7 @@ async def health_check():
 @app.get("/events/search")
 async def search_events_endpoint(
     query: str = Query(..., description="Search query (e.g., 'concerts', 'sports')"),
-    location: Optional[str] = Query(None, description="Location (e.g., 'Baltimore, MD')"),
+    location: Optional[str] = Query(None, description="Location (e.g., 'Denver, CO')"),
     date: Optional[str] = Query(None, description="Date filter (today, tomorrow, this week, next week, or YYYY-MM-DD)"),
     start_date: Optional[str] = Query(None, description="Alias for date filter (YYYY-MM-DD format)"),
     size: int = Query(20, description="Number of results", ge=1, le=100)
@@ -384,7 +384,7 @@ async def search_events_endpoint(
 
 @app.get("/events/local")
 async def local_events_endpoint(
-    location: str = Query(..., description="Location (e.g., 'Baltimore, MD')"),
+    location: str = Query(..., description="Location (e.g., 'Denver, CO')"),
     type: Optional[str] = Query(None, description="Event type (concerts, sports, comedy, theater)"),
     date: Optional[str] = Query(None, description="Date filter (today, tomorrow, this week)"),
     size: int = Query(20, description="Number of results", ge=1, le=100)
