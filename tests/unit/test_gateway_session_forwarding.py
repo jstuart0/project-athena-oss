@@ -332,7 +332,14 @@ def test_resolve_client_key_unparseable_peer_falls_back():
 
 
 class _FakeRedisForLimiter:
-    """Minimal async fake Redis: zadd/zcard/zremrangebyscore/expire."""
+    """Minimal async fake Redis: zadd/zcard/zremrangebyscore/expire/eval.
+
+    F43 (reconciliation round 2): production now issues one EVAL rather
+    than four separate commands, so eval() replays the same trim+count+
+    conditional-add+expire semantics against the same in-memory zset. The
+    four separate methods are kept for any caller still using them
+    directly.
+    """
 
     def __init__(self):
         self._zsets: dict[str, dict[str, float]] = {}
@@ -354,6 +361,17 @@ class _FakeRedisForLimiter:
     async def expire(self, key, ttl):
         return True
 
+    async def eval(self, script, numkeys, key, window_start, now, per_minute, member, ttl):
+        zset = self._zsets.get(key, {})
+        window_start = float(window_start)
+        zset = {m: s for m, s in zset.items() if s > window_start}
+        if len(zset) >= int(per_minute):
+            self._zsets[key] = zset
+            return 0
+        zset[member] = float(now)
+        self._zsets[key] = zset
+        return 1
+
 
 def test_redis_backed_limiter_shares_budget_across_two_instances():
     """Two RedisNewConversationLimiter instances (simulating two gateway
@@ -374,5 +392,82 @@ def test_redis_backed_limiter_shares_budget_across_two_instances():
 
         clock.advance(61)
         assert await replica_a.allow("house") is True
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# F43 (reconciliation round 2, codex r2b Medium): trim+count+add+expire must
+# be one atomic Redis EVAL. Separate ZREMRANGEBYSCORE/ZCARD/ZADD/EXPIRE
+# awaits let two concurrent first-turn requests both observe the same
+# below-limit ZCARD before either ZADDs, letting both pass a per_minute=1
+# budget. The prior coverage above is sequential only -- it never races two
+# callers against the same key.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRedisWithInterleavingLimiter:
+    """Each of zremrangebyscore/zcard/zadd/expire yields at entry, so two
+    concurrent callers CAN interleave between them -- this models the old
+    non-atomic four-round-trip implementation and is what would let two
+    racing callers both pass a per_minute=1 budget.
+
+    eval() yields exactly once (the single network round-trip to Redis)
+    then runs trim+count+conditional-add+expire as one synchronous block --
+    exactly like a Lua script executing atomically once Redis receives it.
+    Two concurrent eval() callers can only interleave at that one await
+    boundary, never inside the atomic body.
+    """
+
+    def __init__(self):
+        self._zsets: dict[str, dict[str, float]] = {}
+
+    async def zremrangebyscore(self, key, min_score, max_score):
+        await asyncio.sleep(0)
+        zset = self._zsets.get(key, {})
+        min_val = float("-inf") if min_score == "-inf" else float(min_score)
+        max_val = float("inf") if max_score == "inf" else float(max_score)
+        self._zsets[key] = {
+            m: s for m, s in zset.items() if not (min_val <= s <= max_val)
+        }
+
+    async def zcard(self, key):
+        await asyncio.sleep(0)
+        return len(self._zsets.get(key, {}))
+
+    async def zadd(self, key, mapping):
+        await asyncio.sleep(0)
+        self._zsets.setdefault(key, {}).update(mapping)
+
+    async def expire(self, key, ttl):
+        await asyncio.sleep(0)
+        return True
+
+    async def eval(self, script, numkeys, key, window_start, now, per_minute, member, ttl):
+        await asyncio.sleep(0)  # the only yield point -- simulates network latency
+        zset = self._zsets.get(key, {})
+        window_start = float(window_start)
+        zset = {m: s for m, s in zset.items() if s > window_start}
+        if len(zset) >= int(per_minute):
+            self._zsets[key] = zset
+            return 0
+        zset[member] = float(now)
+        self._zsets[key] = zset
+        return 1
+
+
+def test_redis_backed_limiter_atomic_across_interleaved_requests():
+    """Two coroutines racing at a per_minute=1 budget for the SAME key must
+    result in exactly one True and one False -- never both True."""
+    fake_redis = _FakeRedisWithInterleavingLimiter()
+    clock = _FakeClock()
+    limiter = RedisNewConversationLimiter(fake_redis, per_minute=1, clock=clock)
+
+    async def _run():
+        results = await asyncio.gather(
+            limiter.allow("house"),
+            limiter.allow("house"),
+        )
+        assert sorted(results) == [False, True]
 
     asyncio.run(_run())
