@@ -17,8 +17,10 @@ ATHENA-1 Phase 3 (Campaign 4).
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import tempfile
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
@@ -40,6 +42,45 @@ if _SRC not in sys.path:
 _CONTROL_AGENT_DIR = os.path.join(_SRC, 'control_agent')
 if _CONTROL_AGENT_DIR not in sys.path:
     sys.path.insert(0, _CONTROL_AGENT_DIR)
+
+# ---------------------------------------------------------------------------
+# Seed CONTROL_AGENT_SERVICES_FILE before importing control_agent.main
+# ---------------------------------------------------------------------------
+# ATHENA-99 (c146353, already on main) replaced the hard-coded
+# PROCESS_SERVICES dict this file's tests were written against with
+# CONTROL_AGENT_SERVICES_FILE-driven config (empty/unset by default). Every
+# test below reads `ca_main.PROCESS_SERVICES` and assumes it is non-empty
+# (`total = len(ca_main.PROCESS_SERVICES)`, `client_mock.post.call_args_list[0]`,
+# etc.) -- with the env var unset, PROCESS_SERVICES loads as `{}`, silently
+# degenerating every count-based assertion (and, for
+# test_sync_registry_loop_retries_after_429, making sync_registry_loop's own
+# `if not PROCESS_SERVICES: return` early-exit fire before _upsert_all_services
+# is ever called, so the CancelledError this test expects never gets raised).
+# Five seeded services give every 429/off-by-one assertion below a non-trivial
+# value (e.g. `expected_remaining = total - N - 1` = 2, not 0) while still
+# resolving cleanly under this phase's own dir/cmd config-load validation
+# (relative dir, no shell metacharacters in cmd) -- must be written and the
+# env var set BEFORE `import control_agent.main` below, since PROCESS_SERVICES
+# is computed once, at that import's module-level statement.
+_PHASE3_SEED_SERVICE_COUNT = 5
+_phase3_seed_fd, _PHASE3_SEED_SERVICES_FILE = tempfile.mkstemp(
+    suffix=".json", prefix="ca-phase3-seed-"
+)
+with os.fdopen(_phase3_seed_fd, "w") as _phase3_seed_f:
+    json.dump(
+        {
+            "processes": {
+                str(8000 + i): {
+                    "name": f"phase3-seed-svc-{8000 + i}",
+                    "dir": "phase3_seed_service_dir",
+                    "cmd": ["python", "-m", "http.server", str(8000 + i)],
+                }
+                for i in range(_PHASE3_SEED_SERVICE_COUNT)
+            }
+        },
+        _phase3_seed_f,
+    )
+os.environ["CONTROL_AGENT_SERVICES_FILE"] = _PHASE3_SEED_SERVICES_FILE
 
 
 # ---------------------------------------------------------------------------
