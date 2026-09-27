@@ -223,6 +223,42 @@ def test_limiter_applies_to_both_routes_first_turn_only():
     assert resp_convert_line < resp_limit_line < resp_room_line
 
 
+# ---------------------------------------------------------------------------
+# F45 (reconciliation round 2, codex r2b Medium): once lifespan swaps
+# new_conversation_limiter to a Redis-backed instance, a RUNTIME Redis
+# failure (connection drop, timeout) must not propagate as a request error
+# -- it must degrade this request to the in-memory fallback limiter.
+# ---------------------------------------------------------------------------
+
+
+class _RedisErrorLimiter:
+    """Simulates a Redis-backed limiter whose connection has failed."""
+
+    async def allow(self, key: str) -> bool:
+        import redis.exceptions as redis_exceptions
+
+        raise redis_exceptions.ConnectionError("redis connection lost")
+
+
+def test_check_new_conversation_limit_degrades_to_memory_on_redis_error(monkeypatch):
+    fallback = NewConversationLimiter(per_minute=1, max_keys=10)
+    monkeypatch.setattr(gw, "new_conversation_limiter", _RedisErrorLimiter())
+    monkeypatch.setattr(gw, "_new_conversation_memory_fallback", fallback)
+
+    one_user_msg = [gw.ChatMessage(role="user", content="hi")]
+
+    async def _run():
+        # Primary (Redis) limiter raises on every call; the request must
+        # not 500 -- it degrades to the in-memory fallback and still
+        # enforces the per_minute=1 budget for this key.
+        await gw._check_new_conversation_limit("9.9.9.9", one_user_msg, None)
+        with pytest.raises(HTTPException) as exc_info:
+            await gw._check_new_conversation_limit("9.9.9.9", one_user_msg, None)
+        assert exc_info.value.status_code == 429
+
+    asyncio.run(_run())
+
+
 def test_check_new_conversation_limit_first_turn_only(monkeypatch):
     limiter = NewConversationLimiter(per_minute=1, max_keys=10)
     monkeypatch.setattr(gw, "new_conversation_limiter", limiter)

@@ -156,6 +156,17 @@ NEW_CONVERSATION_PER_MINUTE_PER_IP = _get_athena_config().new_conversation_per_m
 TRUSTED_PROXY_CIDRS = _get_athena_config().trusted_proxy_cidrs
 new_conversation_limiter = NewConversationLimiter(per_minute=NEW_CONVERSATION_PER_MINUTE_PER_IP)
 new_conversation_limiter_redis_client = None
+# ATHENA-88 / F45 (codex r2b Medium, reconciliation round 2): kept alive
+# regardless of which backend `new_conversation_limiter` currently points
+# at. A Redis failure *after* lifespan already swapped to
+# RedisNewConversationLimiter otherwise propagates through
+# _check_new_conversation_limit as a request error (500) instead of the
+# 429/pass-through this limiter is meant to produce. On a Redis error we
+# degrade the affected request to this instance -- an explicit
+# fail-open-to-memory policy: a single replica briefly loses cross-replica
+# budget sharing during the outage, but new-conversation requests keep
+# being rate-limited rather than let through unchecked or hard-failed.
+_new_conversation_memory_fallback = new_conversation_limiter
 
 # Feature flag cache - per-flag caching with TTL
 # Structure: {flag_name: (timestamp, value)}
@@ -1376,6 +1387,12 @@ async def _check_new_conversation_limit(
     peer) unless that peer is inside TRUSTED_PROXY_CIDRS, in which case
     `forwarded_for`'s original-client address is used instead — see
     gateway.conversation_limiter.resolve_client_key.
+
+    ATHENA-88 / F45 (codex r2b Medium): a runtime Redis failure on the
+    primary limiter (already swapped to RedisNewConversationLimiter by
+    lifespan) degrades this single request to the in-memory fallback
+    limiter instead of propagating as a 500 -- fail-open-to-memory, not
+    fail-open-unchecked or fail-closed.
     """
     if session_id:
         return
@@ -1383,7 +1400,18 @@ async def _check_new_conversation_limit(
     if user_message_count != 1:
         return
     key = resolve_client_key(client_host, forwarded_for, TRUSTED_PROXY_CIDRS)
-    if not await new_conversation_limiter.allow(key):
+    import redis.exceptions as redis_exceptions
+
+    try:
+        allowed = await new_conversation_limiter.allow(key)
+    except redis_exceptions.RedisError as e:
+        logger.warning(
+            "new_conversation_limiter_redis_error_degraded_to_memory",
+            error=str(e),
+            key=key,
+        )
+        allowed = await _new_conversation_memory_fallback.allow(key)
+    if not allowed:
         logger.warning("new_conversation_rate_limited", client_host=client_host, key=key)
         raise HTTPException(
             status_code=429,
