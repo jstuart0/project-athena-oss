@@ -72,27 +72,49 @@ async def get_all_services(
     host/port/endpoint_url topology to unauthenticated callers.  Pre-
     consolidation backward-compat claim no longer applies.
     (xander MED-2, ATHENA-1 Phase 4 reconcile)
+
+    ATHENA-112: overall_health and healthy_services are computed over ENABLED
+    rows only -- a disabled service (deliberately turned off by an operator)
+    must not drag the dashboard into 'degraded'/'unhealthy'.  A disabled row's
+    health_status is reported as the literal string 'disabled' regardless of
+    its last cached poller value, since that cached value goes stale the
+    moment the row is disabled and the poller stops touching it.
+    total_services still counts every row (enabled + disabled) for
+    backward compatibility; enabled_services / disabled_services are new.
     """
     services = db.query(RagService).order_by(RagService.name).all()
 
     service_list = []
+    enabled_list = []
     for svc in services:
         d = svc.to_dict()
-        # Normalise None health_status to 'pending' for UI legibility.
-        if d.get('health_status') is None:
+        if not d.get('enabled'):
+            # Overrides whatever health_status the poller last cached before
+            # the row was disabled -- that value is no longer being refreshed
+            # and must not be read as current state. (ATHENA-112)
+            d['health_status'] = 'disabled'
+        elif d.get('health_status') is None:
+            # Normalise None health_status to 'pending' for UI legibility.
             d['health_status'] = 'pending'
         service_list.append(d)
+        if d.get('enabled'):
+            enabled_list.append(d)
 
     return {
         'services': service_list,
         'total_services': len(service_list),
-        'healthy_services': sum(1 for s in service_list if s.get('health_status') == 'healthy'),
-        'overall_health': _overall_health(service_list),
+        'enabled_services': len(enabled_list),
+        'disabled_services': len(service_list) - len(enabled_list),
+        'healthy_services': sum(1 for s in enabled_list if s.get('health_status') == 'healthy'),
+        'overall_health': _overall_health(enabled_list),
         'control_agent_enabled': get_config().control_agent_enabled,  # ruby B2
     }
 
 
 def _overall_health(services: list) -> str:
+    """Compute aggregate health over the given services (ATHENA-112: caller
+    must pass the ENABLED subset -- this function has no opinion on enabled
+    state itself, it just averages whatever list it's given)."""
     if not services:
         return 'unknown'
     healthy = sum(1 for s in services if s.get('health_status') == 'healthy')

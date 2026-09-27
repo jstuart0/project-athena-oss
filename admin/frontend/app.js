@@ -893,9 +893,14 @@ async function loadStatus() {
         // Fetch services from the service registry
         const data = await apiRequest('/api/service-registry/services');
 
-        // Update stats
+        // Update stats. enabled_services / disabled_services are ATHENA-112;
+        // fall back to total_services against an older backend response shape.
         document.getElementById('stat-healthy').textContent = data.healthy_services;
-        document.getElementById('stat-total').textContent = data.total_services;
+        const enabledCount = data.enabled_services ?? data.total_services;
+        const disabledCount = data.disabled_services ?? 0;
+        document.getElementById('stat-total').textContent = disabledCount > 0
+            ? `${enabledCount} (${disabledCount} disabled)`
+            : `${enabledCount}`;
 
         const healthStat = document.getElementById('stat-health');
         healthStat.textContent = data.overall_health.toUpperCase();
@@ -906,14 +911,23 @@ async function loadStatus() {
 
         statsContainer.style.display = 'grid';
 
-        // Group services by type
+        // Group ENABLED services by type. Disabled rows are rendered in their
+        // own muted group below and never enter Core/RAG/Database counts or
+        // the overall_health computation (ATHENA-112 -- that's server-side,
+        // but keeping them out of these groups too avoids a disabled row
+        // reading as a live member of "Core Services" etc.)
         const servicesByGroup = {
             'RAG Services': [],
             'Core Services': [],
             'Database Services': []
         };
+        const disabledServices = [];
 
         data.services.forEach(service => {
+            if (!service.enabled) {
+                disabledServices.push(service);
+                return;
+            }
             // Determine group based on service type or name
             if (service.service_type === 'rag' ||
                 ['weather', 'sports', 'airports', 'flights', 'events', 'streaming',
@@ -928,7 +942,7 @@ async function loadStatus() {
         });
 
         // Render services by group
-        servicesContainer.innerHTML = Object.entries(servicesByGroup).map(([group, services]) => {
+        const enabledGroupsHtml = Object.entries(servicesByGroup).map(([group, services]) => {
             if (services.length === 0) return ''; // Skip empty groups
 
             return `
@@ -983,6 +997,33 @@ async function loadStatus() {
                 </div>
             `;
         }).filter(html => html !== '').join('');
+
+        // Disabled group -- muted, separate from the enabled groups above,
+        // never counted toward healthy/enabled/overall_health. (ATHENA-112)
+        const disabledHtml = disabledServices.length === 0 ? '' : `
+            <div class="mb-6 opacity-60">
+                <h3 class="text-lg font-semibold text-gray-400 mb-3">Disabled</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    ${disabledServices.map(service => `
+                        <div class="bg-dark-card border border-dark-border rounded-lg p-4">
+                            <div class="flex items-start justify-between mb-2">
+                                <div class="flex-1">
+                                    <h4 class="font-medium text-gray-300">${escapeHtml(service.display_name || service.name)}</h4>
+                                    <p class="text-xs text-gray-500">${escapeHtml(String(service.host))}:${service.port}</p>
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <span class="w-2 h-2 rounded-full bg-gray-600"></span>
+                                    <span class="text-xs text-gray-500">disabled</span>
+                                </div>
+                            </div>
+                            ${service.last_error ? `<p class="text-xs text-gray-500 mt-2">${escapeHtml(service.last_error)}</p>` : ''}
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        `;
+
+        servicesContainer.innerHTML = enabledGroupsHtml + disabledHtml;
 
     } catch (error) {
         errorContainer.innerHTML = `

@@ -407,9 +407,10 @@ def test_callee_sink_known_instances_are_found():
         bucket, detail = callee.resolve_site(file, line, expr, raw_value, offset, adjudications)
         found[(file.name, line)] = (bucket, detail)
 
-    # Line pinned to the current tree (ATHENA-99 shifted app.js by +22 lines
-    # above this point via new dashboard-badge status computation).
-    reveal_bucket, reveal_detail = found[("app.js", 1202)]
+    # Line pinned to the current tree (ATHENA-112 shifted app.js by +41 lines
+    # above this point via the enabled/disabled dashboard-grouping rewrite of
+    # loadStatus; ATHENA-99 shifted it +22 lines before that).
+    reveal_bucket, reveal_detail = found[("app.js", 1243)]
     assert reveal_bucket == "sink-escaped"
     assert reveal_detail["callee"] == "revealSecret"
 

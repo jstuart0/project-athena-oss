@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Ticket:** [ATHENA-112](https://plane.xmojo.net)
+> **Campaign:** `2026-09-27-deliver-athena-dashboard-health-and-tcp-poller`
+
+### Fixed: a disabled service dragged the dashboard's overall health down (ATHENA-112)
+
+- **Fixed — `overall_health` and `healthy_services` counted disabled rows** (`admin/backend/app/routes/service_registry.py::get_all_services`): a service an operator deliberately turned off (still carrying a stale `unhealthy` from before it was disabled) could flip the dashboard to "degraded"/"unhealthy" even though nothing live was actually failing. Both are now computed over **enabled** rows only. New response fields `enabled_services` / `disabled_services`; `total_services` is unchanged (still counts every row) for backward compatibility. A disabled row's `health_status` in the response is now always the literal `"disabled"`, overriding whatever the poller last cached before it was turned off.
+- **Changed — dashboard cards** (`admin/frontend/app.js`, `admin/frontend/index.html`): the middle stat card now reads "Enabled Services" (`N` or `N (K disabled)` when any rows are disabled) instead of "Total Services". The Core/RAG/Database service grid only lists enabled rows; disabled rows are grouped separately in a muted "Disabled" section at the bottom showing each row's `last_error`, and are never counted toward any group or the overall health rollup.
+
+---
+
+## [Unreleased]
+
 > **Ticket:** [ATHENA-110](https://plane.xmojo.net)
 > **Plan:** `.mozart/plans/active/2026-09-27-operate-athena-dashboard-registry-cleanup.md` (P3)
 

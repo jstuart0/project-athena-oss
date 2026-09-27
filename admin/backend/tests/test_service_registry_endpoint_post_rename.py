@@ -208,11 +208,14 @@ class TestServiceRegistryEndpointPostRename:
         )
 
     def test_get_services_exact_envelope(self, client_against_renamed_schema):
-        """Response must contain exactly the five keys the admin UI reads.
+        """Response must contain exactly the seven keys the admin UI reads.
 
-        Exact envelope: {services, total_services, healthy_services,
-        overall_health, control_agent_enabled}. No extra keys; no missing keys.
-        (codex r1 L-1, r3 M2, admin/frontend/service-control.js:101-109)
+        Exact envelope: {services, total_services, enabled_services,
+        disabled_services, healthy_services, overall_health,
+        control_agent_enabled}. No extra keys; no missing keys.
+        (codex r1 L-1, r3 M2, admin/frontend/service-control.js:101-109;
+        enabled_services/disabled_services added ATHENA-112 so overall_health
+        and healthy_services can be computed over enabled rows only.)
         """
         resp = client_against_renamed_schema.get("/api/service-registry/services")
         assert resp.status_code == 200
@@ -221,6 +224,8 @@ class TestServiceRegistryEndpointPostRename:
         assert set(body.keys()) == {
             "services",
             "total_services",
+            "enabled_services",
+            "disabled_services",
             "healthy_services",
             "overall_health",
             "control_agent_enabled",
@@ -233,14 +238,20 @@ class TestServiceRegistryEndpointPostRename:
         body = resp.json()
         assert isinstance(body["services"], list)
         assert isinstance(body["total_services"], int)
+        assert isinstance(body["enabled_services"], int)
+        assert isinstance(body["disabled_services"], int)
         assert isinstance(body["healthy_services"], int)
         assert body["overall_health"] in {"healthy", "degraded", "unhealthy", "unknown"}
         assert isinstance(body["control_agent_enabled"], bool)
 
     def test_get_services_counts_are_consistent(self, client_against_renamed_schema):
-        """total_services == len(services); healthy_services <= total_services."""
+        """total_services == len(services) == enabled_services + disabled_services;
+        healthy_services <= enabled_services <= total_services (ATHENA-112:
+        healthy/overall_health are computed over enabled rows only)."""
         resp = client_against_renamed_schema.get("/api/service-registry/services")
         assert resp.status_code == 200
         body = resp.json()
         assert body["total_services"] == len(body["services"])
-        assert body["healthy_services"] <= body["total_services"]
+        assert body["total_services"] == body["enabled_services"] + body["disabled_services"]
+        assert body["healthy_services"] <= body["enabled_services"]
+        assert body["enabled_services"] <= body["total_services"]
