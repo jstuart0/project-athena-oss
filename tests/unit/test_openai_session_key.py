@@ -568,6 +568,89 @@ def test_streaming_endpoint_persists_session_history(monkeypatch):
     assert persisted.messages[1]["content"] == "Hello there!"
 
 
+class _FakeLLMRouterForStreaming:
+    """ATHENA-88 / F46 (reconciliation round 2, codex r2b Low): the
+    precomputed-answer branch above only exercises the fake-streaming path
+    (state.answer truthy). Reverting the true-LLM-streaming persistence fix
+    at the `else` branch (build_synthesis_prompt_for_streaming +
+    llm.generate_stream) would still pass that test. This fake models the
+    real LLMRouter.generate_stream contract: an async generator yielding
+    {"token": str, "done": bool} chunks.
+    """
+
+    async def generate_stream(self, model, prompt, system_prompt, temperature, max_tokens):
+        for token in ("Hello", " there", "!"):
+            yield {"token": token, "done": False}
+        yield {"token": "", "done": True}
+
+
+def test_true_streaming_endpoint_persists_session_history(monkeypatch):
+    """F46: state.answer is falsy (no handler pre-computed an answer), so
+    the streaming generator takes the true-LLM-streaming branch, not the
+    fake-streaming precomputed-answer branch tested above."""
+    async def _fake_sm_get_config():
+        return SimpleNamespace(
+            get_conversation_settings=mock.AsyncMock(return_value={"session_ttl_seconds": 3600})
+        )
+    monkeypatch.setattr(_session_manager_module, "get_config", _fake_sm_get_config)
+
+    sm = SessionManager()
+    sm.redis_client = _FakeRedisForSessionPersistence()
+    _runtime.set_session_manager(sm)
+    _runtime.set_cache_client(_FakeSessionCacheClient())
+    _runtime.set_llm_router(_FakeLLMRouterForStreaming())
+
+    fake_state = SimpleNamespace(
+        answer=None,
+        intent=SimpleNamespace(value="general_info"),
+        request_id="req-2",
+        retrieved_data=None,
+        temperature=0.5,
+    )
+    monkeypatch.setattr(
+        _main_module, "run_orchestrator_for_streaming", mock.AsyncMock(return_value=fake_state)
+    )
+    monkeypatch.setattr(
+        _main_module, "get_current_mode", mock.AsyncMock(return_value={"mode": "owner", "permissions": {}})
+    )
+    monkeypatch.setattr(
+        _main_module,
+        "build_synthesis_prompt_for_streaming",
+        mock.AsyncMock(return_value=("full prompt", "some-model", "system prompt")),
+    )
+    fake_conv_config = SimpleNamespace(
+        get_conversation_settings=mock.AsyncMock(return_value={"enabled": False})
+    )
+    monkeypatch.setattr(_main_module, "get_config", mock.AsyncMock(return_value=fake_conv_config))
+
+    client = TestClient(_main_module.app)
+    opener = "tell me something interesting"
+    body = {"model": "m", "messages": [{"role": "user", "content": opener}], "stream": True}
+
+    with client.stream("POST", "/v1/chat/completions", json=body) as response:
+        assert response.status_code == 200
+        for _ in response.iter_lines():
+            pass  # drain the SSE stream
+
+    secret = session_hmac_secret(_shared_config.get_config())
+    resolved = resolve_openai_session(
+        [SimpleNamespace(role="user", content=opener)],
+        top_level_session_id=None, extra_body=None, user=None, room=None,
+        secret=secret,
+    )
+
+    async def _fetch():
+        return await sm.get_session(resolved.session_id)
+
+    persisted = _run_asyncio_test_helper(_fetch())
+    assert persisted is not None, "session was never persisted — the true-streaming turn's history is lost"
+    assert len(persisted.messages) == 2
+    assert persisted.messages[0]["role"] == "user"
+    assert persisted.messages[0]["content"] == opener
+    assert persisted.messages[1]["role"] == "assistant"
+    assert persisted.messages[1]["content"] == "Hello there!"
+
+
 def _run_asyncio_test_helper(coro):
     import asyncio
     return asyncio.run(coro)
