@@ -79,6 +79,14 @@ Before opening a PR that touches `src/rag/<service>/` or `src/shared/`:
 
 Read `admin/frontend/README.md` first — it covers the two escaping primitives, the six contexts `escapeJsAttr` is wrong for, and the "add a new frontend file" checklist. `.github/workflows/frontend-escaping.yml` enforces zero wrong-primitive/unescaped handler sites, a single `escapeHtml`/`escapeJsAttr` definition, and load-order/hardening on every PR touching `admin/frontend/**`.
 
+### OSS-First enforcement: no maintainer-identifying values in the tracked tree
+
+Before opening a PR, run `python3 scripts/check-maintainer-leaks.py` (add `--paths <changed files>` to scope it to your diff). It scans for home-lab LAN IPs, a home domain, a home city, home-directory paths, a legacy namespace FQDN, home coordinates, a maintainer's name, and a maintainer's host names — FAIL-class outside docs/tests/examples, WARN-class inside them. `.github/workflows/maintainer-leaks.yml` runs the same scan on every PR and push to `main`.
+
+If a hit is a genuine false positive (a national reference table that happens to include one matching city, a scrubber migration, etc.), add a full-line entry to `scripts/.maintainer-leak-allowlist`: `path-glob<TAB>rule-id|*<TAB>exact-source-line<TAB>reason`. The substring column must be the exact, stripped source line the entry allows, not an arbitrary fragment — one entry can't accidentally cover an unrelated line that shares a shorter substring. An allowlist entry is itself flagged stale (and fails the gate) once the line it names no longer matches anything.
+
+Never commit a genuinely private pattern (a real IP, a private domain, a home address) to the tracked allowlist or rule set. Use `--extra-patterns FILE` (or `MAINTAINER_LEAK_EXTRA_PATTERNS`) with a private `id<TAB>regex` file that lives outside this repository or is gitignored — see `python3 scripts/check-maintainer-leaks.py --help` for the exact format and the rules the tracked gate deliberately doesn't cover.
+
 ## Development Setup
 
 1. **Clone and setup**

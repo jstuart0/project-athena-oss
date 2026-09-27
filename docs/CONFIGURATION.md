@@ -19,7 +19,7 @@ Complete reference for all configuration options in Project Athena.
 
 ## Centralized Configuration via AthenaConfig
 
-`AthenaConfig` (`src/shared/config.py`) is the canonical pydantic-settings `BaseSettings` object for Athena. It centralizes 11 high-leverage env vars migrated in Campaign 4 (ATHENA-7). The remaining ~220 env vars in the codebase continue to use direct `os.getenv` and are migrated per-PR — see `CONTRIBUTING.md` for the extension pattern.
+`AthenaConfig` (`src/shared/config.py`) is the canonical pydantic-settings `BaseSettings` object for Athena. It centralizes 41 env vars, starting with 11 high-leverage vars migrated in Campaign 4 (ATHENA-7) and extended by later campaigns (ATHENA-1, ATHENA-11, ATHENA-12, ATHENA-14, ATHENA-59, ATHENA-88, ATHENA-89). The remaining env vars in the codebase continue to use direct `os.getenv` and are migrated per-PR — see `CONTRIBUTING.md` for the extension pattern.
 
 ### Reading config in code
 
@@ -35,6 +35,11 @@ config.database_url    # DATABASE_URL
 `get_config()` is an `lru_cache`-backed factory — `AthenaConfig` is instantiated exactly once per process. Tests reset it via `_clear_cache_for_tests()`.
 
 ### Centralized env vars
+
+The vars below are the original Campaign 4 batch, kept for illustration. See
+`src/shared/config.py` for the complete, current field list (41 fields as of
+ATHENA-89) — new fields land there per-PR and this table is not re-synced on
+every addition.
 
 | Env var | AthenaConfig field | Default |
 |---|---|---|
@@ -229,8 +234,8 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SEARXNG_URL` | `http://localhost:8080` | SearXNG instance URL used by `parallel_search.py`'s search provider |
-| `SEARXNG_BASE_URL` | *(empty)* | SearXNG instance URL for the admin status check and the orchestrator's SearXNG provider registration. Empty means SearXNG is disabled (status reads "not configured", no network probe made). |
+| `SEARXNG_BASE_URL` | *(empty)* | SearXNG instance URL for the admin status check and the orchestrator's SearXNG provider registration (`parallel_search.py`). Empty means SearXNG is disabled (status reads "not configured", no network probe made). |
+| `SEARXNG_URL` | *(none — deprecated)* | Legacy fallback for `SEARXNG_BASE_URL`. If `SEARXNG_BASE_URL` is empty and this is set, `parallel_search.py` uses it and logs a one-time WARNING (`searxng_url_legacy_env_name`). Prefer `SEARXNG_BASE_URL`. |
 
 ---
 
@@ -396,13 +401,28 @@ or placeholder `SERVICE_API_KEY` is fatal at orchestrator startup.
 |----------|---------|-------------|
 | `SESSION_MAX_COUNT` | `5000` | Cap on concurrent per-conversation sessions (in-memory fallback dict + Redis creation-time index). The oldest session (by last activity / creation time) is evicted once exceeded. |
 | `NEW_CONVERSATION_PER_MINUTE_PER_IP` | `120` | Gateway-side sliding-window limit on *new* conversations (first-turn requests with no explicit `session_id`) per rate-limit key (see `TRUSTED_PROXY_CIDRS`), applied to both `/v1/chat/completions` and `/v1/responses`. Raised from an earlier default of 30 — behind a reverse proxy every caller can share one resolved key, making a low per-source limit a whole-house limit. |
-| `TRUSTED_PROXY_CIDRS` | `10.244.0.0/16` | Comma-separated CIDRs/hosts. The new-conversation limiter trusts `X-Forwarded-For`'s original-client address only when the immediate TCP peer (your reverse proxy) falls inside one of these ranges; an untrusted caller can't spoof another source's key via that header. The header is parsed right-to-left, returning the nearest hop not in this CIDR set (falling back to the TCP peer if every hop is trusted), so a trusted proxy that appends rather than overwrites `X-Forwarded-For` doesn't let an upstream caller forge the left-most value. Keep this list scoped to your actual reverse-proxy subnet, not a broad cluster-wide default. |
+| `TRUSTED_PROXY_CIDRS` | *(empty)* | Comma-separated CIDRs/hosts. The new-conversation limiter trusts `X-Forwarded-For`'s original-client address only when the immediate TCP peer (your reverse proxy) falls inside one of these ranges; an untrusted caller can't spoof another source's key via that header. Empty (the default) means every caller's TCP peer address is used directly — correct with no reverse proxy in front of the gateway, but a shared rate-limit bucket for everyone behind one (the gateway logs `trusted_proxy_cidrs_unset` once at startup as a nudge to set this). The header is parsed right-to-left, returning the nearest hop not in this CIDR set (falling back to the TCP peer if every hop is trusted), so a trusted proxy that appends rather than overwrites `X-Forwarded-For` doesn't let an upstream caller forge the left-most value. Example for a flannel/kubeadm-default cluster's pod CIDR: `10.244.0.0/16`. Keep this list scoped to your actual reverse-proxy subnet, not a broad cluster-wide default. |
 | `NEW_CONVERSATION_RESET_GRACE_SECONDS` | `120` | A first-turn fingerprint reset is skipped when a session under the same fingerprint was created within this many seconds — protects against Home Assistant's truncated-ASR retry path, which resends the same single-user-message opener for the same turn. |
 
 The new-conversation limiter's counters are backed by Redis (`REDIS_URL`)
 when a Redis connection succeeds at gateway startup, so multiple gateway
 replicas share one budget per key; it falls back to an in-memory,
 single-replica-only counter otherwise (logged at startup either way).
+
+### Orchestrator Ingress Authentication (ATHENA-89)
+
+The orchestrator's query routes (`/query`, `/query/stream`, `/query/stream/v2`,
+`/v1/chat/completions`), its four session routes (`GET /sessions`, `GET`/`DELETE
+/sessions/{session_id}`, `GET /sessions/{session_id}/export`), `GET
+/session/{session_id}/warmup`, and four `/admin/*` maintenance routes (13
+routes total) require an `X-Service-Key` header matching `SERVICE_API_KEY`.
+`/v1/models` stays ungated (read-only model metadata).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCHESTRATOR_INGRESS_AUTH` | `enforce` | `enforce` rejects a missing or wrong `X-Service-Key` on the gated routes with 401. `warn` logs `orchestrator_unauthenticated_request` (with `path`, `client_host`, `user_agent`) and allows the request through. Any other value behaves as `enforce` and logs one ERROR (`orchestrator_ingress_auth_invalid_mode`) per process. A header that is present, non-empty, and **wrong** is always rejected with 401, in every mode, including `DEV_MODE` and `warn` — only a missing header is affected by the mode. |
+
+**Rollout recipe**: set `ORCHESTRATOR_INGRESS_AUTH=warn` first if you have callers you haven't audited (a custom Home Assistant integration, a script that calls `/query` directly). Watch for `orchestrator_unauthenticated_request` log lines over a representative window — each one names the unauthenticated caller's path and user agent. Once nothing unexpected shows up, switch to `enforce` (the default). Every in-repo caller (the gateway's orchestrator client, LiveKit integration, the Wyoming bridge, jarvis-web backend, admin-backend's SMS webhook) already sends the header.
 
 ### Authentication (Optional)
 
@@ -507,17 +527,37 @@ worked Denver example, including a feed with an optional `bounds` box.
 
 ## Home Assistant Entity Mappings
 
-All four ship with NO house-specific entity IDs baked in. Unset means the
-corresponding feature is disabled or falls back cleanly rather than
-guessing a device/room your HA instance doesn't have. See `.env.example`
-for the full JSON schema and worked examples.
+These `AthenaConfig` fields ship with NO house-specific entity IDs baked in.
+Unset means the corresponding feature is disabled or falls back cleanly
+rather than guessing a device/room your HA instance doesn't have. See
+`.env.example` for the full JSON schema and worked examples.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HA_SATELLITE_ROOM_MAP` | *(empty)* | JSON object mapping a Voice PE `assist_satellite` entity ID to its room. Used both directions by the gateway: entity→room (conversation room detection) and room→entity (satellite announcements). |
+| `HA_SATELLITE_ROOM_MAP` | *(empty)* | JSON object mapping a Voice PE `assist_satellite` entity ID to its room. Used both directions by the gateway: entity→room (conversation room detection) and room→entity (satellite announcements). An empty map, or an active satellite not listed in it, resolves to room `"unknown"` — the gateway does not fall back to parsing a `friendly_name` naming convention, since a given HA instance may not follow one. |
 | `HA_TV_ENTITIES` | *(empty)* | Fallback room → Apple TV entity mapping, used only when the admin API's Room TV Config is unreachable. JSON array of `{room, media_player_entity_id, remote_entity_id}` objects, or comma-separated `room:media_player_entity_id[:remote_entity_id]` triples. |
 | `HA_MUSIC_PLAYERS` | *(empty)* | Fallback room → Music Assistant `media_player` entity mapping, used only when the admin API's room audio config is unreachable. JSON object `{room: entity_id}` or comma-separated `room:entity_id` pairs. |
 | `HA_BED_WARMER_ENTITIES` | *(empty)* | JSON object naming the 5 HA entities a Sunbeam-via-Tuya dual-zone bed-warmer/mattress-pad integration exposes (`level_left`, `level_right`, `power_main`, `power_side_a`, `power_side_b`). |
+| `HA_LIGHT_GROUPS` | *(empty)* | JSON object mapping a room name to a light-group entity ID (`{"<room>": "<light group entity>"}`), read by `smart_home_controller.py`'s scene-activation-failed fallback (dim/turn on that room's lights when the requested scene or script doesn't exist). A room with no configured group gets no fallback — turning on every light in the house when one room's group isn't configured would be a house-wide regression, not a safe default. |
+
+### jarvis-web appliance and media entities
+
+Plain `os.getenv` reads in `apps/jarvis-web/backend/main.py`, not `AthenaConfig`
+fields — set directly on the jarvis-web Deployment/container, not via the
+shared `athena-config` ConfigMap. Same contract as the table above: empty
+means the endpoint reports the feature isn't configured, instead of
+querying a hardcoded entity your HA instance doesn't have.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OVEN_ENTITY_ID` | *(empty)* | HA `water_heater` entity for the oven. |
+| `FRIDGE_ENTITY_ID` | *(empty)* | HA entity for the fridge. |
+| `FREEZER_ENTITY_ID` | *(empty)* | HA entity for the freezer. |
+| `STOVE_COOK_MODE_SENSOR_ID` | *(empty)* | HA sensor entity reporting the stove's current cook mode. |
+| `STOVE_DISPLAY_TEMP_SENSOR_ID` | *(empty)* | HA sensor entity reporting the stove's displayed temperature. |
+| `STOVE_TIMER_SENSOR_ID` | *(empty)* | HA sensor entity reporting the stove's timer state. |
+| `FRIDGE_DOOR_SENSOR_ID` | *(empty)* | HA binary-sensor entity reporting whether the fridge door is open. |
+| `JARVIS_MEDIA_PLAYERS` | *(empty)* | Comma-separated list of HA `media_player` entity IDs to expose via `GET /api/media`. Empty yields an empty list; each player's display name is read from HA's own `friendly_name` attribute, not from this variable. |
 
 ---
 

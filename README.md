@@ -143,7 +143,7 @@ Best for: Home Assistant integration, custom applications, automation scripts.
 
 1. User sends a query via Jarvis Web, voice device, or API call
 2. Speech-to-text transcribes audio locally (voice interfaces only)
-3. **Gateway** applies rate limiting, circuit breaking, and routes to orchestrator
+3. **Gateway** applies rate limiting, circuit breaking, and routes to orchestrator (the orchestrator's query and session routes require an `X-Service-Key` header by default — see `ORCHESTRATOR_INGRESS_AUTH` in `docs/CONFIGURATION.md`)
 4. **Orchestrator** runs 6-layer deterministic preprocessing (STT error correction, slang normalization, false memory detection, emotional context, pattern classification) before any LLM call
 5. **Complexity detector** scores the query (regex-only, no LLM) and selects the appropriate model tier
 6. **RAG services** fetch real-time data from external APIs
@@ -203,7 +203,7 @@ cd project-athena-oss
 cp .env.example .env
 # Edit .env — set required values:
 #   ATHENA_DB_PASSWORD, ADMIN_API_URL, ENCRYPTION_KEY,
-#   ENCRYPTION_SALT, SESSION_SECRET_KEY, JWT_SECRET
+#   ENCRYPTION_SALT, SESSION_SECRET_KEY, JWT_SECRET, SERVICE_API_KEY
 
 # Disable modules you don't need:
 #   MODULE_HOME_ASSISTANT=false   # skip if no Home Assistant
@@ -236,7 +236,7 @@ cd apps/jarvis-web/backend && pip install -r requirements.in  # requirements.txt
 python -m uvicorn main:app --host 0.0.0.0 --port 3001
 ```
 
-Open `http://localhost:3001` to start chatting. Add RAG services (weather, sports, dining, etc.) as needed — each runs independently on its own port.
+Open `http://localhost:3001` to start chatting. Add RAG services (weather, sports, dining, etc.) as needed — each runs independently on its own port. The transportation, community-events, and Amtrak services start unconfigured (they need a region set via env — see `docs/CONFIGURATION.md`).
 
 ### Full Setup (Voice + Chat + RAG)
 
