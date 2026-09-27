@@ -529,3 +529,30 @@ def test_load_status_uses_summarize_services_helper():
     rather than recomputing the grouping/stat-card logic inline."""
     source = APP_JS.read_text()
     assert "const summary = summarizeServices(data);" in source
+
+
+# ---------------------------------------------------------------------------
+# codex diff review MEDIUM: integrations.js read the service-registry
+# envelope as if it were a bare array. `/api/service-registry/services`
+# returns {services, total_services, ...} -- `ragStatus?.find()` silently
+# resolves to undefined against a plain object (no TypeError, since `?.`
+# short-circuits on `find` not existing), so this fallback path never
+# resolved "connected" for any RAG service integration.
+# ---------------------------------------------------------------------------
+
+INTEGRATIONS_JS = FRONTEND_DIR / "integrations.js"
+
+
+def test_integrations_js_reads_services_array_from_envelope():
+    source = INTEGRATIONS_JS.read_text()
+    assert "(ragStatus?.services || []).find(" in source, (
+        "expected integrations.js to unwrap the {services, ...} envelope "
+        "before calling .find() -- ragStatus?.find() silently no-ops against "
+        "a plain object (codex diff review)"
+    )
+    # The regression this closes: calling .find() directly on the envelope
+    # object (not its .services array) rather than on the comment describing
+    # it -- scoped to the actual call expression, not any mention in prose.
+    assert "const service = ragStatus?.find(" not in source, (
+        "regression: ragStatus?.find() treats the envelope object as an array"
+    )
