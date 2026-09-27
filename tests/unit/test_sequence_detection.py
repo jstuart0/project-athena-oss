@@ -190,6 +190,30 @@ def test_splitter_keeps_descriptive_and_whole(query):
 
 
 # ---------------------------------------------------------------------------
+# F37 (reconciliation round 1, codex r2 High): the pre-standalone-guard
+# word-count filter silently dropped a genuine one-word second fragment
+# instead of falling back to the whole query -- "turn off lights and fan"
+# returned only ["turn off lights"], losing "and fan" entirely.
+# ---------------------------------------------------------------------------
+
+SHORT_FRAGMENT_WHOLE_QUERIES = [
+    "turn off lights and fan",
+    "what is the weather and traffic",
+]
+
+
+def test_short_fragment_whole_population_floor():
+    assert len(SHORT_FRAGMENT_WHOLE_QUERIES) == 2
+
+
+@pytest.mark.parametrize(
+    "query", SHORT_FRAGMENT_WHOLE_QUERIES, ids=SHORT_FRAGMENT_WHOLE_QUERIES
+)
+def test_splitter_keeps_short_second_fragment_whole(query):
+    assert IntentClassifier().detect_multi_intent(query) == [query]
+
+
+# ---------------------------------------------------------------------------
 # Test 6: test_splitter_still_splits_real_multi_intent
 # ---------------------------------------------------------------------------
 

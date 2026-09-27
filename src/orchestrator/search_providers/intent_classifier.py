@@ -328,20 +328,31 @@ class IntentClassifier:
                     new_parts.append(part)
             parts = new_parts
 
-        # Filter out empty or too-short parts
-        valid_parts = [p for p in parts if len(p.split()) >= 2]
+        # ATHENA-88 / F37 (codex r2 High): filter only genuinely empty
+        # (whitespace-only) parts here. Pre-filtering by word count BEFORE
+        # the standalone guard below silently dropped real content instead
+        # of protecting it -- "turn off lights and fan" produced only
+        # ["turn off lights"] (a one-word "fan" fragment was discarded, not
+        # judged), losing the second command entirely rather than falling
+        # back to the whole query. The guard below now runs on the raw
+        # non-empty parts, so a too-short or non-standalone fragment makes
+        # the whole split unsafe (return [query]) instead of being deleted.
+        non_empty_parts = [p for p in parts if p.strip()]
 
-        if not valid_parts:
+        if len(non_empty_parts) <= 1:
             return [query]
 
         # D2 splitter guard: a compound "and"/"then"/... split is only safe
         # when every part after the first is itself a standalone command or
-        # question. Otherwise the split turns one descriptive request
-        # ("what place has happy hour and outdoor seating?") into two
-        # answerable-looking fragments.
-        if len(valid_parts) > 1 and not all(
-            _is_standalone_part(part) for part in valid_parts[1:]
+        # question AND long enough to be a real fragment (>= 2 words).
+        # Otherwise the split turns one descriptive request ("what place has
+        # happy hour and outdoor seating?") into two answerable-looking
+        # fragments, or silently drops a short but meaningful continuation
+        # ("...and fan", "...and traffic").
+        if any(
+            len(part.split()) < 2 or not _is_standalone_part(part)
+            for part in non_empty_parts[1:]
         ):
             return [query]
 
-        return valid_parts
+        return non_empty_parts
