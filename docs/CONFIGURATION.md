@@ -391,11 +391,23 @@ admin UI's External API Keys page (store keys `api-newsapiai` / `api-webz`).
 Distinct from the admin-backend session settings above — these bound the
 orchestrator's per-conversation OpenAI-compatible sessions
 (`/v1/chat/completions`, `/v1/responses`). Every conversation is keyed by an
-HMAC fingerprint over room + user + the first user message (never system
+HMAC fingerprint over an identity plus the first user message (never system
 content or later turns), so it stays stable across Home Assistant's
 full-history replay on every turn. The HMAC secret is `SERVICE_API_KEY`
 (see [Security Settings](#security-settings)); outside `DEV_MODE`, an empty
 or placeholder `SERVICE_API_KEY` is fatal at orchestrator startup.
+
+**Sessions: identity precedence.** The identity mixed into the fingerprint is
+chosen in this order: (1) the top-level `user` field, if non-empty — room
+never enters the key when `user` is present, so a satellite room-detection
+flap between turns can't fragment one conversation; (2) otherwise the
+detected room, but only if it's a real one (not empty or `"unknown"`); (3)
+otherwise no identity at all (a room-less key). **Caveat**: a client that
+sends the same `user` value for every conversation (some generic OpenAI-
+client setups do this) merges every conversation sharing an opening message
+into one session. Send a genuinely per-conversation `user` — or an explicit
+`session_id`/`extra_body.session_id` matching `^explicit-[A-Za-z0-9._:-]{1,55}$`
+— to avoid this.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -521,7 +533,12 @@ worked Denver example, including a feed with an optional `bounds` box.
 | `TRANSIT_REGION_NAME` | *(empty)* | Display label only, purely cosmetic |
 | `TRANSIT_GTFS_FEEDS` | *(empty)* | JSON object of GTFS feed definitions (`{feed_id: {name, agency, url, type, free, bounds?, max_bytes?, allow_private?}}`) |
 | `TRANSIT_STATIC_SERVICES` | *(empty)* | JSON object of non-GTFS transit services with fixed schedules (e.g. a seasonal ferry) |
-| `COMMUNITY_EVENTS_SOURCES` | *(empty)* | JSON array of community-event sources. Each entry's `type` selects the parser: `link_scan`, `event_cards`, `tribe_events_api`, `squarespace_eventlist`. `link_scan` and `event_cards` are best-effort heuristics, validated only against their reference site's HTML structure — a source's markup can drift without notice. |
+| `COMMUNITY_EVENTS_SOURCES` | *(empty)* | JSON array of community-event sources. Each entry's `type` selects the parser: `link_scan`, `event_cards`, `tribe_events_api`, `squarespace_eventlist`. `link_scan` and `event_cards` are best-effort heuristics, validated only against their reference site's HTML structure — a source's markup can drift without notice. `tribe_events_api` and `squarespace_eventlist` are schema-level: they call a documented REST API and a stable Squarespace markup convention, respectively, rather than guessing at page structure. |
+
+**Caveats**:
+- **`bounds` is exclusive.** A GTFS feed's optional `bounds` box (`min_lat`/`max_lat`/`min_lon`/`max_lon`) filters stops with a strict `<` comparison on every edge — a stop exactly on a boundary value is excluded, not included.
+- **`allow_private` residual.** Both feed and event-source fetches go through the shared SSRF guard (`shared.url_safety.safe_get`) with, by default, no private hosts allowed on any hop. Setting `allow_private: true` on one feed/source exempts only that entry's own hostname — on every hop, not just the first. That means the named host resolving to a different private address later (DNS rebinding) or redirecting to itself at a private address are both accepted as operator trust for that one host; a redirect to any *other* private host is still blocked. This is stricter than the CONTRIBUTING.md Class 3 exemption, deliberately — these fetch third-party content, and a hijacked upstream redirect shouldn't reach cluster-internal addresses.
+- **The maintainer-leak CI gate has documented non-goals** — it deliberately doesn't catch a team/place name that doesn't contain the configured home city, a bare latitude with no longitude, or a Linux `/home/<user>` path (only `/Users/…` is ruled). Run `python3 scripts/check-maintainer-leaks.py --help` for the full list before assuming an example value is automatically safe.
 
 ---
 

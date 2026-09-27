@@ -36,7 +36,7 @@ Removes every maintainer-identifying value (home LAN IPs, home domain, home city
 - **Breaking for OSS deployers**:
   - The transportation, community-events, and Amtrak RAG services need explicit region configuration or they start unconfigured (503 on data routes).
   - The orchestrator's query and session routes require `X-Service-Key` by default (`ORCHESTRATOR_INGRESS_AUTH=enforce`); set `SERVICE_API_KEY` and use `warn` mode to find any caller a deployment's own integrations add before switching to `enforce`.
-  - `docker-compose.yml` now fails fast without `SERVICE_API_KEY` set — jarvis-web and the gateway/orchestrator services all require it.
+  - `docker-compose.yml` (which defines the orchestrator and gateway services only) now fails fast without `SERVICE_API_KEY` set. Every other deployment path that talks to the orchestrator — jarvis-web, admin-backend's SMS webhook, the gateway's Wyoming bridge — needs `SERVICE_API_KEY` set in its own environment too; see `docs/INSTALLATION.md`.
   - The MCP domain allowlist defaults to localhost-only; a deployment relying on the previous fail-open behavior for a remote MCP endpoint must add it explicitly.
   - `/v1/responses` now returns 400 for `previous_response_id` instead of silently ignoring it.
   - Every live OpenAI-compatible session id resets once, the first time a conversation is seen after this ships.

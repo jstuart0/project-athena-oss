@@ -181,6 +181,17 @@ JWT_SECRET=your-32-char-base64-key
 # All internal services send this as the X-Service-Key header.
 # Generate: openssl rand -base64 32
 SERVICE_API_KEY=your-service-key
+# ORCHESTRATOR_INGRESS_AUTH defaults to "enforce": the orchestrator's query
+# and session routes reject any caller that doesn't send a matching
+# X-Service-Key. Every process that calls the orchestrator needs this same
+# value: gateway (including its Wyoming voice bridge, which shares the
+# gateway Deployment's env), jarvis-web, and admin-backend's SMS webhook.
+# The canonical athena-prod manifests (gateway.yaml, admin-backend.yaml,
+# manifests/athena-prod/jarvis-web.yaml) all read it from the shared
+# athena-encryption Secret already — nothing extra to configure there. A
+# jarvis-web deployed OUTSIDE athena-prod (apps/jarvis-web/k8s/deployment.yaml,
+# a different namespace with no athena-encryption Secret) needs its own
+# namespace-local Secret; see the Jarvis Web section below.
 
 # OIDC / SSO (REQUIRED in production for admin UI login)
 # The admin backend hard-fails at startup if OIDC_ISSUER is empty or
@@ -652,7 +663,43 @@ kubectl apply -f manifests/athena-prod/
 kubectl apply -f manifests/athena-prod/jarvis-web.yaml
 ```
 
+This canonical deployment shares the `athena-encryption` Secret with the rest
+of `athena-prod`, so `SERVICE_API_KEY` needs no extra setup here.
+
+A **standalone jarvis-web** (deployed into its own namespace, e.g. to run
+close to a browser/voice endpoint on separate infrastructure — see
+`apps/jarvis-web/k8s/deployment.yaml`) has no `athena-encryption` Secret to
+share. Create a namespace-local one before applying it:
+
+```bash
+kubectl -n jarvis-web create secret generic jarvis-web-service-key \
+  --from-literal=SERVICE_API_KEY=<the orchestrator's SERVICE_API_KEY>
+```
+
+If you also apply the optional orchestrator NetworkPolicy below, add a
+`from:` entry for the standalone namespace and its `app: jarvis-web` label —
+same-namespace pod selectors alone won't match a caller in a different
+namespace.
+
 > **Note:** Additional modules (Home Assistant, Guest Mode, Notifications) are configured via environment variables. See [Module Configuration Guide](./MODULES.md) for details.
+
+#### Embedding chat on an external site (chat-embed, optional)
+
+`apps/chat-embed` is a CORS-relay proxy for embedding Athena's chat on a
+third-party site — it is not part of `athena-prod`'s manifests and has no
+Kubernetes manifest in this repo; deploy it as its own small service (its
+own container, wherever you host it) and point it at jarvis-web:
+
+```bash
+# apps/chat-embed/.env
+ATHENA_CHAT_URL=http://<your-jarvis-web>/api/chat
+STREAM_URL=http://<your-jarvis-web>:3001/api/chat/stream
+```
+
+`STREAM_URL` **must** point at jarvis-web's own streaming endpoint, never at
+the orchestrator directly — chat-embed sends no `X-Service-Key`, and the
+orchestrator's `/query/stream` rejects an unauthenticated caller under the
+default `ORCHESTRATOR_INGRESS_AUTH=enforce`.
 
 #### Deploy RAG Services
 
@@ -688,6 +735,28 @@ spec:
   tls:
     secretName: athena-tls
 ```
+
+#### Optional: orchestrator NetworkPolicy
+
+`manifests/athena-prod/optional/networkpolicy-orchestrator.yaml` is
+defence-in-depth alongside `ORCHESTRATOR_INGRESS_AUTH`'s `X-Service-Key`
+check (the control) — it restricts which pods can reach the orchestrator at
+the network layer. It lives under `optional/` deliberately: the documented
+`kubectl apply -f manifests/athena-prod/` is not recursive, so it's never
+applied by accident. Apply it explicitly once every in-cluster caller is
+accounted for in its `podSelector`/`namespaceSelector` rules:
+
+```bash
+kubectl apply -f manifests/athena-prod/optional/networkpolicy-orchestrator.yaml
+```
+
+It's enforced only by a NetworkPolicy-capable CNI (Calico, Cilium, etc.) —
+flannel silently ignores `NetworkPolicy` resources, so verify your cluster's
+CNI before relying on it for isolation. A caller in another namespace (the
+standalone jarvis-web example, a metrics scraper, a debug pod) needs its own
+`from:` entry added before you apply this policy — an unlisted caller is
+blocked at the network layer regardless of whether its `X-Service-Key` is
+correct.
 
 ---
 

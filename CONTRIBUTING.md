@@ -152,6 +152,9 @@ Then add a unit test in `tests/unit/test_config.py` mirroring the existing field
 
 ### Current `AthenaConfig` fields
 
+41 fields, plus one computed property (`llm_endpoint`). This table is meant
+to stay complete — when you add a field, add its row here too.
+
 | Field | Env var | Default | Notes |
 |-------|---------|---------|-------|
 | `ollama_url` | `OLLAMA_URL` | `http://localhost:11434` | LLM inference endpoint |
@@ -159,16 +162,43 @@ Then add a unit test in `tests/unit/test_config.py` mirroring the existing field
 | `llm_endpoint` | _(computed)_ | falls back to `ollama_url` | `llm_service_url` wins when non-empty |
 | `redis_url` | `REDIS_URL` | `redis://redis:6379/0` | In-cluster DNS default |
 | `database_url` | `DATABASE_URL` | `""` | PostgreSQL connection string |
-| `service_api_key` | `SERVICE_API_KEY` | `""` | Service-to-service auth key |
+| `service_api_key` | `SERVICE_API_KEY` | `""` | Service-to-service auth key; HMAC secret for OpenAI-compatible sessions and the orchestrator's ingress-auth check |
 | `default_timezone` | `DEFAULT_TIMEZONE` | `UTC` | |
 | `default_city` | `DEFAULT_CITY` | `""` | |
 | `oidc_issuer` | `OIDC_ISSUER` | `""` | Whitespace stripped |
 | `oidc_client_id` | `OIDC_CLIENT_ID` | `""` | Whitespace stripped |
+| `oidc_validate_iss` | `OIDC_VALIDATE_ISS` | `true` | Set `false` only if your IdP deliberately returns a mismatched issuer URL |
 | `dev_mode` | `DEV_MODE` | `false` | |
 | `demo_mode` | `DEMO_MODE` | `false` | |
 | `control_agent_enabled` | `CONTROL_AGENT_ENABLED` | `false` | Opt-in; set `true` only if a Control Agent runs on a host alongside Ollama. Valid values: `true`/`false`/`1`/`0`. Do not set to a blank string. |
+| `login_rate_limit_per_minute` | `LOGIN_RATE_LIMIT_PER_MINUTE` | `5` | Max `POST /local-login` attempts per IP per 60s |
+| `login_lockout_threshold` | `LOGIN_LOCKOUT_THRESHOLD` | `10` | Cumulative failures before an account locks |
+| `login_lockout_minutes` | `LOGIN_LOCKOUT_MINUTES` | `30` | Lockout duration once the threshold is reached |
+| `login_minimum_delay_ms` | `LOGIN_MINIMUM_DELAY_MS` | `400` | Wall-time floor on every login-failure branch, to equalize timing |
+| `service_registry_write_per_minute` | `SERVICE_REGISTRY_WRITE_PER_MINUTE` | `60` | Rate limit for service-registry POST/toggle/refresh/DELETE |
+| `health_poll_interval_seconds` | `HEALTH_POLL_INTERVAL_SECONDS` | `30` | Background health-poller cycle interval |
+| `health_poll_timeout_seconds` | `HEALTH_POLL_TIMEOUT_SECONDS` | `5` | Per-service `/health` request timeout |
+| `health_poll_concurrency` | `HEALTH_POLL_CONCURRENCY` | `8` | Max simultaneous outbound health pings per cycle |
+| `health_poll_allowed_private_hosts` | `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` | `""` | Comma-separated CIDRs/hostnames allowed through the health poller's own SSRF guard |
 | `sitescraper_allowed_private_hosts` | `SITESCRAPER_ALLOWED_PRIVATE_HOSTS` | `""` | Comma-separated CIDRs/hostnames allowed through the sitescraper SSRF guard. Scope narrowly — wide CIDRs like `10.0.0.0/8` bypass the guard for all RFC-1918 addresses. |
 | `content_fetcher_allow_browser_fetch` | `CONTENT_FETCHER_ALLOW_BROWSER_FETCH` | `false` | Enable Playwright browser fetching in ContentFetcher. Playwright paths bypass the SSRF guard; only enable in isolated/controlled deployments. |
+| `session_max_count` | `SESSION_MAX_COUNT` | `5000` | Cap on concurrent per-conversation OpenAI-compatible sessions |
+| `new_conversation_per_minute_per_ip` | `NEW_CONVERSATION_PER_MINUTE_PER_IP` | `120` | Gateway sliding-window limit on new (first-turn) conversations per rate-limit key |
+| `trusted_proxy_cidrs` | `TRUSTED_PROXY_CIDRS` | `""` | CIDRs/hosts the new-conversation limiter trusts `X-Forwarded-For` from; empty means every caller's TCP peer is trusted directly |
+| `new_conversation_reset_grace_seconds` | `NEW_CONVERSATION_RESET_GRACE_SECONDS` | `120` | Grace window before a first-turn fingerprint reset, to tolerate HA's truncated-ASR retry |
+| `orchestrator_ingress_auth` | `ORCHESTRATOR_INGRESS_AUTH` | `enforce` | `enforce`\|`warn`; gates the orchestrator's query/session routes behind `X-Service-Key` |
+| `music_assistant_url` | `MUSIC_ASSISTANT_URL` | `""` | Empty means Music Assistant isn't configured (no hardcoded-host fallback) |
+| `searxng_base_url` | `SEARXNG_BASE_URL` | `""` | Empty means the SearXNG search provider is disabled |
+| `transit_region_name` | `TRANSIT_REGION_NAME` | `""` | Cosmetic label for the configured transit region |
+| `transit_gtfs_feeds` | `TRANSIT_GTFS_FEEDS` | `""` | JSON GTFS feed definitions for the transportation RAG service |
+| `transit_static_services` | `TRANSIT_STATIC_SERVICES` | `""` | JSON non-GTFS transit services (fixed schedules) |
+| `community_events_sources` | `COMMUNITY_EVENTS_SOURCES` | `""` | JSON community-event source definitions |
+| `default_amtrak_station` | `DEFAULT_AMTRAK_STATION` | `""` | Default Amtrak origin station code |
+| `ha_satellite_room_map` | `HA_SATELLITE_ROOM_MAP` | `""` | Voice PE `assist_satellite` entity → room map (takes priority over the generic friendly-name parse) |
+| `ha_tv_entities` | `HA_TV_ENTITIES` | `""` | Fallback room → Apple TV entity map, used only when the admin API is unreachable |
+| `ha_bed_warmer_entities` | `HA_BED_WARMER_ENTITIES` | `""` | Entity ids for a Sunbeam-via-Tuya bed-warmer integration |
+| `ha_light_groups` | `HA_LIGHT_GROUPS` | `""` | Room → light-group entity map, read only by the scene-activation-failed fallback (per room; empty means no fallback for that room, never house-wide) |
+| `ha_music_players` | `HA_MUSIC_PLAYERS` | `""` | Fallback room → Music Assistant entity map, used only when the admin API is unreachable |
 
 ## Fetching user-supplied or admin-supplied URLs (SSRF guard)
 
@@ -202,6 +232,8 @@ except SsrfBlockedError as exc:
 ```
 
 `safe_get`/`safe_post` never follow redirects automatically — each hop is re-validated against `validate_url_not_private` and the TCP connect is IP-pinned to the validated address (DNS-rebinding mitigation). POST 307/308 redirects are refused. POST 301/302/303 redirects downgrade to GET and strip the body and credential headers on cross-origin hops.
+
+Operator-configured feed/content URLs (the transportation service's GTFS feeds, the community-events service's sources) are Class 1 too — they fetch through `safe_request` (via `safe_get`) with the same per-hop private-address validation, no `allowed_private_hosts` by default. A per-feed/source `allow_private: true` schema field is the only way to exempt one entry's own hostname, on every hop; it does not touch the shared allowlist any other Class-1 call site uses.
 
 ### Do not
 
