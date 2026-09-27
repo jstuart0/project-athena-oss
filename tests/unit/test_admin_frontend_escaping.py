@@ -324,3 +324,108 @@ def test_delivery_proof_pre_fix_shape_would_have_mangled_the_same_payload():
         "the raw value -- if it does, this proof can no longer distinguish the fix"
     )
     assert delivered == "svc&amp;one", f"expected the documented mangled form, got {delivered!r}"
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-99: dashboard service badges must never render the literal text
+# "undefined". app.js:934-944 and :2358-2363 read `service.status`, but
+# /api/service-registry/services returns `health_status` (NULL normalised
+# to 'pending' server-side) and, after DC10, `unconfigured` -- `status`
+# is a field the API has never sent. Both call sites now go through
+# serviceStatus(service), a pure function with no DOM dependency, so it's
+# tested directly in Node rather than requiring the whole app.js (which
+# touches `document`/`window.location` at module scope and would need a
+# full DOM stub to load at all).
+# ---------------------------------------------------------------------------
+
+APP_JS = FRONTEND_DIR / "app.js"
+
+
+def _extract_function_source(file_path: Path, function_name: str) -> str:
+    """Extract a single top-level `function NAME(...) { ... }` block by
+    brace-matching from its `function` keyword to the closing brace --
+    robust to nested braces in the body, unlike a naive regex."""
+    source = file_path.read_text()
+    marker = f"function {function_name}("
+    start = source.index(marker)
+    brace_start = source.index("{", start)
+    depth = 0
+    for i in range(brace_start, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:i + 1]
+    raise AssertionError(f"unbalanced braces extracting {function_name} from {file_path}")
+
+
+def _run_node_with_source(js_source: str, js_expr: str):
+    """Evaluate js_expr in a bare Node context after loading js_source
+    (arbitrary JS text, not necessarily a whole file) -- no `require()`,
+    no DOM stub, since the functions under test here have no DOM
+    dependency at all."""
+    script = f"""
+    'use strict';
+    {js_source}
+    const result = (function() {{ return {js_expr}; }})();
+    process.stdout.write(JSON.stringify(result === undefined ? "__undefined__" : result));
+    """
+    proc = subprocess.run(
+        [NODE_BIN, "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert proc.returncode == 0, f"node failed: {proc.stderr}"
+    return json.loads(proc.stdout)
+
+
+def test_service_status_helper_exists():
+    source = APP_JS.read_text()
+    assert "function serviceStatus(" in source, (
+        "expected a serviceStatus(service) helper in app.js (ATHENA-99)"
+    )
+
+
+@pytest.mark.parametrize("service,expected", [
+    ({"health_status": "healthy"}, "healthy"),
+    ({"health_status": "unconfigured"}, "unconfigured"),
+    ({"health_status": None, "status": "offline"}, "offline"),  # legacy fallback
+    ({}, "unknown"),  # registry-shaped object lacking BOTH fields entirely
+    ({"name": "weather", "host": "athena-rag-weather", "port": 8010}, "unknown"),
+])
+def test_service_status_never_returns_undefined(service, expected):
+    """The exact regression this ticket closes: a registry entry with
+    neither health_status nor status must resolve to 'unknown', never the
+    literal string "undefined" (or JS `undefined` itself)."""
+    fn_source = _extract_function_source(APP_JS, "serviceStatus")
+    result = _run_node_with_source(fn_source, f"serviceStatus({json.dumps(service)})")
+    assert result == expected
+    assert result != "__undefined__"
+    assert "undefined" not in str(result)
+
+
+def test_dashboard_badge_call_sites_use_service_status_helper():
+    """Static check that both known call sites (the Dashboard tab's
+    per-group cards and the RAG Services tab's registry cards) compute
+    status via the helper rather than reading service.status directly,
+    and render it through escapeHtml."""
+    source = APP_JS.read_text()
+
+    # Both card-rendering blocks must call serviceStatus(service).
+    assert source.count("const status = serviceStatus(service);") >= 2, (
+        "expected both app.js dashboard-card render sites to call "
+        "serviceStatus(service) -- found fewer than 2"
+    )
+
+    # And the resolved status text must be escaped when rendered.
+    assert "escapeHtml(status)" in source
+
+
+def test_no_raw_service_status_interpolation_remains_in_app_js():
+    """The literal bug: `${service.status}` interpolated bare (no helper,
+    no escaping) renders "undefined" for any /api/service-registry/services
+    entry, since that endpoint has never sent a `status` field."""
+    source = APP_JS.read_text()
+    assert "${service.status}" not in source

@@ -867,6 +867,21 @@ function showTab(tabName) {
 // Dashboard Tab (Existing Service Status)
 // ============================================================================
 
+/**
+ * Resolve the effective status for a service-registry entry (ATHENA-99).
+ *
+ * The /api/service-registry/services response carries health_status
+ * (server-normalised: NULL -> 'pending'; see service_registry.py), plus
+ * 'unconfigured' after DC10 -- not `status`, a field this file read that
+ * the API has never sent. Both dashboard badges below rendered the
+ * literal text "undefined" as a result. `service.status` is kept as a
+ * fallback only for a hypothetical caller that already passes the older
+ * shape; 'unknown' is the last resort so a badge never renders undefined.
+ */
+function serviceStatus(service) {
+    return service?.health_status ?? service?.status ?? 'unknown';
+}
+
 async function loadStatus() {
     const errorContainer = document.getElementById('error-container');
     const statsContainer = document.getElementById('stats-container');
@@ -920,7 +935,23 @@ async function loadStatus() {
                 <div class="mb-6">
                     <h3 class="text-lg font-semibold text-white mb-3">${group}</h3>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        ${services.map(service => `
+                        ${services.map(service => {
+                            const status = serviceStatus(service);
+                            const dotClass = status === 'healthy' ? 'bg-green-500' :
+                                             status === 'offline' ? 'bg-gray-500' :
+                                             status === 'disabled' ? 'bg-gray-600' :
+                                             status === 'pending' ? 'bg-blue-500' :
+                                             status === 'unconfigured' ? 'bg-amber-500' :
+                                             status === 'unhealthy' || status === 'error' ? 'bg-red-500' :
+                                             'bg-gray-500';
+                            const textClass = status === 'healthy' ? 'text-green-400' :
+                                              status === 'offline' ? 'text-gray-400' :
+                                              status === 'disabled' ? 'text-gray-500' :
+                                              status === 'pending' ? 'text-blue-400' :
+                                              status === 'unconfigured' ? 'text-amber-400' :
+                                              status === 'unhealthy' || status === 'error' ? 'text-red-400' :
+                                              'text-gray-400';
+                            return `
                             <div class="bg-dark-card border border-dark-border rounded-lg p-4">
                                 <div class="flex items-start justify-between mb-2">
                                     <div class="flex-1">
@@ -930,18 +961,8 @@ async function loadStatus() {
                                         </p>
                                     </div>
                                     <div class="flex items-center gap-2">
-                                        <span class="w-2 h-2 rounded-full ${
-                                            service.status === 'healthy' ? 'bg-green-500' :
-                                            service.status === 'offline' ? 'bg-gray-500' :
-                                            service.status === 'disabled' ? 'bg-gray-600' :
-                                            'bg-red-500'
-                                        }"></span>
-                                        <span class="text-xs ${
-                                            service.status === 'healthy' ? 'text-green-400' :
-                                            service.status === 'offline' ? 'text-gray-400' :
-                                            service.status === 'disabled' ? 'text-gray-500' :
-                                            'text-red-400'
-                                        }">${service.status}</span>
+                                        <span class="w-2 h-2 rounded-full ${dotClass}"></span>
+                                        <span class="text-xs ${textClass}">${escapeHtml(status)}</span>
                                     </div>
                                 </div>
                                 ${service.enabled ?
@@ -956,7 +977,8 @@ async function loadStatus() {
                                     <p class="text-xs text-gray-400 mt-2">${service.health_message}</p>
                                 ` : ''}
                             </div>
-                        `).join('')}
+                        `;
+                        }).join('')}
                     </div>
                 </div>
             `;
@@ -2347,6 +2369,14 @@ async function loadServices() {
         container.innerHTML = data.services.map(service => {
             // Raw value for onclick attrs -- escapeJsAttr escapes it below (codex r2 F1).
             const rawName = service.name || '';
+            const status = serviceStatus(service);
+            const badgeClass = status === 'healthy' ? 'bg-green-900/30 text-green-400' :
+                              status === 'offline' ? 'bg-gray-700 text-gray-400' :
+                              status === 'disabled' ? 'bg-gray-700 text-gray-500' :
+                              status === 'pending' ? 'bg-blue-900/30 text-blue-400' :
+                              status === 'unconfigured' ? 'bg-amber-900/30 text-amber-400' :
+                              status === 'error' || status === 'unhealthy' ? 'bg-red-900/30 text-red-400' :
+                              'bg-gray-700 text-gray-300';
             return `
             <div class="bg-dark-card border border-dark-border rounded-lg p-4">
                 <div class="flex justify-between items-start mb-3">
@@ -2354,13 +2384,7 @@ async function loadServices() {
                         <h4 class="text-lg font-semibold text-white">${escapeHtml(service.display_name || service.name)}</h4>
                         <p class="text-sm text-gray-400">${service.host}:${service.port}</p>
                     </div>
-                    <span class="px-2 py-1 rounded text-xs font-medium ${
-                        service.status === 'healthy' ? 'bg-green-900/30 text-green-400' :
-                        service.status === 'offline' ? 'bg-gray-700 text-gray-400' :
-                        service.status === 'disabled' ? 'bg-yellow-900/30 text-yellow-400' :
-                        service.status === 'error' || service.status === 'unhealthy' ? 'bg-red-900/30 text-red-400' :
-                        'bg-gray-700 text-gray-300'
-                    }">${service.status}</span>
+                    <span class="px-2 py-1 rounded text-xs font-medium ${badgeClass}">${escapeHtml(status)}</span>
                 </div>
 
                 <div class="space-y-2 text-sm mb-4">
