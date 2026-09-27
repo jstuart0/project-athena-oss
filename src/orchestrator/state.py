@@ -84,6 +84,10 @@ class OrchestratorState(BaseModel):
     conversation_history: List[Dict[str, str]] = Field(default_factory=list, description="Previous conversation messages")
     history_summary: str = Field("", description="Summarized conversation context (for summarized mode)")
     context_ref_info: Dict[str, Any] = Field(default_factory=dict, description="Detected context reference info")
+    # ATHENA-88 / F16, D13: the routed continuation decision. classify_node
+    # is the sole writer; shape is {"decision": "continued"|"declined"|
+    # "not_consulted", "reason": str}. See context.detector.context_ref_view.
+    continuation_decision: Dict[str, Any] = Field(default_factory=dict, description="Routed context-continuation decision (decision, reason)")
     prev_context: Optional[Dict[str, Any]] = Field(None, description="Previous conversation context from Redis")
 
     # Phase 2: Guest Mode permissions

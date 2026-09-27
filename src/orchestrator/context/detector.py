@@ -5,7 +5,8 @@ Analyzes queries to detect if they reference previous conversation context.
 This enables follow-up queries like "do that again", "turn them off", "what about tomorrow?".
 """
 
-from typing import Dict, Any
+import re
+from typing import Any, Dict, List, Set
 
 
 # Context reference detection patterns
@@ -467,6 +468,14 @@ def detect_context_reference(query: str) -> Dict[str, Any]:
         result["has_context_ref"] = False
         result["is_continuation"] = False
 
+    # ATHENA-88 / F16 / D8: additive anaphora signal, computed with compiled
+    # token/position rules (the same idiom as the F87 sequence matcher).
+    # The legacy keys above are NOT changed by this block, so the seven
+    # existing readers of has_context_ref/ref_types/is_continuation see
+    # identical values to before — only decide_context_continuation (D8)
+    # and context_ref_view (D13) consult anaphora_types.
+    result["anaphora_types"] = sorted(_compute_anaphora_types(query_lower))
+
     return result
 
 
@@ -612,3 +621,211 @@ def detect_location_correction(query: str) -> Dict[str, Any]:
             return result
 
     return result
+
+
+# ============================================================================
+# Anaphora signal (ATHENA-88 / F16, D8) — additive, compiled token/position
+# rules. Feeds decide_context_continuation only; the legacy keys above are
+# untouched.
+# ============================================================================
+
+_YES_NO_BASE_WORDS = ("yes", "yeah", "yep", "yup", "no", "nope", "ok", "okay", "sure", "nah")
+_YES_NO_STANDALONE_WORDS = ("any", "anything", "whatever")
+_YES_NO_SUFFIX = r"(?:please|thanks|thank you|do it|go ahead)"
+
+_YES_NO_WITH_SUFFIX_RE = re.compile(
+    r"^(?:" + "|".join(_YES_NO_BASE_WORDS) + r")(?:\s+" + _YES_NO_SUFFIX + r")?$"
+)
+_YES_NO_STANDALONE_RE = re.compile(r"^(?:" + "|".join(_YES_NO_STANDALONE_WORDS) + r")$")
+_YES_NO_COMMA_RE = re.compile(r"^(?:" + "|".join(_YES_NO_BASE_WORDS) + r")\s*,")
+_TRAILING_PUNCT_RE = re.compile(r"[?.!]+$")
+
+_REPEAT_RE = re.compile(r"\b(?:do (?:that|it) again|same thing|do the same|repeat that)\b")
+_TRAILING_AGAIN_RE = re.compile(r"\bagain\b\s*[?.!]*$")
+
+_INCOMPLETE_COMMAND_PATTERNS = (
+    re.compile(r"^(?:set|change|switch|turn|put|adjust|make)(?: it)? (?:to|at) \S+"),
+    re.compile(r"\blevel \d+\b"),
+    re.compile(r"\b\d+\s*(?:percent|%)"),
+    re.compile(r"^(?:a (?:little|bit) )?(?:higher|lower|up|down)[?.!]*$"),
+    re.compile(r"^(?:turn|set|move) (?:it )?(?:up|down)\b"),
+)
+
+_PRONOUN_WORDS = (
+    "it", "them", "those", "these", "that one", "the same one", "the one",
+    "he", "she", "him", "her", "his", "they", "their",
+)
+_PRONOUN_RES = tuple(re.compile(r"\b" + re.escape(w) + r"\b") for w in _PRONOUN_WORDS)
+
+_FOLLOW_UP_LEADING_RE = re.compile(r"^(?:and|also|or|plus|but)\b")
+_FOLLOW_UP_ABOUT_RE = re.compile(r"^(?:what|how) about\b")
+_FOLLOW_UP_TRAILING_RE = re.compile(r"\b(?:too|as well)\s*[?.!]*$")
+_FOLLOW_UP_INSTEAD_RE = re.compile(r"\binstead\b")
+_FOLLOW_UP_OR_MAYBE_RE = re.compile(r"\bor maybe\b")
+
+_DEVICE_MODIFIER_WORDS = ("brighter", "dimmer", "louder", "quieter", "warmer", "cooler", "different color")
+_DEVICE_MODIFIER_RES = tuple(re.compile(r"\b" + re.escape(w) + r"\b") for w in _DEVICE_MODIFIER_WORDS)
+
+_INQUIRY_ANAPHORA_RE = re.compile(r"^(?:did (?:it|that|you)|was it|were they|are they|is it|which)\b")
+
+_ROOM_ONLY_STRIP_RE = re.compile(r"^(?:and|in|the|what about)\s+")
+
+
+def _is_room_only(query_lower: str) -> bool:
+    """A room word, with <= 3 tokens after stripping a leading and/in/the/what about."""
+    stripped = query_lower
+    while True:
+        new_stripped = _ROOM_ONLY_STRIP_RE.sub("", stripped, count=1)
+        if new_stripped == stripped:
+            break
+        stripped = new_stripped
+    tokens = stripped.split()
+    if not tokens or len(tokens) > 3:
+        return False
+    return any(room in stripped for room in ROOM_INDICATORS)
+
+
+def _compute_anaphora_types(query_lower: str) -> Set[str]:
+    types: Set[str] = set()
+    stripped_query = _TRAILING_PUNCT_RE.sub("", query_lower).strip()
+
+    if (
+        _YES_NO_WITH_SUFFIX_RE.match(stripped_query)
+        or _YES_NO_STANDALONE_RE.match(stripped_query)
+        or _YES_NO_COMMA_RE.match(stripped_query)
+    ):
+        types.add("yes_no")
+
+    if _REPEAT_RE.search(query_lower) or _TRAILING_AGAIN_RE.search(query_lower):
+        types.add("repeat")
+
+    if any(p.search(query_lower) for p in _INCOMPLETE_COMMAND_PATTERNS):
+        types.add("incomplete_command")
+
+    if any(p.search(query_lower) for p in _PRONOUN_RES):
+        types.add("pronoun")
+
+    if (
+        _FOLLOW_UP_LEADING_RE.search(query_lower)
+        or _FOLLOW_UP_ABOUT_RE.search(query_lower)
+        or _FOLLOW_UP_TRAILING_RE.search(query_lower)
+        or _FOLLOW_UP_INSTEAD_RE.search(query_lower)
+        or _FOLLOW_UP_OR_MAYBE_RE.search(query_lower)
+    ):
+        types.add("follow_up")
+
+    if any(p.search(query_lower) for p in _DEVICE_MODIFIER_RES):
+        types.add("device_modifier")
+
+    if _INQUIRY_ANAPHORA_RE.search(query_lower):
+        types.add("inquiry")
+
+    if _is_room_only(query_lower):
+        types.add("room_only")
+
+    return types
+
+
+# ============================================================================
+# Routed continuation decision + single-writer context view (ATHENA-88 /
+# F16, D8/D13)
+# ============================================================================
+
+# Intents that share a family for the "different topic" check in
+# decide_context_continuation. Every intent not listed here is its own
+# family (a set of one).
+_INTENT_FAMILIES = {
+    "music_play": frozenset({"music_play", "music_control"}),
+    "music_control": frozenset({"music_play", "music_control"}),
+}
+
+
+def _same_family(prev_intent: str, fresh_intent: str) -> bool:
+    family = _INTENT_FAMILIES.get(prev_intent, frozenset({prev_intent}))
+    return fresh_intent in family
+
+
+def decide_context_continuation(
+    ref_info: Dict[str, Any],
+    prev_intent: str,
+    fresh_intent: str,
+    fresh_confidence: float,
+) -> "tuple[bool, str]":
+    """
+    Decide whether a short/referential turn should continue the previous
+    intent, or be classified fresh (D8, user decision D3).
+
+    Rule order (each step short-circuits):
+      1. Explicit ellipsis (yes_no / repeat / incomplete_command anaphora)
+         always continues — these name no topic of their own.
+      2. A confident (>=0.85), non-general_info, different-family fresh
+         classification wins — the user named a new topic.
+      3. Any remaining anaphora signal continues.
+      4. A short query with no anaphora and no confident fresh intent
+         continues (the narrowed old "8 words or fewer" rule).
+      5. Otherwise, classify fresh.
+    """
+    anaphora_types = set(ref_info.get("anaphora_types", []))
+
+    if anaphora_types & {"yes_no", "repeat", "incomplete_command"}:
+        return True, "ellipsis"
+
+    fresh_specific = (
+        fresh_confidence >= 0.85
+        and fresh_intent != "general_info"
+        and not _same_family(prev_intent, fresh_intent)
+    )
+    if fresh_specific:
+        return False, "fresh_intent"
+
+    if anaphora_types:
+        return True, "anaphora"
+
+    if ref_info.get("is_short_query"):
+        return True, "low_confidence_short"
+
+    return False, "no_reference"
+
+
+def context_ref_view(ref_info: Dict[str, Any], decision: str) -> Dict[str, Any]:
+    """
+    Return the context_ref_info view downstream readers should see, given
+    the routed continuation decision (ATHENA-88 / F16, D13).
+
+    classify_node is the SOLE writer of state.context_ref_info; every exit
+    calls this instead of storing the raw detect_context_reference result
+    directly, so a substring-matched legacy flag (e.g. has_context_ref=True
+    from an embedded "and") never demotes a correctly-classified fresh
+    intent downstream (F16). The raw dict is preserved under "raw" for
+    debugging; keys no reader consults (e.g. prev_error_context,
+    has_room_indicator) are always preserved as-is.
+
+    Modes:
+      - "continued": an unmodified copy of ref_info. Keeps today's
+        behaviour, including the Phase-2 synthesize demotion for genuine
+        referential follow-ups.
+      - "declined": has_context_ref/is_continuation/is_inquiry are forced
+        False, ref_types/anaphora_types are cleared.
+      - "not_consulted": no previous context was fetched or found (e.g. the
+        context TTL expired while conversation history remains). Flags are
+        re-derived from anaphora_types alone, so a stale substring match in
+        the legacy fields can't demote a fresh turn through that door.
+    """
+    view = dict(ref_info)
+    view["raw"] = dict(ref_info)
+
+    if decision == "declined":
+        view["has_context_ref"] = False
+        view["is_continuation"] = False
+        view["is_inquiry"] = False
+        view["ref_types"] = []
+        view["anaphora_types"] = []
+    elif decision == "not_consulted":
+        anaphora_types = ref_info.get("anaphora_types", [])
+        view["has_context_ref"] = bool(anaphora_types)
+        view["is_continuation"] = "yes_no" in anaphora_types
+        view["is_inquiry"] = "inquiry" in anaphora_types
+        view["ref_types"] = sorted(anaphora_types)
+    # "continued": view already equals a copy of ref_info (plus "raw").
+
+    return view

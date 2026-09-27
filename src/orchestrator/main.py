@@ -112,6 +112,8 @@ from orchestrator.context import (
     detect_strong_intent,
     detect_location_correction,
     is_conversational_reference,
+    decide_context_continuation,
+    context_ref_view,
     CONTEXT_REF_PATTERNS,
     ROOM_INDICATORS,
 )
@@ -2119,7 +2121,15 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     # COMPREHENSIVE CONTEXT DETECTION
     # Detect if this query references previous conversation context
     ref_info = detect_context_reference(state.query)
-    state.context_ref_info = ref_info
+    # ATHENA-88 / F16, D13: classify_node is the SOLE writer of
+    # state.context_ref_info. Every exit stores a context_ref_view(...) of
+    # the raw ref_info, gated by the routed continuation_decision, so a
+    # substring-matched legacy flag never demotes a correctly-classified
+    # fresh intent downstream. This default covers every exit reached
+    # before the decision is actually made below (including the safety/
+    # false-memory/emotional/phone/ETA early returns above this point).
+    state.context_ref_info = context_ref_view(ref_info, "not_consulted")
+    state.continuation_decision = {"decision": "not_consulted", "reason": "not_yet_fetched"}
 
     # LOCATION CORRECTION DETECTION
     # Detect if user is correcting their location (e.g., "I'm not in Baltimore", "use my location")
@@ -2224,6 +2234,8 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                             f"Fast path: strong intent override - routing '{state.query[:50]}...' "
                             f"to {state.intent} (from {detected_intent_str} indicators)"
                         )
+                        state.context_ref_info = context_ref_view(ref_info, "declined")
+                        state.continuation_decision = {"decision": "declined", "reason": "strong_intent"}
                         state.node_timings["classify"] = time.time() - start
                         return state
                 # If detected intent not in map, fall through to normal classification
@@ -2235,8 +2247,9 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                     f"- NOT continuing {prev_context.intent} context"
                 )
                 # Store the previous context info so the response can reference what happened
-                state.context_ref_info = ref_info
-                state.context_ref_info["prev_error_context"] = prev_context.model_dump() if prev_context else None
+                ref_info["prev_error_context"] = prev_context.model_dump() if prev_context else None
+                state.context_ref_info = context_ref_view(ref_info, "declined")
+                state.continuation_decision = {"decision": "declined", "reason": "meta_inquiry"}
                 # Fall through to normal classification (GENERAL or CONVERSATION intent)
             elif ref_info.get("is_conversation_breaker"):
                 # Conversation breakers like "forget it", "I'm sorry", "thanks for your patience"
@@ -2245,54 +2258,85 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                     f"Conversation breaker detected: '{state.query}' breaks {prev_context.intent} context "
                     f"- routing to fresh classification"
                 )
-                state.context_ref_info = ref_info
+                state.context_ref_info = context_ref_view(ref_info, "declined")
+                state.continuation_decision = {"decision": "declined", "reason": "conversation_breaker"}
                 # Fall through to normal classification - will be handled as conversational response
             else:
-                if ref_info["has_context_ref"]:
-                    logger.info(f"Context reference detected: {ref_info['ref_types']} - prev intent: {prev_context.intent}")
+                # ATHENA-88 / F16, D8: continue only on explicit anaphora/
+                # ellipsis, or when no confident fresh intent exists. A
+                # pattern-classifier intent with >=0.85 confidence, that
+                # isn't general_info and isn't in prev_intent's family,
+                # names a new topic and must classify fresh even though the
+                # legacy has_context_ref/is_short_query gate would have
+                # continued unconditionally.
+                fresh_intent, fresh_confidence = _pattern_based_classification(
+                    state.query, return_confidence=True
+                )
+                should_continue, decision_reason = decide_context_continuation(
+                    ref_info, prev_context.intent, fresh_intent, fresh_confidence
+                )
+
+                if not should_continue:
+                    logger.info(
+                        "context_continuation_declined",
+                        reason=decision_reason,
+                        prev_intent=prev_context.intent,
+                        fresh_intent=fresh_intent,
+                        fresh_confidence=fresh_confidence,
+                    )
+                    state.context_ref_info = context_ref_view(ref_info, "declined")
+                    state.continuation_decision = {"decision": "declined", "reason": decision_reason}
+                    # Fall through to normal (cache/LLM) classification below.
                 else:
-                    logger.info(f"Short query with context available: '{state.query}' - prev intent: {prev_context.intent}")
-                    # Mark as implicit context reference for short queries
-                    ref_info["has_context_ref"] = True
-                    ref_info["ref_types"].append("implicit_short_query")
-                    state.context_ref_info = ref_info
+                    if decision_reason == "low_confidence_short":
+                        logger.info(f"Short query with context available: '{state.query}' - prev intent: {prev_context.intent}")
+                        # Mark as implicit context reference for short queries
+                        # with no classifiable intent of their own.
+                        ref_info["has_context_ref"] = True
+                        ref_info["ref_types"].append("implicit_short_query")
+                    else:
+                        logger.info(f"Context reference detected: {ref_info['ref_types']} - prev intent: {prev_context.intent}")
 
-                # Route to the same intent as the previous context
-                # This handles all intents, not just CONTROL
-                try:
-                    state.intent = IntentCategory(prev_context.intent)
-                    state.confidence = 0.95
-                    # Use complexity detector for follow-ups (may upgrade from simple)
-                    state.complexity = get_complexity_with_override(
-                        state.query,
-                        intent=prev_context.intent,
-                        is_followup=True
-                    )
+                    # Route to the same intent as the previous context
+                    # This handles all intents, not just CONTROL
+                    try:
+                        state.intent = IntentCategory(prev_context.intent)
+                        state.confidence = 0.95
+                        # Use complexity detector for follow-ups (may upgrade from simple)
+                        state.complexity = get_complexity_with_override(
+                            state.query,
+                            intent=prev_context.intent,
+                            is_followup=True
+                        )
 
-                    # Use merge_with_context to handle temporal refs, new entities, etc.
-                    merged = merge_with_context(
-                        new_query=state.query,
-                        new_entities=state.entities,
-                        context=prev_context,
-                        ref_info=ref_info
-                    )
-                    state.entities = merged["entities"]
+                        # Use merge_with_context to handle temporal refs, new entities, etc.
+                        merged = merge_with_context(
+                            new_query=state.query,
+                            new_entities=state.entities,
+                            context=prev_context,
+                            ref_info=ref_info
+                        )
+                        state.entities = merged["entities"]
 
-                    # Set flag for pronoun-based follow-ups that need LLM to resolve from history
-                    if merged.get("needs_history_context"):
-                        state.needs_history_context = True
-                        logger.info(f"Pronoun follow-up detected: '{state.query}' needs conversation history for resolution")
+                        # Set flag for pronoun-based follow-ups that need LLM to resolve from history
+                        if merged.get("needs_history_context"):
+                            state.needs_history_context = True
+                            logger.info(f"Pronoun follow-up detected: '{state.query}' needs conversation history for resolution")
 
-                    # Log what we merged
-                    if ref_info["has_temporal_ref"]:
-                        logger.info(f"Temporal context: '{state.query}' - time_ref={merged['entities'].get('time_ref')}")
+                        # Log what we merged
+                        if ref_info["has_temporal_ref"]:
+                            logger.info(f"Temporal context: '{state.query}' - time_ref={merged['entities'].get('time_ref')}")
 
-                    state.node_timings["classify"] = time.time() - start
-                    logger.info(f"Context continuation for '{state.query}' - routing to {state.intent}, entities={state.entities}")
-                    return state
-                except ValueError:
-                    # Unknown intent in context, fall through to normal classification
-                    logger.warning(f"Unknown intent in context: {prev_context.intent}")
+                        state.context_ref_info = context_ref_view(ref_info, "continued")
+                        state.continuation_decision = {"decision": "continued", "reason": decision_reason}
+                        state.node_timings["classify"] = time.time() - start
+                        logger.info(f"Context continuation for '{state.query}' - routing to {state.intent}, entities={state.entities}")
+                        return state
+                    except ValueError:
+                        # Unknown intent in context, fall through to normal classification
+                        logger.warning(f"Unknown intent in context: {prev_context.intent}")
+                        state.context_ref_info = context_ref_view(ref_info, "declined")
+                        state.continuation_decision = {"decision": "declined", "reason": "unknown_prev_intent"}
         else:
             # No previous context found - this is normal for first query in session
             if ref_info["has_context_ref"]:
@@ -5798,6 +5842,123 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
 # LangGraph State Machine
 # ============================================================================
 
+# ATHENA-88 / F16, D13: hoisted to module level (unchanged logic) so it's
+# independently testable without a compiled LangGraph (langgraph isn't
+# installed in the unit-test environment). It uses only module globals
+# (logger, should_use_tool_calling, is_conversational_reference,
+# IntentCategory) — no closure-scoped dependencies on create_orchestrator_graph.
+async def route_after_classify(state: OrchestratorState) -> str:
+    # DEBUG: Log routing function call
+    logger.info(f"route_after_classify called: intent={state.intent.value if state.intent else None}, confidence={state.confidence}")
+
+    # PRIORITY 0: Check for media queries (OWNER MODE ONLY) - must come before control check
+    # because "pending requests" can be misclassified as control intent
+    query_lower = state.query.lower()
+    guest_mode = state.mode == "guest"
+    media_keywords = ["request movie", "request show", "request the movie", "request the show",
+                     "add movie", "add the movie", "add show", "add the show", "add to plex", "add to jellyfin",
+                     "download movie", "download show", "download the movie", "download the show",
+                     "want to watch", "my requests", "media requests", "pending requests", "my pending",
+                     "is available on plex", "is available on jellyfin", "in the library", "on plex", "on jellyfin",
+                     "overseerr", "request status", "movie request", "show request", "tv request"]
+    is_media_query = any(kw in query_lower for kw in media_keywords) and not guest_mode
+    if is_media_query:
+        logger.info("Media query detected - routing to tool_call for request_media")
+        return "tool_call"
+
+    # PRIORITY: Handle CONTROL intent FIRST - route to HA control path
+    if state.intent == IntentCategory.CONTROL:
+        logger.info("Routing to route_control node (Home Assistant)")
+        return "route_control"
+
+    # Handle notification preferences (opt-out/opt-in for proactive notifications)
+    if state.intent == IntentCategory.NOTIFICATION_PREF:
+        logger.info("Routing to notification_pref node")
+        return "notification_pref"
+
+    # SMS Integration: Handle TEXT_ME_THAT intent - send SMS with previous response
+    if state.intent == IntentCategory.TEXT_ME_THAT:
+        logger.info("Routing to send_sms node (SMS Integration)")
+        return "send_sms"
+
+    # Music playback and control - route to music handler
+    if state.intent in [IntentCategory.MUSIC_PLAY, IntentCategory.MUSIC_CONTROL]:
+        logger.info(f"Routing to route_music node ({state.intent.value})")
+        return "route_music"
+
+    # Apple TV control - route to TV handler
+    if state.intent == IntentCategory.TV_CONTROL:
+        logger.info("Routing to route_tv node (TV Control)")
+        return "route_tv"
+
+    # Phase 5: Check if tool calling should be triggered after classification
+    tool_calling_result = await should_use_tool_calling(state, trigger_context="classify")
+    logger.info(f"should_use_tool_calling returned: {tool_calling_result}")
+
+    if tool_calling_result:
+        logger.info("Routing to tool_call node")
+        return "tool_call"
+
+    if state.intent == IntentCategory.GENERAL_INFO:
+        logger.info("Routing GENERAL_INFO to synthesize (no tool call)")
+        return "synthesize"
+
+    # OPTIMIZATION: Route Phase 2 services directly to tool_call
+    # These services use tool calling, not the retrieve path
+    phase2_intents = {
+        IntentCategory.DINING, IntentCategory.RECIPES, IntentCategory.EVENTS,
+        IntentCategory.STREAMING, IntentCategory.NEWS, IntentCategory.STOCKS,
+        IntentCategory.FLIGHTS, IntentCategory.DIRECTIONS
+    }
+
+    if state.intent in phase2_intents:
+        # If the query references conversation context rather than being a fresh
+        # lookup, route to synthesize so the LLM can answer from history.
+        # This prevents dead-end responses when the query is referential
+        # (e.g., "what city was that restaurant in?" or "tell me more about the wings
+        # I mentioned") — the answer is in conversation history, not in a RAG service.
+        has_context = bool(state.conversation_history or state.history_summary)
+        if has_context:
+            is_referential = is_conversational_reference(state.query, has_context)
+            ref_info = state.context_ref_info or {}
+            if is_referential or ref_info.get("has_context_ref", False):
+                logger.info(
+                    f"Phase 2 intent {state.intent.value} has context reference - routing to synthesize",
+                    original_intent=state.intent.value
+                )
+                state.intent = IntentCategory.GENERAL_INFO
+                return "synthesize"
+        logger.info(f"Routing {state.intent.value} to tool_call node (Phase 2 service)")
+        return "tool_call"
+
+    if state.intent == IntentCategory.UNKNOWN:
+        # Check if this is a continuation response (e.g., "no", "yes", "sure")
+        # with conversation history - if so, route to synthesize so LLM can use context
+        ref_info = state.context_ref_info or {}
+        has_continuation = ref_info.get("is_continuation", False)
+        has_history = len(state.conversation_history) > 0
+
+        if has_continuation and has_history:
+            logger.info(
+                f"Continuation detected with {len(state.conversation_history)} history messages - "
+                f"routing to synthesize for context-aware response"
+            )
+            return "synthesize"
+        else:
+            logger.info("Routing to finalize node (no context available)")
+            return "finalize"  # Skip to finalize for unknown intents without context
+    elif state.intent == IntentCategory.GENERAL_INFO:
+        # Route GENERAL_INFO to tool_call - let LLM decide if tools are needed
+        # The LLM can answer directly for: greetings, basic facts, math, creative requests
+        # Or use tools for: current info, real-time data, lookups
+        logger.info("Routing GENERAL_INFO to tool_call (LLM decides if tools needed)")
+        return "tool_call"
+    else:
+        # Other intents (weather, sports, etc.) go through retrieve path
+        logger.info("Routing to route_info node")
+        return "route_info"
+
+
 def create_orchestrator_graph() -> StateGraph:
     """Create the LangGraph state machine."""
 
@@ -5821,117 +5982,7 @@ def create_orchestrator_graph() -> StateGraph:
     # Define edges
     graph.set_entry_point("classify")
 
-    # Conditional routing after classification
-    async def route_after_classify(state: OrchestratorState) -> str:
-        # DEBUG: Log routing function call
-        logger.info(f"route_after_classify called: intent={state.intent.value if state.intent else None}, confidence={state.confidence}")
-
-        # PRIORITY 0: Check for media queries (OWNER MODE ONLY) - must come before control check
-        # because "pending requests" can be misclassified as control intent
-        query_lower = state.query.lower()
-        guest_mode = state.mode == "guest"
-        media_keywords = ["request movie", "request show", "request the movie", "request the show",
-                         "add movie", "add the movie", "add show", "add the show", "add to plex", "add to jellyfin",
-                         "download movie", "download show", "download the movie", "download the show",
-                         "want to watch", "my requests", "media requests", "pending requests", "my pending",
-                         "is available on plex", "is available on jellyfin", "in the library", "on plex", "on jellyfin",
-                         "overseerr", "request status", "movie request", "show request", "tv request"]
-        is_media_query = any(kw in query_lower for kw in media_keywords) and not guest_mode
-        if is_media_query:
-            logger.info("Media query detected - routing to tool_call for request_media")
-            return "tool_call"
-
-        # PRIORITY: Handle CONTROL intent FIRST - route to HA control path
-        if state.intent == IntentCategory.CONTROL:
-            logger.info("Routing to route_control node (Home Assistant)")
-            return "route_control"
-
-        # Handle notification preferences (opt-out/opt-in for proactive notifications)
-        if state.intent == IntentCategory.NOTIFICATION_PREF:
-            logger.info("Routing to notification_pref node")
-            return "notification_pref"
-
-        # SMS Integration: Handle TEXT_ME_THAT intent - send SMS with previous response
-        if state.intent == IntentCategory.TEXT_ME_THAT:
-            logger.info("Routing to send_sms node (SMS Integration)")
-            return "send_sms"
-
-        # Music playback and control - route to music handler
-        if state.intent in [IntentCategory.MUSIC_PLAY, IntentCategory.MUSIC_CONTROL]:
-            logger.info(f"Routing to route_music node ({state.intent.value})")
-            return "route_music"
-
-        # Apple TV control - route to TV handler
-        if state.intent == IntentCategory.TV_CONTROL:
-            logger.info("Routing to route_tv node (TV Control)")
-            return "route_tv"
-
-        # Phase 5: Check if tool calling should be triggered after classification
-        tool_calling_result = await should_use_tool_calling(state, trigger_context="classify")
-        logger.info(f"should_use_tool_calling returned: {tool_calling_result}")
-
-        if tool_calling_result:
-            logger.info("Routing to tool_call node")
-            return "tool_call"
-
-        if state.intent == IntentCategory.GENERAL_INFO:
-            logger.info("Routing GENERAL_INFO to synthesize (no tool call)")
-            return "synthesize"
-
-        # OPTIMIZATION: Route Phase 2 services directly to tool_call
-        # These services use tool calling, not the retrieve path
-        phase2_intents = {
-            IntentCategory.DINING, IntentCategory.RECIPES, IntentCategory.EVENTS,
-            IntentCategory.STREAMING, IntentCategory.NEWS, IntentCategory.STOCKS,
-            IntentCategory.FLIGHTS, IntentCategory.DIRECTIONS
-        }
-
-        if state.intent in phase2_intents:
-            # If the query references conversation context rather than being a fresh
-            # lookup, route to synthesize so the LLM can answer from history.
-            # This prevents dead-end responses when the query is referential
-            # (e.g., "what city was that restaurant in?" or "tell me more about the wings
-            # I mentioned") — the answer is in conversation history, not in a RAG service.
-            has_context = bool(state.conversation_history or state.history_summary)
-            if has_context:
-                is_referential = is_conversational_reference(state.query, has_context)
-                ref_info = state.context_ref_info or {}
-                if is_referential or ref_info.get("has_context_ref", False):
-                    logger.info(
-                        f"Phase 2 intent {state.intent.value} has context reference - routing to synthesize",
-                        original_intent=state.intent.value
-                    )
-                    state.intent = IntentCategory.GENERAL_INFO
-                    return "synthesize"
-            logger.info(f"Routing {state.intent.value} to tool_call node (Phase 2 service)")
-            return "tool_call"
-
-        if state.intent == IntentCategory.UNKNOWN:
-            # Check if this is a continuation response (e.g., "no", "yes", "sure")
-            # with conversation history - if so, route to synthesize so LLM can use context
-            ref_info = state.context_ref_info or {}
-            has_continuation = ref_info.get("is_continuation", False)
-            has_history = len(state.conversation_history) > 0
-
-            if has_continuation and has_history:
-                logger.info(
-                    f"Continuation detected with {len(state.conversation_history)} history messages - "
-                    f"routing to synthesize for context-aware response"
-                )
-                return "synthesize"
-            else:
-                logger.info("Routing to finalize node (no context available)")
-                return "finalize"  # Skip to finalize for unknown intents without context
-        elif state.intent == IntentCategory.GENERAL_INFO:
-            # Route GENERAL_INFO to tool_call - let LLM decide if tools are needed
-            # The LLM can answer directly for: greetings, basic facts, math, creative requests
-            # Or use tools for: current info, real-time data, lookups
-            logger.info("Routing GENERAL_INFO to tool_call (LLM decides if tools needed)")
-            return "tool_call"
-        else:
-            # Other intents (weather, sports, etc.) go through retrieve path
-            logger.info("Routing to route_info node")
-            return "route_info"
+    # Conditional routing after classification (module-level route_after_classify above)
 
     graph.add_conditional_edges(
         "classify",
