@@ -305,7 +305,7 @@ the missing key.
 
 | Variable | Free Tier | Sign Up |
 |----------|-----------|---------|
-| `BRAVE_API_KEY` | 2,000/month | [brave.com/search/api](https://brave.com/search/api/) |
+| `BRAVE_API_KEY` | 2,000/month | [brave.com/search/api](https://brave.com/search/api/) — also used by Sitescraper |
 
 ### Entertainment
 
