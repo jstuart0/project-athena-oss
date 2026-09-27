@@ -534,7 +534,7 @@ rather than guessing a device/room your HA instance doesn't have. See
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HA_SATELLITE_ROOM_MAP` | *(empty)* | JSON object mapping a Voice PE `assist_satellite` entity ID to its room. Used both directions by the gateway: entity→room (conversation room detection) and room→entity (satellite announcements). An empty map, or an active satellite not listed in it, resolves to room `"unknown"` — the gateway does not fall back to parsing a `friendly_name` naming convention, since a given HA instance may not follow one. |
+| `HA_SATELLITE_ROOM_MAP` | *(empty)* | JSON object mapping a Voice PE `assist_satellite` entity ID to its room. Used both directions by the gateway: entity→room (conversation room detection) and room→entity (satellite announcements). Room detection resolves each active satellite in two steps: this map first (an entity_id match always wins when both would resolve), then a generic parse of the satellite's HA `friendly_name` against the `"Voice - <Room> Assist"` convention, then `"unknown"`. The map lets you override or correct a name that doesn't fit that convention; it isn't required for basic room detection to work. |
 | `HA_TV_ENTITIES` | *(empty)* | Fallback room → Apple TV entity mapping, used only when the admin API's Room TV Config is unreachable. JSON array of `{room, media_player_entity_id, remote_entity_id}` objects, or comma-separated `room:media_player_entity_id[:remote_entity_id]` triples. |
 | `HA_MUSIC_PLAYERS` | *(empty)* | Fallback room → Music Assistant `media_player` entity mapping, used only when the admin API's room audio config is unreachable. JSON object `{room: entity_id}` or comma-separated `room:entity_id` pairs. |
 | `HA_BED_WARMER_ENTITIES` | *(empty)* | JSON object naming the 5 HA entities a Sunbeam-via-Tuya dual-zone bed-warmer/mattress-pad integration exposes (`level_left`, `level_right`, `power_main`, `power_side_a`, `power_side_b`). |
@@ -557,7 +557,6 @@ querying a hardcoded entity your HA instance doesn't have.
 | `STOVE_DISPLAY_TEMP_SENSOR_ID` | *(empty)* | HA sensor entity reporting the stove's displayed temperature. |
 | `STOVE_TIMER_SENSOR_ID` | *(empty)* | HA sensor entity reporting the stove's timer state. |
 | `FRIDGE_DOOR_SENSOR_ID` | *(empty)* | HA binary-sensor entity reporting whether the fridge door is open. |
-| `JARVIS_MEDIA_PLAYERS` | *(empty)* | Comma-separated list of HA `media_player` entity IDs to expose via `GET /api/media`. Empty yields an empty list; each player's display name is read from HA's own `friendly_name` attribute, not from this variable. |
 
 ---
 
