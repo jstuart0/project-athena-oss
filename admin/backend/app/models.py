@@ -88,7 +88,7 @@ class User(Base):
     )
 
     ROLE_PERMISSIONS = {
-        'owner': {'read', 'write', 'delete', 'manage_users', 'manage_secrets', 'view_audit'},
+        'owner': {'read', 'write', 'delete', 'manage_users', 'manage_secrets', 'view_audit', 'manage_infrastructure'},
         'operator': {'read', 'write', 'view_audit'},
         'viewer': {'read:dashboard', 'read:alerts'},
         'support': {'read:dashboard', 'read:alerts', 'read:analytics', 'view_audit'},
@@ -2277,9 +2277,14 @@ class RagService(Base):
     - Health poller (``admin/backend/app/services/health_poller.py``):
       ``health_status``, ``last_health_check``, ``last_error``,
       ``last_response_time_ms``, ``health_message``
-    - service_control.py start/stop/restart: ``is_running``, ``last_error``
     - Admin UI / POST upsert: everything else
     - ``updated_at`` tracks **config changes only** — the health poller MUST NOT touch it.
+    - ``is_running`` (DEPRECATED, ATHENA-118 / D1): no longer written anywhere.
+      ``to_dict()['is_running']`` is derived from ``run_state`` (health +
+      enabled, ``app.utils.service_state.derive_run_state``) rather than read
+      from this column. The column itself stays only because
+      ``main.py``'s startup schema gate lists it; dropping it is a follow-up
+      migration.
     """
     __tablename__ = 'athena_service_registry'
 
@@ -2313,9 +2318,9 @@ class RagService(Base):
     enabled = Column(Boolean, default=True)
     auto_start = Column(Boolean, default=True)
 
-    # Health / control state (writer: health poller or service_control respectively)
+    # Health / control state (writer: health poller)
     health_status = Column(String(20))
-    is_running = Column(Boolean, default=False)
+    is_running = Column(Boolean, default=False)  # DEPRECATED (ATHENA-118 / D1) — never written; see class docstring
     last_health_check = Column(DateTime(timezone=True))
     last_response_time_ms = Column(Integer)
     last_error = Column(Text)
@@ -2344,7 +2349,14 @@ class RagService(Base):
         return self.name
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for API responses."""
+        """Convert to dictionary for API responses.
+
+        ``is_running`` and ``run_state`` are derived from health + enabled,
+        never from the deprecated ``is_running`` column (ATHENA-118 / D1).
+        """
+        from app.utils.service_state import derive_run_state
+
+        run_state = derive_run_state(self.enabled, self.health_status)
         return {
             'id': self.id,
             'name': self.name,
@@ -2365,7 +2377,8 @@ class RagService(Base):
             'enabled': self.enabled,
             'auto_start': self.auto_start,
             'health_status': self.health_status,
-            'is_running': self.is_running,
+            'is_running': run_state == 'running',  # DEPRECATED derived value (D1) — not the column
+            'run_state': run_state,
             'last_health_check': self.last_health_check.isoformat() if self.last_health_check else None,
             'last_response_time_ms': self.last_response_time_ms,
             'last_error': self.last_error,

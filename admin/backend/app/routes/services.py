@@ -135,26 +135,43 @@ def create_audit_log(
     db: Session,
     user: User,
     action: str,
-    service: RagService,
+    service: Optional[RagService] = None,
     old_value: dict = None,
     new_value: dict = None,
-    request: Request = None
+    request: Request = None,
+    success: bool = True,
+    error_message: Optional[str] = None,
 ):
-    """Helper function to create audit log entries."""
+    """Helper function to create audit log entries.
+
+    ``service`` is Optional (ATHENA-118 / M4): the ollama/port lifecycle
+    routes have no RagService row to point at, so ``resource_id`` is
+    ``None`` in that case rather than raising on ``service.id``.
+    ``success``/``error_message`` default to the pre-existing "always
+    succeeded" behavior so every caller that predates ATHENA-118 is
+    unaffected.
+    """
     audit = AuditLog(
         user_id=user.id,
         action=action,
         resource_type='service',
-        resource_id=service.id,
+        resource_id=service.id if service else None,
         old_value=old_value,
         new_value=new_value,
         ip_address=request.client.host if request else None,
         user_agent=request.headers.get('user-agent') if request else None,
-        success=True,
+        success=success,
+        error_message=error_message,
     )
     db.add(audit)
     db.commit()
-    logger.info("audit_log_created", action=action, resource_type='service', resource_id=service.id)
+    logger.info(
+        "audit_log_created",
+        action=action,
+        resource_type='service',
+        resource_id=audit.resource_id,
+        success=success,
+    )
 
 
 # =============================================================================

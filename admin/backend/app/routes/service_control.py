@@ -3,12 +3,16 @@ Service Control Routes
 
 Start, stop, restart Athena services and Ollama models.
 Uses Control Agent pattern for secure service management.
+
+ATHENA-118 (Phase 1): run state is derived from health (D2), never from the
+deprecated `is_running` column; `GET /api/service-control` returns a single
+envelope (D3) with server-resolved per-row managers (D4); lifecycle actions
+route through one audited `_run_action` core (D9/D10/D20).
 """
 
-import os
 from datetime import datetime
 from typing import List, Optional, Tuple
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import structlog
@@ -19,13 +23,21 @@ from app.database import get_db
 from app.models import RagService, User, LLMBackend, SystemSetting
 from app.auth.oidc import get_current_user
 from app.utils.service_auth import control_agent_headers
+from app.utils.rate_limit import service_control_rate_limit_dep
+from app.utils.service_state import derive_run_state
+from app.routes.service_registry import _SERVICE_NAME_RE
+from app.routes.services import create_audit_log
+from app.services.service_managers import (
+    CONTROL_AGENT_URL,
+    ManagerResolution,
+    gather_inventory,
+    group_for,
+    resolve_manager,
+)
 from shared.config import get_config
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/service-control", tags=["service-control"])
-
-# Configuration from environment
-CONTROL_AGENT_URL = os.getenv("CONTROL_AGENT_URL", "http://localhost:8099")
 
 
 def get_ollama_url(db: Session) -> str:
@@ -54,7 +66,8 @@ class ServiceResponse(BaseModel):
     health_endpoint: Optional[str] = None
     control_method: Optional[str] = None
     container_name: Optional[str] = None
-    is_running: bool = False
+    is_running: bool = False  # DEPRECATED (D1): derived from run_state, not the column
+    run_state: str = "stopped"
     last_health_check: Optional[str] = None
     last_error: Optional[str] = None
     auto_start: bool = True
@@ -62,6 +75,62 @@ class ServiceResponse(BaseModel):
 
     class Config:
         from_attributes = True
+        extra = "ignore"
+
+
+class ServiceControlRow(ServiceResponse):
+    """A registry row plus the server-resolved manager fields (D3)."""
+    group: str = "core"
+    manager: str = "none"
+    manager_target: Optional[str] = None
+    manager_note: Optional[str] = None
+    native_state: Optional[str] = None
+    actions: List[str] = []
+    confirm_required: bool = False
+    k8s_replicas: Optional[int] = None
+    k8s_ready_replicas: Optional[int] = None
+
+
+class ServiceControlCounts(BaseModel):
+    running: int
+    stopped: int
+    disabled: int
+
+
+class ControlAgentStatus(BaseModel):
+    enabled: bool
+    reachable: bool
+    note: Optional[str] = None
+
+
+class KubernetesStatus(BaseModel):
+    """Kubernetes manager status (D3). Phase 1 always reports the feature as
+    disabled — the adapter and its config flag land in Phase 2."""
+    enabled: bool = False
+    available: bool = False
+    reason: Optional[str] = "disabled"
+
+
+class ServiceControlListResponse(BaseModel):
+    services: List[ServiceControlRow]
+    counts: ServiceControlCounts
+    control_agent: ControlAgentStatus
+    kubernetes: KubernetesStatus
+
+
+class ServiceActionRequest(BaseModel):
+    """Body for lifecycle actions.
+
+    `confirm_name` must equal the RESOLVED target's name for a critical
+    action — the Deployment (or Ollama's conceptual identity), never the
+    row's own display name when the row is an alias onto that target
+    (D4.4 / mozart r3a). Unknown/legacy fields (e.g. a stale `target`) are
+    ignored, never trusted for dispatch (T4.24).
+    """
+    confirm_name: Optional[str] = None
+
+    class Config:
+        extra = "ignore"
 
 
 class ServiceActionResponse(BaseModel):
@@ -85,14 +154,139 @@ class ModelActionResponse(BaseModel):
     message: str
 
 
+def _audit_lifecycle(
+    db: Session,
+    user: User,
+    request: Optional[Request],
+    action: str,
+    service: Optional[RagService],
+    old_value: dict,
+    new_value: dict,
+    success: bool,
+    error_message: Optional[str] = None,
+) -> None:
+    """Audit-write wrapper that never raises (M4).
+
+    A DB hiccup on the audit write must not turn a successful (or already-
+    refused) mutation into a 500 that invites a client retry — retries on a
+    non-idempotent action are exactly what D11/M-4 exist to prevent
+    upstream of this helper. Rolls back only the audit statement's own
+    failed state; the caller's own commit (if any) already happened.
+    """
+    try:
+        create_audit_log(
+            db=db,
+            user=user,
+            action=action,
+            service=service,
+            old_value=old_value,
+            new_value=new_value,
+            request=request,
+            success=success,
+            error_message=error_message,
+        )
+    except Exception as exc:  # noqa: BLE001 — audit failures must never propagate
+        db.rollback()
+        logger.error("service_control_audit_failed", action=action, error=str(exc))
+
+
+async def _run_action(
+    service_name: str,
+    action: str,
+    body: ServiceActionRequest,
+    request: Optional[Request],
+    db: Session,
+    current_user: User,
+) -> ServiceActionResponse:
+    """Shared lifecycle-action core for start/stop/restart (D9/D10/D20).
+
+    Order (mozart r3a amendment): permission -> name validation -> row
+    lookup -> resolution -> the manage_infrastructure gate for a critical
+    target (403, evaluated BEFORE action availability) -> action-not-
+    available (409, native/un-gated actions) -> typed confirm (409) ->
+    dispatch -> audit. Only steps at or after resolution write an audit row.
+    """
+    if not current_user.has_permission('write'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    if not _SERVICE_NAME_RE.match(service_name):
+        raise HTTPException(status_code=422, detail="Invalid service name")
+
+    service = db.query(RagService).filter(RagService.name == service_name).first()
+    if not service:
+        raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
+
+    inv = await gather_inventory(fresh=True)
+    permissions = current_user.get_permissions()
+    resolution = resolve_manager(service, inv, permissions)
+
+    old_value = {
+        "run_state": derive_run_state(service.enabled, service.health_status, resolution.k8s_replicas),
+        "health_status": service.health_status,
+        "native_state": resolution.native_state,
+        "k8s_replicas": resolution.k8s_replicas,
+    }
+
+    if resolution.critical and 'manage_infrastructure' not in permissions:
+        _audit_lifecycle(
+            db, current_user, request, f"service_{action}", service,
+            old_value, {}, success=False, error_message='insufficient_role',
+        )
+        raise HTTPException(status_code=403, detail={"error": "insufficient_role"})
+
+    if action not in resolution.native_actions:
+        _audit_lifecycle(
+            db, current_user, request, f"service_{action}", service,
+            old_value, {}, success=False, error_message='action_not_available',
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "action_not_available", "manager_note": resolution.note},
+        )
+
+    if resolution.critical and body.confirm_name != resolution.confirm_name:
+        _audit_lifecycle(
+            db, current_user, request, f"service_{action}", service,
+            old_value, {}, success=False, error_message='confirmation_required',
+        )
+        raise HTTPException(status_code=409, detail={"error": "confirmation_required"})
+
+    if resolution.kind == 'process':
+        success, message = await process_service_action(service.port, action)
+    elif resolution.kind == 'docker':
+        success, message = await docker_service_action(service.container_name, action)
+    elif resolution.kind == 'ollama':
+        success, message = await launchd_service_action("ollama", action)
+    else:
+        success, message = False, f"Service '{service.name}' is not managed by any control plane"
+
+    new_value = {
+        "manager": resolution.manager,
+        "kind": resolution.kind,
+        "target": resolution.target,
+        "message": message,
+        "replicas_after": resolution.k8s_replicas,
+    }
+    _audit_lifecycle(db, current_user, request, f"service_{action}", service, old_value, new_value, success=success)
+
+    logger.info(f"service_{action}", service=service_name, success=success, user=current_user.username)
+
+    return ServiceActionResponse(
+        service_name=service_name,
+        action=action,
+        success=success,
+        message=message,
+    )
+
+
 # Service Routes
-@router.get("", response_model=List[ServiceResponse])
+@router.get("", response_model=ServiceControlListResponse)
 async def list_services(
     service_type: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """List all Athena services."""
+    """List all Athena services with server-resolved manager/state (D3)."""
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
@@ -101,10 +295,59 @@ async def list_services(
         query = query.filter(RagService.service_type == service_type)
 
     services = query.order_by(RagService.service_type, RagService.display_name).all()
-    return [ServiceResponse(**s.to_dict()) for s in services]
+
+    inv = await gather_inventory(fresh=False)
+    permissions = current_user.get_permissions()
+
+    resolutions = [(svc, resolve_manager(svc, inv, permissions)) for svc in services]
+
+    # D4.4: any Kubernetes target reached by >=2 rows (enabled or disabled)
+    # blocks all of them, so an aliased row can't hijack a critical target.
+    target_counts: dict = {}
+    for _svc, resolution in resolutions:
+        if resolution.manager == 'kubernetes' and resolution.target:
+            target_counts[resolution.target] = target_counts.get(resolution.target, 0) + 1
+
+    rows = []
+    running = stopped = disabled = 0
+    for svc, resolution in resolutions:
+        if resolution.manager == 'kubernetes' and resolution.target and target_counts[resolution.target] > 1:
+            resolution = ManagerResolution(manager='none', note=f"target_collision:{resolution.target}")
+
+        run_state = derive_run_state(svc.enabled, svc.health_status, resolution.k8s_replicas)
+        if run_state == 'disabled':
+            disabled += 1
+        elif run_state == 'running':
+            running += 1
+        else:
+            stopped += 1
+
+        row = svc.to_dict()
+        row['run_state'] = run_state
+        row['group'] = group_for(svc)
+        row['manager'] = resolution.manager
+        row['manager_target'] = resolution.target
+        row['manager_note'] = resolution.note
+        row['native_state'] = resolution.native_state
+        row['actions'] = resolution.actions
+        row['confirm_required'] = resolution.confirm_required
+        row['k8s_replicas'] = resolution.k8s_replicas
+        row['k8s_ready_replicas'] = resolution.k8s_ready_replicas
+        rows.append(row)
+
+    return ServiceControlListResponse(
+        services=rows,
+        counts=ServiceControlCounts(running=running, stopped=stopped, disabled=disabled),
+        control_agent=ControlAgentStatus(
+            enabled=inv.control_agent.enabled,
+            reachable=inv.control_agent.reachable,
+            note=inv.control_agent.note,
+        ),
+        kubernetes=KubernetesStatus(),
+    )
 
 
-@router.post("/refresh-status")
+@router.post("/refresh-status", dependencies=[Depends(service_control_rate_limit_dep)])
 async def refresh_all_service_status(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -133,88 +376,40 @@ async def refresh_all_service_status(
 @router.post("/{service_name}/start", response_model=ServiceActionResponse)
 async def start_service(
     service_name: str,
+    request: Request,
+    body: Optional[ServiceActionRequest] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    _rl: None = Depends(service_control_rate_limit_dep),
 ):
     """Start an Athena service."""
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    service = db.query(RagService).filter(RagService.name == service_name).first()
-    if not service:
-        raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
-
-    success, message = await execute_service_action(service, "start")
-
-    if success:
-        service.is_running = True
-        service.last_error = None
-        db.commit()
-
-    logger.info("service_start", service=service_name, success=success, user=current_user.username)
-
-    return ServiceActionResponse(
-        service_name=service_name,
-        action="start",
-        success=success,
-        message=message
-    )
+    return await _run_action(service_name, "start", body or ServiceActionRequest(), request, db, current_user)
 
 
 @router.post("/{service_name}/stop", response_model=ServiceActionResponse)
 async def stop_service(
     service_name: str,
+    request: Request,
+    body: Optional[ServiceActionRequest] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    _rl: None = Depends(service_control_rate_limit_dep),
 ):
     """Stop an Athena service."""
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    service = db.query(RagService).filter(RagService.name == service_name).first()
-    if not service:
-        raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
-
-    success, message = await execute_service_action(service, "stop")
-
-    if success:
-        service.is_running = False
-        db.commit()
-
-    logger.info("service_stop", service=service_name, success=success, user=current_user.username)
-
-    return ServiceActionResponse(
-        service_name=service_name,
-        action="stop",
-        success=success,
-        message=message
-    )
+    return await _run_action(service_name, "stop", body or ServiceActionRequest(), request, db, current_user)
 
 
 @router.post("/{service_name}/restart", response_model=ServiceActionResponse)
 async def restart_service(
     service_name: str,
+    request: Request,
+    body: Optional[ServiceActionRequest] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    _rl: None = Depends(service_control_rate_limit_dep),
 ):
     """Restart an Athena service."""
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    service = db.query(RagService).filter(RagService.name == service_name).first()
-    if not service:
-        raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
-
-    success, message = await execute_service_action(service, "restart")
-
-    logger.info("service_restart", service=service_name, success=success, user=current_user.username)
-
-    return ServiceActionResponse(
-        service_name=service_name,
-        action="restart",
-        success=success,
-        message=message
-    )
+    return await _run_action(service_name, "restart", body or ServiceActionRequest(), request, db, current_user)
 
 
 # Container Status Route (via Control Agent)
@@ -295,7 +490,11 @@ async def list_ollama_models(
         raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
 
 
-@router.post("/ollama/models/{model_name:path}/load", response_model=ModelActionResponse)
+@router.post(
+    "/ollama/models/{model_name:path}/load",
+    response_model=ModelActionResponse,
+    dependencies=[Depends(service_control_rate_limit_dep)],
+)
 async def load_ollama_model(
     model_name: str,
     db: Session = Depends(get_db),
@@ -336,7 +535,11 @@ async def load_ollama_model(
         )
 
 
-@router.post("/ollama/models/{model_name:path}/unload", response_model=ModelActionResponse)
+@router.post(
+    "/ollama/models/{model_name:path}/unload",
+    response_model=ModelActionResponse,
+    dependencies=[Depends(service_control_rate_limit_dep)],
+)
 async def unload_ollama_model(
     model_name: str,
     db: Session = Depends(get_db),
@@ -378,20 +581,6 @@ async def unload_ollama_model(
 
 
 # Helper Functions
-async def execute_service_action(service: RagService, action: str) -> Tuple[bool, str]:
-    """Execute start/stop/restart action on a service."""
-    if service.control_method == "docker":
-        return await docker_service_action(service.container_name, action)
-    elif service.control_method == "process":
-        return await process_service_action(service.port, action)
-    elif service.control_method == "launchd":
-        return await launchd_service_action(service.name, action)
-    elif service.control_method == "none":
-        return False, f"Service '{service.name}' does not support control actions"
-    else:
-        return False, f"Unknown control method: {service.control_method}"
-
-
 async def docker_service_action(container_name: str, action: str) -> Tuple[bool, str]:
     """
     Execute Docker container action via Control Agent.
@@ -577,7 +766,7 @@ async def get_ollama_health(
         )
 
 
-@router.post("/ollama/start", response_model=ServiceActionResponse)
+@router.post("/ollama/start", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
 async def start_ollama(
     current_user: User = Depends(get_current_user)
 ):
@@ -597,7 +786,7 @@ async def start_ollama(
     )
 
 
-@router.post("/ollama/stop", response_model=ServiceActionResponse)
+@router.post("/ollama/stop", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
 async def stop_ollama(
     current_user: User = Depends(get_current_user)
 ):
@@ -617,7 +806,7 @@ async def stop_ollama(
     )
 
 
-@router.post("/ollama/restart", response_model=ServiceActionResponse)
+@router.post("/ollama/restart", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
 async def restart_ollama(
     current_user: User = Depends(get_current_user)
 ):
@@ -641,13 +830,21 @@ async def restart_ollama(
 @router.post("/port/{port}/start", response_model=ServiceActionResponse)
 async def start_service_by_port(
     port: int,
-    current_user: User = Depends(get_current_user)
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _rl: None = Depends(service_control_rate_limit_dep),
 ):
     """Start a Python process service by port via Control Agent."""
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     success, message = await process_service_action(port, "start")
+
+    _audit_lifecycle(
+        db, current_user, request, "service_start", None,
+        {}, {"port": port, "message": message}, success=success,
+    )
 
     logger.info("service_start_by_port", port=port, success=success, user=current_user.username)
 
@@ -662,13 +859,21 @@ async def start_service_by_port(
 @router.post("/port/{port}/stop", response_model=ServiceActionResponse)
 async def stop_service_by_port(
     port: int,
-    current_user: User = Depends(get_current_user)
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _rl: None = Depends(service_control_rate_limit_dep),
 ):
     """Stop a Python process service by port via Control Agent."""
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     success, message = await process_service_action(port, "stop")
+
+    _audit_lifecycle(
+        db, current_user, request, "service_stop", None,
+        {}, {"port": port, "message": message}, success=success,
+    )
 
     logger.info("service_stop_by_port", port=port, success=success, user=current_user.username)
 
@@ -683,13 +888,21 @@ async def stop_service_by_port(
 @router.post("/port/{port}/restart", response_model=ServiceActionResponse)
 async def restart_service_by_port(
     port: int,
-    current_user: User = Depends(get_current_user)
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _rl: None = Depends(service_control_rate_limit_dep),
 ):
     """Restart a Python process service by port via Control Agent."""
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     success, message = await process_service_action(port, "restart")
+
+    _audit_lifecycle(
+        db, current_user, request, "service_restart", None,
+        {}, {"port": port, "message": message}, success=success,
+    )
 
     logger.info("service_restart_by_port", port=port, success=success, user=current_user.username)
 
