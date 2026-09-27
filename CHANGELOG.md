@@ -10,6 +10,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 > **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+
+### Changed: Mission Control's voice-health card is registry-driven, not hard-coded to 5 named services (ATHENA-113 follow-up)
+
+- **Changed — `admin/backend/app/routes/dashboard.py::get_dashboard_data`** no longer hard-codes exactly Gateway, Orchestrator, and 3 named RAGs (arbitrary, from the initial OSS commit). Core services (`gateway`/`orchestrator`) read their service-registry row when one exists (cached health, no probe), falling back to a gated live probe of `GATEWAY_URL`/`ORCHESTRATOR_URL` only when no row is registered. Every **enabled** registry row with `service_type='rag'` is included; **disabled rows are excluded entirely** (not shown, not counted -- distinct from ATHENA-112/113c's "shown labeled disabled" convention, since this card only ever showed configured, active services in the first place). `unconfigured` counts toward "needs attention" (excluded from `healthy_count`) but keeps its own literal status rather than being relabeled `unhealthy` -- not configured and actively failing are different claims. `critical_services` entries now include `last_error`. The bottom Service Status grid renders the same registry-driven set. `mission-control.js` needed no changes -- it was already fully data-driven off the response shape, with no hardcoded count or name assumptions.
+- **Note**: the OSS dev-mode seed (`admin/backend/app/database.py::seed_oss_service_registry`) still tags every seeded row `service_type='api'` (a pre-existing hardcoded literal, not derived from data), so a fresh `DEV_MODE` install's RAG rows won't match `service_type='rag'` until corrected via the admin UI or the Control Agent's startup sync (which does set it correctly, `"rag" if "-rag" in service_name else "core"` in `src/control_agent/main.py::sync_registry_loop`). Flagged as a separate, pre-existing seed-data inconsistency -- out of scope here.
+
+---
+
+## [Unreleased]
+
+> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
 > **Codex review:** `.mozart/plans/active/2026-09-27-diagnose-athena-mission-control.codex-r2-delta.md` (High/Medium, BLOCK)
 
 ### Fixed: quick-stats had no SSRF gate at all; the SSRF check validated only the host, never the actual request path/query (ATHENA-113 codex r2 delta)

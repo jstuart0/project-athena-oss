@@ -203,32 +203,25 @@ def _allow_gateway_orchestrator_probe(monkeypatch):
     monkeypatch.setattr(dashboard_module, "check_ssrf_safe", AsyncMock(return_value=(True, "")))
 
 
-def test_dashboard_shows_not_configured_for_missing_registry_row(owner_client, db):
-    """No registry row for a RAG name -- the card must read 'not_configured',
-    never attempt to resolve or probe a URL for it."""
+def test_dashboard_shows_only_core_when_no_rag_rows_exist(owner_client, db):
+    """No service_type='rag' rows registered at all -- the card is fully
+    data-driven now (no hardcoded Weather/Sports/Dining placeholders): only
+    the 2 core services appear."""
     with patch("app.routes.dashboard.httpx.AsyncClient", return_value=_mock_ok_client()):
         response = owner_client.get("/api/dashboard")
 
     assert response.status_code == 200
     data = response.json()
-    statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
-    for name in ("Weather RAG", "Sports RAG", "Dining RAG"):
-        assert statuses.get(name) == "not_configured", statuses
-
-    service_grid = {s["name"]: s["status"] for s in data["services"]}
-    for name in ("Weather RAG", "Sports RAG", "Dining RAG"):
-        assert service_grid.get(name) == "not_configured", service_grid
-
-    # Gateway/Orchestrator (mocked healthy) + 3 not_configured RAGs: every
-    # named service counts toward the denominator now, cache-read or not.
-    assert data["voice_health"]["total"] == 5
+    names = {s["name"] for s in data["services"]}
+    assert names == {"Gateway", "Orchestrator"}
+    assert data["voice_health"]["total"] == 2
     assert data["voice_health"]["healthy"] == 2
 
 
-def test_dashboard_reads_healthy_registry_row_from_cache_no_probe(owner_client, db):
+def test_dashboard_reads_healthy_rag_registry_row_from_cache_no_probe(owner_client, db):
     db.add(RagService(
         name="weather", display_name="Weather", host="weather-svc",
-        port=8010, protocol="http", enabled=True, health_status="healthy",
+        port=8010, protocol="http", service_type="rag", enabled=True, health_status="healthy",
     ))
     db.commit()
 
@@ -239,7 +232,7 @@ def test_dashboard_reads_healthy_registry_row_from_cache_no_probe(owner_client, 
     assert response.status_code == 200
     data = response.json()
     statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
-    assert "Weather RAG" not in statuses  # healthy -> not in the problem list
+    assert "Weather" not in statuses  # healthy -> not in the problem list
 
     # No live probe for weather -- only Gateway/Orchestrator hit the client.
     called_urls = [c.args[0] if c.args else c.kwargs.get("url") for c in mock_client.get.call_args_list]
@@ -247,10 +240,10 @@ def test_dashboard_reads_healthy_registry_row_from_cache_no_probe(owner_client, 
     assert len(called_urls) == 2
 
 
-def test_dashboard_reads_unhealthy_registry_row_from_cache(owner_client, db):
+def test_dashboard_reads_unhealthy_rag_registry_row_from_cache(owner_client, db):
     db.add(RagService(
         name="sports", display_name="Sports", host="sports-svc",
-        port=8017, protocol="http", enabled=True, health_status="unhealthy",
+        port=8017, protocol="http", service_type="rag", enabled=True, health_status="unhealthy",
         last_error="connection_refused",
     ))
     db.commit()
@@ -259,14 +252,19 @@ def test_dashboard_reads_unhealthy_registry_row_from_cache(owner_client, db):
         response = owner_client.get("/api/dashboard")
 
     data = response.json()
-    statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
-    assert statuses.get("Sports RAG") == "unhealthy"
+    entries = {s["name"]: s for s in data["voice_health"]["critical_services"]}
+    assert entries["Sports"]["status"] == "unhealthy"
+    assert entries["Sports"]["last_error"] == "connection_refused"
 
 
-def test_dashboard_reads_disabled_registry_row_from_cache(owner_client, db):
+def test_dashboard_excludes_disabled_rag_row_entirely(owner_client, db):
+    """codex follow-up: disabled RAG rows are excluded from the card
+    entirely (not shown, not counted) -- distinct from ATHENA-112/113c's
+    'show it labeled disabled' convention. The query itself filters
+    enabled=True, so a disabled row simply never reaches the response."""
     db.add(RagService(
         name="dining", display_name="Dining", host="dining-svc",
-        port=8019, protocol="http", enabled=False, health_status="unhealthy",
+        port=8019, protocol="http", service_type="rag", enabled=False, health_status="unhealthy",
     ))
     db.commit()
 
@@ -274,14 +272,15 @@ def test_dashboard_reads_disabled_registry_row_from_cache(owner_client, db):
         response = owner_client.get("/api/dashboard")
 
     data = response.json()
-    statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
-    assert statuses.get("Dining RAG") == "disabled"
+    names = {s["name"] for s in data["services"]}
+    assert "Dining" not in names
+    assert data["voice_health"]["total"] == 2  # core only -- dining never counted
 
 
-def test_dashboard_reads_pending_for_null_health_status(owner_client, db):
+def test_dashboard_reads_pending_for_null_health_status_rag_row(owner_client, db):
     db.add(RagService(
         name="weather", display_name="Weather", host="weather-svc",
-        port=8010, protocol="http", enabled=True, health_status=None,
+        port=8010, protocol="http", service_type="rag", enabled=True, health_status=None,
     ))
     db.commit()
 
@@ -290,7 +289,61 @@ def test_dashboard_reads_pending_for_null_health_status(owner_client, db):
 
     data = response.json()
     statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
-    assert statuses.get("Weather RAG") == "pending"
+    assert statuses.get("Weather") == "pending"
+
+
+def test_dashboard_core_service_reads_registry_row_no_probe(owner_client, db):
+    """A registered 'gateway' row is used as-is (cached health), same as a
+    RAG row -- the live-probe fallback only fires when no row exists."""
+    db.add(RagService(
+        name="gateway", display_name="Gateway", host="athena-gateway",
+        port=8000, protocol="http", enabled=True, health_status="healthy",
+    ))
+    db.commit()
+
+    mock_client = _mock_ok_client()
+    with patch("app.routes.dashboard.httpx.AsyncClient", return_value=mock_client):
+        response = owner_client.get("/api/dashboard")
+
+    assert response.status_code == 200
+    called_urls = [c.args[0] if c.args else c.kwargs.get("url") for c in mock_client.get.call_args_list]
+    # Only Orchestrator's fallback probe fires -- Gateway has a registry row.
+    assert len(called_urls) == 1
+    assert "orchestrator" in called_urls[0].lower() or "8001" in called_urls[0]
+
+
+def test_dashboard_registry_driven_scenario_matches_mission_control_spec(owner_client, db):
+    """The exact scenario from the redesign spec: 2 core + 6 RAG rows (1
+    disabled, 1 unhealthy) -> total 7 enabled (2 core + 5 enabled RAG),
+    healthy 6, attention (critical_services) 1, disabled fully excluded."""
+    db.add(RagService(name="gateway", display_name="Gateway", host="h", port=8000,
+                       protocol="http", enabled=True, health_status="healthy"))
+    db.add(RagService(name="orchestrator", display_name="Orchestrator", host="h", port=8001,
+                       protocol="http", enabled=True, health_status="healthy"))
+    rag_names = ["weather", "sports", "dining", "news", "stocks", "flights"]
+    for i, name in enumerate(rag_names):
+        is_disabled = name == "flights"
+        is_unhealthy = name == "stocks"
+        db.add(RagService(
+            name=name, display_name=name.capitalize(), host=f"{name}-svc", port=8010 + i,
+            protocol="http", service_type="rag",
+            enabled=not is_disabled,
+            health_status="unhealthy" if is_unhealthy else "healthy",
+        ))
+    db.commit()
+
+    with patch("app.routes.dashboard.httpx.AsyncClient", return_value=_mock_ok_client()):
+        response = owner_client.get("/api/dashboard")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["voice_health"]["total"] == 7
+    assert data["voice_health"]["healthy"] == 6
+    assert len(data["voice_health"]["critical_services"]) == 1
+    assert data["voice_health"]["critical_services"][0]["name"] == "Stocks"
+    names = {s["name"] for s in data["services"]}
+    assert "Flights" not in names  # disabled -- excluded entirely
+    assert len(data["services"]) == 7
 
 
 # ---------------------------------------------------------------------------

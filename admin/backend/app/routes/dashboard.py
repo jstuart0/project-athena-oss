@@ -27,20 +27,31 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 _GATEWAY_BASE = os.getenv("GATEWAY_URL", "http://localhost:8000").rstrip("/")
 _ORCHESTRATOR_BASE = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001").rstrip("/")
 
-# RAG services shown on the voice-health card. codex BLOCK (2026-09-27
-# diagnose-athena-mission-control review): this card used to resolve each
-# name via app.utils.rag_urls.resolve_rag_url and live-probe the result,
-# bypassing the health poller's SSRF/runtime-DNS allowlist entirely (operator-
-# set registry/env hosts are still subject to it -- write-time validation
-# doesn't catch DNS rebinding after the fact). Now reads the poller's cached
-# health_status/last_error for these three registry rows directly -- no
-# live probe, no SSRF surface, and no duplicate probe fan-out on every page
-# load (the poller already probes on its own interval).
-_RAG_HEALTH_SERVICE_NAMES = {
-    "weather": "Weather RAG",
-    "sports": "Sports RAG",
-    "dining": "Dining RAG",
+# Core (non-RAG) services shown on the voice-health card, keyed by their
+# service-registry row name.
+_CORE_SERVICE_NAMES = {
+    "gateway": "Gateway",
+    "orchestrator": "Orchestrator",
 }
+
+
+def _registry_row_status(svc: RagService) -> str:
+    """Map a registry row to the voice-health card's status vocabulary.
+
+    A disabled row is reported 'disabled' regardless of its last cached
+    health_status (which goes stale the moment the row is disabled and the
+    poller stops touching it) -- same convention as ATHENA-112/113c.
+    'unconfigured' (the poller's own "reachable but not configured" state)
+    counts as needing attention -- it appears in critical_services and is
+    excluded from healthy_count -- but keeps its own literal status string
+    rather than being relabeled 'unhealthy'; the two are different claims
+    (this service isn't set up vs. this service is failing).
+    """
+    if not svc.enabled:
+        return "disabled"
+    if svc.health_status is None:
+        return "pending"
+    return svc.health_status  # healthy | unhealthy | unconfigured
 
 
 @router.get("")
@@ -63,71 +74,91 @@ async def get_dashboard_data(
     now = datetime.utcnow()
 
     # 1. Voice Health - Check actual service health
-    core_services = [
-        {"name": "Gateway", "url": f"{_GATEWAY_BASE}/health"},
-        {"name": "Orchestrator", "url": f"{_ORCHESTRATOR_BASE}/health"},
-    ]
-
-    # RAG rows: cached registry health, never a live probe (see
-    # _RAG_HEALTH_SERVICE_NAMES comment above).
-    rag_rows = {
+    #
+    # Registry-driven (this used to hard-code exactly Gateway, Orchestrator,
+    # and 3 named RAGs -- arbitrary, from the initial OSS commit, and stale
+    # the moment an operator added or removed a RAG service). Core services
+    # (gateway/orchestrator) read their registry row if one exists, falling
+    # back to a gated live probe of GATEWAY_URL/ORCHESTRATOR_URL only when no
+    # row is registered. Every ENABLED registry row with service_type='rag'
+    # is included -- disabled rows are excluded entirely (not counted, not
+    # shown), matching ATHENA-112's enabled-only convention.
+    core_rows = {
         r.name: r for r in db.query(RagService).filter(
-            RagService.name.in_(_RAG_HEALTH_SERVICE_NAMES.keys())
+            RagService.name.in_(_CORE_SERVICE_NAMES.keys())
         ).all()
     }
-    rag_statuses = []
-    for service_key, display_name in _RAG_HEALTH_SERVICE_NAMES.items():
-        svc = rag_rows.get(service_key)
-        if svc is None:
-            status_str = "not_configured"
-        elif not svc.enabled:
-            status_str = "disabled"
-        elif svc.health_status is None:
-            status_str = "pending"
-        else:
-            status_str = svc.health_status  # healthy | unhealthy | unconfigured
-        rag_statuses.append({"name": display_name, "status": status_str, "healthy": status_str == "healthy"})
+    rag_rows = db.query(RagService).filter(
+        RagService.service_type == "rag", RagService.enabled == True
+    ).order_by(RagService.name).all()
 
-    healthy_count = 0
-    total_count = len(core_services) + len(rag_statuses)
-    critical_services = []
+    service_entries = []  # [{"name", "status", "error"}]
 
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            for svc in core_services:
+            for service_key, display_name in _CORE_SERVICE_NAMES.items():
+                row = core_rows.get(service_key)
+                if row is not None:
+                    service_entries.append({
+                        "name": display_name,
+                        "status": _registry_row_status(row),
+                        "error": row.last_error,
+                    })
+                    continue
+
+                # No registry row -- fall back to a gated live probe.
+                base_url = _GATEWAY_BASE if service_key == "gateway" else _ORCHESTRATOR_BASE
+                url = f"{base_url}/health"
                 # codex BLOCK: GATEWAY_URL/ORCHESTRATOR_URL are operator-set,
                 # but DNS can change after write-time validation -- probe
                 # through the same SSRF/runtime-DNS allowlist the health
                 # poller uses, not an unvalidated direct request.
-                allowed, reason = await check_ssrf_safe(svc["url"])
+                allowed, reason = await check_ssrf_safe(url)
                 if not allowed:
-                    logger.warning("dashboard_voice_health_ssrf_blocked", service=svc["name"], reason=reason)
-                    critical_services.append({"name": svc["name"], "status": "ssrf_blocked"})
+                    logger.warning("dashboard_voice_health_ssrf_blocked", service=display_name, reason=reason)
+                    service_entries.append({"name": display_name, "status": "ssrf_blocked", "error": reason})
                     continue
                 try:
-                    response = await client.get(svc["url"])
-                    if response.status_code == 200:
-                        healthy_count += 1
-                    else:
-                        critical_services.append({"name": svc["name"], "status": "unhealthy"})
+                    response = await client.get(url)
+                    status_str = "healthy" if response.status_code == 200 else "unhealthy"
+                    service_entries.append({"name": display_name, "status": status_str, "error": None})
                 except Exception:
-                    critical_services.append({"name": svc["name"], "status": "unreachable"})
+                    service_entries.append({"name": display_name, "status": "unreachable", "error": None})
 
-        for entry in rag_statuses:
-            if entry["healthy"]:
-                healthy_count += 1
-            else:
-                critical_services.append({"name": entry["name"], "status": entry["status"]})
+        for svc in rag_rows:
+            service_entries.append({
+                "name": svc.display_name or svc.name,
+                "status": _registry_row_status(svc),
+                "error": svc.last_error,
+            })
+
+        healthy_count = sum(1 for e in service_entries if e["status"] == "healthy")
+        total_count = len(service_entries)
+        critical_services = [
+            {"name": e["name"], "status": e["status"], "last_error": e["error"]}
+            for e in service_entries if e["status"] != "healthy"
+        ]
 
         health_pct = round((healthy_count / total_count * 100) if total_count > 0 else 0)
         health_history = [health_pct] * 20  # Would need time-series tracking for real history
     except Exception as e:
         logger.warning("dashboard_voice_health_error", error=str(e))
         healthy_count = 0
+        total_count = len(_CORE_SERVICE_NAMES) + len(rag_rows)
         health_pct = 0
         health_history = [0] * 20
-        critical_services = [{"name": s["name"], "status": "unknown"} for s in core_services]
-        critical_services += [{"name": entry["name"], "status": entry["status"]} for entry in rag_statuses]
+        critical_services = [
+            {"name": name, "status": "unknown", "last_error": None}
+            for name in _CORE_SERVICE_NAMES.values()
+        ]
+        critical_services += [
+            {"name": svc.display_name or svc.name, "status": "unknown", "last_error": None}
+            for svc in rag_rows
+        ]
+        # Section 5 (service status grid) reads service_entries -- rebuild it
+        # fully here too so that grid stays consistent with critical_services
+        # when this fallback path is hit.
+        service_entries = [{"name": e["name"], "status": e["status"], "error": None} for e in critical_services]
 
     # 2. Traffic Metrics - From conversation_analytics table
     try:
@@ -235,17 +266,12 @@ async def get_dashboard_data(
         logger.warning("dashboard_alerts_error", error=str(e))
         alert_summary = {"total": 0, "critical": 0, "warning": 0, "info": 0, "recent": []}
 
-    # 5. Service status grid (from actual health checks)
-    service_status = []
-    for svc in core_services:
-        is_healthy = svc["name"] not in [c["name"] for c in critical_services]
-        service_status.append({
-            "name": svc["name"],
-            "status": "healthy" if is_healthy else "unhealthy",
-            "latency_ms": None
-        })
-    for entry in rag_statuses:
-        service_status.append({"name": entry["name"], "status": entry["status"], "latency_ms": None})
+    # 5. Service status grid (from actual health checks) -- same set as the
+    # voice-health card above (core rows/probes + every enabled RAG row).
+    service_status = [
+        {"name": e["name"], "status": e["status"], "latency_ms": None}
+        for e in service_entries
+    ]
 
     logger.info("dashboard_data_fetched", user=current_user.username,
                 healthy=healthy_count, total=total_count,
