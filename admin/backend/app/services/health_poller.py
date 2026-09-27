@@ -333,6 +333,61 @@ async def _heartbeat_lease(
 # Per-service poll (inner loop)
 # ---------------------------------------------------------------------------
 
+async def _tcp_check(
+    svc_id: int,
+    host: str,
+    port: int,
+    timeout_seconds: float,
+    *,
+    verify_redis: bool = False,
+) -> tuple[int, str, Optional[int], str, str, Optional[str]]:
+    """TCP connect check for protocol='tcp' registry rows (ATHENA-109).
+
+    Attempts a raw TCP connect within timeout_seconds. By default no banner is
+    read — a successful connect is 'healthy'. A refused connection or a
+    timeout is 'unhealthy' with a categorical last_error ('tcp_refused' /
+    'tcp_timeout'), matching the categorical-value convention
+    _classify_and_sanitize uses for the HTTP path (xander MED-1).
+
+    verify_redis: after connecting, send a Redis PING and require a +PONG
+    reply within the same timeout budget — proves the process on the far end
+    actually speaks Redis, not just that something accepted the socket.
+    _poll_one sets this for any row whose name contains 'redis' (same
+    substring heuristic app.js already uses to group it under "Database
+    Services"). A connect that succeeds but doesn't reply +PONG is
+    'unhealthy' / 'tcp_bad_banner'.
+    """
+    start = time.monotonic()
+    writer = None
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout_seconds,
+        )
+        if verify_redis:
+            writer.write(b'PING\r\n')
+            await asyncio.wait_for(writer.drain(), timeout=timeout_seconds)
+            reply = await asyncio.wait_for(reader.read(64), timeout=timeout_seconds)
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            if not reply.startswith(b'+PONG'):
+                return (svc_id, 'unhealthy', elapsed_ms, 'tcp_bad_banner', 'redis PING did not return +PONG', None)
+            return (svc_id, 'healthy', elapsed_ms, 'ok', '', None)
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return (svc_id, 'healthy', elapsed_ms, 'ok', '', None)
+    except asyncio.TimeoutError:
+        return (svc_id, 'unhealthy', None, 'tcp_timeout', 'tcp connect timed out', None)
+    except OSError as exc:
+        # ConnectionRefusedError is the common case; other OSErrors (DNS
+        # failure, network unreachable, etc.) are bucketed here too since the
+        # brief only distinguishes refused vs timeout vs ssrf_blocked.
+        return (svc_id, 'unhealthy', None, 'tcp_refused', str(exc)[:100], None)
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+
 async def _poll_one(
     client: httpx.AsyncClient,
     semaphore: asyncio.Semaphore,
@@ -348,17 +403,28 @@ async def _poll_one(
     Returns (svc_id, status, response_time_ms, error_category, error_detail,
     health_message).
 
-    protocol: 'http' or 'https' — read from RagService.protocol so that HTTPS
-    services are polled at the correct scheme.  Defaults to 'http' for callers
+    protocol: 'http', 'https', or 'tcp' — read from RagService.protocol.
+    'http'/'https' issue a GET against `path`; 'tcp' (ATHENA-109) does a raw
+    socket connect and never reads `path`. Defaults to 'http' for callers
     that pre-date the protocol column (codex r2 M-4).
     """
-    # SSRF guard — must precede every outbound HTTP request. (xander HIGH-1)
+    is_tcp = protocol == 'tcp'
+    # SSRF guard — must precede every outbound connection. (xander HIGH-1)
     # Now async (bob r4 finding 7): avoids blocking the event loop on getaddrinfo.
-    ok, reason = await _validate_service_url(host, port, path)
+    # tcp checks have no path, so pass '' to skip the (irrelevant) path checks.
+    ok, reason = await _validate_service_url(host, port, '' if is_tcp else path)
     if not ok:
         logger.warning('poll_blocked_by_ssrf_guard', service=name, reason=reason)
         # last_error stores categorical value per MED-1 spec.
         return (svc_id, 'unhealthy', None, 'ssrf_blocked', f'ssrf-blocked:{reason[:80]}', None)
+
+    if is_tcp:
+        async with semaphore:
+            verify_redis = 'redis' in (name or '').lower()
+            return await _tcp_check(
+                svc_id, host, port, float(get_config().health_poll_timeout_seconds),
+                verify_redis=verify_redis,
+            )
 
     # Normalise protocol — only http/https are valid; fall back to http.
     scheme = protocol if protocol in ('http', 'https') else 'http'

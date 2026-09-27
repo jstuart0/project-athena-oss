@@ -30,7 +30,7 @@ from app.models import RagService, User
 from app.auth.oidc import get_current_user
 from app.utils.service_auth import verify_service_or_oidc
 from app.utils.rate_limit import service_registry_rate_limit_dep
-from app.utils.url_validators import validate_endpoint_url, parse_endpoint_url
+from app.utils.url_validators import validate_endpoint_url, parse_endpoint_url, validate_host
 from shared.config import get_config
 import structlog
 
@@ -178,12 +178,22 @@ async def register_service(
     cache_ttl: int = 300,
     timeout: int = 5000,
     rate_limit: int = 100,
+    protocol: Optional[str] = None,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Register or update (upsert) a service.
 
     Idempotent: safe to call repeatedly (Phase 3 CA startup-upsert relies on this).
     Accepts query params to match the pre-existing calling convention used by the
     Control Agent in Phase 3.
+
+    protocol='tcp' (ATHENA-109): registers a row checked by raw TCP connect
+    instead of an HTTP(S) request.  A TCP check has no scheme or path, so this
+    branch takes host/port directly and does not require (or store)
+    endpoint_url -- validate_endpoint_url only accepts http/https schemes and
+    would reject a "tcp://" URL.  host still passes through validate_host()
+    for the same SSRF protections applied to http(s) rows.
     """
     if not name:
         raise HTTPException(status_code=422, detail="'name' query parameter is required")
@@ -195,29 +205,45 @@ async def register_service(
             status_code=422,
             detail="'name' must match ^[a-zA-Z0-9_-]{1,64}$",
         )
-    if not endpoint_url:
-        raise HTTPException(status_code=422, detail="'endpoint_url' query parameter is required")
 
-    # SSRF protection: validate scheme + host before persisting.
-    # The Phase 4 health poller will make HTTP requests to stored endpoint_url
-    # values; a stored IMDS or cluster-internal URL would be polled silently.
-    # (xander M-3, ATHENA-1 Phase 2 reconcile)
-    try:
-        endpoint_url = validate_endpoint_url(endpoint_url)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    if protocol == 'tcp':
+        if not host:
+            raise HTTPException(status_code=422, detail="'host' is required when protocol='tcp'")
+        if not port or not (1 <= port <= 65535):
+            raise HTTPException(status_code=422, detail="'port' must be between 1 and 65535 when protocol='tcp'")
+        try:
+            host = validate_host(host)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        resolved_endpoint_url: Optional[str] = None
+        parsed = {'host': host, 'port': port, 'protocol': 'tcp', 'health_endpoint': None}
+    else:
+        if not endpoint_url:
+            raise HTTPException(status_code=422, detail="'endpoint_url' query parameter is required")
 
-    # Parse endpoint_url → host/port/protocol/health_endpoint so that the NOT
-    # NULL columns added by migration 055 are populated and the Phase 4 poller
-    # can reach newly-registered services.  (codex r2 H-2)
-    try:
-        parsed = parse_endpoint_url(endpoint_url)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        # SSRF protection: validate scheme + host before persisting.
+        # The Phase 4 health poller will make HTTP requests to stored endpoint_url
+        # values; a stored IMDS or cluster-internal URL would be polled silently.
+        # (xander M-3, ATHENA-1 Phase 2 reconcile)
+        try:
+            endpoint_url = validate_endpoint_url(endpoint_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        # Parse endpoint_url → host/port/protocol/health_endpoint so that the NOT
+        # NULL columns added by migration 055 are populated and the Phase 4 poller
+        # can reach newly-registered services.  (codex r2 H-2)
+        try:
+            parsed = parse_endpoint_url(endpoint_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        resolved_endpoint_url = endpoint_url
+
+    display_url = resolved_endpoint_url or f"tcp://{parsed['host']}:{parsed['port']}"
 
     existing = db.query(RagService).filter(RagService.name == name).first()
     if existing:
-        existing.endpoint_url = endpoint_url
+        existing.endpoint_url = resolved_endpoint_url
         existing.host = parsed['host']
         existing.port = parsed['port']
         existing.protocol = parsed['protocol']
@@ -236,7 +262,7 @@ async def register_service(
         return {
             'service': name,
             'action': 'updated',
-            'url': endpoint_url,
+            'url': display_url,
             'message': f"Service {name} has been updated",
         }
     else:
@@ -244,7 +270,7 @@ async def register_service(
             name=name,
             display_name=display_name or name.replace('-', ' ').title(),
             service_type=service_type,
-            endpoint_url=endpoint_url,
+            endpoint_url=resolved_endpoint_url,
             host=parsed['host'],
             port=parsed['port'],
             protocol=parsed['protocol'],
@@ -261,7 +287,7 @@ async def register_service(
         return {
             'service': name,
             'action': 'created',
-            'url': endpoint_url,
+            'url': display_url,
             'message': f"Service {name} has been registered",
         }
 

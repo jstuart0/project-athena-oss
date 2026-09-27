@@ -225,6 +225,21 @@ Each `processes` entry is additionally hardened at load time (ATHENA-110): `cmd`
 | `SERVICE_HOST` | `localhost` | Default host for all services |
 | `RAG_SERVICE_HOST` | `localhost` | Default host for RAG services |
 
+### Service Registry Health Checks (ATHENA-109 / ATHENA-112)
+
+Every row in `athena_service_registry` carries a `protocol` column that doubles as its **check type** -- there is no separate `check_type` field, since "how do we check this service" and "what scheme does it speak" are the same question. Valid values: `http` (default), `https`, and `tcp`.
+
+- `http` / `https`: the background poller (`admin/backend/app/services/health_poller.py`) issues a `GET` against `health_endpoint` (default `/health`) every `HEALTH_POLL_INTERVAL_SECONDS`. A 200 with a JSON body is `healthy` unless it carries `"configured": false`, which maps to `unconfigured` (an amber "needs setup" state, distinct from a real failure). Non-200, timeout, and connection-refused map to `unhealthy` with a categorical `last_error` (`http_5xx`, `http_4xx`, `timeout`, `connection_refused`).
+- `tcp`: a raw TCP connect to `host:port` within `HEALTH_POLL_TIMEOUT_SECONDS`. For a row whose `name` contains `redis` (same substring match `admin/frontend/app.js` already uses to group it under "Database Services"), the poller additionally sends a Redis `PING\r\n` after connecting and requires a `+PONG` reply within the same timeout budget -- proves the process on the far end actually speaks Redis, not just that something accepted the socket. Every other `tcp` row is a plain connect with no banner read. A successful connect (or, for redis rows, a successful `+PONG`) is `healthy`; a refused connection is `unhealthy` / `last_error=tcp_refused`; a connect that doesn't resolve within the timeout is `unhealthy` / `last_error=tcp_timeout`; a redis row that connects but doesn't reply `+PONG` is `unhealthy` / `last_error=tcp_bad_banner`. Use `tcp` for services that don't speak HTTP or where an HTTP health endpoint doesn't exist.
+
+Both check types share the same SSRF allowlist: `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` (comma-separated CIDRs or hostnames) must include a target before the poller will connect to an RFC1918/loopback/ULA address; otherwise the row reads `unhealthy` / `last_error=ssrf_blocked`. This is a **runtime polling** allowlist, separate from the write-boundary `validate_host()` check applied when a row is created/updated via `POST /api/service-registry/services` (which always rejects loopback addresses outright, for both `http(s)` and `tcp` rows, and allows RFC1918 with a warning log).
+
+A Kubernetes in-cluster `Service` DNS name (e.g. a bare `redis` resolving to a `ClusterIP` in the cluster's service CIDR, commonly `10.96.0.0/12`) is not a `.cluster.local`/`.svc` control-plane hostname and is not blocked outright -- it still needs its resolved address (or the literal hostname `redis` itself) present in `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`, same as any other RFC1918 target. **Every OSS deployer running a `tcp` (or `http`) registry row against an in-cluster Service must add that Service's CIDR or hostname to the allowlist** -- there is no built-in exception for "well-known" service names like `redis`.
+
+Registering a `tcp` row via the admin UI's row editor (or directly via `POST /api/service-registry/services?protocol=tcp&host=...&port=...`) takes `host`/`port` directly instead of `endpoint_url` -- a TCP check has no scheme or path to parse a URL out of, and `endpoint_url` is left `null` for these rows.
+
+**Dashboard aggregation (ATHENA-112)**: `GET /api/service-registry/services` computes `healthy_services` and `overall_health` over **enabled** rows only. A disabled row is reported with `health_status: "disabled"` regardless of its last cached poller value (which goes stale the moment it's disabled) and is excluded from both the counts and the health rollup. `enabled_services` / `disabled_services` are new response fields; `total_services` still counts every row for backward compatibility.
+
 ---
 
 ## Infrastructure Services

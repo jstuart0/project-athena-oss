@@ -654,6 +654,11 @@ function renderRagServiceRow(service) {
     const rawName = service.name || '';
     const safeName = escapeHtml(rawName);
 
+    // Check-type label (ATHENA-109): a tcp row has no HTTP path to show.
+    const checkTypeLabel = service.protocol === 'tcp'
+        ? 'TCP'
+        : escapeHtml(service.health_endpoint || '/health');
+
     // Control Agent gate: disable start/stop/restart when CA is unavailable.
     const caDisabled = !controlAgentEnabled;
     const caTitle = caDisabled ? ' title="Service control requires the Control Agent."' : '';
@@ -667,6 +672,7 @@ function renderRagServiceRow(service) {
             </td>
             <td class="px-4 py-3">
                 <div class="text-sm text-gray-300">${escapeHtml(String(host))}:${port}</div>
+                <div class="text-xs text-gray-500 mt-1">${checkTypeLabel}</div>
                 ${healthMessage}
             </td>
             <td class="px-4 py-3"
@@ -687,10 +693,134 @@ function renderRagServiceRow(service) {
                             class="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded">
                         Refresh
                     </button>
+                    <button onclick="showEditRagServiceModal('${escapeJsAttr(rawName)}')"
+                            class="px-2 py-1 text-xs bg-gray-600 hover:bg-gray-700 text-white rounded">
+                        Edit
+                    </button>
                 </div>
             </td>
         </tr>
     `;
+}
+
+// ============================================================================
+// Registry row editor (ATHENA-109) -- lets an operator switch a row's check
+// type between http/https (endpoint URL) and tcp (host:port connect only).
+// Reuses the existing POST /api/service-registry/services upsert route --
+// there was no create/edit form for registry rows before this; the table only
+// offered enable/disable + on-demand refresh.
+// ============================================================================
+
+function showEditRagServiceModal(serviceName) {
+    const service = ragServices.find(s => s.name === serviceName);
+    if (!service) return;
+
+    const isTcp = service.protocol === 'tcp';
+    const currentEndpointUrl = service.endpoint_url || (
+        service.host && service.port && !isTcp ? `${service.protocol || 'http'}://${service.host}:${service.port}${service.health_endpoint || ''}` : ''
+    );
+
+    const modal = `
+        <div id="rag-edit-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onclick="if(event.target.id==='rag-edit-modal') closeModal('rag-edit-modal')">
+            <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-lg w-full mx-4">
+                <h2 class="text-xl font-semibold text-white mb-4">Edit Service: ${escapeHtml(service.display_name || service.name)}</h2>
+                <form onsubmit="saveRagServiceEdit(event, '${escapeJsAttr(service.name)}')" class="space-y-4">
+                    <div>
+                        <label for="rag-edit-check-type" class="block text-sm font-medium text-gray-300 mb-1">Check Type</label>
+                        <select id="rag-edit-check-type" name="protocol" onchange="_toggleRagEditFields(this.value)"
+                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
+                            <option value="http" ${service.protocol === 'http' || !service.protocol ? 'selected' : ''}>HTTP</option>
+                            <option value="https" ${service.protocol === 'https' ? 'selected' : ''}>HTTPS</option>
+                            <option value="tcp" ${isTcp ? 'selected' : ''}>TCP (raw connect)</option>
+                        </select>
+                    </div>
+                    <div id="rag-edit-url-field" class="${isTcp ? 'hidden' : ''}">
+                        <label for="rag-edit-endpoint-url" class="block text-sm font-medium text-gray-300 mb-1">Endpoint URL</label>
+                        <input type="text" id="rag-edit-endpoint-url" name="endpoint_url" value="${escapeHtml(currentEndpointUrl)}"
+                            placeholder="http://host:port/health"
+                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
+                    </div>
+                    <div id="rag-edit-tcp-fields" class="${isTcp ? '' : 'hidden'} grid grid-cols-2 gap-3">
+                        <div>
+                            <label for="rag-edit-host" class="block text-sm font-medium text-gray-300 mb-1">Host</label>
+                            <input type="text" id="rag-edit-host" name="host" value="${escapeHtml(service.host || '')}"
+                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label for="rag-edit-port" class="block text-sm font-medium text-gray-300 mb-1">Port</label>
+                            <input type="number" id="rag-edit-port" name="port" min="1" max="65535" value="${service.port || ''}"
+                                class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
+                        </div>
+                    </div>
+                    <div>
+                        <label for="rag-edit-display-name" class="block text-sm font-medium text-gray-300 mb-1">Display Name</label>
+                        <input type="text" id="rag-edit-display-name" name="display_name" value="${escapeHtml(service.display_name || '')}"
+                            class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-blue-500">
+                    </div>
+                    <div class="flex gap-2 pt-4">
+                        <button type="submit"
+                            class="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors">
+                            Save
+                        </button>
+                        <button type="button" onclick="closeModal('rag-edit-modal')"
+                            class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition-colors">
+                            Cancel
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+    document.getElementById('modals-container').innerHTML = modal;
+}
+
+function _toggleRagEditFields(protocol) {
+    const urlField = document.getElementById('rag-edit-url-field');
+    const tcpFields = document.getElementById('rag-edit-tcp-fields');
+    if (!urlField || !tcpFields) return;
+    const isTcp = protocol === 'tcp';
+    urlField.classList.toggle('hidden', isTcp);
+    tcpFields.classList.toggle('hidden', !isTcp);
+}
+
+async function saveRagServiceEdit(event, serviceName) {
+    event.preventDefault();
+    const form = event.target;
+    const fd = new FormData(form);
+    const protocol = fd.get('protocol');
+
+    const params = new URLSearchParams({
+        name: serviceName,
+        display_name: fd.get('display_name') || '',
+        protocol: protocol,
+    });
+
+    if (protocol === 'tcp') {
+        const host = fd.get('host');
+        const port = fd.get('port');
+        if (!host || !port) {
+            showServiceError('Host and port are required for a TCP check.');
+            return;
+        }
+        params.set('host', host);
+        params.set('port', port);
+    } else {
+        const endpointUrl = fd.get('endpoint_url');
+        if (!endpointUrl) {
+            showServiceError('Endpoint URL is required for an HTTP(S) check.');
+            return;
+        }
+        params.set('endpoint_url', endpointUrl);
+    }
+
+    try {
+        await apiRequest(`/api/service-registry/services?${params.toString()}`, { method: 'POST' });
+        closeModal('rag-edit-modal');
+        showNotification(`Service ${serviceName} updated`, 'success');
+        await loadRagServicesFromRegistry();
+    } catch (error) {
+        showServiceError(`Failed to update service: ${error.message}`);
+    }
 }
 
 function updateRagServiceCounts(registryResponse) {

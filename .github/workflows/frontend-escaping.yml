@@ -203,8 +203,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/check-html-template-escaping.py --class data-attribute --max 344
-          python3 scripts/check-html-template-escaping.py --class innerhtml-sink --max 442
+          python3 scripts/check-html-template-escaping.py --class data-attribute --max 347
+          python3 scripts/check-html-template-escaping.py --class innerhtml-sink --max 443
 
       - name: Three-way wiring parity and buster presence (D7)
         shell: bash
