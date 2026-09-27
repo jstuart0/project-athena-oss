@@ -61,14 +61,18 @@ _SCAN_ROOTS = (
 _EXCLUDED = {
     REPO_ROOT / "src" / "gateway" / "livekit_routes.py",
     REPO_ROOT / "admin" / "backend" / "app" / "routes" / "pipeline_events.py",
-    # D44/P3: llm_router.py's httpx calls target an MLX/OpenAI-compatible
-    # LLM server's OWN "/v1/chat/completions" -- a generic API-shape
-    # literal that collides with _ROUTE_PATTERN's orchestrator-route entry
-    # of the same path, but is an unrelated third-party endpoint (found
-    # only after widening _SCAN_ROOTS to src/shared for the base-knowledge
-    # extension below; confirmed by reading each call site).
-    REPO_ROOT / "src" / "shared" / "llm_router.py",
 }
+
+# codex P3b FIX: llm_router.py's httpx calls target an MLX/OpenAI-compatible
+# LLM server's OWN "/v1/chat/completions" -- a generic API-shape literal
+# that collides with _ROUTE_PATTERN's orchestrator-route entry of the same
+# path, but is an unrelated third-party endpoint (found only after widening
+# _SCAN_ROOTS to src/shared for the base-knowledge extension below).
+# Narrowed to the specific call PATTERN (an httpx.AsyncClient constructed
+# with base_url=endpoint_url) rather than excluding the whole file, so a
+# real, unrelated, unheadered gated call added to llm_router.py later would
+# still be caught.
+_THIRD_PARTY_BASE_URL_MARKER = "base_url=endpoint_url"
 
 # f-string-aware: matches the route literal whether it's a plain string or
 # embedded in an f-string next to ORCHESTRATOR_URL/GATEWAY_URL-style bases.
@@ -266,6 +270,9 @@ def _analyse_file(path: Path):
                 break
 
         if not gated:
+            continue
+
+        if _THIRD_PARTY_BASE_URL_MARKER in _scope_text(scope, source):
             continue
 
         # DC14 item 6: the header must be within THIS call expression's own

@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
     if not service_key:
         logger.warning(
             "service_api_key_empty",
-            message="SERVICE_API_KEY is not set; the base-knowledge fetch will 503.",
+            message="SERVICE_API_KEY is not set; the base-knowledge fetch will 401 (empty X-Service-Key falls through to the unauthenticated path).",
         )
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -133,7 +133,14 @@ async def lifespan(app: FastAPI):
             )
             if response.status_code == 200:
                 data = response.json()
-                BASE_KNOWLEDGE = {item["key"]: item["value"] for item in data.get("items", [])}
+                # codex P3b FIX: /api/base-knowledge/public returns a JSON
+                # list directly, not {"items": [...]}. Calling .get("items")
+                # on a list raised AttributeError, silently caught below --
+                # BASE_KNOWLEDGE was never populated, and the directions
+                # default-origin fallback never worked. Accept both shapes
+                # defensively (a future/alternate response shape stays safe).
+                entries = data if isinstance(data, list) else data.get("items", [])
+                BASE_KNOWLEDGE = {item["key"]: item["value"] for item in entries}
                 logger.info("base_knowledge_loaded", keys=list(BASE_KNOWLEDGE.keys()))
     except Exception as e:
         logger.warning("base_knowledge_fetch_error", error=str(e))

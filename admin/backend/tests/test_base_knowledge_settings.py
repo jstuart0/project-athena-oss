@@ -16,6 +16,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -479,7 +480,7 @@ def test_B13_cold_start_get_returns_documented_defaults(owner_client, monkeypatc
 # field-by-field instead of leaking a wrong type into the response.
 # ---------------------------------------------------------------------------
 
-def test_P3_public_401_without_any_credentials(client, monkeypatch):
+def test_P1_public_401_without_any_credentials(client, monkeypatch):
     # DEV_MODE's bypass (conftest sets DEV_MODE=true globally) would
     # otherwise silently authenticate this as dev-admin regardless of
     # headers -- disable it for this one test to exercise the real
@@ -493,12 +494,28 @@ def test_P3_public_401_without_any_credentials(client, monkeypatch):
     assert resp.status_code == 401
 
 
-def test_P3_public_200_with_service_key(client):
+def test_P2_public_200_with_service_key_response_shape(client, db):
+    """valerie r2: assert the actual response SHAPE survives the new gate,
+    not just the status code -- a dependency added in the wrong position
+    (or one that swallows the request) could still return 200 with an
+    empty or malformed body."""
+    db.add(BaseKnowledge(category="location", key="default_location", value="Denver, CO", applies_to="both", enabled=True))
+    db.commit()
+
     _clear_cache_for_tests()
     key = get_config().service_api_key
     assert key, "conftest.py must set SERVICE_API_KEY for this test to be meaningful"
     resp = client.get(PUBLIC_URL, headers={"X-Service-Key": key})
     assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body, list)
+    assert len(body) == 1
+    entry = body[0]
+    for field in ("id", "category", "key", "value", "applies_to", "priority", "enabled", "description"):
+        assert field in entry
+    assert entry["category"] == "location"
+    assert entry["key"] == "default_location"
+    assert entry["value"] == "Denver, CO"
 
 
 def test_P3_public_200_with_owner_session(client, db, test_user):
@@ -507,7 +524,7 @@ def test_P3_public_200_with_owner_session(client, db, test_user):
     assert resp.status_code == 200
 
 
-def test_P3_public_401_with_viewer_session(client, db, viewer_user):
+def test_P4_public_401_with_viewer_session(client, db, viewer_user):
     """Decision (per actual verify_service_or_oidc semantics, verified by
     running this test before writing the assertion): a valid API key alone
     is NOT sufficient for a scoped role. get_optional_user calls
@@ -525,9 +542,42 @@ def test_P3_public_401_with_viewer_session(client, db, viewer_user):
     assert resp.status_code == 401
 
 
-def test_P3_public_401_with_wrong_service_key(client):
+def test_P4_public_401_with_wrong_service_key(client):
     resp = client.get(PUBLIC_URL, headers={"X-Service-Key": "not-the-real-key"})
     assert resp.status_code == 401
+
+
+def test_P5_public_503_when_key_unset_but_header_present(client, monkeypatch):
+    """verify_service_or_oidc's fail-closed branch (ATHENA-21): a caller
+    signaling intent to use service-key auth (header present) when
+    SERVICE_API_KEY itself is unset gets 503, not a silent fall-through to
+    the OIDC path -- and no WWW-Authenticate, since retrying with a
+    Bearer token wouldn't fix a server-side config gap."""
+    monkeypatch.delenv("SERVICE_API_KEY", raising=False)
+    _clear_cache_for_tests()
+    resp = client.get(PUBLIC_URL, headers={"X-Service-Key": "something"})
+    assert resp.status_code == 503
+    assert "WWW-Authenticate" not in resp.headers
+
+
+def test_P6_public_filters_still_apply_after_gate(client, db):
+    _clear_cache_for_tests()
+    key = get_config().service_api_key
+    db.add(BaseKnowledge(category="location", key="default_location", value="Denver, CO", applies_to="both", enabled=True))
+    db.add(BaseKnowledge(category="property", key="address", value="123 Main St", applies_to="both", enabled=False))
+    db.commit()
+
+    resp = client.get(f"{PUBLIC_URL}?enabled=true", headers={"X-Service-Key": key})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["category"] == "location"
+
+    resp2 = client.get(f"{PUBLIC_URL}?category=location", headers={"X-Service-Key": key})
+    assert resp2.status_code == 200
+    body2 = resp2.json()
+    assert len(body2) == 1
+    assert body2[0]["category"] == "location"
 
 
 @pytest.mark.parametrize("field", ["city", "state"])
@@ -537,8 +587,25 @@ def test_P3_public_401_with_wrong_service_key(client):
     "Denver\x00null",
     "Denver\ttab",
     "Denver\rcarriage",
+    # These four don't match the ASCII control-char regex
+    # [\x00-\x1f\x7f] -- they're only caught by the .isprintable()
+    # fallback in _is_clean_text. Tessa mutation-tested by deleting that
+    # branch and the suite stayed green; these pin it as load-bearing.
+    # Built via chr() rather than a literal \uXXXX escape or a raw
+    # embedded character -- both are fragile to carry through tooling
+    # that may re-interpret backslash escapes or can't display an
+    # invisible character to edit it back out.
+    pytest.param("Denver" + chr(0x2028) + "Evil", id="line-separator-u2028"),
+    pytest.param("Denver" + chr(0x2029) + "Evil", id="paragraph-separator-u2029"),
+    pytest.param("Denver" + chr(0x200d) + "Evil", id="zero-width-joiner-u200d"),
+    pytest.param("Denver" + chr(0x202e) + "Evil", id="rtl-override-u202e"),
 ])
-def test_P3_sanitization_rejects_control_characters(owner_client, field, payload_value):
+def test_S1_sanitization_rejects_control_characters(owner_client, field, payload_value):
+    # Baseline first, so we can prove a rejected PUT leaves state
+    # untouched -- not just that it 422s.
+    owner_client.put(SETTINGS_URL, json=DENVER_PAYLOAD)
+    baseline = owner_client.get(SETTINGS_URL).json()
+
     payload = {**DENVER_PAYLOAD, field: payload_value}
     resp = owner_client.put(SETTINGS_URL, json=payload)
     assert resp.status_code == 422
@@ -546,19 +613,54 @@ def test_P3_sanitization_rejects_control_characters(owner_client, field, payload
     assert isinstance(detail, str)
     assert detail.startswith(f"{field}:")
 
+    after = owner_client.get(SETTINGS_URL).json()
+    assert after == baseline
 
-def test_P3_sanitization_accepts_clean_text(owner_client):
+
+@pytest.mark.parametrize("city_value", [
+    "Denver",
+    "S\u00e3o Paulo",  # non-ASCII letter (ã) must not be treated as unprintable
+    "Coeur d'Alene",  # apostrophe -- not a control character
+    "St. Louis",  # period -- not a control character
+])
+def test_S1_sanitization_accepts_clean_international_text(owner_client, city_value):
+    payload = {**DENVER_PAYLOAD, "city": city_value}
+    resp = owner_client.put(SETTINGS_URL, json=payload)
+    assert resp.status_code == 200
+    assert owner_client.get(SETTINGS_URL).json()["city"] == city_value
+
+
+# ---------------------------------------------------------------------------
+# S2 -- the rendered system-prompt context has exactly one Default Location
+# line (base_knowledge_utils.build_knowledge_context), not one per fanned-out
+# row (D8 updates every matching row to the same value, but a fresh PUT with
+# no pre-existing rows creates exactly one).
+# ---------------------------------------------------------------------------
+
+def test_S2_rendered_prompt_context_has_exactly_one_default_location_line(owner_client, db):
+    from shared.base_knowledge_utils import build_knowledge_context
+
     resp = owner_client.put(SETTINGS_URL, json=DENVER_PAYLOAD)
     assert resp.status_code == 200
 
+    rows = _location_rows(db)
+    assert len(rows) == 1
+    entries = [row.to_dict() for row in rows]
 
-def test_P3_stored_blob_wrong_type_timezone_falls_back_to_default(owner_client, db):
+    context = build_knowledge_context(entries)
+    assert context.count("Default Location:") == 1
+    assert "Denver, CO" in context
+
+
+def test_B11a_stored_blob_wrong_type_timezone_falls_back_to_default(owner_client, db):
     """codex P3 FIX: a stored blob field with the wrong TYPE (not just an
     invalid value) must fall back to its own default, not surface as-is
     (which would either 500 on response-model validation or, if pydantic
     silently coerced it, return something the operator never wrote).
     temp_unit is a second, independent field in the same blob -- proving
-    one bad field doesn't take down the whole coercion pass."""
+    one bad field doesn't take down the whole coercion pass. Plan r3a: the
+    per-field base_knowledge_settings_field_invalid WARNING is the
+    accepted, asserted behaviour, not just the resulting default value."""
     db.add(SystemSetting(
         key="base_knowledge_settings",
         value=json.dumps({"timezone": [], "temp_unit": "F"}),
@@ -566,14 +668,22 @@ def test_P3_stored_blob_wrong_type_timezone_falls_back_to_default(owner_client, 
     ))
     db.commit()
 
-    resp = owner_client.get(SETTINGS_URL)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["timezone"] == "UTC"
-    assert body["temp_unit"] == "F"
+    with mock.patch("app.routes.base_knowledge.logger") as mock_logger:
+        resp = owner_client.get(SETTINGS_URL)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["timezone"] == "UTC"
+        assert body["temp_unit"] == "F"
+
+        warning_calls = [
+            c for c in mock_logger.warning.call_args_list
+            if c.args and c.args[0] == "base_knowledge_settings_field_invalid"
+        ]
+        assert len(warning_calls) == 1
+        assert warning_calls[0].kwargs.get("field") == "timezone"
 
 
-def test_P3_stored_blob_non_numeric_latitude_falls_back_to_default(owner_client, db):
+def test_B11b_stored_blob_non_numeric_latitude_falls_back_to_default(owner_client, db):
     db.add(SystemSetting(
         key="base_knowledge_settings",
         value=json.dumps({"latitude": "abc", "longitude": "-104.99"}),
@@ -581,8 +691,16 @@ def test_P3_stored_blob_non_numeric_latitude_falls_back_to_default(owner_client,
     ))
     db.commit()
 
-    resp = owner_client.get(SETTINGS_URL)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["latitude"] == ""
-    assert body["longitude"] == "-104.99"
+    with mock.patch("app.routes.base_knowledge.logger") as mock_logger:
+        resp = owner_client.get(SETTINGS_URL)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["latitude"] == ""
+        assert body["longitude"] == "-104.99"
+
+        warning_calls = [
+            c for c in mock_logger.warning.call_args_list
+            if c.args and c.args[0] == "base_knowledge_settings_field_invalid"
+        ]
+        assert len(warning_calls) == 1
+        assert warning_calls[0].kwargs.get("field") == "latitude"

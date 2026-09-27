@@ -429,6 +429,23 @@ def test_T5f_query_with_location_sorts_by_distance(transit_client):
     assert body["stops"] == sorted(body["stops"], key=lambda s: s["distance_meters"])
 
 
+def test_T5f2_query_with_location_and_limit_1_keeps_nearest(transit_client):
+    """valerie r2: the most extreme case of the same regression -- limit=1
+    means only ONE survivor is possible, so a cap-before-sort bug can't
+    coincidentally keep the right answer by including extras; it must get
+    the single nearest stop right or fail outright."""
+    resp = transit_client.get(
+        "/transit/query",
+        params={"query": "c", "lat": 39.7392, "lon": -104.9903, "limit": 1},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "search"
+    assert len(body["stops"]) == 1
+    assert body["stops"][0]["stop_id"] == "rtd_bus_1002"
+    assert body["stops"][0]["distance_meters"] == 0
+
+
 def test_T5g_query_zero_matches_gives_message(transit_client):
     resp = transit_client.get("/transit/query", params={"query": "zzzz"})
     assert resp.status_code == 200
@@ -583,11 +600,20 @@ def test_T6a_is_transit_query_false_cases(query):
 
 
 def test_T6a_floor_named_members():
+    """Six named members (valerie r2/r3): the original two plus codex's
+    four regex additions (commuter rail / rail schedule|line|station
+    include terms, and the "train (my|the|your|a)" verb-sense exclusion),
+    pinned by literal string so a future table edit can't silently drop
+    any of them."""
     helpers_module = _import_helpers_module()
     assert len(_TRUE_QUERIES) > 0
     assert len(_FALSE_QUERIES) > 0
     assert helpers_module.is_transit_query("how do I drive to the airport") is False
     assert helpers_module.is_transit_query("when's the next bus at union station") is True
+    assert helpers_module.is_transit_query("is the commuter rail running today") is True
+    assert helpers_module.is_transit_query("what's the rail schedule this weekend") is True
+    assert helpers_module.is_transit_query("I need to train my dog before we leave") is False
+    assert helpers_module.is_transit_query("can you train the new hire on safety") is False
 
 
 # ---------------------------------------------------------------------------
