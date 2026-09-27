@@ -1,0 +1,16 @@
+{
+  "events": [
+    {
+      "title": "Sample Downtown Event",
+      "url": "https://example.org/events/sample-downtown-event",
+      "start_date": "2026-06-15 18:00:00",
+      "venue": [
+        {
+          "venue": "Sample Venue"
+        }
+      ],
+      "excerpt": "<p>A sample downtown event for tests.</p>",
+      "cost": ""
+    }
+  ]
+}

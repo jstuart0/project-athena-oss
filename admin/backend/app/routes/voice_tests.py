@@ -31,7 +31,6 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, VoiceTest, VoiceTestFeedback, LLMPerformanceMetric, SystemSetting
 from shared.config import get_config
-from shared.config import get_config
 
 logger = structlog.get_logger()
 

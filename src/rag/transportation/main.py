@@ -1,11 +1,11 @@
-"""Transportation RAG Service - Baltimore Transit Integration
+"""Transportation RAG Service - Region-Configurable Transit Integration
 
-Provides transit data for Baltimore area including:
-- Maryland MTA (Bus, Metro, Light Rail, MARC, Commuter Bus)
-- Charm City Circulator (free bus)
-- Harbor Connector (free water taxi)
-- Baltimore Water Taxi (paid)
-- Amtrak
+Provides transit data for an operator-configured region via two JSON env
+vars: TRANSIT_GTFS_FEEDS (GTFS feed URLs) and TRANSIT_STATIC_SERVICES
+(non-GTFS services with fixed schedules, e.g. a ferry or water taxi). See
+.env.example for the schema and CONTRIBUTING.md's SSRF guard section for the
+per-feed allow_private flag. Neither variable set means the service reports
+"not configured" rather than serving any hardcoded region's data.
 
 Endpoints:
 - GET /health - Health check
@@ -21,14 +21,15 @@ import os
 import sys
 import csv
 import io
+import json
 import zipfile
 import asyncio
 from datetime import datetime, time, timedelta
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, NamedTuple, Optional, Tuple
 from dataclasses import dataclass, asdict
 from math import radians, sin, cos, sqrt, atan2
 
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 import httpx
 from contextlib import asynccontextmanager
@@ -41,6 +42,7 @@ from shared.cache import CacheClient
 from shared.config import get_config
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
+from shared.url_safety import safe_get, SsrfBlockedError
 
 # Configure logging
 logger = configure_logging("transportation-rag")
@@ -51,94 +53,92 @@ SERVICE_NAME = "transportation-rag"
 REDIS_URL = get_config().redis_url
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8025"))
 
-# GTFS Feed Configuration
-GTFS_FEEDS = {
-    "mta_bus": {
-        "name": "MTA Local Bus",
-        "agency": "mta",
-        "url": "https://feeds.mta.maryland.gov/gtfs/local-bus",
-        "type": "bus",
-        "free": False
-    },
-    "mta_metro": {
-        "name": "MTA Metro",
-        "agency": "mta",
-        "url": "https://feeds.mta.maryland.gov/gtfs/metro",
-        "type": "metro",
-        "free": False
-    },
-    "mta_light_rail": {
-        "name": "MTA Light Rail",
-        "agency": "mta",
-        "url": "https://feeds.mta.maryland.gov/gtfs/light-rail",
-        "type": "light_rail",
-        "free": False
-    },
-    "mta_marc": {
-        "name": "MARC Train",
-        "agency": "mta",
-        "url": "https://feeds.mta.maryland.gov/gtfs/marc",
-        "type": "commuter_rail",
-        "free": False
-    },
-    "mta_commuter_bus": {
-        "name": "MTA Commuter Bus",
-        "agency": "mta",
-        "url": "https://feeds.mta.maryland.gov/gtfs/commuter-bus",
-        "type": "commuter_bus",
-        "free": False
-    },
-    "circulator": {
-        "name": "Charm City Circulator",
-        "agency": "baltimore_dot",
-        "url": "https://transportation.baltimorecity.gov/files/cccgtfs824zip",
-        "type": "bus",
-        "free": True
-    },
-    "amtrak": {
-        "name": "Amtrak",
-        "agency": "amtrak",
-        "url": "https://content.amtrak.com/content/gtfs/GTFS.zip",
-        "type": "rail",
-        "free": False
-    }
-}
+_BOUNDS_KEYS = ("min_lat", "max_lat", "min_lon", "max_lon")
 
-# Baltimore Water Taxi / Harbor Connector - No GTFS, manual data
-WATER_TRANSIT = {
-    "harbor_connector": {
-        "name": "Harbor Connector",
-        "type": "ferry",
-        "free": True,
-        "hours": {"weekday": {"start": "06:00", "end": "20:00"}, "weekend": None},
-        "frequency_minutes": 15,
-        "stops": [
-            {"name": "Maritime Park", "lat": 39.2659, "lon": -76.5812},
-            {"name": "Locust Point", "lat": 39.2697, "lon": -76.5916},
-            {"name": "Federal Hill", "lat": 39.2789, "lon": -76.6098},
-            {"name": "Pier 5", "lat": 39.2854, "lon": -76.6062},
-            {"name": "Harbor East", "lat": 39.2850, "lon": -76.5968},
-            {"name": "Fells Point", "lat": 39.2826, "lon": -76.5919}
-        ]
-    },
-    "water_taxi_downtown": {
-        "name": "Baltimore Water Taxi - Downtown",
-        "type": "ferry",
-        "free": False,
-        "hours": {"weekday": None, "weekend": {"start": "11:00", "end": "20:00"}},
-        "frequency_minutes": 15,
-        "stops": [
-            {"name": "Harborplace", "lat": 39.2864, "lon": -76.6120},
-            {"name": "Federal Hill", "lat": 39.2789, "lon": -76.6098},
-            {"name": "Fells Point", "lat": 39.2826, "lon": -76.5919},
-            {"name": "Harbor East", "lat": 39.2850, "lon": -76.5968}
-        ]
-    }
-}
 
-# Cache client and HTTP client
+class TransitConfig(NamedTuple):
+    """Parsed TRANSIT_GTFS_FEEDS / TRANSIT_STATIC_SERVICES config.
+
+    Never raises: a malformed value produces configured=False plus an error
+    string naming the key and, where applicable, the feed/service id -- so
+    one operator typo can only make this service report not-configured, not
+    crash-loop the pod (every RAG deployment shares one ConfigMap via
+    envFrom).
+    """
+    configured: bool
+    feeds: Dict[str, Dict[str, Any]]
+    static_services: Dict[str, Dict[str, Any]]
+    region_name: str
+    error: Optional[str]
+
+
+def _validate_bounds(feed_id: str, bounds: Any) -> Optional[str]:
+    """Validate a feed's optional `bounds` box. Returns an error string, or
+    None when valid. Comparisons at filter time are exclusive at the edges,
+    so bounds here are validated as strict min < max (2.2, R11)."""
+    if not isinstance(bounds, dict) or set(bounds.keys()) != set(_BOUNDS_KEYS):
+        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds must have exactly {sorted(_BOUNDS_KEYS)}"
+    try:
+        min_lat, max_lat, min_lon, max_lon = (float(bounds[k]) for k in _BOUNDS_KEYS)
+    except (TypeError, ValueError):
+        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds values must be numeric"
+    if not (min_lat < max_lat):
+        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds min_lat must be less than max_lat"
+    if not (min_lon < max_lon):
+        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds min_lon must be less than max_lon"
+    return None
+
+
+def load_transit_config(cfg) -> TransitConfig:
+    """Parse TRANSIT_* config. Never raises."""
+    region_name = cfg.transit_region_name
+    feeds: Dict[str, Dict[str, Any]] = {}
+    static_services: Dict[str, Dict[str, Any]] = {}
+
+    feeds_raw = cfg.transit_gtfs_feeds
+    if feeds_raw:
+        try:
+            parsed = json.loads(feeds_raw)
+        except json.JSONDecodeError as e:
+            return TransitConfig(False, {}, {}, region_name, f"TRANSIT_GTFS_FEEDS: invalid JSON: {e}")
+        if not isinstance(parsed, dict):
+            return TransitConfig(False, {}, {}, region_name, "TRANSIT_GTFS_FEEDS: must be a JSON object")
+        for feed_id, feed in parsed.items():
+            if not isinstance(feed, dict) or not feed.get("name"):
+                return TransitConfig(False, {}, {}, region_name, f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' missing 'name'")
+            if not feed.get("url"):
+                return TransitConfig(False, {}, {}, region_name, f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' missing 'url'")
+            bounds = feed.get("bounds")
+            if bounds is not None:
+                err = _validate_bounds(feed_id, bounds)
+                if err:
+                    return TransitConfig(False, {}, {}, region_name, err)
+            feeds[feed_id] = feed
+
+    static_raw = cfg.transit_static_services
+    if static_raw:
+        try:
+            parsed = json.loads(static_raw)
+        except json.JSONDecodeError as e:
+            return TransitConfig(False, {}, {}, region_name, f"TRANSIT_STATIC_SERVICES: invalid JSON: {e}")
+        if not isinstance(parsed, dict):
+            return TransitConfig(False, {}, {}, region_name, "TRANSIT_STATIC_SERVICES: must be a JSON object")
+        for service_id, svc in parsed.items():
+            if not isinstance(svc, dict) or not svc.get("name"):
+                return TransitConfig(False, {}, {}, region_name, f"TRANSIT_STATIC_SERVICES: service '{service_id}' missing 'name'")
+            static_services[service_id] = svc
+
+    configured = bool(feeds) or bool(static_services)
+    return TransitConfig(configured, feeds, static_services, region_name, None)
+
+
+transit_config: TransitConfig = load_transit_config(get_config())
+
+# Per-feed fetch failures (e.g. SSRF-blocked), surfaced in /health's message.
+fetch_errors: Dict[str, str] = {}
+
+# Cache client
 cache: Optional[CacheClient] = None
-http_client: Optional[httpx.AsyncClient] = None
 
 # In-memory transit data
 transit_data: Dict[str, Any] = {
@@ -208,6 +208,14 @@ def normalize_time(time_str: str) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def _in_bounds(bounds: Optional[Dict[str, float]], lat: float, lon: float) -> bool:
+    """Exclusive-comparison bounds check. No bounds configured means no
+    filtering (2.2, R11)."""
+    if not bounds:
+        return True
+    return bounds["min_lat"] < lat < bounds["max_lat"] and bounds["min_lon"] < lon < bounds["max_lon"]
+
+
 async def download_and_parse_gtfs(feed_id: str, feed_config: Dict[str, Any]) -> Dict[str, Any]:
     """Download and parse a GTFS feed."""
     logger.info(f"Downloading GTFS feed: {feed_id} from {feed_config['url']}")
@@ -219,14 +227,41 @@ async def download_and_parse_gtfs(feed_id: str, feed_config: Dict[str, Any]) -> 
         "agencies": []
     }
 
+    url = feed_config["url"]
+    bounds = feed_config.get("bounds")
+    max_bytes = feed_config.get("max_bytes", 100 * 2**20)
+
+    # D13: operator-configured fetch URL. By default no
+    # allowed_private_hosts is passed, so every hop -- including the first
+    # -- is validated against the private-address block. allow_private:true
+    # on this feed exempts only this feed's own hostname, on any hop; a
+    # redirect to any OTHER private host is still blocked. Stricter than the
+    # CONTRIBUTING.md Class 3 exemption because this fetches third-party
+    # content and a hijacked upstream redirect shouldn't reach
+    # cluster-internal addresses.
+    safe_get_kwargs: Dict[str, Any] = {}
+    if feed_config.get("allow_private"):
+        safe_get_kwargs["allowed_private_hosts"] = [httpx.URL(url).host]
+
     try:
-        response = await http_client.get(
-            feed_config["url"],
-            follow_redirects=True,
-            timeout=60.0
+        response = await safe_get(
+            url,
+            max_hops=5,
+            max_bytes=max_bytes,
+            timeout=60.0,
+            **safe_get_kwargs,
         )
         response.raise_for_status()
+    except SsrfBlockedError as e:
+        logger.warning("transit_feed_ssrf_blocked", feed_id=feed_id, reason=str(e))
+        fetch_errors[feed_id] = str(e)
+        return result
+    except Exception as e:
+        logger.error(f"Error downloading/parsing {feed_id}: {e}")
+        fetch_errors[feed_id] = str(e)
+        return result
 
+    try:
         # Parse ZIP file
         with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
             file_list = zf.namelist()
@@ -247,10 +282,9 @@ async def download_and_parse_gtfs(feed_id: str, feed_config: Dict[str, Any]) -> 
                                 stop_type=feed_config.get("type", "bus_stop"),
                                 wheelchair_boarding=int(row.get('wheelchair_boarding', 0))
                             )
-                            # Filter to Baltimore area (roughly)
-                            if 39.1 < stop.stop_lat < 39.5 and -77.0 < stop.stop_lon < -76.3:
+                            if _in_bounds(bounds, stop.stop_lat, stop.stop_lon):
                                 result["stops"].append(asdict(stop))
-                        except (ValueError, KeyError) as e:
+                        except (ValueError, KeyError):
                             continue
 
             # Parse routes.txt
@@ -270,7 +304,7 @@ async def download_and_parse_gtfs(feed_id: str, feed_config: Dict[str, Any]) -> 
                                 route_text_color=row.get('route_text_color', '')
                             )
                             result["routes"].append(asdict(route))
-                        except (ValueError, KeyError) as e:
+                        except (ValueError, KeyError):
                             continue
 
             # Parse stop_times.txt (limited for memory)
@@ -308,18 +342,24 @@ async def download_and_parse_gtfs(feed_id: str, feed_config: Dict[str, Any]) -> 
                         })
 
         logger.info(f"Parsed {feed_id}: {len(result['stops'])} stops, {len(result['routes'])} routes, {len(result['stop_times'])} stop_times")
+        fetch_errors.pop(feed_id, None)
         return result
 
     except Exception as e:
         logger.error(f"Error downloading/parsing {feed_id}: {e}")
+        fetch_errors[feed_id] = str(e)
         return result
 
 
 async def load_gtfs_data():
-    """Load all GTFS feeds into memory."""
+    """Load all configured GTFS feeds and static services into memory."""
     global transit_data
 
-    logger.info("Loading GTFS data from all feeds...")
+    if not transit_config.configured:
+        logger.warning("transit_not_configured")
+        return
+
+    logger.info("Loading GTFS data from all configured feeds...")
 
     all_stops = {}
     all_routes = {}
@@ -328,12 +368,12 @@ async def load_gtfs_data():
 
     # Download and parse each feed
     tasks = []
-    for feed_id, feed_config in GTFS_FEEDS.items():
+    for feed_id, feed_config in transit_config.feeds.items():
         tasks.append(download_and_parse_gtfs(feed_id, feed_config))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    for feed_id, result in zip(GTFS_FEEDS.keys(), results):
+    for feed_id, result in zip(transit_config.feeds.keys(), results):
         if isinstance(result, Exception):
             logger.error(f"Failed to load {feed_id}: {result}")
             continue
@@ -354,9 +394,9 @@ async def load_gtfs_data():
         for agency in result.get("agencies", []):
             all_agencies[agency["agency_id"]] = agency
 
-    # Add water transit stops
-    for service_id, service in WATER_TRANSIT.items():
-        for i, stop in enumerate(service["stops"]):
+    # Add static-service stops (e.g. a ferry not modeled as GTFS)
+    for service_id, service in transit_config.static_services.items():
+        for i, stop in enumerate(service.get("stops", [])):
             stop_id = f"{service_id}_{i}"
             all_stops[stop_id] = {
                 "stop_id": stop_id,
@@ -368,9 +408,9 @@ async def load_gtfs_data():
                 "wheelchair_boarding": 1,
                 "service_info": {
                     "name": service["name"],
-                    "free": service["free"],
-                    "hours": service["hours"],
-                    "frequency_minutes": service["frequency_minutes"]
+                    "free": service.get("free", False),
+                    "hours": service.get("hours"),
+                    "frequency_minutes": service.get("frequency_minutes")
                 }
             }
 
@@ -402,7 +442,7 @@ async def load_gtfs_data():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
-    global cache, http_client
+    global cache
 
     # Startup
     logger.info("Starting Transportation RAG service")
@@ -411,25 +451,23 @@ async def lifespan(app: FastAPI):
     cache = CacheClient(url=REDIS_URL)
     await cache.connect()
 
-    # Initialize HTTP client
-    http_client = httpx.AsyncClient(timeout=60.0)
-
-    # Load GTFS data in background
-    asyncio.create_task(load_gtfs_data())
+    if not transit_config.configured:
+        logger.warning("transit_not_configured")
+    else:
+        # Load GTFS data in background
+        asyncio.create_task(load_gtfs_data())
 
     yield
 
     # Shutdown
     logger.info("Shutting down Transportation RAG service")
-    if http_client:
-        await http_client.aclose()
     if cache:
         await cache.disconnect()
 
 
 app = FastAPI(
     title="Transportation RAG Service",
-    description="Baltimore transit data integration",
+    description="Region-configurable transit data integration",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -438,22 +476,45 @@ app = FastAPI(
 setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 
 
+async def require_transit_configured():
+    """FastAPI dependency: 503 when no transit region is configured.
+
+    Generalises the `if not X: raise HTTPException(503, ...)` idiom used at
+    src/rag/tesla/main.py and directions/main.py into a shared dependency.
+    """
+    if not transit_config.configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Transit region not configured: set TRANSIT_GTFS_FEEDS and/or TRANSIT_STATIC_SERVICES",
+        )
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    message = None
+    if not transit_config.configured:
+        message = transit_config.error or "not configured: set TRANSIT_GTFS_FEEDS and/or TRANSIT_STATIC_SERVICES"
+    elif fetch_errors:
+        message = "; ".join(f"{fid}: {reason}" for fid, reason in fetch_errors.items())
+
     return {
         "status": "healthy",
         "service": "transportation-rag",
         "version": "1.0.0",
+        "configured": transit_config.configured,
+        "region": transit_config.region_name,
+        "config_error": transit_config.error,
         "data_loaded": transit_data["last_updated"] is not None,
         "stats": {
             "stops": len(transit_data["stops"]),
             "routes": len(transit_data["routes"])
-        }
+        },
+        **({"message": message} if message else {}),
     }
 
 
-@app.get("/transit/nearby")
+@app.get("/transit/nearby", dependencies=[Depends(require_transit_configured)])
 async def get_nearby_stops(
     lat: float = Query(..., description="Latitude"),
     lon: float = Query(..., description="Longitude"),
@@ -487,9 +548,9 @@ async def get_nearby_stops(
     }
 
 
-@app.get("/transit/routes")
+@app.get("/transit/routes", dependencies=[Depends(require_transit_configured)])
 async def get_routes(
-    agency: Optional[str] = Query(None, description="Filter by agency: mta, baltimore_dot, amtrak"),
+    agency: Optional[str] = Query(None, description="Filter by agency (feed id prefix)"),
     route_type: Optional[int] = Query(None, description="GTFS route type (0=tram, 1=metro, 2=rail, 3=bus)")
 ):
     """List available routes."""
@@ -510,7 +571,7 @@ async def get_routes(
     }
 
 
-@app.get("/transit/departures")
+@app.get("/transit/departures", dependencies=[Depends(require_transit_configured)])
 async def get_departures(
     stop_id: str = Query(..., description="Stop ID"),
     limit: int = Query(10, ge=1, le=50, description="Maximum results")
@@ -521,13 +582,13 @@ async def get_departures(
 
     stop = transit_data["stops"][stop_id]
 
-    # Check if water transit
+    # Check if a non-GTFS static service
     if "service_info" in stop:
         service = stop["service_info"]
         now = datetime.now()
         is_weekend = now.weekday() >= 5
 
-        hours = service["hours"]["weekend" if is_weekend else "weekday"]
+        hours = (service.get("hours") or {}).get("weekend" if is_weekend else "weekday")
         if not hours:
             return {
                 "stop": stop,
@@ -600,7 +661,7 @@ async def get_departures(
     }
 
 
-@app.get("/transit/route/{route_id}")
+@app.get("/transit/route/{route_id}", dependencies=[Depends(require_transit_configured)])
 async def get_route_details(route_id: str):
     """Get route details."""
     if route_id not in transit_data["routes"]:
@@ -612,11 +673,11 @@ async def get_route_details(route_id: str):
     # This would require trips.txt parsing - simplified for now
     return {
         "route": route,
-        "feed_config": GTFS_FEEDS.get(route["feed_id"], {})
+        "feed_config": transit_config.feeds.get(route["feed_id"], {})
     }
 
 
-@app.get("/transit/search")
+@app.get("/transit/search", dependencies=[Depends(require_transit_configured)])
 async def search_transit(
     query: str = Query(..., min_length=2, description="Search query"),
     limit: int = Query(20, ge=1, le=50, description="Maximum results")
@@ -646,86 +707,81 @@ async def search_transit(
     }
 
 
-@app.get("/transit/water")
+@app.get("/transit/water", dependencies=[Depends(require_transit_configured)])
 async def get_water_transit():
-    """Get water transit services (Harbor Connector, Water Taxi)."""
+    """Get non-GTFS static transit services (e.g. ferries) for the configured region."""
     services = []
-    for service_id, service in WATER_TRANSIT.items():
-        now = datetime.now()
-        is_weekend = now.weekday() >= 5
-        hours = service["hours"]["weekend" if is_weekend else "weekday"]
+    now = datetime.now()
+    is_weekend = now.weekday() >= 5
+    for service_id, service in transit_config.static_services.items():
+        hours = (service.get("hours") or {}).get("weekend" if is_weekend else "weekday")
 
         services.append({
             "id": service_id,
             "name": service["name"],
-            "type": service["type"],
-            "free": service["free"],
+            "type": service.get("type", ""),
+            "free": service.get("free", False),
             "operating_today": hours is not None,
             "hours": hours,
-            "frequency_minutes": service["frequency_minutes"],
-            "stops": service["stops"]
+            "frequency_minutes": service.get("frequency_minutes"),
+            "stops": service.get("stops", [])
         })
 
     return {
         "services": services,
-        "day_type": "weekend" if now.weekday() >= 5 else "weekday"
+        "day_type": "weekend" if is_weekend else "weekday"
     }
 
 
-@app.get("/transit/agencies")
+@app.get("/transit/agencies", dependencies=[Depends(require_transit_configured)])
 async def get_agencies():
     """List all transit agencies."""
     agencies = list(transit_data["agencies"].values())
 
-    # Add water transit as pseudo-agencies
-    agencies.extend([
-        {
-            "agency_id": "harbor_connector",
-            "agency_name": "Harbor Connector (Baltimore DOT)",
-            "feed_id": "harbor_connector"
-        },
-        {
-            "agency_id": "water_taxi",
-            "agency_name": "Baltimore Water Taxi",
-            "feed_id": "water_taxi"
-        }
-    ])
+    # Add configured static services as pseudo-agencies
+    for service_id, service in transit_config.static_services.items():
+        agencies.append({
+            "agency_id": service_id,
+            "agency_name": service.get("agency_name", service["name"]),
+            "feed_id": service_id
+        })
 
     return {"agencies": agencies}
 
 
-@app.post("/transit/refresh")
+@app.post("/transit/refresh", dependencies=[Depends(require_transit_configured)])
 async def refresh_data(background_tasks: BackgroundTasks):
     """Trigger refresh of GTFS data."""
     background_tasks.add_task(load_gtfs_data)
     return {"status": "refresh_started", "message": "GTFS data refresh initiated"}
 
 
-@app.get("/transit/free")
+@app.get("/transit/free", dependencies=[Depends(require_transit_configured)])
 async def get_free_transit():
-    """Get all free transit options in Baltimore."""
+    """Get all free transit options for the configured region."""
     free_options = []
 
-    # Charm City Circulator
-    circulator_routes = [r for r in transit_data["routes"].values() if r["feed_id"] == "circulator"]
-    if circulator_routes:
-        free_options.append({
-            "name": "Charm City Circulator",
-            "type": "bus",
-            "routes": circulator_routes,
-            "description": "Free bus service connecting downtown neighborhoods"
-        })
+    for feed_id, feed in transit_config.feeds.items():
+        if not feed.get("free"):
+            continue
+        feed_routes = [r for r in transit_data["routes"].values() if r["feed_id"] == feed_id]
+        if feed_routes:
+            free_options.append({
+                "name": feed["name"],
+                "type": feed.get("type", ""),
+                "routes": feed_routes,
+                "description": feed.get("description", "")
+            })
 
-    # Water transit
-    for service_id, service in WATER_TRANSIT.items():
-        if service["free"]:
+    for service_id, service in transit_config.static_services.items():
+        if service.get("free"):
             free_options.append({
                 "name": service["name"],
-                "type": service["type"],
-                "hours": service["hours"],
-                "frequency_minutes": service["frequency_minutes"],
-                "stops": service["stops"],
-                "description": "Free water transit connecting harbor destinations"
+                "type": service.get("type", ""),
+                "hours": service.get("hours"),
+                "frequency_minutes": service.get("frequency_minutes"),
+                "stops": service.get("stops", []),
+                "description": service.get("description", "")
             })
 
     return {"free_transit_options": free_options}

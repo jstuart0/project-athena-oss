@@ -6,6 +6,58 @@ metadata:
   namespace: athena-prod
 data:
   # ==========================================================================
+  # WARNING: OSS TEMPLATE WITH PLACEHOLDERS. A configured namespace's live
+  # ConfigMap carries deployment-specific values (DEFAULT_CITY,
+  # TRUSTED_PROXY_CIDRS, TRANSIT_*, COMMUNITY_EVENTS_SOURCES,
+  # MUSIC_ASSISTANT_URL, DEFAULT_AMTRAK_STATION, SEARXNG_BASE_URL,
+  # ORCHESTRATOR_INGRESS_AUTH) that are not here. NEVER `kubectl apply -f`
+  # this file (or the manifests/athena-prod/ directory) against a configured
+  # namespace; change a live ConfigMap with `kubectl patch`/`kubectl edit`
+  # or a private overlay.
+  # ==========================================================================
+  # Every key the code reads (AthenaConfig fields + DEFAULT_STATE), listed
+  # here as commented placeholders so a blind `kubectl apply -f` can never
+  # silently clobber a deployment-specific value with an absent key. Set the
+  # ones you need by uncommenting; leave the rest commented to keep the
+  # AthenaConfig default.
+  # COMMUNITY_EVENTS_SOURCES: ""
+  # CONTENT_FETCHER_ALLOW_BROWSER_FETCH: ""
+  # CONTROL_AGENT_ENABLED: ""
+  # DATABASE_URL: ""
+  # DEFAULT_AMTRAK_STATION: ""
+  # DEFAULT_CITY: ""
+  # DEFAULT_STATE: ""
+  # DEFAULT_TIMEZONE: ""
+  # DEMO_MODE: ""
+  # DEV_MODE: ""
+  # HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: ""
+  # HEALTH_POLL_CONCURRENCY: ""
+  # HEALTH_POLL_INTERVAL_SECONDS: ""
+  # HEALTH_POLL_TIMEOUT_SECONDS: ""
+  # LLM_SERVICE_URL: ""
+  # LOGIN_LOCKOUT_MINUTES: ""
+  # LOGIN_LOCKOUT_THRESHOLD: ""
+  # LOGIN_MINIMUM_DELAY_MS: ""
+  # LOGIN_RATE_LIMIT_PER_MINUTE: ""
+  # MUSIC_ASSISTANT_URL: ""
+  # NEW_CONVERSATION_PER_MINUTE_PER_IP: ""
+  # NEW_CONVERSATION_RESET_GRACE_SECONDS: ""
+  # OIDC_CLIENT_ID: ""
+  # OIDC_ISSUER: ""
+  # OIDC_VALIDATE_ISS: ""
+  # OLLAMA_URL: ""
+  # ORCHESTRATOR_INGRESS_AUTH: ""
+  # REDIS_URL: ""
+  # SEARXNG_BASE_URL: ""
+  # SERVICE_API_KEY: ""
+  # SERVICE_REGISTRY_WRITE_PER_MINUTE: ""
+  # SESSION_MAX_COUNT: ""
+  # SITESCRAPER_ALLOWED_PRIVATE_HOSTS: ""
+  # TRANSIT_GTFS_FEEDS: ""
+  # TRANSIT_REGION_NAME: ""
+  # TRANSIT_STATIC_SERVICES: ""
+  # TRUSTED_PROXY_CIDRS: ""
+  # ==========================================================================
   # LLM Backend Configuration
   # ==========================================================================
   # Choose one of the following options:
@@ -100,7 +152,7 @@ data:
   # Do NOT set this to an empty string — unset the key entirely to use the default.
   #
   # Control Agent is opt-in (default disabled). Enable only if you run a Control
-  # Agent process on a host alongside Ollama (e.g., a Mac Studio or bare-metal node).
+  # Agent process on a host alongside Ollama (e.g., an Apple Silicon Mac or bare-metal node).
   # Existing deployments must add CONTROL_AGENT_ENABLED=true via a private overlay
   # or in-cluster env injection. See docs/INSTALLATION.md for operator instructions.
   #
@@ -160,8 +212,8 @@ data:
   #
   # Example for a standard K8s cluster:
   #   HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: "10.96.0.0/12,10.244.0.0/16"
-  # Example for Jay's homelab (pod CIDR + service CIDR + host subnet):
-  #   HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: "10.96.0.0/12,10.244.0.0/16,192.168.10.0/24"
+  # Example with a host subnet (pod CIDR + service CIDR + host subnet):
+  #   HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: "10.96.0.0/12,10.244.0.0/16,192.0.2.0/24"
   #
   # HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: ""
 
@@ -174,7 +226,7 @@ data:
   # iCal, and MCP Class-1 URL fetch paths.  Default empty = fail-closed.
   # Homelab operators whose iCal servers or MCP endpoints are on private IPs
   # MUST set this; public-internet deployments leave it empty.
-  # Example: SITESCRAPER_ALLOWED_PRIVATE_HOSTS: "192.168.10.0/24,my-ical.local"
+  # Example: SITESCRAPER_ALLOWED_PRIVATE_HOSTS: "192.0.2.0/24,my-ical.local"
   #
   # SITESCRAPER_ALLOWED_PRIVATE_HOSTS: ""
 

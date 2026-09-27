@@ -497,3 +497,44 @@ class TestF48ConfigManifestWiring:
             "NEW_CONVERSATION_RESET_GRACE_SECONDS",
         ):
             assert knob in text, f"{knob} not documented in manifests/athena-prod/config.yaml"
+
+
+# ---------------------------------------------------------------------------
+# C1 (ATHENA-89 P2, D2): the 5 region-configurable RAG fields default to ""
+# and read their env var. Plain str fields (never dict/list-typed) so a
+# malformed value can only make the consuming service report
+# configured=False -- never crash AthenaConfig() itself.
+# ---------------------------------------------------------------------------
+
+class TestRegionConfigFields:
+    """C1: transit/community-events/amtrak config fields."""
+
+    @pytest.mark.parametrize(
+        "field_name,env_name",
+        [
+            ("transit_region_name", "TRANSIT_REGION_NAME"),
+            ("transit_gtfs_feeds", "TRANSIT_GTFS_FEEDS"),
+            ("transit_static_services", "TRANSIT_STATIC_SERVICES"),
+            ("community_events_sources", "COMMUNITY_EVENTS_SOURCES"),
+            ("default_amtrak_station", "DEFAULT_AMTRAK_STATION"),
+        ],
+    )
+    def test_C1_default_empty_string(self, monkeypatch, field_name, env_name):
+        monkeypatch.delenv(env_name, raising=False)
+        cfg = _TestConfig()
+        assert getattr(cfg, field_name) == ""
+
+    @pytest.mark.parametrize(
+        "field_name,env_name,value",
+        [
+            ("transit_region_name", "TRANSIT_REGION_NAME", "Denver Metro"),
+            ("transit_gtfs_feeds", "TRANSIT_GTFS_FEEDS", '{"a": {"name": "A", "url": "https://example.org/a.zip"}}'),
+            ("transit_static_services", "TRANSIT_STATIC_SERVICES", '{"a": {"name": "A"}}'),
+            ("community_events_sources", "COMMUNITY_EVENTS_SOURCES", '[{"name": "A", "type": "link_scan", "url": "https://example.org"}]'),
+            ("default_amtrak_station", "DEFAULT_AMTRAK_STATION", "DEN"),
+        ],
+    )
+    def test_C1_reads_env_var(self, monkeypatch, field_name, env_name, value):
+        monkeypatch.setenv(env_name, value)
+        cfg = _TestConfig()
+        assert getattr(cfg, field_name) == value

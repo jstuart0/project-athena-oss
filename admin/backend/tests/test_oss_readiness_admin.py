@@ -257,7 +257,9 @@ def test_A7_migration_027_no_home_dir_path_and_correct_updates():
 def test_M1_no_row_evil_domain_denied(client, db):
     resp = client.post("/api/mcp-security/check-domain", json={"url": "https://evil.example"})
     assert resp.status_code == 200
-    assert resp.json()["allowed"] is False
+    body = resp.json()
+    assert body["allowed"] is False
+    assert "localhost only" in body["reason"]
 
 
 @pytest.mark.parametrize("url", ["http://localhost", "http://127.0.0.1"])

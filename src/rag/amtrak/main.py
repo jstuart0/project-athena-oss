@@ -51,8 +51,11 @@ GTFS_URL = "https://content.amtrak.com/content/gtfs/GTFS.zip"
 DEFAULT_TIMEZONE = get_config().default_timezone
 EASTERN = ZoneInfo(DEFAULT_TIMEZONE)
 
-# Default origin (Baltimore Penn Station)
-DEFAULT_ORIGIN = "BAL"
+# Default origin station, set via DEFAULT_AMTRAK_STATION. Empty means no
+# default is configured; callers must specify an origin explicitly.
+DEFAULT_ORIGIN = get_config().default_amtrak_station.strip().upper()
+if not DEFAULT_ORIGIN:
+    logger.warning("amtrak_default_origin_not_configured")
 
 # Common station aliases for natural language processing
 STATION_ALIASES = {
@@ -505,14 +508,18 @@ setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {
+    content = {
         "status": "healthy",
         "service": "amtrak-rag",
         "version": "1.0.0",
+        "default_origin": DEFAULT_ORIGIN or None,
         "gtfs_loaded": _gtfs_cache['loaded'],
         "stations": len(_gtfs_cache['stops']),
         "trips": len(_gtfs_cache['trips'])
     }
+    if not DEFAULT_ORIGIN:
+        content["message"] = "not configured: set DEFAULT_AMTRAK_STATION for a default origin"
+    return content
 
 
 @app.get("/amtrak/stations")
@@ -542,7 +549,7 @@ async def search_stations(
 
 @app.get("/amtrak/schedule")
 async def get_schedule(
-    origin: Optional[str] = Query(None, description="Origin station (default: Baltimore Penn)"),
+    origin: Optional[str] = Query(None, description="Origin station (default: the configured default station, if any)"),
     destination: str = Query(..., description="Destination station code or name"),
     date: Optional[str] = Query(None, description="Travel date YYYY-MM-DD (default: today)"),
     return_date: Optional[str] = Query(None, description="Return date YYYY-MM-DD for round trip"),
@@ -551,17 +558,24 @@ async def get_schedule(
     """
     Get train schedules between two stations.
 
-    Supports round trips when return_date is provided.
-    Default origin is Baltimore Penn Station if not specified.
+    Supports round trips when return_date is provided. If origin is omitted,
+    the service's configured default station is used; if none is
+    configured, the request is rejected (set DEFAULT_AMTRAK_STATION).
     """
     try:
-        # Default to Baltimore if no origin
         if not origin:
+            if not DEFAULT_ORIGIN:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No origin specified and DEFAULT_AMTRAK_STATION is not configured",
+                )
             origin = DEFAULT_ORIGIN
-            logger.info("Using default origin: Baltimore Penn (BAL)")
+            logger.info(f"Using default origin: {DEFAULT_ORIGIN}")
 
         result = get_schedule_internal(origin, destination, date, return_date, limit)
         return result
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -578,7 +592,7 @@ async def natural_language_query(
 
     Examples:
     - "next train to new york"
-    - "train from baltimore to dc"
+    - "train from was to nyp"
     - "round trip to boston returning friday"
     """
     load_gtfs()
@@ -600,10 +614,15 @@ async def natural_language_query(
             destination = code
             break
 
-    # If no origin specified, default to Baltimore
+    # If no origin specified, use the configured default (if any)
     if not origin:
+        if not DEFAULT_ORIGIN:
+            return {
+                "error": "Could not determine origin station",
+                "hint": "Specify an origin (e.g. 'train from <station> to <destination>') or configure DEFAULT_AMTRAK_STATION",
+            }
         origin = DEFAULT_ORIGIN
-        logger.info("No origin specified, defaulting to Baltimore Penn")
+        logger.info(f"No origin specified, defaulting to {DEFAULT_ORIGIN}")
 
     if not destination:
         return {

@@ -325,6 +325,41 @@ class AthenaConfig(BaseSettings):
     searxng_base_url: str = Field(default="")
 
     # ------------------------------------------------------------------
+    # Region-configurable RAG services (ATHENA-89 / D2, D3)
+    # ------------------------------------------------------------------
+    # These are consumer-parsed JSON/plain strings, not typed dict/list
+    # fields — a malformed value must only make the *consuming service*
+    # report configured=False, never raise inside AthenaConfig() itself
+    # (every RAG deployment shares one ConfigMap via envFrom, so a typed
+    # field that failed validation here would crash-loop every pod, not
+    # just the one that reads it). Same pattern as
+    # health_poll_allowed_private_hosts / sitescraper_allowed_private_hosts.
+    #
+    # transit_region_name: a display label for the configured transit
+    #   region (e.g. "Denver Metro"). Purely cosmetic; empty is fine.
+    transit_region_name: str = Field(default="")
+    # transit_gtfs_feeds: JSON object of {feed_id: {name, agency, url, type,
+    #   free, description?, bounds?, max_bytes?, allow_private?}}. See
+    #   .env.example for the schema and src/rag/transportation/main.py's
+    #   load_transit_config for validation rules. Empty means no GTFS feeds
+    #   are configured.
+    transit_gtfs_feeds: str = Field(default="")
+    # transit_static_services: JSON object of non-GTFS transit services
+    #   (e.g. a ferry) with fixed schedules: {service_id: {name, type, free,
+    #   hours, frequency_minutes, stops, agency_name?, description?}}. Empty
+    #   means none are configured.
+    transit_static_services: str = Field(default="")
+    # community_events_sources: JSON array of community-event source
+    #   definitions (name, type, url, and per-type fields — see
+    #   .env.example and src/rag/community_events/main.py's
+    #   load_event_sources). Empty means the service reports not configured.
+    community_events_sources: str = Field(default="")
+    # default_amtrak_station: a 3-letter Amtrak station code used as the
+    #   default origin when a caller doesn't specify one. Empty means the
+    #   amtrak service requires an explicit origin on every request.
+    default_amtrak_station: str = Field(default="")
+
+    # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern
     # ------------------------------------------------------------------
     # Fields below are NOT yet migrated to AthenaConfig.  They are listed

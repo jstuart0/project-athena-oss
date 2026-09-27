@@ -386,13 +386,13 @@ TOOL_DEFINITIONS = [
             "type": "function",
             "function": {
                 "name": "search_restaurants",
-                "description": "Search for any local business or place. ALWAYS use this tool when the user asks about a specific business name (e.g., 'Cowboy Rose', 'Ikaros', 'The Food Market') to look up their address, hours, phone number, or location. Also use for finding places: restaurants, cafes, supermarkets, grocery stores, pharmacies, gas stations, etc. Returns place names, ratings, addresses, hours, and locations. IMPORTANT: For product searches (PS5, iPhone, etc.), include major retailer names in the term.",
+                "description": "Search for any local business or place. ALWAYS use this tool when the user asks about a specific business name (e.g., 'Blue Door Cafe', 'Main Street Diner') to look up their address, hours, phone number, or location. Also use for finding places: restaurants, cafes, supermarkets, grocery stores, pharmacies, gas stations, etc. Returns place names, ratings, addresses, hours, and locations. IMPORTANT: For product searches (PS5, iPhone, etc.), include major retailer names in the term.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "location": {
                             "type": "string",
-                            "description": "City or neighborhood (e.g., 'Baltimore, MD', 'San Francisco')"
+                            "description": "City or neighborhood (e.g., 'Denver, CO', 'San Francisco')"
                         },
                         "term": {
                             "type": "string",
@@ -456,17 +456,17 @@ TOOL_DEFINITIONS = [
             "type": "function",
             "function": {
                 "name": "search_transit",
-                "description": "Search for public transit options including MTA buses, metro, light rail, MARC trains, Charm City Circulator (free), Harbor Connector (free water taxi), Amtrak, and paid water taxi. Find nearby stops, routes, schedules, and departure times.",
+                "description": "Search public transit in the configured region: stops, routes, schedules, departures, and free options.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "lat": {
                             "type": "number",
-                            "description": "Latitude for nearby stop search (e.g., 39.2904 for Inner Harbor)"
+                            "description": "Latitude of the user's location"
                         },
                         "lon": {
                             "type": "number",
-                            "description": "Longitude for nearby stop search (e.g., -76.6122 for Inner Harbor)"
+                            "description": "Longitude of the user's location"
                         },
                         "query": {
                             "type": "string",
@@ -483,7 +483,7 @@ TOOL_DEFINITIONS = [
                         },
                         "free_only": {
                             "type": "boolean",
-                            "description": "Only show free transit options (Circulator, Harbor Connector)",
+                            "description": "Only show free transit options",
                             "default": False
                         }
                     },
@@ -560,7 +560,7 @@ TOOL_DEFINITIONS = [
             "type": "function",
             "function": {
                 "name": "get_train_schedule",
-                "description": "Get Amtrak train schedules between stations. Default origin is Baltimore Penn Station. Returns departure times, arrival times, train numbers, routes (Acela, Northeast Regional, etc.), and booking links.",
+                "description": "Get Amtrak train schedules between stations. If origin is omitted the service's configured default station is used; if none is configured, ask the user for an origin. Returns departure times, arrival times, train numbers, routes (Acela, Northeast Regional, etc.), and booking links.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -570,7 +570,7 @@ TOOL_DEFINITIONS = [
                         },
                         "origin": {
                             "type": "string",
-                            "description": "Origin station name or code (default: Baltimore Penn Station). Examples: 'Baltimore', 'BAL', 'Washington', 'DC', 'WAS'"
+                            "description": "Origin station name or code. Examples: 'New York', 'NYP', 'Washington', 'WAS'"
                         },
                         "date": {
                             "type": "string",

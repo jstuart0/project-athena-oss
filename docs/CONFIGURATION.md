@@ -229,7 +229,8 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SEARXNG_URL` | `http://localhost:8080` | SearXNG instance URL |
+| `SEARXNG_URL` | `http://localhost:8080` | SearXNG instance URL used by `parallel_search.py`'s search provider |
+| `SEARXNG_BASE_URL` | *(empty)* | SearXNG instance URL for the admin status check and the orchestrator's SearXNG provider registration. Empty means SearXNG is disabled (status reads "not configured", no network probe made). |
 
 ---
 
@@ -485,6 +486,22 @@ The `DEV_MODE=true` condition bypasses all OIDC gates; the other gates run in bo
 | `DEFAULT_COUNTRY` | `US` | Default country |
 | `DEFAULT_TIMEZONE` | `UTC` | Default timezone |
 | `DEFAULT_AMTRAK_STATION` | *(empty)* | Default Amtrak station code |
+
+---
+
+### Region-Configurable RAG Services
+
+The transportation and community_events services ship with no region baked
+in. Unset means the service reports "not configured" via `/health` and its
+data routes return 503. See `.env.example` for the full JSON schema and a
+worked Denver example, including a feed with an optional `bounds` box.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRANSIT_REGION_NAME` | *(empty)* | Display label only, purely cosmetic |
+| `TRANSIT_GTFS_FEEDS` | *(empty)* | JSON object of GTFS feed definitions (`{feed_id: {name, agency, url, type, free, bounds?, max_bytes?, allow_private?}}`) |
+| `TRANSIT_STATIC_SERVICES` | *(empty)* | JSON object of non-GTFS transit services with fixed schedules (e.g. a seasonal ferry) |
+| `COMMUNITY_EVENTS_SOURCES` | *(empty)* | JSON array of community-event sources. Each entry's `type` selects the parser: `link_scan`, `event_cards`, `tribe_events_api`, `squarespace_eventlist`. `link_scan` and `event_cards` are best-effort heuristics, validated only against their reference site's HTML structure — a source's markup can drift without notice. |
 
 ---
 

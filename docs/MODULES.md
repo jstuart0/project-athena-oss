@@ -346,6 +346,9 @@ RAG (Retrieval-Augmented Generation) services provide domain-specific data for q
 | Dining | 8019 | `GOOGLE_PLACES_API_KEY` | See pricing |
 | Recipes | 8020 | `SPOONACULAR_API_KEY` | 150/day |
 | Directions | 8030 | `GOOGLE_DIRECTIONS_API_KEY` + `GOOGLE_PLACES_API_KEY` (optional, shared with Dining) | See pricing |
+| Transportation | 8025 | None — region-configured via `TRANSIT_GTFS_FEEDS`/`TRANSIT_STATIC_SERVICES` (see `docs/CONFIGURATION.md`) | Depends on the operator's transit agency feed |
+| Community Events | 8026 | None — region-configured via `COMMUNITY_EVENTS_SOURCES` (see `docs/CONFIGURATION.md`) | N/A (web scraping / REST API sources) |
+| Amtrak | 8027 | None — `DEFAULT_AMTRAK_STATION` sets a default origin (optional) | N/A (public GTFS feed) |
 
 ### Enable RAG Services
 

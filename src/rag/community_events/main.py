@@ -1,9 +1,11 @@
-"""Community Events RAG Service - Local Baltimore Events Aggregator
+"""Community Events RAG Service - Region-Configurable Events Aggregator
 
-Scrapes and aggregates free community events from local sources:
-- Waterfront Partnership of Baltimore events calendar
-- Eventbrite local free events (future)
-- Additional Baltimore community sources (future)
+Scrapes and aggregates community events from operator-configured local
+sources (COMMUNITY_EVENTS_SOURCES, a JSON list). Four scraper types are
+supported: link_scan, event_cards, tribe_events_api, squarespace_eventlist
+(see .env.example for the schema). link_scan and event_cards are best-effort
+heuristics, validated only against their reference sites -- a source's HTML
+structure can drift without notice.
 
 Events are cached in Redis with 24-hour TTL and refreshed daily.
 
@@ -11,6 +13,7 @@ API Endpoints:
 - GET /health - Health check
 - GET /events/search - Search community events
 - POST /events/refresh - Force refresh of events cache
+- GET /events/sources - List configured sources
 """
 
 import os
@@ -19,8 +22,10 @@ import re
 import json
 import asyncio
 import hashlib
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from itertools import zip_longest
+from typing import Any, Dict, List, NamedTuple, Optional
 from contextlib import asynccontextmanager
 
 # Add parent directory to path for imports
@@ -30,11 +35,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 import httpx
 import structlog
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 
+from shared.config import get_config
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
+from shared.url_safety import safe_get, SsrfBlockedError
 
 logger = configure_logging("community-events-rag")
 
@@ -56,22 +63,120 @@ REDIS_KEY_METADATA = "community_events:metadata"  # Hash for cache metadata
 # Far future timestamp for events without dates (Dec 31, 2099)
 NO_DATE_TIMESTAMP = 4102444800
 
-# Source URLs
-WATERFRONT_CALENDAR_URL = "https://www.waterfrontpartnership.org/events-calendar"
-WATERFRONT_BASE_URL = "https://www.waterfrontpartnership.org"
-VISIT_BALTIMORE_URL = "https://baltimore.org/events/"
-VISIT_BALTIMORE_BASE_URL = "https://baltimore.org"
-DOWNTOWN_PARTNERSHIP_API = "https://godowntownbaltimore.com/wp-json/tribe/events/v1/events"
-FEDERAL_HILL_EVENTS_URL = "https://www.federalhillbaltimore.org/events"
-FEDERAL_HILL_BASE_URL = "https://www.federalhillbaltimore.org"
+# D3: per-type defaults, copied exactly from today's (house-specific) literals.
+# tribe_events_api's is_free is NOT independently configurable -- it's always
+# computed per-event from the API's own `cost` field.
+_TYPE_DEFAULTS = {
+    "link_scan": {"category": "community", "is_free": True},
+    "event_cards": {"category": "community", "is_free": False},
+    "tribe_events_api": {"category": "downtown", "is_free": False},
+    "squarespace_eventlist": {"category": "neighborhood", "is_free": True},
+}
 
 # Global clients
-http_client: Optional[httpx.AsyncClient] = None
 redis_client = None
 
 # In-memory cache fallback (when Redis is unavailable)
 in_memory_events: List[Dict[str, Any]] = []
 in_memory_cache_time: Optional[datetime] = None
+
+
+@dataclass
+class EventSource:
+    """One configured community-events source (D3)."""
+    name: str
+    type: str
+    url: str
+    base_url: str = ""
+    link_path: str = ""
+    default_location: str = ""
+    default_address: str = ""
+    default_city: str = ""
+    default_state: str = ""
+    is_free: bool = False
+    category: str = ""
+    location_match: List[str] = field(default_factory=list)
+    regions: List[str] = field(default_factory=list)
+    max_bytes: Optional[int] = None
+    allow_private: bool = False
+
+
+class CommunityEventsConfig(NamedTuple):
+    """Parsed COMMUNITY_EVENTS_SOURCES config. Never raises."""
+    configured: bool
+    sources: List[EventSource]
+    error: Optional[str]
+
+
+def load_event_sources(cfg) -> CommunityEventsConfig:
+    """Parse COMMUNITY_EVENTS_SOURCES. Never raises."""
+    raw = cfg.community_events_sources
+    if not raw:
+        return CommunityEventsConfig(False, [], None)
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return CommunityEventsConfig(False, [], f"COMMUNITY_EVENTS_SOURCES: invalid JSON: {e}")
+    if not isinstance(parsed, list):
+        return CommunityEventsConfig(False, [], "COMMUNITY_EVENTS_SOURCES: must be a JSON array")
+
+    sources: List[EventSource] = []
+    for i, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            return CommunityEventsConfig(False, [], f"COMMUNITY_EVENTS_SOURCES: source at index {i} must be an object")
+        name = item.get("name")
+        if not name:
+            return CommunityEventsConfig(False, [], f"COMMUNITY_EVENTS_SOURCES: source at index {i} missing 'name'")
+        source_type = item.get("type")
+        if source_type not in _TYPE_DEFAULTS:
+            return CommunityEventsConfig(
+                False, [], f"COMMUNITY_EVENTS_SOURCES: source '{name}' has unknown type '{source_type}'"
+            )
+        if not item.get("url"):
+            return CommunityEventsConfig(False, [], f"COMMUNITY_EVENTS_SOURCES: source '{name}' missing 'url'")
+
+        defaults = _TYPE_DEFAULTS[source_type]
+        if source_type == "tribe_events_api":
+            # Not independently configurable (D3): always computed per-event.
+            is_free = defaults["is_free"]
+        else:
+            is_free = item.get("is_free", defaults["is_free"])
+
+        sources.append(EventSource(
+            name=name,
+            type=source_type,
+            url=item["url"],
+            base_url=item.get("base_url", ""),
+            link_path=item.get("link_path", ""),
+            default_location=item.get("default_location", ""),
+            default_address=item.get("default_address", ""),
+            default_city=item.get("default_city", ""),
+            default_state=item.get("default_state", ""),
+            is_free=is_free,
+            category=item.get("category", defaults["category"]),
+            location_match=item.get("location_match") or [],
+            regions=item.get("regions") or [],
+            max_bytes=item.get("max_bytes"),
+            allow_private=bool(item.get("allow_private", False)),
+        ))
+
+    return CommunityEventsConfig(True, sources, None)
+
+
+event_sources_config: CommunityEventsConfig = load_event_sources(get_config())
+
+# Per-source fetch failures (e.g. SSRF-blocked), surfaced in /health's message.
+fetch_errors: Dict[str, str] = {}
+
+
+def _private_kwargs(src: EventSource) -> Dict[str, Any]:
+    """D13: a private host is permitted ONLY for this source's own hostname,
+    and only when the source opts in. By default no allowed_private_hosts
+    is passed, so every hop -- including the first -- is validated."""
+    if src.allow_private:
+        return {"allowed_private_hosts": [httpx.URL(src.url).host]}
+    return {}
 
 
 async def get_redis_client():
@@ -184,38 +289,29 @@ def extract_date_from_text(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def scrape_waterfront_events() -> List[Dict[str, Any]]:
-    """
-    Scrape events from Waterfront Partnership of Baltimore calendar.
-
-    Returns:
-        List of event dictionaries with title, date, location, description, url
-    """
-    events = []
+async def scrape_link_scan_source(src: EventSource) -> List[Dict[str, Any]]:
+    """link_scan: find <a> tags whose href contains src.link_path, then walk
+    up to the nearest container for date/location/description. Best-effort
+    heuristic (D3), validated only against its reference site."""
+    events: List[Dict[str, Any]] = []
 
     try:
-        logger.info("scraping_waterfront", url=WATERFRONT_CALENDAR_URL)
+        logger.info("scraping_link_scan_source", name=src.name, url=src.url)
 
-        response = await http_client.get(
-            WATERFRONT_CALENDAR_URL,
+        response = await safe_get(
+            src.url,
             headers={
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
             },
-            follow_redirects=True
+            max_hops=5,
+            max_bytes=src.max_bytes or 5 * 2**20,
+            timeout=30.0,
+            **_private_kwargs(src),
         )
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Find event items - Squarespace uses various class patterns
-        # Look for common event container patterns
-        event_containers = soup.find_all(['article', 'div'], class_=lambda x: x and any(
-            term in str(x).lower() for term in ['event', 'calendar', 'item']
-        ))
-
-        # Also try finding by link structure
-        event_links = soup.find_all('a', href=lambda x: x and '/events-calendar/' in x)
-
+        event_links = soup.find_all('a', href=lambda x: x and src.link_path and src.link_path in x)
         seen_urls = set()
 
         for link in event_links:
@@ -225,13 +321,10 @@ async def scrape_waterfront_events() -> List[Dict[str, Any]]:
                     continue
                 seen_urls.add(href)
 
-                # Build full URL
-                full_url = href if href.startswith('http') else f"{WATERFRONT_BASE_URL}{href}"
+                full_url = href if href.startswith('http') else f"{src.base_url}{href}"
 
-                # Get title - could be in the link text or nearby heading
                 title = link.get_text(strip=True)
                 if not title or len(title) < 3:
-                    # Try to find title in parent elements
                     parent = link.find_parent(['div', 'article', 'li'])
                     if parent:
                         heading = parent.find(['h1', 'h2', 'h3', 'h4', 'h5'])
@@ -241,92 +334,85 @@ async def scrape_waterfront_events() -> List[Dict[str, Any]]:
                 if not title or title in ['→', 'View Event', 'View Event →', 'ICS', 'Google Calendar']:
                     continue
 
-                # Skip ICS export links
                 if '?format=ical' in full_url or '?format=gcal' in full_url:
                     continue
 
-                # Try to find date info
                 parent = link.find_parent(['div', 'article', 'li'])
                 date_text = ""
-                location = "Baltimore Waterfront"
+                location = src.default_location
                 description = ""
 
                 if parent:
-                    # Look for date elements
                     time_elem = parent.find(['time', 'span'], class_=lambda x: x and 'date' in str(x).lower())
                     if time_elem:
                         date_text = time_elem.get_text(strip=True)
 
-                    # Look for location
                     loc_elem = parent.find(['span', 'div'], class_=lambda x: x and ('location' in str(x).lower() or 'venue' in str(x).lower()))
                     if loc_elem:
                         location = loc_elem.get_text(strip=True)
 
-                    # Look for description
                     desc_elem = parent.find(['p', 'div'], class_=lambda x: x and ('description' in str(x).lower() or 'excerpt' in str(x).lower()))
                     if desc_elem:
-                        description = desc_elem.get_text(strip=True)[:500]  # Limit length
+                        description = desc_elem.get_text(strip=True)[:500]
 
-                # Parse dates
                 date_info = extract_date_from_text(date_text) or {}
 
-                event = {
+                events.append({
                     "id": hashlib.md5(full_url.encode()).hexdigest()[:12],
                     "title": title,
                     "url": full_url,
-                    "source": "Waterfront Partnership",
+                    "source": src.name,
                     "location": location,
-                    "address": "Inner Harbor, Baltimore, MD",
+                    "address": src.default_address,
                     "description": description,
                     "date_text": date_text,
                     "start_date": date_info.get("start_date"),
                     "end_date": date_info.get("end_date"),
-                    "is_free": True,  # Most Waterfront events are free
-                    "category": "community",
+                    "is_free": src.is_free,
+                    "category": src.category,
                     "scraped_at": datetime.now().isoformat()
-                }
-
-                events.append(event)
+                })
 
             except Exception as e:
-                logger.warning("event_parse_error", error=str(e))
+                logger.warning("event_parse_error", source=src.name, error=str(e))
                 continue
 
-        logger.info("waterfront_scrape_complete", events_found=len(events))
+        logger.info("link_scan_scrape_complete", name=src.name, events_found=len(events))
+        fetch_errors.pop(src.name, None)
 
+    except SsrfBlockedError as e:
+        logger.warning("community_source_ssrf_blocked", source=src.name, reason=str(e))
+        fetch_errors[src.name] = str(e)
     except Exception as e:
-        logger.error("waterfront_scrape_failed", error=str(e))
+        logger.error("link_scan_scrape_failed", name=src.name, error=str(e))
+        fetch_errors[src.name] = str(e)
 
     return events
 
 
-async def scrape_visit_baltimore_events() -> List[Dict[str, Any]]:
-    """
-    Scrape events from Visit Baltimore (baltimore.org).
-
-    Returns:
-        List of event dictionaries with title, date, location, description, url
-    """
-    events = []
+async def scrape_event_cards_source(src: EventSource) -> List[Dict[str, Any]]:
+    """event_cards: find <a> tags whose href contains src.link_path, using
+    each link's parent card for title/date/location/description. Best-effort
+    heuristic (D3), validated only against its reference site."""
+    events: List[Dict[str, Any]] = []
 
     try:
-        logger.info("scraping_visit_baltimore", url=VISIT_BALTIMORE_URL)
+        logger.info("scraping_event_cards_source", name=src.name, url=src.url)
 
-        response = await http_client.get(
-            VISIT_BALTIMORE_URL,
+        response = await safe_get(
+            src.url,
             headers={
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
             },
-            follow_redirects=True
+            max_hops=5,
+            max_bytes=src.max_bytes or 5 * 2**20,
+            timeout=30.0,
+            **_private_kwargs(src),
         )
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Visit Baltimore uses article cards or event listing elements
-        # Look for event links that contain /event/ in the URL
-        event_links = soup.find_all('a', href=lambda x: x and '/event/' in x)
-
+        event_links = soup.find_all('a', href=lambda x: x and src.link_path and src.link_path in x)
         seen_urls = set()
 
         for link in event_links:
@@ -336,13 +422,10 @@ async def scrape_visit_baltimore_events() -> List[Dict[str, Any]]:
                     continue
                 seen_urls.add(href)
 
-                # Build full URL
-                full_url = href if href.startswith('http') else f"{VISIT_BALTIMORE_BASE_URL}{href}"
+                full_url = href if href.startswith('http') else f"{src.base_url}{href}"
 
-                # Get title from link text or parent heading
                 title = link.get_text(strip=True)
 
-                # Try to find title in parent card element
                 parent = link.find_parent(['article', 'div', 'li'])
                 if parent:
                     heading = parent.find(['h2', 'h3', 'h4', 'h5'])
@@ -352,25 +435,20 @@ async def scrape_visit_baltimore_events() -> List[Dict[str, Any]]:
                 if not title or len(title) < 3:
                     continue
 
-                # Skip non-event links
                 if title.lower() in ['read more', 'learn more', 'view all', 'see more']:
                     continue
 
-                # Try to find date info
                 date_text = ""
-                location = "Baltimore, MD"
+                location = src.default_location
                 description = ""
-                time_text = ""
 
                 if parent:
-                    # Look for date elements - Visit Baltimore often uses specific date classes
                     date_elem = parent.find(['time', 'span', 'div'], class_=lambda x: x and any(
                         term in str(x).lower() for term in ['date', 'time', 'when']
                     ))
                     if date_elem:
                         date_text = date_elem.get_text(strip=True)
 
-                    # Also check for text that looks like a date
                     all_text = parent.get_text()
                     date_patterns = [
                         r'((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[,\s]+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2})',
@@ -382,80 +460,73 @@ async def scrape_visit_baltimore_events() -> List[Dict[str, Any]]:
                             date_text = match.group(1)
                             break
 
-                    # Look for location
                     loc_elem = parent.find(['span', 'div', 'address'], class_=lambda x: x and any(
                         term in str(x).lower() for term in ['location', 'venue', 'address', 'where']
                     ))
                     if loc_elem:
                         location = loc_elem.get_text(strip=True)
 
-                    # Look for description/excerpt
                     desc_elem = parent.find(['p', 'div'], class_=lambda x: x and any(
                         term in str(x).lower() for term in ['description', 'excerpt', 'summary', 'content']
                     ))
                     if desc_elem:
                         description = desc_elem.get_text(strip=True)[:500]
 
-                # Parse dates
                 date_info = extract_date_from_text(date_text) or {}
 
-                event = {
+                events.append({
                     "id": hashlib.md5(full_url.encode()).hexdigest()[:12],
                     "title": title,
                     "url": full_url,
-                    "source": "Visit Baltimore",
+                    "source": src.name,
                     "location": location,
-                    "address": "Baltimore, MD",
+                    "address": src.default_address,
                     "description": description,
                     "date_text": date_text,
                     "start_date": date_info.get("start_date"),
                     "end_date": date_info.get("end_date"),
-                    "is_free": False,  # Visit Baltimore includes both free and paid events
-                    "category": "community",
+                    "is_free": src.is_free,
+                    "category": src.category,
                     "scraped_at": datetime.now().isoformat()
-                }
-
-                events.append(event)
+                })
 
             except Exception as e:
-                logger.warning("visit_baltimore_event_parse_error", error=str(e))
+                logger.warning("event_cards_parse_error", source=src.name, error=str(e))
                 continue
 
-        logger.info("visit_baltimore_scrape_complete", events_found=len(events))
+        logger.info("event_cards_scrape_complete", name=src.name, events_found=len(events))
+        fetch_errors.pop(src.name, None)
 
+    except SsrfBlockedError as e:
+        logger.warning("community_source_ssrf_blocked", source=src.name, reason=str(e))
+        fetch_errors[src.name] = str(e)
     except Exception as e:
-        logger.error("visit_baltimore_scrape_failed", error=str(e))
+        logger.error("event_cards_scrape_failed", name=src.name, error=str(e))
+        fetch_errors[src.name] = str(e)
 
     return events
 
 
-async def scrape_downtown_partnership_events() -> List[Dict[str, Any]]:
-    """
-    Fetch events from Downtown Partnership of Baltimore via REST API.
-
-    Uses The Events Calendar WordPress plugin REST API for structured data.
-
-    Returns:
-        List of event dictionaries
-    """
-    events = []
+async def scrape_tribe_events_api_source(src: EventSource) -> List[Dict[str, Any]]:
+    """tribe_events_api: The Events Calendar WordPress plugin REST API.
+    is_free is always computed per-event from the API's own `cost` field --
+    not independently configurable (D3)."""
+    events: List[Dict[str, Any]] = []
 
     try:
-        logger.info("fetching_downtown_partnership", url=DOWNTOWN_PARTNERSHIP_API)
+        logger.info("fetching_tribe_events_api_source", name=src.name, url=src.url)
 
-        # Fetch events from API with generous date range
-        params = {
-            "per_page": 50,
-            "status": "publish"
-        }
-
-        response = await http_client.get(
-            DOWNTOWN_PARTNERSHIP_API,
+        params = {"per_page": 50, "status": "publish"}
+        response = await safe_get(
+            src.url,
             params=params,
             headers={
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
             },
-            follow_redirects=True
+            max_hops=5,
+            max_bytes=src.max_bytes or 5 * 2**20,
+            timeout=30.0,
+            **_private_kwargs(src),
         )
         response.raise_for_status()
 
@@ -464,7 +535,6 @@ async def scrape_downtown_partnership_events() -> List[Dict[str, Any]]:
 
         for api_event in api_events:
             try:
-                # Parse start date
                 start_date_str = api_event.get("start_date", "")
                 start_date = None
                 if start_date_str:
@@ -474,19 +544,16 @@ async def scrape_downtown_partnership_events() -> List[Dict[str, Any]]:
                     except ValueError:
                         pass
 
-                # Get venue info if available
                 venue_list = api_event.get("venue", [])
-                location = "Downtown Baltimore"
-                address = "Baltimore, MD"
+                location = src.default_location
+                address = src.default_address
                 if venue_list and isinstance(venue_list, list) and len(venue_list) > 0:
                     venue = venue_list[0]
                     location = venue.get("venue", location)
-                    address = f"{venue.get('address', '')}, {venue.get('city', 'Baltimore')}, {venue.get('state', 'MD')}"
+                    address = f"{venue.get('address', '')}, {venue.get('city', src.default_city)}, {venue.get('state', src.default_state)}"
 
-                # Clean description (strip HTML)
                 description = api_event.get("excerpt", "") or ""
                 if "<" in description:
-                    # Simple HTML strip
                     description = re.sub(r'<[^>]+>', '', description)
                 description = description[:500].strip()
 
@@ -494,15 +561,15 @@ async def scrape_downtown_partnership_events() -> List[Dict[str, Any]]:
                     "id": hashlib.md5(api_event.get("url", "").encode()).hexdigest()[:12],
                     "title": api_event.get("title", ""),
                     "url": api_event.get("url", ""),
-                    "source": "Downtown Partnership",
+                    "source": src.name,
                     "location": location,
                     "address": address.strip(", "),
                     "description": description,
                     "date_text": f"{start_date_str.split()[0] if start_date_str else ''} {start_date_str.split()[1] if len(start_date_str.split()) > 1 else ''}".strip(),
                     "start_date": start_date,
                     "end_date": None,
-                    "is_free": not api_event.get("cost"),  # Free if no cost listed
-                    "category": "downtown",
+                    "is_free": not api_event.get("cost"),  # Free if no cost listed (not configurable, D3)
+                    "category": src.category,
                     "scraped_at": datetime.now().isoformat()
                 }
 
@@ -510,147 +577,145 @@ async def scrape_downtown_partnership_events() -> List[Dict[str, Any]]:
                     events.append(event)
 
             except Exception as e:
-                logger.warning("downtown_event_parse_error", error=str(e))
+                logger.warning("tribe_events_parse_error", source=src.name, error=str(e))
                 continue
 
-        logger.info("downtown_partnership_fetch_complete", events_found=len(events))
+        logger.info("tribe_events_api_fetch_complete", name=src.name, events_found=len(events))
+        fetch_errors.pop(src.name, None)
 
+    except SsrfBlockedError as e:
+        logger.warning("community_source_ssrf_blocked", source=src.name, reason=str(e))
+        fetch_errors[src.name] = str(e)
     except Exception as e:
-        logger.error("downtown_partnership_fetch_failed", error=str(e))
+        logger.error("tribe_events_api_fetch_failed", name=src.name, error=str(e))
+        fetch_errors[src.name] = str(e)
 
     return events
 
 
-async def scrape_federal_hill_events() -> List[Dict[str, Any]]:
-    """
-    Scrape events from Federal Hill Neighborhood Association.
-
-    Federal Hill uses Squarespace with structured event links.
-    Event structure: <h1 class="eventlist-title"><a href="/events/...">Title</a></h1>
-
-    Returns:
-        List of event dictionaries
-    """
-    events = []
+async def scrape_squarespace_eventlist_source(src: EventSource) -> List[Dict[str, Any]]:
+    """squarespace_eventlist: Squarespace's own eventlist-title/eventlist-meta
+    class structure (structural, not source-specific). src.location_match
+    names the substrings that make the last meta item usable as a location;
+    otherwise src.default_location is used."""
+    events: List[Dict[str, Any]] = []
 
     try:
-        logger.info("scraping_federal_hill", url=FEDERAL_HILL_EVENTS_URL)
+        logger.info("scraping_squarespace_eventlist_source", name=src.name, url=src.url)
 
-        response = await http_client.get(
-            FEDERAL_HILL_EVENTS_URL,
+        response = await safe_get(
+            src.url,
             headers={
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
             },
-            follow_redirects=True
+            max_hops=5,
+            max_bytes=src.max_bytes or 5 * 2**20,
+            timeout=30.0,
+            **_private_kwargs(src),
         )
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Find event titles - Squarespace puts titles in h1.eventlist-title > a
         title_headings = soup.find_all('h1', class_='eventlist-title')
-
         seen_urls = set()
 
         for heading in title_headings:
             try:
-                # Get the link inside the heading
                 link = heading.find('a', href=lambda x: x and '/events/' in x)
                 if not link:
                     continue
 
                 href = link.get('href', '')
 
-                # Skip calendar export links
                 if '?format=' in href or 'google.com' in href:
                     continue
 
-                # Build full URL
                 if href.startswith('/'):
-                    full_url = f"{FEDERAL_HILL_BASE_URL}{href}"
+                    full_url = f"{src.base_url}{href}"
                 elif href.startswith('http'):
                     full_url = href
                 else:
                     continue
 
-                # Dedupe
                 if full_url in seen_urls:
                     continue
                 seen_urls.add(full_url)
 
-                # Get title from link text
                 title = link.get_text(strip=True)
-
-                # Skip empty titles
                 if not title or len(title) < 3:
                     continue
 
-                # Find parent container for date/location info
                 parent = heading.find_parent(['article', 'div'], class_=lambda x: x and 'eventlist' in str(x).lower())
 
                 date_text = ""
                 start_date = None
-                location = "Federal Hill, Baltimore"
+                location = src.default_location
 
                 if parent:
-                    # Look for date elements
                     month_elem = parent.find(['span', 'div'], class_='eventlist-month')
                     day_elem = parent.find(['span', 'div'], class_='eventlist-day')
 
                     if month_elem and day_elem:
                         month = month_elem.get_text(strip=True)
                         day = day_elem.get_text(strip=True)
-                        # Assume current or next year
                         year = datetime.now().year
                         if datetime.now().month > 9 and month.lower() in ['jan', 'feb', 'mar', 'apr', 'may', 'jun']:
                             year += 1
                         date_text = f"{month} {day}, {year}"
                         start_date = date_text
 
-                    # Try to get full date from meta list
                     meta_list = parent.find('ul', class_='eventlist-meta')
                     if meta_list:
                         items = meta_list.find_all('li')
                         if items and len(items) > 0:
                             date_text = items[0].get_text(strip=True)
-                            # Parse the full date
                             date_info = extract_date_from_text(date_text)
                             if date_info:
                                 start_date = date_info.get("start_date")
-                        # Location is often the last item
                         if len(items) >= 3:
                             loc_text = items[-1].get_text(strip=True)
-                            if 'Baltimore' in loc_text or 'MD' in loc_text:
+                            if any(term in loc_text for term in src.location_match):
                                 location = loc_text
 
-                event = {
+                events.append({
                     "id": hashlib.md5(full_url.encode()).hexdigest()[:12],
                     "title": title,
                     "url": full_url,
-                    "source": "Federal Hill",
+                    "source": src.name,
                     "location": location,
-                    "address": "Baltimore, MD 21230",
+                    "address": src.default_address,
                     "description": "",
                     "date_text": date_text,
                     "start_date": start_date,
                     "end_date": None,
-                    "is_free": True,  # Most neighborhood events are free
-                    "category": "neighborhood",
+                    "is_free": src.is_free,
+                    "category": src.category,
                     "scraped_at": datetime.now().isoformat()
-                }
-
-                events.append(event)
+                })
 
             except Exception as e:
-                logger.warning("federal_hill_event_parse_error", error=str(e))
+                logger.warning("squarespace_eventlist_parse_error", source=src.name, error=str(e))
                 continue
 
-        logger.info("federal_hill_scrape_complete", events_found=len(events))
+        logger.info("squarespace_eventlist_scrape_complete", name=src.name, events_found=len(events))
+        fetch_errors.pop(src.name, None)
 
+    except SsrfBlockedError as e:
+        logger.warning("community_source_ssrf_blocked", source=src.name, reason=str(e))
+        fetch_errors[src.name] = str(e)
     except Exception as e:
-        logger.error("federal_hill_scrape_failed", error=str(e))
+        logger.error("squarespace_eventlist_scrape_failed", name=src.name, error=str(e))
+        fetch_errors[src.name] = str(e)
 
     return events
+
+
+SCRAPERS = {
+    "link_scan": scrape_link_scan_source,
+    "event_cards": scrape_event_cards_source,
+    "tribe_events_api": scrape_tribe_events_api_source,
+    "squarespace_eventlist": scrape_squarespace_eventlist_source,
+}
 
 
 async def get_cached_events(
@@ -836,57 +901,33 @@ async def cache_events(events: List[Dict[str, Any]]) -> bool:
 
 
 async def refresh_events_cache() -> List[Dict[str, Any]]:
-    """Refresh the events cache from all sources."""
+    """Refresh the events cache from all configured sources."""
+    if not event_sources_config.configured:
+        logger.warning("community_events_not_configured")
+        return []
+
     logger.info("refreshing_events_cache")
 
-    all_events = []
+    tasks = [SCRAPERS[src.type](src) for src in event_sources_config.sources]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Scrape all sources in parallel
-    import asyncio
-    from itertools import zip_longest
-
-    waterfront_task = asyncio.create_task(scrape_waterfront_events())
-    visit_baltimore_task = asyncio.create_task(scrape_visit_baltimore_events())
-    downtown_task = asyncio.create_task(scrape_downtown_partnership_events())
-    federal_hill_task = asyncio.create_task(scrape_federal_hill_events())
-
-    results = await asyncio.gather(
-        waterfront_task,
-        visit_baltimore_task,
-        downtown_task,
-        federal_hill_task,
-        return_exceptions=True
-    )
-
-    waterfront_events, visit_baltimore_events, downtown_events, federal_hill_events = results
-
-    # Handle exceptions
-    if isinstance(waterfront_events, Exception):
-        logger.error("waterfront_scrape_exception", error=str(waterfront_events))
-        waterfront_events = []
-    if isinstance(visit_baltimore_events, Exception):
-        logger.error("visit_baltimore_scrape_exception", error=str(visit_baltimore_events))
-        visit_baltimore_events = []
-    if isinstance(downtown_events, Exception):
-        logger.error("downtown_scrape_exception", error=str(downtown_events))
-        downtown_events = []
-    if isinstance(federal_hill_events, Exception):
-        logger.error("federal_hill_scrape_exception", error=str(federal_hill_events))
-        federal_hill_events = []
+    source_lists: List[List[Dict[str, Any]]] = []
+    counts: Dict[str, int] = {}
+    for src, result in zip(event_sources_config.sources, results):
+        if isinstance(result, Exception):
+            logger.error("source_scrape_exception", source=src.name, error=str(result))
+            result = []
+        counts[src.name] = len(result)
+        source_lists.append(result)
 
     # Interleave events from all sources for variety in results
-    sources = [waterfront_events, visit_baltimore_events, downtown_events, federal_hill_events]
-    for events_tuple in zip_longest(*sources):
+    all_events: List[Dict[str, Any]] = []
+    for events_tuple in zip_longest(*source_lists):
         for event in events_tuple:
             if event:
                 all_events.append(event)
 
-    logger.info("total_events_scraped",
-                total=len(all_events),
-                waterfront=len(waterfront_events),
-                visit_baltimore=len(visit_baltimore_events),
-                downtown=len(downtown_events),
-                federal_hill=len(federal_hill_events))
+    logger.info("total_events_scraped", total=len(all_events), **counts)
 
     # Cache the results
     await cache_events(all_events)
@@ -1001,8 +1042,8 @@ async def search_events(
     for e in filtered:
         formatted_events.append({
             "title": e.get("title"),
-            "venue": e.get("location", "Baltimore Waterfront"),
-            "address": e.get("address", "Baltimore, MD"),
+            "venue": e.get("location", ""),
+            "address": e.get("address", ""),
             "time": e.get("date_text", "See website for times"),
             "date": e.get("start_date"),
             "link": e.get("url"),
@@ -1015,7 +1056,7 @@ async def search_events(
     return {
         "events": formatted_events,
         "total_events": len(filtered),
-        "sources": ["Waterfront Partnership", "Visit Baltimore", "Downtown Partnership", "Federal Hill"],
+        "sources": [src.name for src in event_sources_config.sources],
         "cache_status": cache_status,
         "query_type": query_type  # Shows whether date filtering was done at Redis level
     }
@@ -1047,25 +1088,22 @@ async def periodic_refresh_task():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
-    global http_client, _refresh_task
+    global _refresh_task
 
     logger.info("community_events_service.startup", msg="Initializing Community Events RAG service")
 
-    # Initialize HTTP client
-    http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(30.0),
-        follow_redirects=True
-    )
+    if not event_sources_config.configured:
+        logger.warning("community_events_not_configured")
+    else:
+        # Initial cache population
+        try:
+            await refresh_events_cache()
+        except Exception as e:
+            logger.warning("initial_cache_failed", error=str(e))
 
-    # Initial cache population
-    try:
-        await refresh_events_cache()
-    except Exception as e:
-        logger.warning("initial_cache_failed", error=str(e))
-
-    # Start periodic refresh background task
-    _refresh_task = asyncio.create_task(periodic_refresh_task())
-    logger.info("periodic_refresh_scheduled", interval_hours=REFRESH_INTERVAL // 3600)
+        # Start periodic refresh background task
+        _refresh_task = asyncio.create_task(periodic_refresh_task())
+        logger.info("periodic_refresh_scheduled", interval_hours=REFRESH_INTERVAL // 3600)
 
     logger.info("community_events_service.startup.complete")
 
@@ -1082,8 +1120,6 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
-    if http_client:
-        await http_client.aclose()
     if redis_client:
         await redis_client.close()
 
@@ -1091,7 +1127,7 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="Community Events RAG Service",
-    description="Local Baltimore community events aggregator with web scraping and Redis caching",
+    description="Region-configurable community events aggregator with web scraping and Redis caching",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -1100,25 +1136,44 @@ app = FastAPI(
 setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 
 
+async def require_community_configured():
+    """FastAPI dependency: 503 when no community-events sources are configured."""
+    if not event_sources_config.configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Community events not configured: set COMMUNITY_EVENTS_SOURCES",
+        )
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     redis = await get_redis_client()
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "healthy",
-            "service": "community-events-rag",
-            "redis_connected": redis is not None,
-            "sources": ["Waterfront Partnership", "Visit Baltimore", "Downtown Partnership", "Federal Hill"]
-        }
-    )
+
+    message = None
+    if not event_sources_config.configured:
+        message = event_sources_config.error or "not configured: set COMMUNITY_EVENTS_SOURCES"
+    elif fetch_errors:
+        message = "; ".join(f"{name}: {reason}" for name, reason in fetch_errors.items())
+
+    content = {
+        "status": "healthy",
+        "service": "community-events-rag",
+        "configured": event_sources_config.configured,
+        "config_error": event_sources_config.error,
+        "redis_connected": redis is not None,
+        "sources": [src.name for src in event_sources_config.sources],
+    }
+    if message:
+        content["message"] = message
+
+    return JSONResponse(status_code=200, content=content)
 
 
-@app.get("/events/search")
+@app.get("/events/search", dependencies=[Depends(require_community_configured)])
 async def search_events_endpoint(
     query: Optional[str] = Query(None, description="Search text"),
-    city: Optional[str] = Query(None, description="City (currently only Baltimore supported)"),
+    city: Optional[str] = Query(None, description="City filter (informational; not applied to results)"),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     category: Optional[str] = Query(None, description="Event category"),
@@ -1129,8 +1184,7 @@ async def search_events_endpoint(
     """
     Search for local community events.
 
-    Returns events from scraped local sources, cached in Redis.
-    Currently supports Baltimore area events from Waterfront Partnership.
+    Returns events from the operator-configured sources, cached in Redis.
     """
     try:
         result = await search_events(
@@ -1156,12 +1210,12 @@ async def search_events_endpoint(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.post("/events/refresh")
+@app.post("/events/refresh", dependencies=[Depends(require_community_configured)])
 async def refresh_events_endpoint(background_tasks: BackgroundTasks):
     """
     Force refresh of the events cache.
 
-    Triggers a background scrape of all sources and updates Redis cache.
+    Triggers a background scrape of all configured sources and updates Redis cache.
     """
     try:
         # Run refresh in background
@@ -1182,41 +1236,18 @@ async def refresh_events_endpoint(background_tasks: BackgroundTasks):
 
 @app.get("/events/sources")
 async def get_sources():
-    """List available event sources."""
+    """List configured event sources."""
     return {
+        "configured": event_sources_config.configured,
         "sources": [
             {
-                "name": "Waterfront Partnership",
-                "url": WATERFRONT_CALENDAR_URL,
-                "type": "web_scrape",
-                "regions": ["Inner Harbor", "Harbor East", "Fells Point", "Canton"]
-            },
-            {
-                "name": "Visit Baltimore",
-                "url": VISIT_BALTIMORE_URL,
-                "type": "web_scrape",
-                "regions": ["Baltimore City", "Inner Harbor", "Hampden", "Federal Hill", "Mount Vernon"]
-            },
-            {
-                "name": "Downtown Partnership",
-                "url": DOWNTOWN_PARTNERSHIP_API,
-                "type": "rest_api",
-                "regions": ["Downtown", "Inner Harbor", "Charles Center"]
-            },
-            {
-                "name": "Federal Hill",
-                "url": FEDERAL_HILL_EVENTS_URL,
-                "type": "web_scrape",
-                "regions": ["Federal Hill", "South Baltimore"]
+                "name": src.name,
+                "type": src.type,
+                "url": src.url,
+                "regions": src.regions,
             }
+            for src in event_sources_config.sources
         ],
-        "planned_sources": [
-            {
-                "name": "Eventbrite",
-                "type": "api",
-                "status": "planned"
-            }
-        ]
     }
 
 
