@@ -521,6 +521,74 @@ def test_classify_node_writes_continuation_decision_not_consulted():
 
 
 # ---------------------------------------------------------------------------
+# tessa F34 (reconciliation round 1, Medium): strong_intent["should_override
+# _context"] AND is_conversational_reference both true left
+# continuation_decision/context_ref_info at the "not_consulted" default --
+# neither the direct-override nor any other sibling branch runs when the
+# conversational-reference veto fires, so no explicit write happened even
+# though a real decision was made. Through route_after_classify: the
+# declined view must not demote a fresh Phase-2 intent to synthesize.
+# ---------------------------------------------------------------------------
+
+def test_classify_node_writes_declined_strong_intent_override_reason():
+    _install_classify_node_runtime()
+    prev_ctx = ConversationContext(
+        intent="weather", query="what is the weather", entities={}, parameters={}, response="Sunny.",
+    )
+    main_module.get_conversation_context = AsyncMock(return_value=prev_ctx)
+    # "restaurant" triggers detect_strong_intent's dining override (prev is
+    # weather); "tell me more about the" is a CONVERSATIONAL_REFERENCE_PHRASES
+    # entry, so is_conversational_reference(...) also fires.
+    state = _make_classify_state("tell me more about the restaurant")
+    state.conversation_history = [
+        {"role": "user", "content": "what is the weather"},
+        {"role": "assistant", "content": "Sunny."},
+    ]
+    result = mock_run(main_module.classify_node(state))
+
+    assert result.continuation_decision == {
+        "decision": "declined", "reason": "strong_intent_override"
+    }
+    assert result.context_ref_info["has_context_ref"] is False
+    assert result.context_ref_info["ref_types"] == []
+
+
+def test_declined_strong_intent_override_view_through_route_after_classify(monkeypatch):
+    """The view fix corrects the RECORDED decision/reason (observability;
+    other readers like tool_call_node's previous-exchange injection and
+    route_control_node consult the view directly). It does not change
+    route_after_classify's routing outcome for THIS query: reader 2 (the
+    Phase-2 demotion gate) also re-derives is_conversational_reference from
+    the raw query independently of the view (D13, unchanged by design) --
+    "tell me more about the restaurant" genuinely IS a conversational
+    reference by its own phrasing, so synthesize is the correct route
+    either way. This is the regression-guard half of the fix: the routing
+    outcome must stay "synthesize", while the decision bookkeeping is now
+    accurate instead of the misleading "not_consulted" default."""
+    monkeypatch.setattr(main_module, "should_use_tool_calling", AsyncMock(return_value=False))
+
+    _install_classify_node_runtime()
+    prev_ctx = ConversationContext(
+        intent="weather", query="what is the weather", entities={}, parameters={}, response="Sunny.",
+    )
+    main_module.get_conversation_context = AsyncMock(return_value=prev_ctx)
+    state = _make_classify_state("tell me more about the restaurant")
+    state.conversation_history = [
+        {"role": "user", "content": "what is the weather"},
+        {"role": "assistant", "content": "Sunny."},
+    ]
+    classified = mock_run(main_module.classify_node(state))
+    assert classified.continuation_decision == {
+        "decision": "declined", "reason": "strong_intent_override"
+    }
+    assert classified.context_ref_info["has_context_ref"] is False
+
+    classified.intent = IntentCategory.DINING
+    route = mock_run(main_module.route_after_classify(classified))
+    assert route == "synthesize"
+
+
+# ---------------------------------------------------------------------------
 # 10. test_route_after_classify_honours_the_view (codex F16)
 # ---------------------------------------------------------------------------
 

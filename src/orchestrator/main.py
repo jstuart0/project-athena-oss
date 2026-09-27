@@ -2203,7 +2203,21 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                         f"in '{state.query[:50]}' - routing to GENERAL_INFO to use history"
                     )
                     # Don't override to the detected intent; fall through to
-                    # context continuation which will route to GENERAL_INFO
+                    # context continuation which will route to GENERAL_INFO.
+                    # tessa F34 (reconciliation round 1): this combination
+                    # (strong_intent + is_conversational_reference both
+                    # true) previously left state.context_ref_info /
+                    # continuation_decision at the default "not_consulted"
+                    # written at classify_node's entry -- neither sibling
+                    # branch below runs (we're in the outer `if
+                    # strong_intent[...]:` arm), so no write happened even
+                    # though a real decision was made here. Per D13's
+                    # table: declined, with a reason distinct from the
+                    # direct-override "strong_intent" case above.
+                    state.context_ref_info = context_ref_view(ref_info, "declined")
+                    state.continuation_decision = {
+                        "decision": "declined", "reason": "strong_intent_override"
+                    }
                 else:
                     logger.info(
                         f"Strong intent detected: '{state.query}' has {detected_intent_str} "
