@@ -1,0 +1,23 @@
+{
+  "processes": {
+    "8000": {
+      "name": "example-gateway",
+      "dir": "src/gateway",
+      "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    },
+    "8010": {
+      "name": "example-rag",
+      "dir": "src/rag/example",
+      "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8010"],
+      "health_path": "/health"
+    },
+    "8099": {
+      "name": "example-disabled-service",
+      "dir": "src/rag/example_disabled",
+      "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8099"],
+      "enabled": false
+    }
+  },
+  "watchdog_exclude": [8099],
+  "containers": ["athena-example-container"]
+}

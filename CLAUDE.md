@@ -180,8 +180,11 @@ The Control Agent runs on a host alongside Ollama (e.g., an Apple Silicon Mac or
 ```bash
 ssh <ssh-user>@<control-agent-host>
 cd ~/<path>/control_agent
-nohup python3 -m uvicorn main:app --host 0.0.0.0 --port 8099 > /tmp/control_agent.log 2>&1 &
+CONTROL_AGENT_SERVICES_FILE=/path/to/services.json \
+    nohup python3 -m uvicorn main:app --host 0.0.0.0 --port 8099 > /tmp/control_agent.log 2>&1 &
 ```
+
+**`CONTROL_AGENT_SERVICES_FILE` (ATHENA-99, D46, OSS-First)**: path to a JSON file naming exactly which bare Python/uvicorn processes, watchdog exclusions, and Docker containers this Control Agent instance may manage. Unset (the default): the Control Agent manages nothing -- the 60s watchdog and the startup registry sync are no-ops, and every `is_port_allowed`/`is_container_allowed` check returns false. There is no built-in process list; a deployment that wants the watchdog/registry-sync/Docker-control features must opt in explicitly with this file. See `src/control_agent/services.example.json` for the schema (`processes` keyed by port, `watchdog_exclude`, `containers`) and `docs/CONFIGURATION.md`. A malformed file logs an ERROR per problem and falls back to managing nothing -- it never crashes the process. `processes` can be empty while `containers` is non-empty (a container-only deployment, e.g. managing `whisper-wyoming`/`athena-piper-tts` with no bare processes at all).
 
 **Verify it's running:**
 ```bash

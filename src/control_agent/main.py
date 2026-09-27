@@ -13,12 +13,13 @@ and auto-restarts any that have crashed.
 """
 
 import asyncio
+import json
 import subprocess
 import os
 import signal
 import time
 from contextlib import asynccontextmanager
-from typing import Optional, Dict, List, Set
+from typing import Optional, Dict, List, Set, Tuple
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -35,14 +36,165 @@ PROJECT_ROOT = Path.home() / "dev" / "project-athena"
 
 
 # =============================================================================
+# MANAGED-SERVICES CONFIGURATION (ATHENA-99, D46)
+# =============================================================================
+# OSS-First: this file used to hard-code every house process (gateway,
+# orchestrator, 11+ RAG services on ports 8000-8040) plus a Docker
+# container whitelist and a watchdog-exclude list. That's why the 60s
+# watchdog relaunched a retired house stack as bare processes after its
+# containers were stopped, and the startup registry sync re-registered
+# them -- the module always had something to manage, whether or not this
+# deployment wanted it to.
+#
+# CONTROL_AGENT_SERVICES_FILE points at a JSON file with three top-level
+# keys, all optional (each defaults empty independently -- e.g. an empty
+# "processes" with a non-empty "containers" is a valid, fully functional
+# state: nothing to watchdog/restart, but Docker containers still
+# controllable):
+#   "processes": {"8000": {"name": ..., "dir": ..., "cmd": [...],
+#                           "health_path"?: ..., "enabled"?: ...}, ...}
+#     -- today's PROCESS_SERVICES shape, keyed by port (as a string)
+#   "watchdog_exclude": [8028, ...]   -- ports the watchdog should not restart
+#   "containers": ["athena-gateway", ...]  -- Docker container allowlist
+# Unset (the default): nothing is managed. Malformed: log ERROR per
+# problem and manage nothing -- never crash the process over a bad file.
+# See src/control_agent/services.example.json and docs/CONFIGURATION.md.
+CONTROL_AGENT_SERVICES_FILE = os.getenv("CONTROL_AGENT_SERVICES_FILE", "").strip()
+
+
+def _validate_service_entry(port_key: str, entry: object) -> Optional[Tuple[int, Dict]]:
+    """Validate one `services`-file entry. Returns (port, config) on
+    success; logs one ERROR and returns None on any problem, including an
+    explicitly disabled entry (enabled: false), which is dropped rather
+    than managed."""
+    try:
+        port = int(port_key)
+    except (TypeError, ValueError):
+        logger.error("control_agent_services_file_invalid_entry", key=port_key, reason="key is not an integer port")
+        return None
+
+    if not isinstance(entry, dict):
+        logger.error("control_agent_services_file_invalid_entry", port=port, reason="entry is not a JSON object")
+        return None
+
+    name = entry.get("name")
+    directory = entry.get("dir")
+    cmd = entry.get("cmd")
+
+    if not isinstance(name, str) or not name:
+        logger.error("control_agent_services_file_invalid_entry", port=port, reason="missing or invalid 'name'")
+        return None
+    if not isinstance(directory, str) or not directory:
+        logger.error("control_agent_services_file_invalid_entry", port=port, reason="missing or invalid 'dir'")
+        return None
+    if not isinstance(cmd, list) or not cmd or not all(isinstance(c, str) for c in cmd):
+        logger.error("control_agent_services_file_invalid_entry", port=port, reason="missing or invalid 'cmd' (must be a non-empty list of strings)")
+        return None
+
+    if entry.get("enabled") is False:
+        return None
+
+    config: Dict = {"name": name, "dir": directory, "cmd": cmd}
+    health_path = entry.get("health_path")
+    if isinstance(health_path, str) and health_path:
+        config["health_path"] = health_path
+    return port, config
+
+
+def _validate_int_list(value: object, field: str, path: Path) -> Set[int]:
+    if not isinstance(value, list):
+        logger.error("control_agent_services_file_invalid", path=str(path), reason=f"'{field}' must be a list")
+        return set()
+    result: Set[int] = set()
+    for item in value:
+        try:
+            result.add(int(item))
+        except (TypeError, ValueError):
+            logger.error("control_agent_services_file_invalid", path=str(path), reason=f"'{field}' entry {item!r} is not an integer")
+    return result
+
+
+def _validate_str_list(value: object, field: str, path: Path) -> Set[str]:
+    if not isinstance(value, list):
+        logger.error("control_agent_services_file_invalid", path=str(path), reason=f"'{field}' must be a list")
+        return set()
+    result: Set[str] = set()
+    for item in value:
+        if isinstance(item, str) and item:
+            result.add(item)
+        else:
+            logger.error("control_agent_services_file_invalid", path=str(path), reason=f"'{field}' entry {item!r} is not a non-empty string")
+    return result
+
+
+def load_control_agent_config() -> Tuple[Dict[int, Dict], Set[int], Set[str]]:
+    """Load PROCESS_SERVICES / WATCHDOG_EXCLUDE / ALLOWED_CONTAINERS from
+    CONTROL_AGENT_SERVICES_FILE. Never raises: any failure degrades to
+    "manage nothing", logged at ERROR (file-level problems) or per-entry
+    (a single bad service definition doesn't take down the rest)."""
+    if not CONTROL_AGENT_SERVICES_FILE:
+        logger.info("control_agent_services_unconfigured", note="CONTROL_AGENT_SERVICES_FILE is unset; no services are managed.")
+        return {}, set(), set()
+
+    path = Path(CONTROL_AGENT_SERVICES_FILE)
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        logger.error("control_agent_services_file_not_found", path=str(path))
+        return {}, set(), set()
+    except OSError as e:
+        logger.error("control_agent_services_file_invalid", path=str(path), error=str(e))
+        return {}, set(), set()
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error("control_agent_services_file_invalid", path=str(path), error=str(e))
+        return {}, set(), set()
+
+    if not isinstance(data, dict):
+        logger.error("control_agent_services_file_invalid", path=str(path), reason="top-level value must be a JSON object")
+        return {}, set(), set()
+
+    processes_raw = data.get("processes", {})
+    services: Dict[int, Dict] = {}
+    if not isinstance(processes_raw, dict):
+        logger.error("control_agent_services_file_invalid", path=str(path), reason="'processes' must be an object keyed by port")
+    else:
+        for key, value in processes_raw.items():
+            result = _validate_service_entry(key, value)
+            if result is not None:
+                port, config = result
+                services[port] = config
+
+    watchdog_exclude = _validate_int_list(data.get("watchdog_exclude", []), "watchdog_exclude", path)
+    containers = _validate_str_list(data.get("containers", []), "containers", path)
+
+    logger.info(
+        "control_agent_services_loaded",
+        path=str(path),
+        count=len(services),
+        watchdog_exclude_count=len(watchdog_exclude),
+        containers_count=len(containers),
+    )
+    return services, watchdog_exclude, containers
+
+
+# Single load, once at import time: PROCESS_SERVICES (below), the
+# watchdog-exclude set, and the container allowlist (further below) all
+# come from this one call.
+PROCESS_SERVICES: Dict[int, Dict]
+WATCHDOG_EXCLUDE: Set[int]
+ALLOWED_CONTAINERS: Set[str]
+PROCESS_SERVICES, WATCHDOG_EXCLUDE, ALLOWED_CONTAINERS = load_control_agent_config()
+
+
+# =============================================================================
 # WATCHDOG CONFIGURATION
 # =============================================================================
-
-# Services that should NOT be auto-restarted (known broken, need manual fix)
-WATCHDOG_EXCLUDE: Set[int] = {
-    8028,  # tesla - needs TeslaMate DB + TCP proxy setup
-    8029,  # media - PYTHONPATH issue needs manual fix
-}
+# Ports the watchdog should not auto-restart -- see WATCHDOG_EXCLUDE above,
+# loaded from CONTROL_AGENT_SERVICES_FILE's "watchdog_exclude" list (empty
+# by default).
 
 # Watchdog state
 watchdog_enabled = True
@@ -166,6 +318,10 @@ async def sync_registry_loop() -> None:
     unaffected.  Exponential backoff (5 → 300 s) prevents hammering a
     transiently-down admin-backend.
     """
+    if not PROCESS_SERVICES:
+        logger.info("no_managed_services_configured", note="no managed services configured")
+        return
+
     admin_url = os.getenv("ADMIN_API_URL", "").strip()
     service_key = os.getenv("SERVICE_API_KEY", "").strip()
 
@@ -266,8 +422,9 @@ async def _upsert_all_services(admin_url: str, service_key: str) -> tuple[int, i
                     # picked up on the next sync_registry_loop iteration after the
                     # rate-limit window resets.
                     # Use enumerate index so the count is exact regardless of
-                    # PROCESS_SERVICES insertion order (ports 8028/8029 are inserted
-                    # after 8033, so a port-comparison sum would undercount).
+                    # PROCESS_SERVICES insertion order (JSON key order in
+                    # CONTROL_AGENT_SERVICES_FILE, not a fixed sequence --
+                    # a port-comparison sum would undercount).
                     remaining_count = len(items) - idx - 1
                     count_skip += 1 + remaining_count
                     logger.warning(
@@ -389,148 +546,10 @@ class ProcessStatus(BaseModel):
 # =============================================================================
 # PROCESS CONTROL CONFIGURATION
 # =============================================================================
-# Maps port -> (service_name, working_directory, startup_command)
-# These are Python/uvicorn services running as bare processes
+# Maps port -> {name, dir, cmd, health_path?} -- loaded from
+# CONTROL_AGENT_SERVICES_FILE above (PROCESS_SERVICES = {} by default, so
+# nothing is managed unless a deployer opts in).
 
-PROCESS_SERVICES: Dict[int, Dict] = {
-    # Core services
-    8000: {
-        "name": "gateway",
-        "dir": "src/gateway",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"],
-    },
-    8001: {
-        "name": "orchestrator",
-        "dir": "src/orchestrator",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"],
-    },
-    8003: {
-        "name": "jarvis-web",
-        "dir": "apps/jarvis-web/backend",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003"],
-    },
-    # RAG services (under src/rag/) - ports match orchestrator/utils/constants.py
-    8010: {
-        "name": "weather-rag",
-        "dir": "src/rag/weather",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8010"],
-    },
-    8011: {
-        "name": "airports-rag",
-        "dir": "src/rag/airports",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8011"],
-    },
-    8012: {
-        "name": "stocks-rag",
-        "dir": "src/rag/stocks",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8012"],
-    },
-    8013: {
-        "name": "flights-rag",
-        "dir": "src/rag/flights",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8013"],
-    },
-    8014: {
-        "name": "events-rag",
-        "dir": "src/rag/events",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8014"],
-    },
-    8015: {
-        "name": "streaming-rag",
-        "dir": "src/rag/streaming",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8015"],
-    },
-    8016: {
-        "name": "news-rag",
-        "dir": "src/rag/news",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8016"],
-    },
-    8017: {
-        "name": "sports-rag",
-        "dir": "src/rag/sports",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8017"],
-    },
-    8018: {
-        "name": "websearch-rag",
-        "dir": "src/rag/websearch",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8018"],
-    },
-    8019: {
-        "name": "dining-rag",
-        "dir": "src/rag/dining",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8019"],
-    },
-    8020: {
-        "name": "recipes-rag",
-        "dir": "src/rag/recipes",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8020"],
-    },
-    8021: {
-        "name": "onecall-rag",
-        "dir": "src/rag/onecall",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8021"],
-    },
-    8022: {
-        "name": "mode-service",
-        "dir": "src/mode_service",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8022"],
-    },
-    8024: {
-        "name": "seatgeek-events-rag",
-        "dir": "src/rag/seatgeek_events",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8024"],
-    },
-    8025: {
-        "name": "transportation-rag",
-        "dir": "src/rag/transportation",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8025"],
-    },
-    8026: {
-        "name": "community-events-rag",
-        "dir": "src/rag/community_events",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8026"],
-    },
-    8027: {
-        "name": "amtrak-rag",
-        "dir": "src/rag/amtrak",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8027"],
-    },
-    8030: {
-        "name": "directions-rag",
-        "dir": "src/rag/directions",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8030"],
-    },
-    8031: {
-        "name": "site-scraper-rag",
-        "dir": "src/rag/site_scraper",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8031"],
-    },
-    8032: {
-        "name": "serpapi-events-rag",
-        "dir": "src/rag/serpapi_events",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8032"],
-    },
-    8033: {
-        "name": "price-compare-rag",
-        "dir": "src/rag/price_compare",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8033"],
-    },
-    8028: {
-        "name": "tesla-rag",
-        "dir": "src/rag/tesla",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8028"],
-    },
-    8029: {
-        "name": "media-rag",
-        "dir": "src/rag/media",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8029"],
-    },
-    8040: {
-        "name": "brightdata-rag",
-        "dir": "src/rag/brightdata",
-        "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8040"],
-    },
-}
 
 
 def is_port_allowed(port: int) -> bool:
@@ -652,28 +671,9 @@ async def start_process_by_port(port: int) -> tuple[bool, str]:
 # =============================================================================
 # DOCKER CONTROL CONFIGURATION
 # =============================================================================
-# Security: Whitelist of allowed containers to control
-# These must match container_name in athena_services table
-ALLOWED_CONTAINERS = {
-    # Core services
-    "athena-gateway",
-    "athena-orchestrator",
-    # RAG services (match migration container names)
-    "athena-weather",
-    "athena-airports",
-    "athena-flights",
-    "athena-news",
-    "athena-stocks",
-    "athena-recipes",
-    "athena-events",
-    "athena-sports",
-    "athena-streaming",
-    "athena-dining",
-    "athena-websearch",
-    # Infrastructure (running on a secondary host)
-    "qdrant",
-    "redis",
-}
+# Security: whitelist of allowed containers to control -- loaded from
+# CONTROL_AGENT_SERVICES_FILE's "containers" list above (empty by
+# default, so no container can be controlled unless a deployer opts in).
 
 
 def is_container_allowed(container_name: str) -> bool:

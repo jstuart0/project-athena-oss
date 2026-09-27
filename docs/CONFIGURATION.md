@@ -188,6 +188,31 @@ DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 | `NOTIFICATIONS_SERVICE_URL` | `http://localhost:8050` | Notifications service |
 | `JARVIS_WEB_URL` | `http://localhost:3001` | Jarvis Web UI |
 | `CONTROL_AGENT_URL` | `http://localhost:8099` | Service management API |
+| `CONTROL_AGENT_SERVICES_FILE` | *(empty)* | Path to a JSON file (read by the Control Agent process itself, not admin-backend) naming which bare processes, watchdog exclusions, and Docker containers this Control Agent may manage. Empty means it manages nothing. See below. |
+
+**Control Agent managed-services file (ATHENA-99, D46)**: `CONTROL_AGENT_SERVICES_FILE` points at a JSON file with three independent, all-optional, all-default-empty top-level keys:
+
+```json
+{
+  "processes": {
+    "8000": {
+      "name": "example-gateway",
+      "dir": "src/gateway",
+      "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"],
+      "health_path": "/health",
+      "enabled": true
+    }
+  },
+  "watchdog_exclude": [8028],
+  "containers": ["athena-example-container"]
+}
+```
+
+- `processes` -- keyed by port (as a JSON string). Each entry needs `name`, `dir` (working directory, relative to the Control Agent's checkout), and `cmd` (argv list). `health_path` and `enabled` are optional; `enabled: false` drops the entry (it's parsed but never managed). This is exactly the shape the Control Agent's watchdog and startup registry-sync (`POST /api/service-registry/services`) already used, just no longer hard-coded into the module.
+- `watchdog_exclude` -- ports the 60-second watchdog should never auto-restart, even if they're in `processes`.
+- `containers` -- the Docker container-name whitelist for the `/docker/*` control endpoints (`is_container_allowed`). Independent of `processes`: a deployment can leave `processes` empty and still manage Docker containers (or vice versa).
+
+Unset (the default): `processes`/`watchdog_exclude`/`containers` are all empty, so the watchdog loop and the startup registry sync are both no-ops (the latter logs one INFO line, `no_managed_services_configured`), and every `is_port_allowed`/`is_container_allowed` check returns false. A malformed file (bad JSON, wrong top-level shape, or an individual bad entry) logs one ERROR per problem and falls back to managing nothing for that section -- it never crashes the Control Agent process. See `src/control_agent/services.example.json` for a complete example.
 
 ### Service Discovery Helpers
 

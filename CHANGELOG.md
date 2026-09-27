@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Ticket:** [ATHENA-99](https://plane.xmojo.net)
+> **Commits:** `c36dc83` (dashboard badges), CA-managed-services SHA to be backfilled at commit time.
+
+### Fixed: dashboard service badges render "undefined"; Control Agent no longer hard-codes a process list (ATHENA-99)
+
+- **Fixed — dashboard service badges rendered the literal text "undefined"** (`admin/frontend/app.js`): the service-registry API returns `health_status` (server-normalised: `NULL` → `pending`) and, after DC10, `unconfigured` — not `status`, a field two dashboard render sites read that the API has never sent. New `serviceStatus(service)` helper (`service?.health_status ?? service?.status ?? 'unknown'`) used by both the Dashboard tab's per-group cards and the RAG Services tab's registry cards; badge classes now cover `healthy` / `unhealthy`|`error` / `offline` / `disabled` / `pending` / `unconfigured` (amber, matching service-control.js's existing "Needs Setup") / `unknown` (gray). Status text now goes through `escapeHtml`.
+- **Fixed — Control Agent hard-coded every house process, a Docker container whitelist, and a watchdog-exclude list** (`src/control_agent/main.py`): this is why the 60s watchdog relaunched a retired house stack as bare processes after its containers were stopped, and the startup registry sync re-registered them — the module always had *something* to manage regardless of what a deployment actually wanted. New `CONTROL_AGENT_SERVICES_FILE` (OSS-First: unset by default, so nothing is managed) points at a JSON file with three independent, all-optional keys: `processes` (today's port-keyed shape: `name`/`dir`/`cmd`/optional `health_path`/`enabled`), `watchdog_exclude` (ports), and `containers` (the Docker allowlist, replacing the previously hard-coded, partly-stale `ALLOWED_CONTAINERS` set). A malformed file or a single bad entry logs one ERROR and falls back to managing nothing for that piece — the process never crashes over a bad config file. See `src/control_agent/services.example.json` and `docs/CONFIGURATION.md`.
+- **Breaking for Control Agent operators**: a deployment that relies on the Control Agent's watchdog, its startup registry sync, or its Docker container control must now set `CONTROL_AGENT_SERVICES_FILE` explicitly — the built-in process list and container whitelist are gone.
+
+---
+
+## [Unreleased]
+
 > **Plan:** `.mozart/plans/active/2026-09-27-deliver-athena-transit-and-base-knowledge.md`
 > **Ticket:** [ATHENA-90](https://plane.xmojo.net) + [ATHENA-91](https://plane.xmojo.net)
 > **Commits:** `5b8b515` (Phase 1 — `search_transit` wiring), `85930aa` (Phase 2 — base-knowledge settings facade), `02fd52e` (P3 — `/public` auth gate, sanitization, transit sort/regex fixes)
