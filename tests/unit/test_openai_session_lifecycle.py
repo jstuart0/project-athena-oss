@@ -72,6 +72,11 @@ def _fake_athena_config(session_max_count: int = 5000):
 # ---------------------------------------------------------------------------
 
 def test_first_turn_resets_same_opener(monkeypatch):
+    """Regression guard for the reset itself, with F38's grace window
+    explicitly disabled (reset_grace_seconds=0) -- a genuinely new
+    conversation reusing the same opener (no recent session under this
+    fingerprint, or the grace window has elapsed) must still be reset. The
+    "recent retry keeps history" case is covered separately below."""
     monkeypatch.setattr(
         session_manager_module, "_get_athena_config", lambda: _fake_athena_config()
     )
@@ -82,17 +87,97 @@ def test_first_turn_resets_same_opener(monkeypatch):
         cache = _FakeCacheClient()
 
         resolved_a = ResolvedSession("oai-sameopener00000000000000000000", "fingerprint", True)
-        await prepare_openai_session(resolved_a, sm, cache, max_count=5000)
+        await prepare_openai_session(resolved_a, sm, cache, max_count=5000, reset_grace_seconds=0)
         session_a = await sm.get_or_create_session(session_id=resolved_a.session_id)
         await sm.add_message(resolved_a.session_id, "user", "what place has happy hour?")
         await sm.add_message(resolved_a.session_id, "assistant", "Here are a few...")
 
         resolved_b = ResolvedSession("oai-sameopener00000000000000000000", "fingerprint", True)
-        await prepare_openai_session(resolved_b, sm, cache, max_count=5000)
+        await prepare_openai_session(resolved_b, sm, cache, max_count=5000, reset_grace_seconds=0)
         session_b = await sm.get_or_create_session(session_id=resolved_b.session_id)
 
         assert len(session_b.messages) == 0
         cache.client.delete.assert_awaited_with(f"athena:context:{resolved_a.session_id}")
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# F38 (reconciliation round 1, codex r2 Medium): a truncated HA ASR retry
+# resends the same single-user-message opener for the SAME turn. Without a
+# grace window, "exactly one user message" alone can't tell that apart from
+# a genuinely new conversation, and the unconditional reset fragments (or,
+# if the truncated text happens to equal the opener, wipes) a still-live
+# conversation.
+# ---------------------------------------------------------------------------
+
+def test_truncated_retry_within_grace_window_keeps_history(monkeypatch):
+    monkeypatch.setattr(
+        session_manager_module, "_get_athena_config", lambda: _fake_athena_config()
+    )
+
+    async def _run():
+        sm = SessionManager()
+        sm.redis_client = None
+        cache = _FakeCacheClient()
+
+        session_id = "oai-truncatedretry0000000000000000"
+        resolved_a = ResolvedSession(session_id, "fingerprint", True)
+        await prepare_openai_session(resolved_a, sm, cache, max_count=5000)
+        await sm.get_or_create_session(session_id=session_id)
+        await sm.add_message(session_id, "user", "what place has happy hour?")
+        await sm.add_message(session_id, "assistant", "Here are a few...")
+
+        # The initial turn's own prepare_openai_session call issues an
+        # unconditional (no-op, since nothing existed yet) delete -- reset
+        # the spy so the assertion below is scoped to the retry only.
+        cache.client.delete.reset_mock()
+
+        # HA's truncated-ASR retry: same fingerprint, still exactly one user
+        # message, arriving moments later (well within the default 120s
+        # grace window) -- must NOT reset.
+        resolved_retry = ResolvedSession(session_id, "fingerprint", True)
+        await prepare_openai_session(resolved_retry, sm, cache, max_count=5000)
+        session_after_retry = await sm.get_or_create_session(session_id=session_id)
+
+        assert len(session_after_retry.messages) == 2
+        cache.client.delete.assert_not_awaited()
+
+    asyncio.run(_run())
+
+
+def test_new_conversation_after_grace_window_still_resets(monkeypatch):
+    monkeypatch.setattr(
+        session_manager_module, "_get_athena_config", lambda: _fake_athena_config()
+    )
+
+    async def _run():
+        from datetime import datetime, timedelta
+
+        sm = SessionManager()
+        sm.redis_client = None
+        cache = _FakeCacheClient()
+
+        session_id = "oai-staleopener00000000000000000000"
+        resolved_a = ResolvedSession(session_id, "fingerprint", True)
+        await prepare_openai_session(resolved_a, sm, cache, max_count=5000)
+        session_a = await sm.get_or_create_session(session_id=session_id)
+        await sm.add_message(session_id, "user", "what place has happy hour?")
+        await sm.add_message(session_id, "assistant", "Here are a few...")
+
+        # Backdate the session's creation time past the grace window, so
+        # this looks like a genuinely new conversation reusing the same
+        # opener, not a fresh retry of the turn that created it.
+        stale_session = await sm.get_session(session_id)
+        stale_session.created_at = datetime.utcnow() - timedelta(seconds=200)
+        await sm._save_session(stale_session)
+
+        resolved_new = ResolvedSession(session_id, "fingerprint", True)
+        await prepare_openai_session(resolved_new, sm, cache, max_count=5000, reset_grace_seconds=120)
+        session_after_reset = await sm.get_or_create_session(session_id=session_id)
+
+        assert len(session_after_reset.messages) == 0
+        cache.client.delete.assert_awaited_with(f"athena:context:{session_id}")
 
     asyncio.run(_run())
 

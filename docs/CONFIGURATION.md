@@ -395,6 +395,7 @@ or placeholder `SERVICE_API_KEY` is fatal at orchestrator startup.
 |----------|---------|-------------|
 | `SESSION_MAX_COUNT` | `5000` | Cap on concurrent per-conversation sessions (in-memory fallback dict + Redis creation-time index). The oldest session (by last activity / creation time) is evicted once exceeded. |
 | `NEW_CONVERSATION_PER_MINUTE_PER_IP` | `30` | Gateway-side sliding-window limit on *new* conversations (first-turn requests with no explicit `session_id`) per client IP, applied to both `/v1/chat/completions` and `/v1/responses`. |
+| `NEW_CONVERSATION_RESET_GRACE_SECONDS` | `120` | A first-turn fingerprint reset is skipped when a session under the same fingerprint was created within this many seconds — protects against Home Assistant's truncated-ASR retry path, which resends the same single-user-message opener for the same turn. |
 
 ### Authentication (Optional)
 

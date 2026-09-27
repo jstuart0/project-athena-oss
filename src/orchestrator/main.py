@@ -7951,6 +7951,7 @@ async def chat_completions(request: OpenAIChatRequest):
             sm,
             _runtime.get_cache_client(),
             max_count=_shared_config.get_config().session_max_count,
+            reset_grace_seconds=_shared_config.get_config().new_conversation_reset_grace_seconds,
         )
         logger.info(
             "openai_session_resolved",

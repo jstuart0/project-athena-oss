@@ -39,6 +39,7 @@ import os
 import re
 import secrets
 import time
+from datetime import datetime
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from shared.logging_config import configure_logging
@@ -233,20 +234,45 @@ async def prepare_openai_session(
     session_manager: Any,
     cache_client: Any,
     max_count: int,
+    reset_grace_seconds: int = 120,
 ) -> None:
     """
     First-turn reset plus index registration/eviction for a resolved OpenAI
     session. Called once by chat_completions, before get_or_create_session.
 
     A fingerprint id whose replayed history holds exactly one user message
-    means this is genuinely a new conversation reusing the same opener in
+    means this is *usually* a new conversation reusing the same opener in
     the same room — its (possibly stale) prior session and context are
     cleared so two successive conversations never share history. Explicit
     ids are never reset.
+
+    ATHENA-88 / F38 (codex r2 Medium): "exactly one user message" alone
+    can't distinguish that from HA's known truncated-ASR retry path, which
+    resends the same single-user-message opener for the SAME turn. Reset
+    unconditionally on that signal would fragment (or, if the truncated
+    text happens to equal the opener, wipe) a conversation that's still
+    live. Before resetting, check whether a session already exists under
+    this exact fingerprint and was created within `reset_grace_seconds` —
+    if so, this is almost certainly a retry of the turn that created it,
+    not a new conversation, so the reset is skipped and the existing
+    session (with its history) stands.
     """
     if resolved.source == "fingerprint" and resolved.is_first_turn:
-        await session_manager.delete_session(resolved.session_id)
-        await clear_conversation_context(cache_client, resolved.session_id)
+        existing = await session_manager.get_session(resolved.session_id)
+        within_grace = False
+        if existing is not None:
+            age_seconds = (datetime.utcnow() - existing.created_at).total_seconds()
+            within_grace = 0 <= age_seconds < reset_grace_seconds
+
+        if within_grace:
+            logger.info(
+                "openai_session_reset_skipped_grace_window",
+                session_id=resolved.session_id,
+                age_seconds=age_seconds,
+            )
+        else:
+            await session_manager.delete_session(resolved.session_id)
+            await clear_conversation_context(cache_client, resolved.session_id)
 
     evicted_ids = await session_manager.register_bounded_session(resolved.session_id, max_count)
     for evicted_id in evicted_ids:

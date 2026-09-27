@@ -278,6 +278,15 @@ class AthenaConfig(BaseSettings):
     #   /v1/responses. Default 30.
     session_max_count: int = Field(default=5000, ge=100)
     new_conversation_per_minute_per_ip: int = Field(default=30, ge=1)
+    # new_conversation_reset_grace_seconds: F38 (codex r2 Medium) — a
+    # first-turn fingerprint reset is skipped when a session under the same
+    # fingerprint was created within this many seconds. HA's known truncated
+    # ASR retry path resends the same single-user-message opener; without
+    # this grace window, resolve_openai_session's is_first_turn (message
+    # count only) can't distinguish that retry from a genuinely new
+    # conversation, and the reset fragments (or wipes, if the truncated text
+    # happens to match the opener) a still-live conversation.
+    new_conversation_reset_grace_seconds: int = Field(default=120, ge=0)
 
     # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern
