@@ -17,6 +17,7 @@ import os
 import uuid
 import wave
 import io
+from urllib.parse import quote as urlquote
 
 # Wyoming protocol imports
 from wyoming.client import AsyncTcpClient
@@ -531,23 +532,26 @@ async def test_rag_query(
             status_code=503, detail=f"'{connector}' RAG service is not configured"
         )
 
-    # codex BLOCK: base_url is operator/registry-resolved, not a fixed
-    # constant -- validate against the health poller's SSRF/runtime-DNS
-    # allowlist before issuing a live request against it.
-    allowed, reason = await check_ssrf_safe(base_url)
+    # Build the final request URL BEFORE validating -- user-supplied query
+    # text is URL-encoded first (codex r2 delta: raw interpolation let
+    # arbitrary text reach the request line unescaped), then the SSRF check
+    # runs against this exact URL (host, port, path, AND query string), not
+    # just base_url -- a check against base_url alone never saw whatever
+    # got appended after it.
+    encoded_text = urlquote(query.text, safe="")
+    if connector == "weather":
+        url = f"{base_url}/weather/current?location={encoded_text}"
+    elif connector == "airports":
+        url = f"{base_url}/airports/{encoded_text}"
+    else:
+        url = f"{base_url}/flights/{encoded_text}"
+
+    allowed, reason = await check_ssrf_safe(url)
     if not allowed:
         logger.warning("rag_test_ssrf_blocked", connector=connector, reason=reason)
-        raise HTTPException(status_code=403, detail=f"SSRF guard: {reason}")
+        raise HTTPException(status_code=403, detail={"error": "ssrf_blocked", "reason": reason})
 
     try:
-        # Build URL based on connector type
-        if connector == "weather":
-            url = f"{base_url}/weather/current?location={query.text}"
-        elif connector == "airports":
-            url = f"{base_url}/airports/{query.text}"
-        else:
-            url = f"{base_url}/flights/{query.text}"
-
         start = time.time()
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -683,7 +687,8 @@ async def test_full_pipeline(
                 ssrf_allowed, ssrf_reason = await check_ssrf_safe(rag_url)
                 if not ssrf_allowed:
                     logger.warning("rag_enhancement_ssrf_blocked", connector=rag_connector, reason=ssrf_reason)
-                    results["rag_error"] = f"ssrf_blocked: {ssrf_reason}"
+                    results["rag_error"] = "ssrf_blocked"
+                    results["rag_error_reason"] = ssrf_reason
                 else:
                     try:
                         start = time.time()

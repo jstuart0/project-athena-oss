@@ -24,6 +24,7 @@ if str(_REPO_ROOT / "src") not in sys.path:
 from app.auth.oidc import get_current_user
 from app.models import RagService
 from app.routes import dashboard as dashboard_module
+from app.services import health_poller as health_poller_module
 from app.utils import rag_urls
 from main import app
 
@@ -128,6 +129,48 @@ def test_resolve_rag_url_unconfigured_returns_none():
     with patch.object(rag_urls, "resolve_rag_base_url", return_value=(None, "unconfigured")):
         url, source = rag_urls.resolve_rag_url("weather", 8010, path="/health")
         assert (url, source) == (None, "unconfigured")
+
+
+# ---------------------------------------------------------------------------
+# check_ssrf_safe -- validates the FULL url (host, port, path, query), not
+# just the host with an empty path (codex r2 delta). The path/CRLF/NUL/
+# traversal check runs before any DNS resolution or host allowlist check in
+# _validate_service_url, so these are host-independent: any host proves it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_check_ssrf_safe_blocks_traversal_in_path():
+    """Real, unmocked _validate_service_url: the path/traversal check runs
+    before any DNS resolution, so this is host-independent and needs no
+    network access or allowlist setup to demonstrate."""
+    allowed, reason = await rag_urls.check_ssrf_safe("http://weather-svc:8010/../../etc/passwd")
+    assert allowed is False
+    assert "traversal" in reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_check_ssrf_safe_passes_full_path_and_query_to_validator(monkeypatch):
+    """codex r2 delta: check_ssrf_safe previously always passed path="" to
+    _validate_service_url regardless of what was actually in the URL, so
+    its CRLF/NUL/traversal path check never saw a real request path or
+    query string. A spy on the real validator proves the fix: the exact
+    path AND query string of the given URL are what gets checked, not an
+    empty placeholder -- urlparse itself neutralizes raw control characters
+    before this point (a stdlib hardening this test doesn't need to
+    re-prove), so a spy on the actual argument is the precise way to show
+    check_ssrf_safe no longer discards the path."""
+    captured = {}
+
+    async def _spy_validator(host, port, path):
+        captured["host"], captured["port"], captured["path"] = host, port, path
+        return True, ""
+    monkeypatch.setattr(health_poller_module, "_validate_service_url", _spy_validator)
+
+    allowed, reason = await rag_urls.check_ssrf_safe("http://weather-svc:8010/weather/current?location=Denver,CO")
+
+    assert (allowed, reason) == (True, "")
+    assert captured == {"host": "weather-svc", "port": 8010, "path": "/weather/current?location=Denver,CO"}
 
 
 # ---------------------------------------------------------------------------
@@ -248,3 +291,34 @@ def test_dashboard_reads_pending_for_null_health_status(owner_client, db):
     data = response.json()
     statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
     assert statuses.get("Weather RAG") == "pending"
+
+
+# ---------------------------------------------------------------------------
+# get_quick_stats -- codex r2 delta High: this endpoint's Gateway/Orchestrator
+# probes had no SSRF gate at all (unlike get_dashboard_data above). Uses the
+# REAL check_ssrf_safe (overriding this file's autouse bypass fixture) since
+# the default test-env GATEWAY_URL/ORCHESTRATOR_URL (localhost, unallowlisted)
+# is itself already the "blocked" case -- no extra env setup needed.
+# ---------------------------------------------------------------------------
+
+
+def test_quick_stats_blocks_ssrf_unsafe_gateway_with_no_network_call(owner_client, db, monkeypatch):
+    monkeypatch.setattr(dashboard_module, "check_ssrf_safe", rag_urls.check_ssrf_safe)
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=AssertionError("must not be called when SSRF-blocked"))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    import structlog
+    with structlog.testing.capture_logs() as cap:
+        with patch("app.routes.dashboard.httpx.AsyncClient", return_value=mock_client):
+            response = owner_client.get("/api/dashboard/quick-stats")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["healthy_services"] == 0
+
+    blocked_events = [e for e in cap if e.get("event") == "dashboard_quick_stats_ssrf_blocked"]
+    assert len(blocked_events) == 2, blocked_events  # Gateway + Orchestrator
+    assert all(e.get("url_status") == "ssrf_blocked" for e in blocked_events)

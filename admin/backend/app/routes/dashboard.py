@@ -350,6 +350,15 @@ async def get_quick_stats(
         async with httpx.AsyncClient(timeout=1.0) as client:
             for url in core_services:
                 try:
+                    # codex r2 delta: GATEWAY_URL/ORCHESTRATOR_URL are
+                    # operator-set, but that's a write-time trust decision
+                    # only -- gate the probe through the same SSRF/runtime-
+                    # DNS allowlist the voice-health card and the health
+                    # poller use, same as get_dashboard_data above.
+                    allowed, reason = await check_ssrf_safe(url)
+                    if not allowed:
+                        logger.warning("dashboard_quick_stats_ssrf_blocked", url_status="ssrf_blocked", reason=reason)
+                        continue
                     response = await client.get(url)
                     if response.status_code == 200:
                         healthy += 1

@@ -10,6 +10,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 > **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+> **Codex review:** `.mozart/plans/active/2026-09-27-diagnose-athena-mission-control.codex-r2-delta.md` (High/Medium, BLOCK)
+
+### Fixed: quick-stats had no SSRF gate at all; the SSRF check validated only the host, never the actual request path/query (ATHENA-113 codex r2 delta)
+
+- **Fixed — `GET /api/dashboard/quick-stats` live-probed Gateway/Orchestrator with no `check_ssrf_safe()` gate**: unlike `get_dashboard_data`, this endpoint's probe loop had no SSRF check at all. Now gated the same way, logging `dashboard_quick_stats_ssrf_blocked` (`url_status="ssrf_blocked"`) and skipping the request when blocked.
+- **Fixed — `app.utils.rag_urls.check_ssrf_safe()` always validated the host with `path=""`**, so the CRLF/NUL/traversal path check it delegates to never actually inspected a real request path or query string. Now derives and validates the full path (including query string) from the given URL.
+- **Fixed — `voice_tests.py::test_rag_query` validated only `base_url` before appending user-supplied text into the request URL**: the final URL (with user text now URL-encoded via `urllib.parse.quote`, closing a request-line-injection vector the raw interpolation left open) is built first, then validated in full, then requested. Blocked responses now carry the exact marker `ssrf_blocked` (`detail={"error": "ssrf_blocked", "reason": ...}`, still 403) instead of only a human-readable `"SSRF guard: ..."` string. `test_full_pipeline`'s RAG-enhancement step's blocked marker is likewise now the exact string `"ssrf_blocked"` (`results["rag_error"]`), with the reason in a separate `rag_error_reason` field.
+- New tests: `check_ssrf_safe` unit tests (real traversal-block proof; a validator spy proving the full path+query reaches it, not an empty placeholder); `test_quick_stats_blocks_ssrf_unsafe_gateway_with_no_network_call` (asserts zero network calls and the `ssrf_blocked` marker via captured logs).
+
+---
+
+## [Unreleased]
+
+> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
 > **Codex review:** `.mozart/plans/active/2026-09-27-diagnose-athena-mission-control.codex-diff.md` (High, BLOCK)
 
 ### Fixed: Mission Control voice-health card and voice-test RAG probes live-probed operator-resolved URLs without the health poller's SSRF/runtime-DNS allowlist (ATHENA-113 codex follow-up)

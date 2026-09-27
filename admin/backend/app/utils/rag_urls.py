@@ -121,7 +121,7 @@ def resolve_rag_url(
     return f"{base}{path}", source
 
 
-async def check_ssrf_safe(url: str, path: str = "") -> tuple[bool, str]:
+async def check_ssrf_safe(url: str) -> tuple[bool, str]:
     """Validate a resolved RAG/service URL before issuing a live probe
     against it (codex BLOCK, 2026-09-27-diagnose-athena-mission-control
     review): registry rows and env vars are operator-set, but that's a
@@ -129,6 +129,15 @@ async def check_ssrf_safe(url: str, path: str = "") -> tuple[bool, str]:
     every caller that actually probes a resolved URL must still pass it
     through the health poller's SSRF/runtime-DNS allowlist, not skip it
     because the host "is operator data".
+
+    Validates the FULL url -- host, port, AND the actual path (plus any
+    query string) that will be sent on the wire (codex r2 delta: the
+    previous version defaulted the path check to "" regardless of what
+    was actually in `url`, so CRLF/NUL/traversal injected via an appended
+    path or query string -- e.g. user-supplied text in a RAG probe URL --
+    was never actually checked). Callers must build the final request URL
+    (path, query string, any user-supplied text already URL-encoded) BEFORE
+    calling this, then use that same URL for the request.
 
     Imports (not reimplements) app.services.health_poller._validate_service_url
     -- the same allowlist (HEALTH_POLL_ALLOWED_PRIVATE_HOSTS, the k8s
@@ -143,4 +152,7 @@ async def check_ssrf_safe(url: str, path: str = "") -> tuple[bool, str]:
     parsed = urlparse(url)
     host = parsed.hostname or ""
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    return await _validate_service_url(host, port, path)
+    path_and_query = parsed.path or ""
+    if parsed.query:
+        path_and_query = f"{path_and_query}?{parsed.query}"
+    return await _validate_service_url(host, port, path_and_query)

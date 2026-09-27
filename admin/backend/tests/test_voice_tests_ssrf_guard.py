@@ -70,7 +70,7 @@ def test_rag_test_endpoint_blocks_unallowlisted_private_host_with_no_network_cal
     response = owner_client.post("/api/voice-tests/rag/test", json={"connector": "weather", "text": "Denver"})
 
     assert response.status_code == 403
-    assert "ssrf" in response.json()["detail"].lower()
+    assert response.json()["detail"]["error"] == "ssrf_blocked"
 
 
 def test_rag_test_endpoint_allows_allowlisted_private_host_and_probes_it(owner_client, db, monkeypatch):
