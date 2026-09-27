@@ -84,14 +84,6 @@ _EXCLUDED = {
     # scan performance, not correctness.
     REPO_ROOT / "src" / "orchestrator" / "main.py",
     REPO_ROOT / "src" / "orchestrator" / "smart_home_controller.py",
-    # rag_client.py's fetch_service_urls_from_registry() calls
-    # /api/internal/config/rag-services with no X-Service-Key -- a real,
-    # pre-existing bug of the same class as ATHENA-114's config_loader.py,
-    # discovered by widening this scan but out of ATHENA-114's stated scope
-    # (config_loader.py only). Flagged to mozart as a scope item rather than
-    # silently folded into this diff; excluded here so this gate doesn't
-    # newly fail on code this ticket didn't touch.
-    REPO_ROOT / "src" / "orchestrator" / "rag_client.py",
 }
 
 # codex P3b FIX: llm_router.py's httpx calls target an MLX/OpenAI-compatible
@@ -445,6 +437,7 @@ def test_AU4_named_members_present():
         "src/shared/admin_config.py",  # D44/P3: /api/base-knowledge/public
         "src/rag/directions/main.py",  # D44/P3: /api/base-knowledge/public
         "src/orchestrator/config_loader.py",  # ATHENA-114: /api/internal/analytics/log
+        "src/orchestrator/rag_client.py",  # ATHENA-114: /api/internal/config/rag-services
     }
     missing = expected_named - rel_names
     assert not missing, f"expected named callers not matched by the scan: {missing}"

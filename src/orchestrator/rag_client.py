@@ -44,11 +44,25 @@ from orchestrator.rate_limiter import (
 from orchestrator.http_pool import get_http_pool
 from orchestrator.utils.constants import RAG_SERVICE_URL_MAP
 from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
 # Admin backend URL (resolved by shared.admin_url.get_admin_url)
 ADMIN_BACKEND_URL = get_admin_url()
+
+# ATHENA-114: /api/internal/* routes require X-Service-Key
+# (admin/backend/app/routes/internal.py). This client previously sent none,
+# so every registry fetch 422'd and silently fell back to the hardcoded
+# RAG_SERVICE_URL_MAP constants.
+_SERVICE_API_KEY = get_config().service_api_key
+if not _SERVICE_API_KEY:
+    logger.warning(
+        "rag_client_service_api_key_empty",
+        message="SERVICE_API_KEY is not set; /api/internal/config/rag-services "
+                "requests will 422 and fall back to hardcoded service URLs. "
+                "Set SERVICE_API_KEY in the orchestrator environment.",
+    )
 
 
 async def fetch_service_urls_from_registry() -> Dict[str, str]:
@@ -61,7 +75,10 @@ async def fetch_service_urls_from_registry() -> Dict[str, str]:
     Falls back to hardcoded constants if registry is unavailable.
     """
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(
+            timeout=5.0,
+            headers={"X-Service-Key": _SERVICE_API_KEY} if _SERVICE_API_KEY else {}
+        ) as client:
             response = await client.get(
                 f"{ADMIN_BACKEND_URL}/api/internal/config/rag-services"
             )
