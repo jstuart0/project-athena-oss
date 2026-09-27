@@ -292,7 +292,7 @@
         let knowledgeLoadFailed = false;
 
         try {
-            const response = await Athena.api('/api/internal/config/base-knowledge');
+            const response = await Athena.api('/api/base-knowledge/settings');
             knowledge = response || {};
         } catch {
             // Leave the fields empty and let the operator fill them in.
@@ -301,6 +301,15 @@
         }
 
         state.data.knowledge = knowledge;
+
+        // D7: the select keeps its 5 fixed options; a stored zone outside
+        // them (set via some other path, e.g. directly in the DB) gets one
+        // extra escaped <option> so the dropdown never silently shows the
+        // wrong selection.
+        const knownTimezones = ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'UTC'];
+        const extraTimezoneOption = (knowledge.timezone && !knownTimezones.includes(knowledge.timezone))
+            ? `<option value="${escapeHtml(knowledge.timezone)}" selected>${escapeHtml(knowledge.timezone)}</option>`
+            : '';
 
         container.innerHTML = `
             ${knowledgeLoadFailed ? '<p id="knowledge-load-error" class="text-sm text-yellow-400 mb-4">Location settings could not be loaded. Enter your city and coordinates below.</p>' : ''}
@@ -312,7 +321,7 @@
                             <i data-lucide="map-pin" class="w-5 h-5 text-blue-400"></i>
                             Location Settings
                         </h3>
-                        <p class="text-sm text-gray-500 mt-1">Used for weather, local search, and time-based features</p>
+                        <p class="text-sm text-gray-500 mt-1">City and state set the assistant's Default Location. Other fields are saved for upcoming features.</p>
                     </div>
                     <div class="p-4 space-y-4">
                         <div class="grid grid-cols-2 gap-4">
@@ -349,7 +358,7 @@
                             <i data-lucide="clock" class="w-5 h-5 text-purple-400"></i>
                             Time Settings
                         </h3>
-                        <p class="text-sm text-gray-500 mt-1">Timezone for scheduling and time-aware responses</p>
+                        <p class="text-sm text-gray-500 mt-1">Saved for upcoming time-aware features.</p>
                     </div>
                     <div class="p-4 space-y-4">
                         <div>
@@ -361,6 +370,7 @@
                                 <option value="America/Denver" ${knowledge.timezone === 'America/Denver' ? 'selected' : ''}>Mountain (America/Denver)</option>
                                 <option value="America/Los_Angeles" ${knowledge.timezone === 'America/Los_Angeles' ? 'selected' : ''}>Pacific (America/Los_Angeles)</option>
                                 <option value="UTC" ${knowledge.timezone === 'UTC' ? 'selected' : ''}>UTC</option>
+                                ${extraTimezoneOption}
                             </select>
                         </div>
                         <div class="p-3 bg-dark-bg rounded-lg">
@@ -760,7 +770,7 @@
         };
 
         try {
-            await Athena.api('/api/internal/config/base-knowledge', {
+            await Athena.api('/api/base-knowledge/settings', {
                 method: 'PUT',
                 body: JSON.stringify(data)
             });
@@ -768,10 +778,15 @@
             if (Athena.components.Toast) {
                 Athena.components.Toast.success('Base knowledge updated');
             }
+
+            const container = document.getElementById('memory-tab-content');
+            if (container) {
+                await loadBaseKnowledge(container);
+            }
         } catch (error) {
             console.error('[MemoryContext] Save base knowledge failed:', error);
             if (Athena.components.Toast) {
-                Athena.components.Toast.error('Failed to save base knowledge');
+                Athena.components.Toast.error(error.message || 'Failed to save base knowledge');
             }
         }
     }
