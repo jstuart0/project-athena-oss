@@ -14,8 +14,8 @@ import structlog
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
-from app.models import User, PipelineEvent, Alert, ExternalAPIKey, Feature, ConversationAnalytics
-from app.utils.rag_urls import resolve_rag_url
+from app.models import User, PipelineEvent, Alert, ExternalAPIKey, Feature, ConversationAnalytics, RagService
+from app.utils.rag_urls import check_ssrf_safe
 import httpx
 
 logger = structlog.get_logger()
@@ -27,15 +27,20 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 _GATEWAY_BASE = os.getenv("GATEWAY_URL", "http://localhost:8000").rstrip("/")
 _ORCHESTRATOR_BASE = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001").rstrip("/")
 
-# RAG services shown on the voice-health card. Each is resolved independently
-# via app.utils.rag_urls.resolve_rag_url (registry -> RAG_<NAME>_URL -> legacy
-# RAG_HOST/RAG_SERVICE_HOST:port) -- ATHENA-113b: a single shared RAG_HOST no
-# longer stands in for every RAG's own Kubernetes Service.
-_RAG_HEALTH_SERVICES = [
-    {"name": "Weather RAG", "service": "weather", "port": 8010},
-    {"name": "Sports RAG", "service": "sports", "port": 8017},
-    {"name": "Dining RAG", "service": "dining", "port": 8019},
-]
+# RAG services shown on the voice-health card. codex BLOCK (2026-09-27
+# diagnose-athena-mission-control review): this card used to resolve each
+# name via app.utils.rag_urls.resolve_rag_url and live-probe the result,
+# bypassing the health poller's SSRF/runtime-DNS allowlist entirely (operator-
+# set registry/env hosts are still subject to it -- write-time validation
+# doesn't catch DNS rebinding after the fact). Now reads the poller's cached
+# health_status/last_error for these three registry rows directly -- no
+# live probe, no SSRF surface, and no duplicate probe fan-out on every page
+# load (the poller already probes on its own interval).
+_RAG_HEALTH_SERVICE_NAMES = {
+    "weather": "Weather RAG",
+    "sports": "Sports RAG",
+    "dining": "Dining RAG",
+}
 
 
 @router.get("")
@@ -59,24 +64,46 @@ async def get_dashboard_data(
 
     # 1. Voice Health - Check actual service health
     core_services = [
-        {"name": "Gateway", "url": f"{_GATEWAY_BASE}/health", "critical": True},
-        {"name": "Orchestrator", "url": f"{_ORCHESTRATOR_BASE}/health", "critical": True},
+        {"name": "Gateway", "url": f"{_GATEWAY_BASE}/health"},
+        {"name": "Orchestrator", "url": f"{_ORCHESTRATOR_BASE}/health"},
     ]
-    not_configured_services = []
-    for rag in _RAG_HEALTH_SERVICES:
-        url, _source = resolve_rag_url(rag["service"], rag["port"], path="/health", db=db)
-        if url is None:
-            not_configured_services.append(rag["name"])
+
+    # RAG rows: cached registry health, never a live probe (see
+    # _RAG_HEALTH_SERVICE_NAMES comment above).
+    rag_rows = {
+        r.name: r for r in db.query(RagService).filter(
+            RagService.name.in_(_RAG_HEALTH_SERVICE_NAMES.keys())
+        ).all()
+    }
+    rag_statuses = []
+    for service_key, display_name in _RAG_HEALTH_SERVICE_NAMES.items():
+        svc = rag_rows.get(service_key)
+        if svc is None:
+            status_str = "not_configured"
+        elif not svc.enabled:
+            status_str = "disabled"
+        elif svc.health_status is None:
+            status_str = "pending"
         else:
-            core_services.append({"name": rag["name"], "url": url, "critical": False})
+            status_str = svc.health_status  # healthy | unhealthy | unconfigured
+        rag_statuses.append({"name": display_name, "status": status_str, "healthy": status_str == "healthy"})
 
     healthy_count = 0
-    total_count = len(core_services)
+    total_count = len(core_services) + len(rag_statuses)
     critical_services = []
 
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             for svc in core_services:
+                # codex BLOCK: GATEWAY_URL/ORCHESTRATOR_URL are operator-set,
+                # but DNS can change after write-time validation -- probe
+                # through the same SSRF/runtime-DNS allowlist the health
+                # poller uses, not an unvalidated direct request.
+                allowed, reason = await check_ssrf_safe(svc["url"])
+                if not allowed:
+                    logger.warning("dashboard_voice_health_ssrf_blocked", service=svc["name"], reason=reason)
+                    critical_services.append({"name": svc["name"], "status": "ssrf_blocked"})
+                    continue
                 try:
                     response = await client.get(svc["url"])
                     if response.status_code == 200:
@@ -86,8 +113,11 @@ async def get_dashboard_data(
                 except Exception:
                     critical_services.append({"name": svc["name"], "status": "unreachable"})
 
-        for name in not_configured_services:
-            critical_services.append({"name": name, "status": "not_configured"})
+        for entry in rag_statuses:
+            if entry["healthy"]:
+                healthy_count += 1
+            else:
+                critical_services.append({"name": entry["name"], "status": entry["status"]})
 
         health_pct = round((healthy_count / total_count * 100) if total_count > 0 else 0)
         health_history = [health_pct] * 20  # Would need time-series tracking for real history
@@ -97,7 +127,7 @@ async def get_dashboard_data(
         health_pct = 0
         health_history = [0] * 20
         critical_services = [{"name": s["name"], "status": "unknown"} for s in core_services]
-        critical_services += [{"name": name, "status": "not_configured"} for name in not_configured_services]
+        critical_services += [{"name": entry["name"], "status": entry["status"]} for entry in rag_statuses]
 
     # 2. Traffic Metrics - From conversation_analytics table
     try:
@@ -214,8 +244,8 @@ async def get_dashboard_data(
             "status": "healthy" if is_healthy else "unhealthy",
             "latency_ms": None
         })
-    for name in not_configured_services:
-        service_status.append({"name": name, "status": "not_configured", "latency_ms": None})
+    for entry in rag_statuses:
+        service_status.append({"name": entry["name"], "status": entry["status"], "latency_ms": None})
 
     logger.info("dashboard_data_fetched", user=current_user.username,
                 healthy=healthy_count, total=total_count,

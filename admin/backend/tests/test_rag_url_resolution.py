@@ -131,7 +131,12 @@ def test_resolve_rag_url_unconfigured_returns_none():
 
 
 # ---------------------------------------------------------------------------
-# get_dashboard_data — "not configured" (not "unreachable") when unresolved
+# get_dashboard_data -- RAG rows read cached registry health_status (no live
+# probe, no SSRF surface -- codex BLOCK, 2026-09-27-diagnose-athena-mission-
+# control review). Gateway/Orchestrator still live-probe, now behind
+# check_ssrf_safe; mocked here to isolate the RAG-cache behavior under test
+# (SSRF-blocked coverage lives in test_voice_tests_ssrf_guard.py, scoped to
+# the endpoints that actually issue an operator/registry-resolved live probe).
 # ---------------------------------------------------------------------------
 
 
@@ -145,9 +150,19 @@ def _mock_ok_client():
     return mock_client
 
 
-def test_dashboard_shows_not_configured_for_unresolved_rag(owner_client, db):
-    """No registry rows, no RAG_<NAME>_URL, no legacy RAG_HOST -- every RAG
-    on the voice-health card must read 'not_configured', not 'unreachable'."""
+@pytest.fixture(autouse=True)
+def _allow_gateway_orchestrator_probe(monkeypatch):
+    """Gateway/Orchestrator's SSRF gate is not what these tests exercise --
+    default GATEWAY_URL/ORCHESTRATOR_URL resolve to localhost in test env,
+    which the real allowlist correctly blocks. Bypass it here so these tests
+    isolate the RAG-cache-read behavior; the gate itself is covered directly
+    in test_voice_tests_ssrf_guard.py."""
+    monkeypatch.setattr(dashboard_module, "check_ssrf_safe", AsyncMock(return_value=(True, "")))
+
+
+def test_dashboard_shows_not_configured_for_missing_registry_row(owner_client, db):
+    """No registry row for a RAG name -- the card must read 'not_configured',
+    never attempt to resolve or probe a URL for it."""
     with patch("app.routes.dashboard.httpx.AsyncClient", return_value=_mock_ok_client()):
         response = owner_client.get("/api/dashboard")
 
@@ -161,16 +176,16 @@ def test_dashboard_shows_not_configured_for_unresolved_rag(owner_client, db):
     for name in ("Weather RAG", "Sports RAG", "Dining RAG"):
         assert service_grid.get(name) == "not_configured", service_grid
 
-    # Gateway/Orchestrator (mocked healthy) count toward the percentage;
-    # unconfigured RAGs must not inflate the denominator with a phantom probe.
-    assert data["voice_health"]["total"] == 2
+    # Gateway/Orchestrator (mocked healthy) + 3 not_configured RAGs: every
+    # named service counts toward the denominator now, cache-read or not.
+    assert data["voice_health"]["total"] == 5
     assert data["voice_health"]["healthy"] == 2
 
 
-def test_dashboard_probes_registry_resolved_rag(owner_client, db):
+def test_dashboard_reads_healthy_registry_row_from_cache_no_probe(owner_client, db):
     db.add(RagService(
         name="weather", display_name="Weather", host="weather-svc",
-        port=8010, protocol="http", enabled=True,
+        port=8010, protocol="http", enabled=True, health_status="healthy",
     ))
     db.commit()
 
@@ -183,5 +198,53 @@ def test_dashboard_probes_registry_resolved_rag(owner_client, db):
     statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
     assert "Weather RAG" not in statuses  # healthy -> not in the problem list
 
+    # No live probe for weather -- only Gateway/Orchestrator hit the client.
     called_urls = [c.args[0] if c.args else c.kwargs.get("url") for c in mock_client.get.call_args_list]
-    assert any("weather-svc:8010/health" in u for u in called_urls), called_urls
+    assert not any("weather-svc" in u for u in called_urls), called_urls
+    assert len(called_urls) == 2
+
+
+def test_dashboard_reads_unhealthy_registry_row_from_cache(owner_client, db):
+    db.add(RagService(
+        name="sports", display_name="Sports", host="sports-svc",
+        port=8017, protocol="http", enabled=True, health_status="unhealthy",
+        last_error="connection_refused",
+    ))
+    db.commit()
+
+    with patch("app.routes.dashboard.httpx.AsyncClient", return_value=_mock_ok_client()):
+        response = owner_client.get("/api/dashboard")
+
+    data = response.json()
+    statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
+    assert statuses.get("Sports RAG") == "unhealthy"
+
+
+def test_dashboard_reads_disabled_registry_row_from_cache(owner_client, db):
+    db.add(RagService(
+        name="dining", display_name="Dining", host="dining-svc",
+        port=8019, protocol="http", enabled=False, health_status="unhealthy",
+    ))
+    db.commit()
+
+    with patch("app.routes.dashboard.httpx.AsyncClient", return_value=_mock_ok_client()):
+        response = owner_client.get("/api/dashboard")
+
+    data = response.json()
+    statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
+    assert statuses.get("Dining RAG") == "disabled"
+
+
+def test_dashboard_reads_pending_for_null_health_status(owner_client, db):
+    db.add(RagService(
+        name="weather", display_name="Weather", host="weather-svc",
+        port=8010, protocol="http", enabled=True, health_status=None,
+    ))
+    db.commit()
+
+    with patch("app.routes.dashboard.httpx.AsyncClient", return_value=_mock_ok_client()):
+        response = owner_client.get("/api/dashboard")
+
+    data = response.json()
+    statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
+    assert statuses.get("Weather RAG") == "pending"

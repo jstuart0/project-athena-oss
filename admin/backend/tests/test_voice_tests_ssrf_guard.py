@@ -1,0 +1,169 @@
+"""codex BLOCK (2026-09-27-diagnose-athena-mission-control review): RAG
+registry/env URLs were live-probed by voice_tests.py without the health
+poller's SSRF/runtime-DNS allowlist. Registry hosts are operator data, but
+that's a write-time trust decision only -- DNS can change afterward, so
+every live probe against a resolved URL must still pass
+app.utils.rag_urls.check_ssrf_safe (which imports, not reimplements,
+app.services.health_poller._validate_service_url).
+
+These tests use a real private IP literal as the registry host (resolves
+via getaddrinfo with no network access needed) rather than a mocked
+resolver, so the allowlist decision exercised here is the real one.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from app.auth.oidc import get_current_user
+from app.models import RagService
+from app.routes import voice_tests as voice_tests_module
+from app.utils import rag_urls
+from main import app
+from shared.config import _clear_cache_for_tests
+
+_PRIVATE_HOST = "10.66.66.66"  # RFC1918, never allowlisted unless a test opts in
+
+
+@pytest.fixture(autouse=True)
+def _reset(monkeypatch):
+    for name in (
+        "RAG_HOST", "RAG_SERVICE_HOST", "RAG_WEATHER_URL", "HEALTH_POLL_ALLOWED_PRIVATE_HOSTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    rag_urls._reset_legacy_warning_cache()
+    _clear_cache_for_tests()
+    yield
+    rag_urls._reset_legacy_warning_cache()
+    _clear_cache_for_tests()
+
+
+@pytest.fixture
+def owner_client(client, test_user):
+    async def _get_user():
+        return test_user
+    app.dependency_overrides[get_current_user] = _get_user
+    yield client
+    app.dependency_overrides.pop(get_current_user, None)
+
+
+def _never_called_session(*args, **kwargs):
+    raise AssertionError("aiohttp.ClientSession must not be constructed when SSRF-blocked")
+
+
+def test_rag_test_endpoint_blocks_unallowlisted_private_host_with_no_network_call(owner_client, db, monkeypatch):
+    db.add(RagService(
+        name="weather", display_name="Weather", host=_PRIVATE_HOST,
+        port=8010, protocol="http", enabled=True,
+    ))
+    db.commit()
+
+    monkeypatch.setattr(voice_tests_module.aiohttp, "ClientSession", _never_called_session)
+
+    response = owner_client.post("/api/voice-tests/rag/test", json={"connector": "weather", "text": "Denver"})
+
+    assert response.status_code == 403
+    assert "ssrf" in response.json()["detail"].lower()
+
+
+def test_rag_test_endpoint_allows_allowlisted_private_host_and_probes_it(owner_client, db, monkeypatch):
+    """Regression for the allowed case: when check_ssrf_safe reports the
+    resolved host as allowed, the probe actually happens. The allowlist
+    parsing itself (HEALTH_POLL_ALLOWED_PRIVATE_HOSTS -> allowed) is
+    covered independently and exhaustively by test_phase4_health_poller.py
+    / test_phase4_reconcile.py / test_athena_109_tcp_poller.py; stubbing
+    check_ssrf_safe directly here isolates "allowed -> probe happens" from
+    get_config()'s process-wide lru_cache, which those other suites'
+    direct os.environ mutation (not monkeypatch-scoped) can leave in a
+    state this test doesn't control."""
+    monkeypatch.setattr(voice_tests_module, "check_ssrf_safe", AsyncMock(return_value=(True, "")))
+    db.add(RagService(
+        name="weather", display_name="Weather", host=_PRIVATE_HOST,
+        port=8010, protocol="http", enabled=True,
+    ))
+    db.commit()
+
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.json = AsyncMock(return_value={"temp": 72})
+    mock_response.headers = {}
+
+    mock_get_ctx = MagicMock()
+    mock_get_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_get_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_get_ctx)
+    mock_session_ctx = MagicMock()
+    mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    monkeypatch.setattr(voice_tests_module.aiohttp, "ClientSession", MagicMock(return_value=mock_session_ctx))
+
+    response = owner_client.post("/api/voice-tests/rag/test", json={"connector": "weather", "text": "Denver"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["success"] is True
+    assert mock_session.get.called
+    called_url = mock_session.get.call_args.args[0]
+    assert _PRIVATE_HOST in called_url
+
+
+def test_full_pipeline_rag_enhancement_blocks_unallowlisted_private_host(owner_client, db, monkeypatch):
+    """test_full_pipeline's RAG-enhancement step must not be reached over the
+    network for a private, non-allowlisted registry host -- the LLM step
+    ahead of it in the same pipeline legitimately uses aiohttp too, so this
+    asserts by URL (the private RAG host is never requested), not by
+    forbidding ClientSession construction outright."""
+    monkeypatch.setenv("DEFAULT_CITY", "Denver")
+    _clear_cache_for_tests()
+    db.add(RagService(
+        name="weather", display_name="Weather", host=_PRIVATE_HOST,
+        port=8010, protocol="http", enabled=True,
+    ))
+    db.commit()
+
+    requested_urls = []
+
+    def _fake_get_response(status=200, json_body=None):
+        resp = MagicMock()
+        resp.status = status
+        resp.json = AsyncMock(return_value=json_body or {})
+        return resp
+
+    def _make_ctx(resp):
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return ctx
+
+    mock_session = MagicMock()
+
+    def _post(url, **kwargs):
+        requested_urls.append(url)
+        return _make_ctx(_fake_get_response(200, {"response": "It's sunny in Denver."}))
+
+    def _get(url, **kwargs):
+        requested_urls.append(url)
+        return _make_ctx(_fake_get_response(200, {}))
+
+    mock_session.post = MagicMock(side_effect=_post)
+    mock_session.get = MagicMock(side_effect=_get)
+    mock_session_ctx = MagicMock()
+    mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(voice_tests_module.aiohttp, "ClientSession", MagicMock(return_value=mock_session_ctx))
+
+    response = owner_client.post("/api/voice-tests/pipeline/test", json={"text": "what's the weather like"})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "ssrf_blocked" in body.get("results", {}).get("rag_error", ""), body
+    assert not any(_PRIVATE_HOST in u for u in requested_urls), requested_urls

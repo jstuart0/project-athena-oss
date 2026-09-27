@@ -151,9 +151,8 @@ async function loadServiceStatus() {
         if (response.ok) {
             const data = await response.json();
 
-            // ATHENA-113c: names are now bare registry/check names
-            // ("gateway", "orchestrator", "ollama"), not the pre-migration
-            // "gateway (studio)" shape -- .includes() still matches either.
+            // ATHENA-113c: names are bare registry/check names
+            // ("gateway", "orchestrator", "ollama").
             for (const service of data.services || []) {
                 const name = (service.name || '').toLowerCase();
                 const status = mapServiceStatusToUiBucket(service);

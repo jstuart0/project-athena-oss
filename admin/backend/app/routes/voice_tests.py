@@ -30,7 +30,7 @@ from wyoming.event import Event
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, VoiceTest, VoiceTestFeedback, LLMPerformanceMetric, SystemSetting
-from app.utils.rag_urls import resolve_rag_base_url
+from app.utils.rag_urls import resolve_rag_base_url, check_ssrf_safe
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -531,6 +531,14 @@ async def test_rag_query(
             status_code=503, detail=f"'{connector}' RAG service is not configured"
         )
 
+    # codex BLOCK: base_url is operator/registry-resolved, not a fixed
+    # constant -- validate against the health poller's SSRF/runtime-DNS
+    # allowlist before issuing a live request against it.
+    allowed, reason = await check_ssrf_safe(base_url)
+    if not allowed:
+        logger.warning("rag_test_ssrf_blocked", connector=connector, reason=reason)
+        raise HTTPException(status_code=403, detail=f"SSRF guard: {reason}")
+
     try:
         # Build URL based on connector type
         if connector == "weather":
@@ -669,22 +677,30 @@ async def test_full_pipeline(
                 else:
                     results["rag_skipped"] = f"'{rag_connector}' RAG service is not configured"
             else:
-                try:
-                    start = time.time()
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(rag_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                            if resp.status == 200:
-                                rag_result = await resp.json()
-                                timings["rag"] = time.time() - start
-                                results["rag_connector"] = rag_connector
-                                results["rag_data"] = rag_result
-                            else:
-                                timings["rag"] = time.time() - start
-                                results["rag_error"] = f"HTTP {resp.status}"
-                except Exception as e:
-                    timings["rag"] = time.time() - start
-                    results["rag_error"] = str(e)
-                    logger.warning("rag_enhancement_failed", connector=rag_connector, error=str(e))
+                # codex BLOCK: rag_url is operator/registry-resolved, not a
+                # fixed constant -- validate against the health poller's
+                # SSRF/runtime-DNS allowlist before issuing a live request.
+                ssrf_allowed, ssrf_reason = await check_ssrf_safe(rag_url)
+                if not ssrf_allowed:
+                    logger.warning("rag_enhancement_ssrf_blocked", connector=rag_connector, reason=ssrf_reason)
+                    results["rag_error"] = f"ssrf_blocked: {ssrf_reason}"
+                else:
+                    try:
+                        start = time.time()
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(rag_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                                if resp.status == 200:
+                                    rag_result = await resp.json()
+                                    timings["rag"] = time.time() - start
+                                    results["rag_connector"] = rag_connector
+                                    results["rag_data"] = rag_result
+                                else:
+                                    timings["rag"] = time.time() - start
+                                    results["rag_error"] = f"HTTP {resp.status}"
+                    except Exception as e:
+                        timings["rag"] = time.time() - start
+                        results["rag_error"] = str(e)
+                        logger.warning("rag_enhancement_failed", connector=rag_connector, error=str(e))
 
         # 3. Home Assistant Integration (if command detected)
         # Note: HA integration handled by orchestrator, not admin pipeline

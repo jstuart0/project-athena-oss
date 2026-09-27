@@ -119,3 +119,28 @@ def resolve_rag_url(
     if path and not path.startswith("/"):
         path = f"/{path}"
     return f"{base}{path}", source
+
+
+async def check_ssrf_safe(url: str, path: str = "") -> tuple[bool, str]:
+    """Validate a resolved RAG/service URL before issuing a live probe
+    against it (codex BLOCK, 2026-09-27-diagnose-athena-mission-control
+    review): registry rows and env vars are operator-set, but that's a
+    write-time trust decision -- DNS can change afterward (rebinding), so
+    every caller that actually probes a resolved URL must still pass it
+    through the health poller's SSRF/runtime-DNS allowlist, not skip it
+    because the host "is operator data".
+
+    Imports (not reimplements) app.services.health_poller._validate_service_url
+    -- the same allowlist (HEALTH_POLL_ALLOWED_PRIVATE_HOSTS, the k8s
+    control-plane hostname block, CRLF/NUL/traversal path rejection) the
+    background poller and the service-registry quick-checks already use.
+
+    Returns (allowed, reason); reason is non-empty only when blocked.
+    """
+    from urllib.parse import urlparse
+    from app.services.health_poller import _validate_service_url
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return await _validate_service_url(host, port, path)

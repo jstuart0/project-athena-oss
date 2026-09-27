@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+> **Codex review:** `.mozart/plans/active/2026-09-27-diagnose-athena-mission-control.codex-diff.md` (High, BLOCK)
+
+### Fixed: Mission Control voice-health card and voice-test RAG probes live-probed operator-resolved URLs without the health poller's SSRF/runtime-DNS allowlist (ATHENA-113 codex follow-up)
+
+- **Fixed — `admin/backend/app/routes/dashboard.py`'s voice-health card no longer live-probes RAG services at all**: it now reads each RAG's `health_status`/`last_error` straight from the service-registry cache (same cached state `GET /api/service-registry/services` reads, kept fresh by the background poller) -- `healthy`/`unhealthy`/`disabled`/`pending`/`unconfigured` states preserved, `not_configured` when no registry row exists. This removes both the SSRF surface (a registry/env-resolved host is operator data only at write time; DNS can change afterward) and the per-page-load probe fan-out the poller was already doing on its own interval.
+- **Fixed — Gateway/Orchestrator's remaining live probes, and every remaining live probe in `admin/backend/app/routes/voice_tests.py` (`test_rag_query`, `test_full_pipeline`'s RAG-enhancement step), now validate the resolved URL first**: new `app.utils.rag_urls.check_ssrf_safe()` imports (not reimplements) `app.services.health_poller._validate_service_url` -- the same allowlist (`HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`, the k8s control-plane hostname block, CRLF/NUL/traversal path rejection) the background poller and the service-registry quick-checks already use. A blocked URL reports `ssrf_blocked` (403 for `test_rag_query`, a `results.rag_error` string for `test_full_pipeline`) instead of ever calling out. New tests: `admin/backend/tests/test_voice_tests_ssrf_guard.py` (blocked case asserts the transport is never constructed; allowed case is a regression that the probe still fires when the SSRF check passes); `admin/backend/tests/test_rag_url_resolution.py`'s dashboard tests rewritten for the cache-read behavior (healthy/unhealthy/disabled/not-configured/pending).
+- Dropped a stale `(studio)` comment in `admin/frontend/system-config.js` (ATHENA-113c's registry names are bare, not the pre-migration `"gateway (studio)"` shape).
+
+---
+
+## [Unreleased]
+
 > **Ticket:** [ATHENA-115](https://plane.xmojo.net)
 
 ### Fixed: `/ha/conversation` 500'd with NameError AFTER a device command had already executed (ATHENA-115)
