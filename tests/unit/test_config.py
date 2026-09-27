@@ -446,3 +446,54 @@ class TestControlAgentEnabled:
         # Clear cache — fresh instance must reflect the new env var.
         _clear_cache_for_tests()
         assert get_config().control_agent_enabled is True
+
+
+# ---------------------------------------------------------------------------
+# F48 (reconciliation round 2, codex r2b Low): the new session/limiter
+# config knobs are documented in .env.example but weren't surfaced in the
+# prod ConfigMap, and a source comment still said "Default 30" next to the
+# field whose actual default was raised to 120 by F39. Guards both so
+# either regressing silently again.
+# ---------------------------------------------------------------------------
+
+class TestF48ConfigManifestWiring:
+    def test_30_new_conversation_default_matches_source(self):
+        """The AthenaConfig field default is the single source of truth --
+        this pins it so a future change is forced to also touch the
+        adjacent docstring (see test_31)."""
+        assert _TestConfig().new_conversation_per_minute_per_ip == 120
+
+    def test_31_config_py_docstring_not_stale(self):
+        """The comment documenting new_conversation_per_minute_per_ip must
+        not still claim the pre-F39 default of 30."""
+        import inspect
+        import shared.config as config_module
+
+        source = inspect.getsource(config_module)
+        # The exact stale phrase this field's docstring carried before F48.
+        assert "session_id) per client IP, applied to /v1/chat/completions and" in source
+        stale_idx = source.index(
+            "session_id) per client IP, applied to /v1/chat/completions and"
+        )
+        # The line immediately after must not say "Default 30." anymore.
+        following = source[stale_idx: stale_idx + 300]
+        assert "Default 30." not in following
+
+    def test_32_prod_configmap_documents_new_session_limiter_knobs(self):
+        """manifests/athena-prod/config.yaml (consumed via envFrom by both
+        the gateway and orchestrator deployments) must at least mention
+        each new knob as a commented example, so an operator scanning the
+        ConfigMap can discover and override it."""
+        import pathlib
+
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        config_yaml = repo_root / "manifests" / "athena-prod" / "config.yaml"
+        text = config_yaml.read_text()
+
+        for knob in (
+            "SESSION_MAX_COUNT",
+            "NEW_CONVERSATION_PER_MINUTE_PER_IP",
+            "TRUSTED_PROXY_CIDRS",
+            "NEW_CONVERSATION_RESET_GRACE_SECONDS",
+        ):
+            assert knob in text, f"{knob} not documented in manifests/athena-prod/config.yaml"

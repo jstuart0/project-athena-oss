@@ -187,5 +187,33 @@ data:
   #
   # CONTENT_FETCHER_ALLOW_BROWSER_FETCH: "false"
 
+  # ==========================================================================
+  # OpenAI-compatible session lifecycle (ATHENA-88 / F88, F39, F38)
+  # ==========================================================================
+
+  # SESSION_MAX_COUNT: cap on concurrent per-conversation OpenAI sessions
+  # (both the in-memory fallback dict and the Redis creation-time index).
+  # Once exceeded, the oldest session is evicted. Default 5000.
+  # SESSION_MAX_COUNT: "5000"
+
+  # NEW_CONVERSATION_PER_MINUTE_PER_IP: gateway-side sliding-window limit on
+  # *new* conversations (first-turn requests with no explicit session_id)
+  # per rate-limit key (see TRUSTED_PROXY_CIDRS below). Default 120.
+  # NEW_CONVERSATION_PER_MINUTE_PER_IP: "120"
+
+  # TRUSTED_PROXY_CIDRS: comma-separated CIDRs/hosts. The gateway's
+  # new-conversation limiter trusts X-Forwarded-For's original-client
+  # address only when the immediate TCP peer falls inside one of these
+  # ranges (parsed right-to-left; the nearest hop NOT in this set wins).
+  # Keep this scoped to your actual reverse-proxy subnet, not a broad
+  # cluster-wide default. Default is this repo's own documented pod CIDR.
+  # TRUSTED_PROXY_CIDRS: "10.244.0.0/16"
+
+  # NEW_CONVERSATION_RESET_GRACE_SECONDS: a first-turn fingerprint reset is
+  # skipped when a session under the same fingerprint was created within
+  # this many seconds (covers HA's truncated-ASR-retry resend of the same
+  # opener). Default 120.
+  # NEW_CONVERSATION_RESET_GRACE_SECONDS: "120"
+
   # Logging
   LOG_LEVEL: "INFO"

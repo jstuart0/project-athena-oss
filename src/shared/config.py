@@ -275,7 +275,7 @@ class AthenaConfig(BaseSettings):
     # new_conversation_per_minute_per_ip: gateway-side sliding-window limit
     #   on *new* conversations (first-turn requests with no explicit
     #   session_id) per client IP, applied to /v1/chat/completions and
-    #   /v1/responses. Default 30.
+    #   /v1/responses. Default 120 (see F39 note below the field for why).
     session_max_count: int = Field(default=5000, ge=100)
     # new_conversation_per_minute_per_ip: F39 (codex r2 Medium) — raised
     # from 30 to 120. Behind Traefik, every HA satellite and Jarvis caller
