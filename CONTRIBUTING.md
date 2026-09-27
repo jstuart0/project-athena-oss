@@ -171,6 +171,7 @@ to stay complete — when you add a field, add its row here too.
 | `dev_mode` | `DEV_MODE` | `false` | |
 | `demo_mode` | `DEMO_MODE` | `false` | |
 | `control_agent_enabled` | `CONTROL_AGENT_ENABLED` | `false` | Opt-in; set `true` only if a Control Agent runs on a host alongside Ollama. Valid values: `true`/`false`/`1`/`0`. Do not set to a blank string. |
+| `service_control_k8s_enabled` | `SERVICE_CONTROL_K8S_ENABLED` | `false` | Opt-in (ATHENA-118); requires `optional/admin-backend-rbac.yaml` and the automount patch applied first, or the Kubernetes manager stays unavailable. See `docs/CONFIGURATION.md` § Service Control on Kubernetes. |
 | `login_rate_limit_per_minute` | `LOGIN_RATE_LIMIT_PER_MINUTE` | `5` | Max `POST /local-login` attempts per IP per 60s |
 | `login_lockout_threshold` | `LOGIN_LOCKOUT_THRESHOLD` | `10` | Cumulative failures before an account locks |
 | `login_lockout_minutes` | `LOGIN_LOCKOUT_MINUTES` | `30` | Lockout duration once the threshold is reached |

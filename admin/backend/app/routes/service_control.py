@@ -19,7 +19,7 @@ import structlog
 import httpx
 import asyncio
 
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.models import RagService, User, LLMBackend, SystemSetting
 from app.auth.oidc import get_current_user
 from app.utils.service_auth import control_agent_headers
@@ -34,10 +34,29 @@ from app.services.service_managers import (
     group_for,
     resolve_manager,
 )
+from app.services.k8s_control import K8sControlError, get_k8s_client
+from app.services.service_control_settings import (
+    LeaseBusy,
+    acquire_lease,
+    read_lease,
+    lease_is_expired,
+    recall_replicas,
+    release_lease,
+    remember_replicas,
+)
 from shared.config import get_config
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/service-control", tags=["service-control"])
+
+# The cross-replica lease (D11) needs its OWN short-lived DB session, visible
+# to another admin-backend replica immediately and independent of the
+# request's own transaction -- never the request-scoped `db: Session =
+# Depends(get_db)`. Production uses the app's real SessionLocal; tests
+# monkeypatch this module attribute to a sessionmaker bound to the same
+# SQLite engine as the test's `db` fixture (ATHENA-118 test hook, same
+# pattern as service_managers._ca_transport).
+LEASE_SESSION_FACTORY = SessionLocal
 
 
 def get_ollama_url(db: Session) -> str:
@@ -251,12 +270,18 @@ async def _run_action(
         )
         raise HTTPException(status_code=409, detail={"error": "confirmation_required"})
 
+    replicas_after = resolution.k8s_replicas
+
     if resolution.kind == 'process':
         success, message = await process_service_action(service.port, action)
     elif resolution.kind == 'docker':
         success, message = await docker_service_action(service.container_name, action)
     elif resolution.kind == 'ollama':
         success, message = await launchd_service_action("ollama", action)
+    elif resolution.kind == 'kubernetes':
+        success, message, replicas_after = await _dispatch_kubernetes_action(
+            resolution.target, action, db, current_user, request, service, old_value,
+        )
     else:
         success, message = False, f"Service '{service.name}' is not managed by any control plane"
 
@@ -265,7 +290,7 @@ async def _run_action(
         "kind": resolution.kind,
         "target": resolution.target,
         "message": message,
-        "replicas_after": resolution.k8s_replicas,
+        "replicas_after": replicas_after,
     }
     _audit_lifecycle(db, current_user, request, f"service_{action}", service, old_value, new_value, success=success)
 
@@ -277,6 +302,63 @@ async def _run_action(
         success=success,
         message=message,
     )
+
+
+async def _dispatch_kubernetes_action(
+    deployment_name: str,
+    action: str,
+    db: Session,
+    current_user: User,
+    request: Optional[Request],
+    service: RagService,
+    old_value: dict,
+) -> Tuple[bool, str, Optional[int]]:
+    """Kubernetes dispatch (D11): acquires the cross-replica lease around
+    the WHOLE action (including restart's bounded wait), releases it in
+    `finally`. Lease contention -> 409 `action_in_progress`, audited, raised
+    here directly (distinct from _run_action's other refusals, since it can
+    only be known after we've committed to dispatching)."""
+    client, reason = get_k8s_client()
+    if client is None:
+        return False, f"Kubernetes control is unavailable ({reason})", None
+
+    try:
+        lease = acquire_lease(LEASE_SESSION_FACTORY, deployment_name, action, target_replicas=0)
+    except LeaseBusy:
+        _audit_lifecycle(
+            db, current_user, request, f"service_{action}", service,
+            old_value, {}, success=False, error_message='action_in_progress',
+        )
+        raise HTTPException(status_code=409, detail={"error": "action_in_progress"})
+
+    remembered: dict = {}
+
+    def _remember(n: int) -> None:
+        remembered['n'] = n
+        remember_replicas(db, deployment_name, n)
+
+    def _recall() -> int:
+        n = recall_replicas(db, deployment_name)
+        remembered['n'] = n
+        return n
+
+    try:
+        if action == 'stop':
+            result = await client.stop(deployment_name, remember=_remember)
+            replicas_after = 0 if result.success else remembered.get('n')
+        elif action == 'start':
+            result = await client.start(deployment_name, recall=_recall)
+            replicas_after = remembered.get('n') if result.success else None
+        else:  # restart
+            result = await client.restart(deployment_name, remember=_remember, recall=_recall)
+            # D11: the scale-back always targets the remembered count,
+            # regardless of whether the bounded wait settled or timed out.
+            replicas_after = remembered.get('n')
+        return result.success, result.message, replicas_after
+    except K8sControlError as exc:
+        return False, f"Kubernetes API error ({exc.kind}): {exc.message}", None
+    finally:
+        release_lease(LEASE_SESSION_FACTORY, lease)
 
 
 # Service Routes
@@ -313,6 +395,19 @@ async def list_services(
     for svc, resolution in resolutions:
         if resolution.manager == 'kubernetes' and resolution.target and target_counts[resolution.target] > 1:
             resolution = ManagerResolution(manager='none', note=f"target_collision:{resolution.target}")
+        elif resolution.manager == 'kubernetes' and resolution.target:
+            # D11: an expired restart lease whose Deployment is stuck at 0
+            # replicas means the admin-backend process died mid-wait --
+            # surface it so an operator presses Start rather than assuming
+            # the service is just "stopped".
+            lease_info = read_lease(db, resolution.target)
+            if (
+                lease_info
+                and lease_info.get('action') == 'restart'
+                and resolution.k8s_replicas == 0
+                and lease_is_expired(lease_info)
+            ):
+                resolution.note = 'restart_interrupted'
 
         run_state = derive_run_state(svc.enabled, svc.health_status, resolution.k8s_replicas)
         if run_state == 'disabled':
@@ -343,7 +438,11 @@ async def list_services(
             reachable=inv.control_agent.reachable,
             note=inv.control_agent.note,
         ),
-        kubernetes=KubernetesStatus(),
+        kubernetes=KubernetesStatus(
+            enabled=inv.kubernetes.enabled if inv.kubernetes else False,
+            available=inv.kubernetes.available if inv.kubernetes else False,
+            reason=inv.kubernetes.reason if inv.kubernetes else 'disabled',
+        ),
     )
 
 
@@ -371,6 +470,153 @@ async def refresh_all_service_status(
     background_tasks.add_task(_poll_all_services, semaphore)
 
     return {"message": "Health check refresh started", "status": "pending"}
+
+
+# ATHENA-118 mid-build fix (tessa P1, Medium #2): the literal /ollama/*
+# routes MUST be registered before the parametrized /{service_name}/*
+# routes below. Starlette matches routes in registration order, and
+# /{service_name}/start matches ANY first path segment -- including
+# "ollama" -- so if it were registered first, POST /ollama/start would be
+# silently swallowed by _run_action (dispatching against a RagService row
+# literally named "ollama", 404 if none exists) instead of ever reaching
+# the dedicated Ollama handlers below. Phase 3 rewrites these handlers to
+# go through _run_action explicitly (D12); until then, this ordering is
+# the only thing making them reachable at all. test_service_control_route_
+# parity.py pins this explicitly.
+class OllamaHealthResponse(BaseModel):
+    healthy: bool
+    status: str
+    api_reachable: bool
+    models_loaded: int
+    version: Optional[str] = None
+    timestamp: str
+    host: Optional[str] = None
+
+
+@router.get("/ollama/health", response_model=OllamaHealthResponse)
+async def get_ollama_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get Ollama health status via Control Agent.
+
+    Returns actual API reachability, not just brew services status.
+    """
+    if not current_user.has_permission('read'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not get_config().control_agent_enabled:
+        return OllamaHealthResponse(
+            healthy=False,
+            status="control_agent_disabled",
+            api_reachable=False,
+            models_loaded=0,
+            version=None,
+            timestamp=datetime.utcnow().isoformat(),
+            host=None,
+        )
+
+    # Get centralized Ollama URL for display
+    ollama_url = get_ollama_url(db)
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0, headers=control_agent_headers()) as client:
+            response = await client.get(f"{CONTROL_AGENT_URL}/ollama/health")
+
+            if response.status_code == 200:
+                data = response.json()
+                data['host'] = ollama_url
+                return OllamaHealthResponse(**data)
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail="Control Agent error"
+                )
+
+    except httpx.ConnectError:
+        # Control Agent not reachable - return unhealthy status
+        from datetime import datetime
+        return OllamaHealthResponse(
+            healthy=False,
+            status="control_agent_offline",
+            api_reachable=False,
+            models_loaded=0,
+            version=None,
+            timestamp=datetime.utcnow().isoformat(),
+            host=ollama_url
+        )
+    except Exception as e:
+        logger.error("ollama_health_check_failed", error=str(e))
+        from datetime import datetime
+        return OllamaHealthResponse(
+            healthy=False,
+            status="error",
+            api_reachable=False,
+            models_loaded=0,
+            version=None,
+            timestamp=datetime.utcnow().isoformat(),
+            host=ollama_url
+        )
+
+
+@router.post("/ollama/start", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
+async def start_ollama(
+    current_user: User = Depends(get_current_user)
+):
+    """Start Ollama service via Control Agent."""
+    if not current_user.has_permission('write'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    success, message = await launchd_service_action("ollama", "start")
+
+    logger.info("ollama_start", success=success, user=current_user.username)
+
+    return ServiceActionResponse(
+        service_name="ollama",
+        action="start",
+        success=success,
+        message=message
+    )
+
+
+@router.post("/ollama/stop", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
+async def stop_ollama(
+    current_user: User = Depends(get_current_user)
+):
+    """Stop Ollama service via Control Agent."""
+    if not current_user.has_permission('write'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    success, message = await launchd_service_action("ollama", "stop")
+
+    logger.info("ollama_stop", success=success, user=current_user.username)
+
+    return ServiceActionResponse(
+        service_name="ollama",
+        action="stop",
+        success=success,
+        message=message
+    )
+
+
+@router.post("/ollama/restart", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
+async def restart_ollama(
+    current_user: User = Depends(get_current_user)
+):
+    """Restart Ollama service via Control Agent."""
+    if not current_user.has_permission('write'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    success, message = await launchd_service_action("ollama", "restart")
+
+    logger.info("ollama_restart", success=success, user=current_user.username)
+
+    return ServiceActionResponse(
+        service_name="ollama",
+        action="restart",
+        success=success,
+        message=message
+    )
 
 
 @router.post("/{service_name}/start", response_model=ServiceActionResponse)
@@ -686,144 +932,6 @@ async def launchd_service_action(service_name: str, action: str) -> Tuple[bool, 
             return False, f"Launchd control failed: {str(e)}"
 
     return False, f"Launchd control not implemented for service: {service_name}"
-
-
-
-# Ollama Health Response Model
-class OllamaHealthResponse(BaseModel):
-    healthy: bool
-    status: str
-    api_reachable: bool
-    models_loaded: int
-    version: Optional[str] = None
-    timestamp: str
-    host: Optional[str] = None
-
-
-@router.get("/ollama/health", response_model=OllamaHealthResponse)
-async def get_ollama_health(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Get Ollama health status via Control Agent.
-
-    Returns actual API reachability, not just brew services status.
-    """
-    if not current_user.has_permission('read'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-    if not get_config().control_agent_enabled:
-        return OllamaHealthResponse(
-            healthy=False,
-            status="control_agent_disabled",
-            api_reachable=False,
-            models_loaded=0,
-            version=None,
-            timestamp=datetime.utcnow().isoformat(),
-            host=None,
-        )
-
-    # Get centralized Ollama URL for display
-    ollama_url = get_ollama_url(db)
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0, headers=control_agent_headers()) as client:
-            response = await client.get(f"{CONTROL_AGENT_URL}/ollama/health")
-
-            if response.status_code == 200:
-                data = response.json()
-                data['host'] = ollama_url
-                return OllamaHealthResponse(**data)
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail="Control Agent error"
-                )
-
-    except httpx.ConnectError:
-        # Control Agent not reachable - return unhealthy status
-        from datetime import datetime
-        return OllamaHealthResponse(
-            healthy=False,
-            status="control_agent_offline",
-            api_reachable=False,
-            models_loaded=0,
-            version=None,
-            timestamp=datetime.utcnow().isoformat(),
-            host=ollama_url
-        )
-    except Exception as e:
-        logger.error("ollama_health_check_failed", error=str(e))
-        from datetime import datetime
-        return OllamaHealthResponse(
-            healthy=False,
-            status="error",
-            api_reachable=False,
-            models_loaded=0,
-            version=None,
-            timestamp=datetime.utcnow().isoformat(),
-            host=ollama_url
-        )
-
-
-@router.post("/ollama/start", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
-async def start_ollama(
-    current_user: User = Depends(get_current_user)
-):
-    """Start Ollama service via Control Agent."""
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    success, message = await launchd_service_action("ollama", "start")
-
-    logger.info("ollama_start", success=success, user=current_user.username)
-
-    return ServiceActionResponse(
-        service_name="ollama",
-        action="start",
-        success=success,
-        message=message
-    )
-
-
-@router.post("/ollama/stop", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
-async def stop_ollama(
-    current_user: User = Depends(get_current_user)
-):
-    """Stop Ollama service via Control Agent."""
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    success, message = await launchd_service_action("ollama", "stop")
-
-    logger.info("ollama_stop", success=success, user=current_user.username)
-
-    return ServiceActionResponse(
-        service_name="ollama",
-        action="stop",
-        success=success,
-        message=message
-    )
-
-
-@router.post("/ollama/restart", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
-async def restart_ollama(
-    current_user: User = Depends(get_current_user)
-):
-    """Restart Ollama service via Control Agent."""
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    success, message = await launchd_service_action("ollama", "restart")
-
-    logger.info("ollama_restart", success=success, user=current_user.username)
-
-    return ServiceActionResponse(
-        service_name="ollama",
-        action="restart",
-        success=success,
-        message=message
-    )
 
 
 # Port-based service control routes (for Voice Pipelines UI)

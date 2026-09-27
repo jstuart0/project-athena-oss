@@ -8,12 +8,13 @@ Complete reference for all configuration options in Project Athena.
 2. [Required Settings](#required-settings)
 3. [Database Configuration](#database-configuration)
 4. [Service URLs](#service-urls)
-5. [Infrastructure Services](#infrastructure-services)
-6. [Module Settings](#module-settings)
-7. [API Keys](#api-keys)
-8. [Voice Services](#voice-services)
-9. [Security Settings](#security-settings)
-10. [Advanced Settings](#advanced-settings)
+5. [Service Control on Kubernetes](#service-control-on-kubernetes-athena-118)
+6. [Infrastructure Services](#infrastructure-services)
+7. [Module Settings](#module-settings)
+8. [API Keys](#api-keys)
+9. [Voice Services](#voice-services)
+10. [Security Settings](#security-settings)
+11. [Advanced Settings](#advanced-settings)
 
 ---
 
@@ -37,8 +38,8 @@ config.database_url    # DATABASE_URL
 ### Centralized env vars
 
 The vars below are the original Campaign 4 batch, kept for illustration. See
-`src/shared/config.py` for the complete, current field list (41 fields as of
-ATHENA-89) — new fields land there per-PR and this table is not re-synced on
+`src/shared/config.py` for the complete, current field list (42 fields as of
+ATHENA-118) — new fields land there per-PR and this table is not re-synced on
 every addition.
 
 | Env var | AthenaConfig field | Default |
@@ -248,6 +249,121 @@ Registering a `tcp` row via the admin UI's row editor (or directly via `POST /ap
 2. **Canonical env var** -- `RAG_<NAME>_URL` (same spelling as `src/orchestrator/urls.py`, e.g. `RAG_WEATHER_URL`, `RAG_SPORTS_URL`, `RAG_DINING_URL`).
 3. **Legacy single-host fallback** -- `RAG_HOST` or `RAG_SERVICE_HOST` plus the service's well-known port. Logs one WARNING per service the first time this fallback is used.
 4. **Not configured** -- no source resolves. The dashboard's voice-health card shows `not_configured` (amber) for that service instead of probing a broken URL and reporting `unreachable`.
+
+---
+
+## Service Control on Kubernetes (ATHENA-118)
+
+`GET /api/service-control` resolves, per registry row, which control plane
+can actually start/stop/restart it: the Control Agent (host-gated — only
+when the row's host equals the Control Agent's own host), Kubernetes
+(opt-in, this section), or `none`. This section covers the Kubernetes half.
+
+### Opt-in steps
+
+1. Apply the RBAC manifest (namespaced Role, not applied by a plain
+   `kubectl apply -f manifests/athena-prod/` since it lives under `optional/`):
+   ```
+   kubectl apply -f manifests/athena-prod/optional/admin-backend-rbac.yaml
+   ```
+2. Set the flag (`AthenaConfig.service_control_k8s_enabled`, default `false`):
+   ```
+   kubectl -n athena-prod patch cm athena-config --type merge \
+     -p '{"data":{"SERVICE_CONTROL_K8S_ENABLED":"true"}}'
+   ```
+3. Mount a token for the `athena-admin-backend` ServiceAccount (the tracked
+   `admin-backend.yaml` deliberately keeps `automountServiceAccountToken:
+   false` — see below):
+   ```
+   kubectl -n athena-prod patch deploy athena-admin-backend --patch-file \
+     manifests/athena-prod/optional/admin-backend-k8s-control.patch.yaml
+   ```
+
+Without step 1 and step 3, the flag alone is inert: `GET /api/service-control`
+reports `kubernetes.available: false` with a `reason` (`not_in_cluster`,
+`no_service_account_token`, or `forbidden`), and the page shows a visible
+amber banner rather than silently doing nothing.
+
+### The exact Role, and why there's no `deployments` patch
+
+`optional/admin-backend-rbac.yaml`'s Role has exactly two rules:
+`apps/deployments` `get`/`list` (namespace-wide — `resourceNames` cannot
+restrict `list`, and a Deployment spec carries no Secret values, only
+`secretKeyRef` names), and `apps/deployments/scale` `get`/`patch`, scoped
+via `resourceNames` to every Deployment in `manifests/athena-prod/*.yaml`
+minus `athena-admin-backend`/`athena-admin-frontend` (currently 30 names).
+There is **no** `patch`/`update` on the base `deployments` resource
+anywhere — that verb would let a compromised admin-backend rewrite a pod
+template (`command`, secret mounts, `serviceAccountName`): real code
+execution and secret exposure. Without it, the worst this Role permits is
+setting the replica count of the 30 named Deployments — scale-to-0 (DoS) or
+scale-to-large-N (resource pressure; there's no `ResourceQuota` in
+`athena-prod`). `tests/unit/test_admin_backend_rbac_manifest.py` (T10)
+computes the expected `resourceNames` set at **test time** by parsing the
+manifests, so it fails loudly the moment a new RAG service is added without
+updating this file.
+
+Adding a Deployment: re-run the generator (parse `manifests/athena-prod/*.yaml`
+— non-recursive, so `optional/` is excluded by construction — for
+`kind: Deployment` docs in `namespace: athena-prod`, minus the two
+protected names) and update the Role's `resourceNames` list.
+
+### Restart means downtime
+
+There is no rolling restart (it needs `deployments` PATCH, deliberately not
+granted). Restart is: scale to 0 → wait up to 60s for `status.replicas` to
+reach 0 → scale back to the remembered count, inside a `finally` guarded by
+`asyncio.shield`, so no exception, timeout, or task cancellation can leave a
+Deployment at 0 while the admin-backend process is alive. **If the
+admin-backend process itself dies mid-wait** (its own rollout, OOM, node
+drain), the Deployment stays at 0 until an operator presses Start — the row
+shows `manager_note: "restart_interrupted"` (an expired restart lease plus
+the Deployment still at 0 replicas) and Start recalls the remembered count.
+There's no automatic recovery, by design.
+
+The pre-stop replica count lives in `system_settings`
+(`service_control.replicas.<deployment>`, clamped 1-10 on read, a stored `0`
+is impossible by construction — `stop`/`restart` only remember when the
+current count is `> 0`).
+
+### The cross-replica lease
+
+When `admin-backend` runs with `replicas: 2`, a k8s start/stop/restart holds
+a lease in `system_settings` (`service_control.lock.<deployment>`, category
+`service_control`, 90s TTL) for the **whole** action, including restart's
+wait — not just the instant of the PATCH. A second replica's action on the
+same Deployment while the lease is held gets 409 `action_in_progress`
+(audited). An expired lease is taken over via a compare-and-swap `UPDATE`
+keyed on the exact previously-observed value, so two replicas racing a
+takeover can't both win. The lease is released, by exact value match, only
+by the holder that acquired it — a stale holder's release can never delete
+a newer holder's lease.
+
+### Guardrails
+
+- **Protected** (`athena-admin-backend`, `athena-admin-frontend`): never
+  targetable, in app code and in RBAC.
+- **Critical** (the named set `athena-gateway`, `athena-orchestrator`,
+  `athena-mode-service`, `athena-jarvis-web`, `redis`, `qdrant`, `ollama`,
+  union any Kubernetes-resolved row whose group isn't `rag`, union Ollama
+  under any manager): requires the owner-only `manage_infrastructure`
+  permission **and** a typed confirmation (`confirm_name` in the request
+  body) that must equal the **resolved target's** name — not an alias row's
+  own name. The owner gate is checked before action-availability, so a
+  non-owner always gets 403 `insufficient_role`, never a 409 about an
+  unavailable action.
+- **Target collisions**: if two registry rows (enabled or disabled) resolve
+  to the same Kubernetes target, both are blocked (`manager_note:
+  "target_collision:<name>"`) — an operator can't alias an obscure row onto
+  a critical Deployment to bypass the owner gate.
+
+### Upgrade / reapply warning
+
+`kubectl apply -f manifests/athena-prod/admin-backend.yaml` (or of the whole
+directory) resets `serviceAccountName`/`automountServiceAccountToken` back to
+the tracked base values (no SA token), silently undoing the automount patch.
+**Re-run the patch file (step 3 above) after any such apply**, or Kubernetes
+control goes dark (visible amber banner, not a crash) until you do.
 
 ---
 

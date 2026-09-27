@@ -14,6 +14,7 @@ fake transport via the module-level ``_ca_transport`` / ``_k8s_transport``
 hooks rather than mocking this module's own functions, so the real
 request-construction and status-mapping code is exercised.
 """
+import ipaddress
 import os
 import re
 import time
@@ -26,6 +27,7 @@ import structlog
 
 from app.models import RagService
 from app.utils.service_auth import control_agent_headers
+from app.services.k8s_control import DEPLOYMENT_NAME_RE, K8sControlError, get_k8s_client
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -98,6 +100,29 @@ def _docker_host_published_port(ports: Optional[str]) -> List[int]:
     return [int(m.group(1)) for m in _HOST_PUBLISHED_PORT_RE.finditer(ports)]
 
 
+def _k8s_label_from_host(host: Optional[str], namespace: Optional[str]) -> Optional[str]:
+    """Reduce a row's host to a Deployment label (D4 rule 2):
+    a bare RFC1123 label is used as-is; `<label>.<namespace>[.svc[.cluster.local]]`
+    gives `<label>`; IPs, other namespaces, and external FQDNs give nothing."""
+    if not host:
+        return None
+    h = host.strip().lower()
+    try:
+        ipaddress.ip_address(h)
+        return None
+    except ValueError:
+        pass
+    if DEPLOYMENT_NAME_RE.match(h):
+        return h
+    if namespace:
+        for suffix in (f".{namespace}.svc.cluster.local", f".{namespace}.svc", f".{namespace}"):
+            if h.endswith(suffix):
+                label = h[: -len(suffix)]
+                if label and DEPLOYMENT_NAME_RE.match(label):
+                    return label
+    return None
+
+
 @dataclass
 class ControlAgentInventory:
     enabled: bool
@@ -109,9 +134,18 @@ class ControlAgentInventory:
 
 
 @dataclass
+class KubernetesInventory:
+    enabled: bool
+    available: bool
+    reason: Optional[str] = None
+    namespace: Optional[str] = None
+    deployments: Dict[str, object] = field(default_factory=dict)  # name -> DeploymentInfo
+
+
+@dataclass
 class Inventory:
     control_agent: ControlAgentInventory
-    kubernetes: Optional[object] = None  # populated by k8s_control.py, Phase 2
+    kubernetes: Optional[KubernetesInventory] = None
 
 
 _inventory_cache: Dict[str, Tuple[float, Inventory]] = {}
@@ -176,6 +210,29 @@ async def _gather_control_agent_inventory() -> ControlAgentInventory:
     )
 
 
+async def _gather_kubernetes_inventory() -> KubernetesInventory:
+    default_namespace = os.getenv("ATHENA_NAMESPACE", "athena-prod")
+    client, reason = get_k8s_client()
+    if client is None:
+        return KubernetesInventory(
+            enabled=get_config().service_control_k8s_enabled,
+            available=False,
+            reason=reason,
+            namespace=default_namespace,
+        )
+    try:
+        deployments = await client.list_deployments()
+    except K8sControlError as exc:
+        return KubernetesInventory(enabled=True, available=False, reason=exc.kind, namespace=client.namespace)
+    return KubernetesInventory(
+        enabled=True,
+        available=True,
+        reason=None,
+        namespace=client.namespace,
+        deployments={d.name: d for d in deployments},
+    )
+
+
 async def gather_inventory(fresh: bool = False) -> Inventory:
     """Fetch (or reuse a <=10s-old cached) snapshot of every manager's
     inventory (D14). Action routes always pass fresh=True so a
@@ -188,7 +245,8 @@ async def gather_inventory(fresh: bool = False) -> Inventory:
             return cached[1]
 
     ca_inventory = await _gather_control_agent_inventory()
-    inv = Inventory(control_agent=ca_inventory, kubernetes=None)
+    k8s_inventory = await _gather_kubernetes_inventory()
+    inv = Inventory(control_agent=ca_inventory, kubernetes=k8s_inventory)
     _inventory_cache[cache_key] = (now, inv)
     return inv
 
@@ -247,6 +305,44 @@ def _gate_for_user(
     )
 
 
+def _try_kubernetes(row: RagService, inv: Inventory, permissions: Set[str]) -> Optional[ManagerResolution]:
+    """Kubernetes resolution (D4 rule 2, Phase 2). Returns None when the
+    row's host doesn't reduce to a Deployment label at all -- that's "this
+    row isn't a k8s row", distinct from every other branch's terminal
+    'none' resolutions (which mean "it IS a k8s row, but ...")."""
+    k8s = inv.kubernetes
+    if k8s is None:
+        return None
+
+    label = _k8s_label_from_host(row.host, k8s.namespace)
+    if not label:
+        return None
+
+    if not k8s.available:
+        return ManagerResolution(manager='none', note=f'kubernetes_unavailable:{k8s.reason}')
+
+    if label in PROTECTED_DEPLOYMENTS:
+        return ManagerResolution(manager='none', note='protected')
+
+    deployment = k8s.deployments.get(label)
+    if deployment is None:
+        return ManagerResolution(manager='none', note=f'no_deployment:{label}')
+
+    native_state = f"{deployment.ready_replicas}/{deployment.replicas} pods"
+    native_actions = ['stop', 'restart'] if deployment.replicas > 0 else ['start']
+    # Fail-safe critical (D9/L3): the named set, UNION any k8s-resolved row
+    # whose group isn't 'rag' -- so a renamed/unlisted core Deployment still
+    # gets the typed confirm instead of silently losing it.
+    critical = label in CRITICAL_DEPLOYMENTS or group_for(row) != 'rag'
+    resolution = _gate_for_user(
+        'kubernetes', 'kubernetes', label, native_state, native_actions,
+        permissions, critical=critical, confirm_name=label,
+    )
+    resolution.k8s_replicas = deployment.replicas
+    resolution.k8s_ready_replicas = deployment.ready_replicas
+    return resolution
+
+
 def resolve_manager(
     row: RagService,
     inv: Inventory,
@@ -254,62 +350,72 @@ def resolve_manager(
 ) -> ManagerResolution:
     """Resolve the manager for a single registry row (D4).
 
-    Precedence: Control Agent (host-gated) -> Kubernetes (Phase 2) -> none.
+    Precedence: Control Agent (host-gated) -> Kubernetes -> none. CA's own
+    unreachability/docker-unavailability notes apply ONLY to rows whose
+    host actually equals the CA host -- a non-CA row must still get a
+    chance at Kubernetes resolution even when the CA happens to be down.
     """
     permissions = permissions or set()
     ca = inv.control_agent
-
-    if not ca.enabled:
-        return ManagerResolution(manager='none')
-
-    if not ca.reachable:
-        return ManagerResolution(manager='none', note='control_agent_unreachable')
-
-    ca_host = normalize_host(urlparse(CONTROL_AGENT_URL).hostname)
     row_host = normalize_host(row.host)
 
-    if row_host and row_host == ca_host:
-        for proc in ca.processes:
-            if proc.get('port') == row.port:
-                running = bool(proc.get('running'))
-                native_state = 'process running' if running else 'process stopped'
-                native_actions = ['stop', 'restart'] if running else ['start']
+    if ca.enabled:
+        ca_host = normalize_host(urlparse(CONTROL_AGENT_URL).hostname)
+        if row_host and row_host == ca_host:
+            if not ca.reachable:
+                return ManagerResolution(manager='none', note='control_agent_unreachable')
+
+            for proc in ca.processes:
+                if proc.get('port') == row.port:
+                    running = bool(proc.get('running'))
+                    native_state = 'process running' if running else 'process stopped'
+                    native_actions = ['stop', 'restart'] if running else ['start']
+                    return _gate_for_user(
+                        'control_agent', 'process', str(row.port), native_state,
+                        native_actions, permissions, critical=False, confirm_name=None,
+                    )
+
+            if not ca.docker_available:
+                return ManagerResolution(manager='none', note='control_agent_docker_unavailable')
+
+            for container in ca.containers:
+                if row.container_name and container.get('name') == row.container_name:
+                    running = bool(container.get('running'))
+                    native_state = 'container up' if running else 'container stopped'
+                    native_actions = ['stop', 'restart'] if running else ['start']
+                    return _gate_for_user(
+                        'control_agent', 'docker', container.get('name'), native_state,
+                        native_actions, permissions, critical=False, confirm_name=None,
+                    )
+
+            for container in ca.containers:
+                if row.port in _docker_host_published_port(container.get('ports')):
+                    running = bool(container.get('running'))
+                    native_state = 'container up' if running else 'container stopped'
+                    native_actions = ['stop', 'restart'] if running else ['start']
+                    return _gate_for_user(
+                        'control_agent', 'docker', container.get('name'), native_state,
+                        native_actions, permissions, critical=False, confirm_name=None,
+                    )
+
+            if row.name and row.name.lower() == 'ollama':
                 return _gate_for_user(
-                    'control_agent', 'process', str(row.port), native_state,
-                    native_actions, permissions, critical=False, confirm_name=None,
+                    'control_agent', 'ollama', 'ollama', None,
+                    ['start', 'stop', 'restart'], permissions,
+                    critical=True, confirm_name='ollama',
                 )
+            # CA host matched but nothing resolved inside -- deliberately
+            # falls through to the generic terminal return below, not to
+            # Kubernetes: a row whose host IS the CA's own host is never a
+            # cluster-internal Deployment.
+            return ManagerResolution(manager='none', note='managed_externally')
 
-        if not ca.docker_available:
-            return ManagerResolution(manager='none', note='control_agent_docker_unavailable')
+    k8s_resolution = _try_kubernetes(row, inv, permissions)
+    if k8s_resolution is not None:
+        return k8s_resolution
 
-        for container in ca.containers:
-            if row.container_name and container.get('name') == row.container_name:
-                running = bool(container.get('running'))
-                native_state = 'container up' if running else 'container stopped'
-                native_actions = ['stop', 'restart'] if running else ['start']
-                return _gate_for_user(
-                    'control_agent', 'docker', container.get('name'), native_state,
-                    native_actions, permissions, critical=False, confirm_name=None,
-                )
-
-        for container in ca.containers:
-            if row.port in _docker_host_published_port(container.get('ports')):
-                running = bool(container.get('running'))
-                native_state = 'container up' if running else 'container stopped'
-                native_actions = ['stop', 'restart'] if running else ['start']
-                return _gate_for_user(
-                    'control_agent', 'docker', container.get('name'), native_state,
-                    native_actions, permissions, critical=False, confirm_name=None,
-                )
-
-        if row.name and row.name.lower() == 'ollama':
-            return _gate_for_user(
-                'control_agent', 'ollama', 'ollama', None,
-                ['start', 'stop', 'restart'], permissions,
-                critical=True, confirm_name='ollama',
-            )
-
-    # Kubernetes resolution lands in Phase 2 (k8s_control.py wires inv.kubernetes).
+    if not ca.enabled and inv.kubernetes is None:
+        return ManagerResolution(manager='none')
     return ManagerResolution(manager='none', note='managed_externally')
 
 

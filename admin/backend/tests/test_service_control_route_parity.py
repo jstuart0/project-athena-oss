@@ -25,11 +25,9 @@ import re
 import httpx
 import pytest
 
-from app.auth.oidc import get_current_user
-from app.models import AuditLog, RagService, User
+from app.models import AuditLog, RagService
 from app.routes import service_control
 from app.services import service_managers as sm
-from main import app
 from shared.config import _clear_cache_for_tests
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
@@ -108,15 +106,6 @@ def _reset_state(monkeypatch):
     _clear_cache_for_tests()
 
 
-@pytest.fixture
-def viewer_client(client, viewer_user):
-    async def _get_user():
-        return viewer_user
-    app.dependency_overrides[get_current_user] = _get_user
-    yield client
-    app.dependency_overrides.pop(get_current_user, None)
-
-
 def test_viewer_gets_403_on_the_generic_start_route(viewer_client, db, monkeypatch):
     """One representative check of the lifecycle-subset viewer-403 rule for
     the /{service_name}/* routes -- the manager-specific behavior (which row
@@ -149,3 +138,41 @@ def test_no_is_running_writes_in_service_control_routes():
     with open(path) as f:
         source = f.read()
     assert ".is_running = " not in source
+
+
+# ---------------------------------------------------------------------------
+# tessa mid-build (Medium #2): /ollama/{action} must be registered BEFORE
+# /{service_name}/{action} -- Starlette matches in registration order, and
+# the parametrized route matches ANY first segment including "ollama". A
+# regression here silently reroutes every /ollama/* POST through _run_action
+# against a (usually nonexistent) RagService row named "ollama".
+# ---------------------------------------------------------------------------
+
+def test_ollama_routes_registered_before_generic_service_name_routes():
+    post_paths = [r.path for r in _discover_post_routes()]
+    # Only the lifecycle-shaped ollama routes (2 segments, ending in
+    # start/stop/restart) collide with /{service_name}/{action} -- the model
+    # load/unload routes have a different shape and never collide, so they're
+    # deliberately excluded from this check.
+    ollama_lifecycle_paths = {
+        "/api/service-control/ollama/start",
+        "/api/service-control/ollama/stop",
+        "/api/service-control/ollama/restart",
+    }
+    ollama_indices = [i for i, p in enumerate(post_paths) if p in ollama_lifecycle_paths]
+    generic_indices = [i for i, p in enumerate(post_paths) if p == "/api/service-control/{service_name}/start"]
+    assert ollama_indices and generic_indices
+    assert max(ollama_indices) < min(generic_indices), (
+        "an /ollama/* lifecycle route is registered after /{service_name}/start and would be shadowed"
+    )
+
+
+def test_ollama_start_reaches_the_dedicated_handler_not_the_generic_dispatcher(owner_client, db, monkeypatch):
+    """No RagService row named 'ollama' exists in this DB. If /ollama/start
+    were shadowed by /{service_name}/start, _run_action's row lookup would
+    404. The dedicated handler never queries the registry at all, so it
+    must return 200 (CA disabled -> success=False, but still 200)."""
+    response = owner_client.post("/api/service-control/ollama/start")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["service_name"] == "ollama"

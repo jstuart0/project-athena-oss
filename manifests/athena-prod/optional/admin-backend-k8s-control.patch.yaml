@@ -1,0 +1,32 @@
+# Service Control on Kubernetes -- opt-in automount patch (ATHENA-118, D8).
+#
+# Apply with a strategic-merge PATCH, never by `kubectl apply -f` on this
+# directory (this file is not a standalone valid Deployment manifest --
+# it's a patch fragment):
+#
+#   kubectl -n athena-prod patch deploy athena-admin-backend --patch-file \
+#     manifests/athena-prod/optional/admin-backend-k8s-control.patch.yaml
+#
+# Why this is a separate opt-in file instead of a change to
+# admin-backend.yaml: the tracked base manifest deliberately keeps
+# `serviceAccountName: athena-admin-backend` + `automountServiceAccountToken:
+# false` (ATHENA-59 D3) so every OSS install gets no mounted token by
+# default, regardless of whether Service Control's Kubernetes feature is
+# wanted. Flipping the base file would mount a token (with a bound Role,
+# once admin-backend-rbac.yaml is also applied) for every OSS deployer,
+# whether they asked for it or not -- wrong default for an opt-in feature.
+#
+# THE REAPPLY FOOTGUN (read this before your next `kubectl apply`):
+# `kubectl apply -f manifests/athena-prod/admin-backend.yaml` (or of the
+# whole `manifests/athena-prod/` directory) resets `serviceAccountName` and
+# `automountServiceAccountToken` back to the tracked base values, silently
+# undoing this patch. Service Control's Kubernetes actions then degrade to
+# `no_service_account_token` (a visible amber banner on the Service Control
+# page, per D18) -- not a crash, but control goes dark until you re-run
+# this patch. Add "re-run this patch" to your post-apply checklist for any
+# full or partial reapply of admin-backend.yaml.
+spec:
+  template:
+    spec:
+      serviceAccountName: athena-admin-backend
+      automountServiceAccountToken: true

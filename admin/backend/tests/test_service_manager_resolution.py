@@ -306,3 +306,135 @@ async def test_gather_inventory_fresh_bypasses_cache_then_cache_hits(monkeypatch
 
     await sm.gather_inventory(fresh=True)
     assert len(transport.requests) == 4  # fresh bypasses cache again
+
+
+# ---------------------------------------------------------------------------
+# T8 — Kubernetes resolution (extends T2). CA is disabled (default) in every
+# case here so k8s resolution is exercised in isolation.
+# ---------------------------------------------------------------------------
+
+from app.services.k8s_control import DeploymentInfo  # noqa: E402
+
+
+def _k8s_inv(deployments=None, available=True, reason=None, namespace='athena-prod'):
+    return sm.Inventory(
+        control_agent=sm.ControlAgentInventory(enabled=False, reachable=False),
+        kubernetes=sm.KubernetesInventory(
+            enabled=True, available=available, reason=reason,
+            namespace=namespace, deployments=deployments or {},
+        ),
+    )
+
+
+def _deploy(name, replicas, ready=None):
+    return DeploymentInfo(name=name, replicas=replicas, ready_replicas=ready if ready is not None else replicas)
+
+
+@pytest.mark.parametrize(
+    "host,expect_manager",
+    [
+        pytest.param("athena-rag-tesla", "kubernetes", id="bare_label"),
+        pytest.param("athena-rag-tesla.athena-prod.svc.cluster.local", "kubernetes", id="fqdn_form"),
+        pytest.param("x.other-ns.svc", "none", id="other_namespace"),
+        pytest.param("192.168.1.5", "none", id="bare_ip"),
+    ],
+)
+def test_k8s_host_reduction_cases(host, expect_manager):
+    row = _row(name="tesla-rag", host=host, port=None, container_name=None)
+    inv = _k8s_inv(deployments={"athena-rag-tesla": _deploy("athena-rag-tesla", 1)})
+    res = sm.resolve_manager(row, inv, {"read", "write", "manage_infrastructure"})
+    assert res.manager == expect_manager
+
+
+def test_k8s_protected_deployment_never_resolves():
+    row = _row(name="admin-backend-row", host="athena-admin-backend", port=None, container_name=None)
+    inv = _k8s_inv(deployments={"athena-admin-backend": _deploy("athena-admin-backend", 2)})
+    res = sm.resolve_manager(row, inv, {"read", "write", "manage_infrastructure"})
+    assert res.manager == "none"
+    assert res.note == "protected"
+
+
+def test_k8s_missing_deployment_gives_no_deployment_note():
+    row = _row(name="ghost-row", host="athena-rag-ghost", port=None, container_name=None)
+    inv = _k8s_inv(deployments={})
+    res = sm.resolve_manager(row, inv, {"read", "write", "manage_infrastructure"})
+    assert res.manager == "none"
+    assert res.note == "no_deployment:athena-rag-ghost"
+
+
+def test_k8s_replicas_zero_gives_stopped_shape():
+    row = _row(name="tesla-rag", host="athena-rag-tesla", port=None, container_name=None)
+    inv = _k8s_inv(deployments={"athena-rag-tesla": _deploy("athena-rag-tesla", 0, ready=0)})
+    res = sm.resolve_manager(row, inv, {"read", "write", "manage_infrastructure"})
+    assert res.manager == "kubernetes"
+    assert res.native_actions == ["start"]
+    assert res.native_state == "0/0 pods"
+    assert res.k8s_replicas == 0
+
+
+@pytest.mark.parametrize(
+    "enabled,replicas,ready,expected_actions,expected_state",
+    [
+        pytest.param(False, 0, 0, ["start"], "0/0 pods", id="disabled_zero_replicas"),
+        pytest.param(False, 1, 1, ["stop", "restart"], "1/1 pods", id="disabled_one_replica"),
+    ],
+)
+def test_k8s_disabled_row_vs_scale_are_orthogonal(enabled, replicas, ready, expected_actions, expected_state):
+    row = _row(name="tesla-rag", host="athena-rag-tesla", port=None, container_name=None, enabled=enabled)
+    inv = _k8s_inv(deployments={"athena-rag-tesla": _deploy("athena-rag-tesla", replicas, ready=ready)})
+    res = sm.resolve_manager(row, inv, {"read", "write", "manage_infrastructure"})
+    assert res.native_actions == expected_actions
+    assert res.native_state == expected_state
+
+
+def test_k8s_owner_gate_orchestrator_actions_empty_for_operator():
+    row = _row(name="orchestrator", host="athena-orchestrator", port=None, container_name=None, service_type="core")
+    inv = _k8s_inv(deployments={"athena-orchestrator": _deploy("athena-orchestrator", 1)})
+    operator_res = sm.resolve_manager(row, inv, {"read", "write"})
+    assert operator_res.actions == []
+    assert operator_res.note == "requires_owner"
+    assert operator_res.confirm_required is True  # critical is still true; only actions are gated
+
+    owner_res = sm.resolve_manager(row, inv, {"read", "write", "manage_infrastructure"})
+    assert owner_res.actions == ["stop", "restart"]
+
+
+def test_k8s_non_critical_rag_row_ungated_for_operator():
+    row = _row(name="tesla-rag", host="athena-rag-tesla", port=None, container_name=None, service_type="rag")
+    inv = _k8s_inv(deployments={"athena-rag-tesla": _deploy("athena-rag-tesla", 1)})
+    operator_res = sm.resolve_manager(row, inv, {"read", "write"})
+    assert operator_res.actions == ["stop", "restart"]
+    assert operator_res.confirm_required is False
+
+
+def test_k8s_fail_safe_critical_by_group_not_just_named_set():
+    """[L3] A k8s row whose Deployment name ISN'T in the hardcoded
+    CRITICAL_DEPLOYMENTS set is still critical if its group != 'rag' --
+    proving the union is OR'd correctly, not backwards."""
+    core_row = _row(name="my-core", host="my-core", port=None, container_name=None, service_type="core")
+    inv = _k8s_inv(deployments={"my-core": _deploy("my-core", 1)})
+    res = sm.resolve_manager(core_row, inv, {"read", "write"})
+    assert res.confirm_required is True
+
+    rag_row = _row(name="my-rag", host="my-rag", port=None, container_name=None, service_type="rag")
+    inv2 = _k8s_inv(deployments={"my-rag": _deploy("my-rag", 1)})
+    res2 = sm.resolve_manager(rag_row, inv2, {"read", "write"})
+    assert res2.confirm_required is False
+
+
+def test_k8s_confirm_name_is_the_deployment_label_not_row_name():
+    """The alias row's OWN name ('obscure') must never satisfy the typed
+    confirm -- only the resolved Deployment label does (D4.4 / mozart r3a)."""
+    alias_row = _row(name="obscure", host="athena-orchestrator", port=None, container_name=None, service_type="core")
+    inv = _k8s_inv(deployments={"athena-orchestrator": _deploy("athena-orchestrator", 1)})
+    res = sm.resolve_manager(alias_row, inv, {"read", "write", "manage_infrastructure"})
+    assert res.confirm_name == "athena-orchestrator"
+    assert res.target == "athena-orchestrator"
+
+
+def test_k8s_kubernetes_unavailable_note_carries_reason():
+    row = _row(name="tesla-rag", host="athena-rag-tesla", port=None, container_name=None)
+    inv = _k8s_inv(available=False, reason="forbidden")
+    res = sm.resolve_manager(row, inv, {"read", "write"})
+    assert res.manager == "none"
+    assert res.note == "kubernetes_unavailable:forbidden"

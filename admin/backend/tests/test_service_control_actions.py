@@ -29,11 +29,11 @@ os.environ.setdefault("SERVICE_API_KEY", "test-svc-key-athena-118")
 import httpx
 import pytest
 import structlog
+from fastapi import HTTPException
 
-from app.auth.oidc import get_current_user
-from app.models import AuditLog, RagService, User
+from app.models import AuditLog, RagService
+from app.routes import service_control
 from app.services import service_managers as sm
-from main import app
 from shared.config import _clear_cache_for_tests
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
@@ -71,40 +71,6 @@ def _reset_state(monkeypatch):
     sm._clear_inventory_cache()
     sm._ca_transport = None
     _clear_cache_for_tests()
-
-
-@pytest.fixture
-def owner_user(db):
-    user = User(
-        authentik_id="owner-athena-118",
-        username="owner-athena-118",
-        email="owner-athena-118@example.com",
-        full_name="Owner",
-        role="owner",
-        active=True,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
-
-
-@pytest.fixture
-def owner_client(client, owner_user):
-    async def _get_user():
-        return owner_user
-    app.dependency_overrides[get_current_user] = _get_user
-    yield client
-    app.dependency_overrides.pop(get_current_user, None)
-
-
-@pytest.fixture
-def viewer_client(client, viewer_user):
-    async def _get_user():
-        return viewer_user
-    app.dependency_overrides[get_current_user] = _get_user
-    yield client
-    app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.fixture
@@ -304,3 +270,343 @@ def test_audit_old_value_is_pre_action_state(owner_client, db, piper_row, monkey
     assert "replicas_after" in audit.new_value
     assert audit.new_value["replicas_after"] is None  # no k8s manager in Phase 1
     assert audit.old_value != audit.new_value
+
+
+# ---------------------------------------------------------------------------
+# tessa mid-build (High #1): mutation-tested findings -- the owner-gate/
+# availability order, and accepting the row's own name as a valid confirm,
+# both left every T4 test green. These drive a genuinely CRITICAL
+# resolution (kind='ollama', critical under any manager per D9/D12) through
+# _run_action directly.
+#
+# Why _run_action directly and not TestClient.post("/api/service-control/
+# ollama/stop"): that URL is currently served by the DEDICATED start_ollama/
+# stop_ollama/restart_ollama handlers (tessa mid-build #2 -- /ollama/* is
+# registered before /{service_name}/* specifically so it ISN'T shadowed),
+# and those handlers don't call _run_action until Phase 3 rewrites them
+# (D12, plan step 20). _run_action is exactly the function those routes
+# will call then; a row named 'ollama' is the only row shape that resolves
+# to kind='ollama' via the CA host-match fallback today, so this is the
+# real function under real conditions, just not reachable via that URL yet.
+# The k8s-alias case below (once Phase 2 lands later in this same file)
+# covers the same two mutations end-to-end over TestClient/HTTP.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ollama_row(db) -> RagService:
+    row = RagService(
+        name="ollama", display_name="Ollama Server", host="localhost", port=None,
+        container_name=None, service_type="infrastructure", enabled=True,
+        health_status="healthy",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_ollama_kind_operator_without_manage_infrastructure_gets_403_not_409(
+    db, operator_user, ollama_row, monkeypatch
+):
+    """Mutation 1 (order swap): an operator has 'write' but not
+    'manage_infrastructure'. If the availability check ran before the
+    owner gate, a valid action (stop IS in native_actions for kind=
+    'ollama') would sail through to the confirm check instead of being
+    refused at the gate. The correct order refuses here regardless of
+    action validity."""
+    transport = _ca_transport_for_piper(running=True)
+    _patch_async_client(monkeypatch, transport)
+
+    body = service_control.ServiceActionRequest(confirm_name="ollama")
+    with pytest.raises(HTTPException) as exc_info:
+        await service_control._run_action("ollama", "stop", body, None, db, operator_user)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == {"error": "insufficient_role"}
+
+    ollama_calls = [r for r in transport.requests if r.url.path.startswith("/ollama/")]
+    assert ollama_calls == []
+
+    rows = db.query(AuditLog).filter(AuditLog.resource_id == ollama_row.id).all()
+    assert len(rows) == 1
+    assert rows[0].success is False
+    assert rows[0].error_message == "insufficient_role"
+
+
+@pytest.mark.asyncio
+async def test_ollama_kind_owner_wrong_confirm_value_rejected(db, test_user, ollama_row, monkeypatch):
+    """Mutation 2 (accept row name instead of resolved target): the row's
+    own `display_name` ('Ollama Server') must NOT satisfy the typed
+    confirm -- only the resolved target's identity ('ollama') may."""
+    transport = _ca_transport_for_piper(running=True)
+    _patch_async_client(monkeypatch, transport)
+
+    wrong_body = service_control.ServiceActionRequest(confirm_name="Ollama Server")
+    with pytest.raises(HTTPException) as exc_info:
+        await service_control._run_action("ollama", "stop", wrong_body, None, db, test_user)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == {"error": "confirmation_required"}
+    ollama_calls = [r for r in transport.requests if r.url.path.startswith("/ollama/")]
+    assert ollama_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ollama_kind_owner_no_confirm_gets_409(db, test_user, ollama_row, monkeypatch):
+    transport = _ca_transport_for_piper(running=True)
+    _patch_async_client(monkeypatch, transport)
+
+    empty_body = service_control.ServiceActionRequest()
+    with pytest.raises(HTTPException) as exc_info:
+        await service_control._run_action("ollama", "stop", empty_body, None, db, test_user)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == {"error": "confirmation_required"}
+
+
+@pytest.mark.asyncio
+async def test_ollama_kind_owner_correct_confirm_value_proceeds(db, test_user, ollama_row, monkeypatch):
+    transport = _ca_transport_for_piper(running=True)
+    transport._responses["/ollama/stop"] = (200, {"success": True, "message": "stopped"})
+    _patch_async_client(monkeypatch, transport)
+
+    correct_body = service_control.ServiceActionRequest(confirm_name="ollama")
+    result = await service_control._run_action("ollama", "stop", correct_body, None, db, test_user)
+
+    assert result.success is True
+    ollama_calls = [r for r in transport.requests if r.url.path == "/ollama/stop"]
+    assert len(ollama_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# T8 (Phase 2) route-level: k8s dispatch through _run_action, end to end
+# over the real HTTP surface. This is the "once P2 lands" half of tessa's
+# mid-build High #1 -- and unlike the ollama-kind case above, native_actions
+# for a k8s row IS state-dependent, so this genuinely discriminates the
+# owner-gate/availability ORDER mutation (an operator hitting 'stop' on a
+# Deployment already at 0 replicas must get 403, never 409, even though
+# 'stop' is also unavailable there).
+# ---------------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+
+from app.services import k8s_control as kc  # noqa: E402
+from app.services.service_control_settings import acquire_lease, release_lease  # noqa: E402
+from tests.conftest import TestingSessionLocal  # noqa: E402
+
+
+class _K8sFakeTransport:
+    def __init__(self, deployments):
+        self.deployments = deployments  # name -> {"replicas": n, "ready": n}
+        self.requests = []
+
+    def handler(self, request):
+        self.requests.append(request)
+        path = request.url.path
+        if path.endswith("/deployments"):
+            items = [
+                {
+                    "metadata": {"name": name},
+                    "spec": {"replicas": d["replicas"]},
+                    "status": {"readyReplicas": d["ready"]},
+                }
+                for name, d in self.deployments.items()
+            ]
+            return httpx.Response(200, json={"items": items})
+
+        name = path.split("/deployments/")[1].split("/scale")[0]
+        if request.method == "GET":
+            d = self.deployments[name]
+            return httpx.Response(200, json={
+                "spec": {"replicas": d["replicas"]},
+                "status": {"replicas": d["replicas"]},
+                "metadata": {"resourceVersion": f"rv-{name}"},
+            })
+        if request.method == "PATCH":
+            body = _json.loads(request.content)
+            n = body["spec"]["replicas"]
+            self.deployments[name]["replicas"] = n
+            self.deployments[name]["ready"] = n
+            return httpx.Response(200, json={})
+        return httpx.Response(404, json={})
+
+
+@pytest.fixture
+def k8s_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("SERVICE_CONTROL_K8S_ENABLED", "true")
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    _clear_cache_for_tests()
+    token_path = tmp_path / "token"
+    token_path.write_text("tok-k8s")
+    monkeypatch.setattr(kc, "TOKEN_PATH_DEFAULT", str(token_path))
+    monkeypatch.setattr(kc, "NAMESPACE_PATH_DEFAULT", str(tmp_path / "namespace"))
+    monkeypatch.setattr(service_control, "LEASE_SESSION_FACTORY", TestingSessionLocal)
+
+    def _apply(deployments):
+        transport = _K8sFakeTransport(deployments)
+        monkeypatch.setattr(kc, "_test_transport", httpx.MockTransport(transport.handler))
+        kc._clear_client_cache()
+        return transport
+
+    yield _apply
+    kc._clear_client_cache()
+    _clear_cache_for_tests()
+
+
+@pytest.fixture
+def orchestrator_row(db) -> RagService:
+    row = RagService(
+        name="orchestrator", display_name="Orchestrator", host="athena-orchestrator",
+        port=None, container_name=None, service_type="core", enabled=True,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@pytest.fixture
+def tesla_row(db) -> RagService:
+    row = RagService(
+        name="tesla-rag", display_name="Tesla RAG", host="athena-rag-tesla",
+        port=None, container_name=None, service_type="rag", enabled=True,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_k8s_critical_owner_no_confirm_gets_409_zero_patch(db, test_user, orchestrator_row, k8s_env):
+    transport = k8s_env({"athena-orchestrator": {"replicas": 2, "ready": 2}})
+    body = service_control.ServiceActionRequest()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service_control._run_action("orchestrator", "stop", body, None, db, test_user)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == {"error": "confirmation_required"}
+    patch_calls = [r for r in transport.requests if r.method == "PATCH"]
+    assert patch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_k8s_critical_owner_correct_confirm_dispatches(db, test_user, orchestrator_row, k8s_env):
+    transport = k8s_env({"athena-orchestrator": {"replicas": 2, "ready": 2}})
+    body = service_control.ServiceActionRequest(confirm_name="athena-orchestrator")
+
+    result = await service_control._run_action("orchestrator", "stop", body, None, db, test_user)
+
+    assert result.success is True
+    patch_calls = [r for r in transport.requests if r.method == "PATCH"]
+    assert len(patch_calls) == 1
+    assert _json.loads(patch_calls[0].content)["spec"]["replicas"] == 0
+
+
+@pytest.mark.asyncio
+async def test_k8s_alias_row_confirm_must_be_resolved_target_not_alias_name(db, test_user, k8s_env):
+    """D4.4 / mozart r3a: an alias row ('obscure') whose host resolves to
+    the critical athena-orchestrator Deployment must require typing the
+    TARGET's name, not the alias row's own name."""
+    alias_row = RagService(
+        name="obscure", display_name="Obscure Alias", host="athena-orchestrator",
+        port=None, container_name=None, service_type="core", enabled=True,
+    )
+    db.add(alias_row)
+    db.commit()
+    db.refresh(alias_row)
+
+    transport = k8s_env({"athena-orchestrator": {"replicas": 2, "ready": 2}})
+
+    wrong_body = service_control.ServiceActionRequest(confirm_name="obscure")
+    with pytest.raises(HTTPException) as exc_info:
+        await service_control._run_action("obscure", "stop", wrong_body, None, db, test_user)
+    assert exc_info.value.status_code == 409
+    assert [r for r in transport.requests if r.method == "PATCH"] == []
+
+    correct_body = service_control.ServiceActionRequest(confirm_name="athena-orchestrator")
+    result = await service_control._run_action("obscure", "stop", correct_body, None, db, test_user)
+    assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_k8s_operator_without_manage_infrastructure_gets_403_even_when_action_unavailable(
+    db, operator_user, orchestrator_row, k8s_env
+):
+    """Mutation 1, now genuinely discriminating: 'stop' on a Deployment
+    ALREADY at 0 replicas is not in native_actions (native_actions ==
+    ['start'] only) -- if the availability check ran before the owner gate,
+    this would 409 action_not_available instead of 403 insufficient_role."""
+    transport = k8s_env({"athena-orchestrator": {"replicas": 0, "ready": 0}})
+    body = service_control.ServiceActionRequest(confirm_name="athena-orchestrator")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service_control._run_action("orchestrator", "stop", body, None, db, operator_user)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == {"error": "insufficient_role"}
+    assert [r for r in transport.requests if r.method == "PATCH"] == []
+
+
+@pytest.mark.asyncio
+async def test_k8s_operator_can_control_non_critical_rag_row(db, operator_user, tesla_row, k8s_env):
+    transport = k8s_env({"athena-rag-tesla": {"replicas": 1, "ready": 1}})
+    body = service_control.ServiceActionRequest()
+
+    result = await service_control._run_action("tesla-rag", "stop", body, None, db, operator_user)
+
+    assert result.success is True
+    assert len([r for r in transport.requests if r.method == "PATCH"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_k8s_busy_lease_gives_409_action_in_progress_zero_patch_audited(
+    db, test_user, tesla_row, k8s_env
+):
+    transport = k8s_env({"athena-rag-tesla": {"replicas": 1, "ready": 1}})
+
+    held_lease = acquire_lease(TestingSessionLocal, "athena-rag-tesla", "restart", target_replicas=0)
+
+    body = service_control.ServiceActionRequest()
+    with pytest.raises(HTTPException) as exc_info:
+        await service_control._run_action("tesla-rag", "stop", body, None, db, test_user)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == {"error": "action_in_progress"}
+    assert [r for r in transport.requests if r.method == "PATCH"] == []
+
+    rows = db.query(AuditLog).filter(AuditLog.resource_id == tesla_row.id).all()
+    assert len(rows) == 1
+    assert rows[0].success is False
+    assert rows[0].error_message == "action_in_progress"
+
+    release_lease(TestingSessionLocal, held_lease)
+
+
+@pytest.mark.asyncio
+async def test_k8s_target_collision_blocks_both_rows_in_envelope(db, test_user, k8s_env):
+    row1 = RagService(
+        name="orchestrator-a", display_name="Orchestrator A", host="athena-orchestrator",
+        port=None, service_type="core", enabled=True,
+    )
+    row2 = RagService(
+        name="orchestrator-b", display_name="Orchestrator B", host="athena-orchestrator.athena-prod.svc",
+        port=None, service_type="core", enabled=True,
+    )
+    db.add_all([row1, row2])
+    db.commit()
+
+    k8s_env({"athena-orchestrator": {"replicas": 2, "ready": 2}})
+
+    inv = await sm.gather_inventory(fresh=True)
+    permissions = test_user.get_permissions()
+    res1 = sm.resolve_manager(row1, inv, permissions)
+    res2 = sm.resolve_manager(row2, inv, permissions)
+    # Envelope-level collision handling lives in list_services; verify both
+    # rows resolve to the SAME target here (the precondition the envelope's
+    # collision check keys on).
+    assert res1.manager == "kubernetes"
+    assert res2.manager == "kubernetes"
+    assert res1.target == res2.target == "athena-orchestrator"

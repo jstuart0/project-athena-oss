@@ -188,6 +188,21 @@ class AthenaConfig(BaseSettings):
     control_agent_enabled: bool = Field(default=False)
 
     # ------------------------------------------------------------------
+    # Service Control on Kubernetes — opt-in feature flag (ATHENA-118)
+    # ------------------------------------------------------------------
+    # When False (default), admin-backend never touches the filesystem for
+    # a ServiceAccount token and the Kubernetes manager always resolves to
+    # unavailable. Set SERVICE_CONTROL_K8S_ENABLED=true only after applying
+    # manifests/athena-prod/optional/admin-backend-rbac.yaml and the
+    # automount patch file (see docs/CONFIGURATION.md § Service Control on
+    # Kubernetes) — the Role there grants ONLY `deployments` get/list and
+    # `deployments/scale` get/patch on a fixed, name-scoped Deployment list;
+    # there is no `deployments` patch (pod-template write), so this flag can
+    # never grant code execution or secret access beyond what `get`/`list`
+    # already exposes (Deployment specs, not Secret values).
+    service_control_k8s_enabled: bool = Field(default=False)
+
+    # ------------------------------------------------------------------
     # Local-login rate limiting + per-account lockout (Campaign 3 / ATHENA-14)
     # ------------------------------------------------------------------
     # login_rate_limit_per_minute: max POST /local-login attempts per IP per 60 s

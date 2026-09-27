@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Ticket:** [ATHENA-118](https://plane.xmojo.net)
+
+### Added: Service Control resolves a real manager per row (Control Agent / Kubernetes / none) instead of guessing from a stale `is_running` flag (ATHENA-118, Phases 1-2)
+
+- **Added — `GET /api/service-control` envelope**: `{services, counts, control_agent, kubernetes}` replaces the old bare list. Each row's run state (`running`/`stopped`/`disabled`) is derived from health + `enabled` (`app/utils/service_state.py`), never the `is_running` column, which is now unwritten (deprecated, kept only for the startup schema gate). **Behavior change**: a row with no manager now returns 409 `action_not_available` on a lifecycle action instead of 200 `success: false`.
+- **Added — `app/services/service_managers.py::resolve_manager`**: per-row manager resolution, Control Agent (host-gated) then Kubernetes then `none`, with server-side grouping (`row.group`) and D10's action table.
+- **Added — `app/services/k8s_control.py`**: a scale-only Kubernetes adapter (`deployments` get/list, `deployments/scale` get/patch — no `deployments` PATCH anywhere, so no pod-template write is ever possible through this path). Restart is scale-to-0, a bounded 60s wait, then a shielded scale-back in `finally` — brief downtime, not a rolling restart. Opt-in via `SERVICE_CONTROL_K8S_ENABLED` (default `false`) plus `manifests/athena-prod/optional/admin-backend-rbac.yaml` and its automount patch file.
+- **Added — cross-replica lease** (`app/services/service_control_settings.py`, `system_settings` key `service_control.lock.<deployment>`, 90s TTL): serializes k8s actions across admin-backend replicas; contention is 409 `action_in_progress`. Remembered replica counts live in `service_control.replicas.<deployment>` (clamped 1-10, never stores a 0).
+- **Added — owner gate**: a new `manage_infrastructure` permission (owner role only) plus a server-enforced typed confirmation (`confirm_name`, checked against the **resolved target's** name, never an alias row's own name) guard critical targets — the named core-service set, any Kubernetes-resolved row outside the `rag` group, and Ollama under any manager. The gate is checked before action-availability, so a non-owner always gets 403 `insufficient_role`.
+- **Added — target-collision guard**: two registry rows resolving to the same Kubernetes Deployment block each other (`manager_note: "target_collision:<name>"`).
+- **Fixed** — `/api/service-control/ollama/{start,stop,restart}` are now registered before `/api/service-control/{service_name}/{action}`; the parametrized route previously would have silently shadowed them once resolution against a matching registry row succeeded.
+- All 12 `POST` routes in `service_control.py` now share a dedicated `service_control` rate-limit budget and audit their outcome (including refused 403/409s once resolution has run).
+- Not yet landed: the frontend rewrite and the Ollama-panel resolver unification (Phases 3-4).
+
+---
+
+## [Unreleased]
+
 > **Ticket:** [ATHENA-113](https://plane.xmojo.net)
 
 ### Changed: Mission Control's voice-health card is registry-driven, not hard-coded to 5 named services (ATHENA-113 follow-up)
