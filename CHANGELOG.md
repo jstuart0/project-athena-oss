@@ -21,6 +21,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+> **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md`
+
+### Fixed: Mission Control never loaded on a plain visit — the default landing tab read 'dashboard', not 'mission-control' (ATHENA-113a)
+
+- **Fixed — `admin/frontend/app.js`'s no-hash fallback defaulted to the wrong tab**: `index.html` declares Mission Control as the default landing page in two places (the sidebar button's pre-applied `sidebar-item-active` class and comment at `:1531-1534`, and the `#tab-mission-control` container's "(Default Landing Page)" comment at `:1882`), but `app.js`'s `const initialTab = hash || 'dashboard'` (present since the initial OSS commit, `794096b`) sent every plain visit to the separate "Service Status" Dashboard tab instead. `Athena.pages.MissionControl.init()` — and its one dependency, `GET /api/dashboard` — never ran unless a user explicitly clicked "Mission Control" or navigated to `#mission-control`, which is exactly what a 6-hour admin-backend log window with zero genuine `/api/dashboard` hits showed. Now defaults to `'mission-control'`; `#dashboard` deep links and the keyboard shortcut are unchanged. New static test: `tests/unit/test_admin_frontend_default_tab.py`.
+- Cache-buster: `app.js` bumped `?v=20260927b` → `?v=20260927f` (main advanced to `e` via ATHENA-112/109 while this campaign was in flight; `f` avoids the collision).
+
+---
+
+## [Unreleased]
+
 > **Ticket:** [ATHENA-110](https://plane.xmojo.net)
 > **Plan:** `.mozart/plans/active/2026-09-27-operate-athena-dashboard-registry-cleanup.md` (P3)
 

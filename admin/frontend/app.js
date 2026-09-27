@@ -99,9 +99,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         StatusBar.start();
     }
 
-    // Handle deep linking - check URL hash for initial tab
+    // Handle deep linking - check URL hash for initial tab (ATHENA-113a: default 'mission-control')
     const hash = window.location.hash.replace('#', '');
-    const initialTab = hash || 'dashboard';
+    const initialTab = hash || 'mission-control';
     showTab(initialTab);
 
     // Listen for hash changes (browser back/forward)
