@@ -1,5 +1,5 @@
 # Auto-generated RAG Services Manifests
-# Generated: 2026-06-12T13:08:17.383384
+# Generated: 2026-09-26T21:48:53.889326
 # Total services: 23
 # Registry: YOUR_REGISTRY  (set REGISTRY env var to override)
 # Tag: latest  (set TAG env var to override)
@@ -50,6 +50,7 @@ spec:
             secretKeyRef:
               name: athena-api-keys
               key: OPENWEATHER_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -124,6 +125,12 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
+        - name: FLIGHTAWARE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-api-keys
+              key: FLIGHTAWARE_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -203,6 +210,7 @@ spec:
             secretKeyRef:
               name: athena-api-keys
               key: ALPHA_VANTAGE_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -282,6 +290,7 @@ spec:
             secretKeyRef:
               name: athena-api-keys
               key: FLIGHTAWARE_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -361,6 +370,7 @@ spec:
             secretKeyRef:
               name: athena-api-keys
               key: TICKETMASTER_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -440,6 +450,7 @@ spec:
             secretKeyRef:
               name: athena-api-keys
               key: TMDB_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -514,11 +525,6 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
-        - name: NEWSAPI_KEY
-          valueFrom:
-            secretKeyRef:
-              name: athena-api-keys
-              key: NEWSAPI_KEY
         resources:
           requests:
             memory: "64Mi"
@@ -598,6 +604,19 @@ spec:
             secretKeyRef:
               name: athena-api-keys
               key: THESPORTSDB_API_KEY
+              optional: true
+        - name: GNEWS_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-api-keys
+              key: GNEWS_API_KEY
+              optional: true
+        - name: API_FOOTBALL_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-api-keys
+              key: API_FOOTBALL_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -677,6 +696,7 @@ spec:
             secretKeyRef:
               name: athena-api-keys
               key: BRAVE_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -751,11 +771,12 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
-        - name: YELP_API_KEY
+        - name: GOOGLE_PLACES_API_KEY
           valueFrom:
             secretKeyRef:
               name: athena-api-keys
-              key: YELP_API_KEY
+              key: GOOGLE_PLACES_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -835,6 +856,7 @@ spec:
             secretKeyRef:
               name: athena-api-keys
               key: SPOONACULAR_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -914,6 +936,7 @@ spec:
             secretKeyRef:
               name: athena-api-keys
               key: OPENWEATHER_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -988,11 +1011,18 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
-        - name: SEATGEEK_API_KEY
+        - name: SEATGEEK_CLIENT_ID
           valueFrom:
             secretKeyRef:
               name: athena-api-keys
-              key: SEATGEEK_API_KEY
+              key: SEATGEEK_CLIENT_ID
+              optional: true
+        - name: SEATGEEK_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: athena-api-keys
+              key: SEATGEEK_CLIENT_SECRET
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -1289,11 +1319,6 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
-        - name: TESLA_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: athena-api-keys
-              key: TESLA_API_KEY
         resources:
           requests:
             memory: "64Mi"
@@ -1368,6 +1393,12 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
+        - name: OVERSEERR_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-api-keys
+              key: OVERSEERR_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -1442,11 +1473,18 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
-        - name: GOOGLE_MAPS_API_KEY
+        - name: GOOGLE_DIRECTIONS_API_KEY
           valueFrom:
             secretKeyRef:
               name: athena-api-keys
-              key: GOOGLE_MAPS_API_KEY
+              key: GOOGLE_DIRECTIONS_API_KEY
+              optional: true
+        - name: GOOGLE_PLACES_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-api-keys
+              key: GOOGLE_PLACES_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -1521,6 +1559,12 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
+        - name: BRAVE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-api-keys
+              key: BRAVE_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -1595,11 +1639,12 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
-        - name: SERPAPI_KEY
+        - name: SERPAPI_API_KEY
           valueFrom:
             secretKeyRef:
               name: athena-api-keys
-              key: SERPAPI_KEY
+              key: SERPAPI_API_KEY
+              optional: true
         resources:
           requests:
             memory: "64Mi"
@@ -1748,11 +1793,12 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
-        - name: BRIGHTDATA_API_KEY
+        - name: BRIGHT_DATA_API_TOKEN
           valueFrom:
             secretKeyRef:
               name: athena-api-keys
-              key: BRIGHTDATA_API_KEY
+              key: BRIGHT_DATA_API_TOKEN
+              optional: true
         resources:
           requests:
             memory: "64Mi"

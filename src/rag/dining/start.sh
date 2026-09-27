@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 export PORT=${1:-${PORT:-8019}}
-[ -z "$YELP_API_KEY" ] && echo "Warning: YELP_API_KEY not set"
+[ -z "$GOOGLE_PLACES_API_KEY" ] && echo "Warning: GOOGLE_PLACES_API_KEY not set"
 if [ ! -d "venv" ]; then python3 -m venv venv; fi
 source venv/bin/activate
 pip install -q --upgrade pip && pip install -q -r requirements.txt

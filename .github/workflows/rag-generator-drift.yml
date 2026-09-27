@@ -4,6 +4,12 @@ name: RAG Dockerfile Generator Drift
 # (scripts/generate-rag-dockerfiles.py) fails CI. To resolve drift, re-run the
 # generator and commit the output, or update the generator template to match
 # intentional Dockerfile changes.
+#
+# ATHENA-88 / F91 (D11): also enforces RAG API-key env-name parity via
+# scripts/check-rag-key-env.py — each service's key_envs in
+# scripts/generate-rag-manifests.py must match what its own code reads,
+# create-secrets.sh must document their union, and the committed
+# manifests/athena-prod/rag-services.yaml must match generator output.
 
 on:
   pull_request:
@@ -12,6 +18,10 @@ on:
       - "scripts/generate-rag-dockerfiles.py"
       - "scripts/service-defs.sh"
       - ".github/workflows/rag-generator-drift.yml"
+      - "scripts/generate-rag-manifests.py"
+      - "scripts/check-rag-key-env.py"
+      - "scripts/create-secrets.sh"
+      - "manifests/athena-prod/rag-services.yaml"
 
 permissions:
   contents: read
@@ -38,4 +48,15 @@ jobs:
           python3 scripts/generate-rag-dockerfiles.py --check | tee drift-summary.txt || RC=$?
           echo "## RAG Dockerfile Generator Drift" >> "${GITHUB_STEP_SUMMARY}"
           cat drift-summary.txt >> "${GITHUB_STEP_SUMMARY}"
+          exit "$RC"
+
+      - name: Check for RAG key-env drift
+        if: always()
+        shell: bash
+        run: |
+          RC=0
+          python3 scripts/check-rag-key-env.py > rag-key-env-drift.txt 2>&1 || RC=$?
+          cat rag-key-env-drift.txt | tee -a drift-summary.txt
+          echo "## RAG Key-Env Drift" >> "${GITHUB_STEP_SUMMARY}"
+          cat rag-key-env-drift.txt >> "${GITHUB_STEP_SUMMARY}"
           exit "$RC"

@@ -176,22 +176,30 @@ fi
 # athena-api-keys — idempotent via --dry-run=client | kubectl apply
 # -----------------------------------------------------------------------
 echo "Creating athena-api-keys..."
+# Names below are the union of every RAG service's key_envs in
+# scripts/generate-rag-manifests.py — kept in sync by
+# scripts/check-rag-key-env.py (ATHENA-88 / F91 D11). Every ref in the
+# generated manifest is optional: true, so it's safe (and expected) to
+# export only the keys you actually have; a service with an unset key
+# starts fine and returns errors only for queries that need it.
 kubectl -n "$NAMESPACE" create secret generic athena-api-keys \
     --from-literal=OPENWEATHER_API_KEY="${OPENWEATHER_API_KEY:-}" \
     --from-literal=BRAVE_API_KEY="${BRAVE_API_KEY:-}" \
-    --from-literal=NEWSAPI_KEY="${NEWSAPI_KEY:-}" \
     --from-literal=TMDB_API_KEY="${TMDB_API_KEY:-}" \
     --from-literal=TICKETMASTER_API_KEY="${TICKETMASTER_API_KEY:-}" \
     --from-literal=ALPHA_VANTAGE_API_KEY="${ALPHA_VANTAGE_API_KEY:-}" \
-    --from-literal=YELP_API_KEY="${YELP_API_KEY:-}" \
+    --from-literal=GOOGLE_PLACES_API_KEY="${GOOGLE_PLACES_API_KEY:-}" \
     --from-literal=SPOONACULAR_API_KEY="${SPOONACULAR_API_KEY:-}" \
     --from-literal=THESPORTSDB_API_KEY="${THESPORTSDB_API_KEY:-}" \
+    --from-literal=GNEWS_API_KEY="${GNEWS_API_KEY:-}" \
+    --from-literal=API_FOOTBALL_KEY="${API_FOOTBALL_KEY:-}" \
     --from-literal=FLIGHTAWARE_API_KEY="${FLIGHTAWARE_API_KEY:-}" \
-    --from-literal=SEATGEEK_API_KEY="${SEATGEEK_API_KEY:-}" \
-    --from-literal=TESLA_API_KEY="${TESLA_API_KEY:-}" \
-    --from-literal=GOOGLE_MAPS_API_KEY="${GOOGLE_MAPS_API_KEY:-}" \
-    --from-literal=SERPAPI_KEY="${SERPAPI_KEY:-}" \
-    --from-literal=BRIGHTDATA_API_KEY="${BRIGHTDATA_API_KEY:-}" \
+    --from-literal=SEATGEEK_CLIENT_ID="${SEATGEEK_CLIENT_ID:-}" \
+    --from-literal=SEATGEEK_CLIENT_SECRET="${SEATGEEK_CLIENT_SECRET:-}" \
+    --from-literal=OVERSEERR_API_KEY="${OVERSEERR_API_KEY:-}" \
+    --from-literal=GOOGLE_DIRECTIONS_API_KEY="${GOOGLE_DIRECTIONS_API_KEY:-}" \
+    --from-literal=SERPAPI_API_KEY="${SERPAPI_API_KEY:-}" \
+    --from-literal=BRIGHT_DATA_API_TOKEN="${BRIGHT_DATA_API_TOKEN:-}" \
     --dry-run=client -o yaml | kubectl apply -f -
 
 # -----------------------------------------------------------------------

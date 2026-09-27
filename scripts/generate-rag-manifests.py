@@ -10,6 +10,12 @@ the generator and diff the output against the committed rag-services.yaml to
 confirm no unintended changes were introduced. Failing to do this will silently
 diverge the generated manifest from the template.
 
+scripts/check-rag-key-env.py (ATHENA-88 / F91) checks that each service's
+key_envs here match the env vars its own code actually reads, that
+create-secrets.sh documents their union, and that this file's output matches
+the committed manifest — run it (or let CI's rag-generator-drift.yml run it)
+before committing a SERVICES change.
+
 Environment variables:
   REGISTRY  Container registry prefix (default: YOUR_REGISTRY).
             Example: REGISTRY=registry.example.com:5000 python3 scripts/generate-rag-manifests.py
@@ -19,53 +25,86 @@ Environment variables:
 
 import datetime
 import os
+from collections import namedtuple
 
-# Service definitions: (name, port, api_key_env or None)
+# name: RAG service name (used for the Deployment/Service and the container
+#   port env var comment below).
+# port: container port.
+# key_envs: tuple of API-key env var names this service's own code reads
+#   (os.getenv/os.environ) — each becomes its own `optional: true`
+#   secretKeyRef against the athena-api-keys Secret. Empty tuple means the
+#   service takes no RAG-specific credential (admin key store only, or no
+#   external API at all).
+# src_dir: the directory under src/rag/ this service's code lives in, when
+#   it differs from `name` (checked by check-rag-key-env.py).
+RagService = namedtuple("RagService", ["name", "port", "key_envs", "src_dir"])
+
 SERVICES = [
-    ("weather", 8010, "OPENWEATHER_API_KEY"),
-    ("airports", 8011, None),
-    ("stocks", 8012, "ALPHA_VANTAGE_API_KEY"),
-    ("flights", 8013, "FLIGHTAWARE_API_KEY"),
-    ("events", 8014, "TICKETMASTER_API_KEY"),
-    ("streaming", 8015, "TMDB_API_KEY"),
-    ("news", 8016, "NEWSAPI_KEY"),
-    ("sports", 8017, "THESPORTSDB_API_KEY"),
-    ("websearch", 8018, "BRAVE_API_KEY"),
-    ("dining", 8019, "YELP_API_KEY"),
-    ("recipes", 8020, "SPOONACULAR_API_KEY"),
-    ("onecall", 8021, "OPENWEATHER_API_KEY"),
-    ("seatgeek", 8024, "SEATGEEK_API_KEY"),
-    ("transportation", 8025, None),
-    ("community", 8026, None),
-    ("amtrak", 8027, None),
-    ("tesla", 8028, "TESLA_API_KEY"),
-    ("media", 8029, None),
-    ("directions", 8030, "GOOGLE_MAPS_API_KEY"),
-    ("sitescraper", 8031, None),
-    ("serpapi", 8032, "SERPAPI_KEY"),
-    ("pricecompare", 8033, None),
-    ("brightdata", 8040, "BRIGHTDATA_API_KEY"),
+    RagService("weather", 8010, ("OPENWEATHER_API_KEY",), "weather"),
+    RagService("airports", 8011, ("FLIGHTAWARE_API_KEY",), "airports"),
+    RagService("stocks", 8012, ("ALPHA_VANTAGE_API_KEY",), "stocks"),
+    RagService("flights", 8013, ("FLIGHTAWARE_API_KEY",), "flights"),
+    RagService("events", 8014, ("TICKETMASTER_API_KEY",), "events"),
+    RagService("streaming", 8015, ("TMDB_API_KEY",), "streaming"),
+    # News is admin-key-store only (store keys api-newsapiai / api-webz) —
+    # the service's own code reads no API-key env var.
+    RagService("news", 8016, (), "news"),
+    RagService(
+        "sports", 8017,
+        ("THESPORTSDB_API_KEY", "GNEWS_API_KEY", "API_FOOTBALL_KEY"),
+        "sports",
+    ),
+    RagService("websearch", 8018, ("BRAVE_API_KEY",), "websearch"),
+    RagService("dining", 8019, ("GOOGLE_PLACES_API_KEY",), "dining"),
+    RagService("recipes", 8020, ("SPOONACULAR_API_KEY",), "recipes"),
+    RagService("onecall", 8021, ("OPENWEATHER_API_KEY",), "onecall"),
+    RagService(
+        "seatgeek", 8024,
+        ("SEATGEEK_CLIENT_ID", "SEATGEEK_CLIENT_SECRET"),
+        "seatgeek_events",
+    ),
+    RagService("transportation", 8025, (), "transportation"),
+    RagService("community", 8026, (), "community_events"),
+    RagService("amtrak", 8027, (), "amtrak"),
+    # Tesla reads TeslaMate DB connection vars, not an API-key credential.
+    RagService("tesla", 8028, (), "tesla"),
+    RagService("media", 8029, ("OVERSEERR_API_KEY",), "media"),
+    RagService(
+        "directions", 8030,
+        ("GOOGLE_DIRECTIONS_API_KEY", "GOOGLE_PLACES_API_KEY"),
+        "directions",
+    ),
+    RagService("sitescraper", 8031, ("BRAVE_API_KEY",), "site_scraper"),
+    RagService("serpapi", 8032, ("SERPAPI_API_KEY",), "serpapi_events"),
+    RagService("pricecompare", 8033, (), "price_compare"),
+    RagService("brightdata", 8040, ("BRIGHT_DATA_API_TOKEN",), "brightdata"),
 ]
 
 REGISTRY = os.environ.get("REGISTRY", "YOUR_REGISTRY")
 TAG = os.environ.get("TAG", "latest")
 
 
-def generate_deployment(name, port, api_key):
+def generate_deployment(name, port, key_envs):
     # Always inject SERVICE_API_KEY so RAG services can call the admin backend
-    # (required for /api/internal/* and /api/external-api-keys/public/* endpoints)
+    # (required for /api/internal/* and /api/external-api-keys/public/* endpoints).
+    # This ref is always required — never optional: true.
     api_key_env = """        - name: SERVICE_API_KEY
           valueFrom:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY"""
-    if api_key:
+    # Per-service API-key refs are optional: true (ATHENA-88 / F91 D10) — a
+    # RAG service with no key configured yet must still start; it degrades
+    # to returning errors for queries that need the missing key, rather than
+    # crash-looping on a missing secret key.
+    for key_env in key_envs:
         api_key_env += f"""
-        - name: {api_key}
+        - name: {key_env}
           valueFrom:
             secretKeyRef:
               name: athena-api-keys
-              key: {api_key}"""
+              key: {key_env}
+              optional: true"""
 
     return f"""---
 apiVersion: apps/v1
@@ -150,9 +189,9 @@ def main():
     print("# To regenerate:")
     print("#   REGISTRY=your.registry.example.com python3 scripts/generate-rag-manifests.py > manifests/athena-prod/rag-services.yaml")
 
-    for name, port, api_key in SERVICES:
-        print(generate_deployment(name, port, api_key))
-        print(generate_service(name, port))
+    for service in SERVICES:
+        print(generate_deployment(service.name, service.port, service.key_envs))
+        print(generate_service(service.name, service.port))
 
 if __name__ == "__main__":
     main()

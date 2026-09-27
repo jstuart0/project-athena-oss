@@ -274,6 +274,27 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 
 ## API Keys
 
+### Key source and precedence (ATHENA-88 / F91)
+
+Every RAG API key below can be set two ways: as an env var (via the
+`athena-api-keys` Secret in Kubernetes, or this file's `.env.example`
+counterpart for local dev), or via the admin UI's **External API Keys**
+page (a database-backed key store). Both are optional per key — a RAG
+service starts fine with neither and simply errors on queries that need
+the missing key.
+
+- **The admin key store wins at startup.** If the store returns a key for
+  a service, it overwrites the env var value. An env-only key (nothing in
+  the store) is used as-is; the store returning nothing (404, non-2xx, or
+  a connection error) falls back to the env var.
+- **Changes in the admin UI aren't live** — the store is only consulted at
+  service startup. Restart the affected `athena-rag-<service>` pod after
+  changing a key there.
+- `scripts/generate-rag-manifests.py`'s `SERVICES` table names exactly the
+  env var each service's own code reads; `scripts/check-rag-key-env.py`
+  enforces that in CI (`rag-generator-drift.yml`) so the manifest,
+  `create-secrets.sh`, and the code can't drift apart again.
+
 ### Weather Services
 
 | Variable | Free Tier | Sign Up |
@@ -295,16 +316,16 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 
 ### News & Information
 
-| Variable | Free Tier | Sign Up |
-|----------|-----------|---------|
-| `NEWSAPI_KEY` | 100/day | [newsapi.org](https://newsapi.org/register) |
+News reads its key from the admin key store only — its own code has no
+`os.getenv`/`os.environ` read for an env-based key. Configure it via the
+admin UI's External API Keys page (store keys `api-newsapiai` / `api-webz`).
 
 ### Food & Dining
 
 | Variable | Free Tier | Sign Up |
 |----------|-----------|---------|
 | `SPOONACULAR_API_KEY` | 150/day | [spoonacular.com](https://spoonacular.com/food-api) |
-| `YELP_API_KEY` | 5,000/day | [yelp.com/developers](https://www.yelp.com/developers/v3/manage_app) |
+| `GOOGLE_PLACES_API_KEY` | See pricing | [developers.google.com/maps](https://developers.google.com/maps/documentation/places/web-service) — also used by Directions |
 
 ### Finance & Sports
 
@@ -312,12 +333,14 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 |----------|-----------|---------|
 | `ALPHA_VANTAGE_API_KEY` | 500/day | [alphavantage.co](https://www.alphavantage.co/support/#api-key) |
 | `THESPORTSDB_API_KEY` | Yes | [thesportsdb.com](https://www.thesportsdb.com/api.php) |
+| `GNEWS_API_KEY` | Optional, sports RAG only | [gnews.io](https://gnews.io/) |
+| `API_FOOTBALL_KEY` | Optional, sports RAG only | [api-football.com](https://www.api-football.com/) |
 
 ### Travel
 
 | Variable | Free Tier | Sign Up |
 |----------|-----------|---------|
-| `FLIGHTAWARE_API_KEY` | Paid only | [flightaware.com](https://www.flightaware.com/commercial/aeroapi/) |
+| `FLIGHTAWARE_API_KEY` | Paid only | [flightaware.com](https://www.flightaware.com/commercial/aeroapi/) — also used by Airports |
 
 ---
 

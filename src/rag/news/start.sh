@@ -10,8 +10,12 @@
 #
 # Environment Variables:
 #   PORT - Port to listen on (default: 8015)
-#   NEWSAPI_KEY - NewsAPI API key (required)
 #   REDIS_URL - Redis cache URL (default: redis://localhost:6379/0)
+#
+# News reads its API key from the admin key store only (store keys
+# api-newsapiai / api-webz) -- there is no NEWSAPI_KEY (or any other)
+# env var to set here. Configure it via the admin UI's External API Keys
+# page.
 #
 
 set -e  # Exit on error
@@ -36,16 +40,8 @@ fi
 export PORT=${1:-${PORT:-8015}}
 export REDIS_URL=${REDIS_URL:-redis://localhost:6379/0}
 
-# Verify NewsAPI key is set
-if [ -z "$NEWSAPI_KEY" ]; then
-    echo -e "${YELLOW}Warning: NEWSAPI_KEY not set${NC}"
-    echo "Service will start but API calls will fail"
-    echo "Get a free API key at: https://newsapi.org/register"
-    echo ""
-    echo "Set it with:"
-    echo "  export NEWSAPI_KEY=your_api_key_here"
-    echo ""
-fi
+# News's key comes from the admin key store only -- there is no env var
+# to verify here (see the header comment above).
 
 # Check Python version
 PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
@@ -79,7 +75,6 @@ python3 -c "from shared.cache import cached" 2>/dev/null || {
 echo -e "${GREEN}Configuration:${NC}"
 echo "  Port: $PORT"
 echo "  Redis: $REDIS_URL"
-echo "  NewsAPI Key: ${NEWSAPI_KEY:0:10}... (${#NEWSAPI_KEY} chars)"
 echo ""
 
 # Start the service
