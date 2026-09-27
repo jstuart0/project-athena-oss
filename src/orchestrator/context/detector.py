@@ -140,6 +140,14 @@ STRONG_INTENT_INDICATORS = {
         "place to eat", "where to eat", "good food", "best food",
         "recommend", "recommendations", "recommendation", "suggest",
         "happy hour", "specials", "menu", "bar", "pub", "cafe", "coffee shop",
+        # Venue phrasings (ATHENA-88 / F89 D7) -- multi-word first so they
+        # can't collide with rooms/weather/recipes the way bare "patio",
+        # "rooftop", "drinks", "cocktails" or "brewery" would.
+        "outdoor seating", "outside seating", "patio seating", "with a patio",
+        "rooftop seating", "with a rooftop", "beer garden", "cocktail lounge",
+        "drink specials", "place for drinks", "spot for drinks",
+        "grab drinks", "grab a drink", "get drinks",
+        "bars", "pubs", "tavern", "gastropub", "bistro", "diner", "eatery",
         "pizza", "pizzeria", "sushi", "thai", "chinese", "mexican", "italian", "itallian",
         "burger", "burgers", "tacos", "taco", "wings", "bbq", "barbecue", "steak", "steakhouse",
         "ramen", "pho", "indian", "korean", "japanese", "vietnamese", "greek", "mediterranean",
@@ -251,6 +259,40 @@ def detect_strong_intent(query: str, prev_intent: str = None) -> Dict[str, Any]:
             all_matches[intent] = matching
 
     if all_matches:
+        # ATHENA-88 / F89 D7: narrowed recipe-precedence rule.
+        #
+        # The D7 venue-phrase additions above (e.g. "bars", "beer garden")
+        # make dining match some genuine recipe requests too ("dinner
+        # recipes" via "dinner", "granola bars recipe" via "bars"). A
+        # recipe request must not be swallowed by that co-occurrence, so
+        # this fires ahead of the priority_intents selection below and
+        # forces "recipes" to win -- but only when the recipes match
+        # includes an explicit trigger phrase (bare "cook"/"bake" don't
+        # count) AND the dining match includes none of the words that mean
+        # the user actually wants a venue (a request like "how to make a
+        # reservation at a restaurant" must stay dining).
+        _recipe_trigger_phrases = {"recipe", "recipes", "how to make", "how to cook"}
+        _dining_venue_trigger_words = {
+            "reservation", "reservations", "restaurant", "restaurants",
+            "near me", "nearby", "menu",
+        }
+        if "recipes" in all_matches and "dining" in all_matches:
+            recipes_has_trigger = any(
+                kw in _recipe_trigger_phrases for kw in all_matches["recipes"]
+            )
+            dining_has_venue_trigger = any(
+                kw in _dining_venue_trigger_words for kw in all_matches["dining"]
+            )
+            if recipes_has_trigger and not dining_has_venue_trigger:
+                result["has_strong_intent"] = True
+                result["detected_intent"] = "recipes"
+                result["matching_keywords"] = all_matches["recipes"]
+                if prev_intent and prev_intent.lower() != "recipes":
+                    result["should_override_context"] = True
+                elif not prev_intent:
+                    result["should_override_context"] = False
+                return result
+
         # Priority intents - these should win when their specific keywords are present
         # even if other generic keywords also match
         priority_intents = ["dining", "weather", "sports", "control"]
