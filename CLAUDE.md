@@ -12,6 +12,7 @@ This is the public OSS repository. All code must be implementation-agnostic:
 2. **No assumption of Jay's infrastructure** — code can't assume specific ports, hostnames, or service locations
 3. **Configuration over convention** — if a value might differ between deployments, it must be configurable
 4. **Test generalizability** — ask "would this work for someone else deploying Athena from scratch?"
+5. **Run the maintainer-leak gate before committing** — `python3 scripts/check-maintainer-leaks.py` (also enforced in CI by `.github/workflows/maintainer-leaks.yml` on every PR and push, no `paths:` filter). Allowlist entries in `scripts/.maintainer-leak-allowlist` are exact full-line matches, not substrings. Private/local patterns you don't want in the public repo go in a file outside this checkout (`--extra-patterns` / `MAINTAINER_LEAK_EXTRA_PATTERNS`), never committed here.
 
 **Examples:**
 - ❌ `ha_url = "http://192.0.2.10:8123"` as a fallback
@@ -163,6 +164,10 @@ When adding a new node, helper, or utility:
 - New pipeline node → `src/orchestrator/nodes/<node_name>.py`, exported from `nodes/__init__.py`
 - New data type shared across the pipeline → `state.py`
 
+**Ingress authentication (ATHENA-89, D10)**
+
+Orchestrator ingress routes (`/query*`, `/v1/chat/completions`, `/sessions*`, `/session/{id}/warmup`, `/admin/*` — 13 routes) are gated by `orchestrator/ingress_auth.py::require_service_caller`; mode via `ORCHESTRATOR_INGRESS_AUTH` (`warn`/`enforce`); every in-cluster caller must send `X-Service-Key` and is checked by `tests/unit/test_orchestrator_callers_send_service_key.py`.
+
 ---
 
 ### Control Agent
@@ -218,7 +223,7 @@ docker build --platform linux/amd64 --no-cache -t YOUR_REGISTRY/athena-orchestra
 | Gateway | `src/gateway/Dockerfile` | `src/` |
 | Mode Service | `src/mode_service/Dockerfile` | `src/` |
 | Jarvis Web | `apps/jarvis-web/Dockerfile` | `apps/jarvis-web/` |
-| RAG Services | `src/rag/<service>/Dockerfile` | `src/rag/<service>/` |
+| RAG Services | `src/rag/<service>/Dockerfile` | `src/` (every RAG Dockerfile does `COPY shared /app/shared`; see `scripts/build-and-push.sh`'s `build_push_src`) |
 
 ### Kubernetes Operations
 
