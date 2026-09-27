@@ -2211,12 +2211,23 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                     # written at classify_node's entry -- neither sibling
                     # branch below runs (we're in the outer `if
                     # strong_intent[...]:` arm), so no write happened even
-                    # though a real decision was made here. Per D13's
-                    # table: declined, with a reason distinct from the
-                    # direct-override "strong_intent" case above.
-                    state.context_ref_info = context_ref_view(ref_info, "declined")
+                    # though a real decision was made here.
+                    #
+                    # F49 (reconciliation round 2, decisions.md D5): per
+                    # D13's table row, this is `continued` /
+                    # `conversational_reference` -- the raw view, unchanged
+                    # -- not `declined`. This turn IS continuing via
+                    # conversation history (the log line above says so:
+                    # "routing to GENERAL_INFO to use history"), so
+                    # `has_context_ref` must survive for reader 1
+                    # (tool_call_node's previous-exchange injection) and
+                    # readers 5-7 (synthesis/validation/route_control),
+                    # which all read this view, not the raw query. a63180e
+                    # wrote `declined` / `strong_intent_override` here from
+                    # a mis-stated conductor brief; this reverts that.
+                    state.context_ref_info = context_ref_view(ref_info, "continued")
                     state.continuation_decision = {
-                        "decision": "declined", "reason": "strong_intent_override"
+                        "decision": "continued", "reason": "conversational_reference"
                     }
                 else:
                     logger.info(
