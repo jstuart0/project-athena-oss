@@ -10,11 +10,125 @@ Supports:
 """
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 import json
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Shared sequence-timing matcher (ATHENA-88 / F87, D1/D3).
+#
+# Single word-boundary-anchored implementation, shared by this module's
+# detect_sequence_intent (classify gate, action-gated bare temporals) and
+# SmartHomeController.detect_sequence_intent (controller path, unconditional
+# bare temporals). Follows the compiled-pattern idiom of
+# search_providers/intent_classifier.py:28-70.
+# ---------------------------------------------------------------------------
+
+_NUMBER_WORDS = (
+    "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+)
+
+_LEADING_ACTION_VERB_RE = re.compile(
+    r"^(?:please\s+|hey\s+|(?:can|could|would|will)\s+you\s+)*"
+    r"(?:turn|switch|set|dim|brighten|lock|unlock|open|close|start|stop|"
+    r"play|pause|run|remind|activate|arm|disarm)\b",
+    re.IGNORECASE,
+)
+
+# Explicit timing: counts unconditionally, no leading-verb gate required.
+_EXPLICIT_TIMING_PATTERNS = [
+    re.compile(
+        r"\bat\s+(?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)(?=\W|$)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bat\s+(?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s*o'?clock\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bat\s+(?:noon|midnight|sunset|sunrise|dawn|dusk)\b", re.IGNORECASE),
+    re.compile(
+        rf"\b(?:at\s+)?(?:{_NUMBER_WORDS})\s*(?:o'?clock|a\.?m\.?|p\.?m\.?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)(?=\W|$)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bo'?clock\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|"
+        r"fifteen|twenty|thirty|forty[- ]five|few|a few|couple of|a couple of)\s+"
+        r"(?:second|minute|hour)s?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:wait|pause|delay)\b", re.IGNORECASE),
+    re.compile(r"\bthen\b", re.IGNORECASE),
+    re.compile(r"\bafter that\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:flash(?:es|ed|ing)?|blink(?:s|ed|ing)?|repeat(?:s|ed|ing)?|"
+        r"strob(?:e|es|ed|ing)|cycl(?:e|es|ed|ing)|loop(?:s|ed|ing)?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:\d+|{_NUMBER_WORDS}|several|few|(?:a )?couple(?: of)?|multiple)\s+times\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?<!how )\bmany\s+times\b", re.IGNORECASE),
+    re.compile(r"\b(?:twice|thrice)\b", re.IGNORECASE),
+    re.compile(r"\b(?:on and off|off and on|on then off|off then on)\b", re.IGNORECASE),
+    re.compile(r"\bschedule\b", re.IGNORECASE),
+]
+
+# Action-gated: bare temporal words and bare/trailing "at <number>" only count
+# when the classify gate requires a leading device verb (require_action_for_
+# bare_temporal=True); they count unconditionally on the controller path.
+_BARE_TEMPORAL_WORDS_RE = re.compile(
+    r"\b(?:tonight|tomorrow|morning|afternoon|evening|later|again|noon|"
+    r"midnight|sunset|sunrise|dusk|dawn)\b",
+    re.IGNORECASE,
+)
+
+_BARE_AT_NUMBER_RE = re.compile(
+    r"\bat\s+(?:1[0-2]|0?[1-9])(?::[0-5]\d)?(?![\d%:])(?!\s*(?:percent|degrees|%))",
+    re.IGNORECASE,
+)
+
+_TRAILING_AT_NUMBER_WORD_RE = re.compile(
+    rf"\bat\s+(?:{_NUMBER_WORDS})[?.!]*$",
+    re.IGNORECASE,
+)
+
+
+def has_sequence_timing(query_lower: str, *, require_action_for_bare_temporal: bool) -> bool:
+    """
+    Word-boundary-anchored check for sequence-timing language (delays, loops,
+    schedules) in an already-lowercased query.
+
+    Explicit timing (a meridiem/o'clock anchor, durations, loop verbs,
+    counts, wait/then/schedule) counts unconditionally. Bare temporal words
+    ("tonight", "later", ...) and bare/trailing "at <number>" only count when
+    `require_action_for_bare_temporal` is False, or when it's True and the
+    query starts with an imperative device verb.
+    """
+    for pattern in _EXPLICIT_TIMING_PATTERNS:
+        if pattern.search(query_lower):
+            return True
+
+    has_bare_temporal = (
+        _BARE_TEMPORAL_WORDS_RE.search(query_lower) is not None
+        or _BARE_AT_NUMBER_RE.search(query_lower) is not None
+        or _TRAILING_AT_NUMBER_WORD_RE.search(query_lower) is not None
+    )
+    if not has_bare_temporal:
+        return False
+
+    if require_action_for_bare_temporal:
+        return _LEADING_ACTION_VERB_RE.match(query_lower) is not None
+    return True
 
 
 class SequenceExecutor:
@@ -307,30 +421,7 @@ def detect_sequence_intent(query: str) -> bool:
         if not any(w in query_lower for w in action_words):
             return False
 
-    # Delay/timing patterns
-    delay_patterns = [
-        'wait', 'then', 'after', 'seconds', 'second',
-        'minutes', 'minute', 'pause', 'delay'
-    ]
-
-    # Loop patterns
-    loop_patterns = [
-        'times', 'repeat', 'cycle', 'loop', 'again',
-        'on and off', 'off and on', 'flash', 'blink'
-    ]
-
-    # Scheduling patterns
-    schedule_patterns = [
-        'at ', 'in ', ' pm', ' am', 'o\'clock', 'oclock',
-        'tonight', 'tomorrow', 'morning', 'evening', 'noon',
-        'midnight', 'later', 'schedule'
-    ]
-
-    has_delay = any(p in query_lower for p in delay_patterns)
-    has_loop = any(p in query_lower for p in loop_patterns)
-    has_schedule = any(p in query_lower for p in schedule_patterns)
-
-    return has_delay or has_loop or has_schedule
+    return has_sequence_timing(query_lower, require_action_for_bare_temporal=True)
 
 
 # Prompt template for sequence generation

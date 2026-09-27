@@ -11,6 +11,74 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# D2 splitter guard (ATHENA-88 / F87): after a compound split, each part
+# after the first must be a standalone command or question, or the split is
+# discarded and the original query is returned whole.
+# ---------------------------------------------------------------------------
+
+_STRIP_LEADING_RE = re.compile(r"^(?:please|also|then|and)\s+", re.IGNORECASE)
+
+_UNAMBIGUOUS_ACTION_VERBS = {
+    "turn", "switch", "show", "tell", "give", "find", "check", "remind",
+    "text", "send", "add",
+}
+
+_CONSTRAINED_VERBS = {
+    "open", "close", "lock", "unlock", "start", "stop", "play", "set",
+    "put", "get", "make", "adjust", "raise", "lower", "increase",
+    "decrease", "dim", "brighten",
+}
+
+_DETERMINERS_AND_PRONOUNS = {
+    "the", "my", "a", "an", "all", "some", "this", "that", "these",
+    "those", "it", "them",
+}
+
+_WH_WORDS = {"what", "what's", "whats", "how", "when", "where", "who", "which", "why"}
+
+_AUX_VERBS = {"is", "are", "does", "do", "can", "could", "will"}
+
+_AUX_SUBJECTS = {
+    "it", "the", "there", "my", "you", "i", "we", "they", "this", "that",
+    "he", "she",
+}
+
+
+def _is_standalone_part(part: str) -> bool:
+    """Whether a post-split fragment reads as its own command or question."""
+    stripped = part.strip()
+    while True:
+        new_stripped = _STRIP_LEADING_RE.sub("", stripped, count=1)
+        if new_stripped == stripped:
+            break
+        stripped = new_stripped
+
+    tokens = stripped.split()
+    if not tokens:
+        return False
+
+    first = tokens[0].lower().strip(",.!?;:")
+
+    if first in _UNAMBIGUOUS_ACTION_VERBS:
+        return True
+
+    if first in _CONSTRAINED_VERBS:
+        if len(tokens) > 1 and tokens[1].lower().strip(",.!?;:") in _DETERMINERS_AND_PRONOUNS:
+            return True
+        return False
+
+    if first in _WH_WORDS:
+        return True
+
+    if first in _AUX_VERBS:
+        if len(tokens) > 1 and tokens[1].lower().strip(",.!?;:") in _AUX_SUBJECTS:
+            return True
+        return False
+
+    return False
+
+
 class IntentClassifier:
     """
     Classifies query intent based on keyword patterns.
@@ -263,4 +331,17 @@ class IntentClassifier:
         # Filter out empty or too-short parts
         valid_parts = [p for p in parts if len(p.split()) >= 2]
 
-        return valid_parts if valid_parts else [query]
+        if not valid_parts:
+            return [query]
+
+        # D2 splitter guard: a compound "and"/"then"/... split is only safe
+        # when every part after the first is itself a standalone command or
+        # question. Otherwise the split turns one descriptive request
+        # ("what place has happy hour and outdoor seating?") into two
+        # answerable-looking fragments.
+        if len(valid_parts) > 1 and not all(
+            _is_standalone_part(part) for part in valid_parts[1:]
+        ):
+            return [query]
+
+        return valid_parts

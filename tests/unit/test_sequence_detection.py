@@ -261,13 +261,36 @@ def _called_names(node: ast.AST) -> set:
     return names
 
 
+def _constants_after_last_exclusion_if(func_node: ast.FunctionDef) -> set:
+    """String constants in the statements after the last exclusion `if`.
+
+    The exclusion prologues (scene/brightness/casual-then/emotional/mqtt)
+    are unchanged per D1 and legitimately reuse plain-English words (e.g.
+    the emotional-exclusion carve-out's `action_words = [..., 'schedule',
+    ...]`) that coincide with the banned bare-substring indicator set for
+    an unrelated reason. The ban targets the code that used to hold
+    delay_patterns/loop_patterns/schedule_patterns, not those prologues, so
+    the scan is scoped to what follows them — the same scoping the plan
+    specifies for sequence_executor.detect_sequence_intent.
+    """
+    exclusion_if_indexes = [
+        i for i, stmt in enumerate(func_node.body) if isinstance(stmt, ast.If)
+    ]
+    assert exclusion_if_indexes, "expected at least one exclusion prologue if-statement"
+    remaining_stmts = func_node.body[exclusion_if_indexes[-1] + 1:]
+    remaining_constants = set()
+    for stmt in remaining_stmts:
+        remaining_constants |= _string_constants(stmt)
+    return remaining_constants
+
+
 def test_has_sequence_timing_is_the_single_implementation():
     controller_src = (REPO_ROOT / "src/orchestrator/smart_home_controller.py").read_text()
     controller_tree = ast.parse(controller_src)
     method_node = _find_class_method(controller_tree, "SmartHomeController", "detect_sequence_intent")
 
     assert "has_sequence_timing" in _called_names(method_node)
-    assert not (_string_constants(method_node) & BANNED_INDICATORS)
+    assert not (_constants_after_last_exclusion_if(method_node) & BANNED_INDICATORS)
 
     seq_src = (REPO_ROOT / "src/orchestrator/sequence_executor.py").read_text()
     seq_tree = ast.parse(seq_src)
@@ -281,14 +304,4 @@ def test_has_sequence_timing_is_the_single_implementation():
         if isinstance(target, ast.Name)
     }
     assert not ({"delay_patterns", "loop_patterns", "schedule_patterns"} & assigned_names)
-
-    # Statements after the last exclusion `if` must carry no banned literal.
-    exclusion_if_indexes = [
-        i for i, stmt in enumerate(func_node.body) if isinstance(stmt, ast.If)
-    ]
-    assert exclusion_if_indexes, "expected at least one exclusion prologue if-statement"
-    remaining_stmts = func_node.body[exclusion_if_indexes[-1] + 1:]
-    remaining_constants = set()
-    for stmt in remaining_stmts:
-        remaining_constants |= _string_constants(stmt)
-    assert not (remaining_constants & BANNED_INDICATORS)
+    assert not (_constants_after_last_exclusion_if(func_node) & BANNED_INDICATORS)

@@ -7,6 +7,7 @@ import json
 import random
 from typing import Dict, List, Optional, Tuple
 from .ha_entity_manager import HAEntityManager
+from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
 
@@ -1570,33 +1571,7 @@ Return ONLY the JSON, no other text."""
         if 'mqtt' in query_lower or 'via mqtt' in query_lower:
             return False  # Technical question, not a sequence
 
-        # Delay/timing patterns
-        delay_patterns = [
-            'wait', 'then', 'after that',
-            'seconds', 'second', 'minutes', 'minute',
-            'pause', 'delay'
-        ]
-
-        # Loop patterns
-        loop_patterns = [
-            'times', 'repeat', 'cycle', 'loop', 'again',
-            'on and off', 'off and on', 'flash', 'blink',
-            'on then off', 'off then on'
-        ]
-
-        # Scheduling patterns
-        schedule_patterns = [
-            ' at ', 'at 6', 'at 7', 'at 8', 'at 9', 'at 10', 'at 11', 'at 12',
-            ' pm', ' am', 'o\'clock', 'oclock',
-            'tonight', 'tomorrow', 'morning', 'evening', 'noon',
-            'midnight', 'schedule'
-        ]
-
-        has_delay = any(p in query_lower for p in delay_patterns)
-        has_loop = any(p in query_lower for p in loop_patterns)
-        has_schedule = any(p in query_lower for p in schedule_patterns)
-
-        return has_delay or has_loop or has_schedule
+        return has_sequence_timing(query_lower, require_action_for_bare_temporal=False)
 
     async def extract_sequence_intent(
         self,
