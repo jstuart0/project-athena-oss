@@ -21,6 +21,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Ticket:** [ATHENA-114](https://plane.xmojo.net)
+> **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md` (S2)
+
+### Fixed: orchestrator's config_loader never sent X-Service-Key, so admin-panel conversation/clarification config silently never took effect (ATHENA-114)
+
+- **Fixed — `src/orchestrator/config_loader.py`'s `ConversationConfig` built its own `httpx.AsyncClient` with no headers at all**: every `/api/internal/config/*` route requires `X-Service-Key` (`admin/backend/app/routes/internal.py`), so every fetch (`get_conversation_settings`, `get_clarification_settings`, `get_clarification_types`, `get_sports_teams`, `get_device_rules`, `get_all_config`) and the `/api/internal/analytics/log` POST 422'd and silently fell back to hardcoded defaults on every cache-refresh cycle -- 5x/hr in production logs from the orchestrator pod. Now attaches `X-Service-Key: <SERVICE_API_KEY>` at client-construction time (same pattern as `main.py`/`self_building_tools.py`), with a one-time WARNING when `SERVICE_API_KEY` is unset. New MockTransport tests: `tests/unit/test_orchestrator_config_loader_service_key.py`.
+- **Extended** `tests/unit/test_orchestrator_callers_send_service_key.py`'s static AST scan to `src/orchestrator` (previously unscanned), with `/api/internal/config/*` and `/api/internal/analytics/log` added to its gated-route pattern. Excludes `main.py`/`smart_home_controller.py` (confirmed zero relevant call sites; excluded for scan performance, not correctness) and `rag_client.py` (a same-class pre-existing bug -- `fetch_service_urls_from_registry()` calls `/api/internal/config/rag-services` with no `X-Service-Key` -- discovered by this widened scan but out of ATHENA-114's stated scope; flagged to mozart rather than folded into this diff).
+
+---
+
+## [Unreleased]
+
 > **Ticket:** [ATHENA-113](https://plane.xmojo.net)
 > **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md`
 

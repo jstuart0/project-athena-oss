@@ -54,6 +54,16 @@ _SCAN_ROOTS = (
     # grep that no other src/rag/*/main.py references this route.
     REPO_ROOT / "src" / "shared",
     REPO_ROOT / "src" / "rag" / "directions",
+    # ATHENA-114: config_loader.py's ConversationConfig.log_analytics_event
+    # calls /api/internal/analytics/log with a literal path argument,
+    # matched below. Its GET-based siblings (get_conversation_settings etc.)
+    # route through _fetch_from_api(endpoint) -- endpoint is a call-site
+    # parameter, not a local binding this scanner's per-call-site text
+    # resolution can see through (same documented limitation as
+    # model_downloads.py's call_control_agent indirection above). That path
+    # is proven instead by a runtime MockTransport test:
+    # tests/unit/test_orchestrator_config_loader_service_key.py.
+    REPO_ROOT / "src" / "orchestrator",
 )
 
 # Files that *define* /sessions-shaped routes of their own rather than call
@@ -61,6 +71,27 @@ _SCAN_ROOTS = (
 _EXCLUDED = {
     REPO_ROOT / "src" / "gateway" / "livekit_routes.py",
     REPO_ROOT / "admin" / "backend" / "app" / "routes" / "pipeline_events.py",
+    # ATHENA-114: widening _SCAN_ROOTS to all of src/orchestrator pulls in
+    # main.py (9k+ lines) and smart_home_controller.py (4.5k+ lines) -- both
+    # confirmed (grep) to contain zero calls matching _ROUTE_PATTERN (their
+    # /query, /sessions, etc. hits are this orchestrator's OWN @app.post/
+    # @app.get route *definitions*, already excluded via
+    # _ROUTE_DEFINITION_OBJECTS). _local_name_bindings walks every HTTP-
+    # method call site's enclosing function unconditionally, before checking
+    # whether it's gated -- across these two files' many dict.get()-style
+    # calls inside multi-hundred-line functions, that walk cost turns into
+    # minutes of wall-clock for zero possible true positives. Excluded for
+    # scan performance, not correctness.
+    REPO_ROOT / "src" / "orchestrator" / "main.py",
+    REPO_ROOT / "src" / "orchestrator" / "smart_home_controller.py",
+    # rag_client.py's fetch_service_urls_from_registry() calls
+    # /api/internal/config/rag-services with no X-Service-Key -- a real,
+    # pre-existing bug of the same class as ATHENA-114's config_loader.py,
+    # discovered by widening this scan but out of ATHENA-114's stated scope
+    # (config_loader.py only). Flagged to mozart as a scope item rather than
+    # silently folded into this diff; excluded here so this gate doesn't
+    # newly fail on code this ticket didn't touch.
+    REPO_ROOT / "src" / "orchestrator" / "rag_client.py",
 }
 
 # codex P3b FIX: llm_router.py's httpx calls target an MLX/OpenAI-compatible
@@ -99,6 +130,14 @@ _ROUTE_PATTERN = re.compile(
     r"""|/docker/\{action\}"""
     r"""|/process/\{action\}"""
     r"""|/ollama/(?:restart|start|stop)['"]"""
+    # ATHENA-114: config_loader.py's /api/internal/* calls. Scoped to the
+    # specific sub-paths this ticket's caller actually uses (config/*,
+    # analytics/log) rather than a blanket /api/internal/ -- src/orchestrator/
+    # intent_discovery.py separately calls /api/internal/emerging-intents
+    # with no X-Service-Key, a real but pre-existing, out-of-scope bug this
+    # scan must not newly surface as a widened-_SCAN_ROOTS side effect.
+    r"""|/api/internal/config/[a-zA-Z\-]+"""
+    r"""|/api/internal/analytics/log"""
 )
 
 _HTTP_METHODS = {"get", "post", "put", "delete", "stream", "request"}
@@ -405,6 +444,7 @@ def test_AU4_named_members_present():
         "src/gateway/livekit_integration.py",
         "src/shared/admin_config.py",  # D44/P3: /api/base-knowledge/public
         "src/rag/directions/main.py",  # D44/P3: /api/base-knowledge/public
+        "src/orchestrator/config_loader.py",  # ATHENA-114: /api/internal/analytics/log
     }
     missing = expected_named - rel_names
     assert not missing, f"expected named callers not matched by the scan: {missing}"

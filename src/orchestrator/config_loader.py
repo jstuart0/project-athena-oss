@@ -15,11 +15,26 @@ import structlog
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 from shared.admin_url import get_admin_url
+import shared.config as _shared_config  # alias: this module's own get_config (below) shadows shared.config.get_config
 
 logger = structlog.get_logger()
 
 # Admin API URL (resolved by shared.admin_url.get_admin_url)
 ADMIN_API_URL = get_admin_url()
+
+# ATHENA-114: every /api/internal/* route requires X-Service-Key
+# (admin/backend/app/routes/internal.py). This client previously sent none,
+# so every conversation/clarification config fetch 422d and silently fell
+# back to hardcoded defaults on each cache-refresh cycle.
+_SERVICE_API_KEY = _shared_config.get_config().service_api_key
+if not _SERVICE_API_KEY:
+    logger.warning(
+        "config_loader_service_api_key_empty",
+        message="SERVICE_API_KEY is not set; /api/internal/config/* and "
+                "/api/internal/analytics/log requests will 422 and fall back "
+                "to hardcoded defaults. Set SERVICE_API_KEY in the orchestrator "
+                "environment.",
+    )
 
 # Redis connection (optional - graceful degradation if not available)
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -50,7 +65,8 @@ class ConversationConfig:
             import httpx
             self.http_client = httpx.AsyncClient(
                 base_url=ADMIN_API_URL,
-                timeout=3.0  # Reduced from 10s - analytics/config should be fast
+                timeout=3.0,  # Reduced from 10s - analytics/config should be fast
+                headers={"X-Service-Key": _SERVICE_API_KEY} if _SERVICE_API_KEY else {}
             )
             logger.info("config_loader_http_client_ready", admin_api_url=ADMIN_API_URL)
 
