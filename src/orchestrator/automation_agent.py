@@ -20,7 +20,6 @@ from typing import Any, Dict, List, Optional, Union
 import structlog
 
 from shared.assistant_profile import build_automation_system_prompt
-from orchestrator.helpers import city_phrases
 from orchestrator.utils.constants import DEFAULT_CITY
 
 logger = structlog.get_logger()
@@ -1379,6 +1378,22 @@ def should_use_automation_agent(query: str) -> bool:
     # City-derived queries (likely tourism/recommendations), deployment-
     # specific rather than a hardcoded house city (3.9). Empty DEFAULT_CITY
     # contributes no phrases.
+    #
+    # Imported locally, not at module level (R2-C3 / DC14 item 0): a
+    # module-level `from orchestrator.helpers import city_phrases` here
+    # runs during `orchestrator.main`'s import of this module (main.py:77),
+    # which is BEFORE main.py imports `orchestrator.nodes` (main.py:144).
+    # That makes THIS import the first thing to pull in orchestrator.helpers,
+    # whose own `from orchestrator.nodes import _runtime` line then loads
+    # nodes/finalize.py, which does `from orchestrator.helpers import
+    # maybe_post_synthesis_fallback` while orchestrator.helpers is still
+    # mid-import (paused before that name is defined) -- a circular
+    # partial-init ImportError at container startup (hank's build gate,
+    # not caught by the unit suite because tests import orchestrator.nodes
+    # before orchestrator.helpers). A call-time import here runs long
+    # after main.py has finished its own module-level imports, so both
+    # modules are already fully initialized in sys.modules.
+    from orchestrator.helpers import city_phrases
     exclusion_patterns += city_phrases(DEFAULT_CITY, ["represent {c}", "{c} has to offer", "best of {c}"])
     if any(p in query_lower for p in exclusion_patterns):
         return False

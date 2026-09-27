@@ -14,7 +14,6 @@ from typing import Optional, Tuple, Dict, Any
 from datetime import datetime, timezone
 
 from shared.cache import get_cache_client
-from orchestrator.helpers import query_mentions_location
 from orchestrator.utils.constants import DEFAULT_CITY
 import structlog
 
@@ -375,6 +374,14 @@ def normalize_location(text: str) -> str:
     # First, check if user mentioned the deployment's own default city.
     # Word-boundary match (query_mentions_location), not a substring check
     # -- retires the "md" (inside "cmd") false match.
+    #
+    # Imported locally (R2-C3 / DC14 item 0, same fix as
+    # automation_agent.py): a module-level import here runs during
+    # orchestrator.main's import of this module (main.py:98), which is
+    # before main.py imports orchestrator.nodes (main.py:144) -- pulling in
+    # orchestrator.helpers first triggers the same circular partial-init
+    # ImportError on maybe_post_synthesis_fallback.
+    from orchestrator.helpers import query_mentions_location
     for pattern, normalized in _location_aliases(DEFAULT_CITY).items():
         if query_mentions_location(text_lower, pattern):
             return normalized
