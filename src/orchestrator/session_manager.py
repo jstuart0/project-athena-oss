@@ -37,6 +37,26 @@ SESSION_KEY_PREFIX = "athena:session:"
 # bound the count of concurrent per-conversation sessions.
 OAI_SESSION_INDEX_KEY = "athena:session:oai_index"
 
+# ATHENA-88 / F40: registers a member and evicts the oldest overflow in one
+# atomic EVAL. KEYS[1]=index key, ARGV[1]=score (creation time),
+# ARGV[2]=member (session_id), ARGV[3]=max_count. Returns the list of
+# evicted member ids (possibly empty).
+_REGISTER_AND_EVICT_SCRIPT = """
+redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
+local max_count = tonumber(ARGV[3])
+local count = redis.call('ZCARD', KEYS[1])
+local evicted = {}
+while count > max_count do
+    local popped = redis.call('ZPOPMIN', KEYS[1])
+    if #popped == 0 then
+        break
+    end
+    table.insert(evicted, popped[1])
+    count = count - 1
+end
+return evicted
+"""
+
 # In-memory fallback storage
 _memory_sessions: Dict[str, Dict[str, Any]] = {}
 
@@ -513,30 +533,41 @@ class SessionManager:
     async def register_bounded_session(self, session_id: str, max_count: int) -> List[str]:
         """
         Register a session in the Redis creation-time index and evict the
-        oldest overflow via delete_session (ATHENA-88 / F88 D4/D5).
+        oldest overflow (ATHENA-88 / F88 D4/D5).
 
         No-op returning [] when Redis is absent — the memory cap in
         _save_session covers that case. Every evicted id is returned so the
         caller (prepare_openai_session) can also clear its conversation
         context key.
+
+        ATHENA-88 / F40 (codex r2 Medium): registration (ZADD) and overflow
+        eviction (ZCARD + a ZPOPMIN loop) run as ONE atomic Lua script via
+        EVAL, not four separate round-trips. With two orchestrator replicas
+        (manifests/athena-prod/orchestrator.yaml, replicas: 2) issuing
+        those commands separately, both could observe an overflowing count
+        after each other's ZADD landed and each independently evict down to
+        max_count, over-evicting active sessions. A single EVAL call is
+        atomic on the Redis server — no other client's commands, from
+        either replica, can interleave with it.
         """
         if not self.redis_client:
             return []
 
         evicted: List[str] = []
         try:
-            await self.redis_client.zadd(OAI_SESSION_INDEX_KEY, {session_id: time.time()})
-            count = await self.redis_client.zcard(OAI_SESSION_INDEX_KEY)
-            while count is not None and count > max_count:
-                popped = await self.redis_client.zpopmin(OAI_SESSION_INDEX_KEY)
-                if not popped:
-                    break
-                member = popped[0][0] if isinstance(popped[0], (tuple, list)) else popped[0]
+            raw_evicted = await self.redis_client.eval(
+                _REGISTER_AND_EVICT_SCRIPT,
+                1,
+                OAI_SESSION_INDEX_KEY,
+                time.time(),
+                session_id,
+                max_count,
+            )
+            for member in raw_evicted or []:
                 if isinstance(member, bytes):
                     member = member.decode()
                 await self.delete_session(member)
                 evicted.append(member)
-                count -= 1
         except Exception as e:
             logger.warning("session_index_register_failed",
                          session_id=session_id,

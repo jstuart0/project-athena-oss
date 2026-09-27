@@ -501,6 +501,18 @@ class _FakeRedisForSessionPersistence:
         score = self._zset.pop(member)
         return [(member, score)]
 
+    async def eval(self, script, numkeys, key, score, member, max_count):
+        """ATHENA-88 / F40: register_bounded_session now calls EVAL
+        (one atomic register+evict), not separate zadd/zcard/zpopmin."""
+        self._zset[member] = float(score)
+        max_count = int(max_count)
+        evicted = []
+        while len(self._zset) > max_count:
+            oldest = min(self._zset, key=lambda m: self._zset[m])
+            del self._zset[oldest]
+            evicted.append(oldest)
+        return evicted
+
 
 def test_streaming_endpoint_persists_session_history(monkeypatch):
     async def _fake_sm_get_config():

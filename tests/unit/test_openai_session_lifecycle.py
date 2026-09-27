@@ -290,6 +290,19 @@ class _FakeRedis:
         score = self._zset.pop(member)
         return [(member, score)]
 
+    async def eval(self, script, numkeys, key, score, member, max_count):
+        """ATHENA-88 / F40: models _REGISTER_AND_EVICT_SCRIPT's semantics
+        (register_bounded_session now calls EVAL, not separate
+        zadd/zcard/zpopmin commands)."""
+        self._zset[member] = float(score)
+        max_count = int(max_count)
+        evicted = []
+        while len(self._zset) > max_count:
+            oldest = min(self._zset, key=lambda m: self._zset[m])
+            del self._zset[oldest]
+            evicted.append(oldest)
+        return evicted
+
     async def delete(self, key):
         self.delete_calls.append(key)
         self._store.pop(key, None)
@@ -449,3 +462,75 @@ def test_lifespan_gates_on_session_secret_first():
                 break
     assert first_set_call_line is not None
     assert secret_call_line < first_set_call_line
+
+
+# ---------------------------------------------------------------------------
+# F40 (reconciliation round 1, codex r2 Medium): register+evict must be one
+# atomic Redis operation. Two orchestrator replicas each issuing separate
+# ZADD/ZCARD/ZPOPMIN commands can both observe an overflowing count after
+# each other's ZADD lands and independently evict down to max_count,
+# over-evicting active sessions.
+# ---------------------------------------------------------------------------
+
+class _FakeRedisWithInterleavingEval:
+    """Models one atomic EVAL per call: a single await at entry (network
+    round-trip), then the whole register+evict runs as one synchronous
+    block -- exactly like a Lua script executing atomically once Redis
+    receives it. Two concurrent callers can only interleave at that one
+    await boundary, never inside the register-then-evict logic itself."""
+
+    def __init__(self):
+        self._zset: dict[str, float] = {}
+
+    async def eval(self, script, numkeys, key, score, member, max_count):
+        await asyncio.sleep(0)  # the only yield point -- simulates network latency
+        self._zset[member] = float(score)
+        max_count = int(max_count)
+        evicted = []
+        while len(self._zset) > max_count:
+            oldest = min(self._zset, key=lambda m: self._zset[m])
+            del self._zset[oldest]
+            evicted.append(oldest)
+        return evicted
+
+    async def delete(self, key):
+        pass
+
+    async def get(self, key):
+        return None
+
+    async def setex(self, key, ttl, value):
+        pass
+
+
+def test_register_bounded_session_atomic_across_interleaved_replicas(monkeypatch):
+    monkeypatch.setattr(
+        session_manager_module, "_get_athena_config", lambda: _fake_athena_config()
+    )
+
+    async def _run():
+        fake_redis = _FakeRedisWithInterleavingEval()
+        sm_replica_a = SessionManager()
+        sm_replica_a.redis_client = fake_redis
+        sm_replica_b = SessionManager()
+        sm_replica_b.redis_client = fake_redis
+
+        # Pre-populate the index at exactly max_count (3).
+        for sid in ("s0", "s1", "s2"):
+            await sm_replica_a.register_bounded_session(sid, max_count=3)
+
+        # Two replicas concurrently register a 4th and 5th session --
+        # interleaved via asyncio.gather, forcing both eval() calls to
+        # start before either finishes its (single) await point.
+        evicted_a, evicted_b = await asyncio.gather(
+            sm_replica_a.register_bounded_session("s3", max_count=3),
+            sm_replica_b.register_bounded_session("s4", max_count=3),
+        )
+
+        total_evicted = evicted_a + evicted_b
+        # Index grew from 3 to 5, cap is 3 -> exactly 2 evictions total,
+        # never 4 (2 per replica), and no id evicted twice.
+        assert len(total_evicted) == 2
+        assert len(set(total_evicted)) == 2
+
+    asyncio.run(_run())
