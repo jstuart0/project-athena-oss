@@ -7,7 +7,6 @@ Deploys to Kubernetes.
 
 import os
 import httpx
-import socket
 import subprocess
 import base64
 from datetime import timedelta
@@ -38,7 +37,7 @@ from app.auth.oidc import (
 )
 from app.utils.rate_limit import login_rate_limit_dep
 from app.auth import oidc as oidc_auth
-from app.models import User
+from app.models import User, RagService
 
 # Import API route modules
 from app.routes import (
@@ -59,41 +58,6 @@ logger = structlog.get_logger()
 
 if DEV_MODE:
     logger.info("dev_mode_active", message="Running in development mode with SQLite in-memory database")
-
-# Configuration
-# Service host IPs - must be set via environment variables (no hardcoded defaults)
-MAC_STUDIO_IP = os.getenv("MAC_STUDIO_IP", "localhost")
-MAC_MINI_IP = os.getenv("MAC_MINI_IP", "localhost")
-
-# Ollama host services
-SERVICE_PORTS = {
-    "gateway": 8000,
-    "orchestrator": 8001,
-    "weather": 8010,
-    "airports": 8011,
-    "flights": 8012,
-    "events": 8013,
-    "streaming": 8014,
-    "news": 8015,
-    "stocks": 8016,
-    "sports": 8017,
-    "websearch": 8018,
-    "dining": 8019,
-    "recipes": 8020,
-    "directions": 8022,
-    "validators": 8030,
-    "ollama": 11434,
-}
-
-# Voice host services (data layer + voice)
-MAC_MINI_PORTS = {
-    "qdrant": 6333,
-    "redis": 6379,
-    "piper_wyoming": 10200,
-    "piper_rest": 10201,
-    "whisper_wyoming": 10300,
-    "whisper_rest": 10301,
-}
 
 app = FastAPI(
     title="Project Athena Admin API",
@@ -1052,6 +1016,75 @@ async def _check_searxng_status(client: httpx.AsyncClient) -> ServiceStatus:
     return searxng_status
 
 
+async def _check_ollama_status(client: httpx.AsyncClient, db: Session) -> ServiceStatus:
+    """Check Ollama via the operator-configured URL (system_settings, falling
+    back to OLLAMA_URL) -- extracted for independent testability, mirroring
+    _check_searxng_status. Only consulted when the registry has no 'ollama'
+    row (ATHENA-113c)."""
+    ollama_status = ServiceStatus(name="ollama", port=11434, healthy=False, status="unknown")
+
+    ollama_url = service_control.get_ollama_url(db)
+    if not ollama_url:
+        ollama_status.status = "not configured"
+        return ollama_status
+
+    try:
+        response = await client.get(f"{ollama_url.rstrip('/')}/api/tags")
+        if response.status_code == 200:
+            ollama_status.healthy = True
+            ollama_status.status = "healthy"
+        else:
+            ollama_status.status = f"error: HTTP {response.status_code}"
+            ollama_status.error = f"Unexpected status code: {response.status_code}"
+    except httpx.ConnectError:
+        ollama_status.status = "unreachable"
+        ollama_status.error = "Ollama not accessible"
+    except httpx.TimeoutException:
+        ollama_status.status = "timeout"
+        ollama_status.error = "Service did not respond within timeout"
+    except Exception as e:
+        ollama_status.status = "error"
+        ollama_status.error = str(e)
+
+    return ollama_status
+
+
+# Gateway/Orchestrator: k8s-cluster-local services, checked directly only
+# when the registry has no row for them (same Class 2 pattern as SearXNG/
+# Ollama). Defaults match dashboard.py's _GATEWAY_BASE/_ORCHESTRATOR_BASE.
+_GATEWAY_BASE = os.getenv("GATEWAY_URL", "http://localhost:8000").rstrip("/")
+_ORCHESTRATOR_BASE = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001").rstrip("/")
+
+
+async def _check_http_service_status(client: httpx.AsyncClient, name: str, base_url: str) -> ServiceStatus:
+    """Generic /health probe for a cluster-local service with a fixed base
+    URL (gateway, orchestrator). Only consulted when the registry has no row
+    for `name` (ATHENA-113c)."""
+    status = ServiceStatus(name=name, port=0, healthy=False, status="unknown")
+    try:
+        response = await client.get(f"{base_url}/health")
+        if response.status_code == 200:
+            status.healthy = True
+            status.status = "healthy"
+        elif response.status_code == 401:
+            # Some services return 401 for unauthenticated health checks.
+            status.healthy = True
+            status.status = "healthy (auth required)"
+        else:
+            status.status = f"error: HTTP {response.status_code}"
+            status.error = f"Unexpected status code: {response.status_code}"
+    except httpx.ConnectError:
+        status.status = "unreachable"
+        status.error = f"{name} not accessible"
+    except httpx.TimeoutException:
+        status.status = "timeout"
+        status.error = "Service did not respond within timeout"
+    except Exception as e:
+        status.status = "error"
+        status.error = str(e)
+    return status
+
+
 @app.get("/health")
 async def health_check():
     """Health check for admin API itself."""
@@ -1064,139 +1097,78 @@ async def health_check():
 
 @app.get("/status", response_model=SystemStatus)
 @app.get("/api/status", response_model=SystemStatus)
-async def get_system_status(current_user: User = Depends(get_current_user)):
-    """Get status of all Athena services."""
-    service_statuses = []
+async def get_system_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get status of all Athena services (ATHENA-113c).
+
+    Pre-migration this probed a single "Mac Studio" host directly for
+    gateway/orchestrator/RAG/ollama, plus a "Mac Mini" host for voice
+    services -- both hardcoded-host assumptions from before gateway and
+    orchestrator moved into Kubernetes and Ollama moved to an operator-
+    chosen host, so every check reported Offline regardless of real health
+    (dick's investigation). The service registry (athena_service_registry,
+    the same cached health_status GET /api/service-registry/services
+    already reads -- kept fresh by the health poller, not probed here) is
+    now the source of truth for every registered service. Ollama, SearXNG,
+    Gateway, and Orchestrator have no registry row by default (the OSS seed
+    list only covers RAG services), so each is checked directly via its own
+    env-configured URL only when the registry has no row for it -- an
+    operator who DOES register one of these four in the service registry
+    gets that row's health instead, with no direct probe. Disabled-row
+    handling and overall_health both reuse GET /api/service-registry/
+    services' ATHENA-112 semantics (service_registry._overall_health) rather
+    than a second, drifting reimplementation.
+    """
+    registry_rows = db.query(RagService).order_by(RagService.name).all()
+    service_statuses: List[ServiceStatus] = []
+    # ATHENA-112-aligned shape ({'health_status': ...} dicts, disabled rows
+    # excluded) so _overall_health computes identically to GET
+    # /api/service-registry/services -- not a second, drifting reimplementation.
+    enabled_health_dicts: List[Dict[str, Any]] = []
+    registry_names = set()
+
+    for svc in registry_rows:
+        registry_names.add(svc.name.lower())
+        if not svc.enabled:
+            # Overrides whatever health_status the poller last cached before
+            # the row was disabled (ATHENA-112: that value is stale).
+            status_str = "disabled"
+        elif svc.health_status is None:
+            status_str = "pending"
+        else:
+            status_str = svc.health_status  # healthy | unhealthy | unconfigured
+        svc_status = ServiceStatus(
+            name=svc.name,
+            port=svc.port or 0,
+            healthy=(status_str == "healthy"),
+            status=status_str,
+        )
+        if svc.last_error:
+            svc_status.error = svc.last_error
+        service_statuses.append(svc_status)
+        if status_str != "disabled":
+            enabled_health_dicts.append({"health_status": status_str})
 
     async with httpx.AsyncClient(timeout=5.0) as client:
-        # Check Ollama host services
-        for service_name, port in SERVICE_PORTS.items():
-            status = ServiceStatus(
-                name=f"{service_name} (studio)",
-                port=port,
-                healthy=False,
-                status="unknown"
-            )
+        checks = []
+        if "searxng" not in registry_names:
+            checks.append(await _check_searxng_status(client))
+        if "ollama" not in registry_names:
+            checks.append(await _check_ollama_status(client, db))
+        if "gateway" not in registry_names:
+            checks.append(await _check_http_service_status(client, "gateway", _GATEWAY_BASE))
+        if "orchestrator" not in registry_names:
+            checks.append(await _check_http_service_status(client, "orchestrator", _ORCHESTRATOR_BASE))
 
-            try:
-                # Special handling for different service types
-                if service_name == "whisper" or service_name == "piper":
-                    # Whisper and Piper use Wyoming protocol (TCP), check via socket
-                    try:
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        sock.settimeout(2)
-                        result = sock.connect_ex((MAC_STUDIO_IP, port))
-                        sock.close()
+    for check in checks:
+        service_statuses.append(check)
+        enabled_health_dicts.append({"health_status": "healthy" if check.healthy else check.status})
 
-                        if result == 0:
-                            status.healthy = True
-                            status.status = "running"
-                        else:
-                            status.status = "error"
-                            status.error = f"Connection failed: {result}"
-                        service_statuses.append(status)
-                        continue  # Skip HTTP check
-                    except Exception as e:
-                        status.status = "error"
-                        status.error = str(e)
-                        service_statuses.append(status)
-                        continue
-
-                # HTTP-based health checks
-                if service_name == "ollama":
-                    url = f"http://{MAC_STUDIO_IP}:{port}/api/tags"
-                else:
-                    url = f"http://{MAC_STUDIO_IP}:{port}/health"
-
-                response = await client.get(url)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    status.healthy = True
-                    status.status = "running"
-                    status.version = data.get("version", "unknown")
-                elif response.status_code == 401:
-                    # Gateway returns 401 for unauthenticated health checks
-                    status.healthy = True
-                    status.status = "running (auth required)"
-                else:
-                    status.status = f"error: HTTP {response.status_code}"
-                    status.error = f"Unexpected status code: {response.status_code}"
-
-            except httpx.TimeoutException:
-                status.status = "timeout"
-                status.error = "Service did not respond within timeout"
-            except Exception as e:
-                status.status = "error"
-                status.error = str(e)
-
-            service_statuses.append(status)
-
-        # Check voice host services (optional - graceful degradation)
-        for service_name, port in MAC_MINI_PORTS.items():
-            status = ServiceStatus(
-                name=f"{service_name} (mini)",
-                port=port,
-                healthy=False,
-                status="not deployed"
-            )
-
-            try:
-                # Wyoming protocol services (whisper/piper) use TCP, not HTTP
-                if service_name in ("redis", "whisper_wyoming", "whisper_rest", "piper_wyoming", "piper_rest"):
-                    # TCP socket check
-                    try:
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        sock.settimeout(2)
-                        result = sock.connect_ex((MAC_MINI_IP, port))
-                        sock.close()
-
-                        if result == 0:
-                            status.healthy = True
-                            status.status = "running"
-                        else:
-                            status.status = "not deployed (optional)"
-                            status.error = "Service not yet deployed - system works without this"
-                    except Exception as e:
-                        status.status = "not deployed (optional)"
-                        status.error = "Service not yet deployed - system works without this"
-                else:
-                    # HTTP-based health checks for other services
-                    if service_name == "qdrant":
-                        url = f"http://{MAC_MINI_IP}:{port}/healthz"
-                    else:
-                        url = f"http://{MAC_MINI_IP}:{port}/health"
-
-                    response = await client.get(url)
-
-                    if response.status_code == 200:
-                        status.healthy = True
-                        status.status = "running"
-                    else:
-                        status.status = f"error: HTTP {response.status_code}"
-                        status.error = f"Unexpected status code: {response.status_code}"
-
-            except httpx.ConnectError:
-                status.status = "not deployed (optional)"
-                status.error = "Service not yet deployed - system works without this"
-            except httpx.TimeoutException:
-                status.status = "not deployed (optional)"
-                status.error = "Service not yet deployed - system works without this"
-            except Exception as e:
-                status.status = "not deployed (optional)"
-                status.error = "Service not yet deployed - system works without this"
-
-            service_statuses.append(status)
-
-        # Check SearXNG (Class 2: operator-configured infra URL, disabled
-        # when unset — no hardcoded cluster-local default)
-        service_statuses.append(await _check_searxng_status(client))
-
-    healthy_count = sum(1 for s in service_statuses if s.healthy)
-    total_count = len(service_statuses)
-
-    overall_health = "healthy" if healthy_count == total_count else \
-                    "degraded" if healthy_count > total_count * 0.5 else "critical"
+    healthy_count = sum(1 for d in enabled_health_dicts if d["health_status"] == "healthy")
+    total_count = len(enabled_health_dicts)
+    overall_health = service_registry._overall_health(enabled_health_dicts)
 
     return SystemStatus(
         healthy_services=healthy_count,

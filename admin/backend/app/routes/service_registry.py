@@ -212,9 +212,16 @@ async def register_service(
     protocol/host/port/display_name -- before this fix, editing a row's check
     type silently reset its cache_ttl/timeout/rate_limit to defaults and
     force-re-enabled it even if an operator had deliberately disabled it.
-    The Control Agent's startup-upsert is unaffected: it always sends all
-    four administrative fields explicitly (test_phase3_ca_upsert.py), so
-    partial-update semantics are a no-op for that caller.
+    The Control Agent's startup-upsert IS affected, and that's the point:
+    its payload (src/control_agent/main.py's sync_registry_loop) sends name/
+    endpoint_url/service_type/cache_ttl/timeout/rate_limit but never
+    `enabled` (test_phase3_ca_upsert.py seeds/asserts exactly that payload
+    shape). Before this partial-update fix, every CA restart re-ran the
+    upsert and reset `enabled` to the INSERT default (True) for every row,
+    silently re-enabling anything an operator had deliberately disabled.
+    Partial-update semantics mean an omitted `enabled` now keeps the row's
+    current value, so an operator-disabled row stays disabled across CA
+    restarts.
     """
     if not name:
         raise HTTPException(status_code=422, detail="'name' query parameter is required")

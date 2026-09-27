@@ -112,6 +112,33 @@ async function loadConversationSettingsForConfig() {
 }
 
 /**
+ * Map a GET /api/status service entry to one of the four UI status buckets
+ * this page renders: 'healthy' | 'unhealthy' | 'neutral' | 'offline'.
+ *
+ * ATHENA-113c: /api/status now derives from the service registry
+ * (statuses: healthy/unhealthy/unconfigured/disabled/pending) instead of
+ * probing a hardcoded host, plus the four direct-check fallbacks' own
+ * strings ('not configured', 'unreachable', 'timeout', 'error[: ...]').
+ * 'disabled'/'unconfigured'/'pending'/'not configured' are a deliberate
+ * choice by an operator or a transient startup state -- neither is the
+ * same claim as "this is down", so they render as a neutral state rather
+ * than Offline.
+ */
+function mapServiceStatusToUiBucket(service) {
+    if (service.healthy) return 'healthy';
+    const status = (service.status || '').toLowerCase();
+    if (status === 'disabled' || status === 'unconfigured' ||
+        status === 'not configured' || status === 'pending') {
+        return 'neutral';
+    }
+    if (status === 'error' || status === 'timeout' || status === 'unreachable' ||
+        status.startsWith('error:')) {
+        return 'offline';
+    }
+    return 'unhealthy';
+}
+
+/**
  * Load service status via admin backend (avoids CORS issues)
  */
 async function loadServiceStatus() {
@@ -124,12 +151,12 @@ async function loadServiceStatus() {
         if (response.ok) {
             const data = await response.json();
 
-            // Parse service status from the response
-            // Services are returned with names like "gateway (studio)", "orchestrator (studio)", "ollama (studio)"
+            // ATHENA-113c: names are now bare registry/check names
+            // ("gateway", "orchestrator", "ollama"), not the pre-migration
+            // "gateway (studio)" shape -- .includes() still matches either.
             for (const service of data.services || []) {
-                const name = service.name.toLowerCase();
-                const status = service.healthy ? 'healthy' :
-                              (service.status === 'error' || service.status === 'timeout') ? 'offline' : 'unhealthy';
+                const name = (service.name || '').toLowerCase();
+                const status = mapServiceStatusToUiBucket(service);
 
                 if (name.includes('gateway')) {
                     configData.serviceStatus.gateway = status;
@@ -224,12 +251,18 @@ function renderServiceStatus() {
             </h3>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 ${services.map(svc => {
+                    // ATHENA-113c: 'neutral' (disabled/unconfigured/pending) is
+                    // an operator choice or transient state, not a failure --
+                    // rendered gray, distinct from 'offline' (red).
                     const statusColor = svc.status === 'healthy' ? 'green' :
-                                       svc.status === 'unhealthy' ? 'yellow' : 'red';
+                                       svc.status === 'unhealthy' ? 'yellow' :
+                                       svc.status === 'neutral' ? 'gray' : 'red';
                     const statusIcon = svc.status === 'healthy' ? '✅' :
-                                      svc.status === 'unhealthy' ? '⚠️' : '❌';
+                                      svc.status === 'unhealthy' ? '⚠️' :
+                                      svc.status === 'neutral' ? '➖' : '❌';
                     const statusText = svc.status === 'healthy' ? 'Healthy' :
-                                      svc.status === 'unhealthy' ? 'Degraded' : 'Offline';
+                                      svc.status === 'unhealthy' ? 'Degraded' :
+                                      svc.status === 'neutral' ? 'Not Configured' : 'Offline';
 
                     return `
                         <div class="bg-dark-card border border-dark-border rounded-xl p-4 hover:border-${statusColor}-500/50 transition-all">

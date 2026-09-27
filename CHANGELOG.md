@@ -21,6 +21,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Ticket:** [ATHENA-109](https://plane.xmojo.net)
+> **Campaign:** `2026-09-27-deliver-athena-dashboard-health-and-tcp-poller`
+> **Commits:** `7de9989`, `fe4544b`, `bd77dfd`, `a2d5e32`, `20d5be6`
+
+### Added: TCP health-check mode for registry rows; registry Edit modal; partial-update upsert (ATHENA-109)
+
+- **Added — `protocol=tcp` health-check mode** (`admin/backend/app/services/health_poller.py`): a raw TCP connect to `host:port` within `HEALTH_POLL_TIMEOUT_SECONDS`, for services that don't speak HTTP or have no health endpoint. For a row whose `name` contains `redis`, the poller additionally sends a Redis `PING\r\n` after connecting and requires a `+PONG` **or** `-NOAUTH` reply (a password-protected Redis still proves it's up and speaking the protocol) within the same timeout; any other reply is `unhealthy` / `last_error=tcp_bad_banner`. Every other `tcp` row is a plain connect with no banner read. Shares the same `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` SSRF allowlist as `http(s)` rows. See `docs/CONFIGURATION.md`'s "Service Registry Health Checks" section for the full state matrix.
+- **Added — registry row Edit modal** (`admin/frontend/service-control.js`): operators can edit an existing row's protocol/host/port/display_name/cache settings in place, rather than delete-and-recreate.
+- **Fixed — the registry upsert (`POST /api/service-registry/services`) was a full replace, not a partial update**: `service_type`, `cache_ttl`, `timeout`, `rate_limit`, and `enabled` are now each applied only if the caller actually passed them; an omitted field keeps the row's current value (INSERT-only defaults still apply when creating a new row). **Behavioral change**: the Control Agent's startup-upsert never sends `enabled` in its payload, so before this fix every CA restart silently reset `enabled` to `True` for every managed row -- an operator-disabled service came back enabled on the next CA restart. It now stays disabled, as the operator set it.
+- **Fixed — `admin/frontend/integrations.js` read the service-registry envelope (`{services, total_services, ...}`) as if it were the bare array itself**: `ragStatus?.find(...)` silently resolved `undefined` against a plain object, so a RAG service integration never read "connected" via this fallback path. Now reads `(ragStatus?.services || []).find(...)`. Commit `20d5be6` restored this fix's test, dropped during an earlier commit split in the same campaign.
+- **Fixed — `GET /services/{service_name}` (single-service lookup) didn't apply the disabled-row override**: it now reports `health_status: "disabled"` for a disabled row, matching `GET /services`'s list behavior instead of a stale cached value.
+
+---
+
+## [Unreleased]
+
 > **Ticket:** [ATHENA-114](https://plane.xmojo.net)
 > **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md` (S2)
 
@@ -53,6 +69,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Fixed — `admin/backend/app/routes/dashboard.py` probed Weather/Sports/Dining RAG health via a single `RAG_HOST` + hardcoded port** (`:8010`/`:8017`/`:8019`): in Kubernetes each RAG is its own Service, so this single-shared-host assumption is an OSS-First violation, and with `RAG_HOST` unset (the normal case for a per-Service deployment) it built malformed `:port/health` URLs and reported every RAG "unreachable". New `app.utils.rag_urls.resolve_rag_url` resolves each RAG independently: service-registry row → canonical `RAG_<NAME>_URL` env var (spelling matches `src/orchestrator/urls.py`) → legacy `RAG_HOST`/`RAG_SERVICE_HOST` + port (one-time WARNING) → `not_configured` (amber), no longer conflated with a genuine probe failure.
 - **Same treatment for `admin/backend/app/routes/voice_tests.py`**: `_rag_probe_url` (the full-pipeline test's auto-detected RAG probe) and `test_rag_query` (the manual "Test RAG" panel) both resolved through the same module-level `RAG_SERVICE_HOST` single-host assumption; both now resolve via the shared helper. `test_rag_query` returns 503 with a clear "not configured" message instead of attempting a request against a broken URL.
 - See `docs/CONFIGURATION.md`'s new "Mission Control voice-health card and RAG test probes" note for the full resolution order.
+
+---
+
+## [Unreleased]
+
+> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+> **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md`
+
+### Fixed: System Configuration's Gateway/Orchestrator/Ollama cards always read Offline -- GET /api/status probed a pre-Kubernetes "Mac Studio"/"Mac Mini" topology (ATHENA-113c)
+
+- **Fixed — `admin/backend/main.py::get_system_status`** probed `MAC_STUDIO_IP`/`MAC_MINI_IP` (both default `localhost`) directly for gateway/orchestrator/RAG/ollama and a separate voice-host port map -- a deployment topology from before gateway and orchestrator moved into Kubernetes and Ollama moved to an operator-chosen host, so every check reported `error`/timeout regardless of real health. The service registry (`athena_service_registry`, the same cached `health_status` `GET /api/service-registry/services` already reads) is now the source of truth for every registered service; Gateway, Orchestrator, Ollama, and SearXNG (no registry row by default -- the OSS seed list only covers RAG services) are each checked directly via their own env-configured URL only when the registry has no row for them. Disabled-row handling and `overall_health` reuse `service_registry._overall_health` (ATHENA-112's enabled-only rollup) instead of a second, drifting implementation -- `overall_health`'s bottom label is now `"unhealthy"` (was `"critical"`), matching that shared helper. Dead `MAC_STUDIO_IP`/`MAC_MINI_IP`/`SERVICE_PORTS`/`MAC_MINI_PORTS`/`socket` import removed. New tests: `admin/backend/tests/test_system_status_registry.py`.
+- **Changed — `admin/frontend/system-config.js`**: new `mapServiceStatusToUiBucket` classifies each `/api/status` entry into `healthy` / `unhealthy` / `neutral` / `offline`; `disabled`/`unconfigured`/`not configured`/`pending` now render as a neutral gray "Not Configured" state instead of red "Offline" -- an operator choice or a transient state is not the same claim as "this is down". New Node test: `tests/unit/test_admin_frontend_system_config_status_mapping.py`. Cache-buster: `system-config.js` `?v=20260913` → `?v=20260927`.
+- **Note**: `voice-pipelines.js`'s STT/TTS component-health cards (which also read `GET /api/status`, matching on `whisper`/`piper`/`stt`/`tts`) now show "not configured" for those components rather than a stale probe result, since the old `MAC_MINI_PORTS` voice-host probing is gone and no registry rows exist for them by default. `renderComponentRow` already degrades gracefully for an absent service (gray "not configured"), so this is a behavior improvement, not a regression -- flagging it as an observed side effect of this fix, not a new capability.
 
 ---
 
