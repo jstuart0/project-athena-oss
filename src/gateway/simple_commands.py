@@ -111,22 +111,33 @@ async def execute_simple_command(
         if entity_id:
             try:
                 if ha_client:
-                    await ha_client.post(
+                    resp = await ha_client.post(
                         f"{ha_url}/api/services/homeassistant/turn_on",
                         headers=headers,
                         json={"entity_id": entity_id}
                     )
                 else:
                     async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-                        await client.post(
+                        resp = await client.post(
                             f"{ha_url}/api/services/homeassistant/turn_on",
                             headers=headers,
                             json={"entity_id": entity_id}
                         )
+                if resp.status_code >= 400:
+                    logger.warning(
+                        "simple_command_ha_call_failed",
+                        command="turn_on", device=device, entity_id=entity_id,
+                        status_code=resp.status_code,
+                    )
+                    return None
                 logger.info("simple_command_executed", command="turn_on", device=device, entity_id=entity_id)
                 return f"I've turned on the {device}."
             except Exception as e:
-                logger.warning(f"Failed to turn on {device}: {e}")
+                logger.warning(
+                    "simple_command_ha_call_error",
+                    command="turn_on", device=device, entity_id=entity_id,
+                    error_type=type(e).__name__,
+                )
                 return None
         return None
 
@@ -136,22 +147,33 @@ async def execute_simple_command(
         if entity_id:
             try:
                 if ha_client:
-                    await ha_client.post(
+                    resp = await ha_client.post(
                         f"{ha_url}/api/services/homeassistant/turn_off",
                         headers=headers,
                         json={"entity_id": entity_id}
                     )
                 else:
                     async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-                        await client.post(
+                        resp = await client.post(
                             f"{ha_url}/api/services/homeassistant/turn_off",
                             headers=headers,
                             json={"entity_id": entity_id}
                         )
+                if resp.status_code >= 400:
+                    logger.warning(
+                        "simple_command_ha_call_failed",
+                        command="turn_off", device=device, entity_id=entity_id,
+                        status_code=resp.status_code,
+                    )
+                    return None
                 logger.info("simple_command_executed", command="turn_off", device=device, entity_id=entity_id)
                 return f"I've turned off the {device}."
             except Exception as e:
-                logger.warning(f"Failed to turn off {device}: {e}")
+                logger.warning(
+                    "simple_command_ha_call_error",
+                    command="turn_off", device=device, entity_id=entity_id,
+                    error_type=type(e).__name__,
+                )
                 return None
         return None
 

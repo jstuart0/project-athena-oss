@@ -627,3 +627,144 @@ def _fake_orchestrator_json_response(answer: str, session_id: str):
     resp.raise_for_status = mock.MagicMock()
     resp.json.return_value = {"answer": answer, "session_id": session_id}
     return resp
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-121 -- /ha/conversation fast path must report the real HA outcome.
+#
+# Live bug: HA returned 403 to the turn_off service call. httpx does not
+# raise on a non-2xx response unless raise_for_status() is called, so the
+# old execute_simple_command() ignored the status code entirely and always
+# returned the canned "I've turned off the office light." with
+# data.success=True -- the service call never reached HA. These tests drive
+# the real (unmocked) detect_simple_command/execute_simple_command code
+# path against a fake ha_client, so they exercise the actual bug rather than
+# a re-statement of it.
+# ---------------------------------------------------------------------------
+
+
+class _StatusHAClient:
+    """Fake ha_client whose .post() returns a fixed status_code, like a real
+    httpx.AsyncClient would for a non-2xx HA response (no exception raised)."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        self.calls = []
+
+    async def post(self, url, **kwargs):
+        self.calls.append(url)
+        resp = mock.MagicMock()
+        resp.status_code = self.status_code
+        return resp
+
+
+class _RaisingHAClient:
+    """Fake ha_client whose .post() raises, like a real timeout/connect error."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    async def post(self, url, **kwargs):
+        raise self._exc
+
+
+def _fastpath_flags():
+    async def _flags(flag_name, default=False):
+        return {"ha_simple_command_fastpath": True}.get(flag_name, False)
+    return _flags
+
+
+def test_ATHENA_121_fastpath_ha_403_falls_through_to_orchestrator(monkeypatch, _fixed_room):
+    monkeypatch.setattr(gw, "get_feature_flag", _fastpath_flags())
+    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
+    monkeypatch.setattr(gw, "ha_client", _StatusHAClient(403))
+
+    fake_orch = _CapturingClient(_fake_orchestrator_json_response(
+        "I couldn't reach Home Assistant to do that.", "sess-orch-403"
+    ))
+    monkeypatch.setattr(gw, "orchestrator_client", fake_orch)
+
+    client = TestClient(gw.app)
+    resp = client.post("/ha/conversation", json={
+        "text": "turn off the office light",
+        "device_id": "office",
+        "language": "en",
+    })
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    spoken = body["response"]["speech"]["plain"]["speech"]
+    assert spoken == "I couldn't reach Home Assistant to do that."
+    assert spoken != "I've turned off the office light."
+    assert body["conversation_id"] == "sess-orch-403"
+
+
+def test_ATHENA_121_fastpath_ha_500_falls_through_to_orchestrator(monkeypatch, _fixed_room):
+    monkeypatch.setattr(gw, "get_feature_flag", _fastpath_flags())
+    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
+    monkeypatch.setattr(gw, "ha_client", _StatusHAClient(500))
+
+    fake_orch = _CapturingClient(_fake_orchestrator_json_response(
+        "Something went wrong turning that off.", "sess-orch-500"
+    ))
+    monkeypatch.setattr(gw, "orchestrator_client", fake_orch)
+
+    client = TestClient(gw.app)
+    resp = client.post("/ha/conversation", json={
+        "text": "turn off the office light",
+        "device_id": "office",
+        "language": "en",
+    })
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    spoken = body["response"]["speech"]["plain"]["speech"]
+    assert spoken == "Something went wrong turning that off."
+    assert spoken != "I've turned off the office light."
+
+
+def test_ATHENA_121_fastpath_ha_timeout_falls_through_to_orchestrator(monkeypatch, _fixed_room):
+    monkeypatch.setattr(gw, "get_feature_flag", _fastpath_flags())
+    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
+    monkeypatch.setattr(gw, "ha_client", _RaisingHAClient(httpx.ConnectTimeout("timed out")))
+
+    fake_orch = _CapturingClient(_fake_orchestrator_json_response(
+        "Home Assistant didn't respond in time.", "sess-orch-timeout"
+    ))
+    monkeypatch.setattr(gw, "orchestrator_client", fake_orch)
+
+    client = TestClient(gw.app)
+    resp = client.post("/ha/conversation", json={
+        "text": "turn off the office light",
+        "device_id": "office",
+        "language": "en",
+    })
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    spoken = body["response"]["speech"]["plain"]["speech"]
+    assert spoken == "Home Assistant didn't respond in time."
+    assert spoken != "I've turned off the office light."
+
+
+def test_ATHENA_121_fastpath_ha_2xx_still_returns_real_success(monkeypatch, _fixed_room):
+    """Regression guard: a genuine 2xx HA response must still take the fast
+    path and speak the canned success line -- the fix must not turn every
+    fast-path command into a fallback."""
+    monkeypatch.setattr(gw, "get_feature_flag", _fastpath_flags())
+    monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
+    ha_client = _StatusHAClient(200)
+    monkeypatch.setattr(gw, "ha_client", ha_client)
+
+    client = TestClient(gw.app)
+    resp = client.post("/ha/conversation", json={
+        "text": "turn off the office light",
+        "device_id": "office",
+        "language": "en",
+    })
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["response"]["speech"]["plain"]["speech"] == "I've turned off the office light."
+    assert body["response"]["data"] == {"success": True, "targets": []}
+    assert len(ha_client.calls) == 1
