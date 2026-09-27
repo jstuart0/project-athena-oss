@@ -9,6 +9,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Ticket:** [ATHENA-110](https://plane.xmojo.net)
+> **Plan:** `.mozart/plans/active/2026-09-27-operate-athena-dashboard-registry-cleanup.md` (P3)
+
+### Fixed: Control Agent had zero incoming auth on any route; process launch used a shell; services-file `dir` could escape PROJECT_ROOT (ATHENA-110)
+
+- **Fixed — every Control Agent route was reachable by anyone on the LAN with no authentication** (`src/control_agent/main.py`, new `src/control_agent/auth.py`): xander's review (F2, 2026-09-27-operate-athena-dashboard-registry-cleanup) found this Critical pre-existing gap — anyone able to reach port 8099 could stop Ollama or any managed process/container. New `require_service_caller` FastAPI dependency (mirrors `orchestrator/ingress_auth.py`'s constant-time `X-Service-Key` check, with no `DEV_MODE` bypass — the Control Agent has no such concept) is now applied to all 17 mutating routes: `/process/start|stop|restart/{port}`, `/docker/start|stop|restart/{container_name}`, `/ollama/start|stop|restart`, `/huggingface/download` (POST), `/huggingface/download/{job_id}` (DELETE), `/huggingface/import-to-ollama`, `/huggingface/downloaded` (DELETE), `/watchdog/enable|disable|exclude/{port}|include/{port}`. A missing or wrong key returns 401; an unset `SERVICE_API_KEY` returns 503 on every mutating route (fail-closed) with a one-time startup WARNING. Read-only routes (health/status/list/search endpoints, `/debug-logs/*`) are unchanged.
+- **Fixed — admin-backend and the orchestrator now send `X-Service-Key` on every Control Agent call**: new `app.utils.service_auth.control_agent_headers()` helper wired into `service_control.py`'s three Control Agent client constructions (docker/process/ollama actions, plus the read-only containers-status and ollama-health clients) and `model_downloads.py`'s single `call_control_agent` helper (covers all `/huggingface/*` calls). The orchestrator's own gateway-keepalive caller (`ensure_gateway_running` in `src/orchestrator/main.py`) — previously building an unheadered client for `/process/status` and `/process/start` — now reuses its existing `_SERVICE_API_KEY`.
+- **Fixed — process launch used `create_subprocess_shell` with a joined command string**: `start_process_by_port` now uses `asyncio.create_subprocess_exec(*cmd, cwd=working_dir, stdout=log_fh, stderr=STDOUT)` — an argv list, never a shell. Defence in depth: `CONTROL_AGENT_SERVICES_FILE` entries are now rejected at load time if any `cmd` element contains a shell metacharacter (`; & | $ \` < > \n`).
+- **Fixed — `dir` in a services-file entry could point outside the Control Agent's checkout** (e.g. `dir: "/etc"` or `dir: "../../etc"`): `dir` must now be a relative path with no `..` component that resolves under `PROJECT_ROOT`; violations are rejected at load time with one ERROR log, same handling as any other malformed entry.
+- **Added — services-file permission warning**: `CONTROL_AGENT_SERVICES_FILE` is checked for group/world-writable permissions at load time; a writable file logs one WARNING (still loads — warn, not refuse, since it names commands and containers this Control Agent may execute/control).
+- See `docs/CONFIGURATION.md` and `CLAUDE.md`'s Control Agent section for the full route list and the admin-backend/orchestrator caller wiring.
+
+---
+
+## [Unreleased]
+
 > **Ticket:** [ATHENA-99](https://plane.xmojo.net)
 > **Commits:** `c36dc83` (dashboard badges), `c146353` (Control Agent managed-services config)
 

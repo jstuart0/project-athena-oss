@@ -31,6 +31,15 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..',
 _SRC = os.path.join(_REPO_ROOT, 'src')
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
+# ATHENA-110: main.py now imports its sibling auth.py at module level
+# (`from auth import ...`), the same flat-sibling style it already uses
+# for huggingface.py/url_validator.py (those are lazy, call-time imports,
+# so they never needed this path entry before) -- src/control_agent must
+# be on sys.path for that absolute import to resolve even when main.py is
+# imported package-qualified as control_agent.main below.
+_CONTROL_AGENT_DIR = os.path.join(_SRC, 'control_agent')
+if _CONTROL_AGENT_DIR not in sys.path:
+    sys.path.insert(0, _CONTROL_AGENT_DIR)
 
 
 # ---------------------------------------------------------------------------

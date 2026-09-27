@@ -17,17 +17,20 @@ import json
 import subprocess
 import os
 import signal
+import stat
 import time
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, List, Set, Tuple
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 import structlog
+
+from auth import require_service_caller, warn_if_service_key_unset
 
 logger = structlog.get_logger()
 
@@ -62,11 +65,27 @@ PROJECT_ROOT = Path.home() / "dev" / "project-athena"
 CONTROL_AGENT_SERVICES_FILE = os.getenv("CONTROL_AGENT_SERVICES_FILE", "").strip()
 
 
+# Shell metacharacters rejected in any `cmd` element at config-load time
+# (ATHENA-110). start_process_by_port never invokes a shell (it uses
+# asyncio.create_subprocess_exec with an argv list) -- this check is
+# defence in depth so a future regression that reintroduces shell
+# execution doesn't silently become an injection vector via the services
+# file, and so an operator gets an immediate, loud ERROR instead of a
+# quietly-broken launch.
+_CMD_METACHARACTERS = frozenset(";&|$`<>\n")
+
+
 def _validate_service_entry(port_key: str, entry: object) -> Optional[Tuple[int, Dict]]:
     """Validate one `services`-file entry. Returns (port, config) on
     success; logs one ERROR and returns None on any problem, including an
     explicitly disabled entry (enabled: false), which is dropped rather
-    than managed."""
+    than managed.
+
+    Two additional checks close the gaps xander flagged (F2,
+    2026-09-27-operate-athena-dashboard-registry-cleanup): every `cmd`
+    element is rejected if it contains a shell metacharacter, and `dir`
+    must be a relative path with no `..` component that resolves under
+    PROJECT_ROOT (rejects e.g. `dir: "/etc"` or `dir: "../../etc"`)."""
     try:
         port = int(port_key)
     except (TypeError, ValueError):
@@ -89,6 +108,36 @@ def _validate_service_entry(port_key: str, entry: object) -> Optional[Tuple[int,
         return None
     if not isinstance(cmd, list) or not cmd or not all(isinstance(c, str) for c in cmd):
         logger.error("control_agent_services_file_invalid_entry", port=port, reason="missing or invalid 'cmd' (must be a non-empty list of strings)")
+        return None
+
+    for element in cmd:
+        bad_chars = _CMD_METACHARACTERS.intersection(element)
+        if bad_chars:
+            logger.error(
+                "control_agent_services_file_invalid_entry",
+                port=port,
+                reason="'cmd' element contains shell metacharacters",
+                element=element,
+                chars=sorted(bad_chars),
+            )
+            return None
+
+    dir_path = Path(directory)
+    if dir_path.is_absolute():
+        logger.error("control_agent_services_file_invalid_entry", port=port, reason="'dir' must be a relative path")
+        return None
+    if ".." in dir_path.parts:
+        logger.error("control_agent_services_file_invalid_entry", port=port, reason="'dir' must not contain '..'")
+        return None
+    resolved_root = str(PROJECT_ROOT.resolve())
+    resolved_dir = str((PROJECT_ROOT / dir_path).resolve())
+    if not (resolved_dir == resolved_root or resolved_dir.startswith(resolved_root + os.sep)):
+        logger.error(
+            "control_agent_services_file_invalid_entry",
+            port=port,
+            reason="'dir' resolves outside PROJECT_ROOT",
+            resolved=resolved_dir,
+        )
         return None
 
     if entry.get("enabled") is False:
@@ -145,6 +194,23 @@ def load_control_agent_config() -> Tuple[Dict[int, Dict], Set[int], Set[str]]:
     except OSError as e:
         logger.error("control_agent_services_file_invalid", path=str(path), error=str(e))
         return {}, set(), set()
+
+    # ATHENA-110: warn (don't refuse) if the config file is group- or
+    # world-writable -- it names process commands and Docker containers
+    # this Control Agent may execute/control, so a writable-by-others file
+    # is a privilege-escalation vector even though the loader itself is
+    # otherwise safe.
+    try:
+        mode = path.stat().st_mode
+        if mode & (stat.S_IWGRP | stat.S_IWOTH):
+            logger.warning(
+                "control_agent_services_file_writable",
+                path=str(path),
+                mode=oct(mode & 0o777),
+                note="file is group- or world-writable; consider chmod 600.",
+            )
+    except OSError:
+        pass
 
     try:
         data = json.loads(raw)
@@ -467,6 +533,10 @@ async def lifespan(app):
     """Start watchdog and registry-sync on startup, stop on shutdown."""
     global watchdog_task
 
+    # ATHENA-110: one-time startup warning if SERVICE_API_KEY is unset --
+    # every mutating route will 503 until it's configured.
+    warn_if_service_key_unset()
+
     # SSRF guard: warn loudly if no callback allowlist is configured.
     if not os.getenv("ALLOWED_CALLBACK_HOSTS", "").strip():
         logger.critical(
@@ -634,24 +704,30 @@ async def start_process_by_port(port: int) -> tuple[bool, str]:
         if cmd_parts[0] == "python":
             cmd_parts[0] = str(python_path)
 
-        # Redirect output to log files (append, preserves history)
+        # Redirect output to a log file (append, preserves history).
+        # ATHENA-110: no shell -- create_subprocess_exec takes the argv
+        # list directly (cmd_parts is validated at config-load time to
+        # contain no shell metacharacters, but this is belt-and-braces:
+        # there is no shell here to interpret them even if one slipped
+        # through). stdout/stderr are the log file's own fd (opened once,
+        # in append mode, shared by both streams via STDOUT), replacing
+        # the old `cd ... && ... >> log 2>&1` shell string.
         service_name = config["name"]
         log_file = Path("/tmp") / f"{service_name}.log"
-        cmd_str = f"cd {working_dir} && " + " ".join(cmd_parts) + f" >> {log_file} 2>&1"
 
-        # Add restart marker to log
-        with open(log_file, "a") as f:
-            f.write(f"\n{'=' * 40}\n")
-            f.write(f"=== WATCHDOG RESTART: {datetime.utcnow().isoformat()} ===\n")
-            f.write(f"{'=' * 40}\n")
+        with open(log_file, "a") as log_fh:
+            log_fh.write(f"\n{'=' * 40}\n")
+            log_fh.write(f"=== WATCHDOG RESTART: {datetime.utcnow().isoformat()} ===\n")
+            log_fh.write(f"{'=' * 40}\n")
+            log_fh.flush()
 
-        process = await asyncio.create_subprocess_shell(
-            cmd_str,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            cwd=str(working_dir),
-            start_new_session=True  # Detach from control agent
-        )
+            process = await asyncio.create_subprocess_exec(
+                *cmd_parts,
+                cwd=str(working_dir),
+                stdout=log_fh,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,  # Detach from control agent
+            )
 
         # Wait a moment for service to start
         await asyncio.sleep(2)
@@ -723,7 +799,7 @@ async def health_check():
 
 
 # Docker Container Control
-@app.post("/docker/start/{container_name}", response_model=ActionResponse)
+@app.post("/docker/start/{container_name}", response_model=ActionResponse, dependencies=[Depends(require_service_caller)])
 async def start_container(container_name: str):
     """Start a Docker container."""
     if not is_container_allowed(container_name):
@@ -745,7 +821,7 @@ async def start_container(container_name: str):
     )
 
 
-@app.post("/docker/stop/{container_name}", response_model=ActionResponse)
+@app.post("/docker/stop/{container_name}", response_model=ActionResponse, dependencies=[Depends(require_service_caller)])
 async def stop_container(container_name: str):
     """Stop a Docker container."""
     if not is_container_allowed(container_name):
@@ -767,7 +843,7 @@ async def stop_container(container_name: str):
     )
 
 
-@app.post("/docker/restart/{container_name}", response_model=ActionResponse)
+@app.post("/docker/restart/{container_name}", response_model=ActionResponse, dependencies=[Depends(require_service_caller)])
 async def restart_container(container_name: str):
     """Restart a Docker container."""
     if not is_container_allowed(container_name):
@@ -857,7 +933,7 @@ async def list_containers():
 
 
 # Ollama Model Control (via launchd/brew services)
-@app.post("/ollama/restart", response_model=ActionResponse)
+@app.post("/ollama/restart", response_model=ActionResponse, dependencies=[Depends(require_service_caller)])
 async def restart_ollama():
     """Restart Ollama service using brew services."""
     try:
@@ -1000,7 +1076,7 @@ async def ollama_health():
         )
 
 
-@app.post("/ollama/start", response_model=ActionResponse)
+@app.post("/ollama/start", response_model=ActionResponse, dependencies=[Depends(require_service_caller)])
 async def start_ollama():
     """Start Ollama service using brew services."""
     try:
@@ -1049,7 +1125,7 @@ async def start_ollama():
         )
 
 
-@app.post("/ollama/stop", response_model=ActionResponse)
+@app.post("/ollama/stop", response_model=ActionResponse, dependencies=[Depends(require_service_caller)])
 async def stop_ollama():
     """Stop Ollama service using brew services."""
     try:
@@ -1089,7 +1165,7 @@ async def stop_ollama():
 # =============================================================================
 # Control Python/uvicorn processes by port number
 
-@app.post("/process/stop/{port}", response_model=ActionResponse)
+@app.post("/process/stop/{port}", response_model=ActionResponse, dependencies=[Depends(require_service_caller)])
 async def stop_process(port: int):
     """Stop a process listening on a port."""
     if not is_port_allowed(port):
@@ -1112,7 +1188,7 @@ async def stop_process(port: int):
     )
 
 
-@app.post("/process/start/{port}", response_model=ActionResponse)
+@app.post("/process/start/{port}", response_model=ActionResponse, dependencies=[Depends(require_service_caller)])
 async def start_process(port: int):
     """Start a service on a port."""
     if not is_port_allowed(port):
@@ -1135,7 +1211,7 @@ async def start_process(port: int):
     )
 
 
-@app.post("/process/restart/{port}", response_model=ActionResponse)
+@app.post("/process/restart/{port}", response_model=ActionResponse, dependencies=[Depends(require_service_caller)])
 async def restart_process(port: int):
     """Restart a service on a port (stop then start)."""
     if not is_port_allowed(port):
@@ -1334,7 +1410,7 @@ async def hf_repo_files(repo_id: str, format_filter: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/huggingface/download", response_model=HFDownloadStatus)
+@app.post("/huggingface/download", response_model=HFDownloadStatus, dependencies=[Depends(require_service_caller)])
 async def hf_download(request: HFDownloadRequest):
     """Start downloading a model file from Hugging Face."""
     # SSRF guard (xander:7): validate callback_url before handing it to the
@@ -1408,7 +1484,7 @@ async def hf_download_status(job_id: str):
     )
 
 
-@app.delete("/huggingface/download/{job_id}")
+@app.delete("/huggingface/download/{job_id}", dependencies=[Depends(require_service_caller)])
 async def hf_cancel_download(job_id: str):
     """Cancel an active download."""
     from huggingface import cancel_download
@@ -1421,7 +1497,7 @@ async def hf_cancel_download(job_id: str):
         raise HTTPException(status_code=404, detail=f"Download job {job_id} not found or already completed")
 
 
-@app.post("/huggingface/import-to-ollama", response_model=ActionResponse)
+@app.post("/huggingface/import-to-ollama", response_model=ActionResponse, dependencies=[Depends(require_service_caller)])
 async def hf_import_to_ollama(request: HFImportRequest):
     """Import a downloaded GGUF file into Ollama."""
     from huggingface import import_to_ollama
@@ -1460,7 +1536,7 @@ async def hf_list_downloaded():
     ]
 
 
-@app.delete("/huggingface/downloaded")
+@app.delete("/huggingface/downloaded", dependencies=[Depends(require_service_caller)])
 async def hf_delete_downloaded(file_path: str):
     """Delete a downloaded model file."""
     from huggingface import delete_downloaded_model
@@ -1863,7 +1939,7 @@ async def watchdog_status():
     }
 
 
-@app.post("/watchdog/enable")
+@app.post("/watchdog/enable", dependencies=[Depends(require_service_caller)])
 async def enable_watchdog():
     """Enable the watchdog."""
     global watchdog_enabled
@@ -1872,7 +1948,7 @@ async def enable_watchdog():
     return {"enabled": True, "message": "Watchdog enabled"}
 
 
-@app.post("/watchdog/disable")
+@app.post("/watchdog/disable", dependencies=[Depends(require_service_caller)])
 async def disable_watchdog():
     """Disable the watchdog (services won't be auto-restarted)."""
     global watchdog_enabled
@@ -1881,7 +1957,7 @@ async def disable_watchdog():
     return {"enabled": False, "message": "Watchdog disabled - services will NOT be auto-restarted"}
 
 
-@app.post("/watchdog/exclude/{port}")
+@app.post("/watchdog/exclude/{port}", dependencies=[Depends(require_service_caller)])
 async def exclude_from_watchdog(port: int):
     """Exclude a service port from watchdog auto-restart."""
     if port not in PROCESS_SERVICES:
@@ -1892,7 +1968,7 @@ async def exclude_from_watchdog(port: int):
     return {"message": f"Excluded {name} (port {port}) from watchdog"}
 
 
-@app.post("/watchdog/include/{port}")
+@app.post("/watchdog/include/{port}", dependencies=[Depends(require_service_caller)])
 async def include_in_watchdog(port: int):
     """Re-include a previously excluded service in watchdog monitoring."""
     if port not in PROCESS_SERVICES:

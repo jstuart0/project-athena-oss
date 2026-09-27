@@ -18,7 +18,7 @@ from app.models import ModelDownload, User, ExternalAPIKey, Alert
 from app.auth.oidc import get_current_user
 from app.utils.encryption import decrypt_value
 from app.routes.websocket import broadcast_model_download_event
-from app.utils.service_auth import verify_service_api_key
+from app.utils.service_auth import verify_service_api_key, control_agent_headers
 from shared.config import get_config
 
 
@@ -152,7 +152,7 @@ async def call_control_agent(
     if not get_config().control_agent_enabled:
         return (False, {"error": "Control Agent disabled"})
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, headers=control_agent_headers()) as client:
             url = f"{CONTROL_AGENT_URL}{endpoint}"
 
             if method == "GET":

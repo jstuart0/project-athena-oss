@@ -198,6 +198,8 @@ The admin-backend needs `CONTROL_AGENT_URL=http://<your-control-agent-host>:8099
 **OSS-First default — opt-in required:**
 The Control Agent is disabled by default (`CONTROL_AGENT_ENABLED=false`). Set `CONTROL_AGENT_ENABLED=true` in your private overlay or `.env` only if a Control Agent process is actually running on a host. OSS deployers without a Control Agent no longer see connection errors from admin-backend or orchestrator startup. Deployment-specific host/IP values (SSH targets, private kubeconfig overlay entries) belong in `CLAUDE.local.md` (untracked; see `.gitignore`), not here.
 
+**Inbound authentication (ATHENA-110)**: every mutating Control Agent route (`/process/*`, `/docker/*`, `/ollama/start|stop|restart`, `/huggingface/download|import-to-ollama|downloaded`-DELETE, `/watchdog/*`) requires an `X-Service-Key` header matching this host's `SERVICE_API_KEY` env var — a missing/wrong key gets 401, an unset key gets 503 on every mutating route (fail-closed; the Control Agent has no `DEV_MODE` bypass). Read-only routes are unaffected. The start command above is unchanged; set `SERVICE_API_KEY` in the same environment the Control Agent runs in, matching the value admin-backend and the orchestrator already use for `/api/*` service-to-service auth. See `docs/CONFIGURATION.md` for the full route list and `src/control_agent/auth.py` for the dependency.
+
 ## Development Commands
 
 ### Building Images

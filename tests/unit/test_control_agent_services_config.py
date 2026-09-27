@@ -27,6 +27,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+# ATHENA-110: main.py now imports its sibling auth.py at module level
+# (`from auth import ...`), the same way it lazily imports huggingface.py
+# and url_validator.py -- put src/control_agent on sys.path so that
+# resolves under spec_from_file_location the same way it does when
+# uvicorn runs main.py with that directory as its cwd in production.
+_CONTROL_AGENT_DIR = _SRC / "control_agent"
+if str(_CONTROL_AGENT_DIR) not in sys.path:
+    sys.path.insert(0, str(_CONTROL_AGENT_DIR))
 
 for _mod in ("prometheus_client",):
     if _mod not in sys.modules:

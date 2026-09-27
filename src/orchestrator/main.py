@@ -1001,7 +1001,12 @@ async def ensure_gateway_running() -> bool:
         return True  # Not an error, just disabled
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # ATHENA-110: /process/start is a mutating Control Agent route
+        # gated by require_service_caller -- send X-Service-Key (reusing the
+        # module-level _SERVICE_API_KEY, ATHENA-89) on the whole client so
+        # both this GET and the POST below carry it.
+        _ca_headers = {"X-Service-Key": _SERVICE_API_KEY} if _SERVICE_API_KEY else {}
+        async with httpx.AsyncClient(timeout=10.0, headers=_ca_headers) as client:
             # Check gateway status
             status_response = await client.get(f"{CONTROL_AGENT_URL}/process/status/{GATEWAY_PORT}")
 

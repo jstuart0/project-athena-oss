@@ -26,6 +26,26 @@ from fastapi import Depends
 logger = structlog.get_logger()
 
 
+def control_agent_headers() -> dict:
+    """Outbound `X-Service-Key` header for admin-backend's Control Agent
+    client (ATHENA-110). Every admin-backend call into a *mutating* Control
+    Agent route (`/process/start|stop|restart`, `/docker/start|stop|restart`,
+    `/ollama/start|stop|restart`, `/huggingface/download`,
+    `/huggingface/import-to-ollama`, `/huggingface/downloaded` DELETE) must
+    send this, or the Control Agent's `require_service_caller` dependency
+    401s/503s it. Harmless to attach on read-only Control Agent calls too
+    (e.g. `/docker/list`, `/ollama/health`) — those routes aren't gated and
+    ignore the extra header.
+
+    Returns `{}` when `SERVICE_API_KEY` is unset so callers don't send a
+    literal `X-Service-Key: ` header with an empty value; the Control Agent
+    treats a missing header and an empty one identically (401, or 503 if
+    its own key is also unset).
+    """
+    key = get_config().service_api_key
+    return {"X-Service-Key": key} if key else {}
+
+
 def verify_service_api_key(x_service_key: str = Header(..., alias="X-Service-Key")) -> bool:
     """
     FastAPI dependency that authenticates service-to-service requests.

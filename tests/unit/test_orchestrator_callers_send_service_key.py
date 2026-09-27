@@ -76,6 +76,18 @@ _THIRD_PARTY_BASE_URL_MARKER = "base_url=endpoint_url"
 
 # f-string-aware: matches the route literal whether it's a plain string or
 # embedded in an f-string next to ORCHESTRATOR_URL/GATEWAY_URL-style bases.
+#
+# ATHENA-110: the Control Agent's mutating routes joined this list --
+# /docker/{action} and /process/{action} match service_control.py's
+# f-string endpoint-building (action is start/stop/restart), and the three
+# literal /ollama/start|stop|restart calls are matched directly. This does
+# NOT reach model_downloads.py's /huggingface/* calls: those go through a
+# shared call_control_agent(method, endpoint, ...) helper whose actual
+# httpx call builds its URL from an `endpoint` PARAMETER, not a literal in
+# the call's own text -- this scanner's per-call-site text resolution
+# can't see through that indirection (interprocedural, not in scope here).
+# That path is proven instead by a runtime MockTransport test:
+# admin/backend/tests/test_control_agent_caller_headers.py.
 _ROUTE_PATTERN = re.compile(
     r"""/query(?:/stream(?:/v2)?)?["'?]"""
     r"""|/v1/chat/completions"""
@@ -84,10 +96,23 @@ _ROUTE_PATTERN = re.compile(
     r"""|/admin/(?:invalidate-feature-cache|invalidate-model-cache"""
     r"""|reset-circuit-breaker|reset-all-circuits)"""
     r"""|/api/base-knowledge/public["'?]"""
+    r"""|/docker/\{action\}"""
+    r"""|/process/\{action\}"""
+    r"""|/ollama/(?:restart|start|stop)['"]"""
 )
 
 _HTTP_METHODS = {"get", "post", "put", "delete", "stream", "request"}
 _HEADER_LITERAL = "X-Service-Key"
+# ATHENA-110: service_control.py's three Control Agent client constructions
+# use `async with httpx.AsyncClient(..., headers=control_agent_headers())`
+# -- the literal header string lives inside that helper, not in the call
+# site's own text. Treated as an equivalent marker everywhere
+# _HEADER_LITERAL is checked below.
+_HEADER_MARKERS = (_HEADER_LITERAL, "control_agent_headers(")
+
+
+def _has_header_marker(text: str) -> bool:
+    return any(marker in text for marker in _HEADER_MARKERS)
 
 # Route-*definition* decorators (`@app.post(...)`, `@router.get(...)`) are
 # Call nodes too, but they define this file's own endpoints -- not a call
@@ -129,13 +154,30 @@ def _is_asyncclient_call(call: ast.Call) -> bool:
 
 class _CallSiteScanner(ast.NodeVisitor):
     """Collects (call_node, enclosing_scope_node_or_None, callee_dotted_name)
-    for every HTTP-method call, and (dotted_name -> assign_node) for every
-    assignment whose RHS constructs an httpx.AsyncClient."""
+    for every HTTP-method call; (dotted_name -> constructor_call_node) for
+    every module-visible name (module constant or `self.X` instance
+    attribute) bound to an httpx.AsyncClient(...) construction; and
+    ((scope_id, name) -> constructor_call_node) for every LOCAL `with`/
+    `async with httpx.AsyncClient(...) as name:` binding (ATHENA-110 --
+    service_control.py's Control Agent callers use this shape).
+
+    The `with`-binding carve-out is deliberately scoped per enclosing
+    function: a bare local name like `client` is reused across many
+    unrelated functions in the same file (some Control-Agent-headered,
+    some not, e.g. service_control.py's Ollama-direct calls at lines
+    ~271/312/353 alongside its Control-Agent calls) -- a file-global name
+    match would let one function's real header cover another function's
+    unheadered call. The pre-existing Assign-based carve-out keeps its
+    original file-global behaviour, unscoped, because it's what makes the
+    legitimate cross-method case work (`self._http_client` set once in
+    `LiveKitIntegration.initialize()`, reused by every other method on
+    that instance -- there is no single enclosing function to scope to)."""
 
     def __init__(self):
         self._scope_stack: list[ast.AST] = []
         self.call_sites: list[tuple[ast.Call, ast.AST | None, str | None]] = []
-        self.client_constructions: dict[str, ast.Assign] = {}
+        self.client_constructions: dict[str, ast.Call] = {}
+        self.with_client_constructions: dict[tuple[int, str], ast.Call] = {}
 
     def _visit_scope(self, node):
         self._scope_stack.append(node)
@@ -159,8 +201,22 @@ class _CallSiteScanner(ast.NodeVisitor):
             for target in node.targets:
                 name = _dotted_name(target)
                 if name is not None:
-                    self.client_constructions[name] = node
+                    self.client_constructions[name] = node.value
         self.generic_visit(node)
+
+    def _visit_with(self, node):
+        scope = self._scope_stack[-1] if self._scope_stack else None
+        for item in node.items:
+            if (
+                isinstance(item.context_expr, ast.Call)
+                and _is_asyncclient_call(item.context_expr)
+                and isinstance(item.optional_vars, ast.Name)
+            ):
+                self.with_client_constructions[(id(scope), item.optional_vars.id)] = item.context_expr
+        self.generic_visit(node)
+
+    visit_With = _visit_with
+    visit_AsyncWith = _visit_with
 
 
 def _module_level_assign_texts(tree: ast.Module, source: str) -> dict[str, str]:
@@ -237,8 +293,15 @@ def _analyse_file(path: Path):
     # in at construction time.
     preauth_clients = {
         name
-        for name, assign_node in scanner.client_constructions.items()
-        if _HEADER_LITERAL in (ast.get_source_segment(source, assign_node.value) or "")
+        for name, ctor_call in scanner.client_constructions.items()
+        if _has_header_marker(ast.get_source_segment(source, ctor_call) or "")
+    }
+    # Local `with ... as name:` bindings, scoped per enclosing function --
+    # see _CallSiteScanner's docstring for why this one can't be file-global.
+    preauth_with_clients = {
+        key
+        for key, ctor_call in scanner.with_client_constructions.items()
+        if _has_header_marker(ast.get_source_segment(source, ctor_call) or "")
     }
 
     results = []
@@ -283,7 +346,7 @@ def _analyse_file(path: Path):
         # "headered" purely because the OTHER call's header text appeared
         # somewhere else in the same function body.
         call_own_text = ast.get_source_segment(source, call_node) or ""
-        header_directly_present = _HEADER_LITERAL in call_own_text
+        header_directly_present = _has_header_marker(call_own_text)
 
         header_via_binding = False
         if not header_directly_present:
@@ -294,11 +357,16 @@ def _analyse_file(path: Path):
             for kw in call_node.keywords:
                 if kw.arg == "headers" and isinstance(kw.value, ast.Name):
                     bound_text = bindings.get(kw.value.id)
-                    if bound_text and _HEADER_LITERAL in bound_text:
+                    if bound_text and _has_header_marker(bound_text):
                         header_via_binding = True
                         break
 
-        headered = header_directly_present or header_via_binding or (callee in preauth_clients)
+        headered = (
+            header_directly_present
+            or header_via_binding
+            or (callee in preauth_clients)
+            or ((id(scope), callee) in preauth_with_clients)
+        )
         results.append({
             "line": call_node.lineno,
             "callee": callee,

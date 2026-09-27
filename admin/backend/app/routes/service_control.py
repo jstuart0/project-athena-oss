@@ -18,6 +18,7 @@ import asyncio
 from app.database import get_db
 from app.models import RagService, User, LLMBackend, SystemSetting
 from app.auth.oidc import get_current_user
+from app.utils.service_auth import control_agent_headers
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -229,7 +230,7 @@ async def get_containers_status(
         return []
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=control_agent_headers()) as client:
             response = await client.get(f"{CONTROL_AGENT_URL}/docker/list")
 
             if response.status_code == 200:
@@ -401,7 +402,7 @@ async def docker_service_action(container_name: str, action: str) -> Tuple[bool,
     if not get_config().control_agent_enabled:
         return False, "Control Agent disabled"
     try:
-        async with httpx.AsyncClient(timeout=65.0) as client:
+        async with httpx.AsyncClient(timeout=65.0, headers=control_agent_headers()) as client:
             # Map action to Control Agent endpoint
             response = await client.post(
                 f"{CONTROL_AGENT_URL}/docker/{action}/{container_name}"
@@ -435,7 +436,7 @@ async def process_service_action(port: int, action: str) -> Tuple[bool, str]:
     if not get_config().control_agent_enabled:
         return False, "Control Agent disabled"
     try:
-        async with httpx.AsyncClient(timeout=65.0) as client:
+        async with httpx.AsyncClient(timeout=65.0, headers=control_agent_headers()) as client:
             # Map action to Control Agent process endpoint
             response = await client.post(
                 f"{CONTROL_AGENT_URL}/process/{action}/{port}"
@@ -470,7 +471,7 @@ async def launchd_service_action(service_name: str, action: str) -> Tuple[bool, 
     # For Ollama, map to the specific endpoint
     if "ollama" in service_name.lower():
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, headers=control_agent_headers()) as client:
                 if action == "restart":
                     response = await client.post(f"{CONTROL_AGENT_URL}/ollama/restart")
                 elif action == "start":
@@ -537,7 +538,7 @@ async def get_ollama_health(
     ollama_url = get_ollama_url(db)
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=control_agent_headers()) as client:
             response = await client.get(f"{CONTROL_AGENT_URL}/ollama/health")
 
             if response.status_code == 200:
