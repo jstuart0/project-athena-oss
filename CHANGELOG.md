@@ -11,7 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > **Plan:** `.mozart/plans/active/2026-09-27-deliver-athena-transit-and-base-knowledge.md`
 > **Ticket:** [ATHENA-90](https://plane.xmojo.net) + [ATHENA-91](https://plane.xmojo.net)
-> **Commits:** `5b8b515` (Phase 1 — `search_transit` wiring), `85930aa` (Phase 2 — base-knowledge settings facade), P3 SHA to be backfilled at reconciliation close.
+> **Commits:** `5b8b515` (Phase 1 — `search_transit` wiring), `85930aa` (Phase 2 — base-knowledge settings facade), `02fd52e` (P3 — `/public` auth gate, sanitization, transit sort/regex fixes)
 
 ### Transit tool wiring: `search_transit` reaches a real transportation route (ATHENA-90, Phase 1)
 
