@@ -23,6 +23,7 @@ from app.models import Feature, MCPSecurity, MusicConfig
 from app.routes import internal as internal_module
 from app.routes import mcp_security as mcp_security_module
 from app.routes import voice_tests as voice_tests_module
+from app.utils import rag_urls as rag_urls_module
 from shared.config import _clear_cache_for_tests
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -173,16 +174,34 @@ def test_A5_rag_probe_url_weather_skipped_when_city_empty():
     assert voice_tests_module._rag_probe_url("weather", 8010, "", "") is None
 
 
-def test_A5_rag_probe_url_weather_with_city_and_state():
+def test_A5_rag_probe_url_weather_with_city_and_state(monkeypatch):
+    # ATHENA-113b: host resolution now goes through app.utils.rag_urls'
+    # registry -> RAG_<NAME>_URL -> legacy chain instead of a bare
+    # RAG_SERVICE_HOST default; set the legacy env var so this test still
+    # exercises URL construction rather than the "not configured" branch.
+    monkeypatch.setenv("RAG_SERVICE_HOST", "localhost")
+    rag_urls_module._reset_legacy_warning_cache()
     url = voice_tests_module._rag_probe_url("weather", 8010, "Denver", "CO")
     assert url.endswith("location=Denver,CO")
 
 
-def test_A5_rag_probe_url_airports_uses_fixed_probe_code():
+def test_A5_rag_probe_url_airports_uses_fixed_probe_code(monkeypatch):
+    monkeypatch.setenv("RAG_SERVICE_HOST", "localhost")
+    rag_urls_module._reset_legacy_warning_cache()
     url = voice_tests_module._rag_probe_url("airports", 8011, "", "")
     assert url is not None
     assert url.endswith(f"/airports/{voice_tests_module.PROBE_AIRPORT_CODE}")
     assert url.endswith("/airports/JFK")
+
+
+def test_A5_rag_probe_url_unconfigured_returns_none(monkeypatch):
+    """ATHENA-113b: with no registry row, no RAG_<NAME>_URL, and no legacy
+    RAG_HOST/RAG_SERVICE_HOST set, the probe must report "not configured"
+    (None) rather than building a broken http://:port URL."""
+    monkeypatch.delenv("RAG_HOST", raising=False)
+    monkeypatch.delenv("RAG_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("RAG_AIRPORTS_URL", raising=False)
+    assert voice_tests_module._rag_probe_url("airports", 8011, "", "") is None
 
 
 # ---------------------------------------------------------------------------

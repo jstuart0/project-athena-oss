@@ -33,6 +33,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+> **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md` (S1)
+
+### Fixed: Mission Control's voice-health card assumed every RAG shares one host, reporting all of them "unreachable" instead of "not configured" (ATHENA-113b)
+
+- **Fixed — `admin/backend/app/routes/dashboard.py` probed Weather/Sports/Dining RAG health via a single `RAG_HOST` + hardcoded port** (`:8010`/`:8017`/`:8019`): in Kubernetes each RAG is its own Service, so this single-shared-host assumption is an OSS-First violation, and with `RAG_HOST` unset (the normal case for a per-Service deployment) it built malformed `:port/health` URLs and reported every RAG "unreachable". New `app.utils.rag_urls.resolve_rag_url` resolves each RAG independently: service-registry row → canonical `RAG_<NAME>_URL` env var (spelling matches `src/orchestrator/urls.py`) → legacy `RAG_HOST`/`RAG_SERVICE_HOST` + port (one-time WARNING) → `not_configured` (amber), no longer conflated with a genuine probe failure.
+- **Same treatment for `admin/backend/app/routes/voice_tests.py`**: `_rag_probe_url` (the full-pipeline test's auto-detected RAG probe) and `test_rag_query` (the manual "Test RAG" panel) both resolved through the same module-level `RAG_SERVICE_HOST` single-host assumption; both now resolve via the shared helper. `test_rag_query` returns 503 with a clear "not configured" message instead of attempting a request against a broken URL.
+- See `docs/CONFIGURATION.md`'s new "Mission Control voice-health card and RAG test probes" note for the full resolution order.
+
+---
+
+## [Unreleased]
+
 > **Ticket:** [ATHENA-110](https://plane.xmojo.net)
 > **Plan:** `.mozart/plans/active/2026-09-27-operate-athena-dashboard-registry-cleanup.md` (P3)
 

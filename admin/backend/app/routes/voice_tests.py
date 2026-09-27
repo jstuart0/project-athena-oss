@@ -30,6 +30,7 @@ from wyoming.event import Event
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, VoiceTest, VoiceTestFeedback, LLMPerformanceMetric, SystemSetting
+from app.utils.rag_urls import resolve_rag_base_url
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -42,9 +43,6 @@ WYOMING_STT_PORT = int(os.getenv("WYOMING_STT_PORT", "10300"))
 WYOMING_TTS_HOST = os.getenv("WYOMING_TTS_HOST", "localhost")
 WYOMING_TTS_PORT = int(os.getenv("WYOMING_TTS_PORT", "10200"))
 
-# Other service configuration
-RAG_SERVICE_HOST = os.getenv("RAG_SERVICE_HOST", "localhost")
-
 # D8: the full-pipeline test's auto-detected RAG probe has no user-supplied
 # location, so it can't reuse test_rag_query's query.text. The airport probe
 # always uses a fixed, non-behavioral example code; it isn't derived from
@@ -52,18 +50,27 @@ RAG_SERVICE_HOST = os.getenv("RAG_SERVICE_HOST", "localhost")
 PROBE_AIRPORT_CODE = "JFK"
 
 
-def _rag_probe_url(connector: str, port: int, city: str, state: str) -> Optional[str]:
+def _rag_probe_url(
+    connector: str, port: int, city: str, state: str, db: Optional[Session] = None
+) -> Optional[str]:
     """Build the synthetic probe URL for test_full_pipeline's auto-detected
     RAG connector. Returns None when the probe can't run generically (the
-    weather probe needs a configured DEFAULT_CITY)."""
+    weather probe needs a configured DEFAULT_CITY, or the RAG service host
+    isn't resolvable via the registry/env/legacy chain -- ATHENA-113b:
+    resolution goes through app.utils.rag_urls, the same per-service
+    registry -> RAG_<NAME>_URL -> legacy RAG_HOST/RAG_SERVICE_HOST chain the
+    Mission Control dashboard uses, instead of a single shared RAG_SERVICE_HOST)."""
+    if connector == "weather" and not city:
+        return None
+    base, _source = resolve_rag_base_url(connector, port, db)
+    if base is None:
+        return None
     if connector == "weather":
-        if not city:
-            return None
         location = f"{city},{state}" if state else city
-        return f"http://{RAG_SERVICE_HOST}:{port}/weather/current?location={location}"
+        return f"{base}/weather/current?location={location}"
     if connector == "airports":
-        return f"http://{RAG_SERVICE_HOST}:{port}/airports/{PROBE_AIRPORT_CODE}"
-    return f"http://{RAG_SERVICE_HOST}:{port}/scores"
+        return f"{base}/airports/{PROBE_AIRPORT_CODE}"
+    return f"{base}/scores"
 
 
 def get_ollama_url(db: Session) -> str:
@@ -506,24 +513,32 @@ async def test_rag_query(
 
     connector = query.connector or "weather"
 
-    try:
-        # Determine RAG service URL
-        port_map = {
-            "weather": 8010,
-            "airports": 8011,
-            "flights": 8012
-        }
-        port = port_map.get(connector, 8010)
+    if connector not in ("weather", "airports", "flights"):
+        raise HTTPException(status_code=400, detail=f"Unknown connector: {connector}")
 
+    # Determine RAG service URL (ATHENA-113b: per-service registry ->
+    # RAG_<NAME>_URL -> legacy RAG_HOST/RAG_SERVICE_HOST chain, same helper
+    # the Mission Control dashboard uses -- no single shared RAG host).
+    port_map = {
+        "weather": 8010,
+        "airports": 8011,
+        "flights": 8012
+    }
+    port = port_map.get(connector, 8010)
+    base_url, _source = resolve_rag_base_url(connector, port, db)
+    if base_url is None:
+        raise HTTPException(
+            status_code=503, detail=f"'{connector}' RAG service is not configured"
+        )
+
+    try:
         # Build URL based on connector type
         if connector == "weather":
-            url = f"http://{RAG_SERVICE_HOST}:{port}/weather/current?location={query.text}"
+            url = f"{base_url}/weather/current?location={query.text}"
         elif connector == "airports":
-            url = f"http://{RAG_SERVICE_HOST}:{port}/airports/{query.text}"
-        elif connector == "flights":
-            url = f"http://{RAG_SERVICE_HOST}:{port}/flights/{query.text}"
+            url = f"{base_url}/airports/{query.text}"
         else:
-            raise HTTPException(status_code=400, detail=f"Unknown connector: {connector}")
+            url = f"{base_url}/flights/{query.text}"
 
         start = time.time()
         async with aiohttp.ClientSession() as session:
@@ -645,11 +660,14 @@ async def test_full_pipeline(
             # Call appropriate RAG service
             cfg = get_config()
             rag_url = _rag_probe_url(
-                rag_connector, port, cfg.default_city, os.getenv("DEFAULT_STATE", "")
+                rag_connector, port, cfg.default_city, os.getenv("DEFAULT_STATE", ""), db=db
             )
 
             if rag_url is None:
-                results["rag_skipped"] = f"no DEFAULT_CITY configured for {rag_connector} probe"
+                if rag_connector == "weather" and not cfg.default_city:
+                    results["rag_skipped"] = f"no DEFAULT_CITY configured for {rag_connector} probe"
+                else:
+                    results["rag_skipped"] = f"'{rag_connector}' RAG service is not configured"
             else:
                 try:
                     start = time.time()

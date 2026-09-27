@@ -242,6 +242,13 @@ Registering a `tcp` row via the admin UI's row editor (or directly via `POST /ap
 
 **Dashboard aggregation (ATHENA-112)**: `GET /api/service-registry/services` computes `healthy_services` and `overall_health` over **enabled** rows only. A disabled row is reported with `health_status: "disabled"` regardless of its last cached poller value (which goes stale the moment it's disabled) and is excluded from both the counts and the health rollup. `enabled_services` / `disabled_services` are new response fields; `total_services` still counts every row for backward compatibility.
 
+**Mission Control voice-health card and RAG test probes (ATHENA-113b)**: the admin-backend's dashboard (`admin/backend/app/routes/dashboard.py`) and voice-test routes (`admin/backend/app/routes/voice_tests.py`) resolve each RAG service's URL independently via `app.utils.rag_urls.resolve_rag_url`, instead of assuming every RAG shares one host behind `RAG_HOST`/`RAG_SERVICE_HOST` -- in Kubernetes each RAG is its own Service, so a single shared host is an OSS-First violation and (when unset) reported every RAG as "unreachable" rather than "not configured". Resolution order per service:
+
+1. **Service registry** -- a row in `athena_service_registry` for that service name (host/port/protocol, or `endpoint_url` directly), configured via the Admin UI's service registry.
+2. **Canonical env var** -- `RAG_<NAME>_URL` (same spelling as `src/orchestrator/urls.py`, e.g. `RAG_WEATHER_URL`, `RAG_SPORTS_URL`, `RAG_DINING_URL`).
+3. **Legacy single-host fallback** -- `RAG_HOST` or `RAG_SERVICE_HOST` plus the service's well-known port. Logs one WARNING per service the first time this fallback is used.
+4. **Not configured** -- no source resolves. The dashboard's voice-health card shows `not_configured` (amber) for that service instead of probing a broken URL and reporting `unreachable`.
+
 ---
 
 ## Infrastructure Services

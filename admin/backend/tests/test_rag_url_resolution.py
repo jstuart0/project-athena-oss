@@ -1,0 +1,187 @@
+"""ATHENA-113b — per-service RAG URL resolution (app.utils.rag_urls) and the
+Mission Control dashboard voice-health card.
+
+dashboard.py used to probe every RAG through one shared RAG_HOST + a
+hardcoded port, an OSS-First single-host assumption that breaks whenever a
+RAG runs behind its own Kubernetes Service (the normal case) -- the card
+then reported every RAG "unreachable" instead of "not configured". These
+tests cover the resolution order (registry -> RAG_<NAME>_URL -> legacy
+RAG_HOST/RAG_SERVICE_HOST -> unconfigured) and the dashboard route's
+"not configured" (not "unreachable") card behavior when nothing resolves.
+"""
+import asyncio
+import os
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+from app.auth.oidc import get_current_user
+from app.models import RagService
+from app.routes import dashboard as dashboard_module
+from app.utils import rag_urls
+from main import app
+
+
+@pytest.fixture(autouse=True)
+def _clean_rag_env(monkeypatch):
+    for name in (
+        "RAG_HOST", "RAG_SERVICE_HOST", "RAG_WEATHER_URL", "RAG_SPORTS_URL",
+        "RAG_DINING_URL", "RAG_AIRPORTS_URL", "RAG_FLIGHTS_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    rag_urls._reset_legacy_warning_cache()
+    yield
+    rag_urls._reset_legacy_warning_cache()
+
+
+@pytest.fixture
+def owner_client(client, test_user):
+    async def _get_user():
+        return test_user
+    app.dependency_overrides[get_current_user] = _get_user
+    yield client
+    app.dependency_overrides.pop(get_current_user, None)
+
+
+# ---------------------------------------------------------------------------
+# resolve_rag_base_url / resolve_rag_url — resolution order
+# ---------------------------------------------------------------------------
+
+
+def test_registry_row_wins_over_env_and_legacy(db, monkeypatch):
+    monkeypatch.setenv("RAG_WEATHER_URL", "http://env-weather:9999")
+    monkeypatch.setenv("RAG_HOST", "http://legacy-host")
+    db.add(RagService(
+        name="weather", display_name="Weather", host="registry-weather",
+        port=8010, protocol="http", enabled=True,
+    ))
+    db.commit()
+
+    base, source = rag_urls.resolve_rag_base_url("weather", 8010, db)
+    assert source == "registry"
+    assert base == "http://registry-weather:8010"
+
+
+def test_registry_row_disabled_falls_through_to_env(db, monkeypatch):
+    monkeypatch.setenv("RAG_WEATHER_URL", "http://env-weather:9999")
+    db.add(RagService(
+        name="weather", display_name="Weather", host="registry-weather",
+        port=8010, protocol="http", enabled=False,
+    ))
+    db.commit()
+
+    base, source = rag_urls.resolve_rag_base_url("weather", 8010, db)
+    assert (base, source) == ("http://env-weather:9999", "env")
+
+
+def test_env_wins_over_legacy_when_no_registry_row(db, monkeypatch):
+    monkeypatch.setenv("RAG_WEATHER_URL", "http://env-weather:9999")
+    monkeypatch.setenv("RAG_HOST", "http://legacy-host")
+
+    base, source = rag_urls.resolve_rag_base_url("weather", 8010, db)
+    assert (base, source) == ("http://env-weather:9999", "env")
+
+
+def test_legacy_rag_host_used_when_no_registry_or_env(db, monkeypatch):
+    monkeypatch.setenv("RAG_HOST", "http://legacy-host")
+
+    base, source = rag_urls.resolve_rag_base_url("weather", 8010, db)
+    assert (base, source) == ("http://legacy-host:8010", "legacy")
+
+
+def test_legacy_rag_service_host_used_as_fallback(db, monkeypatch):
+    monkeypatch.setenv("RAG_SERVICE_HOST", "legacy-host-no-scheme")
+
+    base, source = rag_urls.resolve_rag_base_url("weather", 8010, db)
+    assert (base, source) == ("http://legacy-host-no-scheme:8010", "legacy")
+
+
+def test_legacy_fallback_warns_once_per_service(db, monkeypatch):
+    import structlog
+
+    monkeypatch.setenv("RAG_HOST", "http://legacy-host")
+    with structlog.testing.capture_logs() as cap:
+        rag_urls.resolve_rag_base_url("weather", 8010, db)
+        rag_urls.resolve_rag_base_url("weather", 8010, db)
+    warnings = [e for e in cap if e.get("event") == "rag_url_legacy_host_fallback"]
+    assert len(warnings) == 1, f"expected exactly one warning, got {len(warnings)}: {warnings}"
+
+
+def test_unconfigured_when_nothing_resolves(db):
+    base, source = rag_urls.resolve_rag_base_url("weather", 8010, db)
+    assert (base, source) == (None, "unconfigured")
+
+
+def test_resolve_rag_url_appends_path():
+    with patch.object(rag_urls, "resolve_rag_base_url", return_value=("http://host:8010", "env")):
+        url, source = rag_urls.resolve_rag_url("weather", 8010, path="/health")
+        assert (url, source) == ("http://host:8010/health", "env")
+
+
+def test_resolve_rag_url_unconfigured_returns_none():
+    with patch.object(rag_urls, "resolve_rag_base_url", return_value=(None, "unconfigured")):
+        url, source = rag_urls.resolve_rag_url("weather", 8010, path="/health")
+        assert (url, source) == (None, "unconfigured")
+
+
+# ---------------------------------------------------------------------------
+# get_dashboard_data — "not configured" (not "unreachable") when unresolved
+# ---------------------------------------------------------------------------
+
+
+def _mock_ok_client():
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=mock_response)
+    return mock_client
+
+
+def test_dashboard_shows_not_configured_for_unresolved_rag(owner_client, db):
+    """No registry rows, no RAG_<NAME>_URL, no legacy RAG_HOST -- every RAG
+    on the voice-health card must read 'not_configured', not 'unreachable'."""
+    with patch("app.routes.dashboard.httpx.AsyncClient", return_value=_mock_ok_client()):
+        response = owner_client.get("/api/dashboard")
+
+    assert response.status_code == 200
+    data = response.json()
+    statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
+    for name in ("Weather RAG", "Sports RAG", "Dining RAG"):
+        assert statuses.get(name) == "not_configured", statuses
+
+    service_grid = {s["name"]: s["status"] for s in data["services"]}
+    for name in ("Weather RAG", "Sports RAG", "Dining RAG"):
+        assert service_grid.get(name) == "not_configured", service_grid
+
+    # Gateway/Orchestrator (mocked healthy) count toward the percentage;
+    # unconfigured RAGs must not inflate the denominator with a phantom probe.
+    assert data["voice_health"]["total"] == 2
+    assert data["voice_health"]["healthy"] == 2
+
+
+def test_dashboard_probes_registry_resolved_rag(owner_client, db):
+    db.add(RagService(
+        name="weather", display_name="Weather", host="weather-svc",
+        port=8010, protocol="http", enabled=True,
+    ))
+    db.commit()
+
+    mock_client = _mock_ok_client()
+    with patch("app.routes.dashboard.httpx.AsyncClient", return_value=mock_client):
+        response = owner_client.get("/api/dashboard")
+
+    assert response.status_code == 200
+    data = response.json()
+    statuses = {s["name"]: s["status"] for s in data["voice_health"]["critical_services"]}
+    assert "Weather RAG" not in statuses  # healthy -> not in the problem list
+
+    called_urls = [c.args[0] if c.args else c.kwargs.get("url") for c in mock_client.get.call_args_list]
+    assert any("weather-svc:8010/health" in u for u in called_urls), called_urls

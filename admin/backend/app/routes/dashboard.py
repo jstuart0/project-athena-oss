@@ -15,6 +15,7 @@ import structlog
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, PipelineEvent, Alert, ExternalAPIKey, Feature, ConversationAnalytics
+from app.utils.rag_urls import resolve_rag_url
 import httpx
 
 logger = structlog.get_logger()
@@ -23,10 +24,18 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 # Service URLs — configurable via env vars.
 # GATEWAY_URL and ORCHESTRATOR_URL are set by k8s deployments to cluster services.
-# RAG_HOST points to the machine running the RAG microservices.
 _GATEWAY_BASE = os.getenv("GATEWAY_URL", "http://localhost:8000").rstrip("/")
 _ORCHESTRATOR_BASE = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001").rstrip("/")
-_RAG_HOST = os.getenv("RAG_HOST", "http://localhost").rstrip("/")
+
+# RAG services shown on the voice-health card. Each is resolved independently
+# via app.utils.rag_urls.resolve_rag_url (registry -> RAG_<NAME>_URL -> legacy
+# RAG_HOST/RAG_SERVICE_HOST:port) -- ATHENA-113b: a single shared RAG_HOST no
+# longer stands in for every RAG's own Kubernetes Service.
+_RAG_HEALTH_SERVICES = [
+    {"name": "Weather RAG", "service": "weather", "port": 8010},
+    {"name": "Sports RAG", "service": "sports", "port": 8017},
+    {"name": "Dining RAG", "service": "dining", "port": 8019},
+]
 
 
 @router.get("")
@@ -52,10 +61,14 @@ async def get_dashboard_data(
     core_services = [
         {"name": "Gateway", "url": f"{_GATEWAY_BASE}/health", "critical": True},
         {"name": "Orchestrator", "url": f"{_ORCHESTRATOR_BASE}/health", "critical": True},
-        {"name": "Weather RAG", "url": f"{_RAG_HOST}:8010/health", "critical": False},
-        {"name": "Sports RAG", "url": f"{_RAG_HOST}:8017/health", "critical": False},
-        {"name": "Dining RAG", "url": f"{_RAG_HOST}:8019/health", "critical": False},
     ]
+    not_configured_services = []
+    for rag in _RAG_HEALTH_SERVICES:
+        url, _source = resolve_rag_url(rag["service"], rag["port"], path="/health", db=db)
+        if url is None:
+            not_configured_services.append(rag["name"])
+        else:
+            core_services.append({"name": rag["name"], "url": url, "critical": False})
 
     healthy_count = 0
     total_count = len(core_services)
@@ -73,6 +86,9 @@ async def get_dashboard_data(
                 except Exception:
                     critical_services.append({"name": svc["name"], "status": "unreachable"})
 
+        for name in not_configured_services:
+            critical_services.append({"name": name, "status": "not_configured"})
+
         health_pct = round((healthy_count / total_count * 100) if total_count > 0 else 0)
         health_history = [health_pct] * 20  # Would need time-series tracking for real history
     except Exception as e:
@@ -81,6 +97,7 @@ async def get_dashboard_data(
         health_pct = 0
         health_history = [0] * 20
         critical_services = [{"name": s["name"], "status": "unknown"} for s in core_services]
+        critical_services += [{"name": name, "status": "not_configured"} for name in not_configured_services]
 
     # 2. Traffic Metrics - From conversation_analytics table
     try:
@@ -197,6 +214,8 @@ async def get_dashboard_data(
             "status": "healthy" if is_healthy else "unhealthy",
             "latency_ms": None
         })
+    for name in not_configured_services:
+        service_status.append({"name": name, "status": "not_configured", "latency_ms": None})
 
     logger.info("dashboard_data_fetched", user=current_user.username,
                 healthy=healthy_count, total=total_count,
