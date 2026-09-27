@@ -429,3 +429,103 @@ def test_no_raw_service_status_interpolation_remains_in_app_js():
     entry, since that endpoint has never sent a `status` field."""
     source = APP_JS.read_text()
     assert "${service.status}" not in source
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-112 P3: summarizeServices(payload), a pure function with no DOM
+# dependency, extracted out of loadStatus() so the dashboard's stat-card
+# text/classes and the enabled-service groupings (including the `disabled`
+# group) are covered directly in Node -- same extraction pattern as
+# serviceStatus() above.
+# ---------------------------------------------------------------------------
+
+def _registry_service(name, *, enabled, health_status, service_type="api"):
+    return {
+        "name": name,
+        "display_name": name.title(),
+        "enabled": enabled,
+        "health_status": health_status,
+        "service_type": service_type,
+        "host": "127.0.0.1",
+        "port": 8000,
+    }
+
+
+def _summarize(payload):
+    fn_source = _extract_function_source(APP_JS, "summarizeServices")
+    return _run_node_with_source(fn_source, f"summarizeServices({json.dumps(payload)})")
+
+
+def test_summarize_services_helper_exists():
+    source = APP_JS.read_text()
+    assert "function summarizeServices(" in source, (
+        "expected a summarizeServices(payload) helper in app.js (ATHENA-112 P3)"
+    )
+
+
+def test_three_enabled_healthy_two_disabled_summary():
+    """3 enabled healthy + 2 disabled: healthy text '3', enabled text
+    '3 (2 disabled)', overall class healthy, and the two disabled rows
+    appear ONLY in the disabled group -- never in Core/RAG/Database."""
+    payload = {
+        "services": [
+            _registry_service("gateway", enabled=True, health_status="healthy"),
+            _registry_service("orchestrator", enabled=True, health_status="healthy"),
+            _registry_service("mode", enabled=True, health_status="healthy"),
+            _registry_service("old-svc-a", enabled=False, health_status="healthy"),
+            _registry_service("old-svc-b", enabled=False, health_status="unhealthy"),
+        ],
+        "total_services": 5,
+        "enabled_services": 3,
+        "disabled_services": 2,
+        "healthy_services": 3,
+        "overall_health": "healthy",
+    }
+    result = _summarize(payload)
+
+    assert result["healthyText"] == "3"
+    assert result["enabledText"] == "3 (2 disabled)"
+    assert result["overallClass"] == "text-green-400"
+    assert result["overallText"] == "HEALTHY"
+
+    disabled_names = {s["name"] for s in result["disabled"]}
+    assert disabled_names == {"old-svc-a", "old-svc-b"}
+
+    grouped_names = set()
+    for services in result["groups"].values():
+        grouped_names.update(s["name"] for s in services)
+    assert grouped_names == {"gateway", "orchestrator", "mode"}
+    assert not (grouped_names & disabled_names), (
+        "a disabled row leaked into an enabled group (Core/RAG/Database)"
+    )
+
+
+def test_one_enabled_unhealthy_reads_degraded():
+    """1 enabled unhealthy among enabled healthy rows and zero disabled rows:
+    overall class degraded, enabled text has no '(N disabled)' suffix."""
+    payload = {
+        "services": [
+            _registry_service("gateway", enabled=True, health_status="healthy"),
+            _registry_service("orchestrator", enabled=True, health_status="healthy"),
+            _registry_service("broken-svc", enabled=True, health_status="unhealthy"),
+        ],
+        "total_services": 3,
+        "enabled_services": 3,
+        "disabled_services": 0,
+        "healthy_services": 2,
+        "overall_health": "degraded",
+    }
+    result = _summarize(payload)
+
+    assert result["healthyText"] == "2"
+    assert result["enabledText"] == "3"
+    assert result["overallClass"] == "text-yellow-400"
+    assert result["overallText"] == "DEGRADED"
+    assert result["disabled"] == []
+
+
+def test_load_status_uses_summarize_services_helper():
+    """Static check: loadStatus() must render from summarizeServices(data)
+    rather than recomputing the grouping/stat-card logic inline."""
+    source = APP_JS.read_text()
+    assert "const summary = summarizeServices(data);" in source

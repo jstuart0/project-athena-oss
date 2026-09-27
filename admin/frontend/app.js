@@ -882,6 +882,62 @@ function serviceStatus(service) {
     return service?.health_status ?? service?.status ?? 'unknown';
 }
 
+/**
+ * Pure function: compute the dashboard's stat-card text/classes and the
+ * enabled-service groupings (RAG/Core/Database, plus a `disabled` group) from
+ * a GET /api/service-registry/services payload. No DOM access -- everything
+ * DOM-touching stays in loadStatus() below, so this can be loaded and tested
+ * directly in Node (same extraction pattern as serviceStatus(), ATHENA-99).
+ *
+ * enabled_services / disabled_services are ATHENA-112; enabledText falls
+ * back to total_services against an older backend response shape that
+ * doesn't send them. Disabled rows never enter the Core/RAG/Database groups
+ * or affect overallClass/overallText (those come straight from the server's
+ * enabled-only rollup) -- they're returned separately in `disabled` so a
+ * disabled row never reads as a live member of "Core Services" etc.
+ * (ATHENA-112 P3)
+ */
+function summarizeServices(payload) {
+    const enabledCount = payload.enabled_services ?? payload.total_services;
+    const disabledCount = payload.disabled_services ?? 0;
+    const overallHealth = payload.overall_health;
+
+    const groups = {
+        'RAG Services': [],
+        'Core Services': [],
+        'Database Services': []
+    };
+    const disabled = [];
+
+    (payload.services || []).forEach(service => {
+        if (!service.enabled) {
+            disabled.push(service);
+            return;
+        }
+        // Determine group based on service type or name
+        if (service.service_type === 'rag' ||
+            ['weather', 'sports', 'airports', 'flights', 'events', 'streaming',
+             'news', 'stocks', 'websearch', 'dining', 'recipes'].includes(service.name)) {
+            groups['RAG Services'].push(service);
+        } else if (service.service_type === 'database' ||
+                   service.name.includes('qdrant') || service.name.includes('redis')) {
+            groups['Database Services'].push(service);
+        } else {
+            groups['Core Services'].push(service);
+        }
+    });
+
+    return {
+        healthyText: `${payload.healthy_services}`,
+        enabledText: disabledCount > 0 ? `${enabledCount} (${disabledCount} disabled)` : `${enabledCount}`,
+        overallText: (overallHealth || '').toUpperCase(),
+        overallClass: overallHealth === 'healthy' ? 'text-green-400' :
+                      overallHealth === 'degraded' ? 'text-yellow-400' : 'text-red-400',
+        groups,
+        disabled,
+    };
+}
+
 async function loadStatus() {
     const errorContainer = document.getElementById('error-container');
     const statsContainer = document.getElementById('stats-container');
@@ -892,57 +948,21 @@ async function loadStatus() {
     try {
         // Fetch services from the service registry
         const data = await apiRequest('/api/service-registry/services');
+        const summary = summarizeServices(data);
 
-        // Update stats. enabled_services / disabled_services are ATHENA-112;
-        // fall back to total_services against an older backend response shape.
-        document.getElementById('stat-healthy').textContent = data.healthy_services;
-        const enabledCount = data.enabled_services ?? data.total_services;
-        const disabledCount = data.disabled_services ?? 0;
-        document.getElementById('stat-total').textContent = disabledCount > 0
-            ? `${enabledCount} (${disabledCount} disabled)`
-            : `${enabledCount}`;
+        // Update stats
+        document.getElementById('stat-healthy').textContent = summary.healthyText;
+        document.getElementById('stat-total').textContent = summary.enabledText;
 
         const healthStat = document.getElementById('stat-health');
-        healthStat.textContent = data.overall_health.toUpperCase();
-        healthStat.className = `text-3xl font-bold ${
-            data.overall_health === 'healthy' ? 'text-green-400' :
-            data.overall_health === 'degraded' ? 'text-yellow-400' : 'text-red-400'
-        }`;
+        healthStat.textContent = summary.overallText;
+        healthStat.className = `text-3xl font-bold ${summary.overallClass}`;
 
         statsContainer.style.display = 'grid';
 
-        // Group ENABLED services by type. Disabled rows are rendered in their
-        // own muted group below and never enter Core/RAG/Database counts or
-        // the overall_health computation (ATHENA-112 -- that's server-side,
-        // but keeping them out of these groups too avoids a disabled row
-        // reading as a live member of "Core Services" etc.)
-        const servicesByGroup = {
-            'RAG Services': [],
-            'Core Services': [],
-            'Database Services': []
-        };
-        const disabledServices = [];
-
-        data.services.forEach(service => {
-            if (!service.enabled) {
-                disabledServices.push(service);
-                return;
-            }
-            // Determine group based on service type or name
-            if (service.service_type === 'rag' ||
-                ['weather', 'sports', 'airports', 'flights', 'events', 'streaming',
-                 'news', 'stocks', 'websearch', 'dining', 'recipes'].includes(service.name)) {
-                servicesByGroup['RAG Services'].push(service);
-            } else if (service.service_type === 'database' ||
-                       service.name.includes('qdrant') || service.name.includes('redis')) {
-                servicesByGroup['Database Services'].push(service);
-            } else {
-                servicesByGroup['Core Services'].push(service);
-            }
-        });
-
-        // Render services by group
-        const enabledGroupsHtml = Object.entries(servicesByGroup).map(([group, services]) => {
+        // Render services by group (disabled rows are grouped separately below --
+        // see summarizeServices for why they're excluded from these three).
+        const enabledGroupsHtml = Object.entries(summary.groups).map(([group, services]) => {
             if (services.length === 0) return ''; // Skip empty groups
 
             return `
@@ -1000,11 +1020,11 @@ async function loadStatus() {
 
         // Disabled group -- muted, separate from the enabled groups above,
         // never counted toward healthy/enabled/overall_health. (ATHENA-112)
-        const disabledHtml = disabledServices.length === 0 ? '' : `
+        const disabledHtml = summary.disabled.length === 0 ? '' : `
             <div class="mb-6 opacity-60">
                 <h3 class="text-lg font-semibold text-gray-400 mb-3">Disabled</h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    ${disabledServices.map(service => `
+                    ${summary.disabled.map(service => `
                         <div class="bg-dark-card border border-dark-border rounded-lg p-4">
                             <div class="flex items-start justify-between mb-2">
                                 <div class="flex-1">
