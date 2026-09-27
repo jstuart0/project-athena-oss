@@ -363,3 +363,85 @@ def test_checker_main_diffs_committed_manifest(tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert "manifest drift" in output
+
+
+# ---------------------------------------------------------------------------
+# F42 (reconciliation round 1, codex r2 Low): the src/rag directory-set
+# population check must run in the CLI checker itself, not only in
+# test_generator_names_equal_code_names_per_service (pytest-only).
+# ---------------------------------------------------------------------------
+
+def test_checker_flags_new_rag_directory_with_no_services_entry(tmp_path):
+    root = _copy_real_tree(tmp_path)
+    (root / "src" / "rag" / "newservice").mkdir(parents=True)
+    (root / "src" / "rag" / "newservice" / "main.py").write_text("import os\n")
+
+    checker = _load_checker()
+    rc = checker.main(["--root", str(root)])
+    assert rc == 1
+
+
+def test_checker_flags_stale_services_entry_with_no_directory(tmp_path):
+    root = _copy_real_tree(tmp_path)
+    generator_path = root / "scripts" / "generate-rag-manifests.py"
+    text = generator_path.read_text()
+    mutated = text.replace('"dining"),\n', '"dining_renamed"),\n', 1)
+    assert mutated != text
+    generator_path.write_text(mutated)
+
+    checker = _load_checker()
+    rc = checker.main(["--root", str(root)])
+    assert rc == 1
+
+
+def test_checker_real_repo_src_dir_population_passes():
+    checker = _load_checker()
+    findings = checker.check_src_dir_population(REPO_ROOT)
+    assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# F41 (reconciliation round 1, codex r2 Medium): stale RAG key names still
+# advertised in operator-facing example/doc files.
+# ---------------------------------------------------------------------------
+
+def test_checker_flags_stale_name_in_env_secrets_example(tmp_path):
+    root = _copy_real_tree(tmp_path)
+    (root / ".env.secrets.example").write_text("YELP_API_KEY=\n")
+
+    checker = _load_checker()
+    findings = checker.check_stale_doc_references(root)
+    assert any(".env.secrets.example" in f and "YELP_API_KEY" in f for f in findings)
+    assert checker.main(["--root", str(root)]) == 1
+
+
+def test_checker_flags_stale_name_in_markdown_table(tmp_path):
+    root = _copy_real_tree(tmp_path)
+    (root / "docs").mkdir(parents=True, exist_ok=True)
+    (root / "docs" / "MODULES.md").write_text(
+        "| Dining | 8019 | `YELP_API_KEY` | 5,000/day |\n"
+    )
+
+    checker = _load_checker()
+    findings = checker.check_stale_doc_references(root)
+    assert any("MODULES.md" in f and "YELP_API_KEY" in f for f in findings)
+
+
+def test_checker_ignores_prose_mention_of_stale_name(tmp_path):
+    """A comment explaining the historical drift (not an active
+    declaration or a documented table value) must not false-positive."""
+    root = _copy_real_tree(tmp_path)
+    (root / ".env.secrets.example").write_text(
+        "# Some modules historically read SerpAPI under SERPAPI_KEY.\n"
+        "SERPAPI_API_KEY=\n"
+    )
+
+    checker = _load_checker()
+    findings = checker.check_stale_doc_references(root)
+    assert findings == []
+
+
+def test_checker_real_repo_doc_files_clean():
+    checker = _load_checker()
+    findings = checker.check_stale_doc_references(REPO_ROOT)
+    assert findings == []

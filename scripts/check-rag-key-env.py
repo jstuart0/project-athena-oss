@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-RAG API-key env-var name parity + drift guard (ATHENA-88 / F91, D11).
+RAG API-key env-var name parity + drift guard (ATHENA-88 / F91, D11; F40/F41
+reconciliation additions).
 
-Checks four things, all against a repo rooted at --root (default: this
+Checks six things, all against a repo rooted at --root (default: this
 repo's root):
 
 1. Per-service parity: the env-var names each src/rag/<src_dir>/*.py
@@ -17,6 +18,12 @@ repo's root):
    generator's own output (modulo the `# Generated:` timestamp line), with
    REGISTRY and TAG removed from the environment so the defaults are
    pinned.
+5. (F42) The src/rag/* directory set (every dir containing main.py) equals
+   SERVICES' src_dir set — catches a new RAG service shipped with no
+   manifest entry, not just a name mismatch on existing ones.
+6. (F41) Operator-facing example/doc files (.env.secrets.example,
+   config.env.example, docs/INSTALLATION.md, docs/MODULES.md,
+   docs/CONFIGURATION.md) contain none of the stale pre-F91 RAG key names.
 
 Reuses check-env-example.py::collect_getenv_names via importlib — no
 second AST walker for os.getenv/os.environ reads.
@@ -181,6 +188,81 @@ def check_manifest_drift(root: Path) -> list:
     return []
 
 
+def check_src_dir_population(root: Path) -> list:
+    """
+    ATHENA-88 / F42 (codex r2 Low): a new src/rag/*/main.py directory with
+    no corresponding SERVICES entry is otherwise invisible to this checker
+    (check_per_service only iterates SERVICES). Compares the directory set
+    to SERVICES.src_dir directly.
+    """
+    generator = _load_generator(root)
+    rag_root = root / "src" / "rag"
+    if not rag_root.exists():
+        return [f"src/rag not found under {root}"]
+
+    dirs_on_disk = {
+        p.name for p in rag_root.iterdir() if p.is_dir() and (p / "main.py").exists()
+    }
+    declared = {service.src_dir for service in generator.SERVICES}
+
+    findings = []
+    missing_from_services = dirs_on_disk - declared
+    stale_in_services = declared - dirs_on_disk
+    if missing_from_services:
+        findings.append(
+            f"src/rag directories with no SERVICES entry: {sorted(missing_from_services)}"
+        )
+    if stale_in_services:
+        findings.append(
+            f"SERVICES src_dir entries with no matching src/rag directory: "
+            f"{sorted(stale_in_services)}"
+        )
+    return findings
+
+
+# ATHENA-88 / F41 (codex r2 Medium): the pre-F91 wrong names. Any of these
+# still active (as an env declaration or a documented table/code-span
+# value) in an operator-facing example/doc file means an operator would
+# configure a key the code never reads.
+STALE_RAG_KEY_NAMES = frozenset({
+    "YELP_API_KEY",
+    "NEWSAPI_KEY",
+    "SEATGEEK_API_KEY",
+    "SERPAPI_KEY",
+    "BRIGHTDATA_API_KEY",
+    "GOOGLE_MAPS_API_KEY",
+    "TESLA_API_KEY",
+})
+
+OPERATOR_FACING_DOC_FILES = (
+    ".env.secrets.example",
+    "config.env.example",
+    "docs/INSTALLATION.md",
+    "docs/MODULES.md",
+    "docs/CONFIGURATION.md",
+)
+
+# An active or commented env-style declaration: "NAME=" or "# NAME=" at the
+# start of a line (same shape check-env-example.py's own ENV_LINE uses).
+_ENV_DECLARATION_RE = re.compile(r"^\s*#?\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=", re.MULTILINE)
+# A markdown code-span name, e.g. a table cell: `NEWSAPI_KEY`.
+_BACKTICK_NAME_RE = re.compile(r"`([A-Z][A-Z0-9_]*)`")
+
+
+def check_stale_doc_references(root: Path) -> list:
+    findings = []
+    for rel_path in OPERATOR_FACING_DOC_FILES:
+        path = root / rel_path
+        if not path.exists():
+            continue
+        text = path.read_text()
+        names_found = set(_ENV_DECLARATION_RE.findall(text)) | set(_BACKTICK_NAME_RE.findall(text))
+        stale = names_found & STALE_RAG_KEY_NAMES
+        if stale:
+            findings.append(f"{rel_path}: stale RAG key name(s) still present: {sorted(stale)}")
+    return findings
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=str(REPO_ROOT), help="Repo root to check.")
@@ -192,6 +274,8 @@ def main(argv=None) -> int:
     findings += check_create_secrets(root)
     findings += check_ref_shape(root)
     findings += check_manifest_drift(root)
+    findings += check_src_dir_population(root)
+    findings += check_stale_doc_references(root)
 
     if findings:
         print("RAG key-env drift detected:")

@@ -426,16 +426,16 @@ OPENWEATHER_API_KEY=your-key
 # Web Search (recommended - fallback for unknown queries)
 BRAVE_API_KEY=your-key
 
-# News
-NEWSAPI_KEY=your-key
+# News (key-store only -- configure via the admin UI's External API Keys
+# page; the service's own code reads no env var)
 
 # Entertainment
 TMDB_API_KEY=your-key
 TICKETMASTER_API_KEY=your-key
 
-# Food & Dining
+# Food & Dining (GOOGLE_PLACES_API_KEY is also used by Directions)
 SPOONACULAR_API_KEY=your-key
-YELP_API_KEY=your-key
+GOOGLE_PLACES_API_KEY=your-key
 
 # Finance
 ALPHA_VANTAGE_API_KEY=your-key

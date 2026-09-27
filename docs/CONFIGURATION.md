@@ -572,7 +572,8 @@ MODULE_MONITORING=true
 # API Keys
 OPENWEATHER_API_KEY=your-key
 BRAVE_API_KEY=your-key
-NEWSAPI_KEY=your-key
+# News is key-store only -- configure via the admin UI's External API
+# Keys page; the service's own code reads no env var.
 
 # Environment
 ENVIRONMENT=production

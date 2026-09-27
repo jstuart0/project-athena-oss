@@ -340,10 +340,10 @@ RAG (Retrieval-Augmented Generation) services provide domain-specific data for q
 | Flights | 8013 | `FLIGHTAWARE_API_KEY` | Paid only |
 | Events | 8014 | `TICKETMASTER_API_KEY` | 5,000/day |
 | Streaming | 8015 | `TMDB_API_KEY` | 1M/month |
-| News | 8016 | `NEWSAPI_KEY` | 100/day |
+| News | 8016 | None (admin key store only) | 100/day |
 | Stocks | 8012 | `ALPHA_VANTAGE_API_KEY` | 500/day |
 | WebSearch | 8018 | `BRAVE_API_KEY` | 2,000/month |
-| Dining | 8019 | `YELP_API_KEY` | 5,000/day |
+| Dining | 8019 | `GOOGLE_PLACES_API_KEY` | See pricing |
 | Recipes | 8020 | `SPOONACULAR_API_KEY` | 150/day |
 | Directions | 8030 | None | N/A |
 
