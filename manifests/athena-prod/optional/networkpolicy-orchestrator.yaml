@@ -20,6 +20,13 @@
 # app: jarvis-web) need an ADDITIONAL `from:` entry below with a
 # namespaceSelector, since same-namespace pod selectors alone won't match
 # them.
+#
+# Any OTHER in-cluster caller of the orchestrator -- a standalone
+# Wyoming/LiveKit bridge Deployment, a debug/bench pod, anything not
+# already listed in the podSelector below -- needs its own podSelector (or
+# namespaceSelector) entry added here BEFORE this policy is applied. A
+# correct X-Service-Key does not help a caller this policy doesn't
+# recognize: it's blocked at the network layer regardless of the key.
 # =============================================================================
 ---
 apiVersion: networking.k8s.io/v1

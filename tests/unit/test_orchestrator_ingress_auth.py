@@ -90,7 +90,8 @@ def _chat_body():
     return {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": False}
 
 
-# Each: (method, path, body-or-None). Population is 8 (AU1).
+# Each: (method, path, body-or-None). Population is 13 (AU1, amended DC12:
+# the original 8 chat/session routes plus warmup + the 4 /admin/* routes).
 _GATED_ROUTES = [
     ("POST", "/query", _query_body()),
     ("POST", "/query/stream", _query_body()),
@@ -100,6 +101,11 @@ _GATED_ROUTES = [
     ("GET", "/sessions/nonexistent-session-id", None),
     ("DELETE", "/sessions/nonexistent-session-id", None),
     ("GET", "/sessions/nonexistent-session-id/export", None),
+    ("GET", "/session/nonexistent-session-id/warmup", None),
+    ("POST", "/admin/invalidate-feature-cache", None),
+    ("POST", "/admin/reset-circuit-breaker/test-service", None),
+    ("POST", "/admin/reset-all-circuits", None),
+    ("POST", "/admin/invalidate-model-cache", None),
 ]
 
 
@@ -111,12 +117,23 @@ def _hit(client, method, path, body):
     return client.post(path, json=body)
 
 
-def test_AU1_population_is_8():
-    assert len(_GATED_ROUTES) == 8
+def test_AU1_population_is_13():
+    assert len(_GATED_ROUTES) == 13
 
 
 def test_AU1_named_member_delete_sessions_present():
     assert ("DELETE", "/sessions/nonexistent-session-id", None) in _GATED_ROUTES
+
+
+def test_AU1_named_member_warmup_present():
+    assert ("GET", "/session/nonexistent-session-id/warmup", None) in _GATED_ROUTES
+
+
+def test_AU1_named_member_admin_routes_present():
+    assert ("POST", "/admin/invalidate-feature-cache", None) in _GATED_ROUTES
+    assert ("POST", "/admin/reset-circuit-breaker/test-service", None) in _GATED_ROUTES
+    assert ("POST", "/admin/reset-all-circuits", None) in _GATED_ROUTES
+    assert ("POST", "/admin/invalidate-model-cache", None) in _GATED_ROUTES
 
 
 @pytest.mark.parametrize("method,path,body", _GATED_ROUTES)
@@ -145,6 +162,42 @@ def test_AU1_enforce_correct_header_not_401(monkeypatch, client, method, path, b
         headers={"X-Service-Key": _shared_get_config().service_api_key},
     )
     assert resp.status_code != 401
+
+
+# DC12: warmup and one /admin/* route explicitly asserted 401-without-key /
+# 200-with-key (not just "not 401"), per xander's P3b ask.
+
+
+def test_AU1_warmup_401_without_key_200_with_key(monkeypatch, client):
+    monkeypatch.setenv("ORCHESTRATOR_INGRESS_AUTH", "enforce")
+    monkeypatch.setenv("SERVICE_API_KEY", REAL_SERVICE_KEY)
+    monkeypatch.delenv("DEV_MODE", raising=False)
+    _clear_cache_for_tests()
+
+    no_key = client.get("/session/nonexistent-session-id/warmup")
+    assert no_key.status_code == 401
+
+    with_key = client.get(
+        "/session/nonexistent-session-id/warmup",
+        headers={"X-Service-Key": _shared_get_config().service_api_key},
+    )
+    assert with_key.status_code == 200
+
+
+def test_AU1_admin_route_401_without_key_200_with_key(monkeypatch, client):
+    monkeypatch.setenv("ORCHESTRATOR_INGRESS_AUTH", "enforce")
+    monkeypatch.setenv("SERVICE_API_KEY", REAL_SERVICE_KEY)
+    monkeypatch.delenv("DEV_MODE", raising=False)
+    _clear_cache_for_tests()
+
+    no_key = client.post("/admin/invalidate-feature-cache")
+    assert no_key.status_code == 401
+
+    with_key = client.post(
+        "/admin/invalidate-feature-cache",
+        headers={"X-Service-Key": _shared_get_config().service_api_key},
+    )
+    assert with_key.status_code == 200
 
 
 @pytest.mark.parametrize("method,path,body", _GATED_ROUTES)

@@ -8522,7 +8522,7 @@ async def health_check(detailed: bool = False):
     return health
 
 
-@app.post("/admin/invalidate-feature-cache")
+@app.post("/admin/invalidate-feature-cache", dependencies=[Depends(require_service_caller)])
 async def invalidate_feature_cache(request: Request, flags: Optional[List[str]] = None):
     """
     Invalidate feature flag and configuration caches.
@@ -8566,7 +8566,7 @@ async def invalidate_feature_cache(request: Request, flags: Optional[List[str]] 
         }
 
 
-@app.get("/session/{session_id}/warmup")
+@app.get("/session/{session_id}/warmup", dependencies=[Depends(require_service_caller)])
 async def warmup_session(session_id: str) -> dict:
     """
     Pre-fetch session data to warm cache.
@@ -8716,7 +8716,7 @@ async def resilience_status():
         return {"status": "error", "error": str(e)}
 
 
-@app.post("/admin/reset-circuit-breaker/{service_name}")
+@app.post("/admin/reset-circuit-breaker/{service_name}", dependencies=[Depends(require_service_caller)])
 async def reset_circuit_breaker(service_name: str):
     """
     Reset a specific service's circuit breaker.
@@ -8746,7 +8746,7 @@ async def reset_circuit_breaker(service_name: str):
         return {"status": "error", "error": str(e)}
 
 
-@app.post("/admin/reset-all-circuits")
+@app.post("/admin/reset-all-circuits", dependencies=[Depends(require_service_caller)])
 async def reset_all_circuits():
     """
     Reset all circuit breakers and rate limiters.
@@ -8770,7 +8770,7 @@ async def reset_all_circuits():
         return {"status": "error", "error": str(e)}
 
 
-@app.post("/admin/invalidate-model-cache")
+@app.post("/admin/invalidate-model-cache", dependencies=[Depends(require_service_caller)])
 async def invalidate_model_cache():
     """
     Invalidate component model cache.

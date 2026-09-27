@@ -188,9 +188,10 @@ def test_G3_route_to_orchestrator_scoped_to_ha_conversation_only():
     assert _calls_named(tree, "responses_api", "route_to_orchestrator") == []
     assert len(_calls_named(tree, "ha_conversation", "route_to_orchestrator")) == 1
 
-    assert "_orchestrator_openai_payload(" in ast.dump(
-        next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_orchestrator_openai_payload")
-    ) or True  # function exists (parsed without error) -- shape check below
+    assert next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_orchestrator_openai_payload"
+    )  # raises StopIteration (failing the test) if the function is missing
     assert "async def stream_orchestrator_response" in source
     assert source.index("async def stream_orchestrator_response") < source.index(
         "_orchestrator_openai_payload(request, device_id, stream=True)"
@@ -351,3 +352,38 @@ def test_G11_orchestrator_client_constructed_with_service_key_header():
     idx = source.index("orchestrator_client = httpx.AsyncClient(")
     snippet = source[idx: idx + 300]
     assert 'headers={"X-Service-Key": SERVICE_API_KEY}' in snippet
+
+
+# ---------------------------------------------------------------------------
+# DC12 (P3b, xander): gateway's ad-hoc warmup client sends X-Service-Key
+# ---------------------------------------------------------------------------
+
+
+def test_DC12_warmup_session_sends_service_key_header(monkeypatch):
+    session_mgr = mock.MagicMock()
+    session_mgr.get_session_for_device = mock.AsyncMock(return_value="sess-warm-1")
+    monkeypatch.setattr(gw, "device_session_mgr", session_mgr)
+
+    captured = {}
+
+    class _FakeAsyncClient:
+        def __init__(self, timeout=None):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+        async def get(self, url, headers=None, **kwargs):
+            captured["url"] = url
+            captured["headers"] = headers
+            return mock.MagicMock()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    asyncio.run(gw._warmup_session("device-1"))
+
+    assert captured["headers"] == {"X-Service-Key": gw.SERVICE_API_KEY}
+    assert captured["url"].endswith("/session/sess-warm-1/warmup")

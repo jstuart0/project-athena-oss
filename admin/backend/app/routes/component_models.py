@@ -361,7 +361,11 @@ async def _invalidate_orchestrator_cache() -> Dict[str, Any]:
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(orchestrator_url, timeout=5.0)
+            response = await client.post(
+                orchestrator_url,
+                headers={"X-Service-Key": get_config().service_api_key},
+                timeout=5.0,
+            )
 
             if response.status_code == 200:
                 logger.info("orchestrator_cache_invalidated")

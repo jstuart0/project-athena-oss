@@ -2,10 +2,15 @@
 
 A FastAPI dependency gating the orchestrator's query and session routes so
 an unauthenticated caller can no longer create, drive, read, export or
-delete session state. Config (`orchestrator_ingress_auth`, `service_api_key`)
-is read fresh on every call via `get_config()` — never captured once at
-import time — so a mode change or key rotation takes effect on the very
-next request, with no restart.
+delete session state. Config (`orchestrator_ingress_auth`, `service_api_key`) is read via
+`get_config()` on every call — never captured once at import time as a
+module-level constant — so it never goes stale within a running process
+the way a constant snapshotted at import would. `get_config()` itself is
+`functools.lru_cache`d, so a mode change or key rotation made by editing
+the ConfigMap/env still needs a process restart (or a call to
+`shared.config._clear_cache_for_tests()` in tests) to actually take
+effect; this dependency does not add its own additional staleness on top
+of that.
 
 Decision order (D10, six steps — mirrors the parity established at
 `admin/backend/app/utils/service_auth.py:142-168`'s `_check_service_key_raw`,

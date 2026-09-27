@@ -18,6 +18,7 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, Feature, LLMPerformanceMetric
 from app.utils.service_auth import verify_service_api_key
+from shared.config import get_config
 
 import os
 
@@ -50,7 +51,11 @@ async def _notify_services_of_flag_change(flag_names: List[str]):
         tasks = []
         for endpoint in CACHE_INVALIDATION_ENDPOINTS:
             tasks.append(
-                client.post(endpoint, json={"flags": flag_names})
+                client.post(
+                    endpoint,
+                    json={"flags": flag_names},
+                    headers={"X-Service-Key": get_config().service_api_key},
+                )
             )
 
         results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -2500,7 +2500,10 @@ async def _warmup_session(device_id: str):
         if session_id:
             # Pre-fetch from orchestrator session manager to warm cache
             async with httpx.AsyncClient(timeout=2.0) as client:
-                await client.get(f"{ORCHESTRATOR_URL}/session/{session_id}/warmup")
+                await client.get(
+                    f"{ORCHESTRATOR_URL}/session/{session_id}/warmup",
+                    headers={"X-Service-Key": SERVICE_API_KEY},
+                )
                 logger.debug(f"Session warmed for device {device_id}")
         else:
             # No existing session - nothing to warm

@@ -20,6 +20,7 @@ from app.models import (
     GatewayConfig, ComponentModelAssignment
 )
 from app.auth.oidc import get_current_user
+from shared.config import get_config
 
 import os
 
@@ -517,7 +518,12 @@ async def invalidate_service_caches():
     async with httpx.AsyncClient(timeout=5.0) as client:
         tasks = []
         for endpoint in CACHE_INVALIDATION_ENDPOINTS:
-            tasks.append(client.post(endpoint))
+            tasks.append(
+                client.post(
+                    endpoint,
+                    headers={"X-Service-Key": get_config().service_api_key},
+                )
+            )
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
