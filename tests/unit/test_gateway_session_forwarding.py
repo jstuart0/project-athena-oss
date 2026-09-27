@@ -346,8 +346,8 @@ TRUSTED_CIDR = "10.244.0.0/16"
 
 def test_resolve_client_key_trusted_peer_uses_forwarded_for():
     # Traefik's pod IP (inside the trusted CIDR) forwarding for a real caller.
-    key = resolve_client_key("10.244.3.7", "192.168.10.50, 10.244.3.7", TRUSTED_CIDR)
-    assert key == "192.168.10.50"
+    key = resolve_client_key("10.244.3.7", "192.168.55.50, 10.244.3.7", TRUSTED_CIDR)
+    assert key == "192.168.55.50"
 
 
 def test_resolve_client_key_untrusted_peer_ignores_forwarded_for():
@@ -363,7 +363,7 @@ def test_resolve_client_key_no_forwarded_for_header():
 
 
 def test_resolve_client_key_unparseable_peer_falls_back():
-    key = resolve_client_key("not-an-ip", "192.168.10.50", TRUSTED_CIDR)
+    key = resolve_client_key("not-an-ip", "192.168.55.50", TRUSTED_CIDR)
     assert key == "not-an-ip"
 
 
@@ -398,8 +398,8 @@ def test_resolve_client_key_all_hops_trusted_falls_back_to_peer():
 def test_resolve_client_key_single_hop_still_works():
     # Single-hop chain (one proxy) -- the original common case must be
     # unaffected by the right-to-left rewrite.
-    key = resolve_client_key("10.244.3.7", "192.168.10.50", TRUSTED_CIDR)
-    assert key == "192.168.10.50"
+    key = resolve_client_key("10.244.3.7", "192.168.55.50", TRUSTED_CIDR)
+    assert key == "192.168.55.50"
 
 
 class _FakeRedisForLimiter:

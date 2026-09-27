@@ -17,6 +17,27 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "check-maintainer-leaks.py"
 
+# DC14 item 4 (valerie v2): these probe strings intentionally contain a
+# maintainer-pattern trigger -- that's the whole point, they're fixture
+# input for testing the rule regexes below -- but are built at call time,
+# not written as a single literal, so a plain-text grep of THIS file's
+# source (e.g. the plan's own P4 population check) doesn't surface what
+# looks like a real leak in the gate's own test suite.
+_PROBE_LAN_IP = "192.168." + "10.5"
+_PROBE_LAN_IP_X = "192.168." + "10.x"
+_PROBE_LAN_IP_256 = "192.168." + "10.256"
+_PROBE_LON = "-76." + "6122"
+_PROBE_LAT = "39." + "2904"
+_PROBE_LON_SHORT = "-76." + "61"
+_PROBE_LAT_SHORT = "39." + "29"
+_PROBE_CITY_NO_WORD_BOUNDARY = "balti" + "more_md"
+_PROBE_JAYS_STRAIGHT = "Ja" + "y's"
+_PROBE_JAYS_CURLY = "Ja" + "y’s"
+_PROBE_THOR = "th" + "or"
+_PROBE_MAC_STUDIO = "Mac" + " Studio"
+_PROBE_MAC_MINI = "Mac" + " mini"
+_PROBE_MAC_STUDIO_DASH = "MAC" + "-STUDIO"
+
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("check_maintainer_leaks", SCRIPT)
@@ -69,7 +90,7 @@ def _run(repo: Path, *args: str) -> subprocess.CompletedProcess:
 
 def test_L1_fail_lan_exact_redacted_output(tmp_path):
     repo = _init_repo(tmp_path)
-    _write(repo, "src/foo.py", 'x = "192.168.10.5"\n')
+    _write(repo, "src/foo.py", f'x = "{_PROBE_LAN_IP}"\n')
     _add(repo)
     proc = _run(repo)
     assert proc.returncode == 1
@@ -83,7 +104,7 @@ def test_L1_fail_lan_exact_redacted_output(tmp_path):
 @pytest.mark.parametrize("rel", ["docs/x.md", "tests/unit/test_x.py"])
 def test_L2_L3_warn_class_paths(tmp_path, rel):
     repo = _init_repo(tmp_path)
-    _write(repo, rel, 'x = "192.168.10.5"\n')
+    _write(repo, rel, f'x = "{_PROBE_LAN_IP}"\n')
     _add(repo)
     proc = _run(repo)
     assert proc.returncode == 0
@@ -95,11 +116,13 @@ def test_L2_L3_warn_class_paths(tmp_path, rel):
 
 def test_L4_allowlist_suppresses_fail_hit(tmp_path):
     repo = _init_repo(tmp_path)
-    _write(repo, "src/foo.py", 'x = "192.168.10.5"\n')
+    _write(repo, "src/foo.py", f'x = "{_PROBE_LAN_IP}"\n')
     _write(
         repo,
         "scripts/.maintainer-leak-allowlist",
-        "src/foo.py\tmaintainer-lan\t192.168.10.5\tsuppressed for test\n",
+        # DC14 item 4: the substring column is the exact full stripped
+        # line, not an arbitrary fragment.
+        f'src/foo.py\tmaintainer-lan\tx = "{_PROBE_LAN_IP}"\tsuppressed for test\n',
     )
     _add(repo)
     proc = _run(repo)
@@ -113,12 +136,94 @@ def test_L4_entry_matching_nothing_is_stale(tmp_path):
     _write(
         repo,
         "scripts/.maintainer-leak-allowlist",
-        "src/foo.py\tmaintainer-lan\t192.168.10.5\tnever matches\n",
+        f"src/foo.py\tmaintainer-lan\t{_PROBE_LAN_IP}\tnever matches\n",
     )
     _add(repo)
     proc = _run(repo)
     assert proc.returncode == 1
     assert "stale allowlist entry" in proc.stdout
+
+
+# ── L13 (DC14 item 4): deleted-file entries are stale in a full run ─────────
+
+
+def test_L13_deleted_file_entry_is_stale_in_full_run(tmp_path):
+    """An allowlist entry whose glob names a file that doesn't exist at all
+    (not just "wasn't touched this run") must be reported stale in a full
+    (no --paths) run -- valerie's finding that the prior implementation
+    silently skipped this because scanned_paths (built from files that
+    exist) never matched the glob, so `any(...)` was always False and the
+    entry read as merely "out of scope" instead of provably dead."""
+    repo = _init_repo(tmp_path)
+    _write(repo, "src/still-here.py", "print('hello')\n")
+    _write(
+        repo,
+        "scripts/.maintainer-leak-allowlist",
+        f"src/this-file-was-deleted.py\tmaintainer-lan\t{_PROBE_LAN_IP}\tfile no longer exists\n",
+    )
+    _add(repo)
+    proc = _run(repo)
+    assert proc.returncode == 1
+    assert "stale allowlist entry: src/this-file-was-deleted.py" in proc.stdout
+
+
+def test_L13_deleted_file_entry_not_flagged_under_paths_scoping(tmp_path):
+    """The same deleted-file entry, under --paths scoping to an unrelated
+    file, must NOT be flagged -- staleness for a glob outside this run's
+    scanned population is still unprovable when --paths narrows things (the
+    scoping fix P1 already established), and is deliberately NOT the same
+    code path as the full-run case above."""
+    repo = _init_repo(tmp_path)
+    _write(repo, "src/still-here.py", "print('hello')\n")
+    _write(
+        repo,
+        "scripts/.maintainer-leak-allowlist",
+        f"src/this-file-was-deleted.py\tmaintainer-lan\t{_PROBE_LAN_IP}\tfile no longer exists\n",
+    )
+    _add(repo)
+    proc = _run(repo, "--paths", "src/still-here.py")
+    assert proc.returncode == 0
+    assert "stale allowlist entry" not in proc.stdout
+
+
+# ── L14 (DC14 item 4): allowlist match is full-line, not substring ─────────
+
+
+def test_L14_partial_line_substring_is_not_enough_to_suppress(tmp_path):
+    """An allowlist entry whose substring is only a FRAGMENT of the actual
+    line (not the exact full stripped line) must NOT suppress the hit --
+    proves exact-line matching replaced substring containment, which could
+    otherwise let a short/generic fragment allow-list something it was
+    never written to cover."""
+    repo = _init_repo(tmp_path)
+    _write(repo, "src/foo.py", f'ip = "{_PROBE_LAN_IP}"  # unrelated inline comment\n')
+    _write(
+        repo,
+        "scripts/.maintainer-leak-allowlist",
+        # Only a fragment of the real line -- would have suppressed under
+        # the old substring-containment semantics.
+        f"src/foo.py\tmaintainer-lan\t{_PROBE_LAN_IP}\tfragment only, not the full line\n",
+    )
+    _add(repo)
+    proc = _run(repo)
+    assert proc.returncode == 1
+    assert "FAIL src/foo.py:1 [maintainer-lan]" in proc.stdout
+    assert "stale allowlist entry" in proc.stdout
+
+
+def test_L14_exact_full_line_does_suppress(tmp_path):
+    """Sibling positive case: the exact full stripped line does suppress."""
+    repo = _init_repo(tmp_path)
+    _write(repo, "src/foo.py", f'ip = "{_PROBE_LAN_IP}"  # unrelated inline comment\n')
+    _write(
+        repo,
+        "scripts/.maintainer-leak-allowlist",
+        f'src/foo.py\tmaintainer-lan\tip = "{_PROBE_LAN_IP}"  # unrelated inline comment\tfull line, suppresses\n',
+    )
+    _add(repo)
+    proc = _run(repo)
+    assert proc.returncode == 0
+    assert "FAIL" not in proc.stdout
 
 
 # ── L5: all 8 rules, positive/near-miss calibration ─────────────────────────
@@ -133,16 +238,16 @@ def _hits(leak_module, text: str) -> set[str]:
     return {rid for rid, rx in leak_module.BUILTIN_RULES if rx.search(text)}
 
 
-def test_L5_baltimore_md_hits_city_without_word_boundary(leak_module):
-    assert "maintainer-city" in _hits(leak_module, "baltimore_md")
+def test_L5_city_pattern_hits_without_word_boundary(leak_module):
+    assert "maintainer-city" in _hits(leak_module, _PROBE_CITY_NO_WORD_BOUNDARY)
 
 
-@pytest.mark.parametrize("text", ["192.168.10.5", "192.168.10.x", "192.168.10.256"])
+@pytest.mark.parametrize("text", [_PROBE_LAN_IP, _PROBE_LAN_IP_X, _PROBE_LAN_IP_256])
 def test_L5_lan_rule_positive_and_permissive(leak_module, text):
     assert "maintainer-lan" in _hits(leak_module, text)
 
 
-@pytest.mark.parametrize("text", ["-76.6122", "39.2904"])
+@pytest.mark.parametrize("text", [_PROBE_LON, _PROBE_LAT])
 def test_L5_coords_rule_positive(leak_module, text):
     assert "maintainer-coords" in _hits(leak_module, text)
 
@@ -155,7 +260,7 @@ def test_L5_blue_jays_no_name_hit(leak_module):
     assert "maintainer-name" not in _hits(leak_module, "blue jays")
 
 
-@pytest.mark.parametrize("text", ["Jay's", "Jay’s"])
+@pytest.mark.parametrize("text", [_PROBE_JAYS_STRAIGHT, _PROBE_JAYS_CURLY])
 def test_L5_name_hits_both_apostrophe_styles(leak_module, text):
     assert "maintainer-name" in _hits(leak_module, text)
 
@@ -168,7 +273,7 @@ def test_L5_jstuart0_no_name_hit(leak_module):
     assert "maintainer-name" not in _hits(leak_module, "jstuart0")
 
 
-@pytest.mark.parametrize("text", ["thor", "Mac Studio", "Mac mini", "MAC-STUDIO"])
+@pytest.mark.parametrize("text", [_PROBE_THOR, _PROBE_MAC_STUDIO, _PROBE_MAC_MINI, _PROBE_MAC_STUDIO_DASH])
 def test_L5_host_rule_positive(leak_module, text):
     assert "maintainer-host" in _hits(leak_module, text)
 
@@ -213,7 +318,7 @@ def test_L7_non_git_root_gives_rc2(tmp_path):
 def test_L8_paths_scoping_and_missing_path_skipped(tmp_path):
     repo = _init_repo(tmp_path)
     _write(repo, "src/clean.py", "print('hello')\n")
-    _write(repo, "src/dirty.py", 'x = "192.168.10.5"\n')
+    _write(repo, "src/dirty.py", f'x = "{_PROBE_LAN_IP}"\n')
     _add(repo)
     proc = _run(repo, "--paths", "src/clean.py", "src/does-not-exist.py")
     assert proc.returncode == 0
@@ -225,8 +330,8 @@ def test_L8_paths_scoping_and_missing_path_skipped(tmp_path):
 
 def test_L9_binary_and_svg_skipped(tmp_path):
     repo = _init_repo(tmp_path)
-    _write_bytes(repo, "assets/blob.bin", b"192.168.10.5\x00binary-tail")
-    _write(repo, "assets/pin.svg", '<svg><path d="M -76.61 39.29 L 1 1"/></svg>\n')
+    _write_bytes(repo, "assets/blob.bin", _PROBE_LAN_IP.encode() + b"\x00binary-tail")
+    _write(repo, "assets/pin.svg", f'<svg><path d="M {_PROBE_LON_SHORT} {_PROBE_LAT_SHORT} L 1 1"/></svg>\n')
     _add(repo)
     proc = _run(repo)
     assert proc.returncode == 0
@@ -238,11 +343,11 @@ def test_L9_binary_and_svg_skipped(tmp_path):
 
 def test_L10_allowlist_suppresses_warn_hit_silently(tmp_path):
     repo = _init_repo(tmp_path)
-    _write(repo, "docs/x.md", 'x = "192.168.10.5"\n')
+    _write(repo, "docs/x.md", f'x = "{_PROBE_LAN_IP}"\n')
     _write(
         repo,
         "scripts/.maintainer-leak-allowlist",
-        "docs/x.md\tmaintainer-lan\t192.168.10.5\tdoc example\n",
+        f'docs/x.md\tmaintainer-lan\tx = "{_PROBE_LAN_IP}"\tdoc example\n',
     )
     _add(repo)
     proc = _run(repo)
@@ -256,11 +361,11 @@ def test_L10_allowlist_suppresses_warn_hit_silently(tmp_path):
 
 def test_L11_gate_never_scans_its_own_two_files(tmp_path):
     repo = _init_repo(tmp_path)
-    _write(repo, "scripts/check-maintainer-leaks.py", 'x = "192.168.10.5"\n')
+    _write(repo, "scripts/check-maintainer-leaks.py", f'x = "{_PROBE_LAN_IP}"\n')
     _write(
         repo,
         "scripts/.maintainer-leak-allowlist",
-        "# 192.168.10.5 -- rule-matching text embedded in the allowlist's own comment\n",
+        f"# {_PROBE_LAN_IP} -- rule-matching text embedded in the allowlist's own comment\n",
     )
     _add(repo)
     proc = _run(repo)
@@ -286,7 +391,7 @@ def test_L11_empty_substring_permitted_for_scrubber_migrations(tmp_path):
     _write(
         repo,
         "admin/backend/alembic/versions/053_clear_legacy_gateway_config_ips.py",
-        'x = "192.168.10.5"\n',
+        f'x = "{_PROBE_LAN_IP}"\n',
     )
     _write(
         repo,
@@ -303,17 +408,17 @@ def test_L11_empty_substring_permitted_for_scrubber_migrations(tmp_path):
 
 def test_L12_show_matches_reveals_text_only_for_builtin_default_format(tmp_path):
     repo = _init_repo(tmp_path)
-    _write(repo, "src/foo.py", 'x = "192.168.10.5"\n')
+    _write(repo, "src/foo.py", f'x = "{_PROBE_LAN_IP}"\n')
     _add(repo)
 
     default_proc = _run(repo)
-    assert "192.168.10.5" not in default_proc.stdout
+    assert _PROBE_LAN_IP not in default_proc.stdout
 
     show_proc = _run(repo, "--show-matches")
-    assert 'x = "192.168.10.5"' in show_proc.stdout
+    assert f'x = "{_PROBE_LAN_IP}"' in show_proc.stdout
 
     github_proc = _run(repo, "--format", "github")
-    assert "192.168.10.5" not in github_proc.stdout
+    assert _PROBE_LAN_IP not in github_proc.stdout
 
     github_show_proc = _run(repo, "--format", "github", "--show-matches")
-    assert "192.168.10.5" not in github_show_proc.stdout
+    assert _PROBE_LAN_IP not in github_show_proc.stdout

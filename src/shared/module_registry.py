@@ -171,7 +171,7 @@ class ModuleRegistry:
 
         Example:
             registry.configure_service_url("mode_service", "http://mode-service:8022")
-            registry.configure_service_url("notifications_service", "http://notifications.athena.svc.cluster.local:8050")
+            registry.configure_service_url("notifications_service", "http://notifications:8050")
         """
         self._service_urls[component_name] = url
         # Invalidate cache for this component

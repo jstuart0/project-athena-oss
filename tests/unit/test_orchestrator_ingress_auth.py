@@ -37,6 +37,7 @@ sys.modules.setdefault("orchestrator.config_loader", _config_loader_mock)
 
 import orchestrator.nodes  # noqa: E402,F401
 import orchestrator.main as _main_module  # noqa: E402
+import orchestrator.ingress_auth as _ingress_auth_module  # noqa: E402
 from orchestrator.ingress_auth import require_service_caller  # noqa: E402
 from orchestrator.nodes import _runtime  # noqa: E402
 from orchestrator.session_manager import SessionManager  # noqa: E402
@@ -57,8 +58,10 @@ class _FakeSessionCacheClient:
 @pytest.fixture(autouse=True)
 def _reset_config_cache():
     _clear_cache_for_tests()
+    _ingress_auth_module._invalid_mode_warned = False
     yield
     _clear_cache_for_tests()
+    _ingress_auth_module._invalid_mode_warned = False
 
 
 @pytest.fixture
@@ -281,6 +284,31 @@ def test_AU3_invalid_mode_behaves_as_enforce_logs_error(monkeypatch, client):
     resp = client.get("/sessions")
     assert resp.status_code == 401
     assert any(e["event"] == "orchestrator_ingress_auth_invalid_mode" for e in errors)
+
+
+def test_AU3_invalid_mode_logs_error_once_per_process_not_per_request(monkeypatch, client):
+    """DC14 item v4 (valerie): the invalid-mode ERROR must not fire on every
+    request -- it's a process-lifetime misconfiguration (the mode can't
+    change without a restart; get_config() is lru_cache'd), so at request
+    volume a per-request log is spam. Five requests must produce exactly
+    one ERROR log line."""
+    monkeypatch.setenv("ORCHESTRATOR_INGRESS_AUTH", "not-a-real-mode")
+    monkeypatch.setenv("SERVICE_API_KEY", REAL_SERVICE_KEY)
+    monkeypatch.delenv("DEV_MODE", raising=False)
+    _clear_cache_for_tests()
+
+    errors = []
+    monkeypatch.setattr(
+        _ingress_auth_module.logger, "error",
+        lambda event, **kw: errors.append({"event": event, **kw}),
+    )
+
+    for _ in range(5):
+        resp = client.get("/sessions")
+        assert resp.status_code == 401
+
+    matching = [e for e in errors if e["event"] == "orchestrator_ingress_auth_invalid_mode"]
+    assert len(matching) == 1
 
 
 # ---------------------------------------------------------------------------

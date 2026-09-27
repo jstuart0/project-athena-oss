@@ -370,6 +370,46 @@ class AthenaConfig(BaseSettings):
     #   default origin when a caller doesn't specify one. Empty means the
     #   amtrak service requires an explicit origin on every request.
     default_amtrak_station: str = Field(default="")
+    # ha_satellite_room_map: JSON object mapping a Home Assistant
+    #   assist_satellite entity ID to the room it's physically located in
+    #   ({"assist_satellite.<id>": "<room>", ...}). Consumed by the gateway
+    #   (parsed lazily, not at import time — see _get_ha_satellite_room_map
+    #   in src/gateway/main.py) for both directions: entity->room (active-
+    #   satellite room detection) and its inverse, room->entity (satellite
+    #   announcements). Empty means satellite-based room detection and
+    #   announcements are both disabled (OSS-First — this deployment's HA
+    #   setup gives no way to guess a room from hardware we don't know
+    #   about) rather than falling back to a friendly_name naming
+    #   convention ("Voice - <Room> Assist") a given house's HA instance
+    #   may not use at all.
+    ha_satellite_room_map: str = Field(default="")
+    # ha_tv_entities: fallback room -> Apple TV entity mapping used only
+    #   when the admin API's Room TV Config is unreachable (see
+    #   src/orchestrator/tv_handler.py's get_tv_configs). Accepts a JSON
+    #   array of {"room", "media_player_entity_id", "remote_entity_id"}
+    #   objects, or a comma-separated list of
+    #   "room:media_player_entity_id[:remote_entity_id]" triples for a
+    #   lighter .env-friendly form. Empty means no hardcoded fallback --
+    #   every handler already treats an empty TV-config dict as "no TV
+    #   entity configured" and returns a message naming that, so this is
+    #   behavior-preserving when the admin API is also unreachable.
+    ha_tv_entities: str = Field(default="")
+    # ha_bed_warmer_entities: JSON object naming the 5 HA entities a
+    #   Sunbeam-via-Tuya dual-zone bed-warmer/mattress-pad integration
+    #   exposes: {"level_left", "level_right", "power_main",
+    #   "power_side_a", "power_side_b"}. This is inherently
+    #   house-specific hardware (DC14 item 1) -- empty means the
+    #   bed_warmer intent handler reports the feature isn't configured
+    #   instead of controlling a hardcoded device.
+    ha_bed_warmer_entities: str = Field(default="")
+    # ha_music_players: fallback room -> Music Assistant media_player
+    #   entity mapping, used only when the admin API's room_audio_config
+    #   table is unreachable (see src/orchestrator/music_handler.py's
+    #   get_room_configs). Accepts a JSON object {"room": "entity_id"} or
+    #   a comma-separated list of "room:entity_id" pairs. Empty means no
+    #   hardcoded fallback -- every caller already handles an empty
+    #   room-config dict.
+    ha_music_players: str = Field(default="")
 
     # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern

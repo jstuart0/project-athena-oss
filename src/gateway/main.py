@@ -517,17 +517,47 @@ async def lifespan(app: FastAPI):
         await ha_client.aclose()
 
 
-# Room to assist_satellite entity mapping
-# Home Assistant Voice PE device IDs:
-# - 0a2296: Office (confirmed via user testing)
-# - 0a4332: Master Bedroom (confirmed via user testing)
-ROOM_TO_SATELLITE = {
-    "office": "assist_satellite.home_assistant_voice_0a2296_assist_satellite",
-    "master_bedroom": "assist_satellite.home_assistant_voice_0a4332_assist_satellite",
-    "master bedroom": "assist_satellite.home_assistant_voice_0a4332_assist_satellite",
-    "bedroom": "assist_satellite.home_assistant_voice_0a4332_assist_satellite",  # Alias
-    # Add more mappings as devices are added
-}
+# Room <-> assist_satellite entity mapping, configured via
+# HA_SATELLITE_ROOM_MAP (JSON object {"<entity_id>": "<room>"}) rather than
+# hardcoded here (DC14 item 1a, OSS-First). Parsed lazily (not at import
+# time) so a malformed value degrades to "unconfigured" instead of crashing
+# gateway startup.
+_ha_satellite_room_map_cache: Optional[Dict[str, str]] = None
+_ha_satellite_room_map_warned = False
+
+
+def _get_ha_satellite_room_map() -> Dict[str, str]:
+    """entity_id -> room, from HA_SATELLITE_ROOM_MAP. Empty/unset/invalid
+    all resolve to {} (logged once, INFO for unset -- an expected default
+    state -- ERROR for invalid JSON -- a real misconfiguration)."""
+    global _ha_satellite_room_map_cache, _ha_satellite_room_map_warned
+    if _ha_satellite_room_map_cache is not None:
+        return _ha_satellite_room_map_cache
+
+    raw = _get_athena_config().ha_satellite_room_map
+    if not raw:
+        if not _ha_satellite_room_map_warned:
+            logger.info("ha_satellite_room_map_unset_satellite_features_disabled")
+            _ha_satellite_room_map_warned = True
+        _ha_satellite_room_map_cache = {}
+        return _ha_satellite_room_map_cache
+
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("HA_SATELLITE_ROOM_MAP must be a JSON object")
+        _ha_satellite_room_map_cache = {str(k): str(v) for k, v in parsed.items()}
+    except Exception as e:
+        logger.error("ha_satellite_room_map_invalid_json", error=str(e))
+        _ha_satellite_room_map_cache = {}
+    return _ha_satellite_room_map_cache
+
+
+def _get_room_to_satellite_map() -> Dict[str, str]:
+    """room (lowercased) -> entity_id, the inverse of
+    _get_ha_satellite_room_map(), for send_satellite_announcement's
+    room-name lookup."""
+    return {room.lower(): entity_id for entity_id, room in _get_ha_satellite_room_map().items()}
 
 
 async def send_satellite_announcement(room: str, message: str) -> bool:
@@ -550,7 +580,7 @@ async def send_satellite_announcement(room: str, message: str) -> bool:
         return False
 
     # Map room to satellite entity
-    satellite_entity = ROOM_TO_SATELLITE.get(room.lower())
+    satellite_entity = _get_room_to_satellite_map().get(room.lower())
     if not satellite_entity:
         logger.warning(f"No satellite mapping for room: {room}")
         return False
@@ -2356,9 +2386,9 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
     """
     Detect which room the conversation is coming from by checking active Voice PE satellites.
 
-    Since HA doesn't pass device_id in conversation requests, we query HA's assist_satellite
-    entities to find which one is currently active (not idle) and extract the room from its
-    friendly_name.
+    Since HA doesn't pass device_id in conversation requests, we query HA's
+    assist_satellite entities to find which one is currently active (not
+    idle) and look its entity_id up in HA_SATELLITE_ROOM_MAP.
 
     Args:
         device_id: The device_id from the request (usually "unknown")
@@ -2367,17 +2397,25 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
         Room name (e.g., "office", "master_bedroom") or "unknown" when it
         can't be determined -- never a hardcoded house room (D11).
 
+    OSS-First (DC14 item 1a): requires HA_SATELLITE_ROOM_MAP to be
+    configured. An unconfigured map returns "unknown" immediately (D11's
+    room-less path) rather than guessing a room from a friendly_name naming
+    convention ("Voice - <Room> Assist") a given house's HA instance may
+    not follow at all.
+
     Performance:
         - Uses shared ha_client instead of creating new httpx.AsyncClient for every call.
         - When ha_room_detection_cache is enabled, caches room for 3 seconds.
         - Saves ~100-200ms per request during continued conversations.
     """
-    import re
-
     # If device_id is already a valid room, use it
     known_rooms = ["office", "kitchen", "living_room", "master_bedroom", "bedroom", "dining_room"]
     if device_id.lower() in known_rooms:
         return device_id.lower()
+
+    entity_to_room = _get_ha_satellite_room_map()
+    if not entity_to_room:
+        return "unknown"
 
     # Check if caching is enabled via feature flag
     cache_enabled = await get_feature_flag("ha_room_detection_cache", default=False)
@@ -2432,9 +2470,8 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
         # First pass: Look for any currently active (not idle) satellite
         for sat in satellites:
             if sat["state"] != "idle":
-                match = re.search(r"Voice\s*-\s*(.+?)\s*(Assist|$)", sat["friendly_name"], re.IGNORECASE)
-                if match:
-                    room_name = match.group(1).strip().lower().replace(" ", "_")
+                room_name = entity_to_room.get(sat["entity_id"])
+                if room_name:
                     logger.info(f"Detected active satellite in room: {room_name} (state: {sat['state']})")
                     if cache_enabled:
                         _set_cached_room(device_id, room_name)
@@ -2463,9 +2500,8 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
             # Sort by age (most recent first)
             recently_changed.sort(key=lambda x: x[1])
             sat, age = recently_changed[0]
-            match = re.search(r"Voice\s*-\s*(.+?)\s*(Assist|$)", sat["friendly_name"], re.IGNORECASE)
-            if match:
-                room_name = match.group(1).strip().lower().replace(" ", "_")
+            room_name = entity_to_room.get(sat["entity_id"])
+            if room_name:
                 logger.info(f"Detected recently active satellite in room: {room_name} (changed {age:.1f}s ago)")
                 if cache_enabled:
                     _set_cached_room(device_id, room_name)

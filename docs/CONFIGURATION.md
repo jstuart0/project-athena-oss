@@ -505,6 +505,22 @@ worked Denver example, including a feed with an optional `bounds` box.
 
 ---
 
+## Home Assistant Entity Mappings
+
+All four ship with NO house-specific entity IDs baked in. Unset means the
+corresponding feature is disabled or falls back cleanly rather than
+guessing a device/room your HA instance doesn't have. See `.env.example`
+for the full JSON schema and worked examples.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HA_SATELLITE_ROOM_MAP` | *(empty)* | JSON object mapping a Voice PE `assist_satellite` entity ID to its room. Used both directions by the gateway: entity→room (conversation room detection) and room→entity (satellite announcements). |
+| `HA_TV_ENTITIES` | *(empty)* | Fallback room → Apple TV entity mapping, used only when the admin API's Room TV Config is unreachable. JSON array of `{room, media_player_entity_id, remote_entity_id}` objects, or comma-separated `room:media_player_entity_id[:remote_entity_id]` triples. |
+| `HA_MUSIC_PLAYERS` | *(empty)* | Fallback room → Music Assistant `media_player` entity mapping, used only when the admin API's room audio config is unreachable. JSON object `{room: entity_id}` or comma-separated `room:entity_id` pairs. |
+| `HA_BED_WARMER_ENTITIES` | *(empty)* | JSON object naming the 5 HA entities a Sunbeam-via-Tuya dual-zone bed-warmer/mattress-pad integration exposes (`level_left`, `level_right`, `power_main`, `power_side_a`, `power_side_b`). |
+
+---
+
 ## RAG Service URLs
 
 Override these for distributed RAG service deployment:

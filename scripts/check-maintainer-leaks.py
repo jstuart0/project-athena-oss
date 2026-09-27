@@ -98,7 +98,15 @@ BUILTIN_RULES: list[tuple[str, re.Pattern]] = [
     ("maintainer-coords", re.compile(r"-7[67]\.\d+|\b39\.\d{3,}\b")),
     (
         "maintainer-name",
-        re.compile(r"\bjay['’]s\b|\bjay\s+stuart\b|\bjstuart\b", re.IGNORECASE),
+        # jay_stuart / jay-stuart: deliberately NOT \b-anchored on the left --
+        # entity-id-style identifiers glue words with underscores
+        # (media_player.spotify_jay_stuart), and \b doesn't fire between two
+        # \w characters (underscore is \w), so an anchored form would miss
+        # exactly the case this rule needs to catch (DC14 item 2).
+        re.compile(
+            r"\bjay['’]s\b|\bjay\s+stuart\b|\bjstuart\b|jay_stuart|jay-stuart",
+            re.IGNORECASE,
+        ),
     ),
     (
         "maintainer-host",
@@ -120,11 +128,17 @@ class AllowlistEntry(NamedTuple):
     matched: bool = False
 
     def matches(self, hit: "Hit") -> bool:
+        # DC14 item 4: exact full-line match, not substring containment --
+        # a short/generic fragment (e.g. a filename that happens to appear
+        # inside an unrelated longer line) could otherwise silently
+        # suppress a hit the entry was never written for. self.substring
+        # holds the EXACT stripped source line (empty only for the two
+        # scrubber-migration blanket-suppress entries).
         if not fnmatch.fnmatch(hit.path, self.glob):
             return False
         if self.rule != "*" and self.rule != hit.rule:
             return False
-        if self.substring != "" and self.substring not in hit.line_text:
+        if self.substring != "" and self.substring != hit.line_text:
             return False
         return True
 
@@ -265,17 +279,24 @@ def scan_file(root: Path, rel_path: str, extra_rules: list[tuple[str, re.Pattern
 
 
 def apply_allowlist(
-    entries: list[AllowlistEntry], hits: list[Hit], scanned_paths: set[str]
+    entries: list[AllowlistEntry], hits: list[Hit], scanned_paths: set[str], is_full_run: bool = True
 ) -> tuple[list[Hit], list[AllowlistEntry]]:
     """Suppress hits covered by an allowlist entry; report entries that never
     suppressed anything as stale.
 
-    Staleness is scoped to what was actually scanned this run (`--paths`
-    narrows the population): an entry whose glob names a file that wasn't in
-    `scanned_paths` this run isn't reachable, so it can't be proven stale —
-    it's silently skipped rather than flagged, or a `--paths`-scoped phase
-    gate run would spuriously fail on every allowlist entry outside the
-    touched-file set.
+    is_full_run=True (no `--paths`, the default): `scanned_paths` is every
+    tracked file that currently exists. An entry that suppressed nothing is
+    stale REGARDLESS of whether its glob matches anything in
+    `scanned_paths` (DC14 item 4) -- if its glob matches nothing that
+    exists, that's exactly the deleted-file case: the target file is gone
+    and the entry is unambiguously dead, not "out of scope this run".
+
+    is_full_run=False (`--paths` narrows the population): staleness is
+    scoped to what was actually scanned. An entry whose glob names a file
+    that wasn't in `scanned_paths` this run isn't reachable, so it can't be
+    proven stale here — it's silently skipped rather than flagged, so a
+    `--paths`-scoped phase gate run doesn't spuriously fail on every
+    allowlist entry outside the touched-file set.
     """
     used = [False] * len(entries)
     kept: list[Hit] = []
@@ -287,11 +308,14 @@ def apply_allowlist(
                 suppressed = True
         if not suppressed:
             kept.append(hit)
-    stale = [
-        entry
-        for entry, was_used in zip(entries, used)
-        if not was_used and any(fnmatch.fnmatch(p, entry.glob) for p in scanned_paths)
-    ]
+    if is_full_run:
+        stale = [entry for entry, was_used in zip(entries, used) if not was_used]
+    else:
+        stale = [
+            entry
+            for entry, was_used in zip(entries, used)
+            if not was_used and any(fnmatch.fnmatch(p, entry.glob) for p in scanned_paths)
+        ]
     return kept, stale
 
 
@@ -376,7 +400,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     for rel in scan_targets:
         all_hits.extend(scan_file(root, rel, extra_rules))
 
-    kept_hits, stale_entries = apply_allowlist(allowlist, all_hits, set(scan_targets))
+    kept_hits, stale_entries = apply_allowlist(
+        allowlist, all_hits, set(scan_targets), is_full_run=not bool(args.paths)
+    )
     kept_fails = [h for h in kept_hits if h.cls == "FAIL"]
     kept_warns = [h for h in kept_hits if h.cls == "WARN"]
 

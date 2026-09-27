@@ -244,8 +244,30 @@ def _analyse_file(path: Path):
         if not gated:
             continue
 
-        scope_text = _scope_text(scope, source)
-        headered = _HEADER_LITERAL in scope_text or (callee in preauth_clients)
+        # DC14 item 6: the header must be within THIS call expression's own
+        # argument list (or resolve via the client it's made through) --
+        # NOT "anywhere in the enclosing function's text". The prior
+        # scope-text check missed a mutation with two gated calls in one
+        # function, one headered and one not: the unheadered call read as
+        # "headered" purely because the OTHER call's header text appeared
+        # somewhere else in the same function body.
+        call_own_text = ast.get_source_segment(source, call_node) or ""
+        header_directly_present = _HEADER_LITERAL in call_own_text
+
+        header_via_binding = False
+        if not header_directly_present:
+            # Support `headers=headers` where `headers = {"X-Service-Key":
+            # ...}` was bound earlier in the same scope -- still THIS
+            # call's own argument (a Name), just one hop of resolution,
+            # not a scope-wide text scan.
+            for kw in call_node.keywords:
+                if kw.arg == "headers" and isinstance(kw.value, ast.Name):
+                    bound_text = bindings.get(kw.value.id)
+                    if bound_text and _HEADER_LITERAL in bound_text:
+                        header_via_binding = True
+                        break
+
+        headered = header_directly_present or header_via_binding or (callee in preauth_clients)
         results.append({
             "line": call_node.lineno,
             "callee": callee,

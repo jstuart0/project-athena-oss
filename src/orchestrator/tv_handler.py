@@ -11,6 +11,7 @@ Supports:
 - Multi-TV control ("open Netflix everywhere")
 - Guest mode app filtering
 """
+import json
 import os
 import re
 import asyncio
@@ -22,17 +23,71 @@ from dataclasses import dataclass
 from shared.ha_client import HomeAssistantClient
 from shared.admin_config import AdminConfigClient
 from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
-# Fallback room to Apple TV entity mapping
-# Used when admin API is unavailable
-FALLBACK_ROOM_TO_TV = {
-    "master_bedroom": ("media_player.master_bedroom_tv", "remote.master_bedroom_tv"),
-    "bedroom": ("media_player.master_bedroom_tv", "remote.master_bedroom_tv"),  # Alias
-    "living_room": ("media_player.living_room_tv", "remote.living_room_tv"),
-    "office": ("media_player.office_tv", "remote.office_tv"),
-}
+# Fallback room -> Apple TV entity mapping, used only when the admin API's
+# Room TV Config is unreachable. Configured via HA_TV_ENTITIES (DC14 item
+# 1b, OSS-First) rather than hardcoded here; empty means no fallback --
+# every handler below already treats an empty tv_configs dict as "no TV
+# entity configured" (see e.g. handle_launch's early "No Apple TVs
+# configured" return), so this degrades cleanly.
+_fallback_room_to_tv_cache: Optional[Dict[str, Tuple[str, str]]] = None
+_fallback_room_to_tv_warned = False
+
+
+def _parse_ha_tv_entities(raw: str) -> Dict[str, Tuple[str, str]]:
+    """room_name -> (media_player_entity_id, remote_entity_id).
+
+    Accepts a JSON array of {"room", "media_player_entity_id",
+    "remote_entity_id"} objects, or a comma-separated list of
+    "room:media_player_entity_id[:remote_entity_id]" triples.
+    """
+    result: Dict[str, Tuple[str, str]] = {}
+    raw = raw.strip()
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            for item in parsed:
+                room = str(item["room"]).lower()
+                media_player = str(item["media_player_entity_id"])
+                remote = str(item.get("remote_entity_id", ""))
+                result[room] = (media_player, remote)
+        except Exception as e:
+            logger.error("ha_tv_entities_invalid_json", error=str(e))
+            return {}
+    else:
+        for token in raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            parts = token.split(":")
+            if len(parts) < 2:
+                logger.error("ha_tv_entities_invalid_entry", entry=token)
+                continue
+            room = parts[0].lower()
+            media_player = parts[1]
+            remote = parts[2] if len(parts) > 2 else ""
+            result[room] = (media_player, remote)
+    return result
+
+
+def _get_fallback_room_to_tv() -> Dict[str, Tuple[str, str]]:
+    global _fallback_room_to_tv_cache, _fallback_room_to_tv_warned
+    if _fallback_room_to_tv_cache is not None:
+        return _fallback_room_to_tv_cache
+
+    raw = get_config().ha_tv_entities
+    if not raw:
+        if not _fallback_room_to_tv_warned:
+            logger.info("ha_tv_entities_unset_no_fallback_tv_configured")
+            _fallback_room_to_tv_warned = True
+        _fallback_room_to_tv_cache = {}
+        return _fallback_room_to_tv_cache
+
+    _fallback_room_to_tv_cache = _parse_ha_tv_entities(raw)
+    return _fallback_room_to_tv_cache
 
 # Cache for TV configs fetched from admin API
 _tv_config_cache: Dict[str, Any] = {}
@@ -85,7 +140,7 @@ async def get_tv_configs() -> Dict[str, Dict[str, Any]]:
         "room_name": name,
         "media_player_entity_id": entities[0],
         "remote_entity_id": entities[1]
-    } for name, entities in FALLBACK_ROOM_TO_TV.items()}
+    } for name, entities in _get_fallback_room_to_tv().items()}
 
 
 async def get_app_configs(guest_mode: bool = False) -> List[Dict[str, Any]]:

@@ -12,6 +12,7 @@ Supports:
 - Room exclusion ("play everywhere except...")
 - Per-room pause/resume with state tracking
 """
+import json
 import os
 import re
 import time
@@ -24,6 +25,7 @@ from enum import Enum
 from shared.ha_client import HomeAssistantClient
 from shared.admin_config import AdminConfigClient
 from shared.admin_url import get_admin_url
+from shared.config import get_config
 from orchestrator.follow_me_audio import get_most_recent_room
 
 logger = structlog.get_logger()
@@ -221,26 +223,58 @@ def get_playback_manager() -> PlaybackStateManager:
         _playback_manager = PlaybackStateManager()
     return _playback_manager
 
-# Fallback room to Music Assistant media player entity mapping
-# Used when admin API is unavailable
-# Source of truth is now the Admin backend's room_audio_config table
-# Updated 2026-01-05 to use Music Assistant entities (mass_player_type: player)
-# NOT the AirPlay entities (office_3, kitchen_2, etc.)
-FALLBACK_ROOM_TO_PLAYER = {
-    "living_room": "media_player.living_room_2_2",  # MA player
-    "kitchen": "media_player.kitchen",              # MA player
-    "office": "media_player.office_group",          # MA stereo group (both HomePods)
-    "bedroom": "media_player.master_bedroom",       # Alias - MA player
-    "master_bedroom": "media_player.master_bedroom", # MA player
-    "master_bathroom": "media_player.master_bathroom", # MA player
-    "alpha": "media_player.alpha",                  # MA player
-    "beta": "media_player.beta",                    # MA player
-    "dining_room": "media_player.living_room_2_2",  # MA player (shared with living room)
-    "basement": "media_player.basement_bathroom",   # Alias - MA player
-    "basement_bathroom": "media_player.basement_bathroom", # MA player
-    "main_bathroom": "media_player.main_bathroom_2", # MA player
-    "home": "media_player.office_group",            # Default - office stereo pair
-}
+# Fallback room to Music Assistant media player entity mapping, used only
+# when the admin API's room_audio_config table is unreachable. Configured
+# via HA_MUSIC_PLAYERS (DC14 item 1, OSS-First) rather than hardcoded --
+# empty means no fallback; get_room_entity() already returns None for any
+# room not present in the configs dict, which every caller handles.
+_fallback_room_to_player_cache: Optional[Dict[str, str]] = None
+_fallback_room_to_player_warned = False
+
+
+def _parse_ha_music_players(raw: str) -> Dict[str, str]:
+    """room_name -> media_player entity_id. Accepts a JSON object
+    {"room": "entity_id"} or a comma-separated list of "room:entity_id"
+    pairs."""
+    raw = raw.strip()
+    if raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                raise ValueError("HA_MUSIC_PLAYERS must be a JSON object")
+            return {str(k).lower(): str(v) for k, v in parsed.items()}
+        except Exception as e:
+            logger.error("ha_music_players_invalid_json", error=str(e))
+            return {}
+
+    result: Dict[str, str] = {}
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if ":" not in token:
+            logger.error("ha_music_players_invalid_entry", entry=token)
+            continue
+        room, _, entity_id = token.partition(":")
+        result[room.strip().lower()] = entity_id.strip()
+    return result
+
+
+def _get_fallback_room_to_player() -> Dict[str, str]:
+    global _fallback_room_to_player_cache, _fallback_room_to_player_warned
+    if _fallback_room_to_player_cache is not None:
+        return _fallback_room_to_player_cache
+
+    raw = get_config().ha_music_players
+    if not raw:
+        if not _fallback_room_to_player_warned:
+            logger.info("ha_music_players_unset_no_fallback_configured")
+            _fallback_room_to_player_warned = True
+        _fallback_room_to_player_cache = {}
+        return _fallback_room_to_player_cache
+
+    _fallback_room_to_player_cache = _parse_ha_music_players(raw)
+    return _fallback_room_to_player_cache
 
 # Cache for room configs fetched from admin API
 _room_config_cache: Dict[str, Any] = {}
@@ -289,7 +323,7 @@ async def get_room_configs() -> Dict[str, Dict[str, Any]]:
 
     # Fallback to hardcoded values
     return {name: {"room_name": name, "primary_entity_id": entity}
-            for name, entity in FALLBACK_ROOM_TO_PLAYER.items()}
+            for name, entity in _get_fallback_room_to_player().items()}
 
 
 def get_room_entity(room_name: str, room_configs: Dict[str, Dict[str, Any]]) -> Optional[str]:

@@ -50,16 +50,29 @@ logger = configure_logging("orchestrator.ingress_auth")
 
 _VALID_MODES = frozenset({"enforce", "warn"})
 
+# DC14 item v4 (valerie): the invalid-mode ERROR fires on every request that
+# reaches this dependency while misconfigured -- at request volume, that's
+# log spam for a condition that doesn't change request-to-request (the mode
+# comes from get_config(), which is lru_cache'd; it can't flip mid-process
+# without a restart per this module's own docstring above). Logged once per
+# process instead, module-flag-gated like the other "unset/misconfigured at
+# startup" warnings elsewhere in this codebase (e.g. gateway's
+# _warn_if_trusted_proxy_unset).
+_invalid_mode_warned = False
+
 
 async def require_service_caller(request: Request) -> None:
     """FastAPI dependency: gate a route behind X-Service-Key (D10)."""
+    global _invalid_mode_warned
     cfg = get_config()
     mode = cfg.orchestrator_ingress_auth
     configured_key = cfg.service_api_key
     header_value = request.headers.get("X-Service-Key")
 
     if mode not in _VALID_MODES:
-        logger.error("orchestrator_ingress_auth_invalid_mode", mode=mode)
+        if not _invalid_mode_warned:
+            logger.error("orchestrator_ingress_auth_invalid_mode", mode=mode)
+            _invalid_mode_warned = True
         mode = "enforce"
 
     # Step 1: a present, non-empty, WRONG key is never tolerated, in any mode.

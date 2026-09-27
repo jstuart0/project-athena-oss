@@ -1,20 +1,28 @@
-# scripts/.maintainer-leak-allowlist — D5
+# scripts/.maintainer-leak-allowlist — D5 (DC14 item 4: full-line form)
 # glob<TAB>rule-id|*<TAB>required-substring<TAB>reason
 # An entry suppresses matching hits of either class (FAIL or WARN). It is
-# stale, and a FAIL, only if it matches no hit of any class. The empty
-# substring is permitted only for the two scrubber migrations below.
+# stale, and a FAIL, only if it matches no hit of any class. The substring
+# column is the EXACT, stripped, full source line the entry allows -- not
+# an arbitrary substring -- so one entry can't accidentally cover a second,
+# unrelated line that happens to share a shorter fragment. A file with
+# multiple distinct allowed lines gets one entry per line. The empty
+# substring is permitted only for the two scrubber migrations below, which
+# intentionally blanket-suppress their whole file.
 admin/backend/alembic/versions/053_clear_legacy_gateway_config_ips.py	*		scrubber migration
 admin/backend/alembic/versions/058_clear_legacy_oidc_redirect_uri.py	*		scrubber migration
-admin/backend/alembic/versions/048_add_performance_optimization_features.py	maintainer-city	"baltimore": "BWI"	national airport seed table
-src/orchestrator/airport_lookup.py	maintainer-city	"baltimore": "BWI"	national table
-src/orchestrator/utils/constants.py	maintainer-city	"Baltimore": "MD"	national city-state table
-src/orchestrator/intent_classifier.py	maintainer-city	"Baltimore Ravens"	team proper name
-src/orchestrator/intent_classifier.py	maintainer-city	"Baltimore Orioles"	team proper name
-src/rag/amtrak/main.py	maintainer-city	"baltimore": "BAL"	national station aliases
-src/rag/amtrak/main.py	maintainer-city	"baltimore penn": "BAL"	national station aliases
-scripts/setup-mac-studio.sh	maintainer-host	setup-mac-studio.sh	script filename (Apple Silicon host setup)
-LICENSE	maintainer-domain	jay@xmojo.net	licensing contact
-README.md	maintainer-domain	jay@xmojo.net	licensing contact
-docs/INSTALLATION.md	*	the maintainer's	explains the 053/058 scrubbers
-admin/backend/tests/test_migration_058.py	maintainer-domain	xmojo.net	scrubber test
-admin/backend/tests/test_regression_guards.py	*	xmojo.net	guard test
+admin/backend/alembic/versions/048_add_performance_optimization_features.py	maintainer-city	'{"cache_ttl_seconds": 86400, "fallback_airports": {"new york": "JFK", "los angeles": "LAX", "chicago": "ORD", "miami": "MIA", "san francisco": "SFO", "boston": "BOS", "seattle": "SEA", "denver": "DEN", "atlanta": "ATL", "dallas": "DFW", "washington": "DCA", "baltimore": "BWI", "philadelphia": "PHL"}}'::jsonb	national airport seed table
+src/orchestrator/airport_lookup.py	maintainer-city	"baltimore": "BWI",	national table
+src/orchestrator/utils/constants.py	maintainer-city	"Baltimore": "MD",	national city-state table
+src/orchestrator/intent_classifier.py	maintainer-city	"ravens": "Baltimore Ravens",	team proper name
+src/orchestrator/intent_classifier.py	maintainer-city	"orioles": "Baltimore Orioles",	team proper name
+src/rag/amtrak/main.py	maintainer-city	"baltimore": "BAL",	national station aliases
+src/rag/amtrak/main.py	maintainer-city	"baltimore penn": "BAL",	national station aliases
+scripts/setup-mac-studio.sh	maintainer-host	#   ./setup-mac-studio.sh [ollama|mlx|both]	script filename in its own usage comment (Apple Silicon host setup)
+LICENSE	maintainer-domain	For commercial licensing inquiries, contact: jay@xmojo.net	licensing contact
+README.md	maintainer-domain	For commercial licensing inquiries, contact: jay@xmojo.net	licensing contact
+docs/INSTALLATION.md	*	still contains rows with `http://192.168.10.167:*` (the maintainer's homelab IPs	explains the 053/058 scrubbers
+docs/INSTALLATION.md	*	in the `secrets` table that were seeded with the maintainer's xmojo.net values	explains the 053/058 scrubbers
+admin/backend/tests/test_migration_058.py	maintainer-domain	LEGACY_REDIRECT = "https://athena-admin.xmojo.net/api/auth/callback"	scrubber test
+admin/backend/tests/test_migration_058.py	maintainer-domain	LEGACY_PROVIDER = "https://auth.xmojo.net/application/o/athena-admin/"	scrubber test
+admin/backend/tests/test_regression_guards.py	*	a maintainer IP (192.168.x.x) or maintainer domain (*.xmojo.net) as a	guard test docstring
+admin/backend/tests/test_regression_guards.py	*	(https?://*.xmojo.net).	guard test regex-in-docstring

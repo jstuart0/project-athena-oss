@@ -547,6 +547,29 @@ class TestFallbackBranch:
         assert result.error == "permission_denied"
         assert "permission" in result.answer.lower()
 
+    def test_fallback_no_device_extracted_asks_for_details_never_defaults_to_a_house_entity(self):
+        """DC14 item 1: the fallback branch used to silently default an
+        unspecified device to the hardcoded 'light.office' -- a real
+        house-specific entity ID that would be wrong for any other
+        deployment (and arguably wrong UX even for this one, since it
+        acted on a device the user never named). No device extracted must
+        now fall through to the existing 'need more details' clarification
+        instead of guessing any entity."""
+        _runtime.set_smart_controller(None)
+        ha = MagicMock()
+        ha.call_service = AsyncMock(return_value={"result": "ok"})
+        _runtime.set_ha_client(ha)
+        state = _make_state(
+            query="turn on the lights",
+            entities={},
+        )
+        with patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                   return_value={"enabled": False}):
+            result = _run(route_control_node(state))
+        ha.call_service.assert_not_awaited()
+        assert "light.office" not in (result.answer or "")
+        assert "more details" in result.answer.lower()
+
 
 class TestErrorHandlingAndMetrics:
     def setup_method(self):

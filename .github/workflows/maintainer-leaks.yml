@@ -6,34 +6,13 @@ name: Maintainer Leak Gate
 # re-entering the tracked tree. See scripts/check-maintainer-leaks.py and
 # scripts/.maintainer-leak-allowlist. ATHENA-89.
 
+# DC14 item 3: no paths: filter on either trigger. A maintainer-identifying
+# string can land in ANY tracked file, not just the ones a paths: filter
+# would guess at in advance -- this gate runs on every PR and every push.
 on:
-  pull_request:
-    paths:
-      - "src/**"
-      - "admin/**"
-      - "apps/**"
-      - "scripts/**"
-      - "manifests/**"
-      - ".env.example"
-      - "docker-compose*.yml"
-      - "CLAUDE.md"
-      - "docs/**"
-      - "tests/unit/test_check_maintainer_leaks.py"
-      - ".github/workflows/maintainer-leaks.yml"
+  pull_request: {}
   push:
     branches: [main]
-    paths:
-      - "src/**"
-      - "admin/**"
-      - "apps/**"
-      - "scripts/**"
-      - "manifests/**"
-      - ".env.example"
-      - "docker-compose*.yml"
-      - "CLAUDE.md"
-      - "docs/**"
-      - "tests/unit/test_check_maintainer_leaks.py"
-      - ".github/workflows/maintainer-leaks.yml"
 
 permissions:
   contents: read

@@ -30,8 +30,13 @@ spec:
         env:
         - name: PORT
           value: "8000"
-        - name: DEFAULT_ROOM
-          value: "office"
+        # DEFAULT_ROOM: OSS template -- commented out, not a tracked value
+        # (DC14 item 1d). The backend's own os.getenv("DEFAULT_ROOM",
+        # "guest") default applies when this key isn't set at all; the
+        # house-specific room name (e.g. "office") is a live-cluster env
+        # patch, never a value in this tracked manifest.
+        # - name: DEFAULT_ROOM
+        #   value: "your-default-room"
         - name: HA_URL
           valueFrom:
             secretKeyRef:

@@ -10,6 +10,7 @@ from .ha_entity_manager import HAEntityManager
 from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 
 # Round 17: Response variety templates for natural conversation
@@ -3416,12 +3417,36 @@ Do NOT mention rooms that have no current or recent motion."""
         import logging
         logger = logging.getLogger(__name__)
 
-        # Sunbeam mattress pad entities
-        LEVEL_LEFT = "select.sunbeam_bedding_dual_s2_level_1"
-        LEVEL_RIGHT = "select.sunbeam_bedding_dual_s2_level_2"
-        POWER_MAIN = "switch.sunbeam_bedding_dual_s2_power"
-        POWER_SIDE_A = "switch.sunbeam_bedding_dual_s2_side_a_power"
-        POWER_SIDE_B = "switch.sunbeam_bedding_dual_s2_side_b_power"
+        # Bed-warmer entities, configured via HA_BED_WARMER_ENTITIES (JSON
+        # object naming all 5 keys below) rather than hardcoded (DC14 item
+        # 1, OSS-First) -- this is inherently specific hardware (a Sunbeam
+        # dual-zone mattress pad via a Tuya integration), not something
+        # most deployments have.
+        raw_entities = get_config().ha_bed_warmer_entities
+        required_keys = ("level_left", "level_right", "power_main", "power_side_a", "power_side_b")
+        entities: Dict[str, str] = {}
+        if raw_entities:
+            try:
+                parsed = json.loads(raw_entities)
+                if not isinstance(parsed, dict):
+                    raise ValueError("HA_BED_WARMER_ENTITIES must be a JSON object")
+                entities = {k: str(parsed[k]) for k in required_keys if k in parsed}
+            except Exception as e:
+                logger.error(f"HA_BED_WARMER_ENTITIES invalid: {e}")
+                entities = {}
+
+        if not all(k in entities for k in required_keys):
+            return (
+                "Bed warmer isn't configured. Set HA_BED_WARMER_ENTITIES "
+                "(a JSON object naming level_left, level_right, power_main, "
+                "power_side_a and power_side_b entity IDs) to enable this."
+            )
+
+        LEVEL_LEFT = entities["level_left"]
+        LEVEL_RIGHT = entities["level_right"]
+        POWER_MAIN = entities["power_main"]
+        POWER_SIDE_A = entities["power_side_a"]
+        POWER_SIDE_B = entities["power_side_b"]
 
         side = parameters.get('side', 'both')
         level = parameters.get('level', 1)  # Default to level 1 (low)
@@ -3866,13 +3891,15 @@ Do NOT mention rooms that have no current or recent motion."""
 
                 # Provide fallback behavior based on what was requested
                 if 'movie' in query_lower:
-                    # Dim living room lights as a fallback
+                    # Dim lights as a fallback (DC14 item 1: "all" is HA's
+                    # own universal per-domain target, not a house-specific
+                    # light-group entity)
                     try:
                         await ha_client.call_service("light", "turn_on", {
-                            "entity_id": "light.living_room_all",
+                            "entity_id": "all",
                             "brightness_pct": 20
                         })
-                        return "Movie mode ready! I've dimmed the living room lights."
+                        return "Movie mode ready! I've dimmed the lights."
                     except:
                         pass
                 elif 'good night' in query_lower or 'goodnight' in query_lower:
@@ -3883,10 +3910,11 @@ Do NOT mention rooms that have no current or recent motion."""
                     except:
                         pass
                 elif 'good morning' in query_lower:
-                    # Turn on lights as a fallback
+                    # Turn on lights as a fallback (DC14 item 1: "all",
+                    # not a house-specific light-group entity)
                     try:
                         await ha_client.call_service("light", "turn_on", {
-                            "entity_id": "light.office_all",
+                            "entity_id": "all",
                             "brightness_pct": 100
                         })
                         return "Good morning! I've turned on the lights."
@@ -3901,10 +3929,11 @@ Do NOT mention rooms that have no current or recent motion."""
                     except:
                         pass
                 elif 'home' in query_lower:
-                    # Turn on some lights as a fallback
+                    # Turn on some lights as a fallback (DC14 item 1: "all",
+                    # not a house-specific light-group entity)
                     try:
                         await ha_client.call_service("light", "turn_on", {
-                            "entity_id": "light.living_room_all",
+                            "entity_id": "all",
                             "brightness_pct": 80
                         })
                         return "Welcome home! I've turned on the lights."

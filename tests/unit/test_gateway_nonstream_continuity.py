@@ -316,6 +316,12 @@ def test_G10_population_is_4():
 
 @pytest.mark.parametrize("scenario", _G10_SCENARIOS)
 def test_G10_room_fallback_is_unknown_not_office(monkeypatch, scenario):
+    # DC14 item 1a: _detect_room_from_active_satellite now short-circuits
+    # to "unknown" whenever HA_SATELLITE_ROOM_MAP is unconfigured, BEFORE
+    # ever reaching the HA_TOKEN/network paths these 4 scenarios exist to
+    # exercise. Configure a non-empty map here so each scenario still
+    # drives past that gate and into the specific failure mode it names.
+    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {"assist_satellite.test_office": "office"})
     monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(return_value=False))
 
     if scenario == "no_token":
@@ -340,6 +346,73 @@ def test_G10_room_fallback_is_unknown_not_office(monkeypatch, scenario):
     monkeypatch.setattr(gw, "ha_client", fake_client)
     result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
     assert result == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# DC14 item 1a: HA_SATELLITE_ROOM_MAP gating (empty -> unknown, no network
+# call at all; configured -> entity_id lookup, not friendly_name regex)
+# ---------------------------------------------------------------------------
+
+
+def test_DC14_1a_empty_map_returns_unknown_without_querying_ha(monkeypatch):
+    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {})
+    monkeypatch.setenv("HA_TOKEN", "test-token")
+    fake_client = mock.MagicMock()
+    fake_client.get = mock.AsyncMock(side_effect=AssertionError("must not query HA when map is empty"))
+    monkeypatch.setattr(gw, "ha_client", fake_client)
+
+    result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
+
+    assert result == "unknown"
+    fake_client.get.assert_not_called()
+
+
+def test_DC14_1a_unset_config_logs_once_at_info(monkeypatch):
+    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", None)
+    monkeypatch.setattr(gw, "_ha_satellite_room_map_warned", False)
+    monkeypatch.setattr(gw._get_athena_config(), "ha_satellite_room_map", "", raising=False)
+
+    calls = []
+    monkeypatch.setattr(gw.logger, "info", lambda event, **kw: calls.append({"event": event, **kw}))
+
+    first = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
+    second = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
+
+    assert first == "unknown"
+    assert second == "unknown"
+    matching = [c for c in calls if c["event"] == "ha_satellite_room_map_unset_satellite_features_disabled"]
+    assert len(matching) == 1
+
+
+def test_DC14_1a_configured_map_resolves_via_entity_id_not_friendly_name(monkeypatch):
+    """The old implementation regexed 'Voice - <Room> Assist' out of
+    friendly_name; the new one must ignore friendly_name entirely and key
+    off entity_id, so a friendly_name that would have matched the old
+    pattern but an entity_id NOT in the map still yields 'unknown'."""
+    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {"assist_satellite.configured_one": "office"})
+    monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(return_value=False))
+    monkeypatch.setenv("HA_TOKEN", "test-token")
+
+    resp = mock.MagicMock(status_code=200)
+    resp.json.return_value = [
+        {
+            "entity_id": "assist_satellite.not_in_map",
+            "state": "responding",
+            "attributes": {"friendly_name": "Voice - Office Assist"},
+            "last_changed": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+    fake_client = mock.MagicMock()
+    fake_client.get = mock.AsyncMock(return_value=resp)
+    monkeypatch.setattr(gw, "ha_client", fake_client)
+
+    result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
+    assert result == "unknown"
+
+    # Now the configured entity_id IS the active one -- resolves correctly.
+    resp.json.return_value[0]["entity_id"] = "assist_satellite.configured_one"
+    result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
+    assert result == "office"
 
 
 # ---------------------------------------------------------------------------

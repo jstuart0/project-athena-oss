@@ -72,21 +72,27 @@ class TransitConfig(NamedTuple):
     error: Optional[str]
 
 
-def _validate_bounds(feed_id: str, bounds: Any) -> Optional[str]:
-    """Validate a feed's optional `bounds` box. Returns an error string, or
-    None when valid. Comparisons at filter time are exclusive at the edges,
-    so bounds here are validated as strict min < max (2.2, R11)."""
+def _validate_bounds(feed_id: str, bounds: Any) -> Tuple[Optional[str], Optional[Dict[str, float]]]:
+    """Validate a feed's optional `bounds` box. Returns (error, None) when
+    invalid, or (None, normalized_bounds) when valid -- normalized_bounds
+    has every value coerced to float (DC14 item 5), so a JSON author who
+    quoted their numbers ("39.1" instead of 39.1) still gets a real float
+    at both validation time and downstream filter time (_in_bounds), not a
+    str/float comparison TypeError the first time a stop is actually
+    filtered. Comparisons at filter time are exclusive at the edges, so
+    bounds here are validated as strict min < max (2.2, R11)."""
     if not isinstance(bounds, dict) or set(bounds.keys()) != set(_BOUNDS_KEYS):
-        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds must have exactly {sorted(_BOUNDS_KEYS)}"
+        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds must have exactly {sorted(_BOUNDS_KEYS)}", None
     try:
         min_lat, max_lat, min_lon, max_lon = (float(bounds[k]) for k in _BOUNDS_KEYS)
     except (TypeError, ValueError):
-        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds values must be numeric"
+        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds values must be numeric", None
     if not (min_lat < max_lat):
-        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds min_lat must be less than max_lat"
+        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds min_lat must be less than max_lat", None
     if not (min_lon < max_lon):
-        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds min_lon must be less than max_lon"
-    return None
+        return f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' bounds min_lon must be less than max_lon", None
+    normalized = {"min_lat": min_lat, "max_lat": max_lat, "min_lon": min_lon, "max_lon": max_lon}
+    return None, normalized
 
 
 def load_transit_config(cfg) -> TransitConfig:
@@ -110,9 +116,10 @@ def load_transit_config(cfg) -> TransitConfig:
                 return TransitConfig(False, {}, {}, region_name, f"TRANSIT_GTFS_FEEDS: feed '{feed_id}' missing 'url'")
             bounds = feed.get("bounds")
             if bounds is not None:
-                err = _validate_bounds(feed_id, bounds)
+                err, normalized_bounds = _validate_bounds(feed_id, bounds)
                 if err:
                     return TransitConfig(False, {}, {}, region_name, err)
+                feed = {**feed, "bounds": normalized_bounds}
             feeds[feed_id] = feed
 
     static_raw = cfg.transit_static_services

@@ -430,9 +430,6 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
             else:
                 action = None
 
-            if not device:
-                device = "light.office"  # Default
-
             if device and action:
                 # Phase 2: Check entity permission before executing command
                 if not check_entity_permission(device, state.permissions):

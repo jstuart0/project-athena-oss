@@ -682,6 +682,32 @@ def test_R11_invalid_bounds_configured_false_names_feed(monkeypatch, bounds):
     assert "test_feed" in module.transit_config.error
 
 
+def test_R11_string_numeric_bounds_normalized_to_float_at_load(monkeypatch):
+    """DC14 item 5: a JSON author who quoted their numbers ("39.5" instead
+    of 39.5) is valid (float("39.5") succeeds) and must be NORMALIZED to a
+    real float at load time -- not stored as the original string -- so
+    _in_bounds's `bounds["min_lat"] < lat` comparison at actual filter time
+    doesn't hit a str/float TypeError the first time a stop is checked."""
+    feeds = json.dumps({
+        "test_feed": {
+            "name": "Test Feed", "agency": "test", "url": "https://example.org/gtfs.zip",
+            "type": "bus", "free": False,
+            "bounds": {"min_lat": "39.5", "max_lat": "39.9", "min_lon": "-105.3", "max_lon": "-104.7"},
+        }
+    })
+    module = _reload_transportation(monkeypatch, TRANSIT_GTFS_FEEDS=feeds)
+    assert module.transit_config.configured is True
+    bounds = module.transit_config.feeds["test_feed"]["bounds"]
+    assert bounds == {"min_lat": 39.5, "max_lat": 39.9, "min_lon": -105.3, "max_lon": -104.7}
+    for v in bounds.values():
+        assert isinstance(v, float)
+
+    # And _in_bounds actually works against the normalized values -- this
+    # is the real regression: pre-fix, this call raised TypeError.
+    assert module._in_bounds(bounds, 39.7, -105.0) is True
+    assert module._in_bounds(bounds, 10.0, -105.0) is False
+
+
 # ---------------------------------------------------------------------------
 # R11b: SSRF allow_private composition (both required sub-cases)
 # ---------------------------------------------------------------------------

@@ -1630,15 +1630,19 @@ async def get_sensors_summary():
 # Media Player Control
 # =============================================================================
 
-# Known media players to expose (friendly names)
-MEDIA_PLAYERS = {
-    "media_player.living_room": "Living Room Sonos",
-    "media_player.living_room_2": "Living Room Apple TV",
-    "media_player.master_bedroom_tv": "Master Bedroom Apple TV",
-    "media_player.samsung_q80_series_75": "Living Room Samsung TV",
-    "media_player.spotify_jay_stuart": "Spotify",
-    "media_player.home_speakers": "Home Speakers"
-}
+# Media players to expose, configured via JARVIS_MEDIA_PLAYERS (comma-
+# separated list of HA media_player entity IDs) rather than hardcoded here
+# (DC14 item 1c, OSS-First). Empty/unset yields an empty list. Note: this
+# constant isn't currently read anywhere else in this file --
+# get_media_players() below derives each player's display name from HA's
+# own reported friendly_name attribute, not from a static id->name table --
+# kept only so a caller that wants an explicit allowlist has a
+# configurable place to put one.
+JARVIS_MEDIA_PLAYERS = [
+    entity_id.strip()
+    for entity_id in os.getenv("JARVIS_MEDIA_PLAYERS", "").split(",")
+    if entity_id.strip()
+]
 
 
 @app.get("/api/media")
@@ -1816,16 +1820,21 @@ async def _media_command(entity_id: str, service: str, data: Dict[str, Any] = No
 # Kitchen Appliances (Oven, Fridge, Freezer)
 # =============================================================================
 
-# GE Appliance entity IDs (exposed as water_heater entities)
-OVEN_ENTITY = "water_heater.szrm197097p_oven"
-FRIDGE_ENTITY = "water_heater.tl514903_fridge"
-FREEZER_ENTITY = "water_heater.tl514903_freezer"
+# Appliance entity IDs, configured via env (DC14 item 1, OSS-First) --
+# these name a specific GE appliance model's HA entities (exposed as
+# water_heater entities), not something every deployment has. Empty means
+# the corresponding endpoint reports the appliance isn't configured
+# instead of querying/calling a hardcoded entity that doesn't exist in
+# this deployment's HA instance.
+OVEN_ENTITY = os.getenv("OVEN_ENTITY_ID", "")
+FRIDGE_ENTITY = os.getenv("FRIDGE_ENTITY_ID", "")
+FREEZER_ENTITY = os.getenv("FREEZER_ENTITY_ID", "")
 
 # Related sensors
-STOVE_COOK_MODE_SENSOR = "sensor.stove_cook_mode"
-STOVE_DISPLAY_TEMP_SENSOR = "sensor.stove_display_temperature"
-STOVE_TIMER_SENSOR = "sensor.stove_cook_time_remaining"
-FRIDGE_DOOR_SENSOR = "binary_sensor.refrigerator_door"
+STOVE_COOK_MODE_SENSOR = os.getenv("STOVE_COOK_MODE_SENSOR_ID", "")
+STOVE_DISPLAY_TEMP_SENSOR = os.getenv("STOVE_DISPLAY_TEMP_SENSOR_ID", "")
+STOVE_TIMER_SENSOR = os.getenv("STOVE_TIMER_SENSOR_ID", "")
+FRIDGE_DOOR_SENSOR = os.getenv("FRIDGE_DOOR_SENSOR_ID", "")
 
 # Temperature limits for safety
 OVEN_MIN_TEMP = 170
@@ -1883,6 +1892,8 @@ async def get_oven_state():
     """Get current oven state, temperature, and cooking mode"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
+    if not OVEN_ENTITY:
+        raise HTTPException(status_code=503, detail="Oven not configured. Set OVEN_ENTITY_ID.")
 
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -1961,6 +1972,8 @@ async def set_oven_temperature(request: SetOvenTempRequest):
     """Set oven target temperature"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
+    if not OVEN_ENTITY:
+        raise HTTPException(status_code=503, detail="Oven not configured. Set OVEN_ENTITY_ID.")
 
     temp = request.temperature
     if temp < OVEN_MIN_TEMP or temp > OVEN_MAX_TEMP:
@@ -2001,6 +2014,8 @@ async def set_oven_mode(request: SetOvenModeRequest):
     """Set oven cooking mode (Bake, Convection, etc.)"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
+    if not OVEN_ENTITY:
+        raise HTTPException(status_code=503, detail="Oven not configured. Set OVEN_ENTITY_ID.")
 
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2034,6 +2049,8 @@ async def turn_oven_off():
     """Turn off the oven"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
+    if not OVEN_ENTITY:
+        raise HTTPException(status_code=503, detail="Oven not configured. Set OVEN_ENTITY_ID.")
 
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2066,6 +2083,8 @@ async def get_fridge_state():
     """Get fridge and freezer state"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
+    if not FRIDGE_ENTITY and not FREEZER_ENTITY:
+        raise HTTPException(status_code=503, detail="Fridge/freezer not configured. Set FRIDGE_ENTITY_ID/FREEZER_ENTITY_ID.")
 
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2125,6 +2144,8 @@ async def set_fridge_temperature(request: SetApplianceTempRequest):
     """Set fridge target temperature"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
+    if not FRIDGE_ENTITY:
+        raise HTTPException(status_code=503, detail="Fridge not configured. Set FRIDGE_ENTITY_ID.")
 
     temp = request.temperature
     if temp < FRIDGE_MIN_TEMP or temp > FRIDGE_MAX_TEMP:
@@ -2165,6 +2186,8 @@ async def set_freezer_temperature(request: SetApplianceTempRequest):
     """Set freezer target temperature"""
     if not HA_TOKEN:
         raise HTTPException(status_code=503, detail="Home Assistant not configured")
+    if not FREEZER_ENTITY:
+        raise HTTPException(status_code=503, detail="Freezer not configured. Set FREEZER_ENTITY_ID.")
 
     temp = request.temperature
     if temp < FREEZER_MIN_TEMP or temp > FREEZER_MAX_TEMP:
