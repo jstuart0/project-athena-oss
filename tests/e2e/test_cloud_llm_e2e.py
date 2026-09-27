@@ -24,6 +24,7 @@ GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8000")
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
 ADMIN_URL = os.getenv("ADMIN_URL", "http://localhost:8080")
 TEST_API_KEY = os.getenv("TEST_API_KEY", "")
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 
 
 def get_auth_headers():
@@ -31,6 +32,12 @@ def get_auth_headers():
     if TEST_API_KEY:
         return {"X-API-Key": TEST_API_KEY}
     return {}
+
+
+def get_service_headers():
+    """D10: X-Service-Key for direct orchestrator /query calls, required
+    outside DEV_MODE/warn mode."""
+    return {"X-Service-Key": SERVICE_API_KEY} if SERVICE_API_KEY else {}
 
 
 class TestFullCloudPipeline:
@@ -69,7 +76,8 @@ class TestFullCloudPipeline:
                     "query": "Hello",
                     "mode": "owner",
                     "room": "office"
-                }
+                },
+                headers=get_service_headers()
             )
             assert response.status_code == 200
             data = response.json()
@@ -152,7 +160,7 @@ class TestLoadAndPerformance:
             ]
 
             tasks = [
-                client.post(f"{ORCHESTRATOR_URL}/query", json=q)
+                client.post(f"{ORCHESTRATOR_URL}/query", json=q, headers=get_service_headers())
                 for q in queries
             ]
 
@@ -168,7 +176,8 @@ class TestLoadAndPerformance:
             start = datetime.utcnow()
             response = await client.post(
                 f"{ORCHESTRATOR_URL}/query",
-                json={"query": "Hi", "mode": "owner", "room": "office"}
+                json={"query": "Hi", "mode": "owner", "room": "office"},
+                headers=get_service_headers()
             )
             elapsed = (datetime.utcnow() - start).total_seconds()
 
@@ -185,7 +194,8 @@ class TestRollbackScenarios:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 f"{ORCHESTRATOR_URL}/query",
-                json={"query": "What time is it?", "mode": "owner", "room": "office"}
+                json={"query": "What time is it?", "mode": "owner", "room": "office"},
+                headers=get_service_headers()
             )
             assert response.status_code == 200
             data = response.json()
@@ -219,7 +229,8 @@ class TestPrivacyFilter:
                     "query": "Tell me about the weather",
                     "mode": "owner",
                     "room": "office"
-                }
+                },
+                headers=get_service_headers()
             )
             assert response.status_code == 200
 

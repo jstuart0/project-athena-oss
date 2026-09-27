@@ -1,5 +1,7 @@
 # =============================================================================
-# ALTERNATIVE deployment for jarvis-web in a standalone namespace.
+# STANDALONE EXAMPLE — deploys jarvis-web into its own namespace. The
+# athena-prod deployment is manifests/athena-prod/jarvis-web.yaml.
+#
 # This file is structurally different from manifests/athena-prod/jarvis-web.yaml
 # (different namespace, different service mesh assumptions, Authentik ForwardAuth
 # integration). Use this file ONLY if you are deploying jarvis-web independently
@@ -10,6 +12,17 @@
 #   YOUR_REGISTRY    - your container registry (e.g., registry.example.com:5000)
 #   YOUR_DOMAIN_HERE - your domain (e.g., jarvis.yourdomain.com)
 #   YOUR_LOCAL_CIDR  - your LAN CIDR (e.g., 192.168.0.0/16 or 10.0.0.0/8)
+#
+# D10: the orchestrator's /query and /query/stream now require X-Service-Key.
+# This namespace has no athena-encryption Secret (that's athena-prod's), so
+# create a namespace-local one before applying:
+#   kubectl -n jarvis-web create secret generic jarvis-web-service-key \
+#     --from-literal=SERVICE_API_KEY=<the orchestrator's SERVICE_API_KEY>
+#
+# If you add manifests/athena-prod/optional/networkpolicy-orchestrator.yaml,
+# it needs an additional `from:` entry with a namespaceSelector for this
+# namespace and the `app: jarvis-web` label, since that policy otherwise
+# only allows same-namespace (athena-prod) callers.
 # =============================================================================
 ---
 apiVersion: v1
@@ -47,13 +60,23 @@ spec:
         - containerPort: 8000
           name: http
         env:
-        # Orchestrator URL — internal cluster DNS; change only if orchestrator
-        # is in a different namespace or cluster.
+        # Orchestrator URL — this namespace is NOT athena-prod, so the short
+        # in-namespace DNS name ("athena-orchestrator") doesn't resolve;
+        # use the fully-qualified cross-namespace form.
+        # REQUIRED: replace YOUR_ORCHESTRATOR_NAMESPACE (e.g., "athena-prod").
         - name: ORCHESTRATOR_URL
-          value: "http://athena-orchestrator:8001"
+          value: "http://athena-orchestrator.YOUR_ORCHESTRATOR_NAMESPACE.svc.cluster.local:8001"
         # Admin backend URL
         - name: ADMIN_BACKEND_URL
           value: "http://athena-admin-backend:8080"
+        # D10: required once the orchestrator's ORCHESTRATOR_INGRESS_AUTH
+        # is "enforce" (the default). See the namespace-local Secret
+        # creation note in the header banner above.
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: jarvis-web-service-key
+              key: SERVICE_API_KEY
         - name: DEFAULT_ROOM
           value: "guest"
         # Home Assistant for climate control (optional)

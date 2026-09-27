@@ -99,6 +99,7 @@ fi
 echo -n "9. Basic query... "
 RESPONSE=$(curl -sf -X POST "${ORCHESTRATOR_URL}/query" \
     -H "Content-Type: application/json" \
+    -H "X-Service-Key: ${SERVICE_API_KEY:-}" \
     -d '{"query":"Hello","mode":"owner","room":"office"}' 2>/dev/null || echo "error")
 if [[ "$RESPONSE" != "error" ]]; then
     echo "OK"

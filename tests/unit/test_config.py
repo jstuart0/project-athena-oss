@@ -538,3 +538,26 @@ class TestRegionConfigFields:
         monkeypatch.setenv(env_name, value)
         cfg = _TestConfig()
         assert getattr(cfg, field_name) == value
+
+
+# ---------------------------------------------------------------------------
+# C2 (ATHENA-89 P3, 3.1): TRUSTED_PROXY_CIDRS defaults to "" (was
+# "10.244.0.0/16"); ORCHESTRATOR_INGRESS_AUTH defaults to "enforce".
+# ---------------------------------------------------------------------------
+
+class TestIngressAuthAndProxyFields:
+    def test_C2_trusted_proxy_cidrs_default_empty(self, monkeypatch):
+        monkeypatch.delenv("TRUSTED_PROXY_CIDRS", raising=False)
+        assert _TestConfig().trusted_proxy_cidrs == ""
+
+    def test_C2_trusted_proxy_cidrs_reads_env(self, monkeypatch):
+        monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "10.244.0.0/16")
+        assert _TestConfig().trusted_proxy_cidrs == "10.244.0.0/16"
+
+    def test_C2_orchestrator_ingress_auth_default_enforce(self, monkeypatch):
+        monkeypatch.delenv("ORCHESTRATOR_INGRESS_AUTH", raising=False)
+        assert _TestConfig().orchestrator_ingress_auth == "enforce"
+
+    def test_C2_orchestrator_ingress_auth_reads_env(self, monkeypatch):
+        monkeypatch.setenv("ORCHESTRATOR_INGRESS_AUTH", "warn")
+        assert _TestConfig().orchestrator_ingress_auth == "warn"

@@ -18,6 +18,10 @@ services:
       - RAG_AIRPORTS_URL=${RAG_AIRPORTS_URL}
       - RAG_SPORTS_URL=${RAG_SPORTS_URL}
       - LOG_LEVEL=INFO
+      # D10: required by the gateway to call this service's gated routes.
+      # No default -- compose fails loudly at startup if unset, rather than
+      # the orchestrator silently 401ing every request.
+      - SERVICE_API_KEY=${SERVICE_API_KEY:?set SERVICE_API_KEY in .env}
     networks:
       - athena-network
     healthcheck:
@@ -41,6 +45,8 @@ services:
       - LLM_SERVICE_URL=${LLM_SERVICE_URL}
       - GATEWAY_API_KEY=${GATEWAY_API_KEY}
       - LOG_LEVEL=INFO
+      # D10: one .env value feeds both services; no secret goes in this file.
+      - SERVICE_API_KEY=${SERVICE_API_KEY:?set SERVICE_API_KEY in .env}
     networks:
       - athena-network
     depends_on:

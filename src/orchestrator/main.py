@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from enum import Enum
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
@@ -91,6 +91,7 @@ from orchestrator.follow_me_audio import (
 # Resilience pattern imports
 from orchestrator.rag_client import get_rag_client, initialize_rag_client
 from orchestrator.circuit_breaker import get_circuit_breaker_registry
+from orchestrator.ingress_auth import require_service_caller
 from orchestrator.rate_limiter import get_rate_limiter_registry
 
 # Semantic query caching for latency optimization
@@ -117,7 +118,7 @@ from orchestrator.context import (
     CONTEXT_REF_PATTERNS,
     ROOM_INDICATORS,
 )
-from orchestrator.utils.constants import DEFAULT_LOCATION, CITY_STATE_MAP, DEFAULT_TIMEZONE
+from orchestrator.utils.constants import DEFAULT_LOCATION, DEFAULT_CITY, CITY_STATE_MAP, DEFAULT_TIMEZONE
 
 # SMS integration imports
 from sms.content_detector import detect_textable_content, extract_sms_content
@@ -173,6 +174,9 @@ from orchestrator.helpers import (
     session_hmac_secret,
     summarize_conversation_history,
     _fallback_to_web_search,
+    log_continuation_decision,
+    query_mentions_location,
+    city_phrases,
 )
 
 # Event system imports for real-time pipeline monitoring
@@ -2132,7 +2136,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     state.continuation_decision = {"decision": "not_consulted", "reason": "not_yet_fetched"}
 
     # LOCATION CORRECTION DETECTION
-    # Detect if user is correcting their location (e.g., "I'm not in Baltimore", "use my location")
+    # Detect if user is correcting their location (e.g., "I'm not in Denver", "use my location")
     location_correction = detect_location_correction(state.query)
     if location_correction["is_correction"]:
         logger.info(
@@ -2162,7 +2166,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "source": "user_correction",
                 "correction_type": location_correction["correction_type"]
             }
-            # Clear any cached Baltimore default
+            # Clear any cached default-city location
             if state.entities:
                 state.entities.pop("location", None)
             logger.info("Location override: will use device/GPS location")
@@ -3622,7 +3626,7 @@ async def execute_tools_parallel(
     Args:
         tool_calls: List of tool call objects from LLM
         guest_mode: Whether to filter tools by guest mode permissions
-        location: User's location for enriching local searches (e.g., "Baltimore, MD")
+        location: User's location for enriching local searches (e.g., "Denver, CO")
 
     Returns:
         Dict mapping tool call IDs to results
@@ -3720,7 +3724,7 @@ async def execute_tools_parallel(
                 # - Queries starting with "the" (e.g., "the worthington")
                 # - Queries asking for phone/contact/address
                 query_words = query.split()
-                has_location = any(loc.lower() in query for loc in ["baltimore", "maryland", "md", "dc", "washington"])
+                has_location = query_mentions_location(query, location)
                 is_short_query = len(query_words) <= 5
                 looks_like_business = (
                     query.startswith("the ") or
@@ -3732,7 +3736,8 @@ async def execute_tools_parallel(
                 )
 
                 # If it looks like a local business search without location, add location
-                if is_short_query and not has_location and looks_like_business:
+                # (only when we actually have one to add -- 3.9)
+                if is_short_query and not has_location and looks_like_business and location:
                     original_query = arguments["query"]
                     arguments["query"] = f"{original_query} {location}"
                     logger.info(f"Enriched search query with location: '{original_query}' -> '{arguments['query']}'")
@@ -4572,12 +4577,15 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             "itinerary", "day trip", "things to do",
             "what should we do", "whole day", "full day", "date idea",
             "day date", "fun day", "day of fun", "surprise me",
-            "fun things", "good food", "represent baltimore", "baltimore experience",
+            "fun things", "good food",
             "local experience", "show me around", "take me around",
             # More specific "plan" phrases to avoid matching "party planning"
             "plan my day", "plan for today", "plan for tomorrow", "plan for the day",
             "plan the day", "plan a day", "plan our day", "plan this weekend"
         ]
+        # City-derived phrases (3.9): deployment-specific, not a hardcoded
+        # house city. Empty DEFAULT_CITY contributes no phrases.
+        planning_keywords.extend(city_phrases(DEFAULT_CITY, ["represent {c}", "{c} experience"]))
         # Exclude party/event planning from triggering day itinerary
         party_exclusions = ["birthday party", "party for", "party planning", "planning a party",
                            "plan a party", "anniversary party", "surprise party", "baby shower",
@@ -4770,7 +4778,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             logger.info("Memory context injected into tool_call prompt")
 
         # Append function calling instructions (OPTIMIZED: Reduced verbosity)
-        # Use actual home address instead of hardcoded "Baltimore, MD"
+        # Use actual home address instead of a hardcoded city
 
         # Add special instructions for planning/itinerary queries
         if is_planning_query:
@@ -6140,7 +6148,7 @@ class QueryResponse(BaseModel):
     sms_content: Optional[str] = Field(None, description="Content to send via SMS if offered")
     sms_content_type: Optional[str] = Field(None, description="Type of detected SMS content")
 
-@app.post("/query", response_model=QueryResponse)
+@app.post("/query", response_model=QueryResponse, dependencies=[Depends(require_service_caller)])
 async def process_query(request: QueryRequest) -> QueryResponse:
     """
     Process a user query through the orchestrator state machine.
@@ -6650,6 +6658,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         tool_exec_start = time.time()
         with request_duration.labels(intent="processing").time():
             final_state = await orchestrator_graph.ainvoke(initial_state)
+        log_continuation_decision(final_state, session.session_id)
         tool_exec_time = time.time() - tool_exec_start
 
         # Phase 2: Check intent permission AFTER classification
@@ -6984,7 +6993,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             detail=f"Failed to process query: {str(e)}"
         )
 
-@app.post("/query/stream")
+@app.post("/query/stream", dependencies=[Depends(require_service_caller)])
 async def process_query_stream(request: QueryRequest):
     """
     Process a user query with TRUE streaming response (Server-Sent Events).
@@ -7129,6 +7138,7 @@ async def process_query_stream(request: QueryRequest):
 
             tool_start_time = time.time()
             state = await run_orchestrator_for_streaming(initial_state)
+            log_continuation_decision(state, session.session_id)
             tool_exec_time = time.time() - tool_start_time
 
             if state.retrieved_data:
@@ -7272,7 +7282,7 @@ async def process_query_stream(request: QueryRequest):
     )
 
 
-@app.post("/query/stream/v2")
+@app.post("/query/stream/v2", dependencies=[Depends(require_service_caller)])
 async def process_query_stream_v2(request: QueryRequest):
     """
     Process a user query with true LLM streaming and sentence buffering.
@@ -7335,6 +7345,7 @@ async def process_query_stream_v2(request: QueryRequest):
 
             # Run through classification and RAG nodes only (stop before synthesis)
             final_state = await orchestrator_graph.ainvoke(initial_state)
+            log_continuation_decision(final_state, session.session_id)
 
             intent_value = final_state.get("intent")
             intent_str = intent_value.value if hasattr(intent_value, "value") else str(intent_value)
@@ -7941,7 +7952,7 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
     return state
 
 
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=[Depends(require_service_caller)])
 async def chat_completions(request: OpenAIChatRequest):
     """
     OpenAI-compatible chat completions endpoint with streaming support.
@@ -7983,6 +7994,7 @@ async def chat_completions(request: OpenAIChatRequest):
             source=resolved_session.source,
             first_turn=resolved_session.is_first_turn,
             session_prefix=resolved_session.session_id[:12],
+            identity_kind=resolved_session.identity_kind,
         )
 
         # If streaming is requested, use SSE format
@@ -8075,6 +8087,7 @@ async def chat_completions(request: OpenAIChatRequest):
 
                 # Run orchestrator through RAG collection (no synthesis)
                 state = await run_orchestrator_for_streaming(initial_state)
+                log_continuation_decision(state, resolved_session.session_id)
 
                 # Check if already answered by a handler (control, music, TV, SMS)
                 if state.answer:
@@ -8247,10 +8260,17 @@ async def chat_completions(request: OpenAIChatRequest):
                 }
             )
 
-        # Non-streaming response (original behavior)
+        # Non-streaming response (original behavior). F97: forward room and
+        # temperature like every other graph-run path does (3.7) -- the
+        # pre-fix version silently dropped both, regressing room-scoped
+        # commands on the non-streaming F97 path. `user` is deliberately
+        # NOT mapped to a QueryRequest field; identity resolution happens
+        # earlier, at session-resolve time (D11), not here.
         query_request = QueryRequest(
             query=user_message,
-            session_id=resolved_session.session_id
+            session_id=resolved_session.session_id,
+            room=(request.room or (request.extra_body or {}).get("room") or "unknown"),
+            temperature=request.temperature,
         )
 
         result = await process_query(query_request)
@@ -8820,7 +8840,7 @@ class SessionDetailResponse(BaseModel):
     messages: List[Dict[str, Any]]
     metadata: Dict[str, Any]
 
-@app.get("/sessions", response_model=SessionListResponse)
+@app.get("/sessions", response_model=SessionListResponse, dependencies=[Depends(require_service_caller)])
 async def list_sessions(
     limit: int = 50,
     offset: int = 0
@@ -8845,7 +8865,7 @@ async def list_sessions(
         total=0
     )
 
-@app.get("/sessions/{session_id}", response_model=SessionDetailResponse)
+@app.get("/sessions/{session_id}", response_model=SessionDetailResponse, dependencies=[Depends(require_service_caller)])
 async def get_session_details(session_id: str) -> SessionDetailResponse:
     """
     Get details of a specific session including message history.
@@ -8871,7 +8891,7 @@ async def get_session_details(session_id: str) -> SessionDetailResponse:
         metadata=session.metadata
     )
 
-@app.delete("/sessions/{session_id}")
+@app.delete("/sessions/{session_id}", dependencies=[Depends(require_service_caller)])
 async def delete_session(session_id: str):
     """
     Delete a conversation session.
@@ -8891,7 +8911,7 @@ async def delete_session(session_id: str):
 
     return {"status": "success", "message": f"Session {session_id} deleted"}
 
-@app.get("/sessions/{session_id}/export")
+@app.get("/sessions/{session_id}/export", dependencies=[Depends(require_service_caller)])
 async def export_session_history(session_id: str, format: str = "json"):
     """
     Export session history in various formats.

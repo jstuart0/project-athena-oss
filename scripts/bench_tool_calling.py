@@ -90,6 +90,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -673,8 +674,15 @@ async def _post_query(
         "skip_semantic_cache": True,
     }
     t0 = time.monotonic()
+    # D10: send X-Service-Key when SERVICE_API_KEY is set in the caller's
+    # env. Omitted (not sent as an empty string) when unset, so a caller
+    # running against a DEV_MODE/warn orchestrator doesn't need one.
+    headers = {}
+    service_api_key = os.getenv("SERVICE_API_KEY", "")
+    if service_api_key:
+        headers["X-Service-Key"] = service_api_key
     try:
-        resp = await client.post(url, json=payload, timeout=timeout_s)
+        resp = await client.post(url, json=payload, timeout=timeout_s, headers=headers)
         latency_ms = (time.monotonic() - t0) * 1000.0
         if resp.status_code != 200:
             return None, latency_ms, "http_non_200", resp.status_code
@@ -878,7 +886,7 @@ def _self_test() -> None:
     row = build_turn_result(
         {"query": "weather?", "expected_tools": ["get_weather"], "expected_component": "tool_calling_simple"},
         {"metadata": {
-            "tool_calls_emitted": {"calls": [{"name": "get_weather", "arguments": {"location": "Baltimore"}}], "filtered_invalid": []},
+            "tool_calls_emitted": {"calls": [{"name": "get_weather", "arguments": {"location": "Denver"}}], "filtered_invalid": []},
             "model_component_name": "tool_calling_simple",
             "model_component_used": "qwen3:4b",
             "tokens_per_second": 55.0,
@@ -950,7 +958,7 @@ def _self_test() -> None:
     row6 = build_turn_result(
         {"query": "weather and flights", "expected_tools": ["get_weather", "search_flights"], "expected_component": "tool_calling_complex"},
         {"metadata": {
-            "tool_calls_emitted": {"calls": [{"name": "get_weather", "arguments": {"location": "Baltimore"}}], "filtered_invalid": []},
+            "tool_calls_emitted": {"calls": [{"name": "get_weather", "arguments": {"location": "Denver"}}], "filtered_invalid": []},
             "model_component_name": "tool_calling_complex",
             "model_component_used": "qwen3:4b",
             "tokens_per_second": 45.0,
@@ -1029,14 +1037,14 @@ def _self_test() -> None:
     normal_resp = {
         "message": {
             "tool_calls": [
-                {"function": {"name": "get_weather", "arguments": {"location": "Baltimore"}}}
+                {"function": {"name": "get_weather", "arguments": {"location": "Denver"}}}
             ]
         }
     }
     emitted, filtered, err = _parse_ollama_tool_calls(normal_resp, oracle)
     assert len(emitted) == 1
     assert emitted[0]["name"] == "get_weather"
-    assert emitted[0]["arguments"] == {"location": "Baltimore"}
+    assert emitted[0]["arguments"] == {"location": "Denver"}
     assert filtered == []
     assert err is None
 
@@ -1093,7 +1101,7 @@ def _self_test() -> None:
     synthetic = {
         "metadata": {
             "tool_calls_emitted": {
-                "calls": [{"name": "get_weather", "arguments": {"location": "Baltimore"}}],
+                "calls": [{"name": "get_weather", "arguments": {"location": "Denver"}}],
                 "filtered_invalid": [],
             },
             "model_component_name": "micro_probe",

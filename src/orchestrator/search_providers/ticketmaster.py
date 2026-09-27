@@ -49,7 +49,7 @@ class TicketmasterProvider(SearchProvider):
     async def search(
         self,
         query: str,
-        location: Optional[str] = "Baltimore, MD",
+        location: Optional[str] = None,
         limit: int = 5,
         **kwargs
     ) -> List[SearchResult]:
@@ -58,7 +58,8 @@ class TicketmasterProvider(SearchProvider):
 
         Args:
             query: Search query (artist name, event type, etc.)
-            location: City/state for search (default: Baltimore, MD)
+            location: City/state for search. Optional; when None, the
+                request omits the city parameter entirely.
             limit: Maximum number of results (default 5)
             **kwargs: Additional parameters:
                 - classification_name: "music", "sports", "arts"
@@ -69,7 +70,7 @@ class TicketmasterProvider(SearchProvider):
             List of SearchResult objects with event details
         """
         try:
-            self.logger.info(f"Ticketmaster search started: {query} in {location}")
+            self.logger.info(f"Ticketmaster search started: {query} in {location or 'unspecified location'}")
 
             # Build request parameters
             params = {

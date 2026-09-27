@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional, Union
 import structlog
 
 from shared.assistant_profile import build_automation_system_prompt
+from orchestrator.helpers import city_phrases
+from orchestrator.utils.constants import DEFAULT_CITY
 
 logger = structlog.get_logger()
 
@@ -1373,9 +1375,11 @@ def should_use_automation_agent(query: str) -> bool:
         # General assistance
         'help me', 'can you', 'tell me about', 'what is', 'who is',
         'surprise me', 'fun things', 'good things', 'enjoy',
-        # Baltimore/location specific queries (likely tourism/recommendations)
-        'represent baltimore', 'baltimore has to offer', 'best of baltimore',
     ]
+    # City-derived queries (likely tourism/recommendations), deployment-
+    # specific rather than a hardcoded house city (3.9). Empty DEFAULT_CITY
+    # contributes no phrases.
+    exclusion_patterns += city_phrases(DEFAULT_CITY, ["represent {c}", "{c} has to offer", "best of {c}"])
     if any(p in query_lower for p in exclusion_patterns):
         return False
 

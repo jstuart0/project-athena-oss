@@ -69,6 +69,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MAIN_PY = REPO_ROOT / "src" / "orchestrator" / "main.py"
 
 
+def _service_headers() -> dict:
+    """ATHENA-89 / D10: the gated routes this file posts to now require
+    X-Service-Key. Read via get_config() at call time, never a hardcoded
+    literal (r3 test-harness hygiene note), so this tracks whatever env
+    this test session actually configured."""
+    return {"X-Service-Key": _shared_config.get_config().service_api_key}
+
+
 @pytest.fixture(autouse=True)
 def _reset_runtime_between_tests():
     _runtime.reset_for_test()
@@ -148,9 +156,54 @@ def test_different_conversations_isolated():
     ids = {alice.session_id, bob.session_id, none_user.session_id}
     assert len(ids) == 3
 
+    # ATHENA-89 / D11 amendment (O10, O13): this assertion is DELIBERATELY
+    # FLIPPED from `!=` to `==`. Pre-D11, room was always part of the
+    # fingerprint key, so same user + different room produced different
+    # ids. D11's identity precedence puts `user` first: when `user` is
+    # present, room never enters the key at all, so satellite room-detection
+    # flapping between turns can't fragment one HA conversation. O11 below
+    # is the complement: same test shape with user=None, where room DOES
+    # still differentiate the key.
     kitchen = _resolve(same_opener, room="kitchen", user="alice")
     office = _resolve(same_opener, room="office", user="alice")
+    assert kitchen.session_id == office.session_id
+
+
+# ---------------------------------------------------------------------------
+# O11 (D11): the complement of O10 -- with NO user, room still differentiates
+# ---------------------------------------------------------------------------
+
+def test_no_user_different_room_gives_different_id():
+    same_opener = [_msg("user", "what's the weather")]
+    kitchen = _resolve(same_opener, room="kitchen", user=None)
+    office = _resolve(same_opener, room="office", user=None)
     assert kitchen.session_id != office.session_id
+
+
+# ---------------------------------------------------------------------------
+# O12 (D11): no user, room "unknown"/"" both collapse to the same room-less
+# fingerprint -- "office" is no longer reachable through any code path.
+# ---------------------------------------------------------------------------
+
+def test_no_user_no_real_room_collapses_to_roomless_key_logs_weak_identity():
+    same_opener = [_msg("user", "what's the weather")]
+
+    calls = []
+    import orchestrator.helpers as helpers_module
+    original_info = helpers_module.logger.info
+    helpers_module.logger.info = lambda event, **kw: calls.append({"event": event, **kw})
+    try:
+        unknown_room = _resolve(same_opener, room="unknown", user=None)
+        empty_room = _resolve(same_opener, room="", user=None)
+    finally:
+        helpers_module.logger.info = original_info
+
+    assert unknown_room.session_id == empty_room.session_id
+    assert unknown_room.identity_kind == "none"
+
+    weak_events = [c for c in calls if c["event"] == "openai_session_identity_weak"]
+    assert len(weak_events) == 2
+    assert all(c["reason"] == "no_user_no_room" for c in weak_events)
 
 
 # ---------------------------------------------------------------------------
@@ -413,16 +466,19 @@ def test_non_stream_branch_passes_resolved_session():
         resp_a1 = client.post(
             "/v1/chat/completions",
             json={"model": "m", "messages": [{"role": "user", "content": opener_a}], "stream": False},
+            headers=_service_headers(),
         )
         resp_b = client.post(
             "/v1/chat/completions",
             json={"model": "m", "messages": [{"role": "user", "content": opener_b}], "stream": False},
+            headers=_service_headers(),
         )
         # Replay of the first opener (e.g. a second, independent
         # conversation starting the same way) must resolve to the same id.
         resp_a2 = client.post(
             "/v1/chat/completions",
             json={"model": "m", "messages": [{"role": "user", "content": opener_a}], "stream": False},
+            headers=_service_headers(),
         )
     finally:
         _main_module.process_query = original_process_query
@@ -544,7 +600,7 @@ def test_streaming_endpoint_persists_session_history(monkeypatch):
     opener = "what's the weather"
     body = {"model": "m", "messages": [{"role": "user", "content": opener}], "stream": True}
 
-    with client.stream("POST", "/v1/chat/completions", json=body) as response:
+    with client.stream("POST", "/v1/chat/completions", json=body, headers=_service_headers()) as response:
         assert response.status_code == 200
         for _ in response.iter_lines():
             pass  # drain the SSE stream
@@ -627,7 +683,7 @@ def test_true_streaming_endpoint_persists_session_history(monkeypatch):
     opener = "tell me something interesting"
     body = {"model": "m", "messages": [{"role": "user", "content": opener}], "stream": True}
 
-    with client.stream("POST", "/v1/chat/completions", json=body) as response:
+    with client.stream("POST", "/v1/chat/completions", json=body, headers=_service_headers()) as response:
         assert response.status_code == 200
         for _ in response.iter_lines():
             pass  # drain the SSE stream

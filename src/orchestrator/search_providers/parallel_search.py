@@ -51,7 +51,7 @@ class ParallelSearchEngine:
     async def search(
         self,
         query: str,
-        location: Optional[str] = "Baltimore, MD",
+        location: Optional[str] = None,
         limit_per_provider: int = 5,
         force_search: bool = False,
         **kwargs
@@ -61,7 +61,8 @@ class ParallelSearchEngine:
 
         Args:
             query: Search query
-            location: Location for search (used by event providers)
+            location: Location for search (used by event providers). When
+                None, providers omit the location parameter entirely.
             limit_per_provider: Max results per provider
             force_search: Force web search even for RAG intents (for fallback mode)
             **kwargs: Provider-specific parameters

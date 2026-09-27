@@ -16,6 +16,7 @@ from .searxng import SearXNGProvider
 from .ticketmaster import TicketmasterProvider
 from .eventbrite import EventbriteProvider
 from shared.admin_config import get_admin_client
+from shared.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,8 @@ class ProviderRouter:
             ticketmaster_api_key: Ticketmaster API key
             eventbrite_api_key: Eventbrite API key
             brave_api_key: Brave Search API key
-            searxng_base_url: SearXNG instance base URL (defaults to internal cluster service)
+            searxng_base_url: SearXNG instance base URL. Empty/None means
+                the provider is not registered at all (O8).
             enable_ticketmaster: Enable Ticketmaster provider
             enable_eventbrite: Enable Eventbrite provider
             enable_brave: Enable Brave Search provider
@@ -106,13 +108,17 @@ class ProviderRouter:
             except Exception as e:
                 logger.error(f"Failed to initialize DuckDuckGo provider: {e}")
 
-        # Initialize SearXNG (no API key needed)
-        if enable_searxng:
+        # Initialize SearXNG (no API key needed, but a base URL is required --
+        # empty means not configured, and the provider is skipped entirely
+        # rather than registered with no URL to call, O8).
+        if enable_searxng and searxng_base_url:
             try:
                 self.all_providers["searxng"] = SearXNGProvider(base_url=searxng_base_url)
                 logger.info("Initialized SearXNG provider")
             except Exception as e:
                 logger.error(f"Failed to initialize SearXNG provider: {e}")
+        elif enable_searxng:
+            logger.warning("searxng_not_configured")
 
         # Initialize Brave Search
         if enable_brave and brave_api_key:
@@ -297,7 +303,7 @@ class ProviderRouter:
         - TICKETMASTER_API_KEY: Ticketmaster API key (fallback)
         - EVENTBRITE_API_KEY: Eventbrite API key (fallback)
         - BRAVE_SEARCH_API_KEY: Brave Search API key (fallback)
-        - SEARXNG_BASE_URL: SearXNG instance base URL (default: cluster-local)
+        - SEARXNG_BASE_URL: SearXNG instance base URL (default: empty, disabled)
         - ENABLE_TICKETMASTER: Enable Ticketmaster (default: true)
         - ENABLE_EVENTBRITE: Enable Eventbrite (default: true)
         - ENABLE_BRAVE_SEARCH: Enable Brave Search (default: true)
@@ -340,8 +346,9 @@ class ProviderRouter:
         except Exception as e:
             logger.warning(f"Failed to fetch Eventbrite API key from database: {e}. Using environment variable.")
 
-        # SearXNG base URL (no API key needed)
-        searxng_base_url = os.getenv("SEARXNG_BASE_URL")  # Defaults to cluster-local in provider
+        # SearXNG base URL (no API key needed). Read via get_config() so this
+        # is the single canonical source, not a second os.getenv() path.
+        searxng_base_url = get_config().searxng_base_url or None
 
         return cls(
             ticketmaster_api_key=ticketmaster_api_key,

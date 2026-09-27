@@ -18,10 +18,33 @@ from urllib.parse import quote_plus
 import structlog
 import httpx
 
+from shared.config import get_config
+
 logger = structlog.get_logger()
 
-# SearXNG URL - configurable via environment
-SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080")
+
+def _resolve_searxng_url() -> str:
+    """Canonical SEARXNG_BASE_URL (D7), with SEARXNG_URL accepted as a
+    legacy fallback and a one-time deprecation WARNING (DC8) -- same
+    pattern as orchestrator/urls.py's legacy <NAME>_RAG_URL handling.
+    Empty means the SearXNG race leg is skipped entirely."""
+    canonical = (get_config().searxng_base_url or "").strip().rstrip("/")
+    if canonical:
+        return canonical
+    legacy = (os.getenv("SEARXNG_URL", "") or "").strip().rstrip("/")
+    if legacy:
+        logger.warning(
+            "searxng_url_legacy_env_name",
+            canonical="SEARXNG_BASE_URL",
+            legacy="SEARXNG_URL",
+            value=legacy,
+        )
+        return legacy
+    return ""
+
+
+# SearXNG URL - see _resolve_searxng_url for the canonical/legacy precedence.
+SEARXNG_URL = _resolve_searxng_url()
 
 
 class ParallelSearchEngine:
@@ -240,7 +263,10 @@ class ParallelSearchEngine:
         query: str,
         max_results: int
     ) -> Optional[Dict[str, Any]]:
-        """Search via SearXNG on Thor cluster."""
+        """Search via your SearXNG instance."""
+        if not SEARXNG_URL:
+            logger.debug("searxng_not_configured")
+            return None
         try:
             url = f"{SEARXNG_URL}/search"
             params = {

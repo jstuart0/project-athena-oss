@@ -14,6 +14,8 @@ from typing import Optional, Tuple, Dict, Any
 from datetime import datetime, timezone
 
 from shared.cache import get_cache_client
+from orchestrator.helpers import query_mentions_location
+from orchestrator.utils.constants import DEFAULT_CITY
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -331,17 +333,23 @@ UNCACHEABLE_PATTERNS = [
     r"\bfinish\s+(the|that|your)\b",  # Finish the story/that/your thought
 ]
 
-# Location normalization for Baltimore area
-LOCATION_NORMALIZATIONS = {
-    "baltimore": "baltimore_md",
-    "bmore": "baltimore_md",
-    "charm city": "baltimore_md",
-    "maryland": "baltimore_md",
-    "md": "baltimore_md",
-    "owings mills": "baltimore_md",
-    "towson": "baltimore_md",
-    "downtown": "baltimore_md",
-}
+def _slug(text: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
+
+
+def _location_aliases(city: str) -> Dict[str, str]:
+    """Location-normalization alias derived from DEFAULT_CITY (3.9).
+
+    Replaces the old hardcoded 8-entry, single-region alias list (multiple
+    neighborhood/nickname/state spellings all mapping to one region key) --
+    those affected cache keys only (D6) and don't generalize to another
+    deployment's region. Empty city means no aliases.
+    """
+    city_norm = _slug(city)
+    if not city_norm:
+        return {}
+    return {city.strip().lower(): f"default_{city_norm}"}
+
 
 # Phrases that indicate user is specifying a different location
 # Note: [?!.;]* handles trailing punctuation like "in Philly?" or "near NYC!"
@@ -357,15 +365,18 @@ def normalize_location(text: str) -> str:
     """
     Normalize location references to canonical form.
 
-    IMPORTANT: Only defaults to baltimore_md if NO location is specified.
-    If user mentions a specific location (e.g., "in Northampton"), use that location
-    to prevent cache collisions between different locations.
+    IMPORTANT: Only defaults to the deployment's default-city key if NO
+    location is specified. If user mentions a specific location (e.g., "in
+    Northampton"), use that location to prevent cache collisions between
+    different locations.
     """
     text_lower = text.lower()
 
-    # First, check if user specified a location that's in our normalization dict
-    for pattern, normalized in LOCATION_NORMALIZATIONS.items():
-        if pattern in text_lower:
+    # First, check if user mentioned the deployment's own default city.
+    # Word-boundary match (query_mentions_location), not a substring check
+    # -- retires the "md" (inside "cmd") false match.
+    for pattern, normalized in _location_aliases(DEFAULT_CITY).items():
+        if query_mentions_location(text_lower, pattern):
             return normalized
 
     # Check if user explicitly specified a different location
@@ -381,13 +392,16 @@ def normalize_location(text: str) -> str:
                 if safe_location:
                     return safe_location
 
-    # Only default to baltimore_md if truly no location is specified
-    # Check for common phrases that imply default location
+    # Only default to the deployment's default-city key if truly no
+    # location is specified. Check for common phrases that imply default
+    # location.
     default_phrases = ["around me", "near me", "nearby", "close by", "in my area", "local"]
     if any(phrase in text_lower for phrase in default_phrases):
-        return "user_location"  # Different key than explicit baltimore queries
+        return "user_location"  # Different key than an explicit default-city query
 
-    return "baltimore_md"  # Default location when nothing is specified
+    # Empty DEFAULT_CITY means there's no deployment-specific default to key
+    # on; fall back to a generic key rather than a hardcoded house city.
+    return f"default_{_slug(DEFAULT_CITY)}" if DEFAULT_CITY else "default_location"
 
 
 def extract_semantic_intent(query: str) -> Tuple[str, str]:

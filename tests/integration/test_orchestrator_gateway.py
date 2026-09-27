@@ -1,5 +1,7 @@
 """Integration tests for orchestrator and gateway."""
 
+import os
+
 import pytest
 import httpx
 import asyncio
@@ -9,6 +11,10 @@ pytestmark = pytest.mark.integration
 
 BASE_GATEWAY_URL = "http://localhost:8000"
 BASE_ORCHESTRATOR_URL = "http://localhost:8001"
+# D10: the orchestrator's /query now requires X-Service-Key outside
+# DEV_MODE/warn mode. Read from env so this suite works against a real
+# enforce-mode orchestrator too.
+_SERVICE_KEY_HEADERS = {"X-Service-Key": os.getenv("SERVICE_API_KEY", "")}
 
 @pytest.mark.asyncio
 async def test_health_endpoints():
@@ -55,7 +61,7 @@ async def test_weather_query_flow():
             json={
                 "model": "gpt-4",
                 "messages": [
-                    {"role": "user", "content": "What's the weather in Baltimore?"}
+                    {"role": "user", "content": "What's the weather in Denver?"}
                 ]
             },
             headers={"Authorization": "Bearer dummy-key"}
@@ -65,8 +71,8 @@ async def test_weather_query_flow():
         result = response.json()
         content = result["choices"][0]["message"]["content"].lower()
 
-        # Should mention Baltimore or weather terms
-        assert "baltimore" in content or "weather" in content or "temperature" in content
+        # Should mention the queried city or weather terms
+        assert "denver" in content or "weather" in content or "temperature" in content
 
 @pytest.mark.asyncio
 async def test_direct_orchestrator_query():
@@ -78,7 +84,8 @@ async def test_direct_orchestrator_query():
                 "query": "What time is it?",
                 "mode": "owner",
                 "room": "office"
-            }
+            },
+            headers=_SERVICE_KEY_HEADERS
         )
 
         assert response.status_code == 200
@@ -116,7 +123,8 @@ async def test_latency_requirements():
         start = time.time()
         response = await client.post(
             f"{BASE_ORCHESTRATOR_URL}/query",
-            json={"query": "turn off bedroom lights"}
+            json={"query": "turn off bedroom lights"},
+            headers=_SERVICE_KEY_HEADERS
         )
         control_time = time.time() - start
 
@@ -127,7 +135,8 @@ async def test_latency_requirements():
         start = time.time()
         response = await client.post(
             f"{BASE_ORCHESTRATOR_URL}/query",
-            json={"query": "what's the weather forecast for tomorrow?"}
+            json={"query": "what's the weather forecast for tomorrow?"},
+            headers=_SERVICE_KEY_HEADERS
         )
         knowledge_time = time.time() - start
 

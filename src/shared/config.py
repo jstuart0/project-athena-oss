@@ -287,19 +287,23 @@ class AthenaConfig(BaseSettings):
     # trusted_proxy_cidrs: F39 — comma-separated CIDRs/hosts. The gateway's
     # new-conversation limiter trusts X-Forwarded-For's original-client
     # address only when the immediate TCP peer falls inside one of these
-    # ranges (Traefik's pod CIDR by default), so an untrusted caller can't
-    # spoof another source's rate-limit key via that header. Same
+    # ranges (a reverse proxy's pod CIDR, typically), so an untrusted caller
+    # can't spoof another source's rate-limit key via that header. Same
     # allowlist-by-CIDR pattern as health_poll_allowed_private_hosts /
-    # sitescraper_allowed_private_hosts. Default is this repo's own
-    # documented pod CIDR (manifests/athena-prod) — override for your
-    # cluster's actual pod/service CIDR.
+    # sitescraper_allowed_private_hosts. Empty (default) means every
+    # caller's peer address is used directly -- correct for OSS deployers
+    # with no reverse proxy in front of the gateway, but a shared limiter
+    # bucket for everyone behind one (the gateway logs
+    # trusted_proxy_cidrs_unset once at startup as a nudge to set this).
+    # Example for a flannel/kubeadm-default cluster's pod CIDR:
+    # "10.244.0.0/16".
     # F44 (codex r2b Medium, reconciliation round 2): resolve_client_key
     # parses X-Forwarded-For right-to-left and returns the nearest hop NOT
     # in this CIDR set, so a trusted proxy that appends rather than
     # overwrites the header can't be used to smuggle an attacker-forged
     # left-most value. Keep this scoped to the actual reverse-proxy
     # subnet, not a broad cluster-wide default.
-    trusted_proxy_cidrs: str = Field(default="10.244.0.0/16")
+    trusted_proxy_cidrs: str = Field(default="")
     # new_conversation_reset_grace_seconds: F38 (codex r2 Medium) — a
     # first-turn fingerprint reset is skipped when a session under the same
     # fingerprint was created within this many seconds. HA's known truncated
@@ -309,6 +313,14 @@ class AthenaConfig(BaseSettings):
     # conversation, and the reset fragments (or wipes, if the truncated text
     # happens to match the opener) a still-live conversation.
     new_conversation_reset_grace_seconds: int = Field(default=120, ge=0)
+    # orchestrator_ingress_auth: D10. "enforce" (default) requires
+    # X-Service-Key on the gated orchestrator routes (query/stream/session
+    # routes); a wrong key is always 401, including in DEV_MODE. "warn"
+    # logs orchestrator_unauthenticated_request and allows the request
+    # through -- for finding callers a header rollout missed before
+    # switching to enforce. Any other value behaves as "enforce" and logs
+    # an ERROR once (invalid config, not a silent fallback).
+    orchestrator_ingress_auth: str = Field(default="enforce")
 
     # ------------------------------------------------------------------
     # Optional third-party integrations (ATHENA-89 / D7)

@@ -16,7 +16,7 @@ Usage:
     client = get_rag_client()
 
     # Simple GET request with all resilience patterns
-    data = await client.get("weather", "/weather/current", params={"location": "Baltimore"})
+    data = await client.get("weather", "/weather/current", params={"location": "Denver"})
 
     # POST request
     data = await client.post("dining", "/restaurants/search", json={"cuisine": "italian"})
@@ -395,9 +395,23 @@ class RAGClient:
                     )
             else:
                 # Non-200 response - still record success (service is responding)
+                # DC9: surface the body's detail/error (capped) so a tool's
+                # description that tells the LLM what to do next (e.g. "ask
+                # the user for an origin") is actually actionable -- a bare
+                # status code gives the model nothing to act on.
+                error_detail = None
+                try:
+                    body = response.json()
+                    if isinstance(body, dict):
+                        error_detail = body.get("detail") or body.get("error")
+                except Exception:
+                    pass
+                error_message = f"Service returned status {response.status_code}"
+                if error_detail:
+                    error_message = f"{error_message}: {str(error_detail)[:200]}"
                 return RAGResponse(
                     success=False,
-                    error=f"Service returned status {response.status_code}",
+                    error=error_message,
                     status_code=response.status_code,
                     service_name=service_name
                 )
@@ -575,7 +589,7 @@ async def fetch_rag_data(
     Returns data dict on success, None on failure.
 
     Usage:
-        data = await fetch_rag_data("weather", "/weather/current", {"location": "Baltimore"})
+        data = await fetch_rag_data("weather", "/weather/current", {"location": "Denver"})
         if data:
             # Process weather data
     """

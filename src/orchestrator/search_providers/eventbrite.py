@@ -52,7 +52,7 @@ class EventbriteProvider(SearchProvider):
     async def search(
         self,
         query: str,
-        location: Optional[str] = "Baltimore, MD",
+        location: Optional[str] = None,
         limit: int = 5,
         **kwargs
     ) -> List[SearchResult]:
@@ -61,7 +61,9 @@ class EventbriteProvider(SearchProvider):
 
         Args:
             query: Search query (event type, keywords, etc.)
-            location: City/location for search (default: Baltimore, MD)
+            location: City/location for search. Optional; when None, the
+                outgoing request omits the location parameter entirely
+                rather than sending a hardcoded default.
             limit: Maximum number of results (default 5)
             **kwargs: Additional parameters:
                 - start_date: ISO 8601 date range start
@@ -73,15 +75,17 @@ class EventbriteProvider(SearchProvider):
             List of SearchResult objects with event details
         """
         try:
-            self.logger.info(f"Eventbrite search started: {query} in {location}")
+            self.logger.info(f"Eventbrite search started: {query} in {location or 'unspecified location'}")
 
-            # Build request parameters
+            # Build request parameters. location is omitted entirely when
+            # not provided, never sent as a hardcoded default (3.10).
             params = {
                 "q": query,
-                "location.address": location,
                 "expand": "venue,ticket_availability",
                 "sort_by": "date"
             }
+            if location:
+                params["location.address"] = location
 
             # Add optional parameters
             if "start_date" in kwargs:

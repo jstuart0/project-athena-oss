@@ -154,6 +154,27 @@ SERVICE_API_KEY = _get_athena_config().service_api_key
 # multiple gateway replicas share one budget per key.
 NEW_CONVERSATION_PER_MINUTE_PER_IP = _get_athena_config().new_conversation_per_minute_per_ip
 TRUSTED_PROXY_CIDRS = _get_athena_config().trusted_proxy_cidrs
+
+
+def _warn_if_trusted_proxy_unset(cidrs: str) -> bool:
+    """Log a one-time WARNING when TRUSTED_PROXY_CIDRS is empty (3.1).
+    Returns True when it warned, so tests can assert on the return value
+    without inspecting the log capture."""
+    if not cidrs:
+        logger.warning(
+            "trusted_proxy_cidrs_unset",
+            message=(
+                "TRUSTED_PROXY_CIDRS is empty: every caller's new-conversation "
+                "rate limit is keyed on the immediate TCP peer. Behind a "
+                "reverse proxy, that collapses every caller onto one shared "
+                "budget. Set TRUSTED_PROXY_CIDRS to your proxy's pod/service "
+                "CIDR if you run one."
+            ),
+        )
+        return True
+    return False
+
+
 new_conversation_limiter = NewConversationLimiter(per_minute=NEW_CONVERSATION_PER_MINUTE_PER_IP)
 new_conversation_limiter_redis_client = None
 # ATHENA-88 / F45 (codex r2b Medium, reconciliation round 2): kept alive
@@ -329,6 +350,7 @@ async def lifespan(app: FastAPI):
 
     # Startup
     logger.info("Starting Gateway service")
+    _warn_if_trusted_proxy_unset(TRUSTED_PROXY_CIDRS)
 
     # Initialize shared HTTP clients for reuse (performance optimization)
     metric_client = httpx.AsyncClient(timeout=5.0)  # For metric logging
@@ -363,7 +385,8 @@ async def lifespan(app: FastAPI):
 
     orchestrator_client = httpx.AsyncClient(
         base_url=orchestrator_url,
-        timeout=float(orchestrator_timeout)
+        timeout=float(orchestrator_timeout),
+        headers={"X-Service-Key": SERVICE_API_KEY}
     )
 
     # Load LLM backends from database (with fallback to centralized system_settings)
@@ -630,6 +653,11 @@ class ResponsesAPIRequest(BaseModel):
     # ChatCompletionRequest by _responses_to_chat_request.
     user: Optional[str] = Field(None, description="User identifier")
     session_id: Optional[str] = Field(None, description="Explicit conversation session id")
+    # D12: rejected outright (400), never silently dropped. The gateway
+    # stores no responses, so honouring this would need a new response
+    # store keyed by id; silently dropping it (the old behaviour) makes
+    # every turn look like a first turn and resets the session.
+    previous_response_id: Optional[str] = Field(None, description="Not supported; do not send")
 
 
 class ResponsesAPIOutput(BaseModel):
@@ -858,7 +886,7 @@ async def classify_intent_llm(query: str) -> bool:
 
     Uses phi3:mini-q8 model for fast, accurate intent classification.
     Classifies queries into two categories:
-    - athena: Home control, weather, sports, airports, local info (Baltimore context)
+    - athena: Home control, weather, sports, airports, local info (the deployment's home location)
     - general: General knowledge, math, coding, explanations
 
     Args:
@@ -877,14 +905,14 @@ async def classify_intent_llm(query: str) -> bool:
 Query: "{query}"
 
 Categories:
-- athena: Home control, weather, SPORTS (games/scores/schedules/teams), airports, local info (Baltimore context)
+- athena: Home control, weather, SPORTS (games/scores/schedules/teams), airports, local info (the deployment's home location)
 - general: General knowledge, math, coding, explanations
 
 Examples of athena queries:
 - "turn on the lights"
 - "what's the weather?"
-- "when do the Ravens play?" or "football schedule" (SPORTS - always athena)
-- "BWI flight delays?"
+- "when does my team play?" or "football schedule" (SPORTS - always athena)
+- "flight delays at the airport?"
 
 Respond with ONLY the category name (athena or general)."""
 
@@ -938,6 +966,12 @@ Respond with ONLY the category name (athena or general)."""
         return is_athena_query_keywords(temp_messages)
 
 
+def _location_keywords(city: str) -> List[str]:
+    """Location-context keyword(s) derived from DEFAULT_CITY (3.6), not a
+    hardcoded house city. Empty city contributes no keywords."""
+    return [city.lower()] if city else []
+
+
 def is_athena_query_keywords(messages: List[ChatMessage]) -> bool:
     """
     Keyword-based classification (fast, 0ms overhead).
@@ -948,7 +982,7 @@ def is_athena_query_keywords(messages: List[ChatMessage]) -> bool:
     - Weather queries
     - Airport/flight information
     - Sports information (all major leagues and teams)
-    - Location-specific queries (Baltimore context)
+    - Location-specific queries (the deployment's home location)
     - Recipes and cooking
     - Entertainment and events
 
@@ -1022,8 +1056,8 @@ def is_athena_query_keywords(messages: List[ChatMessage]) -> bool:
         "manchester united", "manchester city", "liverpool", "chelsea", "arsenal", "tottenham",
         "barcelona", "real madrid", "atletico madrid", "bayern munich", "borussia dortmund",
         "juventus", "ac milan", "inter milan", "psg", "paris saint-germain",
-        # Location context
-        "baltimore", "home", "office", "bedroom", "kitchen",
+        # Location context (deployment-specific city added below, 3.6)
+        "home", "office", "bedroom", "kitchen",
         # Recipes and cooking (RAG + web search)
         "recipe", "cook", "how to make", "ingredients", "cooking",
         # Dining and restaurants (RAG)
@@ -1042,6 +1076,7 @@ def is_athena_query_keywords(messages: List[ChatMessage]) -> bool:
         "concert", "perform", "tour", "show", "event", "when does",
         "who is", "what is", "tell me about"
     ]
+    athena_patterns += _location_keywords(_get_athena_config().default_city)
 
     return any(pattern in last_user_msg for pattern in athena_patterns)
 
@@ -1324,6 +1359,112 @@ async def stream_response(request: ChatCompletionRequest) -> AsyncIterator[str]:
         logger.error(f"Streaming error: {e}", exc_info=True)
         yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
 
+def _orchestrator_openai_payload(
+    request: ChatCompletionRequest, device_id: Optional[str] = None, *, stream: bool
+) -> dict:
+    """Build the OpenAI-shaped payload the orchestrator's
+    /v1/chat/completions expects. Shared by the streaming
+    (stream_orchestrator_response) and non-streaming
+    (route_chat_completion_to_orchestrator) gateway paths (D1-B, 3.5), so
+    both resolve the same OpenAI session the same way. room is passed both
+    top-level and via extra_body (resolve_openai_session reads request.room
+    or extra_body.room), and identity fields are omitted entirely when
+    unset rather than sent as None/"" (ATHENA-88 / F88)."""
+    payload = {
+        "model": request.model,
+        "messages": [
+            {"role": msg.role, "content": msg.content}
+            for msg in request.messages
+        ],
+        "temperature": request.temperature,
+        "stream": stream,
+        "extra_body": {"room": device_id or "unknown"}  # Pass room context
+    }
+    # ATHENA-88 / F88: forward identity top-level too, omitting unset
+    # values (never send them as None or "").
+    if request.user is not None:
+        payload["user"] = request.user
+    if request.session_id is not None:
+        payload["session_id"] = request.session_id
+    if device_id is not None:
+        payload["room"] = device_id
+    return payload
+
+
+async def route_chat_completion_to_orchestrator(
+    request: ChatCompletionRequest, device_id: Optional[str] = None
+) -> ChatCompletionResponse:
+    """F97 non-streaming path (D1-B): forwards the full OpenAI payload (not
+    just the last user message) to the orchestrator's /v1/chat/completions,
+    via the same _orchestrator_openai_payload the streaming path uses, so
+    both resolve the same OpenAI session (D11). Failure semantics match
+    route_to_orchestrator exactly (3.5): an open breaker falls back to
+    Ollama; an HTTPStatusError records a breaker failure and raises 502;
+    any other exception records a breaker failure and falls back to Ollama.
+    """
+    circuit_breaker_enabled = gateway_config.get("circuit_breaker_enabled", True) if gateway_config else True
+
+    if circuit_breaker_enabled and orchestrator_circuit_breaker:
+        can_proceed = await orchestrator_circuit_breaker.can_execute()
+        if not can_proceed:
+            logger.warning(
+                "circuit_breaker_open",
+                state=orchestrator_circuit_breaker.state.value,
+                message="Falling back to Ollama due to circuit breaker"
+            )
+            return await route_to_ollama(request)
+
+    user_message = ""
+    for msg in request.messages:
+        if msg.role == "user":
+            user_message = msg.content
+
+    payload = _orchestrator_openai_payload(request, device_id, stream=False)
+
+    try:
+        with request_duration.labels(endpoint="orchestrator").time():
+            response = await orchestrator_client.post("/v1/chat/completions", json=payload)
+            response.raise_for_status()
+
+        result = response.json()
+
+        if circuit_breaker_enabled and orchestrator_circuit_breaker:
+            await orchestrator_circuit_breaker.record_success()
+
+        content = ""
+        if result.get("choices"):
+            content = result["choices"][0].get("message", {}).get("content", "") or ""
+
+        return ChatCompletionResponse(
+            id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            created=int(time.time()),
+            model=request.model,
+            choices=[
+                ChatChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=content),
+                    finish_reason="stop"
+                )
+            ],
+            usage={
+                "prompt_tokens": len(user_message.split()),
+                "completion_tokens": len(content.split()),
+                "total_tokens": len(user_message.split()) + len(content.split())
+            }
+        )
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Orchestrator error: {e}")
+        if circuit_breaker_enabled and orchestrator_circuit_breaker:
+            await orchestrator_circuit_breaker.record_failure()
+        raise HTTPException(status_code=502, detail="Orchestrator error")
+    except Exception as e:
+        logger.error(f"Failed to route to orchestrator: {e}", exc_info=True)
+        if circuit_breaker_enabled and orchestrator_circuit_breaker:
+            await orchestrator_circuit_breaker.record_failure()
+        return await route_to_ollama(request)
+
+
 async def stream_orchestrator_response(
     request: ChatCompletionRequest,
     device_id: Optional[str] = None
@@ -1332,24 +1473,7 @@ async def stream_orchestrator_response(
     try:
         # Forward streaming request to orchestrator's /v1/chat/completions endpoint
         # Note: room context passed via extra_body for orchestrator to use
-        payload = {
-            "model": request.model,
-            "messages": [
-                {"role": msg.role, "content": msg.content}
-                for msg in request.messages
-            ],
-            "temperature": request.temperature,
-            "stream": True,
-            "extra_body": {"room": device_id or "unknown"}  # Pass room context
-        }
-        # ATHENA-88 / F88: forward identity top-level too, omitting unset
-        # values (never send them as None or "").
-        if request.user is not None:
-            payload["user"] = request.user
-        if request.session_id is not None:
-            payload["session_id"] = request.session_id
-        if device_id is not None:
-            payload["room"] = device_id
+        payload = _orchestrator_openai_payload(request, device_id, stream=True)
 
         # Stream from orchestrator using the same timeout as non-streaming path (audit bob:5)
         async with orchestrator_client.stream(
@@ -1483,7 +1607,7 @@ async def chat_completions(
             logger.info("Routing to orchestrator (default - tools always available)")
 
         # Always use orchestrator so tools are available, pass room for context
-        response = await route_to_orchestrator(request, device_id=room)
+        response = await route_chat_completion_to_orchestrator(request, device_id=room)
 
         request_counter.labels(endpoint="chat_completions", status="success").inc()
         return response
@@ -1515,16 +1639,34 @@ def _responses_to_chat_request(request: ResponsesAPIRequest) -> ChatCompletionRe
     if isinstance(request.input, str):
         messages.append(ChatMessage(role="user", content=request.input))
     elif isinstance(request.input, list):
-        # Input is a list of message-like objects
+        # D12: only convert items that are messages (type=="message" or no
+        # type) AND carry a role. function_call/function_call_output/
+        # reasoning items are skipped (logged at DEBUG with a count) since
+        # neither house HA integration sends them on a normal turn, and
+        # defaulting them to role="user" with "" content would inflate the
+        # user-message count and corrupt the OpenAI session fingerprint.
+        skipped = 0
         for item in request.input:
-            if isinstance(item, dict):
-                role = item.get("role", "user")
-                content = item.get("content", "")
-                if isinstance(content, list):
-                    # Handle content array format
-                    text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
-                    content = " ".join(text_parts)
-                messages.append(ChatMessage(role=role, content=content))
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            role = item.get("role")
+            if item_type not in (None, "message") or role is None:
+                skipped += 1
+                continue
+            content = item.get("content", "")
+            if isinstance(content, list):
+                # Handle content array format: text (chat completions style),
+                # input_text (Responses API user turns), output_text
+                # (Responses API assistant turns).
+                text_parts = [
+                    c.get("text", "") for c in content
+                    if isinstance(c, dict) and c.get("type") in ("text", "input_text", "output_text")
+                ]
+                content = " ".join(text_parts)
+            messages.append(ChatMessage(role=role, content=content))
+        if skipped:
+            logger.debug("responses_api_items_skipped", count=skipped)
 
     return ChatCompletionRequest(
         model=request.model,
@@ -1550,6 +1692,16 @@ async def responses_api(
     Used by some clients like HA OpenAI Conversation Plus.
     """
     request_counter.labels(endpoint="responses_api", status="started").inc()
+
+    # D12: reject rather than silently drop -- the gateway stores no
+    # responses to resume from, so honouring this would need a new state
+    # store. Rejected loudly, before any conversion or orchestrator call.
+    if request.previous_response_id is not None:
+        request_counter.labels(endpoint="responses_api", status="error").inc()
+        raise HTTPException(
+            status_code=400,
+            detail="previous_response_id is not supported; send the full conversation in input",
+        )
 
     # Debug: Log raw request body to see exactly what HA sends
     try:
@@ -1589,7 +1741,7 @@ async def responses_api(
             )
 
         # Non-streaming: route to orchestrator
-        response = await route_to_orchestrator(chat_request, device_id=room)
+        response = await route_chat_completion_to_orchestrator(chat_request, device_id=room)
 
         # Convert ChatCompletionResponse to ResponsesAPIResponse
         response_text = ""
@@ -2212,7 +2364,8 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
         device_id: The device_id from the request (usually "unknown")
 
     Returns:
-        Room name (e.g., "office", "master_bedroom") or "office" as default
+        Room name (e.g., "office", "master_bedroom") or "unknown" when it
+        can't be determined -- never a hardcoded house room (D11).
 
     Performance:
         - Uses shared ha_client instead of creating new httpx.AsyncClient for every call.
@@ -2243,7 +2396,7 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
 
         if not ha_token:
             logger.warning("HA_TOKEN not set, cannot detect room from satellite")
-            return "office"  # Default
+            return "unknown"
 
         headers = {"Authorization": f"Bearer {ha_token}"}
 
@@ -2257,7 +2410,7 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
 
         if resp.status_code != 200:
             logger.warning(f"Failed to query HA states: {resp.status_code}")
-            return "office"
+            return "unknown"
 
         states = resp.json()
 
@@ -2320,12 +2473,12 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
 
         # No active satellite found - might be a race condition or satellite already went idle
         # Fall back to most recently used or default
-        logger.info("No active or recently changed satellite found, defaulting to office")
-        return "office"
+        logger.info("No active or recently changed satellite found, defaulting to unknown")
+        return "unknown"
 
     except Exception as e:
         logger.warning(f"Error detecting room from satellite: {e}")
-        return "office"
+        return "unknown"
 
 
 # =============================================================================

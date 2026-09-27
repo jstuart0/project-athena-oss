@@ -136,6 +136,12 @@ class ResolvedSession(NamedTuple):
     session_id: str
     source: str  # "explicit" | "fingerprint"
     is_first_turn: bool
+    # "explicit" | "user" | "room" | "none" (D11). Defaulted (not required)
+    # so pre-D11 direct ResolvedSession(...) construction elsewhere (e.g.
+    # tests/unit/test_openai_session_lifecycle.py's fixtures, which only
+    # exercise first-turn-reset logic and never inspect this field) keeps
+    # working unchanged.
+    identity_kind: str = ""
 
 
 def session_hmac_secret(config: Any) -> bytes:
@@ -200,9 +206,19 @@ def resolve_openai_session(
     namespace — is rejected with a WARNING and falls back to the HMAC
     fingerprint below.
 
-    The fingerprint is derived from room + user + the FIRST user message
-    only (never system/developer content or later turns), so it stays
-    stable across Home Assistant's full-history replay on every turn.
+    D11 identity precedence (the fingerprint's ``kind``+``value``):
+      1. top-level ``user``, if it's a non-empty string. Room never enters
+         the key when ``user`` is present, so satellite room-detection
+         flapping between turns can't fragment one HA conversation.
+      2. otherwise ``room``, but only if it's a real detected room (not
+         ``""``/``"unknown"``).
+      3. otherwise nothing: a room-less key, logged INFO
+         ``openai_session_identity_weak`` (``reason=no_user_no_room``).
+
+    The payload is ``f"{kind}\\x00{value}\\x00{first_user_content}"``, where
+    ``first_user_content`` is the FIRST user message only (never
+    system/developer content or later turns), so it stays stable across
+    Home Assistant's full-history replay on every turn.
     """
     candidate = top_level_session_id
     if not candidate and extra_body:
@@ -214,19 +230,74 @@ def resolve_openai_session(
             # first-turn reset (prepare_openai_session gates that on
             # source == "fingerprint"); report False unconditionally so the
             # field never implies otherwise.
-            return ResolvedSession(candidate, "explicit", False)
+            return ResolvedSession(candidate, "explicit", False, "explicit")
         logger.warning(
             "openai_session_id_rejected",
             reason="type" if not isinstance(candidate, str) else "pattern",
         )
 
     is_first_turn = _count_user_messages(messages) == 1
-    room_norm = (room or "").strip().lower()
-    user_norm = user or ""
     first_user_content = _first_user_content(messages).strip()
-    payload = f"{room_norm}\x00{user_norm}\x00{first_user_content}".encode("utf-8")
+    user_norm = (user or "").strip()
+    room_norm = (room or "").strip().lower()
+
+    if user_norm:
+        kind, value, identity_kind = "u", user_norm, "user"
+    elif room_norm and room_norm != "unknown":
+        kind, value, identity_kind = "r", room_norm, "room"
+    else:
+        kind, value, identity_kind = "-", "", "none"
+        logger.info("openai_session_identity_weak", reason="no_user_no_room")
+
+    payload = f"{kind}\x00{value}\x00{first_user_content}".encode("utf-8")
     digest = hmac.new(secret, payload, hashlib.sha256).hexdigest()[:32]
-    return ResolvedSession(f"{_FINGERPRINT_PREFIX}{digest}", "fingerprint", is_first_turn)
+    return ResolvedSession(f"{_FINGERPRINT_PREFIX}{digest}", "fingerprint", is_first_turn, identity_kind)
+
+
+def log_continuation_decision(state: Any, session_id: str) -> None:
+    """Log the routed context-continuation decision after a graph run
+    (3.8, P-6: called after all four graph-run sites). Accepts either an
+    OrchestratorState or a plain dict; never raises -- a logging helper
+    must never be the thing that breaks a request."""
+    try:
+        decision_dict = None
+        if isinstance(state, dict):
+            decision_dict = state.get("continuation_decision")
+        else:
+            decision_dict = getattr(state, "continuation_decision", None)
+        decision_dict = decision_dict or {}
+        logger.info(
+            "continuation_decision",
+            decision=decision_dict.get("decision"),
+            reason=decision_dict.get("reason"),
+            session_prefix=(session_id or "")[:12],
+        )
+    except Exception:
+        logger.warning("continuation_decision_log_failed", exc_info=True)
+
+
+def query_mentions_location(query: Optional[str], location: Optional[str]) -> bool:
+    """Word-boundary match of any token in `location` against `query`
+    (3.9). Retires the substring bug where "md" inside "cmd" false-matched
+    Maryland: a plain `in` check has no such boundary."""
+    if not query or not location:
+        return False
+    query_lower = query.lower()
+    for token in re.split(r"[,\s]+", location.strip()):
+        token = token.strip().lower()
+        if token and re.search(rf"\b{re.escape(token)}\b", query_lower):
+            return True
+    return False
+
+
+def city_phrases(city: Optional[str], templates: Sequence[str]) -> List[str]:
+    """Render each `{c}`-style template with `city`, lowercased (3.9). Empty
+    city contributes no phrases -- city-derived behaviour must degrade to
+    "no phrases" rather than a hardcoded house city."""
+    c = (city or "").strip().lower()
+    if not c:
+        return []
+    return [t.format(c=c).lower() for t in templates]
 
 
 async def prepare_openai_session(

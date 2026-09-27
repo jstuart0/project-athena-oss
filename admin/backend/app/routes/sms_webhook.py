@@ -19,6 +19,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 from ..database import get_db
 from ..models import SMSIncoming, CalendarEvent, GuestSMSPreference
+from shared.config import get_config
 
 logger = structlog.get_logger(__name__)
 
@@ -405,6 +406,7 @@ async def route_to_orchestrator(
                     "channel": "sms",
                 },
             },
+            headers={"X-Service-Key": get_config().service_api_key},
         )
 
         if response.status_code == 200:

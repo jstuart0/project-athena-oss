@@ -12,6 +12,8 @@ import asyncio
 from typing import Optional, Any, Dict
 import structlog
 
+from shared.config import get_config
+
 from gateway.livekit_service import (
     LiveKitService,
     LiveKitSession,
@@ -58,7 +60,8 @@ class LiveKitIntegration:
         # Create HTTP client for orchestrator calls
         self._http_client = httpx.AsyncClient(
             base_url=self.orchestrator_url,
-            timeout=60.0
+            timeout=60.0,
+            headers={"X-Service-Key": get_config().service_api_key}
         )
 
         # Create STT client wrapper

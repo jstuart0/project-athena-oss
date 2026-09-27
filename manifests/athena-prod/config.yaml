@@ -258,8 +258,17 @@ data:
   # address only when the immediate TCP peer falls inside one of these
   # ranges (parsed right-to-left; the nearest hop NOT in this set wins).
   # Keep this scoped to your actual reverse-proxy subnet, not a broad
-  # cluster-wide default. Default is this repo's own documented pod CIDR.
+  # cluster-wide default. Empty (default) means every caller's peer address
+  # is used directly (the gateway logs trusted_proxy_cidrs_unset once at
+  # startup). Example for a flannel/kubeadm-default cluster's pod CIDR:
   # TRUSTED_PROXY_CIDRS: "10.244.0.0/16"
+
+  # ORCHESTRATOR_INGRESS_AUTH (D10): "enforce" (default) requires
+  # X-Service-Key on the orchestrator's query/session routes; a wrong key
+  # is always 401. "warn" logs orchestrator_unauthenticated_request and
+  # allows the request -- use temporarily to find a caller a header
+  # rollout missed. Any other value behaves as "enforce" and logs an ERROR.
+  # ORCHESTRATOR_INGRESS_AUTH: "enforce"
 
   # NEW_CONVERSATION_RESET_GRACE_SECONDS: a first-turn fingerprint reset is
   # skipped when a session under the same fingerprint was created within

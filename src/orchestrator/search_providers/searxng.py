@@ -23,7 +23,8 @@ class SearXNGProvider(SearchProvider):
 
     Configuration:
     - No API key required (self-hosted instance)
-    - Internal URL: http://searxng.athena-admin.svc.cluster.local:8080
+    - Set SEARXNG_BASE_URL to your instance's URL. Empty means this
+      provider is disabled (provider_router registers it only when set).
     """
 
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
@@ -31,11 +32,12 @@ class SearXNGProvider(SearchProvider):
         Initialize SearXNG provider.
 
         Args:
-            base_url: SearXNG instance URL (defaults to internal cluster service)
+            base_url: SearXNG instance URL. Empty/None means not configured
+                -- no hardcoded cluster-internal default.
             api_key: Not used (SearXNG doesn't require API keys)
         """
         super().__init__(api_key=None)
-        self.base_url = base_url or "http://searxng.athena-admin.svc.cluster.local:8080"
+        self.base_url = base_url or ""
         self.client = httpx.AsyncClient(
             timeout=10.0,
             headers={

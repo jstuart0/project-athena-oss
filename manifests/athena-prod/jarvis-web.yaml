@@ -46,6 +46,11 @@ spec:
           value: "65"
         - name: MAX_TEMP
           value: "75"
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         resources:
           requests:
             memory: "128Mi"

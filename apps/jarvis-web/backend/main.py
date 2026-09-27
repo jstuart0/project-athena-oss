@@ -40,6 +40,16 @@ logger = structlog.get_logger()
 
 # Configuration from environment
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
+# D10: the orchestrator's gated routes now require X-Service-Key outside
+# DEV_MODE/warn mode. Warn loudly at import time if this backend would send
+# an empty key, rather than let every query silently 401 at runtime.
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+if not SERVICE_API_KEY:
+    logger.warning(
+        "jarvis_web_service_api_key_unset",
+        message="SERVICE_API_KEY is empty; orchestrator calls will be "
+                "rejected once ORCHESTRATOR_INGRESS_AUTH=enforce.",
+    )
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8000")
 ADMIN_BACKEND_URL = get_admin_url()
 DEFAULT_ROOM = os.getenv("DEFAULT_ROOM", "guest")
@@ -98,7 +108,7 @@ class SetModeRequest(BaseModel):
 HA_URL = os.getenv("HA_URL", "")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
 
-# Voice services configuration (Mac mini STT/TTS)
+# Voice services configuration (voice host STT/TTS)
 VOICE_API_URL = os.getenv("VOICE_API_URL", "http://localhost:10201")
 CLIMATE_ENTITY = os.getenv("CLIMATE_ENTITY", "climate.thermostat")
 
@@ -627,7 +637,8 @@ async def chat(message: ChatMessage):
 
             response = await client.post(
                 f"{ORCHESTRATOR_URL}/query",
-                json=request_body
+                json=request_body,
+                headers={"X-Service-Key": SERVICE_API_KEY}
             )
 
             if response.status_code != 200:
@@ -864,7 +875,8 @@ async def chat_stream(message: ChatMessage, request: Request):
                 async with client.stream(
                     "POST",
                     f"{ORCHESTRATOR_URL}/query/stream",
-                    json=request_body
+                    json=request_body,
+                    headers={"X-Service-Key": SERVICE_API_KEY}
                 ) as response:
                     async for chunk in response.aiter_text():
                         if thread_id:

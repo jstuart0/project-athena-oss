@@ -1,0 +1,49 @@
+# =============================================================================
+# Orchestrator NetworkPolicy (OPTIONAL) — defence-in-depth alongside D10's
+# X-Service-Key ingress auth (manifests/athena-prod's orchestrator.yaml).
+# =============================================================================
+#
+# Enforced only by a NetworkPolicy-capable CNI (Calico/Cilium/...; flannel
+# ignores NetworkPolicy resources entirely — verify your CNI before relying
+# on this). D10's X-Service-Key check is the control; this is optional
+# defence-in-depth, not a substitute.
+#
+# Not applied by `kubectl apply -f manifests/athena-prod/` (this file lives
+# under optional/, and that command is not recursive) -- apply explicitly:
+#   kubectl apply -f manifests/athena-prod/optional/networkpolicy-orchestrator.yaml
+#
+# Add your metrics scraper's namespace to the ingress rules below if you
+# scrape the orchestrator's /metrics endpoint from outside athena-prod.
+#
+# Callers in OTHER namespaces (e.g. the standalone jarvis-web example at
+# apps/jarvis-web/k8s/deployment.yaml, namespace jarvis-web, label
+# app: jarvis-web) need an ADDITIONAL `from:` entry below with a
+# namespaceSelector, since same-namespace pod selectors alone won't match
+# them.
+# =============================================================================
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: athena-orchestrator-ingress
+  namespace: athena-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: athena-orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: athena-gateway
+        - podSelector:
+            matchLabels:
+              app: athena-jarvis-web
+        - podSelector:
+            matchLabels:
+              app: athena-admin-backend
+      ports:
+        - protocol: TCP
+          port: 8001

@@ -89,12 +89,23 @@ except ImportError:
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 # Configuration
 DEFAULT_STT_URL = os.getenv("STT_URL", "http://localhost:10301")
 DEFAULT_TTS_URL = os.getenv("TTS_URL", "http://localhost:10201")
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
 ADMIN_API_URL = get_admin_url()
+
+# D10: the orchestrator's /query now requires X-Service-Key outside
+# DEV_MODE/warn mode. Warn loudly at import time if this bridge would send
+# an empty key, rather than let every query silently 401 at runtime.
+if not get_config().service_api_key:
+    logger.warning(
+        "wyoming_bridge_service_api_key_unset",
+        message="SERVICE_API_KEY is empty; orchestrator calls will be "
+                "rejected once ORCHESTRATOR_INGRESS_AUTH=enforce.",
+    )
 
 # AI-initiated follow-up settings (Phase 2)
 FOLLOW_UP_DELAY_SECONDS = 3.0  # Wait 3 seconds after TTS before follow-up
@@ -532,7 +543,8 @@ if WYOMING_AVAILABLE:
                 async with httpx.AsyncClient(timeout=60.0) as client:
                     response = await client.post(
                         f"{ORCHESTRATOR_URL}/query",
-                        json=request_data
+                        json=request_data,
+                        headers={"X-Service-Key": get_config().service_api_key}
                     )
 
                     llm_elapsed = time.time() - llm_start_time
