@@ -292,6 +292,39 @@ def test_dashboard_reads_pending_for_null_health_status_rag_row(owner_client, db
     assert statuses.get("Weather") == "pending"
 
 
+def test_dashboard_unconfigured_rag_row_counts_as_attention_not_unhealthy(owner_client, db):
+    """codex r3: a registry row with health_status='unconfigured' (the
+    poller's own "reachable but not set up" state, e.g. missing API key)
+    must keep that literal status string -- not get relabeled 'unhealthy'
+    -- while still counting toward attention (excluded from healthy_count,
+    present in critical_services), per _registry_row_status's documented
+    policy."""
+    db.add(RagService(
+        name="weather", display_name="Weather", host="weather-svc",
+        port=8010, protocol="http", service_type="rag", enabled=True,
+        health_status="unconfigured",
+    ))
+    db.commit()
+
+    with patch("app.routes.dashboard.httpx.AsyncClient", return_value=_mock_ok_client()):
+        response = owner_client.get("/api/dashboard")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    entries = {s["name"]: s for s in data["voice_health"]["critical_services"]}
+    assert "Weather" in entries
+    assert entries["Weather"]["status"] == "unconfigured"  # literal, not relabeled "unhealthy"
+
+    service_grid = {s["name"]: s["status"] for s in data["services"]}
+    assert service_grid.get("Weather") == "unconfigured"
+
+    # Counts toward the denominator (it's enabled) but not toward healthy
+    # (2 core, mocked healthy, + this 1 unconfigured RAG = 3 total, 2 healthy).
+    assert data["voice_health"]["total"] == 3
+    assert data["voice_health"]["healthy"] == 2
+
+
 def test_dashboard_core_service_reads_registry_row_no_probe(owner_client, db):
     """A registered 'gateway' row is used as-is (cached health), same as a
     RAG row -- the live-probe fallback only fires when no row exists."""

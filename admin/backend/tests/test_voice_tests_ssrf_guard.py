@@ -15,6 +15,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import quote as urlquote
 
 import pytest
 
@@ -82,8 +83,16 @@ def test_rag_test_endpoint_allows_allowlisted_private_host_and_probes_it(owner_c
     check_ssrf_safe directly here isolates "allowed -> probe happens" from
     get_config()'s process-wide lru_cache, which those other suites'
     direct os.environ mutation (not monkeypatch-scoped) can leave in a
-    state this test doesn't control."""
-    monkeypatch.setattr(voice_tests_module, "check_ssrf_safe", AsyncMock(return_value=(True, "")))
+    state this test doesn't control.
+
+    codex r3: also spies on check_ssrf_safe's own call argument, proving
+    the URL it validates is the EXACT final URL -- built with the
+    user-supplied text already urllib.parse.quote-encoded -- and that
+    session.get() is given that same URL (not a pre-encoding or
+    differently-encoded variant of it). Uses text with characters that
+    must be percent-encoded so the assertion can't pass on a no-op quote()."""
+    ssrf_spy = AsyncMock(return_value=(True, ""))
+    monkeypatch.setattr(voice_tests_module, "check_ssrf_safe", ssrf_spy)
     db.add(RagService(
         name="weather", display_name="Weather", host=_PRIVATE_HOST,
         port=8010, protocol="http", enabled=True,
@@ -107,13 +116,22 @@ def test_rag_test_endpoint_allows_allowlisted_private_host_and_probes_it(owner_c
 
     monkeypatch.setattr(voice_tests_module.aiohttp, "ClientSession", MagicMock(return_value=mock_session_ctx))
 
-    response = owner_client.post("/api/voice-tests/rag/test", json={"connector": "weather", "text": "Denver"})
+    response = owner_client.post("/api/voice-tests/rag/test", json={"connector": "weather", "text": "Denver, CO"})
 
     assert response.status_code == 200, response.text
     assert response.json()["success"] is True
+
+    expected_url = f"http://{_PRIVATE_HOST}:8010/weather/current?location={urlquote('Denver, CO', safe='')}"
+    assert expected_url == f"http://{_PRIVATE_HOST}:8010/weather/current?location=Denver%2C%20CO"  # sanity: proves quoting actually changed the text
+
+    assert ssrf_spy.called
+    ssrf_called_url = ssrf_spy.call_args.args[0]
+    assert ssrf_called_url == expected_url
+
     assert mock_session.get.called
-    called_url = mock_session.get.call_args.args[0]
-    assert _PRIVATE_HOST in called_url
+    session_called_url = mock_session.get.call_args.args[0]
+    assert session_called_url == expected_url
+    assert session_called_url == ssrf_called_url  # the exact same URL, not just equal-looking
 
 
 def test_full_pipeline_rag_enhancement_blocks_unallowlisted_private_host(owner_client, db, monkeypatch):
@@ -165,5 +183,10 @@ def test_full_pipeline_rag_enhancement_blocks_unallowlisted_private_host(owner_c
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert "ssrf_blocked" in body.get("results", {}).get("rag_error", ""), body
+    results = body.get("results", {})
+    # codex r3: exact equality on the marker -- "ssrf_blocked" is the
+    # contract, not merely a substring of some longer human-readable string.
+    assert results.get("rag_error") == "ssrf_blocked", body
+    assert results.get("rag_error_reason", "") != ""
+    assert "private ip" in results["rag_error_reason"].lower()
     assert not any(_PRIVATE_HOST in u for u in requested_urls), requested_urls
