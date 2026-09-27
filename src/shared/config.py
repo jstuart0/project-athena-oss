@@ -266,6 +266,20 @@ class AthenaConfig(BaseSettings):
     content_fetcher_allow_browser_fetch: bool = Field(default=False)
 
     # ------------------------------------------------------------------
+    # OpenAI-compatible session lifecycle (ATHENA-88 / F88)
+    # ------------------------------------------------------------------
+    # session_max_count: cap on concurrent per-conversation OpenAI sessions
+    #   (both the in-memory fallback dict and the Redis creation-time
+    #   index). Once exceeded, the oldest session is evicted via
+    #   SessionManager.delete_session. Default 5000.
+    # new_conversation_per_minute_per_ip: gateway-side sliding-window limit
+    #   on *new* conversations (first-turn requests with no explicit
+    #   session_id) per client IP, applied to /v1/chat/completions and
+    #   /v1/responses. Default 30.
+    session_max_count: int = Field(default=5000, ge=100)
+    new_conversation_per_minute_per_ip: int = Field(default=30, ge=1)
+
+    # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern
     # ------------------------------------------------------------------
     # Fields below are NOT yet migrated to AthenaConfig.  They are listed

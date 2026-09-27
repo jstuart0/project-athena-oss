@@ -357,6 +357,22 @@ OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 | `SESSION_SECRET_KEY` | Secret used for JWT signing when `JWT_SECRET` is unset; must not be the default in production |
 | `JWT_SECRET` | Secret for JWT tokens |
 
+### OpenAI-Compatible Conversation Sessions (ATHENA-88)
+
+Distinct from the admin-backend session settings above — these bound the
+orchestrator's per-conversation OpenAI-compatible sessions
+(`/v1/chat/completions`, `/v1/responses`). Every conversation is keyed by an
+HMAC fingerprint over room + user + the first user message (never system
+content or later turns), so it stays stable across Home Assistant's
+full-history replay on every turn. The HMAC secret is `SERVICE_API_KEY`
+(see [Security Settings](#security-settings)); outside `DEV_MODE`, an empty
+or placeholder `SERVICE_API_KEY` is fatal at orchestrator startup.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SESSION_MAX_COUNT` | `5000` | Cap on concurrent per-conversation sessions (in-memory fallback dict + Redis creation-time index). The oldest session (by last activity / creation time) is evicted once exceeded. |
+| `NEW_CONVERSATION_PER_MINUTE_PER_IP` | `30` | Gateway-side sliding-window limit on *new* conversations (first-turn requests with no explicit `session_id`) per client IP, applied to both `/v1/chat/completions` and `/v1/responses`. |
+
 ### Authentication (Optional)
 
 | Variable | Description |

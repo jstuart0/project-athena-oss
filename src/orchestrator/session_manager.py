@@ -6,6 +6,7 @@ Integrates with config_loader for dynamic configuration.
 """
 
 import os
+import time
 import uuid
 import json
 import asyncio
@@ -14,6 +15,10 @@ from datetime import datetime, timedelta
 import structlog
 
 from orchestrator.config_loader import get_config
+# Alias because the async config_loader.get_config above shadows the sync
+# shared.config.get_config name — SESSION_MAX_COUNT lives on the sync
+# AthenaConfig, not the DB-driven conversation-settings object.
+from shared.config import get_config as _get_athena_config
 
 logger = structlog.get_logger()
 
@@ -26,6 +31,11 @@ REDIS_ENABLED = os.getenv("REDIS_ENABLED", "false").lower() == "true"
 
 # Session key prefix
 SESSION_KEY_PREFIX = "athena:session:"
+
+# Redis sorted-set index of OpenAI-compatible session ids, scored by
+# creation time (ATHENA-88 / F88 D4). Used by register_bounded_session to
+# bound the count of concurrent per-conversation sessions.
+OAI_SESSION_INDEX_KEY = "athena:session:oai_index"
 
 # In-memory fallback storage
 _memory_sessions: Dict[str, Dict[str, Any]] = {}
@@ -477,10 +487,62 @@ class SessionManager:
                              error=str(e))
 
         # Fallback to memory
+        is_new_session = session.session_id not in _memory_sessions
         _memory_sessions[session.session_id] = session_dict
+        if is_new_session:
+            await self._enforce_memory_cap()
         logger.debug("session_saved",
                    session_id=session.session_id,
                    source="memory")
+
+    async def _enforce_memory_cap(self) -> None:
+        """
+        Evict the oldest-by-last_activity session once SESSION_MAX_COUNT is
+        exceeded (ATHENA-88 / F88 D4, xander Medium — no count bound existed
+        anywhere). Eviction goes through delete_session so both the memory
+        entry and any stale Redis key are cleared consistently.
+        """
+        max_count = _get_athena_config().session_max_count
+        while len(_memory_sessions) > max_count:
+            oldest_id = min(
+                _memory_sessions,
+                key=lambda sid: _memory_sessions[sid].get("last_activity", ""),
+            )
+            await self.delete_session(oldest_id)
+
+    async def register_bounded_session(self, session_id: str, max_count: int) -> List[str]:
+        """
+        Register a session in the Redis creation-time index and evict the
+        oldest overflow via delete_session (ATHENA-88 / F88 D4/D5).
+
+        No-op returning [] when Redis is absent — the memory cap in
+        _save_session covers that case. Every evicted id is returned so the
+        caller (prepare_openai_session) can also clear its conversation
+        context key.
+        """
+        if not self.redis_client:
+            return []
+
+        evicted: List[str] = []
+        try:
+            await self.redis_client.zadd(OAI_SESSION_INDEX_KEY, {session_id: time.time()})
+            count = await self.redis_client.zcard(OAI_SESSION_INDEX_KEY)
+            while count is not None and count > max_count:
+                popped = await self.redis_client.zpopmin(OAI_SESSION_INDEX_KEY)
+                if not popped:
+                    break
+                member = popped[0][0] if isinstance(popped[0], (tuple, list)) else popped[0]
+                if isinstance(member, bytes):
+                    member = member.decode()
+                await self.delete_session(member)
+                evicted.append(member)
+                count -= 1
+        except Exception as e:
+            logger.warning("session_index_register_failed",
+                         session_id=session_id,
+                         error=str(e))
+
+        return evicted
 
     async def _cleanup_loop(self):
         """Background task to cleanup expired sessions."""

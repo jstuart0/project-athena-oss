@@ -19,13 +19,17 @@ Import contract:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import os
 import re
+import secrets
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from shared.logging_config import configure_logging
 
+from orchestrator.context.storage import clear_conversation_context
 from orchestrator.nodes import _runtime
 from orchestrator.state import ConversationContext
 from orchestrator.urls import (
@@ -86,6 +90,153 @@ _CONTINUATION_PATTERN = re.compile(
     r'\n\s*(User|Human|Jarvis|Assistant)\s*:',
     re.IGNORECASE,
 )
+
+
+# =============================================================================
+# OpenAI-compatible session resolution (ATHENA-88 / F88, D4/D5)
+# =============================================================================
+#
+# Every conversation on the OpenAI-compatible streaming path (and the
+# non-streaming /v1/chat/completions path) gets its own session, keyed per
+# room/user/first-user-message, instead of the shared "openwebui-session" /
+# "ha-voice-assistant" literals. resolve_openai_session is pure;
+# prepare_openai_session does the first-turn reset + index registration and
+# is called once by chat_completions, before the stream/non-stream branch.
+
+# explicit- namespace: {1,55} caps the total id at 64 chars ("explicit-" is
+# 9 chars), matching the narrowest persisted session_id column
+# (admin/backend/app/models.py CloudLLMUsage.session_id, String(64)).
+_EXPLICIT_SESSION_ID_RE = re.compile(r"^explicit-[A-Za-z0-9._:-]{1,55}$")
+_FINGERPRINT_PREFIX = "oai-"
+_SESSION_HMAC_PLACEHOLDER = "dev-service-key-change-in-production"
+
+# Process-lifetime ephemeral HMAC secret, used only when DEV_MODE=true and
+# SERVICE_API_KEY is empty. Sessions derived from it don't survive a
+# restart and don't agree across replicas — acceptable in dev only.
+_ephemeral_session_hmac_secret: Optional[bytes] = None
+
+
+class ResolvedSession(NamedTuple):
+    """Result of resolving an OpenAI-compatible request to a session id."""
+    session_id: str
+    source: str  # "explicit" | "fingerprint"
+    is_first_turn: bool
+
+
+def session_hmac_secret(config: Any) -> bytes:
+    """
+    Resolve the HMAC key used to derive per-conversation OpenAI session ids.
+
+    Outside DEV_MODE, an empty or placeholder SERVICE_API_KEY is fatal
+    (RuntimeError) — callers (lifespan) turn that into a SystemExit before
+    the pod becomes ready. In DEV_MODE with an empty key, returns a
+    process-stable ephemeral secret with one WARNING.
+    """
+    global _ephemeral_session_hmac_secret
+
+    key = (getattr(config, "service_api_key", "") or "").strip()
+    if key and key != _SESSION_HMAC_PLACEHOLDER:
+        return key.encode("utf-8")
+
+    if getattr(config, "dev_mode", False):
+        if _ephemeral_session_hmac_secret is None:
+            _ephemeral_session_hmac_secret = secrets.token_hex(32).encode("utf-8")
+            logger.warning(
+                "openai_session_hmac_ephemeral_secret",
+                message="SERVICE_API_KEY is empty or a placeholder; using a "
+                        "process-lifetime ephemeral secret because DEV_MODE=true. "
+                        "Sessions will not survive a restart or agree across replicas.",
+            )
+        return _ephemeral_session_hmac_secret
+
+    raise RuntimeError(
+        "SERVICE_API_KEY is empty or the placeholder value "
+        f"'{_SESSION_HMAC_PLACEHOLDER}'; set SERVICE_API_KEY or enable DEV_MODE"
+    )
+
+
+def _count_user_messages(messages: Sequence[Any]) -> int:
+    return sum(1 for m in messages if getattr(m, "role", None) == "user")
+
+
+def _first_user_content(messages: Sequence[Any]) -> str:
+    for m in messages:
+        if getattr(m, "role", None) == "user":
+            return getattr(m, "content", None) or ""
+    return ""
+
+
+def resolve_openai_session(
+    messages: Sequence[Any],
+    *,
+    top_level_session_id: Optional[str],
+    extra_body: Optional[Dict[str, Any]],
+    user: Optional[str],
+    room: Optional[str],
+    secret: bytes,
+) -> ResolvedSession:
+    """
+    Resolve an OpenAI-compatible chat-completions request to a session id.
+
+    Explicit ids are accepted only from the ``explicit-`` namespace
+    (``^explicit-[A-Za-z0-9._:-]{1,55}$``, top-level ``session_id`` wins over
+    ``extra_body.session_id``); anything else — malformed input, the legacy
+    shared literals, an ``oai-...`` fingerprint value, or an id outside the
+    namespace — is rejected with a WARNING and falls back to the HMAC
+    fingerprint below.
+
+    The fingerprint is derived from room + user + the FIRST user message
+    only (never system/developer content or later turns), so it stays
+    stable across Home Assistant's full-history replay on every turn.
+    """
+    candidate = top_level_session_id
+    if not candidate and extra_body:
+        candidate = extra_body.get("session_id")
+
+    if candidate is not None:
+        if isinstance(candidate, str) and _EXPLICIT_SESSION_ID_RE.match(candidate):
+            # Explicit ids are caller-managed and never subject to the
+            # first-turn reset (prepare_openai_session gates that on
+            # source == "fingerprint"); report False unconditionally so the
+            # field never implies otherwise.
+            return ResolvedSession(candidate, "explicit", False)
+        logger.warning(
+            "openai_session_id_rejected",
+            reason="type" if not isinstance(candidate, str) else "pattern",
+        )
+
+    is_first_turn = _count_user_messages(messages) == 1
+    room_norm = (room or "").strip().lower()
+    user_norm = user or ""
+    first_user_content = _first_user_content(messages).strip()
+    payload = f"{room_norm}\x00{user_norm}\x00{first_user_content}".encode("utf-8")
+    digest = hmac.new(secret, payload, hashlib.sha256).hexdigest()[:32]
+    return ResolvedSession(f"{_FINGERPRINT_PREFIX}{digest}", "fingerprint", is_first_turn)
+
+
+async def prepare_openai_session(
+    resolved: ResolvedSession,
+    session_manager: Any,
+    cache_client: Any,
+    max_count: int,
+) -> None:
+    """
+    First-turn reset plus index registration/eviction for a resolved OpenAI
+    session. Called once by chat_completions, before get_or_create_session.
+
+    A fingerprint id whose replayed history holds exactly one user message
+    means this is genuinely a new conversation reusing the same opener in
+    the same room — its (possibly stale) prior session and context are
+    cleared so two successive conversations never share history. Explicit
+    ids are never reset.
+    """
+    if resolved.source == "fingerprint" and resolved.is_first_turn:
+        await session_manager.delete_session(resolved.session_id)
+        await clear_conversation_context(cache_client, resolved.session_id)
+
+    evicted_ids = await session_manager.register_bounded_session(resolved.session_id, max_count)
+    for evicted_id in evicted_ids:
+        await clear_conversation_context(cache_client, evicted_id)
 
 
 # =============================================================================

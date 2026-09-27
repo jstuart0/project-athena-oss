@@ -44,6 +44,7 @@ from gateway.simple_commands import detect_simple_command, execute_simple_comman
 from gateway.intent_prerouter import classify_intent, handle_simple_intent
 from gateway.circuit_breaker import CircuitBreaker, CircuitState
 from gateway.rate_limiter import TokenBucketRateLimiter
+from gateway.conversation_limiter import NewConversationLimiter
 
 # LiveKit WebRTC support (optional). Records LIVEKIT_IMPORT_ERROR on
 # failure but does not log — logging isn't configured yet (this import runs
@@ -137,6 +138,12 @@ OLLAMA_URL = _get_athena_config().llm_endpoint
 API_KEY = os.getenv("GATEWAY_API_KEY", "dummy-key")  # Optional for Phase 1
 ADMIN_API_URL = get_admin_url()
 SERVICE_API_KEY = _get_athena_config().service_api_key
+
+# ATHENA-88 / F88 D4: per-source new-conversation rate limit. Distinct from
+# global_rate_limiter (a single global bucket, applied only to
+# /v1/chat/completions) — this one is per client IP and covers both routes.
+NEW_CONVERSATION_PER_MINUTE_PER_IP = _get_athena_config().new_conversation_per_minute_per_ip
+new_conversation_limiter = NewConversationLimiter(per_minute=NEW_CONVERSATION_PER_MINUTE_PER_IP)
 
 # Feature flag cache - per-flag caching with TTL
 # Structure: {flag_name: (timestamp, value)}
@@ -544,6 +551,9 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: float = Field(0, ge=-2, le=2)
     frequency_penalty: float = Field(0, ge=-2, le=2)
     user: Optional[str] = Field(None, description="User identifier")
+    # ATHENA-88 / F88: caller-supplied explicit session id (namespace
+    # `explicit-...`), forwarded to the orchestrator's resolver as-is.
+    session_id: Optional[str] = Field(None, description="Explicit conversation session id")
 
 class ChatChoice(BaseModel):
     index: int
@@ -568,6 +578,10 @@ class ResponsesAPIRequest(BaseModel):
     stream: bool = Field(False, description="Stream response")
     temperature: float = Field(0.7, ge=0, le=2, description="Sampling temperature")
     max_output_tokens: Optional[int] = Field(None, description="Max tokens to generate")
+    # ATHENA-88 / F88: identity fields, carried through to the converted
+    # ChatCompletionRequest by _responses_to_chat_request.
+    user: Optional[str] = Field(None, description="User identifier")
+    session_id: Optional[str] = Field(None, description="Explicit conversation session id")
 
 
 class ResponsesAPIOutput(BaseModel):
@@ -1280,6 +1294,14 @@ async def stream_orchestrator_response(
             "stream": True,
             "extra_body": {"room": device_id or "unknown"}  # Pass room context
         }
+        # ATHENA-88 / F88: forward identity top-level too, omitting unset
+        # values (never send them as None or "").
+        if request.user is not None:
+            payload["user"] = request.user
+        if request.session_id is not None:
+            payload["session_id"] = request.session_id
+        if device_id is not None:
+            payload["room"] = device_id
 
         # Stream from orchestrator using the same timeout as non-streaming path (audit bob:5)
         async with orchestrator_client.stream(
@@ -1299,9 +1321,36 @@ async def stream_orchestrator_response(
         logger.error(f"Orchestrator streaming error: {e}", exc_info=True)
         yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
 
+async def _check_new_conversation_limit(
+    client_host: str,
+    messages: List[ChatMessage],
+    session_id: Optional[str],
+) -> None:
+    """
+    Raise 429 when a source starts too many new conversations per minute.
+
+    A "new conversation" is a first-turn request (exactly one user message)
+    with no explicit session_id — a follow-up turn or an explicit id never
+    consumes budget, matching the orchestrator-side first-turn reset this
+    limiter protects (ATHENA-88 / F88 D4).
+    """
+    if session_id:
+        return
+    user_message_count = sum(1 for m in messages if m.role == "user")
+    if user_message_count != 1:
+        return
+    if not new_conversation_limiter.allow(client_host):
+        logger.warning("new_conversation_rate_limited", client_host=client_host)
+        raise HTTPException(
+            status_code=429,
+            detail="Too many new conversations from this address. Please try again shortly.",
+        )
+
+
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(
     request: ChatCompletionRequest,
+    raw_request: Request,
     _: bool = Depends(validate_api_key)
 ):
     """
@@ -1322,6 +1371,10 @@ async def chat_completions(
                 status_code=429,
                 detail="Rate limit exceeded. Please try again later."
             )
+
+    # ATHENA-88 / F88 D4: per-source new-conversation limit (first-turn
+    # requests with no explicit session_id only).
+    await _check_new_conversation_limit(raw_request.client.host, request.messages, request.session_id)
 
     try:
         # Detect room from active Voice PE satellite for context
@@ -1369,6 +1422,46 @@ async def chat_completions(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+def _responses_to_chat_request(request: ResponsesAPIRequest) -> ChatCompletionRequest:
+    """Convert a Responses API request to Chat Completions format.
+
+    Extracted so identity fields (user, session_id) and the message-list
+    conversion are exercised the same way for both streaming and
+    non-streaming callers, and so _check_new_conversation_limit can run
+    against the converted messages/session_id before room detection.
+    """
+    messages = []
+
+    # Add system instructions if provided
+    if request.instructions:
+        messages.append(ChatMessage(role="system", content=request.instructions))
+
+    # Handle input - can be string or list of messages
+    if isinstance(request.input, str):
+        messages.append(ChatMessage(role="user", content=request.input))
+    elif isinstance(request.input, list):
+        # Input is a list of message-like objects
+        for item in request.input:
+            if isinstance(item, dict):
+                role = item.get("role", "user")
+                content = item.get("content", "")
+                if isinstance(content, list):
+                    # Handle content array format
+                    text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                    content = " ".join(text_parts)
+                messages.append(ChatMessage(role=role, content=content))
+
+    return ChatCompletionRequest(
+        model=request.model,
+        messages=messages,
+        temperature=request.temperature,
+        stream=request.stream,
+        max_tokens=request.max_output_tokens,
+        user=request.user,
+        session_id=request.session_id,
+    )
+
+
 @app.post("/v1/responses")
 async def responses_api(
     request: ResponsesAPIRequest,
@@ -1397,34 +1490,13 @@ async def responses_api(
 
     try:
         # Convert Responses API format to Chat Completions format
-        messages = []
+        chat_request = _responses_to_chat_request(request)
 
-        # Add system instructions if provided
-        if request.instructions:
-            messages.append(ChatMessage(role="system", content=request.instructions))
-
-        # Handle input - can be string or list of messages
-        if isinstance(request.input, str):
-            messages.append(ChatMessage(role="user", content=request.input))
-        elif isinstance(request.input, list):
-            # Input is a list of message-like objects
-            for item in request.input:
-                if isinstance(item, dict):
-                    role = item.get("role", "user")
-                    content = item.get("content", "")
-                    if isinstance(content, list):
-                        # Handle content array format
-                        text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
-                        content = " ".join(text_parts)
-                    messages.append(ChatMessage(role=role, content=content))
-
-        # Create ChatCompletionRequest
-        chat_request = ChatCompletionRequest(
-            model=request.model,
-            messages=messages,
-            temperature=request.temperature,
-            stream=request.stream,
-            max_tokens=request.max_output_tokens
+        # ATHENA-88 / F88 D4: limiter runs after conversion (first-turn
+        # detection needs the converted message list) and before room
+        # detection.
+        await _check_new_conversation_limit(
+            raw_request.client.host, chat_request.messages, chat_request.session_id
         )
 
         # Detect room

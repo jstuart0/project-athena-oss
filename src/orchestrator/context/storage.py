@@ -88,3 +88,30 @@ async def store_conversation_context(
     except Exception as e:
         logger.warning(f"Failed to store conversation context: {e}")
         return False
+
+
+async def clear_conversation_context(cache_client, session_id: str) -> bool:
+    """
+    Delete conversation context for a session (ATHENA-88 / F88).
+
+    Used on first-turn session reset and index eviction so a reused
+    OpenAI-session fingerprint or an evicted session doesn't leak stale
+    conversation context into the next conversation at that id.
+
+    Args:
+        cache_client: Redis cache client instance
+        session_id: Session identifier
+
+    Returns:
+        True if the delete was issued successfully, False otherwise
+    """
+    if not cache_client or not session_id:
+        return False
+
+    try:
+        context_key = f"athena:context:{session_id}"
+        await cache_client.client.delete(context_key)
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to clear conversation context: {e}")
+        return False

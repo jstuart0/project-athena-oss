@@ -166,6 +166,9 @@ from orchestrator.helpers import (
     _direct_general_info_response,
     _strip_hallucinated_continuation,
     _CONTINUATION_PATTERN,
+    resolve_openai_session,
+    prepare_openai_session,
+    session_hmac_secret,
     summarize_conversation_history,
     _fallback_to_web_search,
 )
@@ -1032,6 +1035,14 @@ async def ensure_gateway_running() -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
+    # ATHENA-88 / F88 D4: gate on the OpenAI-session HMAC secret before any
+    # client construction. An empty or placeholder SERVICE_API_KEY outside
+    # DEV_MODE is fatal — the pod must never become ready in that state.
+    try:
+        session_hmac_secret(_shared_config.get_config())
+    except RuntimeError as e:
+        raise SystemExit(f"FATAL: {e}")
+
     # Kill any existing process on orchestrator port before starting
     orchestrator_port = int(os.getenv("ORCHESTRATOR_PORT", "8001"))
     await kill_port(orchestrator_port, "Orchestrator")
@@ -7337,6 +7348,11 @@ class OpenAIChatRequest(BaseModel):
     max_tokens: Optional[int] = None
     stream: bool = False  # Enable streaming responses
     extra_body: Optional[Dict[str, Any]] = None  # Extra context (room, interface_type)
+    # ATHENA-88 / F88: per-conversation session identity, forwarded by the
+    # gateway. All optional so pre-existing callers keep working unchanged.
+    user: Optional[str] = None
+    session_id: Optional[str] = None
+    room: Optional[str] = None
 
 class OpenAIChatResponse(BaseModel):
     """OpenAI chat completion response format."""
@@ -7866,18 +7882,43 @@ async def chat_completions(request: OpenAIChatRequest):
         if not user_message:
             raise HTTPException(status_code=400, detail="No user message found")
 
+        # ATHENA-88 / F88 D4/D5: resolve the per-conversation session id
+        # once, before the stream/non-stream branch, and prepare it
+        # (first-turn reset + index registration/eviction) so both branches
+        # below use the same resolved id.
+        resolved_session = resolve_openai_session(
+            request.messages,
+            top_level_session_id=request.session_id,
+            extra_body=request.extra_body,
+            user=request.user,
+            room=request.room or (request.extra_body or {}).get("room"),
+            secret=session_hmac_secret(_shared_config.get_config()),
+        )
+        sm = _runtime.get_session_manager()
+        await prepare_openai_session(
+            resolved_session,
+            sm,
+            _runtime.get_cache_client(),
+            max_count=_shared_config.get_config().session_max_count,
+        )
+        logger.info(
+            "openai_session_resolved",
+            source=resolved_session.source,
+            first_turn=resolved_session.is_first_turn,
+            session_prefix=resolved_session.session_id[:12],
+        )
+
         # If streaming is requested, use SSE format
         if request.stream:
             async def openai_stream_generator():
                 # Initialize state and run orchestrator
-                sm = _runtime.get_session_manager()
                 llm = _runtime.get_llm_router()
                 global orchestrator_graph
                 if orchestrator_graph is None:
                     orchestrator_graph = create_orchestrator_graph()
 
                 session = await sm.get_or_create_session(
-                    session_id="openwebui-session",
+                    session_id=resolved_session.session_id,
                     user_id="openwebui",
                     zone="web"
                 )
@@ -8123,7 +8164,7 @@ async def chat_completions(request: OpenAIChatRequest):
         # Non-streaming response (original behavior)
         query_request = QueryRequest(
             query=user_message,
-            session_id="ha-voice-assistant"
+            session_id=resolved_session.session_id
         )
 
         result = await process_query(query_request)
