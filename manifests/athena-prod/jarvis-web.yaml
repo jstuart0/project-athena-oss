@@ -37,6 +37,24 @@ spec:
         # patch, never a value in this tracked manifest.
         # - name: DEFAULT_ROOM
         #   value: "your-default-room"
+        # Kitchen appliance entities (OSS template -- commented out). This
+        # names a specific appliance model's HA entities; each
+        # /api/appliances/* endpoint reports "not configured" until its
+        # own key(s) below are uncommented and set.
+        # - name: OVEN_ENTITY_ID
+        #   value: "water_heater.your_oven"
+        # - name: FRIDGE_ENTITY_ID
+        #   value: "water_heater.your_fridge"
+        # - name: FREEZER_ENTITY_ID
+        #   value: "water_heater.your_freezer"
+        # - name: STOVE_COOK_MODE_SENSOR_ID
+        #   value: "sensor.stove_cook_mode"
+        # - name: STOVE_DISPLAY_TEMP_SENSOR_ID
+        #   value: "sensor.stove_display_temperature"
+        # - name: STOVE_TIMER_SENSOR_ID
+        #   value: "sensor.stove_cook_time_remaining"
+        # - name: FRIDGE_DOOR_SENSOR_ID
+        #   value: "binary_sensor.refrigerator_door"
         - name: HA_URL
           valueFrom:
             secretKeyRef:

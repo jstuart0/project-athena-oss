@@ -402,6 +402,15 @@ class AthenaConfig(BaseSettings):
     #   bed_warmer intent handler reports the feature isn't configured
     #   instead of controlling a hardcoded device.
     ha_bed_warmer_entities: str = Field(default="")
+    # ha_light_groups: JSON object mapping a room name to a light-group
+    #   entity ID ({"<room>": "<light group entity>"}), used only by
+    #   smart_home_controller.py's scene-activation-failed fallback (dim/
+    #   turn on that room's lights when the named scene/script doesn't
+    #   exist). Empty means the fallback for an absent room is skipped
+    #   entirely (DC17 item 1, OSS-First) -- turning on every light in the
+    #   house ("all") when a specific room's group isn't configured is a
+    #   house-wide regression, not a safe default.
+    ha_light_groups: str = Field(default="")
     # ha_music_players: fallback room -> Music Assistant media_player
     #   entity mapping, used only when the admin API's room_audio_config
     #   table is unreachable (see src/orchestrator/music_handler.py's

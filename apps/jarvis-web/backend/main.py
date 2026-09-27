@@ -1630,21 +1630,6 @@ async def get_sensors_summary():
 # Media Player Control
 # =============================================================================
 
-# Media players to expose, configured via JARVIS_MEDIA_PLAYERS (comma-
-# separated list of HA media_player entity IDs) rather than hardcoded here
-# (DC14 item 1c, OSS-First). Empty/unset yields an empty list. Note: this
-# constant isn't currently read anywhere else in this file --
-# get_media_players() below derives each player's display name from HA's
-# own reported friendly_name attribute, not from a static id->name table --
-# kept only so a caller that wants an explicit allowlist has a
-# configurable place to put one.
-JARVIS_MEDIA_PLAYERS = [
-    entity_id.strip()
-    for entity_id in os.getenv("JARVIS_MEDIA_PLAYERS", "").split(",")
-    if entity_id.strip()
-]
-
-
 @app.get("/api/media")
 async def get_media_players():
     """Get all available media players and their states"""

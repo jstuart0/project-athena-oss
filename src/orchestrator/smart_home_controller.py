@@ -69,6 +69,45 @@ def vary_response(templates: list, **kwargs) -> str:
         return templates[0].format(**kwargs)
 
 
+_light_groups_cache: Optional[Dict[str, str]] = None
+_light_groups_warned = False
+
+
+def _get_light_groups() -> Dict[str, str]:
+    """room -> light-group entity ID, from HA_LIGHT_GROUPS (DC17 item 1).
+
+    Used only by the scene-activation-failed fallback below: dim/turn on
+    a SPECIFIC room's lights when the requested scene/script doesn't
+    exist. Empty/unset means a room with no configured group gets no
+    fallback at all -- turning on "all" lights house-wide when one room's
+    group isn't configured is a house-wide regression, not a safe
+    default."""
+    global _light_groups_cache, _light_groups_warned
+    if _light_groups_cache is not None:
+        return _light_groups_cache
+
+    import logging
+    logger = logging.getLogger(__name__)
+
+    raw = get_config().ha_light_groups
+    if not raw:
+        if not _light_groups_warned:
+            logger.info("ha_light_groups_unset_no_scene_fallback_configured")
+            _light_groups_warned = True
+        _light_groups_cache = {}
+        return _light_groups_cache
+
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("HA_LIGHT_GROUPS must be a JSON object")
+        _light_groups_cache = {str(k).lower(): str(v) for k, v in parsed.items()}
+    except Exception as e:
+        logger.error("ha_light_groups_invalid_json", error=str(e))
+        _light_groups_cache = {}
+    return _light_groups_cache
+
+
 class SmartHomeController:
     def __init__(self, entity_manager: HAEntityManager, llm_router):
         self.entity_manager = entity_manager
@@ -3858,12 +3897,18 @@ Do NOT mention rooms that have no current or recent motion."""
             else:
                 return f"Unknown scene or routine: {entity_id}"
 
+            # Computed unconditionally (not just on the success path): the
+            # fallback-exhausted message below also references scene_name,
+            # and needs it defined even when the activation call itself
+            # failed (that's exactly when the fallback runs). Previously
+            # this was assigned only after a successful activation call,
+            # so a failed activation raised UnboundLocalError here instead
+            # of ever reaching the intended "not configured yet" message.
+            scene_name = entity_id.split('.')[-1].replace('_', ' ').title()
+
             # Try to activate the scene/script
             try:
                 await ha_client.call_service(domain, service, {"entity_id": entity_id})
-
-                # Generate a friendly response based on the scene/routine
-                scene_name = entity_id.split('.')[-1].replace('_', ' ').title()
 
                 # Custom responses based on common patterns
                 if 'movie' in entity_id:
@@ -3891,17 +3936,19 @@ Do NOT mention rooms that have no current or recent motion."""
 
                 # Provide fallback behavior based on what was requested
                 if 'movie' in query_lower:
-                    # Dim lights as a fallback (DC14 item 1: "all" is HA's
-                    # own universal per-domain target, not a house-specific
-                    # light-group entity)
-                    try:
-                        await ha_client.call_service("light", "turn_on", {
-                            "entity_id": "all",
-                            "brightness_pct": 20
-                        })
-                        return "Movie mode ready! I've dimmed the lights."
-                    except:
-                        pass
+                    # Dim the living room's lights as a fallback (DC17
+                    # item 1: a specific room's group, configured via
+                    # HA_LIGHT_GROUPS -- never a house-wide "all" target).
+                    living_room_group = _get_light_groups().get("living_room")
+                    if living_room_group:
+                        try:
+                            await ha_client.call_service("light", "turn_on", {
+                                "entity_id": living_room_group,
+                                "brightness_pct": 20
+                            })
+                            return "Movie mode ready! I've dimmed the living room lights."
+                        except:
+                            pass
                 elif 'good night' in query_lower or 'goodnight' in query_lower:
                     # Turn off all lights as a fallback
                     try:
@@ -3910,16 +3957,18 @@ Do NOT mention rooms that have no current or recent motion."""
                     except:
                         pass
                 elif 'good morning' in query_lower:
-                    # Turn on lights as a fallback (DC14 item 1: "all",
-                    # not a house-specific light-group entity)
-                    try:
-                        await ha_client.call_service("light", "turn_on", {
-                            "entity_id": "all",
-                            "brightness_pct": 100
-                        })
-                        return "Good morning! I've turned on the lights."
-                    except:
-                        pass
+                    # Turn on the office's lights as a fallback (DC17
+                    # item 1: a specific room's group, never "all").
+                    office_group = _get_light_groups().get("office")
+                    if office_group:
+                        try:
+                            await ha_client.call_service("light", "turn_on", {
+                                "entity_id": office_group,
+                                "brightness_pct": 100
+                            })
+                            return "Good morning! I've turned on the lights."
+                        except:
+                            pass
                 elif 'leaving' in query_lower or 'goodbye' in query_lower:
                     # Turn off all lights and lock doors as a fallback
                     try:
@@ -3929,16 +3978,18 @@ Do NOT mention rooms that have no current or recent motion."""
                     except:
                         pass
                 elif 'home' in query_lower:
-                    # Turn on some lights as a fallback (DC14 item 1: "all",
-                    # not a house-specific light-group entity)
-                    try:
-                        await ha_client.call_service("light", "turn_on", {
-                            "entity_id": "all",
-                            "brightness_pct": 80
-                        })
-                        return "Welcome home! I've turned on the lights."
-                    except:
-                        pass
+                    # Turn on the office's lights as a fallback (DC17
+                    # item 1: a specific room's group, never "all").
+                    arriving_group = _get_light_groups().get("office")
+                    if arriving_group:
+                        try:
+                            await ha_client.call_service("light", "turn_on", {
+                                "entity_id": arriving_group,
+                                "brightness_pct": 80
+                            })
+                            return "Welcome home! I've turned on the lights."
+                        except:
+                            pass
 
                 return f"I tried to activate {scene_name}, but it may not be configured yet. I'll try a basic version."
 

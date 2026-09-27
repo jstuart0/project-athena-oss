@@ -7,6 +7,7 @@ Athena-specific queries or falls back to Ollama for general queries.
 
 import os
 import json
+import re
 import time
 import uuid
 import asyncio
@@ -2382,13 +2383,34 @@ async def list_models():
             ]
         }
 
+_SATELLITE_FRIENDLY_NAME_ROOM = re.compile(r"Voice\s*-\s*(.+?)\s*(Assist|$)", re.IGNORECASE)
+
+
+def _room_from_satellite(sat: dict, entity_to_room: Dict[str, str]) -> Optional[str]:
+    """Resolve a room for one active satellite: HA_SATELLITE_ROOM_MAP entry
+    first (DC14 item 1a), then a generic "Voice - <Room> Assist"
+    friendly_name parse as the fallback (DC17 item 2 -- restored: a
+    satellite not present in the map shouldn't silently give up when its
+    friendly_name still names the room in the common Voice PE convention),
+    else None."""
+    room_name = entity_to_room.get(sat["entity_id"])
+    if room_name:
+        return room_name
+    match = _SATELLITE_FRIENDLY_NAME_ROOM.search(sat.get("friendly_name", ""))
+    if match:
+        return match.group(1).strip().lower().replace(" ", "_")
+    return None
+
+
 async def _detect_room_from_active_satellite(device_id: str) -> str:
     """
     Detect which room the conversation is coming from by checking active Voice PE satellites.
 
     Since HA doesn't pass device_id in conversation requests, we query HA's
     assist_satellite entities to find which one is currently active (not
-    idle) and look its entity_id up in HA_SATELLITE_ROOM_MAP.
+    idle) and resolve a room for it via _room_from_satellite: the
+    HA_SATELLITE_ROOM_MAP entity->room map first, then a generic
+    friendly_name parse, then "unknown".
 
     Args:
         device_id: The device_id from the request (usually "unknown")
@@ -2396,12 +2418,6 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
     Returns:
         Room name (e.g., "office", "master_bedroom") or "unknown" when it
         can't be determined -- never a hardcoded house room (D11).
-
-    OSS-First (DC14 item 1a): requires HA_SATELLITE_ROOM_MAP to be
-    configured. An unconfigured map returns "unknown" immediately (D11's
-    room-less path) rather than guessing a room from a friendly_name naming
-    convention ("Voice - <Room> Assist") a given house's HA instance may
-    not follow at all.
 
     Performance:
         - Uses shared ha_client instead of creating new httpx.AsyncClient for every call.
@@ -2414,8 +2430,6 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
         return device_id.lower()
 
     entity_to_room = _get_ha_satellite_room_map()
-    if not entity_to_room:
-        return "unknown"
 
     # Check if caching is enabled via feature flag
     cache_enabled = await get_feature_flag("ha_room_detection_cache", default=False)
@@ -2470,7 +2484,7 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
         # First pass: Look for any currently active (not idle) satellite
         for sat in satellites:
             if sat["state"] != "idle":
-                room_name = entity_to_room.get(sat["entity_id"])
+                room_name = _room_from_satellite(sat, entity_to_room)
                 if room_name:
                     logger.info(f"Detected active satellite in room: {room_name} (state: {sat['state']})")
                     if cache_enabled:
@@ -2500,7 +2514,7 @@ async def _detect_room_from_active_satellite(device_id: str) -> str:
             # Sort by age (most recent first)
             recently_changed.sort(key=lambda x: x[1])
             sat, age = recently_changed[0]
-            room_name = entity_to_room.get(sat["entity_id"])
+            room_name = _room_from_satellite(sat, entity_to_room)
             if room_name:
                 logger.info(f"Detected recently active satellite in room: {room_name} (changed {age:.1f}s ago)")
                 if cache_enabled:

@@ -31,6 +31,7 @@ data:
   # DEMO_MODE: ""
   # DEV_MODE: ""
   # HA_BED_WARMER_ENTITIES: ""
+  # HA_LIGHT_GROUPS: ""
   # HA_MUSIC_PLAYERS: ""
   # HA_SATELLITE_ROOM_MAP: ""
   # HA_TV_ENTITIES: ""

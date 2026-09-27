@@ -349,22 +349,38 @@ def test_G10_room_fallback_is_unknown_not_office(monkeypatch, scenario):
 
 
 # ---------------------------------------------------------------------------
-# DC14 item 1a: HA_SATELLITE_ROOM_MAP gating (empty -> unknown, no network
-# call at all; configured -> entity_id lookup, not friendly_name regex)
+# DC14 item 1a / DC17 item 2: HA_SATELLITE_ROOM_MAP entity_id lookup first,
+# then the generic "Voice - <Room> Assist" friendly_name parse as a
+# fallback (restored per valerie r2 -- an unmapped satellite shouldn't give
+# up when its friendly_name still names the room), then "unknown".
 # ---------------------------------------------------------------------------
 
 
-def test_DC14_1a_empty_map_returns_unknown_without_querying_ha(monkeypatch):
+def test_DC17_2_empty_map_still_queries_ha_and_uses_name_parsing(monkeypatch):
+    """An empty/unset map must NOT skip the HA query outright -- the
+    generic friendly_name fallback still works with zero configuration,
+    exactly like it did before HA_SATELLITE_ROOM_MAP existed."""
     monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {})
+    monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(return_value=False))
     monkeypatch.setenv("HA_TOKEN", "test-token")
+
+    resp = mock.MagicMock(status_code=200)
+    resp.json.return_value = [
+        {
+            "entity_id": "assist_satellite.some_satellite",
+            "state": "responding",
+            "attributes": {"friendly_name": "Voice - Kitchen Assist"},
+            "last_changed": "2026-01-01T00:00:00+00:00",
+        }
+    ]
     fake_client = mock.MagicMock()
-    fake_client.get = mock.AsyncMock(side_effect=AssertionError("must not query HA when map is empty"))
+    fake_client.get = mock.AsyncMock(return_value=resp)
     monkeypatch.setattr(gw, "ha_client", fake_client)
 
     result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
 
-    assert result == "unknown"
-    fake_client.get.assert_not_called()
+    fake_client.get.assert_awaited_once()
+    assert result == "kitchen"
 
 
 def test_DC14_1a_unset_config_logs_once_at_info(monkeypatch):
@@ -384,11 +400,37 @@ def test_DC14_1a_unset_config_logs_once_at_info(monkeypatch):
     assert len(matching) == 1
 
 
-def test_DC14_1a_configured_map_resolves_via_entity_id_not_friendly_name(monkeypatch):
-    """The old implementation regexed 'Voice - <Room> Assist' out of
-    friendly_name; the new one must ignore friendly_name entirely and key
-    off entity_id, so a friendly_name that would have matched the old
-    pattern but an entity_id NOT in the map still yields 'unknown'."""
+def test_DC17_2_configured_entity_id_takes_priority_over_name_parsing(monkeypatch):
+    """The map is checked BEFORE name-parsing: a satellite present in
+    HA_SATELLITE_ROOM_MAP resolves from the map even if its friendly_name
+    would parse to a different room."""
+    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {"assist_satellite.configured_one": "office"})
+    monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(return_value=False))
+    monkeypatch.setenv("HA_TOKEN", "test-token")
+
+    resp = mock.MagicMock(status_code=200)
+    resp.json.return_value = [
+        {
+            "entity_id": "assist_satellite.configured_one",
+            "state": "responding",
+            # Friendly name would parse to "kitchen" -- the map wins.
+            "attributes": {"friendly_name": "Voice - Kitchen Assist"},
+            "last_changed": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+    fake_client = mock.MagicMock()
+    fake_client.get = mock.AsyncMock(return_value=resp)
+    monkeypatch.setattr(gw, "ha_client", fake_client)
+
+    result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
+    assert result == "office"
+
+
+def test_DC17_2_unmapped_satellite_falls_back_to_name_parsing(monkeypatch):
+    """A satellite NOT present in HA_SATELLITE_ROOM_MAP falls back to the
+    generic friendly_name parse instead of giving up -- this is the
+    behavior valerie r2 restored (P7 had made an unmapped entity_id yield
+    'unknown' even when the name was parseable)."""
     monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {"assist_satellite.configured_one": "office"})
     monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(return_value=False))
     monkeypatch.setenv("HA_TOKEN", "test-token")
@@ -407,12 +449,30 @@ def test_DC14_1a_configured_map_resolves_via_entity_id_not_friendly_name(monkeyp
     monkeypatch.setattr(gw, "ha_client", fake_client)
 
     result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
-    assert result == "unknown"
-
-    # Now the configured entity_id IS the active one -- resolves correctly.
-    resp.json.return_value[0]["entity_id"] = "assist_satellite.configured_one"
-    result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
     assert result == "office"
+
+
+def test_DC17_2_unmapped_unparseable_satellite_yields_unknown(monkeypatch):
+    """Neither the map nor the name-parse resolves a room -> "unknown"."""
+    monkeypatch.setattr(gw, "_ha_satellite_room_map_cache", {"assist_satellite.configured_one": "office"})
+    monkeypatch.setattr(gw, "get_feature_flag", mock.AsyncMock(return_value=False))
+    monkeypatch.setenv("HA_TOKEN", "test-token")
+
+    resp = mock.MagicMock(status_code=200)
+    resp.json.return_value = [
+        {
+            "entity_id": "assist_satellite.not_in_map",
+            "state": "responding",
+            "attributes": {"friendly_name": "Some Random Device"},
+            "last_changed": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+    fake_client = mock.MagicMock()
+    fake_client.get = mock.AsyncMock(return_value=resp)
+    monkeypatch.setattr(gw, "ha_client", fake_client)
+
+    result = asyncio.run(gw._detect_room_from_active_satellite("unspecified"))
+    assert result == "unknown"
 
 
 # ---------------------------------------------------------------------------
