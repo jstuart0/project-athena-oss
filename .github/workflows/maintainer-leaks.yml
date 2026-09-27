@@ -1,0 +1,69 @@
+name: Maintainer Leak Gate
+
+# Guards against maintainer-identifying strings (home-lab LAN IPs, home
+# domain, home city, home-dir paths, a legacy namespace FQDN, home
+# coordinates, the maintainer's name, and the maintainer's host names)
+# re-entering the tracked tree. See scripts/check-maintainer-leaks.py and
+# scripts/.maintainer-leak-allowlist. ATHENA-89.
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "admin/**"
+      - "apps/**"
+      - "scripts/**"
+      - "manifests/**"
+      - ".env.example"
+      - "docker-compose*.yml"
+      - "CLAUDE.md"
+      - "docs/**"
+      - "tests/unit/test_check_maintainer_leaks.py"
+      - ".github/workflows/maintainer-leaks.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "admin/**"
+      - "apps/**"
+      - "scripts/**"
+      - "manifests/**"
+      - ".env.example"
+      - "docker-compose*.yml"
+      - "CLAUDE.md"
+      - "docs/**"
+      - "tests/unit/test_check_maintainer_leaks.py"
+      - ".github/workflows/maintainer-leaks.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  maintainer-leak-gate:
+    name: Maintainer leak scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Scan the tree for maintainer-identifying strings
+        shell: bash
+        run: |
+          RC=0
+          python3 scripts/check-maintainer-leaks.py --format github > leaks.txt 2>&1 || RC=$?
+          echo "## Maintainer Leak Gate" >> "${GITHUB_STEP_SUMMARY}"
+          cat leaks.txt >> "${GITHUB_STEP_SUMMARY}"
+          exit "$RC"
+
+      - name: Run the gate script's own test suite
+        if: always()
+        shell: bash
+        run: |
+          python3 -m pytest tests/unit/test_check_maintainer_leaks.py -q
