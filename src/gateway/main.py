@@ -44,7 +44,11 @@ from gateway.simple_commands import detect_simple_command, execute_simple_comman
 from gateway.intent_prerouter import classify_intent, handle_simple_intent
 from gateway.circuit_breaker import CircuitBreaker, CircuitState
 from gateway.rate_limiter import TokenBucketRateLimiter
-from gateway.conversation_limiter import NewConversationLimiter
+from gateway.conversation_limiter import (
+    NewConversationLimiter,
+    RedisNewConversationLimiter,
+    resolve_client_key,
+)
 
 # LiveKit WebRTC support (optional). Records LIVEKIT_IMPORT_ERROR on
 # failure but does not log — logging isn't configured yet (this import runs
@@ -142,8 +146,16 @@ SERVICE_API_KEY = _get_athena_config().service_api_key
 # ATHENA-88 / F88 D4: per-source new-conversation rate limit. Distinct from
 # global_rate_limiter (a single global bucket, applied only to
 # /v1/chat/completions) — this one is per client IP and covers both routes.
+# ATHENA-88 / F39: TRUSTED_PROXY_CIDRS gates when X-Forwarded-For's
+# original-client address is trusted over the immediate TCP peer (see
+# gateway.conversation_limiter.resolve_client_key). The limiter instance
+# itself starts in-memory (single replica only) and is replaced with a
+# Redis-backed instance in lifespan() when a Redis connection succeeds, so
+# multiple gateway replicas share one budget per key.
 NEW_CONVERSATION_PER_MINUTE_PER_IP = _get_athena_config().new_conversation_per_minute_per_ip
+TRUSTED_PROXY_CIDRS = _get_athena_config().trusted_proxy_cidrs
 new_conversation_limiter = NewConversationLimiter(per_minute=NEW_CONVERSATION_PER_MINUTE_PER_IP)
+new_conversation_limiter_redis_client = None
 
 # Feature flag cache - per-flag caching with TTL
 # Structure: {flag_name: (timestamp, value)}
@@ -298,6 +310,7 @@ async def lifespan(app: FastAPI):
     global orchestrator_circuit_breaker, global_rate_limiter
     global metric_client, ha_client
     global orchestrator_timeout
+    global new_conversation_limiter, new_conversation_limiter_redis_client
 
     # Kill any existing process on gateway port before starting
     gateway_port = int(os.getenv("GATEWAY_PORT", "8000"))
@@ -393,6 +406,28 @@ async def lifespan(app: FastAPI):
         requests_per_minute=rate_limit_rpm
     )
 
+    # ATHENA-88 / F39: back the new-conversation limiter with Redis so
+    # multiple gateway replicas share one budget per key. Falls back to the
+    # in-memory NewConversationLimiter already assigned at module load if
+    # Redis is unreachable -- a single-replica deployment (or local dev
+    # without Redis) still works, just without cross-replica sharing.
+    try:
+        import redis.asyncio as redis_asyncio
+        redis_url = _get_athena_config().redis_url
+        candidate_redis_client = redis_asyncio.from_url(redis_url, decode_responses=True)
+        await candidate_redis_client.ping()
+        new_conversation_limiter_redis_client = candidate_redis_client
+        new_conversation_limiter = RedisNewConversationLimiter(
+            candidate_redis_client, per_minute=NEW_CONVERSATION_PER_MINUTE_PER_IP
+        )
+        logger.info("new_conversation_limiter_backend", backend="redis", redis_url=redis_url)
+    except Exception as e:
+        logger.warning(
+            "new_conversation_limiter_redis_unavailable",
+            error=str(e),
+            backend="in-memory",
+        )
+
     # Check orchestrator health
     try:
         response = await orchestrator_client.get("/health")
@@ -432,6 +467,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"LiveKit shutdown error: {e}")
 
+    if new_conversation_limiter_redis_client:
+        await new_conversation_limiter_redis_client.aclose()
     if device_session_mgr:
         await device_session_mgr.close()
     if orchestrator_client:
@@ -1325,6 +1362,7 @@ async def _check_new_conversation_limit(
     client_host: str,
     messages: List[ChatMessage],
     session_id: Optional[str],
+    forwarded_for: Optional[str] = None,
 ) -> None:
     """
     Raise 429 when a source starts too many new conversations per minute.
@@ -1333,14 +1371,20 @@ async def _check_new_conversation_limit(
     with no explicit session_id — a follow-up turn or an explicit id never
     consumes budget, matching the orchestrator-side first-turn reset this
     limiter protects (ATHENA-88 / F88 D4).
+
+    ATHENA-88 / F39: the rate-limit key is `client_host` (the immediate TCP
+    peer) unless that peer is inside TRUSTED_PROXY_CIDRS, in which case
+    `forwarded_for`'s original-client address is used instead — see
+    gateway.conversation_limiter.resolve_client_key.
     """
     if session_id:
         return
     user_message_count = sum(1 for m in messages if m.role == "user")
     if user_message_count != 1:
         return
-    if not new_conversation_limiter.allow(client_host):
-        logger.warning("new_conversation_rate_limited", client_host=client_host)
+    key = resolve_client_key(client_host, forwarded_for, TRUSTED_PROXY_CIDRS)
+    if not await new_conversation_limiter.allow(key):
+        logger.warning("new_conversation_rate_limited", client_host=client_host, key=key)
         raise HTTPException(
             status_code=429,
             detail="Too many new conversations from this address. Please try again shortly.",
@@ -1374,7 +1418,10 @@ async def chat_completions(
 
     # ATHENA-88 / F88 D4: per-source new-conversation limit (first-turn
     # requests with no explicit session_id only).
-    await _check_new_conversation_limit(raw_request.client.host, request.messages, request.session_id)
+    await _check_new_conversation_limit(
+        raw_request.client.host, request.messages, request.session_id,
+        forwarded_for=raw_request.headers.get("x-forwarded-for"),
+    )
 
     try:
         # Detect room from active Voice PE satellite for context
@@ -1496,7 +1543,8 @@ async def responses_api(
         # detection needs the converted message list) and before room
         # detection.
         await _check_new_conversation_limit(
-            raw_request.client.host, chat_request.messages, chat_request.session_id
+            raw_request.client.host, chat_request.messages, chat_request.session_id,
+            forwarded_for=raw_request.headers.get("x-forwarded-for"),
         )
 
         # Detect room

@@ -394,8 +394,14 @@ or placeholder `SERVICE_API_KEY` is fatal at orchestrator startup.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SESSION_MAX_COUNT` | `5000` | Cap on concurrent per-conversation sessions (in-memory fallback dict + Redis creation-time index). The oldest session (by last activity / creation time) is evicted once exceeded. |
-| `NEW_CONVERSATION_PER_MINUTE_PER_IP` | `30` | Gateway-side sliding-window limit on *new* conversations (first-turn requests with no explicit `session_id`) per client IP, applied to both `/v1/chat/completions` and `/v1/responses`. |
+| `NEW_CONVERSATION_PER_MINUTE_PER_IP` | `120` | Gateway-side sliding-window limit on *new* conversations (first-turn requests with no explicit `session_id`) per rate-limit key (see `TRUSTED_PROXY_CIDRS`), applied to both `/v1/chat/completions` and `/v1/responses`. Raised from an earlier default of 30 — behind a reverse proxy every caller can share one resolved key, making a low per-source limit a whole-house limit. |
+| `TRUSTED_PROXY_CIDRS` | `10.244.0.0/16` | Comma-separated CIDRs/hosts. The new-conversation limiter trusts `X-Forwarded-For`'s original-client address only when the immediate TCP peer (your reverse proxy) falls inside one of these ranges; an untrusted caller can't spoof another source's key via that header. Override for your cluster's actual pod/service CIDR. |
 | `NEW_CONVERSATION_RESET_GRACE_SECONDS` | `120` | A first-turn fingerprint reset is skipped when a session under the same fingerprint was created within this many seconds — protects against Home Assistant's truncated-ASR retry path, which resends the same single-user-message opener for the same turn. |
+
+The new-conversation limiter's counters are backed by Redis (`REDIS_URL`)
+when a Redis connection succeeds at gateway startup, so multiple gateway
+replicas share one budget per key; it falls back to an in-memory,
+single-replica-only counter otherwise (logged at startup either way).
 
 ### Authentication (Optional)
 

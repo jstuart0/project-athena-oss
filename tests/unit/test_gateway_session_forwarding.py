@@ -25,7 +25,11 @@ os.environ.setdefault("SERVICE_API_KEY", "test-key-gateway-session-forwarding")
 os.environ.setdefault("ADMIN_API_URL", "http://localhost:8080")
 
 import gateway.main as gw  # noqa: E402
-from gateway.conversation_limiter import NewConversationLimiter  # noqa: E402
+from gateway.conversation_limiter import (  # noqa: E402
+    NewConversationLimiter,
+    RedisNewConversationLimiter,
+    resolve_client_key,
+)
 
 from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -162,16 +166,19 @@ def test_new_conversation_limiter():
     clock = _FakeClock()
     limiter = NewConversationLimiter(per_minute=2, max_keys=2, clock=clock)
 
-    assert limiter.allow("A") is True
-    assert limiter.allow("A") is True
-    assert limiter.allow("A") is False
+    async def _run():
+        assert await limiter.allow("A") is True
+        assert await limiter.allow("A") is True
+        assert await limiter.allow("A") is False
 
-    clock.advance(61)
-    assert limiter.allow("A") is True
+        clock.advance(61)
+        assert await limiter.allow("A") is True
 
-    assert limiter.allow("B") is True
-    assert limiter.allow("C") is True
-    assert len(limiter) <= 2
+        assert await limiter.allow("B") is True
+        assert await limiter.allow("C") is True
+        assert len(limiter) <= 2
+
+    asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +260,7 @@ def test_check_new_conversation_limit_first_turn_only(monkeypatch):
 def test_route_level_429_on_both_routes(monkeypatch, path):
     limiter = NewConversationLimiter(per_minute=1, max_keys=10)
     # TestClient reports the client host as "testclient"; pre-consume it.
-    assert limiter.allow("testclient") is True
+    assert asyncio.run(limiter.allow("testclient")) is True
     monkeypatch.setattr(gw, "new_conversation_limiter", limiter)
 
     room_sentinel = mock.AsyncMock(side_effect=HTTPException(status_code=418))
@@ -290,3 +297,82 @@ def test_route_level_429_on_both_routes(monkeypatch, path):
     response = client.post(path, json=follow_up_body)
     assert response.status_code == 418
     room_sentinel.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# F39 (reconciliation round 1, codex r2 Medium): behind Traefik, every
+# caller's immediate TCP peer collapses to the proxy's pod IP; two in-memory
+# gateway replicas also enforce their own window inconsistently.
+# ---------------------------------------------------------------------------
+
+TRUSTED_CIDR = "10.244.0.0/16"
+
+
+def test_resolve_client_key_trusted_peer_uses_forwarded_for():
+    # Traefik's pod IP (inside the trusted CIDR) forwarding for a real caller.
+    key = resolve_client_key("10.244.3.7", "192.168.10.50, 10.244.3.7", TRUSTED_CIDR)
+    assert key == "192.168.10.50"
+
+
+def test_resolve_client_key_untrusted_peer_ignores_forwarded_for():
+    # A caller hitting the gateway directly (not through Traefik) can't
+    # spoof another source's key via its own X-Forwarded-For header.
+    key = resolve_client_key("203.0.113.9", "10.0.0.1", TRUSTED_CIDR)
+    assert key == "203.0.113.9"
+
+
+def test_resolve_client_key_no_forwarded_for_header():
+    key = resolve_client_key("10.244.3.7", None, TRUSTED_CIDR)
+    assert key == "10.244.3.7"
+
+
+def test_resolve_client_key_unparseable_peer_falls_back():
+    key = resolve_client_key("not-an-ip", "192.168.10.50", TRUSTED_CIDR)
+    assert key == "not-an-ip"
+
+
+class _FakeRedisForLimiter:
+    """Minimal async fake Redis: zadd/zcard/zremrangebyscore/expire."""
+
+    def __init__(self):
+        self._zsets: dict[str, dict[str, float]] = {}
+
+    async def zremrangebyscore(self, key, min_score, max_score):
+        zset = self._zsets.get(key, {})
+        min_val = float("-inf") if min_score == "-inf" else float(min_score)
+        max_val = float("inf") if max_score == "inf" else float(max_score)
+        self._zsets[key] = {
+            m: s for m, s in zset.items() if not (min_val <= s <= max_val)
+        }
+
+    async def zcard(self, key):
+        return len(self._zsets.get(key, {}))
+
+    async def zadd(self, key, mapping):
+        self._zsets.setdefault(key, {}).update(mapping)
+
+    async def expire(self, key, ttl):
+        return True
+
+
+def test_redis_backed_limiter_shares_budget_across_two_instances():
+    """Two RedisNewConversationLimiter instances (simulating two gateway
+    replicas) backed by the SAME Redis must share one budget per key."""
+    fake_redis = _FakeRedisForLimiter()
+    clock = _FakeClock()
+
+    replica_a = RedisNewConversationLimiter(fake_redis, per_minute=2, clock=clock)
+    replica_b = RedisNewConversationLimiter(fake_redis, per_minute=2, clock=clock)
+
+    async def _run():
+        assert await replica_a.allow("house") is True
+        # A different replica instance, same Redis backend, same key.
+        assert await replica_b.allow("house") is True
+        # Budget (2/min) is now exhausted regardless of which replica asks.
+        assert await replica_a.allow("house") is False
+        assert await replica_b.allow("house") is False
+
+        clock.advance(61)
+        assert await replica_a.allow("house") is True
+
+    asyncio.run(_run())

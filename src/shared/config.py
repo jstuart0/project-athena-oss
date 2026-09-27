@@ -277,7 +277,23 @@ class AthenaConfig(BaseSettings):
     #   session_id) per client IP, applied to /v1/chat/completions and
     #   /v1/responses. Default 30.
     session_max_count: int = Field(default=5000, ge=100)
-    new_conversation_per_minute_per_ip: int = Field(default=30, ge=1)
+    # new_conversation_per_minute_per_ip: F39 (codex r2 Medium) — raised
+    # from 30 to 120. Behind Traefik, every HA satellite and Jarvis caller
+    # can share one resolved key (trusted_proxy_cidrs below), so the old
+    # per-source default of 30/min was really a whole-house budget; 120
+    # gives normal multi-room household traffic headroom while still
+    # bounding abuse.
+    new_conversation_per_minute_per_ip: int = Field(default=120, ge=1)
+    # trusted_proxy_cidrs: F39 — comma-separated CIDRs/hosts. The gateway's
+    # new-conversation limiter trusts X-Forwarded-For's original-client
+    # address only when the immediate TCP peer falls inside one of these
+    # ranges (Traefik's pod CIDR by default), so an untrusted caller can't
+    # spoof another source's rate-limit key via that header. Same
+    # allowlist-by-CIDR pattern as health_poll_allowed_private_hosts /
+    # sitescraper_allowed_private_hosts. Default is this repo's own
+    # documented pod CIDR (manifests/athena-prod) — override for your
+    # cluster's actual pod/service CIDR.
+    trusted_proxy_cidrs: str = Field(default="10.244.0.0/16")
     # new_conversation_reset_grace_seconds: F38 (codex r2 Medium) — a
     # first-turn fingerprint reset is skipped when a session under the same
     # fingerprint was created within this many seconds. HA's known truncated
