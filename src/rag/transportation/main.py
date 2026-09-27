@@ -829,13 +829,20 @@ def _resolve_stop_id(stop_id: str) -> Optional[str]:
 
 
 def _search_stops_and_routes(
-    query: str, transit_type: Optional[str], free_only: bool, limit: int
+    query: str, transit_type: Optional[str], free_only: bool, limit: int, apply_limit: bool = True
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Case-insensitive substring match on stop_name / route names, with the
     transit_type and free_only filters applied before the result cap (D2:
     the filters must run before the cap, which is why this isn't a call to
     the existing /transit/search route). Returns copies, since callers
-    (departures attachment, distance annotation) mutate the returned dicts."""
+    (departures attachment, distance annotation) mutate the returned dicts.
+
+    apply_limit=False (codex P3 FIX): when the caller is about to sort the
+    results by distance (lat/lon given alongside query), capping here first
+    would cut the list in dict-iteration order -- before distance is even
+    computed -- and could silently drop the nearest match. Callers that
+    need a distance sort collect every match uncapped, sort, then cap
+    themselves."""
     query_lower = query.lower()
 
     stops: List[Dict[str, Any]] = []
@@ -847,7 +854,7 @@ def _search_stops_and_routes(
         if free_only and not _is_free_feed_or_service(stop["feed_id"]):
             continue
         stops.append(dict(stop))
-        if len(stops) >= limit:
+        if apply_limit and len(stops) >= limit:
             break
 
     routes: List[Dict[str, Any]] = []
@@ -861,7 +868,7 @@ def _search_stops_and_routes(
         if free_only and not feed.get("free"):
             continue
         routes.append(dict(route))
-        if len(routes) >= limit:
+        if apply_limit and len(routes) >= limit:
             break
 
     return stops, routes
@@ -936,11 +943,18 @@ async def transit_query(
         }
 
     if query:
-        stops, routes = _search_stops_and_routes(query, transit_type, free_only, limit)
-        if lat is not None and lon is not None:
+        has_location = lat is not None and lon is not None
+        stops, routes = _search_stops_and_routes(
+            query, transit_type, free_only, limit, apply_limit=not has_location
+        )
+        if has_location:
             for stop in stops:
                 stop["distance_meters"] = round(haversine_distance(lat, lon, stop["stop_lat"], stop["stop_lon"]))
             stops.sort(key=lambda s: s["distance_meters"])
+            # Cap AFTER sorting (codex P3 FIX) -- _search_stops_and_routes
+            # left both lists uncapped above so the sort sees every match.
+            stops = stops[:limit]
+            routes = routes[:limit]
 
         if not stops and not routes:
             return {

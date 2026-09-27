@@ -303,21 +303,24 @@ _TRANSIT_QUERY_RE = re.compile(
     r"|stops?|stations?"
     r"|route \d+[a-z]?"
     r"|(?:bus|train|ferry|route) schedule|schedule for (?:the )?(?:route|bus|train|line)"
+    r"|commuter rail|rail schedule|rail line|rail station"
     r"|free ride"
     r")\b",
     re.IGNORECASE,
 )
 
 # Phrases that would otherwise false-positive on the include list above
-# (a gas/charging station, a non-stop flight, "stop by the store"). Matched
-# spans are stripped before the include search runs, so an include term
-# that only appears inside one of these phrases no longer matches -- but a
-# *separate* include term elsewhere in the query still does.
+# (a gas/charging station, a non-stop flight, "stop by the store", "train
+# my dog" -- the verb sense of "train", not the noun). Matched spans are
+# stripped before the include search runs, so an include term that only
+# appears inside one of these phrases no longer matches -- but a *separate*
+# include term elsewhere in the query still does.
 _TRANSIT_QUERY_EXCLUDE_RE = re.compile(
     r"\b(?:gas|charging|ev|fire|police|radio|weather|power) stations?\b"
     r"|\bnon-?stop\b"
     r"|\b(?:pit|rest|truck) stop\b"
-    r"|\bstop by\b",
+    r"|\bstop by\b"
+    r"|\btrain (?:my|the|your|a)\b",
     re.IGNORECASE,
 )
 

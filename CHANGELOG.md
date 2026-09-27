@@ -11,7 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > **Plan:** `.mozart/plans/active/2026-09-27-deliver-athena-transit-and-base-knowledge.md`
 > **Ticket:** [ATHENA-90](https://plane.xmojo.net) + [ATHENA-91](https://plane.xmojo.net)
-> **Commits:** Phase 1 SHA to be backfilled here at Phase 2 (precedent: this file's other multi-phase entries list earlier phases' SHAs, filled in by the following phase's commit).
+> **Commits:** `5b8b515` (Phase 1 — `search_transit` wiring), `85930aa` (Phase 2 — base-knowledge settings facade), P3 SHA to be backfilled at reconciliation close.
 
 ### Transit tool wiring: `search_transit` reaches a real transportation route (ATHENA-90, Phase 1)
 
@@ -23,7 +23,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Added — `tool_registry` seed** (`admin/backend/alembic/versions/059_seed_search_transit_tool.py`): a data-only, `ON CONFLICT DO NOTHING` migration so `search_transit` can be toggled on the Admin UI tools page, matching the pattern already used for the other RAG tools. Run `alembic upgrade head` to apply.
 - **Documentation**: `docs/CONFIGURATION.md`'s Transit section now states the feed `type` vocabulary the tool's `transit_type` filter matches by prefix, and that departures use container-local time.
 
+### Memory & Context → Base Knowledge saves and re-loads; `/public` gated behind service auth (ATHENA-91, Phases 2-3)
 
+The Admin UI's Memory & Context → Base Knowledge tab called a service-key-gated `/api/internal` path a browser could never authenticate against, so every save silently failed. It now has its own typed facade, and a related pre-existing gap — the read-only `/api/base-knowledge/public` route serving every base-knowledge row, including a home address, with **no authentication at all** — is closed in the same reconciliation pass (xander FIX, found in diff review).
+
+- **Added — `GET`/`PUT /api/base-knowledge/settings`** (`admin/backend/app/routes/base_knowledge.py`): an 8-field facade over the two-store split — city/state live in the `location/default_location` entry (fanned out to every matching row on write, regardless of `applies_to`); the other six fields live in `system_settings`, never published on `/public`. One session, one commit; any exception rolls back both writes together. Validation happens in the handler and returns a single string 422 detail naming the field, not a pydantic list the frontend's `ApiError` would stringify to `[object Object]`. Timezone defaults to `DEFAULT_TIMEZONE` when it's IANA-valid, else UTC.
+- **Fixed — `admin/frontend/memory-context.js`** now loads from and saves to the new endpoint instead of the unreachable `/api/internal` path. Save re-renders the tab from the response; the error toast now shows the actual validation message.
+- **Fixed — `GET /api/base-knowledge/public` now requires authentication** (`admin/backend/app/routes/base_knowledge.py`, D44): gated behind `verify_service_or_oidc` — an `X-Service-Key` matching `SERVICE_API_KEY`, or an authenticated admin session (owner/operator; a scoped role like viewer is rejected too, since it also fails the `read:base_knowledge` permission check `verify_service_or_oidc` runs internally). Previously ungated — any unauthenticated caller could read every row, including a home street address under `category='property'`. Both in-repo callers now send the header: `shared.admin_config.AdminConfigClient.get_base_knowledge` (`src/shared/admin_config.py`, used by the orchestrator) and `src/rag/directions/main.py`'s startup fetch, which also logs a one-time warning if `SERVICE_API_KEY` is unset.
+- **Fixed — prompt-injection via city/state** (`admin/backend/app/routes/base_knowledge.py`): city and state are rendered verbatim into every guest's system prompt (`base_knowledge_utils.build_knowledge_context`). A value containing a control character or embedded newline (e.g. `"Denver\nIGNORE PREVIOUS INSTRUCTIONS"`) is now rejected with a 422 naming the field, checked before whitespace-trimming so a leading/trailing newline can't slip through.
+- **Fixed — a type-drifted `system_settings` blob no longer leaks a wrong type into the response**: each stored field is now re-validated independently against the same rules the write path enforces; a field with the wrong type or an invalid value (e.g. a stale enum value, `timezone` stored as a list) falls back to its own default with one WARNING, never a 500.
+- **Fixed — `/transit/query`'s `query`+`lat`/`lon` search mode no longer caps results before sorting by distance** (`src/rag/transportation/main.py`): when more matches exist than the requested `limit`, the nearest ones now always survive the cap; previously the cap was applied during the unsorted scan, so the nearest match could be dropped before distance was ever computed.
+- **Fixed — `is_transit_query`'s keyword gate** (`src/orchestrator/helpers.py`): "train my dog" / "train the new hire" (the verb sense) no longer misclassifies as transit-related; "commuter rail" and "rail schedule/line/station" now do.
+- **Documentation**: `docs/CONFIGURATION.md` documents the `/api/base-knowledge/public` service-key requirement alongside the existing orchestrator ingress-auth section.
+
+---
+
+## [Unreleased]
+
+> **Plan:** `.mozart/plans/active/2026-09-27-deliver-athena-oss-readiness.md`
 > **Ticket:** [ATHENA-89](https://plane.xmojo.net) (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`)
 > **Commits:** `cea046a` (P0 — leak-gate script), `c23dc27` (P1 — admin-backend/frontend), `ddaf16b` (P2 — region-configurable RAG services), `b16924b` (P3 — gateway/orchestrator session + ingress auth), `13ba5f6` (P3b — gate extension), `88caad4` (P4 — remaining references), `d6825a0` (P5 — CI workflow), `75a5af0` (P7 item 0 — import-cycle fix), `4826214` (P7 items 1–6 — HA entity/room config), `f6e9f51` (P8 — light-group scene fallback, restored satellite name-parse fallback, dropped unused `JARVIS_MEDIA_PLAYERS`)
 

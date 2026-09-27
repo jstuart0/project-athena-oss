@@ -161,11 +161,6 @@ def _seed_transit_data(module) -> None:
             "stop_lat": 39.7527, "stop_lon": -104.9997,
             "feed_id": "rtd_bus", "stop_type": "bus", "wheelchair_boarding": 0,
         },
-        "rtd_bus_1002": {
-            "stop_id": "rtd_bus_1002", "stop_name": "Civic Center",
-            "stop_lat": 39.7392, "stop_lon": -104.9903,
-            "feed_id": "rtd_bus", "stop_type": "bus", "wheelchair_boarding": 0,
-        },
         "rtd_bus_1003": {
             "stop_id": "rtd_bus_1003", "stop_name": "Stadium Stop",
             "stop_lat": 39.7561, "stop_lon": -105.0201,
@@ -181,6 +176,36 @@ def _seed_transit_data(module) -> None:
                 "hours": {"weekday": {"start": "07:00", "end": "19:00"}, "weekend": None},
                 "frequency_minutes": 20,
             },
+        },
+        # T5f (codex P3 FIX): four "c"-matching filler stops, all farther
+        # from the query point than rtd_bus_1002 below, and all inserted
+        # BEFORE it -- so a cap-before-sort regression would keep these and
+        # drop the actual nearest stop (rtd_bus_1002), rather than
+        # coincidentally keeping it because it happened to iterate first.
+        "rtd_bus_1004": {
+            "stop_id": "rtd_bus_1004", "stop_name": "Commerce City Stop",
+            "stop_lat": 39.8083, "stop_lon": -104.9342,
+            "feed_id": "rtd_bus", "stop_type": "bus", "wheelchair_boarding": 0,
+        },
+        "rtd_bus_1005": {
+            "stop_id": "rtd_bus_1005", "stop_name": "Cherry Creek Stop",
+            "stop_lat": 39.7047, "stop_lon": -104.9412,
+            "feed_id": "rtd_bus", "stop_type": "bus", "wheelchair_boarding": 0,
+        },
+        "rtd_bus_1006": {
+            "stop_id": "rtd_bus_1006", "stop_name": "Capitol Hill Stop",
+            "stop_lat": 39.7355, "stop_lon": -104.9812,
+            "feed_id": "rtd_bus", "stop_type": "bus", "wheelchair_boarding": 0,
+        },
+        "rtd_bus_1007": {
+            "stop_id": "rtd_bus_1007", "stop_name": "Curtis Park Stop",
+            "stop_lat": 39.7547, "stop_lon": -104.9764,
+            "feed_id": "rtd_bus", "stop_type": "bus", "wheelchair_boarding": 0,
+        },
+        "rtd_bus_1002": {
+            "stop_id": "rtd_bus_1002", "stop_name": "Civic Center",
+            "stop_lat": 39.7392, "stop_lon": -104.9903,
+            "feed_id": "rtd_bus", "stop_type": "bus", "wheelchair_boarding": 0,
         },
     })
     module.transit_data["routes"].update({
@@ -390,10 +415,16 @@ def test_T5f_query_with_location_sorts_by_distance(transit_client):
     body = resp.json()
     assert body["mode"] == "search"
     stop_ids = [s["stop_id"] for s in body["stops"]]
-    # Only stops whose name contains "c": Civic Center (dist 0 from the
-    # query point) and Confluence Park (~1.4km away) -- Union Station has
-    # no "c" in its name and is excluded by the search predicate itself.
+    # Six stops match "c" (Union Station and Stadium Stop don't); the query
+    # point is exactly rtd_bus_1002's coordinates (dist 0), which is
+    # inserted LAST in the fixture -- a cap-before-sort regression (codex
+    # P3 FIX) would drop it entirely, since the first 5 in insertion order
+    # are the other five "c" matches. With limit=5, the correct survivors
+    # are the 5 nearest; rtd_bus_1004 (Commerce City, ~9km away) is the
+    # farthest of the six and is the one correctly dropped.
+    assert len(stop_ids) == 5
     assert stop_ids[0] == "rtd_bus_1002"
+    assert "rtd_bus_1004" not in stop_ids
     assert all("distance_meters" in s for s in body["stops"])
     assert body["stops"] == sorted(body["stops"], key=lambda s: s["distance_meters"])
 
@@ -497,6 +528,8 @@ _TRUE_QUERIES = [
     "departures from civic center",
     "nearest subway stop",
     "water taxi to the harbor",
+    "is the commuter rail running today",
+    "what's the rail schedule this weekend",
 ]
 
 _FALSE_QUERIES = [
@@ -506,6 +539,8 @@ _FALSE_QUERIES = [
     "walking directions to the park",
     "find a charging station on the way",
     "non-stop route to Denver",
+    "I need to train my dog before we leave",
+    "can you train the new hire on safety",
     "stop by the grocery store on the way home",
     "",
     None,

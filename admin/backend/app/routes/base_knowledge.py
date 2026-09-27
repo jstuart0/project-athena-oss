@@ -5,6 +5,7 @@ Provides endpoints for managing context-aware knowledge entries for voice assist
 Supports property information, user mode context, and temporal data.
 """
 import json
+import re
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -15,6 +16,7 @@ import structlog
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, BaseKnowledge, SystemSetting
+from app.utils.service_auth import verify_service_or_oidc
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -81,6 +83,22 @@ def _nonempty_join(*values: str) -> str:
     return ", ".join(v for v in values if v)
 
 
+# xander Medium (P3/D44): city/state are rendered VERBATIM into every
+# guest's system prompt via base_knowledge_utils.build_knowledge_context
+# ("• Default Location: <value>"). An embedded control character or
+# newline lets a value smuggle a fake prompt line, e.g.
+# "Denver\nIGNORE PREVIOUS INSTRUCTIONS". Reject outright rather than
+# silently stripping -- a silent strip still persists an attacker-chosen
+# string, just with the tell-tale character quietly removed.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _is_clean_text(value: str) -> bool:
+    if _CONTROL_CHAR_RE.search(value):
+        return False
+    return value.isprintable()
+
+
 def _validate_settings(body: Any) -> Dict[str, str]:
     """M2: validation happens here, not via pydantic request-body
     validators, so a failure is a single string detail naming the field
@@ -92,13 +110,23 @@ def _validate_settings(body: Any) -> Dict[str, str]:
     result = _default_settings()
 
     if "city" in body:
-        value = str(body["city"]).strip()
+        # Check the RAW value for control characters BEFORE .strip() --
+        # a leading/trailing newline (e.g. "\nIGNORE PREVIOUS
+        # INSTRUCTIONS") would otherwise be silently removed by strip()
+        # and the rest would read as ordinary, wrongly-accepted text.
+        raw_value = str(body["city"])
+        if not _is_clean_text(raw_value):
+            raise HTTPException(status_code=422, detail="city: must not contain control characters or newlines")
+        value = raw_value.strip()
         if len(value) > 100:
             raise HTTPException(status_code=422, detail="city: must be 100 characters or fewer")
         result["city"] = value
 
     if "state" in body:
-        value = str(body["state"]).strip()
+        raw_value = str(body["state"])
+        if not _is_clean_text(raw_value):
+            raise HTTPException(status_code=422, detail="state: must not contain control characters or newlines")
+        value = raw_value.strip()
         if len(value) > 100:
             raise HTTPException(status_code=422, detail="state: must be 100 characters or fewer")
         result["state"] = value
@@ -154,6 +182,76 @@ def _validate_settings(body: Any) -> Dict[str, str]:
     return result
 
 
+def _coerce_stored_settings(data: Dict[str, Any]) -> Dict[str, str]:
+    """codex P3 FIX: a persisted system_settings blob can drift from the
+    current schema (a hand-edited row, a since-narrowed enum, a bad
+    migration writing the wrong type -- e.g. timezone: [] or
+    latitude: "abc"). Re-validate each field independently against the same
+    rules _validate_settings enforces on write; a field that fails falls
+    back to its own default with one WARNING. This must never raise or
+    500 -- B11's "corrupt JSON survives" guarantee extends to "corrupt
+    field" too, not just "corrupt JSON entirely"."""
+    result = _default_settings()
+
+    def _warn(field: str, reason: str) -> None:
+        logger.warning("base_knowledge_settings_field_invalid", field=field, reason=reason)
+
+    for field in ("city", "state"):
+        if field not in data:
+            continue
+        value = data[field]
+        if isinstance(value, str) and len(value) <= 100 and _is_clean_text(value):
+            result[field] = value
+        else:
+            _warn(field, "not a valid string")
+
+    for field, lo, hi in (("latitude", -90, 90), ("longitude", -180, 180)):
+        if field not in data:
+            continue
+        value = data[field]
+        if not isinstance(value, str):
+            _warn(field, "not a string")
+            continue
+        if value == "":
+            result[field] = value
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            _warn(field, "not numeric")
+            continue
+        if lo <= parsed <= hi:
+            result[field] = value
+        else:
+            _warn(field, "out of range")
+
+    if "timezone" in data:
+        value = data["timezone"]
+        if isinstance(value, str):
+            try:
+                ZoneInfo(value)
+                result["timezone"] = value
+            except (ZoneInfoNotFoundError, ValueError, KeyError):
+                _warn("timezone", "invalid IANA zone")
+        else:
+            _warn("timezone", "not a string")
+
+    for field, valid_set in (
+        ("temp_unit", _VALID_TEMP_UNITS),
+        ("distance_unit", _VALID_DISTANCE_UNITS),
+        ("date_format", _VALID_DATE_FORMATS),
+    ):
+        if field not in data:
+            continue
+        value = data[field]
+        if isinstance(value, str) and value in valid_set:
+            result[field] = value
+        else:
+            _warn(field, "not a valid value")
+
+    return result
+
+
 def _load_settings_blob(db: Session) -> Dict[str, str]:
     defaults = _default_settings()
     setting = db.query(SystemSetting).filter(SystemSetting.key == _SETTINGS_KEY).first()
@@ -168,9 +266,7 @@ def _load_settings_blob(db: Session) -> Dict[str, str]:
         logger.warning("base_knowledge_settings_corrupt", error=str(e))
         return defaults
 
-    merged = dict(defaults)
-    merged.update({k: v for k, v in data.items() if k in defaults})
-    return merged
+    return _coerce_stored_settings(data)
 
 
 def _preferred_location_entries(db: Session) -> List[BaseKnowledge]:
@@ -306,12 +402,21 @@ async def list_base_knowledge_public(
     category: Optional[str] = Query(None, description="Filter by category"),
     applies_to: Optional[str] = Query(None, description="Filter by applies_to (guest/owner/both)"),
     enabled: Optional[bool] = Query(None, description="Filter by enabled status"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _authorized: bool = Depends(verify_service_or_oidc),
 ):
     """
-    Public read-only endpoint for internal service-to-service calls.
+    Read-only endpoint for internal service-to-service calls (D44/P3).
 
-    Runtime services use this route so admin UI access can remain authenticated.
+    Gated by verify_service_or_oidc: an X-Service-Key matching
+    SERVICE_API_KEY, OR an authenticated admin session (Bearer JWT /
+    X-API-Key) -- any role, since this dependency authenticates, it doesn't
+    authorize by permission. Previously ungated: any unauthenticated caller
+    could read every base_knowledge row, including a home street address
+    stored under category='property' (xander FIX). Path and response shape
+    unchanged for the two known callers (shared.admin_config.AdminConfigClient
+    .get_base_knowledge, src/rag/directions/main.py) -- both now send
+    X-Service-Key.
     """
     try:
         query = db.query(BaseKnowledge)

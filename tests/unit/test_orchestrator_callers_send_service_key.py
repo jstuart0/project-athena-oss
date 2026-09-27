@@ -24,6 +24,14 @@ construction of the client object the call is made through (e.g.
 once in `LiveKitIntegration.initialize()` and reused by every other method
 on that instance) -- a client "constructed with the header" satisfies every
 call made through it, matching mozart's DC12 carve-out.
+
+D44/P3 (2026-09-27-deliver-athena-transit-and-base-knowledge): extended to
+cover `/api/base-knowledge/public`, gated the same way after xander's diff
+review found it serving a home street address with no auth. Widening
+_SCAN_ROOTS to src/shared surfaced one unrelated false positive
+(llm_router.py calling an MLX server's own /v1/chat/completions) --
+excluded rather than special-cased in the matcher, since the collision is
+this repo's, not the scanner's.
 """
 from __future__ import annotations
 
@@ -38,6 +46,14 @@ _SCAN_ROOTS = (
     REPO_ROOT / "apps" / "jarvis-web" / "backend",
     REPO_ROOT / "admin" / "backend" / "app",
     REPO_ROOT / "apps" / "chat-embed",
+    # D44/P3: /api/base-knowledge/public gained the same X-Service-Key-or-
+    # session gate as the orchestrator ingress routes above. Its two
+    # callers live outside the roots this file originally scanned --
+    # shared.admin_config.AdminConfigClient (src/shared) and the one RAG
+    # service that calls it directly (src/rag/directions). Confirmed by
+    # grep that no other src/rag/*/main.py references this route.
+    REPO_ROOT / "src" / "shared",
+    REPO_ROOT / "src" / "rag" / "directions",
 )
 
 # Files that *define* /sessions-shaped routes of their own rather than call
@@ -45,6 +61,13 @@ _SCAN_ROOTS = (
 _EXCLUDED = {
     REPO_ROOT / "src" / "gateway" / "livekit_routes.py",
     REPO_ROOT / "admin" / "backend" / "app" / "routes" / "pipeline_events.py",
+    # D44/P3: llm_router.py's httpx calls target an MLX/OpenAI-compatible
+    # LLM server's OWN "/v1/chat/completions" -- a generic API-shape
+    # literal that collides with _ROUTE_PATTERN's orchestrator-route entry
+    # of the same path, but is an unrelated third-party endpoint (found
+    # only after widening _SCAN_ROOTS to src/shared for the base-knowledge
+    # extension below; confirmed by reading each call site).
+    REPO_ROOT / "src" / "shared" / "llm_router.py",
 }
 
 # f-string-aware: matches the route literal whether it's a plain string or
@@ -56,6 +79,7 @@ _ROUTE_PATTERN = re.compile(
     r"""|/session/[^"']*?/warmup"""
     r"""|/admin/(?:invalidate-feature-cache|invalidate-model-cache"""
     r"""|reset-circuit-breaker|reset-all-circuits)"""
+    r"""|/api/base-knowledge/public["'?]"""
 )
 
 _HTTP_METHODS = {"get", "post", "put", "delete", "stream", "request"}
@@ -304,6 +328,8 @@ def test_AU4_named_members_present():
         "apps/jarvis-web/backend/main.py",
         "src/gateway/main.py",  # covers both orchestrator_client uses and the warmup client
         "src/gateway/livekit_integration.py",
+        "src/shared/admin_config.py",  # D44/P3: /api/base-knowledge/public
+        "src/rag/directions/main.py",  # D44/P3: /api/base-knowledge/public
     }
     missing = expected_named - rel_names
     assert not missing, f"expected named callers not matched by the scan: {missing}"

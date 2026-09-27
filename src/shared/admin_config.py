@@ -878,13 +878,18 @@ class AdminConfigClient:
         if self._base_knowledge_cache and (time.time() - self._base_knowledge_cache_time < self._cache_ttl):
             knowledge = self._base_knowledge_cache
         else:
-            # Fetch from API (use public endpoint - no auth required)
+            # Fetch from API. D44/P3: this route now requires
+            # X-Service-Key or an admin session -- self.client's default
+            # headers send X-API-Key (for the OTHER admin routes that
+            # accept it), not X-Service-Key, so this call needs its own
+            # explicit header, same as get_secrets_for_service /
+            # get_external_api_key / get_tool_apis_public below.
             try:
                 url = f"{self.admin_url}/api/base-knowledge/public"
                 if enabled_only:
                     url += "?enabled=true"
 
-                response = await self.client.get(url)
+                response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
 
                 if response.status_code == 200:
                     knowledge = response.json()

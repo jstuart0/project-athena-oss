@@ -115,10 +115,22 @@ async def lifespan(app: FastAPI):
         logger.warning("settings_fetch_error", error=str(e))
         load_default_settings()
 
-    # Fetch base knowledge for default origin
+    # Fetch base knowledge for default origin. D44/P3: this route now
+    # requires X-Service-Key or an admin session -- send it explicitly
+    # (this is a bare httpx.AsyncClient with no default headers, unlike
+    # admin_client's shared client).
+    service_key = get_config().service_api_key
+    if not service_key:
+        logger.warning(
+            "service_api_key_empty",
+            message="SERVICE_API_KEY is not set; the base-knowledge fetch will 503.",
+        )
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{ADMIN_API_URL}/api/base-knowledge/public")
+            response = await client.get(
+                f"{ADMIN_API_URL}/api/base-knowledge/public",
+                headers={"X-Service-Key": service_key},
+            )
             if response.status_code == 200:
                 data = response.json()
                 BASE_KNOWLEDGE = {item["key"]: item["value"] for item in data.get("items", [])}
