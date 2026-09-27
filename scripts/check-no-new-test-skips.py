@@ -103,6 +103,16 @@ SANCTIONED = {
         "reason: the workflow resolves ATHENA_NODE_BIN from `command -v node` after "
         "actions/setup-node pins the version, so NODE_BIN is never None there."
     ),
+    (
+        "tests/unit/test_admin_frontend_system_config_status_mapping.py",
+        "requires_node = pytest.mark.skipif(",
+    ): (
+        "ATHENA-113c. Same shape and same reason as test_frontend_guard_scripts.py's "
+        "requires_node above: guards fixtures that shell out to node to exercise "
+        "system-config.js's mapServiceStatusToUiBucket via vm.runInThisContext. "
+        "UNREACHABLE IN CI: actions/setup-node pins the node version before this "
+        "workflow runs, so `shutil.which('node')` never returns None there."
+    ),
 }
 
 SKIP_RE = re.compile(r"^\+.*pytest\.mark\.skip")
