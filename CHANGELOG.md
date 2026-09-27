@@ -10,7 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 > **Ticket:** [ATHENA-99](https://plane.xmojo.net)
-> **Commits:** `c36dc83` (dashboard badges), CA-managed-services SHA to be backfilled at commit time.
+> **Commits:** `c36dc83` (dashboard badges), `c146353` (Control Agent managed-services config)
 
 ### Fixed: dashboard service badges render "undefined"; Control Agent no longer hard-codes a process list (ATHENA-99)
 
