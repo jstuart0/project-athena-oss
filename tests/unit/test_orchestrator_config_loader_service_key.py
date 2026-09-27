@@ -32,6 +32,17 @@ if str(_SRC) not in sys.path:
 
 import httpx  # noqa: E402
 
+# Other test files in this suite (test_health_probes.py,
+# test_orchestrator_gateway_keepalive_service_key.py,
+# test_transit_tool_wiring.py) deliberately replace
+# sys.modules["orchestrator.config_loader"] with a MagicMock at import time,
+# to keep orchestrator.main importable without its heavy runtime deps. If
+# any of those files collect before this one (alphabetically,
+# test_health_probes.py does), a plain `import orchestrator.config_loader`
+# here would silently bind to their mock instead of the real module this
+# file exists to test. Force a fresh import of the genuine module.
+sys.modules.pop("orchestrator.config_loader", None)
+
 from shared.config import _clear_cache_for_tests  # noqa: E402
 import orchestrator.config_loader as config_loader  # noqa: E402
 

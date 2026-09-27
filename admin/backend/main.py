@@ -1103,9 +1103,9 @@ async def get_system_status(
 ):
     """Get status of all Athena services (ATHENA-113c).
 
-    Pre-migration this probed a single "Mac Studio" host directly for
-    gateway/orchestrator/RAG/ollama, plus a "Mac Mini" host for voice
-    services -- both hardcoded-host assumptions from before gateway and
+    Pre-migration this probed one hardcoded LAN host directly for
+    gateway/orchestrator/RAG/ollama, plus a second hardcoded LAN host for
+    voice services -- both host assumptions from before gateway and
     orchestrator moved into Kubernetes and Ollama moved to an operator-
     chosen host, so every check reported Offline regardless of real health
     (dick's investigation). The service registry (athena_service_registry,

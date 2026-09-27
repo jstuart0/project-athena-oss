@@ -4,9 +4,9 @@
 probes each assumed every RAG service is reachable through a single
 `RAG_HOST` / `RAG_SERVICE_HOST` + a hardcoded port. In Kubernetes each RAG is
 its own Service, so that single-host assumption is an OSS-First violation
-(CLAUDE.md: "no assumption of Jay's infrastructure") -- it silently reports
-every RAG unreachable whenever the shared host env var isn't set, which is
-the normal case for a per-Service deployment.
+(no deployment-specific infrastructure assumptions, per CLAUDE.md) -- it
+silently reports every RAG unreachable whenever the shared host env var
+isn't set, which is the normal case for a per-Service deployment.
 
 This module centralizes the resolution order any caller should use for a
 given RAG service name:
