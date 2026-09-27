@@ -18,9 +18,11 @@ import os
 from app.database import get_db
 from app.models import MusicConfig, Feature
 from app.auth.oidc import get_current_user
+from shared.config import get_config
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/music-config", tags=["music"])
+_warned_music_assistant_url_not_configured = False
 
 # Home Assistant configuration for artist search
 # HA_URL intentionally has no hardcoded default — a bare IP would bypass the
@@ -368,7 +370,19 @@ async def get_browser_playback_config(
 
     # Extract WebSocket URL from base URL
     # MA server typically runs WebSocket on same port
-    ma_url = config.music_assistant_url or "http://192.168.10.168:8095"
+    # Class 3 (operator-env service URL): DB value wins, MUSIC_ASSISTANT_URL
+    # is the deploy-time fallback. No hardcoded host fallback — an unset
+    # value means Music Assistant isn't configured for this deployment.
+    ma_url = config.music_assistant_url or get_config().music_assistant_url
+    if not ma_url:
+        global _warned_music_assistant_url_not_configured
+        if not _warned_music_assistant_url_not_configured:
+            logger.warning("music_assistant_url_not_configured")
+            _warned_music_assistant_url_not_configured = True
+        return {
+            "enabled": False,
+            "error": "Music Assistant not configured"
+        }
     ws_url = ma_url.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
 
     return {

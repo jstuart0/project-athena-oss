@@ -2,7 +2,7 @@
 Model Downloads Routes
 
 Search, download, and manage models from Hugging Face Hub.
-Uses Control Agent for actual download execution on Mac Studio.
+Uses Control Agent for actual download execution on the Control Agent host.
 """
 
 from datetime import datetime
@@ -587,7 +587,7 @@ async def import_to_ollama(
 async def list_downloaded_files(
     current_user: User = Depends(get_current_user)
 ):
-    """List all downloaded model files on Mac Studio."""
+    """List all downloaded model files on the Control Agent host."""
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 

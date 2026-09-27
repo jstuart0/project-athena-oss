@@ -169,12 +169,12 @@ class TestSSRFGuard:
     # --- RFC1918 192.168/16 ---
     @pytest.mark.parametrize("path", ['/health', '/status', '/ready'])
     def test_rfc1918_192168_blocked_without_allowlist(self, path):
-        ok, reason = self._validate('192.168.10.50', path=path)
-        assert not ok, f"Expected 192.168.10.50 to be blocked without allowlist"
+        ok, reason = self._validate('192.168.55.50', path=path)
+        assert not ok, f"Expected 192.168.55.50 to be blocked without allowlist"
 
     def test_rfc1918_192168_allowed_literal_hostname(self):
-        ok, reason = self._validate('192.168.10.50', allowed='192.168.10.50')
-        assert ok, f"Expected 192.168.10.50 allowed as literal hostname, reason: {reason}"
+        ok, reason = self._validate('192.168.55.50', allowed='192.168.55.50')
+        assert ok, f"Expected 192.168.55.50 allowed as literal hostname, reason: {reason}"
 
     # --- RFC1918 172.16/12 ---
     @pytest.mark.parametrize("path", ['/health', '/api', '/ping'])

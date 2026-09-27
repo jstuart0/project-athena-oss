@@ -102,9 +102,9 @@ async def get_mcp_security(
 
     security = db.query(MCPSecurity).first()
     if not security:
-        # Create default configuration (includes Thor's n8n service)
+        # Create default configuration: deny-all-remote (localhost only)
         security = MCPSecurity(
-            allowed_domains=["localhost", "127.0.0.1", "localhost", "*"],
+            allowed_domains=["localhost", "127.0.0.1"],
             blocked_domains=[],
             max_execution_time_ms=30000,
             max_concurrent_tools=5,
@@ -128,10 +128,10 @@ async def get_mcp_security_public(db: Session = Depends(get_db)):
     """
     security = db.query(MCPSecurity).first()
     if not security:
-        # Return default configuration (includes Thor's n8n service)
+        # Return default configuration: deny-all-remote (localhost only)
         return MCPSecurityResponse(
             id=0,
-            allowed_domains=["localhost", "127.0.0.1", "localhost", "*"],
+            allowed_domains=["localhost", "127.0.0.1"],
             blocked_domains=[],
             max_execution_time_ms=30000,
             max_concurrent_tools=5,
@@ -162,6 +162,22 @@ async def update_mcp_security(
 
     # Update fields
     update_data = data.model_dump(exclude_unset=True)
+
+    # D14: a bare "*"/"" is never a wildcard. Strip it per-item and keep the
+    # rest — a list that mixes a valid domain with "*" still saves the valid
+    # domain. A PUT of ["*"] alone saves [], which is D14's own definition of
+    # localhost-only (check_domain treats an empty allowlist as localhost-only).
+    if update_data.get("allowed_domains") is not None:
+        raw = update_data["allowed_domains"]
+        stripped_out = [d for d in raw if d in ("*", "")]
+        if stripped_out:
+            logger.warning(
+                "mcp_allowlist_bare_wildcard_stripped",
+                stripped=stripped_out,
+                user=current_user.username,
+            )
+        update_data["allowed_domains"] = [d for d in raw if d not in ("*", "")]
+
     for field, value in update_data.items():
         setattr(security, field, value)
 
@@ -323,11 +339,12 @@ async def check_domain(
 
     security = db.query(MCPSecurity).first()
 
-    # Default to allowing localhost services if no config
+    # No config yet: deny-all-remote, localhost only (D14 — matches the
+    # empty-allowlist semantics below, not a fail-open default).
     if not security:
-        default_allowed = ["localhost", "127.0.0.1", "localhost"]
-        allowed = domain in default_allowed or domain.endswith("")
-        reason = "Allowed (default)" if allowed else "No security config, domain not in defaults"
+        default_allowed = ["localhost", "127.0.0.1"]
+        allowed = domain in default_allowed
+        reason = "Allowed (default, localhost only)" if allowed else "No security config, localhost only"
         return DomainCheckResponse(url=url, domain=domain, allowed=allowed, reason=reason)
 
     # Check blocklist first (takes precedence)
@@ -455,20 +472,38 @@ def _is_valid_domain(domain: str) -> bool:
 
 
 def _domain_matches(domain: str, patterns: List[str]) -> bool:
-    """Check if domain matches any pattern in list (supports wildcards)."""
+    """Check if domain matches any pattern in list (supports wildcards).
+
+    D14: a bare "*" or "" entry is never a wildcard. It's skipped per-item
+    (not per-list), so a list like ["*", "good.example.com"] still matches
+    "good.example.com" normally — the bare entry just never grants blanket
+    access. Suffix matching is dot-anchored: "*.example.com" matches
+    "example.com" and "sub.example.com", never "notexample.com".
+    """
     domain = domain.lower()
+    bare_wildcards_ignored: List[str] = []
+    matched = False
 
     for pattern in patterns:
-        pattern = pattern.lower()
+        pattern = pattern.lower().strip()
+
+        if pattern in ("*", ""):
+            bare_wildcards_ignored.append(pattern)
+            continue
 
         # Exact match
         if domain == pattern:
-            return True
+            matched = True
+            break
 
-        # Wildcard match (*.example.com matches sub.example.com)
+        # Wildcard match (*.example.com matches example.com and sub.example.com)
         if pattern.startswith("*."):
             suffix = pattern[2:]  # Remove "*."
-            if domain.endswith(suffix) or domain == suffix:
-                return True
+            if domain == suffix or domain.endswith("." + suffix):
+                matched = True
+                break
 
-    return False
+    if bare_wildcards_ignored:
+        logger.warning("mcp_allowlist_bare_wildcard_ignored", ignored=bare_wildcards_ignored)
+
+    return matched

@@ -379,7 +379,7 @@ async def check_voice_services_health(
 
 
 # ============================================================================
-# Voice Control Proxy (forwards to Mac mini voice-control API)
+# Voice Control Proxy (forwards to the voice host's voice-control API)
 # ============================================================================
 
 VOICE_CONTROL_URL = os.getenv("VOICE_CONTROL_URL", "http://localhost:8098")
@@ -388,9 +388,9 @@ VOICE_CONTROL_URL = os.getenv("VOICE_CONTROL_URL", "http://localhost:8098")
 @router.get("/running-config")
 async def get_running_voice_config() -> Dict[str, Any]:
     """
-    Proxy to get running configuration from Mac mini containers.
+    Proxy to get running configuration from the voice host's containers.
 
-    This endpoint forwards to the voice-control API on Mac mini to get
+    This endpoint forwards to the voice-control API on the voice host to get
     the actual running Whisper model and Piper voice from containers.
     """
     import httpx
@@ -414,9 +414,9 @@ async def restart_voice_services_proxy(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
-    Proxy to restart voice services on Mac mini.
+    Proxy to restart voice services on the voice host.
 
-    Also updates the .env config on Mac mini with current admin settings.
+    Also updates the .env config on the voice host with current admin settings.
     """
     import httpx
 
@@ -451,7 +451,7 @@ async def restart_voice_services_proxy(
                 return response.json()
             return {"error": f"Restart failed with status {response.status_code}"}
     except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Voice control API unreachable on Mac mini")
+        raise HTTPException(status_code=503, detail="Voice control API unreachable on the voice host")
     except Exception as e:
         logger.error("restart_services_proxy_error", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))

@@ -3257,7 +3257,7 @@ class Memory(Base):
 
     Supports three scopes:
     - 'global': Facts available to everyone (promoted from owner/guest)
-    - 'owner': Jay's persistent memories (never expires)
+    - 'owner': the owner's persistent memories (never expires)
     - 'guest': Scoped to a GuestSession (expires after retention period)
     """
     __tablename__ = 'memories'
@@ -3919,7 +3919,7 @@ class VoiceServiceConfig(Base):
     """
     Voice service host/port configuration.
 
-    Stores connection details for STT and TTS services on Mac mini.
+    Stores connection details for STT and TTS services on the voice host.
     """
     __tablename__ = 'voice_service_config'
 
@@ -3929,7 +3929,7 @@ class VoiceServiceConfig(Base):
     service_type = Column(String(10), unique=True, nullable=False)  # 'stt' or 'tts'
 
     # Connection details
-    host = Column(String(100), nullable=False)  # 192.168.10.181
+    host = Column(String(100), nullable=False)  # e.g. 192.0.2.20
     wyoming_port = Column(Integer, nullable=False)  # Wyoming protocol port
     rest_port = Column(Integer)  # REST API port (optional)
 
@@ -4121,7 +4121,7 @@ class MCPSecurity(Base):
     id = Column(Integer, primary_key=True)
 
     # Domain restrictions
-    allowed_domains = Column(JSONB, default=list)  # e.g., ["localhost", "n8n.xmojo.net"]
+    allowed_domains = Column(JSONB, default=list)  # e.g., ["localhost", "n8n.example.com"]
     blocked_domains = Column(JSONB, default=list)
 
     # Execution limits

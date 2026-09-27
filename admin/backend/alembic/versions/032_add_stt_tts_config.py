@@ -98,7 +98,7 @@ def upgrade() -> None:
         ('ljspeech-high', 'LJSpeech (High Quality)', 'piper', 'en_US-ljspeech-high', 'en', 'high', 'Classic high-quality female voice.', false)
     """)
 
-    # Seed default service config (Mac mini)
+    # Seed default service config (the voice host)
     op.execute("""
         INSERT INTO voice_service_config (service_type, host, wyoming_port, rest_port, enabled)
         VALUES

@@ -9,7 +9,7 @@ let haPipelines = [];
 let currentPipelineMode = 'full';
 let haConnected = false;
 
-// Running configuration from Mac mini containers
+// Running configuration from the voice host's containers
 let runningConfig = {
     whisper_model: null,
     piper_voice: null,
@@ -58,7 +58,7 @@ async function loadVoiceConfig() {
         ttsVoices = await ttsRes.json();
         voiceServices = await servicesRes.json();
 
-        // Load running config from Mac mini (non-blocking)
+        // Load running config from the voice host (non-blocking)
         loadRunningConfig().then(() => {
             updateSyncStatus();
         });
@@ -93,8 +93,8 @@ function updateSyncStatus() {
     const ttsSyncEl = document.getElementById('tts-sync-status');
 
     if (!runningConfig.loaded) {
-        if (sttSyncEl) sttSyncEl.innerHTML = '<span class="sync-unknown" title="Cannot check - Mac mini unreachable"><i class="fas fa-question-circle"></i> Unknown</span>';
-        if (ttsSyncEl) ttsSyncEl.innerHTML = '<span class="sync-unknown" title="Cannot check - Mac mini unreachable"><i class="fas fa-question-circle"></i> Unknown</span>';
+        if (sttSyncEl) sttSyncEl.innerHTML = '<span class="sync-unknown" title="Cannot check - voice host unreachable"><i class="fas fa-question-circle"></i> Unknown</span>';
+        if (ttsSyncEl) ttsSyncEl.innerHTML = '<span class="sync-unknown" title="Cannot check - voice host unreachable"><i class="fas fa-question-circle"></i> Unknown</span>';
         return;
     }
 
@@ -580,7 +580,7 @@ async function setActiveTTS(id, name) {
 
 async function restartVoiceServices() {
     try {
-        showNotification('Restarting voice services on Mac mini...', 'info');
+        showNotification('Restarting voice services on the voice host...', 'info');
 
         // Use admin backend proxy which handles config update and restart
         const response = await fetch('/api/voice-config/restart-services', {
@@ -609,7 +609,7 @@ async function restartVoiceServices() {
 
     } catch (error) {
         console.error('Restart error:', error);
-        showNotification(`Restart failed: ${error.message}. Check Mac mini connection.`, 'error');
+        showNotification(`Restart failed: ${error.message}. Check the voice host connection.`, 'error');
         // Show manual restart instructions as fallback
         showNotification('Manual: Restart Wyoming services on your voice server (docker compose restart whisper piper)', 'info');
     }

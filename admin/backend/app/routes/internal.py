@@ -339,7 +339,7 @@ async def get_base_knowledge() -> Dict[str, Any]:
             return dict(row)
         # Return default values if no config exists
         return {
-            "default_location": "Baltimore, MD",
+            "default_location": None,
             "user_name": None,
             "preferences": {}
         }
@@ -435,7 +435,7 @@ async def get_all_config() -> Dict[str, Any]:
         # Base knowledge
         row = await athena_conn.fetchrow("SELECT * FROM base_knowledge LIMIT 1")
         result['base_knowledge'] = dict(row) if row else {
-            "default_location": "Baltimore, MD",
+            "default_location": None,
             "user_name": None,
             "preferences": {}
         }

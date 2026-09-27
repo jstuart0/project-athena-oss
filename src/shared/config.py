@@ -183,7 +183,7 @@ class AthenaConfig(BaseSettings):
     # that talk to the Control Agent short-circuit with a per-endpoint
     # "disabled" response that matches each route's existing typed contract.
     # Set CONTROL_AGENT_ENABLED=true in your env only if you actually run
-    # a Control Agent on a host (e.g., a Mac Studio alongside Ollama).
+    # a Control Agent on a host (e.g., an Apple Silicon Mac alongside Ollama).
     # Valid values: true / false / 1 / 0. Do not set to a blank string.
     control_agent_enabled: bool = Field(default=False)
 
@@ -222,7 +222,7 @@ class AthenaConfig(BaseSettings):
     #   (asyncio.Semaphore). Default 8.
     # health_poll_allowed_private_hosts: comma-separated CIDRs or hostnames
     #   that override the RFC1918/loopback/ULA block. Empty default = fail-
-    #   closed for OSS deployers. Jay's homelab: set "192.168.10.0/24" (or the
+    #   closed for OSS deployers. Example with a host subnet: 192.0.2.0/24 (or the
     #   specific pod/service CIDR) so the poller can reach in-cluster services.
     #   Example for K8s: "10.96.0.0/12,10.244.0.0/16"
     #   To allow loopback (local-dev only): add "127.0.0.0/8" to this list.
@@ -309,6 +309,20 @@ class AthenaConfig(BaseSettings):
     # conversation, and the reset fragments (or wipes, if the truncated text
     # happens to match the opener) a still-live conversation.
     new_conversation_reset_grace_seconds: int = Field(default=120, ge=0)
+
+    # ------------------------------------------------------------------
+    # Optional third-party integrations (ATHENA-89 / D7)
+    # ------------------------------------------------------------------
+    # music_assistant_url: base URL for a Music Assistant instance (e.g.
+    #   http://music-assistant.local:8095). Empty (default) means Music
+    #   Assistant isn't configured; consumers must not fall back to a
+    #   hardcoded host. The admin-stored MusicConfig.music_assistant_url
+    #   column takes precedence over this env default when set.
+    music_assistant_url: str = Field(default="")
+    # searxng_base_url: base URL for a self-hosted SearXNG instance. Empty
+    #   (default) means the SearXNG search provider is disabled and its
+    #   admin status reads "not configured" with no network probe made.
+    searxng_base_url: str = Field(default="")
 
     # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern

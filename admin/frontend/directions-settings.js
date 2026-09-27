@@ -426,7 +426,7 @@ function renderOriginPlaceholderSettings(data) {
 
             <div class="mt-4 p-3 bg-gray-800/50 rounded-lg border border-gray-700">
                 <p class="text-gray-400 text-sm">
-                    <strong class="text-white">How it works:</strong> When a user asks "Give me directions to Baltimore"
+                    <strong class="text-white">How it works:</strong> When a user asks "Give me directions to the airport"
                     and the LLM sets <code class="text-blue-400">origin: "current location"</code>, the orchestrator
                     detects this placeholder and replaces it with the user's actual GPS location or search location override.
                 </p>

@@ -1,10 +1,11 @@
 -- Migration 012: Add process control method support
--- Description: Updates services on Mac Studio to use 'process' control method
---              instead of 'docker' since they run as bare Python processes
+-- Description: Updates services on the Control Agent host to use 'process'
+--              control method instead of 'docker' since they run as bare
+--              Python processes
 -- Date: 2025-12-02
 
 -- ============================================================================
--- UPDATE CONTROL METHOD FOR MAC STUDIO SERVICES
+-- UPDATE CONTROL METHOD FOR CONTROL AGENT HOST SERVICES
 -- ============================================================================
 -- These services run as Python/uvicorn processes, not Docker containers
 
@@ -29,7 +30,7 @@ WHERE host = 'localhost'
   );
 
 -- Keep Ollama as 'launchd' since it's managed by brew services
--- Keep infrastructure services (qdrant, redis on Mac mini) as 'docker'
+-- Keep infrastructure services (qdrant, redis on the voice host) as 'docker'
 -- Keep control-agent as 'none' since it doesn't need to control itself
 
 -- ============================================================================

@@ -2,7 +2,7 @@
 Voice testing API routes.
 
 Provides testing endpoints for STT, TTS, LLM, RAG, and full pipeline tests.
-Adapted for Mac Studio/mini architecture (no Jetson wake word detection).
+Adapted for a headless voice-host architecture (no Jetson wake word detection).
 """
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
@@ -31,6 +31,7 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, VoiceTest, VoiceTestFeedback, LLMPerformanceMetric, SystemSetting
 from shared.config import get_config
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -44,6 +45,26 @@ WYOMING_TTS_PORT = int(os.getenv("WYOMING_TTS_PORT", "10200"))
 
 # Other service configuration
 RAG_SERVICE_HOST = os.getenv("RAG_SERVICE_HOST", "localhost")
+
+# D8: the full-pipeline test's auto-detected RAG probe has no user-supplied
+# location, so it can't reuse test_rag_query's query.text. The airport probe
+# always uses a fixed, non-behavioral example code; it isn't derived from
+# DEFAULT_CITY/DEFAULT_STATE.
+PROBE_AIRPORT_CODE = "JFK"
+
+
+def _rag_probe_url(connector: str, port: int, city: str, state: str) -> Optional[str]:
+    """Build the synthetic probe URL for test_full_pipeline's auto-detected
+    RAG connector. Returns None when the probe can't run generically (the
+    weather probe needs a configured DEFAULT_CITY)."""
+    if connector == "weather":
+        if not city:
+            return None
+        location = f"{city},{state}" if state else city
+        return f"http://{RAG_SERVICE_HOST}:{port}/weather/current?location={location}"
+    if connector == "airports":
+        return f"http://{RAG_SERVICE_HOST}:{port}/airports/{PROBE_AIRPORT_CODE}"
+    return f"http://{RAG_SERVICE_HOST}:{port}/scores"
 
 
 def get_ollama_url(db: Session) -> str:
@@ -210,7 +231,7 @@ async def test_speech_to_text(
                 "confidence": 0.95,  # Wyoming doesn't return confidence, use default
                 "processing_time": int(elapsed * 1000),
                 "model": "faster-whisper-tiny.en",
-                "service": "mac-studio-whisper",
+                "service": "whisper",
                 "wyoming_host": f"{WYOMING_STT_HOST}:{WYOMING_STT_PORT}"
             }
 
@@ -318,7 +339,7 @@ async def test_text_to_speech(
                 "audio_duration_ms": audio_duration_ms,
                 "audio_bytes": len(pcm_audio) if pcm_audio else 0,
                 "model": "piper-tts",
-                "service": "mac-studio-piper",
+                "service": "piper",
                 "wyoming_host": f"{WYOMING_TTS_HOST}:{WYOMING_TTS_PORT}"
             }
 
@@ -424,7 +445,7 @@ async def test_llm_processing(
                         "model": model,
                         "tokens": data.get("eval_count", 0),
                         "tokens_per_second": round(data.get("eval_count", 0) / elapsed, 2) if elapsed > 0 else 0,
-                        "service": "mac-studio-ollama"
+                        "service": "ollama"
                     }
 
                     # Store test result
@@ -516,7 +537,7 @@ async def test_rag_query(
                         "processing_time": int(elapsed * 1000),
                         "connector": connector,
                         "cached": resp.headers.get('X-Cache-Hit', 'false') == 'true',
-                        "service": f"mac-studio-rag-{connector}"
+                        "service": f"rag-{connector}"
                     }
 
                     # Store test result
@@ -619,33 +640,34 @@ async def test_full_pipeline(
                 break
 
         if rag_connector:
-            try:
-                start = time.time()
-                port_map = {"weather": 8010, "airports": 8011, "sports": 8017}
-                port = port_map.get(rag_connector, 8010)
+            port_map = {"weather": 8010, "airports": 8011, "sports": 8017}
+            port = port_map.get(rag_connector, 8010)
 
-                # Call appropriate RAG service
-                if rag_connector == "weather":
-                    rag_url = f"http://{RAG_SERVICE_HOST}:{port}/weather/current?location=Baltimore,MD"
-                elif rag_connector == "airports":
-                    rag_url = f"http://{RAG_SERVICE_HOST}:{port}/airports/BWI"
-                else:
-                    rag_url = f"http://{RAG_SERVICE_HOST}:{port}/scores"
+            # Call appropriate RAG service
+            cfg = get_config()
+            rag_url = _rag_probe_url(
+                rag_connector, port, cfg.default_city, os.getenv("DEFAULT_STATE", "")
+            )
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(rag_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        if resp.status == 200:
-                            rag_result = await resp.json()
-                            timings["rag"] = time.time() - start
-                            results["rag_connector"] = rag_connector
-                            results["rag_data"] = rag_result
-                        else:
-                            timings["rag"] = time.time() - start
-                            results["rag_error"] = f"HTTP {resp.status}"
-            except Exception as e:
-                timings["rag"] = time.time() - start if "start" in dir() else 0
-                results["rag_error"] = str(e)
-                logger.warning("rag_enhancement_failed", connector=rag_connector, error=str(e))
+            if rag_url is None:
+                results["rag_skipped"] = f"no DEFAULT_CITY configured for {rag_connector} probe"
+            else:
+                try:
+                    start = time.time()
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(rag_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                            if resp.status == 200:
+                                rag_result = await resp.json()
+                                timings["rag"] = time.time() - start
+                                results["rag_connector"] = rag_connector
+                                results["rag_data"] = rag_result
+                            else:
+                                timings["rag"] = time.time() - start
+                                results["rag_error"] = f"HTTP {resp.status}"
+                except Exception as e:
+                    timings["rag"] = time.time() - start
+                    results["rag_error"] = str(e)
+                    logger.warning("rag_enhancement_failed", connector=rag_connector, error=str(e))
 
         # 3. Home Assistant Integration (if command detected)
         # Note: HA integration handled by orchestrator, not admin pipeline

@@ -12,8 +12,6 @@ COMMENT ON COLUMN component_model_assignments.disable_thinking IS
 UPDATE component_model_assignments
 SET disable_thinking = TRUE
 WHERE model_name IN (
-    '/Users/jstuart/models/mlx/Qwen3-4B-Instruct-2507-4bit',
-    '/Users/jstuart/models/mlx/Qwen3-8B-4bit',
     'qwen3:4b-instruct-2507-q4_K_M',
     'qwen3:4b',
     'qwen3:8b'
@@ -22,9 +20,10 @@ OR model_name ILIKE 'qwen3:%'
 OR model_name ILIKE '%Qwen3%';
 
 -- For MLX-backed Qwen models, disable thinking at the template layer too.
+-- Matched by backend_type + model_name pattern rather than a literal model
+-- path, so this generalizes across deployments. The || merge (rather than a
+-- clobbering SET) preserves any other mlx_options keys already set for the
+-- row. This is a no-op on a fresh DB with no matching rows.
 UPDATE model_configurations
-SET mlx_options = '{"chat_template_kwargs":{"enable_thinking":false}}'::jsonb
-WHERE model_name IN (
-    '/Users/jstuart/models/mlx/Qwen3-4B-Instruct-2507-4bit',
-    '/Users/jstuart/models/mlx/Qwen3-8B-4bit'
-);
+SET mlx_options = COALESCE(mlx_options, '{}'::jsonb) || '{"chat_template_kwargs":{"enable_thinking":false}}'::jsonb
+WHERE backend_type = 'mlx' AND model_name ILIKE '%Qwen3%';

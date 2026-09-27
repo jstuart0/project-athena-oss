@@ -48,8 +48,8 @@ import control_agent.main as ca_main
 
 FAKE_ADMIN_URL = "https://athena.example.com"
 FAKE_SERVICE_KEY = "test-service-key-phase3"
-FAKE_CA_URL = "http://192.168.10.108:8099"
-FAKE_CA_HOST = "192.168.10.108"
+FAKE_CA_URL = "http://203.0.113.10:8099"
+FAKE_CA_HOST = "203.0.113.10"
 
 EXPECTED_PARAM_KEYS = {"name", "endpoint_url", "service_type", "cache_ttl", "timeout", "rate_limit"}
 

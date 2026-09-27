@@ -504,7 +504,7 @@ async def save_house_layout_settings(
 
     Example layout description:
     ```
-    2-story house in Baltimore.
+    2-story house.
 
     First floor:
     - Living room, dining room, kitchen (open floor plan, connected)

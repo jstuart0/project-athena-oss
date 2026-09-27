@@ -265,8 +265,18 @@ def scan_file(root: Path, rel_path: str, extra_rules: list[tuple[str, re.Pattern
 
 
 def apply_allowlist(
-    entries: list[AllowlistEntry], hits: list[Hit]
+    entries: list[AllowlistEntry], hits: list[Hit], scanned_paths: set[str]
 ) -> tuple[list[Hit], list[AllowlistEntry]]:
+    """Suppress hits covered by an allowlist entry; report entries that never
+    suppressed anything as stale.
+
+    Staleness is scoped to what was actually scanned this run (`--paths`
+    narrows the population): an entry whose glob names a file that wasn't in
+    `scanned_paths` this run isn't reachable, so it can't be proven stale —
+    it's silently skipped rather than flagged, or a `--paths`-scoped phase
+    gate run would spuriously fail on every allowlist entry outside the
+    touched-file set.
+    """
     used = [False] * len(entries)
     kept: list[Hit] = []
     for hit in hits:
@@ -277,7 +287,11 @@ def apply_allowlist(
                 suppressed = True
         if not suppressed:
             kept.append(hit)
-    stale = [entry for entry, was_used in zip(entries, used) if not was_used]
+    stale = [
+        entry
+        for entry, was_used in zip(entries, used)
+        if not was_used and any(fnmatch.fnmatch(p, entry.glob) for p in scanned_paths)
+    ]
     return kept, stale
 
 
@@ -362,7 +376,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     for rel in scan_targets:
         all_hits.extend(scan_file(root, rel, extra_rules))
 
-    kept_hits, stale_entries = apply_allowlist(allowlist, all_hits)
+    kept_hits, stale_entries = apply_allowlist(allowlist, all_hits, set(scan_targets))
     kept_fails = [h for h in kept_hits if h.cls == "FAIL"]
     kept_warns = [h for h in kept_hits if h.cls == "WARN"]
 

@@ -289,24 +289,21 @@
      */
     async function loadBaseKnowledge(container) {
         let knowledge = {};
+        let knowledgeLoadFailed = false;
 
         try {
             const response = await Athena.api('/api/internal/config/base-knowledge');
             knowledge = response || {};
         } catch {
-            // Use defaults if API not available
-            knowledge = {
-                city: 'Baltimore',
-                state: 'MD',
-                latitude: '39.2904',
-                longitude: '-76.6122',
-                timezone: 'America/New_York'
-            };
+            // Leave the fields empty and let the operator fill them in.
+            knowledge = {};
+            knowledgeLoadFailed = true;
         }
 
         state.data.knowledge = knowledge;
 
         container.innerHTML = `
+            ${knowledgeLoadFailed ? '<p id="knowledge-load-error" class="text-sm text-yellow-400 mb-4">Location settings could not be loaded. Enter your city and coordinates below.</p>' : ''}
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <!-- Location Settings -->
                 <div class="bg-dark-card border border-dark-border rounded-xl">
@@ -435,7 +432,7 @@
     function updateCurrentTime() {
         const el = document.getElementById('current-time');
         if (el) {
-            const timezone = document.getElementById('knowledge-timezone')?.value || 'America/New_York';
+            const timezone = document.getElementById('knowledge-timezone')?.value || 'UTC';
             try {
                 el.textContent = new Date().toLocaleTimeString('en-US', { timeZone: timezone });
             } catch {
@@ -756,7 +753,7 @@
             state: document.getElementById('knowledge-state')?.value.trim() || '',
             latitude: document.getElementById('knowledge-latitude')?.value.trim() || '',
             longitude: document.getElementById('knowledge-longitude')?.value.trim() || '',
-            timezone: document.getElementById('knowledge-timezone')?.value || 'America/New_York',
+            timezone: document.getElementById('knowledge-timezone')?.value || 'UTC',
             temp_unit: document.getElementById('knowledge-temp-unit')?.value || 'F',
             distance_unit: document.getElementById('knowledge-distance-unit')?.value || 'mi',
             date_format: document.getElementById('knowledge-date-format')?.value || 'MM/DD/YYYY'

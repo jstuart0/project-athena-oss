@@ -2,7 +2,7 @@
 Project Athena - Admin Interface Backend
 
 Provides REST API for monitoring and managing Athena services.
-Deploys to thor Kubernetes cluster.
+Deploys to Kubernetes.
 """
 
 import os
@@ -65,7 +65,7 @@ if DEV_MODE:
 MAC_STUDIO_IP = os.getenv("MAC_STUDIO_IP", "localhost")
 MAC_MINI_IP = os.getenv("MAC_MINI_IP", "localhost")
 
-# Mac Studio services
+# Ollama host services
 SERVICE_PORTS = {
     "gateway": 8000,
     "orchestrator": 8001,
@@ -85,7 +85,7 @@ SERVICE_PORTS = {
     "ollama": 11434,
 }
 
-# Mac mini services (data layer + voice)
+# Voice host services (data layer + voice)
 MAC_MINI_PORTS = {
     "qdrant": 6333,
     "redis": 6379,
@@ -1012,6 +1012,46 @@ class SystemStatus(BaseModel):
     services: List[ServiceStatus]
 
 
+async def _check_searxng_status(client: httpx.AsyncClient) -> ServiceStatus:
+    """Check SearXNG (Class 2: operator-configured infra URL, disabled when
+    unset — no hardcoded cluster-local default). Extracted from
+    get_system_status so it's independently unit-testable (ATHENA-89 A6)."""
+    searxng_status = ServiceStatus(
+        name="searxng (search)",
+        port=8080,
+        healthy=False,
+        status="unknown"
+    )
+
+    searxng_base_url = get_config().searxng_base_url
+    if not searxng_base_url:
+        searxng_status.status = "not configured"
+        return searxng_status
+
+    try:
+        url = f"{searxng_base_url.rstrip('/')}/healthz"
+        response = await client.get(url, follow_redirects=False)
+
+        if response.status_code == 200:
+            searxng_status.healthy = True
+            searxng_status.status = "running"
+        else:
+            searxng_status.status = f"error: HTTP {response.status_code}"
+            searxng_status.error = f"Unexpected status code: {response.status_code}"
+
+    except httpx.ConnectError:
+        searxng_status.status = "not deployed"
+        searxng_status.error = "SearXNG service not accessible"
+    except httpx.TimeoutException:
+        searxng_status.status = "timeout"
+        searxng_status.error = "Service did not respond within timeout"
+    except Exception as e:
+        searxng_status.status = "error"
+        searxng_status.error = str(e)
+
+    return searxng_status
+
+
 @app.get("/health")
 async def health_check():
     """Health check for admin API itself."""
@@ -1029,7 +1069,7 @@ async def get_system_status(current_user: User = Depends(get_current_user)):
     service_statuses = []
 
     async with httpx.AsyncClient(timeout=5.0) as client:
-        # Check Mac Studio services
+        # Check Ollama host services
         for service_name, port in SERVICE_PORTS.items():
             status = ServiceStatus(
                 name=f"{service_name} (studio)",
@@ -1092,7 +1132,7 @@ async def get_system_status(current_user: User = Depends(get_current_user)):
 
             service_statuses.append(status)
 
-        # Check Mac mini services (optional - graceful degradation)
+        # Check voice host services (optional - graceful degradation)
         for service_name, port in MAC_MINI_PORTS.items():
             status = ServiceStatus(
                 name=f"{service_name} (mini)",
@@ -1148,36 +1188,9 @@ async def get_system_status(current_user: User = Depends(get_current_user)):
 
             service_statuses.append(status)
 
-        # Check SearXNG (cluster-local service)
-        searxng_status = ServiceStatus(
-            name="searxng (search)",
-            port=8080,
-            healthy=False,
-            status="unknown"
-        )
-
-        try:
-            url = "http://searxng.athena-admin.svc.cluster.local:8080/healthz"
-            response = await client.get(url)
-
-            if response.status_code == 200:
-                searxng_status.healthy = True
-                searxng_status.status = "running"
-            else:
-                searxng_status.status = f"error: HTTP {response.status_code}"
-                searxng_status.error = f"Unexpected status code: {response.status_code}"
-
-        except httpx.ConnectError:
-            searxng_status.status = "not deployed"
-            searxng_status.error = "SearXNG service not accessible"
-        except httpx.TimeoutException:
-            searxng_status.status = "timeout"
-            searxng_status.error = "Service did not respond within timeout"
-        except Exception as e:
-            searxng_status.status = "error"
-            searxng_status.error = str(e)
-
-        service_statuses.append(searxng_status)
+        # Check SearXNG (Class 2: operator-configured infra URL, disabled
+        # when unset — no hardcoded cluster-local default)
+        service_statuses.append(await _check_searxng_status(client))
 
     healthy_count = sum(1 for s in service_statuses if s.healthy)
     total_count = len(service_statuses)
