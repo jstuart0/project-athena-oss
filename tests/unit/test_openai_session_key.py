@@ -21,22 +21,58 @@ import structlog
 
 sys.path.insert(0, "src")
 
-# Stub heavy/absent deps and pre-import orchestrator.nodes before
-# orchestrator.helpers — helpers.py's `from orchestrator.nodes import
-# _runtime` (line ~29) otherwise races nodes/__init__.py's own
-# `from orchestrator.helpers import maybe_post_synthesis_fallback` (via
-# finalize.py) into a circular partial-init ImportError. Importing
-# orchestrator.nodes first lets it pull in a fresh orchestrator.helpers
-# to completion before this module ever touches it directly.
-sys.modules.setdefault("prometheus_client", mock.MagicMock())
+# Stub heavy/absent deps *before* the first orchestrator.* import.
+#
+# - langgraph / langgraph.graph / prometheus_client aren't installed in the
+#   unit-test environment.
+# - orchestrator.config_loader must be mocked here, first, not after
+#   orchestrator.nodes/orchestrator.helpers: those already import
+#   `from orchestrator.config_loader import ADMIN_API_URL` (helpers.py) and
+#   would otherwise load the REAL config_loader (DB-driven, needs a live
+#   admin backend) before this module gets a chance to install the mock —
+#   sys.modules.setdefault would then be a no-op. Registering the mock first
+#   makes every later `from orchestrator.config_loader import X` resolve
+#   against it instead (same pattern as tests/unit/test_health_probes.py).
+# - orchestrator.nodes must be imported before orchestrator.helpers —
+#   helpers.py's own `from orchestrator.nodes import _runtime` otherwise
+#   races nodes/__init__.py's `from orchestrator.helpers import
+#   maybe_post_synthesis_fallback` (via finalize.py) into a circular
+#   partial-init ImportError. See also helpers.py's "Import contract" note.
+for _mod in ("langgraph", "langgraph.graph", "prometheus_client"):
+    if _mod not in sys.modules:
+        sys.modules[_mod] = mock.MagicMock()
 os.environ.setdefault("SERVICE_API_KEY", "test-key-session-key")
 os.environ.setdefault("ADMIN_API_URL", "http://localhost:8080")
+
+from shared.config import get_config as _shared_get_config  # noqa: E402
+import shared.config as _shared_config  # noqa: E402
+
+_config_loader_mock = mock.MagicMock()
+_config_loader_mock.get_config = _shared_get_config
+_config_loader_mock.ADMIN_API_URL = os.environ["ADMIN_API_URL"]
+_config_loader_mock.get_feature_flag = mock.AsyncMock(return_value=False)
+_config_loader_mock.get_feature_flags = mock.AsyncMock(return_value={})
+_config_loader_mock.clear_cache = mock.AsyncMock()
+sys.modules.setdefault("orchestrator.config_loader", _config_loader_mock)
+
 import orchestrator.nodes  # noqa: E402,F401
 
-from orchestrator.helpers import resolve_openai_session, ResolvedSession  # noqa: E402
+from orchestrator.helpers import resolve_openai_session, ResolvedSession, session_hmac_secret  # noqa: E402
+
+import orchestrator.main as _main_module  # noqa: E402
+from orchestrator.nodes import _runtime  # noqa: E402
+from orchestrator.session_manager import SessionManager  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MAIN_PY = REPO_ROOT / "src" / "orchestrator" / "main.py"
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_between_tests():
+    _runtime.reset_for_test()
+    yield
+    _runtime.reset_for_test()
 
 SECRET = b"test-secret"
 
@@ -329,3 +365,89 @@ def test_openai_chat_request_accepts_identity_fields():
         if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
     }
     assert {"user", "session_id", "room"} <= annotated_fields
+
+
+# ---------------------------------------------------------------------------
+# 12. test_non_stream_branch_passes_resolved_session (binding, C10)
+#
+# Tests 9 and 10 prove *shape*: no literal legacy string, and the two call
+# sites pass a variable literally named session_id. Neither proves that
+# variable is bound to resolve_openai_session's actual return value at the
+# point of use. This test runs the real /v1/chat/completions endpoint (via
+# TestClient) with a real memory-mode SessionManager and asserts on the
+# actual QueryRequest.session_id two different requests receive.
+# ---------------------------------------------------------------------------
+
+class _FakeSessionCacheClient:
+    """Minimal stand-in for shared.cache.CacheClient: .client.delete(...)."""
+
+    def __init__(self):
+        self.client = SimpleNamespace(
+            delete=mock.AsyncMock(),
+            get=mock.AsyncMock(return_value=None),
+            setex=mock.AsyncMock(),
+        )
+
+
+def test_non_stream_branch_passes_resolved_session():
+    sm = SessionManager()
+    sm.redis_client = None
+    _runtime.set_session_manager(sm)
+    _runtime.set_cache_client(_FakeSessionCacheClient())
+
+    captured_requests = []
+
+    async def _fake_process_query(query_request):
+        captured_requests.append(query_request)
+        return SimpleNamespace(request_id="req-fake", answer="ok")
+
+    original_process_query = _main_module.process_query
+    _main_module.process_query = _fake_process_query
+    try:
+        client = TestClient(_main_module.app)
+
+        opener_a = "what place has happy hour and outdoor seating?"
+        opener_b = "turn off the lights"
+
+        resp_a1 = client.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": opener_a}], "stream": False},
+        )
+        resp_b = client.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": opener_b}], "stream": False},
+        )
+        # Replay of the first opener (e.g. a second, independent
+        # conversation starting the same way) must resolve to the same id.
+        resp_a2 = client.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": opener_a}], "stream": False},
+        )
+    finally:
+        _main_module.process_query = original_process_query
+
+    assert resp_a1.status_code == 200
+    assert resp_b.status_code == 200
+    assert resp_a2.status_code == 200
+    assert len(captured_requests) == 3
+
+    session_id_a1 = captured_requests[0].session_id
+    session_id_b = captured_requests[1].session_id
+    session_id_a2 = captured_requests[2].session_id
+
+    assert session_id_a1 != session_id_b
+    assert session_id_a1 == session_id_a2
+
+    secret = session_hmac_secret(_shared_config.get_config())
+    expected_a = resolve_openai_session(
+        [SimpleNamespace(role="user", content=opener_a)],
+        top_level_session_id=None, extra_body=None, user=None, room=None,
+        secret=secret,
+    )
+    expected_b = resolve_openai_session(
+        [SimpleNamespace(role="user", content=opener_b)],
+        top_level_session_id=None, extra_body=None, user=None, room=None,
+        secret=secret,
+    )
+    assert session_id_a1 == expected_a.session_id
+    assert session_id_b == expected_b.session_id

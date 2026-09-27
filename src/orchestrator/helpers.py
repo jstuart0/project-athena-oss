@@ -15,6 +15,20 @@ Import contract:
   - shared.admin_config, shared.service_registry — sibling-already modules
   - Standard library + third-party (httpx, re, etc.)
   - NO `from orchestrator.main import ...` lines (three-pattern rule, r1c:R3-H2)
+
+A test module (or any other entry point) that imports this module directly
+MUST import `orchestrator.nodes` first. This module's own `from
+orchestrator.nodes import _runtime` line otherwise races
+`orchestrator/nodes/__init__.py`'s `from orchestrator.helpers import
+maybe_post_synthesis_fallback` (via `nodes/finalize.py`) into a circular
+partial-init `ImportError` — Python starts executing this file, pauses at
+the `_runtime` import to load `orchestrator.nodes`, which pulls in
+`finalize.py`, which tries to import a name from this file that isn't
+defined yet (this file hasn't reached that line). `orchestrator.main`
+already imports `orchestrator.nodes` (indirectly) before it imports from
+`orchestrator.helpers`, so production code never hits this; only a test
+or script importing `orchestrator.helpers` as its first orchestrator-
+related import can.
 """
 from __future__ import annotations
 
