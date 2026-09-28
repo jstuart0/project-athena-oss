@@ -14,13 +14,16 @@ execute_intent, surfaces any denial recorded on the scope as the answer
 """
 from __future__ import annotations
 
+import asyncio
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
+from uuid import uuid4
 
 import structlog
 
 from orchestrator.nodes._runtime import (
     get_automation_agent,
+    get_cache_client,
     get_entity_manager,
     get_ha_client,
     get_sequence_executor,
@@ -56,8 +59,235 @@ from orchestrator.utterance_kind import (
     classify_utterance,
 )
 from orchestrator.utterance_kind import UNKNOWN_CLASSIFICATION as _KILL_SWITCH_CLASSIFICATION
+from orchestrator.context.detector import context_ref_view
+from orchestrator.metrics import ha_write_fanout_confirm_total
+from orchestrator import write_fanout
 
 logger = structlog.get_logger(__name__)
+
+PENDING_CONFIRMATION_TTL_SECONDS = 60
+CONTROL_CONTEXT_TTL_SECONDS = 300
+EXPIRED_PENDING_TEXT = "That request expired. Please say it again."
+CROSS_IDENTITY_TEXT = "I'm not sure what you're agreeing to."
+DECLINED_TEXT = "Okay, I won't."
+ALREADY_DONE_TEXT = "Already done."
+
+# Nonce claims when Redis is unavailable: nonce -> expiry epoch. Only
+# de-duplicates within one process; Redis SET NX covers replicas.
+_NONCE_FALLBACK: Dict[str, float] = {}
+
+
+async def _claim_nonce(nonce: Optional[str]) -> bool:
+    """True exactly once per nonce within the pending TTL. A pending
+    without a nonce is never claimable (fail closed)."""
+    if not nonce:
+        return False
+    cache_client = get_cache_client()
+    if cache_client is not None and getattr(cache_client, "client", None) is not None:
+        try:
+            claimed = await asyncio.wait_for(
+                cache_client.client.set(
+                    f"athena:fanout_nonce:{nonce}", 1, nx=True, ex=PENDING_CONFIRMATION_TTL_SECONDS
+                ),
+                timeout=2.0,
+            )
+            return bool(claimed)
+        except Exception as e:
+            logger.warning("fanout_nonce_claim_redis_failed", error=str(e))
+    now = time.time()
+    for key, expiry in list(_NONCE_FALLBACK.items()):
+        if expiry <= now:
+            del _NONCE_FALLBACK[key]
+    if nonce in _NONCE_FALLBACK:
+        return False
+    _NONCE_FALLBACK[nonce] = now + PENDING_CONFIRMATION_TTL_SECONDS
+    return True
+
+
+def _without_pending(prev: Dict[str, Any]) -> Dict[str, Any]:
+    params = dict(prev.get("parameters") or {})
+    params.pop("pending_write_confirmation", None)
+    params.setdefault("action", "get_status")
+    return {**prev, "parameters": params}
+
+
+async def _clear_pending(state: OrchestratorState, prev: Dict[str, Any], ttl: int) -> None:
+    """Overwrite the stored context with the same read-sentinel context
+    minus the pending key."""
+    if not state.session_id:
+        return
+    cleared = _without_pending(prev)
+    await store_conversation_context(
+        session_id=state.session_id,
+        intent=cleared.get("intent") or "control",
+        query=cleared.get("query") or "",
+        entities=cleared.get("entities") or {},
+        parameters=cleared["parameters"],
+        response=cleared.get("response") or "",
+        ttl=ttl,
+    )
+
+
+def _pending_domain(pending: Dict[str, Any]) -> str:
+    writes = pending.get("writes") or []
+    return (writes[0][0] if writes and writes[0] else None) or "unknown"
+
+
+async def _store_pending_write_confirmation(
+    state: OrchestratorState, intent: Dict[str, Any], result: str, blk: "write_fanout.FanoutBlock"
+) -> None:
+    """5.2: `result` is the gate's answer. A bounded prompt (it ends in
+    '?', which the gate only returns inside pending_carrier(enabled=True))
+    is stored as a pending confirmation; a rewording is only surfaced."""
+    state.answer = result
+    if not (result and result.endswith("?") and not blk.unbounded and state.session_id):
+        return
+    device_type = intent.get("device_type")
+    room = intent.get("room")
+    await store_conversation_context(
+        session_id=state.session_id,
+        intent="control",
+        query=state.query,
+        entities={"room": room, "device_type": device_type},
+        parameters={
+            "action": "get_status",
+            "device_type": device_type,
+            "room": room,
+            "pending_write_confirmation": {
+                "intent": intent,
+                "writes": [[w.domain, w.service, list(w.entity_ids)] for w in blk.writes],
+                "fingerprint": state.caller_fingerprint,
+                "nonce": uuid4().hex,
+                "expires_at": time.time() + PENDING_CONFIRMATION_TTL_SECONDS,
+            },
+        },
+        response=result,
+        ttl=PENDING_CONFIRMATION_TTL_SECONDS,
+    )
+
+
+async def _resolve_pending_write_confirmation(state: OrchestratorState, scope) -> bool:
+    """5.3. True when this turn was fully answered as a reply to a pending
+    confirmation; False to continue with normal routing (with
+    state.prev_context already cleared or stripped of the pending)."""
+    prev = state.prev_context or {}
+    pending = (prev.get("parameters") or {}).get("pending_write_confirmation")
+    if not pending:
+        return False
+
+    reply = write_fanout.normalize_reply(state.query)
+    bare_yes = bool(write_fanout.BARE_AFFIRMATION_RE.match(reply))
+    bare_no = bool(write_fanout.BARE_NEGATION_RE.match(reply))
+
+    # Rule 1: expired -- the stored and in-state context both go before any
+    # dispatch, so nothing downstream can merge the stale intent.
+    if pending.get("expires_at", 0) <= time.time():
+        state.prev_context = None
+        state.context_ref_info = context_ref_view(state.context_ref_info or {}, "declined")
+        await _clear_pending(state, prev, ttl=1)
+        if bare_yes or bare_no:
+            state.answer = EXPIRED_PENDING_TEXT
+            return True
+        return False
+
+    fingerprint = pending.get("fingerprint")
+    same_caller = bool(fingerprint) and fingerprint == state.caller_fingerprint
+
+    # Rule 2: not a yes/no reply -- a new utterance. A different caller
+    # can neither clear the pending nor inherit its context.
+    if "yes_no" not in (state.context_ref_info or {}).get("anaphora_types", []):
+        if same_caller:
+            await _clear_pending(state, prev, ttl=CONTROL_CONTEXT_TTL_SECONDS)
+            state.prev_context = _without_pending(prev)
+        else:
+            state.prev_context = None
+            state.context_ref_info = context_ref_view(state.context_ref_info or {}, "declined")
+        return False
+
+    # Rule 3: a yes/no from a different caller -- neutral, no replay, no
+    # clear, no store.
+    if not same_caller:
+        state.answer = CROSS_IDENTITY_TEXT
+        logger.warning(
+            "pending_write_resolved_cross_identity",
+            session_id=state.session_id,
+            pending_fingerprint=(fingerprint or "")[:6],
+            caller_fingerprint=(state.caller_fingerprint or "")[:6],
+        )
+        ha_write_fanout_confirm_total.labels(domain=_pending_domain(pending), outcome="cross_identity").inc()
+        return True
+
+    # Rule 4: bare negation.
+    if bare_no:
+        await _clear_pending(state, prev, ttl=CONTROL_CONTEXT_TTL_SECONDS)
+        state.prev_context = None
+        state.answer = DECLINED_TEXT
+        ha_write_fanout_confirm_total.labels(domain=_pending_domain(pending), outcome="declined").inc()
+        return True
+
+    # Rule 6: anything else ("yes, just the desk lamp") -- same as rule 2.
+    if not bare_yes:
+        await _clear_pending(state, prev, ttl=CONTROL_CONTEXT_TTL_SECONDS)
+        state.prev_context = _without_pending(prev)
+        return False
+
+    # Rule 5: bare affirmation -- replay under THIS turn's scope.
+    with write_fanout.pending_carrier(scope, enabled=True):
+        if not await _claim_nonce(pending.get("nonce")):
+            state.answer = ALREADY_DONE_TEXT
+            ha_write_fanout_confirm_total.labels(domain=_pending_domain(pending), outcome="replay_claim_lost").inc()
+            return True
+
+        await _clear_pending(state, prev, ttl=CONTROL_CONTEXT_TTL_SECONDS)
+        state.prev_context = None
+
+        intent = dict(pending.get("intent") or {})
+        precheck_denied_domains = [
+            d for d in intent_write_domains(intent)
+            if not authorize_ha_write(d, "_precheck", None, scope.permissions).allowed
+        ]
+        if precheck_denied_domains:
+            state.answer = permission_refusal_message(precheck_denied_domains, scope)
+            state.error = "permission_denied"
+            return True
+
+        confirmed_ids = [e for w in (pending.get("writes") or []) for e in (w[2] if len(w) > 2 else [])]
+        denials_before = len(scope.denials)
+        writes_before = scope.allowed_writes
+        with write_fanout.confirmed(confirmed_ids):
+            result = await smart_controller.execute_intent(
+                intent, ha_client, original_query=prev.get("query"), device_room=state.room
+            )
+        blk = write_fanout.take_block()
+
+        if len(scope.denials) > denials_before:
+            denied_domains = tuple(
+                d.domain for d in scope.denials[denials_before:] if d.reason != "halted_after_denial"
+            )
+            state.answer = permission_refusal_message(
+                denied_domains, scope, partial=scope.allowed_writes > writes_before
+            )
+            state.error = "permission_denied"
+            return True
+
+        if blk is not None:
+            await _store_pending_write_confirmation(state, intent, result, blk)
+            return True
+
+        state.answer = result
+        state.retrieved_data = {"intent": intent}
+        ha_write_fanout_confirm_total.labels(domain=_pending_domain(pending), outcome="confirmed").inc()
+        if state.session_id and "couldn't" not in result.lower():
+            await store_conversation_context(
+                session_id=state.session_id,
+                intent="control",
+                query=prev.get("query") or state.query,
+                entities=prev.get("entities") or {},
+                parameters=intent,
+                response=result,
+                ttl=CONTROL_CONTEXT_TTL_SECONDS,
+            )
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +527,13 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         request_id=state.request_id,
                         session_id=state.session_id,
                     )
+                    state.node_timings["route_control"] = time.time() - start
+                    return state
+
+                # ATHENA-128 (5.3): a reply to a pending write confirmation
+                # resolves before any other dispatch -- a bare "yes" must
+                # never be routed as a fresh utterance.
+                if await _resolve_pending_write_confirmation(state, scope):
                     state.node_timings["route_control"] = time.time() - start
                     return state
 
@@ -606,7 +843,12 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 # Execute the command (pass original query for fallback room extraction, and device_room for context)
                 denials_before = len(scope.denials)
                 writes_before = scope.allowed_writes
-                result = await smart_controller.execute_intent(intent, ha_client, original_query=state.query, device_room=state.room)
+                # ATHENA-128 (D16): this call is the only non-replay window
+                # in which a fan-out block may become a pending confirmation.
+                carry_pending = bool(state.supports_followup and state.session_id and state.caller_fingerprint)
+                with write_fanout.pending_carrier(scope, enabled=carry_pending):
+                    result = await smart_controller.execute_intent(intent, ha_client, original_query=state.query, device_room=state.room)
+                blk = write_fanout.take_block()
 
                 if len(scope.denials) > denials_before:
                     denied_domains = tuple(
@@ -629,6 +871,10 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         ).inc()
                     else:
                         state.error = "permission_denied"
+                elif blk is not None:
+                    # 5.2: the answer is the gate's prompt or rewording, not a
+                    # completed action -- no normal success store.
+                    await _store_pending_write_confirmation(state, intent, result, blk)
                 else:
                     state.answer = result
                     state.retrieved_data = {"intent": intent}

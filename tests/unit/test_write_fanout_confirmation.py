@@ -4,7 +4,8 @@ Phase 4: the gate itself (write_fanout.py), the closed-world drift test
 over every SmartHomeController method containing call_service(, and the
 gate's own unit tests (thresholds, cues, unbounded, isolation).
 
-Phase 5 (confirmation carriage) tests are appended in the Phase 5 commit.
+Phase 5: confirmation carriage through route_control_node (5.4) --
+store, resolve rules 0-6, identity binding, nonce claim, expiry.
 """
 from __future__ import annotations
 
@@ -472,3 +473,564 @@ class TestSequenceStepFanoutRefusal:
         step_results = executor._last_results.get("seq-2")
         assert step_results[0]["status"] == "refused_fanout"
         assert write_fanout.take_block() is None
+
+
+# ---------------------------------------------------------------------------
+# 5.4 -- confirmation carriage through route_control_node
+# ---------------------------------------------------------------------------
+
+import time as _time_mod
+
+from orchestrator.nodes import _runtime
+from orchestrator.nodes import route_control as rc_module
+from orchestrator.nodes import route_control_node
+from orchestrator.state import OrchestratorState
+
+OFFICE_N = 11
+LIGHT_OFF_JSON = (
+    '{"device_type": "light", "room": "office", "action": "turn_off", '
+    '"target_scope": "group", "parameters": {}}'
+)
+PROMPT_11 = "That would turn off 11 lights in the office. Should I go ahead?"
+EXPIRED_TEXT = "That request expired. Please say it again."
+NEUTRAL_TEXT = "I'm not sure what you're agreeing to."
+DECLINED_TEXT = "Okay, I won't."
+
+
+class _FakeEntityManager54:
+    def __init__(self, n_lights=OFFICE_N, n_locks=0):
+        self.n_lights = n_lights
+        self._locks = {
+            f"lock.door_{i}": {"state": "locked", "attributes": {"friendly_name": f"Door {i} Lock"}}
+            for i in range(n_locks)
+        }
+
+    async def get_entities(self):
+        ents = {
+            f"light.office_{i}": {"state": "on", "attributes": {"friendly_name": f"Office Light {i}"}}
+            for i in range(self.n_lights)
+        }
+        ents.update(self._locks)
+        return ents
+
+    async def find_lights_by_room(self, room):
+        if room and "office" in room.lower():
+            return [
+                {"entity_id": f"light.office_{i}", "friendly_name": f"Office Light {i}",
+                 "members": [], "state": "on", "type": "individual"}
+                for i in range(self.n_lights)
+            ]
+        return []
+
+    async def get_all_light_groups(self):
+        return []
+
+
+class _LLM54:
+    def __init__(self, response_text=LIGHT_OFF_JSON):
+        self.response_text = response_text
+        self.generate = AsyncMock(side_effect=self._generate)
+
+    async def _generate(self, **kwargs):
+        return {"response": self.response_text}
+
+
+class _NxCache:
+    """A cache client whose .client.set has real SET NX semantics."""
+
+    def __init__(self):
+        self.keys = {}
+        self.client = self
+
+    async def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.keys:
+            return None
+        self.keys[key] = value
+        return True
+
+
+def _written(client, domain=None):
+    """Entity ids written through the raw HA client (optionally one domain)."""
+    ids = []
+    for call in client.call_service.await_args_list:
+        args = list(call.args)
+        call_domain = args[0] if args else call.kwargs.get("domain")
+        if domain and call_domain != domain:
+            continue
+        data = args[2] if len(args) > 2 else (call.kwargs.get("service_data") or call.kwargs.get("data") or {})
+        eid = (data or {}).get("entity_id")
+        if isinstance(eid, (list, tuple)):
+            ids.extend(eid)
+        elif eid:
+            ids.append(eid)
+    return ids
+
+
+def _raw_client_54(fail_domains=()):
+    client = MagicMock()
+
+    async def _call_service(domain, service, data=None, *a, **kw):
+        if domain in fail_domains:
+            raise RuntimeError(f"{domain} not found")
+        return {"ok": True}
+
+    client.call_service = AsyncMock(side_effect=_call_service)
+    client.get_state = AsyncMock(return_value={"state": "on"})
+    client.get_states = AsyncMock(return_value=[])
+    return client
+
+
+def _fp(trust="household", device="voice-a", room="office", mode="owner"):
+    return write_fanout.caller_fingerprint(trust, device, room, mode)
+
+
+def _state54(query, *, fingerprint=None, supports_followup=True, session_id="sess-1",
+             prev_context=None, context_ref_info=None, mode="owner", room="office"):
+    state = OrchestratorState(query=query)
+    state.mode = mode
+    state.permissions = {"mode": mode}
+    state.room = room
+    state.session_id = session_id
+    state.prev_context = prev_context
+    state.context_ref_info = context_ref_info if context_ref_info is not None else {}
+    state.node_timings = {}
+    state.supports_followup = supports_followup
+    state.caller_fingerprint = fingerprint if fingerprint is not None else _fp(mode=mode)
+    return state
+
+
+class _Harness:
+    """One runtime (controller, raw HA client, entity manager, cache) shared
+    by every route_control_node call made through it, plus a single call
+    log that records context stores and execute_intent in order."""
+
+    def __init__(self, *, llm_text=LIGHT_OFF_JSON, n_lights=OFFICE_N, n_locks=0,
+                 cache=None, fail_domains=(), threshold=6, hard_limit=18):
+        self.em = _FakeEntityManager54(n_lights=n_lights, n_locks=n_locks)
+        self.llm = _LLM54(llm_text)
+        self.controller = shc.SmartHomeController(entity_manager=self.em, llm_router=self.llm)
+        self.client = _raw_client_54(fail_domains)
+        self.cache = cache
+        self.cfg = _fake_config(threshold=threshold, hard_limit=hard_limit)
+        self.log = []
+        self.stores = []
+        self.extract_calls = []
+
+        real_execute = self.controller.execute_intent
+        real_extract = self.controller.extract_intent
+
+        async def _execute(intent, *a, **kw):
+            self.log.append(("execute_intent", intent.get("action")))
+            return await real_execute(intent, *a, **kw)
+
+        async def _extract(query, *a, **kw):
+            self.extract_calls.append((query, kw))
+            return await real_extract(query, *a, **kw)
+
+        self.controller.execute_intent = _execute
+        self.controller.extract_intent = _extract
+
+    async def _store(self, **kw):
+        self.log.append(("store", kw.get("ttl"), "pending_write_confirmation" in (kw.get("parameters") or {})))
+        self.stores.append(kw)
+        return True
+
+    def _install(self):
+        _runtime.set_smart_controller(self.controller)
+        _runtime.set_entity_manager(self.em)
+        _runtime.set_ha_client(self.client)
+        _runtime.set_sequence_executor(None)
+        _runtime.set_automation_agent(None)
+        _runtime.set_cache_client(self.cache)
+
+    async def arun(self, state, now=None):
+        self._install()
+
+        async def _feature_config(name):
+            return {"enabled": name in ("status_bulk_query", "status_skip_synthesis")}
+
+        patches = [
+            mock.patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock, side_effect=_feature_config),
+            mock.patch("orchestrator.nodes.route_control.get_automation_system_mode", new_callable=AsyncMock, return_value="pattern"),
+            mock.patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+            mock.patch("orchestrator.nodes.route_control.store_conversation_context", side_effect=self._store),
+            mock.patch.object(write_fanout, "get_config", lambda: self.cfg),
+        ]
+        if now is not None:
+            patches.append(mock.patch("time.time", return_value=now))
+        for p in patches:
+            p.start()
+        try:
+            return await route_control_node(state)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+    def run(self, state, now=None):
+        return _run(self.arun(state, now=now))
+
+    def last_pending(self):
+        return self.stores[-1]["parameters"]["pending_write_confirmation"]
+
+
+def _prev_with_pending(*, fingerprint, expires_at, nonce="nonce-1", n=OFFICE_N, query="office lights off please"):
+    """The context shape 5.2 stores, for tests that need to control
+    expires_at or the fingerprint directly (the others use _first_turn)."""
+    return {
+        "intent": "control",
+        "query": query,
+        "response": PROMPT_11,
+        "entities": {"room": "office", "device_type": "light"},
+        "parameters": {
+            "action": "get_status",
+            "device_type": "light",
+            "room": "office",
+            "pending_write_confirmation": {
+                "intent": {"device_type": "light", "room": "office", "action": "turn_off",
+                           "target_scope": "group", "parameters": {}},
+                "writes": [["light", "turn_off", [f"light.office_{i}" for i in range(n)]]],
+                "fingerprint": fingerprint,
+                "nonce": nonce,
+                "expires_at": expires_at,
+            },
+        },
+    }
+
+
+def _first_turn(h, *, supports_followup=True, query="office lights off please", fingerprint=None):
+    """Drives the real first turn and returns (state, prev_context as the
+    next turn would read it from the store)."""
+    state = h.run(_state54(query, supports_followup=supports_followup, fingerprint=fingerprint))
+    if not h.stores:
+        return state, None
+    stored = h.stores[-1]
+    prev = {k: stored[k] for k in ("intent", "query", "entities", "parameters", "response")}
+    return state, prev
+
+
+YES_NO = {"anaphora_types": ["yes_no"], "has_context_ref": True, "is_continuation": False}
+
+
+class TestPendingStored:
+    def test_non_imperative_over_threshold_followup_stores_pending(self):
+        h = _Harness()
+        state, prev = _first_turn(h)
+        assert _written(h.client) == []
+        assert state.answer == PROMPT_11
+        assert len(h.stores) == 1
+        stored = h.stores[0]
+        assert stored["ttl"] == 60
+        assert stored["parameters"]["action"] == "get_status"
+        pending = stored["parameters"]["pending_write_confirmation"]
+        assert pending["fingerprint"] == state.caller_fingerprint and pending["fingerprint"]
+        assert pending["nonce"]
+        assert [w[:2] for w in pending["writes"]] == [["light", "turn_off"]]
+        assert sorted(pending["writes"][0][2]) == sorted(f"light.office_{i}" for i in range(OFFICE_N))
+        assert pending["intent"]["action"] == "turn_off"
+
+    def test_no_followup_gets_rewording_and_no_store_then_rewording_executes(self):
+        h = _Harness()
+        state, prev = _first_turn(h, supports_followup=False)
+        assert _written(h.client) == []
+        assert "say: turn off all the office lights" in state.answer
+        assert not state.answer.endswith("?")
+        assert h.stores == []
+
+        say = state.answer.split("say:", 1)[1].strip().rstrip(".")
+        h2 = _Harness()
+        h2.run(_state54(say, supports_followup=False))
+        assert len(set(_written(h2.client, "light"))) == OFFICE_N
+
+    def test_missing_fingerprint_is_not_a_followup_surface(self):
+        h = _Harness()
+        state = _state54("office lights off please")
+        state.caller_fingerprint = None
+        out = h.run(state)
+        assert not out.answer.endswith("?")
+        assert h.stores == []
+        assert _written(h.client) == []
+
+    def test_seven_locks_from_non_imperative_prompts(self):
+        h = _Harness(
+            llm_text='{"device_type": "lock", "room": null, "action": "unlock", "target_scope": "group", "parameters": {}}',
+            n_lights=0, n_locks=7,
+        )
+        out = h.run(_state54("doors please", room=None))
+        assert _written(h.client) == []
+        assert out.answer.endswith("?"), out.answer
+        assert "unlock 7" in out.answer
+        assert h.stores and h.stores[-1]["ttl"] == 60
+
+
+class TestBareRepliesResolve:
+    def test_affirmations_replay_exactly_the_pending_writes(self):
+        for phrase in ("yes", "Yes.", "Yes, please.", "Okay, do it.", "yeah go ahead"):
+            h = _Harness()
+            state, prev = _first_turn(h)
+            assert prev is not None
+            h.log.clear()
+            out = h.run(_state54(phrase, prev_context=prev, context_ref_info=YES_NO))
+            assert sorted(set(_written(h.client, "light"))) == sorted(f"light.office_{i}" for i in range(OFFICE_N)), phrase
+            assert len(_written(h.client)) == OFFICE_N, phrase
+            clear_idx = next(i for i, e in enumerate(h.log) if e[0] == "store" and e[2] is False)
+            exec_idx = next(i for i, e in enumerate(h.log) if e[0] == "execute_intent")
+            assert clear_idx < exec_idx, (phrase, h.log)
+
+    def test_negations_decline_without_writing(self):
+        for phrase in ("No.", "No, thanks."):
+            h = _Harness()
+            _, prev = _first_turn(h)
+            h.stores.clear()
+            h.log.clear()
+            out = h.run(_state54(phrase, prev_context=prev, context_ref_info=YES_NO))
+            assert _written(h.client) == [], phrase
+            assert out.answer == DECLINED_TEXT
+            assert h.stores and "pending_write_confirmation" not in h.stores[-1]["parameters"]
+            assert not any(e[0] == "execute_intent" for e in h.log), phrase
+
+    def test_qualified_yes_does_not_replay_and_clears(self):
+        h = _Harness(llm_text='{"device_type": "light", "room": "office", "action": "get_status", "target_scope": "group", "parameters": {}}')
+        prev = _prev_with_pending(fingerprint=_fp(), expires_at=_time_mod.time() + 60)
+        out = h.run(_state54("yes, just the desk lamp", prev_context=prev, context_ref_info=YES_NO))
+        assert _written(h.client) == []
+        assert h.stores and "pending_write_confirmation" not in h.stores[0]["parameters"]
+        assert h.stores[0]["parameters"]["action"] == "get_status"
+
+
+class TestExpiry:
+    NOW = 1_900_000_000.0
+
+    def test_expires_at_equal_now_is_expired(self):
+        h = _Harness()
+        prev = _prev_with_pending(fingerprint=_fp(), expires_at=self.NOW)
+        state = _state54("yes", prev_context=prev, context_ref_info=YES_NO)
+        out = h.run(state, now=self.NOW)
+        assert _written(h.client) == []
+        assert out.answer == EXPIRED_TEXT
+        assert h.extract_calls == []
+        assert out.prev_context is None
+        assert not any(e[0] == "execute_intent" for e in h.log)
+        assert h.stores and "pending_write_confirmation" not in h.stores[0]["parameters"]
+
+    def test_expires_at_now_plus_one_is_valid(self):
+        h = _Harness()
+        prev = _prev_with_pending(fingerprint=_fp(), expires_at=self.NOW + 1)
+        h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO), now=self.NOW)
+        assert len(set(_written(h.client, "light"))) == OFFICE_N
+
+    def test_expired_prev_context_is_nulled_before_any_dispatch(self):
+        h = _Harness()
+        seen = []
+        real_execute = h.controller.execute_intent
+
+        async def _execute(intent, *a, **kw):
+            seen.append(state.prev_context)
+            return await real_execute(intent, *a, **kw)
+
+        h.controller.execute_intent = _execute
+        prev = _prev_with_pending(fingerprint=_fp(), expires_at=self.NOW)
+        state = _state54("turn off the office lights", prev_context=prev, context_ref_info=YES_NO)
+        h.run(state, now=self.NOW)
+        assert seen and all(p is None for p in seen)
+
+    def test_expired_then_new_utterance_is_context_free(self):
+        h = _Harness()
+        prev = _prev_with_pending(fingerprint=_fp(), expires_at=self.NOW)
+        ref = {"anaphora_types": ["pronoun"], "has_context_ref": True, "is_continuation": True}
+        h.run(_state54("turn them off", prev_context=prev, context_ref_info=ref), now=self.NOW)
+        assert h.extract_calls, "extract_intent must run for a non-yes/no utterance"
+        for _, kw in h.extract_calls:
+            assert kw.get("prev_query") is None
+            assert not kw.get("prev_intent_entities")
+
+
+class TestIdentityBinding:
+    def test_wrong_fingerprint_same_session_neutral_no_store(self):
+        h = _Harness()
+        _, prev = _first_turn(h, fingerprint=_fp(device="voice-a"))
+        h.stores.clear()
+        h.log.clear()
+        with mock.patch.object(rc_module.logger, "warning") as warn:
+            out = h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO, fingerprint=_fp(device="voice-b")))
+        assert _written(h.client) == []
+        assert out.answer == NEUTRAL_TEXT
+        assert h.stores == []
+        assert not any(e[0] == "execute_intent" for e in h.log)
+        assert any(c.args and c.args[0] == "pending_write_resolved_cross_identity" for c in warn.call_args_list)
+
+    def test_wrong_fingerprint_non_yes_no_neither_clears_nor_merges(self):
+        """A mismatched caller can't clear someone else's pending or read
+        its context (Risks: 'can't replay, decline, clear or learn')."""
+        h = _Harness(llm_text='{"device_type": "light", "room": "kitchen", "action": "turn_on", "target_scope": "group", "parameters": {}}')
+        prev = _prev_with_pending(fingerprint=_fp(device="voice-a"), expires_at=_time_mod.time() + 60)
+        ref = {"anaphora_types": ["pronoun"], "has_context_ref": True, "is_continuation": True}
+        h.run(_state54("turn them on", prev_context=prev, context_ref_info=ref, fingerprint=_fp(device="voice-b")))
+        assert not any(s["query"] == prev["query"] for s in h.stores), h.stores
+        for _, kw in h.extract_calls:
+            assert kw.get("prev_query") is None
+
+    def test_session_b_without_pending_does_nothing(self):
+        h = _Harness(llm_text='{"device_type": "light", "room": "office", "action": "get_status", "target_scope": "group", "parameters": {}}')
+        _first_turn(h)
+        h.client.call_service.reset_mock()
+        out = h.run(_state54("yes", session_id="sess-B", prev_context=None, context_ref_info={}))
+        assert _written(h.client) == []
+
+    def test_guest_yes_to_owner_pending_never_writes(self):
+        h = _Harness()
+        _, prev = _first_turn(h)
+        out = h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO, mode="guest"))
+        assert _written(h.client) == []
+        assert _fp(mode="guest") != prev["parameters"]["pending_write_confirmation"]["fingerprint"]
+
+    def test_ha_assist_device_id_is_a_fingerprint_input(self):
+        a = write_fanout.caller_fingerprint("household", "ha-device-1", "office", "owner")
+        b = write_fanout.caller_fingerprint("household", "ha-device-2", "office", "owner")
+        assert a != b
+        h = _Harness()
+        _, prev = _first_turn(h, fingerprint=a)
+        out = h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO, fingerprint=b))
+        assert _written(h.client) == []
+        assert out.answer == NEUTRAL_TEXT
+
+
+class TestReplaySafety:
+    def test_double_yes_replays_once_with_redis_nx(self):
+        cache = _NxCache()
+        h = _Harness(cache=cache)
+        _, prev = _first_turn(h)
+
+        async def _both():
+            return await asyncio.gather(
+                h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO)),
+                h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO)),
+            )
+
+        outs = _run(_both())
+        assert len(_written(h.client, "light")) == OFFICE_N
+        assert sorted(o.answer for o in outs).count("Already done.") == 1
+        assert any(k.startswith("athena:fanout_nonce:") for k in cache.keys)
+
+    def test_double_yes_replays_once_with_process_fallback(self):
+        h = _Harness(cache=None)
+        _, prev = _first_turn(h)
+
+        async def _both():
+            return await asyncio.gather(
+                h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO)),
+                h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO)),
+            )
+
+        _run(_both())
+        assert len(_written(h.client, "light")) == OFFICE_N
+
+    def test_replay_that_resolves_a_twelfth_entity_reasks(self):
+        h = _Harness()
+        _, prev = _first_turn(h)
+        h.em.n_lights = OFFICE_N + 1
+        h.stores.clear()
+        out = h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO))
+        assert _written(h.client) == []
+        assert out.answer.endswith("?")
+        assert "12" in out.answer
+        assert h.stores and h.stores[-1]["ttl"] == 60
+        new_pending = h.last_pending()
+        assert len(new_pending["writes"][0][2]) == OFFICE_N + 1
+        assert new_pending["nonce"] != prev["parameters"]["pending_write_confirmation"]["nonce"]
+
+    def test_non_yes_no_follow_up_does_not_execute_pending_set(self):
+        h = _Harness(llm_text='{"device_type": "light", "room": "office", "action": "turn_on", "target_scope": "group", "parameters": {}}')
+        _, prev = _first_turn(_Harness())
+        ref = {"anaphora_types": ["pronoun"], "has_context_ref": True, "is_continuation": True}
+        out = h.run(_state54("turn them on", prev_context=prev, context_ref_info=ref))
+        assert not any(c.args[1] == "turn_off" for c in h.client.call_service.await_args_list)
+        assert h.extract_calls, "the follow-up must be re-extracted"
+        cleared = [s for s in h.stores if s["ttl"] == 300 and "pending_write_confirmation" not in s["parameters"]]
+        assert cleared, h.stores
+
+
+class TestReplayPrecheck:
+    """5.3 rule 5: the replay runs the same D14 domain precheck as the
+    normal path, before execute_intent. The precheck's authorize_ha_write
+    is patched in route_control only, so the guard can't mask a skipped
+    precheck."""
+
+    def _replay(self, allow_light):
+        h = _Harness()
+        _, prev = _first_turn(h)
+        h.log.clear()
+        h.client.call_service.reset_mock()
+
+        def _decide(domain, service, data, perms):
+            return MagicMock(allowed=(allow_light or domain != "light"))
+
+        with mock.patch.object(rc_module, "authorize_ha_write", side_effect=_decide):
+            out = h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO))
+        return h, out
+
+    def test_precheck_denial_stops_replay_before_execute(self):
+        h, out = self._replay(allow_light=False)
+        assert not any(e[0] == "execute_intent" for e in h.log)
+        assert _written(h.client) == []
+        assert out.error == "permission_denied"
+
+    def test_precheck_allow_is_the_positive_control(self):
+        h, out = self._replay(allow_light=True)
+        assert any(e[0] == "execute_intent" for e in h.log)
+        assert len(_written(h.client, "light")) == OFFICE_N
+
+
+class TestUnboundedFallback:
+    GOOD_NIGHT = (
+        '{"device_type": "scene", "room": null, "action": "turn_on", "target_scope": "group", '
+        '"parameters": {"entity_id": "scene.good_night"}}'
+    )
+
+    def test_good_night_missing_scene_is_reworded_never_pending(self):
+        """Plan 5.4 lists this case twice ('-> the rewording, no store' and
+        '-> prompt (unbounded)'); D7 rule 0 decides it: unbounded never
+        prompts."""
+        h = _Harness(llm_text=self.GOOD_NIGHT, fail_domains=("scene", "script"))
+        out = h.run(_state54("good night"))
+        assert _written(h.client, "light") == []
+        assert not out.answer.endswith("?")
+        assert "say:" in out.answer
+        assert h.stores == []
+
+        out2 = h.run(_state54("yes", prev_context=None, context_ref_info=YES_NO))
+        assert _written(h.client, "light") == []
+
+
+class TestPrePlanReaderSeesReadSentinel:
+    def test_pending_context_through_continuation_reads_get_status(self):
+        """Old code (no 5.3) handed the pending context: the continuation
+        branch copies prev parameters and must see a read."""
+        h = _Harness(llm_text='{"parameters": {}}')
+        prev = _prev_with_pending(fingerprint=_fp(), expires_at=_time_mod.time() + 60)
+
+        async def _no_resolve(*a, **kw):
+            return False
+
+        ref = {"anaphora_types": ["yes_no"], "has_context_ref": True, "is_continuation": True}
+        with mock.patch.object(rc_module, "_resolve_pending_write_confirmation", _no_resolve):
+            h.run(_state54("yes", prev_context=prev, context_ref_info=ref))
+        actions = [e[1] for e in h.log if e[0] == "execute_intent"]
+        assert actions == ["get_status"]
+        assert _written(h.client) == []
+
+
+class TestReplyNormalization:
+    def test_bare_affirmation_and_negation_regexes(self):
+        yes = ["yes", "Yes.", "Yes, please.", "Okay, do it.", "yeah go ahead", "go ahead", "do it", "sure thanks"]
+        no = ["no", "No.", "No, thanks.", "nope", "nah thank you"]
+        neither = ["yes, just the desk lamp", "no, only the ceiling light", "whatever", "yes turn on the kitchen"]
+        for p in yes:
+            assert write_fanout.BARE_AFFIRMATION_RE.match(write_fanout.normalize_reply(p)), p
+            assert not write_fanout.BARE_NEGATION_RE.match(write_fanout.normalize_reply(p)), p
+        for p in no:
+            assert write_fanout.BARE_NEGATION_RE.match(write_fanout.normalize_reply(p)), p
+            assert not write_fanout.BARE_AFFIRMATION_RE.match(write_fanout.normalize_reply(p)), p
+        for p in neither:
+            n = write_fanout.normalize_reply(p)
+            assert not write_fanout.BARE_AFFIRMATION_RE.match(n), p
+            assert not write_fanout.BARE_NEGATION_RE.match(n), p

@@ -126,6 +126,8 @@ class LiveKitIntegration:
                 # this is trusted for the orchestrator's owner-mode PIN
                 # override path.
                 "caller_trust": "household",
+                # ATHENA-128 D14: the LiveKit session persists across turns.
+                "supports_followup": True,
             }
 
             # Include interruption context if user interrupted previous response

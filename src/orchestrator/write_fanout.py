@@ -40,6 +40,23 @@ class FanoutBlock:
 
 _SCOPE_CUE_RE = re.compile(r"\b(?:all|every|everything|whole|entire|house)\b", re.IGNORECASE)
 
+# 5.3 rules 4/5, matched against normalize_reply() output. Anything with
+# more content than these ("yes, just the desk lamp") is a new utterance,
+# never a confirmation.
+BARE_AFFIRMATION_RE = re.compile(
+    r"^(?:yes|yeah|yep|yup|ok|okay|sure)(?:\s+(?:please|thanks|thank you|do it|go ahead))?$"
+    r"|^(?:go ahead|do it)$"
+)
+BARE_NEGATION_RE = re.compile(r"^(?:no|nope|nah)(?:\s+(?:thanks|thank you))?$")
+
+
+def normalize_reply(query: Optional[str]) -> str:
+    """5.3 rule 0: lowercase, strip trailing punctuation, remove commas,
+    collapse whitespace -- STT emits "Yes, please." for a bare yes."""
+    q = (query or "").strip().lower()
+    q = re.sub(r"[.!?]+$", "", q).replace(",", "")
+    return re.sub(r"\s+", " ", q).strip()
+
 _VERB_FOR_SERVICE = {
     "turn_on": "turn on",
     "turn_off": "turn off",
@@ -133,16 +150,18 @@ def _room_text(room: Optional[str], scope_hint: Any) -> str:
     return ""
 
 
-def _command_text(write: PlannedWrite) -> str:
+def _command_text(write: PlannedWrite, room: Optional[str] = None) -> str:
     verb = _verb_for(write.service)
     noun = noun_for_domains([write.domain])
-    return f"{verb} all the {noun}"
+    where = f"{room.replace('_', ' ')} " if room else ""
+    return f"{verb} all the {where}{noun}"
 
 
 def rewording(block: FanoutBlock) -> str:
     """A user-facing rewording that would pass the gate. Never ends in
     '?'. One command per planned write, joined with ', then say:'."""
-    commands = [_command_text(w) for w in block.writes]
+    room = None if block.unbounded else block.room
+    commands = [_command_text(w, room) for w in block.writes]
     say = "To do it, say: " + (", then say: ".join(commands)) + "."
     noun = noun_for_domains([w.domain for w in block.writes])
     if block.unbounded:
@@ -184,10 +203,7 @@ def _gate_writes(
     if scope is not None and scope.confirmed_entity_ids is not None and not is_unbounded:
         if all_ids and all_ids.issubset(scope.confirmed_entity_ids):
             return None
-        block = FanoutBlock(writes=writes, unbounded=False, room=room)
-        scope.fanout_block = block
-        ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome="reasked").inc()
-        return rewording(block)
+        return _block(scope, writes, room, scope_hint, domain_for_metric, "reasked", "reasked")
 
     # D7 rule 1: an explicit scope cue in the utterance text always
     # proceeds, evaluated before the unbounded/imperative/threshold
@@ -219,17 +235,23 @@ def _gate_writes(
         if threshold == 0 or n <= threshold:
             return None
 
+    return _block(scope, writes, room, scope_hint, domain_for_metric, "requested", "reworded")
+
+
+def _block(scope, writes, room, scope_hint, domain_for_metric: str, prompt_outcome: str, reword_outcome: str) -> str:
+    """Record a bounded block on the scope; return the confirmation prompt
+    when the scope can carry a pending (D16), else the rewording."""
     block = FanoutBlock(writes=writes, unbounded=False, room=room)
     if scope is not None:
         scope.fanout_block = block
 
-    can_carry = bool(scope is not None and scope.can_carry_pending)
-    if can_carry:
-        ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome="requested").inc()
+    if scope is not None and scope.can_carry_pending:
+        ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome=prompt_outcome).inc()
+        n = len({e for w in writes for e in w.entity_ids})
         verb = _verb_for(writes[0].service)
         noun = noun_for_domains([w.domain for w in writes])
         return f"That would {verb} {n} {noun}{_room_text(room, scope_hint)}. Should I go ahead?"
-    ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome="reworded").inc()
+    ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome=reword_outcome).inc()
     return rewording(block)
 
 

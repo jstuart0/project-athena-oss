@@ -153,6 +153,7 @@ from orchestrator.mode_permission import (
     handle_owner_mode_utterance,
     resolve_request_authorization,
 )
+from orchestrator.write_fanout import caller_fingerprint as compute_caller_fingerprint
 from orchestrator.helpers import (
     get_feature_config,
     get_automation_system_mode,
@@ -6184,6 +6185,16 @@ class QueryRequest(BaseModel):
     source: Optional[str] = Field(None, description="Interface origin for analytics: 'chatbot', 'jarvis', 'voice', 'ha', etc.")
     chat_history: Optional[List[Dict[str, str]]] = Field(None, description="Prior conversation turns to inject when no live session exists (role/content pairs)")
     skip_semantic_cache: bool = Field(False, description="When True, bypass both the semantic cache read and write (benchmark use — prevents cache poisoning across repeated turns)")
+    supports_followup: bool = Field(
+        False,
+        description=(
+            "Set by the calling service in server code (ATHENA-128 D14): "
+            "True only for surfaces that carry a follow-up turn on the same "
+            "session. Chooses between a confirmation prompt and an exact "
+            "rewording when a write would fan out; it never authorizes "
+            "anything, since a pending confirmation is fingerprint-bound."
+        ),
+    )
 
 class QueryResponse(BaseModel):
     """Response model for query endpoint."""
@@ -6441,7 +6452,11 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             memory_context=memory_context,  # Memory augmentation: Relevant memories for LLM context
             timing_tracker=timing_tracker,  # Granular execution time tracking
             entities=initial_entities,  # Include location from request
-            interruption_context=request.interruption_context  # Barge-in: Pass interruption context for natural acknowledgment
+            interruption_context=request.interruption_context,  # Barge-in: Pass interruption context for natural acknowledgment
+            supports_followup=request.supports_followup,
+            caller_fingerprint=compute_caller_fingerprint(
+                request.caller_trust, request.device_id, request.room, permissions.get("mode")
+            ),
         )
 
         # Emit session start event for Admin Jarvis monitoring
@@ -7193,6 +7208,10 @@ async def process_query_stream(request: QueryRequest):
                 context=query_context,
                 temperature=request.temperature,
                 interface_type=request.interface_type,
+                supports_followup=request.supports_followup,
+                caller_fingerprint=compute_caller_fingerprint(
+                    request.caller_trust, request.device_id, request.room, authz.permissions.get("mode")
+                ),
             )
 
             # Stage 2: RAG collection — classify + retrieve, stopping before LLM synthesis
@@ -7433,7 +7452,11 @@ async def process_query_stream_v2(request: QueryRequest):
                 interface_type=request.interface_type,
                 context=dict(request.context) if request.context else {},
                 memory_context="",
-                timing_tracker=timing_tracker
+                timing_tracker=timing_tracker,
+                supports_followup=request.supports_followup,
+                caller_fingerprint=compute_caller_fingerprint(
+                    request.caller_trust, request.device_id, request.room, authz.permissions.get("mode")
+                ),
             )
 
             # Run through classification and RAG nodes only (stop before synthesis)
@@ -8189,7 +8212,11 @@ async def chat_completions(request: OpenAIChatRequest):
                     session_id=session.session_id,
                     request_id=hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8],
                     start_time=start_time,
-                    interface_type=interface_type
+                    interface_type=interface_type,
+                    # OpenAIChatRequest carries no caller_trust or device_id:
+                    # never a follow-up surface (D14).
+                    supports_followup=False,
+                    caller_fingerprint=compute_caller_fingerprint(None, None, room, authz.permissions.get("mode")),
                 )
 
                 # TRUE STREAMING: Run orchestrator for RAG collection, then stream LLM tokens
