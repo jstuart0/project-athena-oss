@@ -7,7 +7,7 @@ Includes CRUD operations for manual guest entries and guest history tracking.
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from datetime import datetime, timedelta
 import hmac
 import structlog
@@ -23,6 +23,27 @@ from shared.config import get_config
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/guest-mode", tags=["guest_mode"])
+
+# ATHENA-69 Pass H (codex full-diff, Low): the known IntentCategory values
+# (src/orchestrator/state.py), duplicated here rather than imported --
+# admin-backend and the orchestrator are separately deployed services and
+# don't import each other's internals. Keep in sync if IntentCategory
+# gains a member.
+_KNOWN_INTENT_NAMES = frozenset({
+    "control", "weather", "airports", "sports", "flights", "events",
+    "streaming", "news", "stocks", "recipes", "dining", "directions",
+    "websearch", "text_me_that", "music_play", "music_control",
+    "tv_control", "notification_pref", "tesla", "general_info", "unknown",
+})
+
+
+def _validate_intent_names(value: Optional[List[str]]) -> Optional[List[str]]:
+    if value is None:
+        return value
+    unknown = sorted(set(v.lower() for v in value) - _KNOWN_INTENT_NAMES)
+    if unknown:
+        raise ValueError(f"Unknown intent name(s): {', '.join(unknown)}")
+    return [v.lower() for v in value]
 
 
 async def _guest_mode_config_auth(
@@ -69,11 +90,14 @@ class GuestModeConfigCreate(BaseModel):
     guest_allowed_intents: List[str] = []
     guest_restricted_entities: List[str] = []
     guest_allowed_domains: List[str] = []
+    guest_restricted_intents: List[str] = []
     max_queries_per_minute_guest: int = 10
     max_queries_per_minute_owner: int = 100
     guest_data_retention_hours: int = 24
     auto_purge_enabled: bool = True
     config: dict = {}
+
+    _validate_guest_restricted_intents = field_validator("guest_restricted_intents")(_validate_intent_names)
 
 
 class GuestModeConfigUpdate(BaseModel):
@@ -89,11 +113,14 @@ class GuestModeConfigUpdate(BaseModel):
     guest_allowed_intents: Optional[List[str]] = None
     guest_restricted_entities: Optional[List[str]] = None
     guest_allowed_domains: Optional[List[str]] = None
+    guest_restricted_intents: Optional[List[str]] = None
     max_queries_per_minute_guest: Optional[int] = None
     max_queries_per_minute_owner: Optional[int] = None
     guest_data_retention_hours: Optional[int] = None
     auto_purge_enabled: Optional[bool] = None
     config: Optional[dict] = None
+
+    _validate_guest_restricted_intents = field_validator("guest_restricted_intents")(_validate_intent_names)
 
 
 class GuestModeConfigResponse(BaseModel):
@@ -119,6 +146,7 @@ class GuestModeConfigResponse(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     owner_pin_configured: bool = False
+    owner_pin_needs_reset: bool = False
     config_source: str = "admin"
 
     class Config:
@@ -293,6 +321,12 @@ def _config_response(config: GuestModeConfig, config_source: str = "admin") -> G
         created_at=config.created_at,
         updated_at=config.updated_at,
         owner_pin_configured=config.owner_pin is not None,
+        # ATHENA-69 Pass H (valerie r1, Medium): a legacy unsalted-SHA256
+        # PIN (pre-D30) can never be verified -- POST verify-pin always
+        # answers "not_configured" for it (internal.py:137-141). Flag it
+        # distinctly so the admin UI can prompt for a fresh PIN instead of
+        # implying an override PIN is usable when it isn't.
+        owner_pin_needs_reset=bool(config.owner_pin) and not config.owner_pin.startswith("pbkdf2_sha256$"),
         config_source=config_source,
     )
 
@@ -410,6 +444,7 @@ async def create_guest_mode_config(
         guest_allowed_intents=config_data.guest_allowed_intents,
         guest_restricted_entities=config_data.guest_restricted_entities,
         guest_allowed_domains=config_data.guest_allowed_domains,
+        guest_restricted_intents=config_data.guest_restricted_intents,
         max_queries_per_minute_guest=config_data.max_queries_per_minute_guest,
         max_queries_per_minute_owner=config_data.max_queries_per_minute_owner,
         guest_data_retention_hours=config_data.guest_data_retention_hours,
@@ -482,6 +517,8 @@ async def update_guest_mode_config(
         config.guest_restricted_entities = config_data.guest_restricted_entities
     if config_data.guest_allowed_domains is not None:
         config.guest_allowed_domains = config_data.guest_allowed_domains
+    if config_data.guest_restricted_intents is not None:
+        config.guest_restricted_intents = config_data.guest_restricted_intents
     if config_data.max_queries_per_minute_guest is not None:
         config.max_queries_per_minute_guest = config_data.max_queries_per_minute_guest
     if config_data.max_queries_per_minute_owner is not None:

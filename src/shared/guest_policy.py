@@ -30,9 +30,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Baseline defaults (D8, D22). These are the built-in floor/allowlists used
 # whenever the corresponding AthenaConfig JSON-array env var is unset (empty
-# string) or fails to parse. An explicit "[]" from the deployer is a valid,
-# intentional opt-out and is honoured as an empty list -- only an unset or
-# malformed value falls back to these defaults.
+# string) or fails to parse. For GUEST_BASELINE_RESTRICTED_ENTITIES and
+# GUEST_BASELINE_ALLOWED_INTENTS, an explicit "[]" from the deployer is a
+# valid, intentional opt-out and is honoured as an empty list -- only an
+# unset or malformed value falls back to these defaults.
+# GUEST_BASELINE_ALLOWED_DOMAINS is the one exception (Pass H, codex
+# full-diff, Low): an empty allowed_domains list has no safe meaning
+# downstream (check_entity_permission's `if allowed_domains and ...` check
+# would skip domain filtering entirely and allow every domain -- the
+# opposite of what setting it to "[]" is meant to express), so
+# _baseline_allowed_domains treats an explicit "[]" there the same as
+# unset. There is no way to configure allowed_domains down to zero
+# domains via this env var.
 # ---------------------------------------------------------------------------
 
 GUEST_BASELINE_RESTRICTED_ENTITIES_DEFAULT: List[str] = [
@@ -100,10 +109,32 @@ def _baseline_allowed_intents() -> List[str]:
 
 
 def _baseline_allowed_domains() -> List[str]:
-    return parse_json_array_env(
+    parsed = parse_json_array_env(
         get_config().guest_baseline_allowed_domains,
         GUEST_BASELINE_ALLOWED_DOMAINS_DEFAULT,
     )
+    if not parsed:
+        # ATHENA-69 Pass H (codex full-diff, Low): unlike
+        # restricted_entities (always unioned, never opt-outable) and
+        # allowed_intents (an empty allow-list has the safe deny-by-
+        # default meaning "nothing extra allowed"), an empty
+        # allowed_domains has NO safe meaning downstream --
+        # check_entity_permission's `if allowed_domains and ...` skips the
+        # domain check entirely when the list is empty, so a deployer
+        # setting GUEST_BASELINE_ALLOWED_DOMAINS=[] intending "no domains
+        # beyond the floor" instead got "every domain allowed". Treat an
+        # explicit "[]" here the same as unset.
+        return list(GUEST_BASELINE_ALLOWED_DOMAINS_DEFAULT)
+    return parsed
+
+
+def baseline_allowed_domains() -> List[str]:
+    """Public: the effective baseline allowed-domains list (see
+    _baseline_allowed_domains's Pass H note on why an explicit "[]"
+    override is treated as unset here but not for the other two baseline
+    lists). Used by mode_permission.check_entity_permission as the
+    fallback when a permissions dict's own allowed_domains is empty."""
+    return _baseline_allowed_domains()
 
 
 def apply_guest_baseline(permissions: Dict[str, Any]) -> Dict[str, Any]:

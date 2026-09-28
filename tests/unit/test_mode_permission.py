@@ -458,20 +458,49 @@ class TestCheckEntityPermission:
         }
         assert mode_permission.check_entity_permission("light.bedroom", perms) is True
 
-    def test_entity_allowed_with_no_restrictions(self):
+    def test_empty_allowed_domains_falls_back_to_baseline_not_unrestricted(self):
+        """ATHENA-69 Pass H (codex full-diff, Low): an empty allowed_domains
+        -- however it arose -- no longer means "every domain allowed". It
+        falls back to the baseline domain list (light/media_player/switch/
+        climate by default): an in-baseline domain is still allowed, an
+        out-of-baseline one is now blocked (previously silently allowed)."""
         perms = {
             "mode": "guest",
             "restricted_entities": [],
             "allowed_domains": [],
         }
+        assert mode_permission.check_entity_permission("light.bedroom", perms) is True
+        assert mode_permission.check_entity_permission("sensor.temperature", perms) is False
+        assert mode_permission.check_entity_permission("vacuum.roomba", perms) is False
+
+    def test_degraded_mode_empty_allowed_domains_is_not_baseline_restricted(self):
+        """The guest-baseline fallback above is scoped to mode=="guest"
+        only. degraded_permissions() (D4) deliberately sets
+        allowed_domains=[] to mean "no domain restriction beyond the
+        entity floor" for an owner-during-outage/system scope -- applying
+        the guest baseline there would newly block domains (e.g. select,
+        input_boolean) an owner is meant to keep during an outage.
+        Regression: this exact scenario broke test_smart_home_bed_warmer.py's
+        direct _handle_bed_warmer_intent call (no open scope -> D3's
+        degraded system-mode fallback) the first time this fix shipped."""
+        perms = {
+            "mode": "degraded",
+            "restricted_entities": [r"^lock\."],
+            "allowed_domains": [],
+        }
+        assert mode_permission.check_entity_permission("select.bed_level_left", perms) is True
         assert mode_permission.check_entity_permission("sensor.temperature", perms) is True
+        assert mode_permission.check_entity_permission("lock.front_door", perms) is False
 
     def test_invalid_regex_exact_match_fallback(self):
-        # Pattern that is not a wildcard and not a valid regex but equals entity_id exactly
+        # Pattern that is not a wildcard and not a valid regex but equals entity_id exactly.
+        # allowed_domains explicit so this exercises only the regex-fallback
+        # logic under test, not the (Pass H) empty-allowed_domains-falls-
+        # back-to-baseline behavior covered by the test above.
         perms = {
             "mode": "guest",
             "restricted_entities": ["[invalid"],
-            "allowed_domains": [],
+            "allowed_domains": ["sensor"],
         }
         # "[invalid" is invalid regex, doesn't end with *, doesn't equal "sensor.co2"
         assert mode_permission.check_entity_permission("sensor.co2", perms) is True

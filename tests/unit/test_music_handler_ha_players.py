@@ -14,6 +14,14 @@ from unittest import mock
 
 import pytest
 
+# Stub heavy deps before any orchestrator import -- MusicHandler.__init__
+# lazily imports orchestrator.mode_permission (-> orchestrator.metrics ->
+# prometheus_client) the first time it's actually constructed, which the
+# regression test below at the end of this file does.
+for _mod in ("prometheus_client", "langgraph", "langgraph.graph"):
+    if _mod not in sys.modules:
+        sys.modules[_mod] = mock.MagicMock()
+
 sys.path.insert(0, "src")
 
 import orchestrator.music_handler as music_handler  # noqa: E402
@@ -94,3 +102,31 @@ def test_get_room_configs_falls_back_to_empty_dict_when_admin_api_and_ha_music_p
 
     assert result == {}
     assert music_handler.get_room_entity("office", result) is None
+
+
+def test_player_check_succeeds_when_constructed_with_already_guarded_client():
+    """Pass H regression: production (main.py's lifespan) passes the
+    already-guarded ha_client into get_music_handler(), so MusicHandler's
+    own ensure_permission_enforcing() call is a no-op wrapping an already-
+    wrapped guard (idempotent). Before Pass H, MusicHandler kept a private
+    self._ha_raw = ha_client reference and used raw .url/.headers on it --
+    since that "raw" reference was actually the guard, .headers raised
+    AttributeError (caught and silently turned into "no players found",
+    breaking playback). Now the player check goes through the guard's
+    get_states() read passthrough and must succeed."""
+    from orchestrator import mode_permission
+
+    inner = mock.MagicMock()
+    inner.get_states = mock.AsyncMock(return_value=[
+        {"entity_id": "media_player.mass_kitchen", "attributes": {"mass_player_type": "player"}},
+    ])
+    already_guarded = mode_permission.ensure_permission_enforcing(inner)
+    assert already_guarded._athena_ha_guard is mode_permission._GUARD_SENTINEL
+
+    handler = music_handler.MusicHandler(already_guarded)
+    music_handler._ma_config_checked = False  # bypass the module-level once-per-session cache
+
+    has_players = asyncio.run(music_handler.check_music_assistant_players(handler.ha))
+
+    assert has_players is True
+    inner.get_states.assert_awaited_once()

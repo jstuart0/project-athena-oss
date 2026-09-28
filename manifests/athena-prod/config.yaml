@@ -331,14 +331,16 @@ data:
 
   # MODE_SERVICE_INGRESS_AUTH (D15/D23): same three-value contract as
   # ORCHESTRATOR_INGRESS_AUTH above, applied to the mode service's /mode*
-  # routes via shared.service_ingress_auth. The code default is "enforce";
-  # this template pins "warn" instead for a staged rollout -- the mode
-  # service logs mode_service_ingress_auth_warn_active at startup and hourly
-  # while active, so it's easy to notice this override is still in effect.
-  # Switch to "enforce" once every caller (orchestrator, gateway) is
-  # confirmed sending X-Service-Key, then remove this line to fall back to
-  # the code default.
-  MODE_SERVICE_INGRESS_AUTH: "warn"
+  # routes via shared.service_ingress_auth. Code default is "enforce" --
+  # left commented here so a fresh OSS install runs it from the start, not
+  # "warn" forever. Uncomment temporarily to "warn" ONLY during a staged
+  # rollout onto an already-running deployment (e.g. an upgrade where the
+  # orchestrator/gateway haven't picked up SERVICE_API_KEY yet) -- the mode
+  # service logs mode_service_ingress_auth_warn_active at startup and
+  # hourly while "warn" is active, so it's easy to notice the override is
+  # still in effect. Remove this line (back to commented) once every
+  # caller is confirmed sending X-Service-Key.
+  # MODE_SERVICE_INGRESS_AUTH: "warn"
 
   # LIVEKIT_USER_TOKEN_TTL_MINUTES (D27): TTL for browser-facing LiveKit
   # room tokens minted for jarvis-web voice sessions (clamped 1-1440).

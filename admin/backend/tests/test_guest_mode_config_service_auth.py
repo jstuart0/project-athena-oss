@@ -102,6 +102,35 @@ def test_guest_mode_config_includes_restricted_intents(client, db):
     assert resp.json()["guest_restricted_intents"] == ["tesla"]
 
 
+def test_legacy_pin_hash_reports_needs_reset(client, db):
+    """ATHENA-69 Pass H (valerie r1, Medium): a legacy unsalted-SHA256 PIN
+    (pre-D30) can never be verified by POST verify-pin -- it always
+    answers "not_configured" for that hash format. The config response
+    must say so distinctly from "no PIN at all", so the admin UI can
+    prompt for a fresh PIN rather than imply the existing one still works."""
+    resp = client.get(CONFIG_URL)
+    assert resp.status_code == 200
+    assert resp.json()["owner_pin_configured"] is False
+    assert resp.json()["owner_pin_needs_reset"] is False
+
+    config = db.query(GuestModeConfig).first()
+    config.owner_pin = "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d"  # legacy unsalted sha256
+    db.commit()
+
+    resp2 = client.get(CONFIG_URL)
+    body2 = resp2.json()
+    assert body2["owner_pin_configured"] is True
+    assert body2["owner_pin_needs_reset"] is True
+
+    config.owner_pin = "pbkdf2_sha256$600000$deadbeef$cafebabe"
+    db.commit()
+
+    resp3 = client.get(CONFIG_URL)
+    body3 = resp3.json()
+    assert body3["owner_pin_configured"] is True
+    assert body3["owner_pin_needs_reset"] is False
+
+
 def test_service_key_auto_create_has_no_creator(client, db):
     """D39 correction: a service-key fetch against an empty DB returns the
     built-in defaults and creates NOTHING -- created_by_id is NOT NULL, so a

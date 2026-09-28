@@ -40,7 +40,7 @@ import structlog
 from orchestrator.metrics import ha_write_denied_total
 from orchestrator.state import IntentCategory
 from shared.config import get_config
-from shared.guest_policy import apply_guest_baseline, guest_baseline, parse_json_array_env
+from shared.guest_policy import apply_guest_baseline, baseline_allowed_domains, guest_baseline, parse_json_array_env
 
 logger = structlog.get_logger(__name__)
 
@@ -104,6 +104,29 @@ async def get_current_mode() -> Dict[str, Any]:
         response = await mode_client.get("/mode")
         response.raise_for_status()
         mode_data = response.json()
+
+        mode_value = mode_data.get("mode", "owner")
+        if mode_value == "degraded":
+            # D38 cold start (valerie r1, High): the mode service answered
+            # successfully but hasn't completed its first successful
+            # admin-config load yet, and reports mode="degraded" -- a
+            # value OrchestratorState/QueryRequest never accept (only
+            # owner/guest), so letting it through 500s every /query* call
+            # from the first request after a mode-service restart until
+            # that first load completes. Treat it exactly like the D4
+            # outage branch below: never propagate "degraded" as a mode
+            # string.
+            logger.warning(
+                "mode_service_reports_degraded",
+                reason=mode_data.get("reason", "Unknown"),
+            )
+            return {
+                "mode": "owner",
+                "permissions": degraded_permissions(),
+                "override_active": False,
+                "degraded": True,
+                "reason": mode_data.get("reason", "Mode service cold start"),
+            }
 
         # Get permissions for current mode
         perms_response = await mode_client.get("/mode/permissions")
@@ -578,14 +601,28 @@ def check_entity_permission(entity_id: str, permissions: Dict[str, Any]) -> bool
                 )
                 return False
 
-    # Check if entity domain is allowed
+    # Check if entity domain is allowed. An empty allowed_domains has no
+    # safe "allow everything" meaning for a GUEST specifically -- fall
+    # back to the baseline domain list rather than skip the check
+    # entirely (Pass H, codex full-diff, Low: this previously let an
+    # empty allowed_domains, however it arose, silently allow every
+    # domain for a guest). Scoped to mode=="guest": degraded_permissions()
+    # (D4) deliberately sets allowed_domains=[] to mean "no domain
+    # restriction beyond the entity floor" for an outage/system scope --
+    # applying the guest baseline there would newly block domains
+    # (select, input_boolean, ...) an owner-during-outage is meant to
+    # keep.
     entity_domain = entity_id.split(".")[0] if "." in entity_id else entity_id
-    if allowed_domains and entity_domain not in allowed_domains:
+    if mode == "guest":
+        effective_allowed_domains = allowed_domains or baseline_allowed_domains()
+    else:
+        effective_allowed_domains = allowed_domains
+    if effective_allowed_domains and entity_domain not in effective_allowed_domains:
         logger.info(
             "entity_blocked_domain",
             entity_id=entity_id,
             domain=entity_domain,
-            allowed_domains=allowed_domains,
+            allowed_domains=effective_allowed_domains,
             mode=mode
         )
         return False
@@ -1166,15 +1203,20 @@ class PermissionEnforcingHAClient:
     no-op).
 
     The read allowlist is deliberately narrow: only ``get_state``,
-    ``health_check``, ``close``, ``is_configured``, and ``url`` pass
-    through. Any other attribute access (``client``, ``token``, an
-    unintercepted write method) raises AttributeError -- the raw
-    authenticated transport is never reachable through the guard.
+    ``get_states``, ``health_check``, ``close``, and ``is_configured`` pass
+    through. Any other attribute access (``client``, ``token``, ``url``,
+    ``headers``, an unintercepted write method) raises AttributeError --
+    the raw authenticated transport is never reachable through the guard.
+    ``get_states`` (ATHENA-69 Pass H) is the bulk ``/api/states`` read used
+    by music-player-discovery callers that previously kept an unwrapped
+    ``_ha_raw`` reference specifically to reach ``.url``/``.headers`` for a
+    raw httpx call -- that exception is gone; there is no unwrapped
+    reference anywhere in ``src/orchestrator`` anymore.
     """
 
     _athena_ha_guard = _GUARD_SENTINEL
 
-    _READ_ALLOWLIST = frozenset({"get_state", "health_check", "close", "is_configured", "url"})
+    _READ_ALLOWLIST = frozenset({"get_state", "get_states", "health_check", "close", "is_configured"})
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner

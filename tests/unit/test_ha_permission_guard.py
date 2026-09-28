@@ -136,10 +136,12 @@ def _make_inner():
     inner = MagicMock()
     inner.call_service = AsyncMock(return_value={"ok": True})
     inner.get_state = AsyncMock(return_value={"state": "on"})
+    inner.get_states = AsyncMock(return_value=[{"entity_id": "light.kitchen", "state": "on"}])
     inner.health_check = AsyncMock(return_value=True)
     inner.close = AsyncMock(return_value=None)
     inner.is_configured = True
-    inner.url = "http://ha.local"
+    inner.url = "http://ha.local"  # not exposed through the guard (Pass H)
+    inner.headers = {"Authorization": "Bearer super-secret-token"}  # not exposed either
     inner.client = MagicMock()  # the raw authenticated transport
     inner.token = "super-secret-token"
     return inner
@@ -199,9 +201,9 @@ class TestPassthroughReadsAllowlist:
         inner = _make_inner()
         guard = mp.PermissionEnforcingHAClient(inner)
         assert _run(guard.get_state("light.kitchen")) == {"state": "on"}
+        assert _run(guard.get_states()) == [{"entity_id": "light.kitchen", "state": "on"}]
         assert _run(guard.health_check()) is True
         assert guard.is_configured is True
-        assert guard.url == "http://ha.local"
         _run(guard.close())
         inner.close.assert_awaited_once()
 
@@ -212,6 +214,10 @@ class TestRawTransportNotExposed:
         guard = mp.PermissionEnforcingHAClient(inner)
         with pytest.raises(AttributeError):
             guard.client
+        with pytest.raises(AttributeError):
+            guard.url
+        with pytest.raises(AttributeError):
+            guard.headers
         with pytest.raises(AttributeError):
             guard.token
 
@@ -600,7 +606,7 @@ class TestGuardAutomationMethods:
 
     def test_ha_client_write_surface_is_intercepted(self):
         """Public async def methods of HomeAssistantClient minus
-        {get_state, health_check, close} equal exactly
+        {get_state, get_states, health_check, close} equal exactly
         {call_service, create_automation, delete_automation, disable_automation}."""
         import inspect
         from shared.ha_client import HomeAssistantClient
@@ -609,7 +615,7 @@ class TestGuardAutomationMethods:
             name for name, member in inspect.getmembers(HomeAssistantClient, predicate=inspect.iscoroutinefunction)
             if not name.startswith("_")
         }
-        write_methods = public_async_methods - {"get_state", "health_check", "close"}
+        write_methods = public_async_methods - {"get_state", "get_states", "health_check", "close"}
         assert write_methods == {"call_service", "create_automation", "delete_automation", "disable_automation"}
         for name in write_methods:
             assert hasattr(mp.PermissionEnforcingHAClient, name), f"guard doesn't intercept {name}"

@@ -49,6 +49,7 @@ conflicts (mozart, 2026-09-28).
 """
 from __future__ import annotations
 
+import asyncio
 import ast
 import importlib.util
 import os
@@ -57,6 +58,8 @@ import sys
 import unittest.mock as mock
 from pathlib import Path
 from typing import Optional
+
+import pytest
 
 for _mod in ("prometheus_client", "langgraph", "langgraph.graph"):
     if _mod not in sys.modules:
@@ -73,8 +76,28 @@ SRC = REPO_ROOT / "src"
 class TestGuardPassthroughAllowlist:
     def test_guard_passthrough_allowlist_excludes_transport(self):
         assert mp.PermissionEnforcingHAClient._READ_ALLOWLIST == frozenset(
-            {"get_state", "health_check", "close", "is_configured", "url"}
+            {"get_state", "get_states", "health_check", "close", "is_configured"}
         )
+
+    def test_guard_exposes_get_states(self):
+        """Pass H: get_states() (bulk /api/states read) passes through the
+        guard -- the fix for the _ha_raw exception this replaces."""
+        inner = mock.MagicMock()
+        inner.get_states = mock.AsyncMock(return_value=[{"entity_id": "sensor.x"}])
+        guard = mp.PermissionEnforcingHAClient(inner)
+        result = asyncio.run(guard.get_states())
+        assert result == [{"entity_id": "sensor.x"}]
+        inner.get_states.assert_awaited_once()
+
+    def test_guard_still_blocks_headers_and_url(self):
+        """Pass H: killing the _ha_raw exception must not accidentally
+        widen the allowlist -- .headers was never exposed, and .url (used
+        by nothing in src/ anymore) is removed too, not just left as-is."""
+        guard = mp.PermissionEnforcingHAClient(mock.MagicMock())
+        with pytest.raises(AttributeError):
+            guard.headers
+        with pytest.raises(AttributeError):
+            guard.url
 
 
 class TestNoRawHAWriteEndpointsInOrchestrator:
@@ -250,10 +273,10 @@ class TestCallServiceMethodsSubsetOfHAClientMethods:
     def test_call_service_methods_subset_of_ha_client_methods(self):
         """Every `.call_service(` receiver across the guarded modules is a
         known ha_client-like reference -- never a bare/raw variable that
-        bypassed ensure_permission_enforcing. `self._ha_raw` (music_handler's
-        unwrapped reference, kept only for the one read-only bulk-states
-        call) is deliberately NOT in this allowlist -- see the two
-        dedicated `_ha_raw` tests below, which scope it to reads only."""
+        bypassed ensure_permission_enforcing. Pass H removed music_handler's
+        `self._ha_raw` unwrapped-client exception entirely (it now reads
+        via the guard's `get_states()` passthrough like everything else),
+        so there is no read-only carve-out left to allowlist here."""
         allowed_receivers = {
             "ha_client", "self.ha_client", "self.ha", "self._inner", "inner",
             "self.music.ha",  # FollowMeAudioService reaches MusicHandler's already-wrapped self.ha
@@ -278,34 +301,19 @@ class TestCallServiceMethodsSubsetOfHAClientMethods:
                     offenders.append(f"{path.name}:{receiver}")
         assert offenders == []
 
-    def test_ha_raw_never_calls_call_service(self):
-        """Mutation-resistance (tessa, Pass B review): self._ha_raw
-        (music_handler's deliberately-unwrapped reference for one
-        read-only bulk-states call) must NEVER be used for a write -- a
-        synthetic `self._ha_raw.call_service(...)` anywhere in src/ must
-        fail this test, independent of the general allowlist above."""
+    def test_no_ha_raw_anywhere(self):
+        """Pass H: music_handler.py's unwrapped-client exception (a
+        `self._ha_raw` attribute holding the raw, unguarded
+        HomeAssistantClient) is gone entirely -- that attribute reference
+        must never reappear anywhere in src/. Scoped to the actual `self.`
+        attribute access, not prose mentioning the removed name in a
+        docstring or comment explaining the history."""
         offenders = []
         for path in SRC.rglob("*.py"):
             text = path.read_text(encoding="utf-8", errors="ignore")
-            if "self._ha_raw.call_service(" in text:
+            if "self._ha_raw" in text or "._ha_raw =" in text:
                 offenders.append(str(path.relative_to(REPO_ROOT)))
         assert offenders == []
-
-    def test_ha_raw_attribute_access_scoped_to_one_read_site(self):
-        """The only `self._ha_raw.<attr>` accesses anywhere in src/ are
-        `.url` and `.headers`, both at music_handler.py's one bulk-states
-        read site (get_playing_rooms_from_ha) -- never a write method, and
-        never from any other file."""
-        pattern = re.compile(r"self\._ha_raw\.([A-Za-z_][A-Za-z0-9_]*)")
-        found = []
-        for path in SRC.rglob("*.py"):
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            for m in pattern.finditer(text):
-                found.append((str(path.relative_to(REPO_ROOT)), m.group(1)))
-        assert found, "expected at least one self._ha_raw usage (music_handler.py)"
-        for file_path, attr in found:
-            assert file_path.endswith("music_handler.py"), (file_path, attr)
-            assert attr in ("url", "headers"), (file_path, attr)
 
 
 class TestControllerCallServiceReceiversAreHAClient:
@@ -357,7 +365,7 @@ class TestHAClientWriteSurfaceIsIntercepted:
             name for name, member in inspect.getmembers(HomeAssistantClient, predicate=inspect.iscoroutinefunction)
             if not name.startswith("_")
         }
-        write_methods = public_async_methods - {"get_state", "health_check", "close"}
+        write_methods = public_async_methods - {"get_state", "get_states", "health_check", "close"}
         assert write_methods == {"call_service", "create_automation", "delete_automation", "disable_automation"}
         for name in write_methods:
             assert hasattr(mp.PermissionEnforcingHAClient, name), f"guard doesn't intercept {name}"
@@ -808,10 +816,28 @@ class TestNoClientModeTrust:
 
 
 class TestPinBranchOnlyViaTrustHelper:
+    """D24 / Pass H: activate_owner_override is never called directly
+    anywhere outside mode_permission.py's own implementation --
+    handle_owner_mode_utterance is the sole entry point. As of Pass H,
+    handle_owner_mode_utterance is called from all four query entry
+    points, not just process_query (codex full-diff, Medium): the two SSE
+    stream endpoints and the OpenAI-compatible streaming branch previously
+    let a PIN utterance fall through to normal chat synthesis instead of
+    being refused/verified.
+
+    "Enclosing function" is the OUTERMOST named function on the stack, not
+    the innermost -- chat_completions' call is inside a nested
+    `async def openai_stream_generator():` closure, same reasoning as the
+    D36 caller-trust census scanner above."""
+
+    EXPECTED_ENTRY_POINTS = {
+        "process_query", "process_query_stream", "process_query_stream_v2", "chat_completions",
+    }
+
     def test_pin_branch_only_via_trust_helper(self):
         tree = ast.parse(_MAIN_PY.read_text(encoding="utf-8"), filename=str(_MAIN_PY))
+
         activate_calls = 0
-        handle_calls = []
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
@@ -819,23 +845,33 @@ class TestPinBranchOnlyViaTrustHelper:
                 and node.func.id == "activate_owner_override"
             ):
                 activate_calls += 1
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "handle_owner_mode_utterance"
-            ):
-                handle_calls.append(node)
         assert activate_calls == 0
 
-        # handle_owner_mode_utterance is called exactly once, inside
-        # process_query.
-        assert len(handle_calls) == 1
-        enclosing = None
-        for node in ast.walk(tree):
-            if isinstance(node, ast.AsyncFunctionDef) and node.name == "process_query":
-                if any(inner is handle_calls[0] for inner in ast.walk(node)):
-                    enclosing = node
-        assert enclosing is not None, "handle_owner_mode_utterance must be called inside process_query"
+        found_in = set()
+
+        class _PinCallVisitor(ast.NodeVisitor):
+            def __init__(self):
+                self.func_stack: list[ast.AST] = []
+
+            def visit_FunctionDef(self, node):
+                self.func_stack.append(node)
+                self.generic_visit(node)
+                self.func_stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node):
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "handle_owner_mode_utterance"
+                    and self.func_stack
+                ):
+                    found_in.add(self.func_stack[0].name)
+                self.generic_visit(node)
+
+        _PinCallVisitor().visit(tree)
+
+        assert found_in == self.EXPECTED_ENTRY_POINTS
 
 
 # ---------------------------------------------------------------------------

@@ -359,3 +359,109 @@ class TestSourceFieldNeverGrantsPinPath:
         assert body["intent"] == "mode_override"
         assert body["metadata"]["refused_reason"] == "untrusted_surface"
         server.post.assert_not_awaited()
+
+
+class TestModeServiceColdStartDegraded:
+    """valerie r1, High: the mode service's mode="degraded" reply (D38 cold
+    start -- up, but no successful admin-config load yet) was passed
+    straight through get_current_mode() into resolve_request_authorization
+    -> OrchestratorState, which only ever accepts owner/guest. Every
+    /query* request 500'd (a pydantic ValidationError) from the first
+    request after a mode-service restart until its first config load
+    completed."""
+
+    def test_degraded_mode_service_reply_does_not_500_and_denies_a_lock(self, client, monkeypatch):
+        # /mode/permissions deliberately answers with a *valid, non-raising*
+        # 200 here -- not an AssertionError -- so a mutation that removes
+        # the degraded short-circuit can't be masked by get_current_mode's
+        # own broad `except Exception`. If the short-circuit is skipped,
+        # this response's own "mode": "degraded" flows straight into
+        # OrchestratorState's Literal["owner","guest"] field and raises a
+        # real pydantic ValidationError past get_current_mode entirely.
+        get_permissions_calls = []
+
+        async def _get(url, params=None, **kwargs):
+            if url == "/mode":
+                return _make_response(200, {"mode": "degraded", "override_active": False, "reason": "cold start"})
+            if url == "/mode/permissions":
+                get_permissions_calls.append(url)
+                return _make_response(200, {"mode": "degraded", "allowed_intents": [], "restricted_entities": []})
+            if url == "/health":
+                return _make_response(200, {"pin_authority": "admin"})
+            raise AssertionError(f"unexpected GET {url}")
+
+        mode_client = mock.AsyncMock()
+        mode_client.get = mock.AsyncMock(side_effect=_get)
+        _runtime.set_mode_client(mode_client)
+
+        graph = _FakeGraph({
+            "intent": SimpleNamespace(value="control"),
+            "error": "permission_denied",
+            "node_timings": {},
+        })
+        monkeypatch.setattr(_main_module, "orchestrator_graph", graph)
+
+        resp = client.post(
+            "/query",
+            json={"query": "unlock the front door", "mode": "owner", "room": "kitchen"},
+            headers=_service_headers(),
+        )
+
+        assert resp.status_code == 200
+        assert get_permissions_calls == [], "degraded short-circuit must skip /mode/permissions entirely"
+        initial_state = graph.calls[0]
+        assert initial_state.mode == "owner"
+        assert r"^lock\." in initial_state.permissions.get("restricted_entities", [])
+
+
+class TestStreamEndpointsRunPinBranch:
+    """codex full-diff item 4 (Pass H): /query/stream and /query/stream/v2
+    previously never called handle_owner_mode_utterance at all -- a PIN
+    utterance from an untrusted caller_trust fell straight through to
+    normal chat synthesis instead of being refused before the graph ever
+    ran (and, worse, a *trusted* tier's PIN utterance would have been
+    silently ignored on these endpoints rather than verified)."""
+
+    def test_query_stream_pin_branch_refuses_untrusted_surface(self, client, monkeypatch):
+        server = _install_mode_client(server_mode="owner")
+        graph = _FakeGraph()
+        monkeypatch.setattr(_main_module, "orchestrator_graph", graph)
+
+        with client.stream(
+            "POST", "/query/stream",
+            json={
+                "query": "switch to owner mode pin 123456",
+                "mode": "owner",
+                "room": "kitchen",
+                "caller_trust": "web_public",
+            },
+            headers=_service_headers(),
+        ) as resp:
+            assert resp.status_code == 200
+            body = "".join(resp.iter_lines())
+
+        assert "Owner mode isn't available from here." in body
+        server.post.assert_not_awaited()
+        assert len(graph.calls) == 0
+
+    def test_stream_v2_pin_branch_refuses_untrusted_surface(self, client, monkeypatch):
+        server = _install_mode_client(server_mode="owner")
+        graph = _FakeGraph()
+        monkeypatch.setattr(_main_module, "orchestrator_graph", graph)
+
+        with client.stream(
+            "POST", "/query/stream/v2",
+            json={
+                "query": "switch to owner mode pin 123456",
+                "mode": "owner",
+                "room": "kitchen",
+                "caller_trust": "web_public",
+            },
+            headers=_service_headers(),
+        ) as resp:
+            assert resp.status_code == 200
+            body = "".join(resp.iter_lines())
+
+        assert "Owner mode isn't available from here." in body
+        server.post.assert_not_awaited()
+        assert len(graph.calls) == 0

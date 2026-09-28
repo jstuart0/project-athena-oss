@@ -7099,6 +7099,18 @@ async def process_query_stream(request: QueryRequest):
             authz = await resolve_request_authorization(request.mode, guest_info)
             current_mode = authz.mode
 
+            # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
+            # utterance path -- every entry point runs this, not just
+            # /query. caller_trust is set by the calling SERVICE, never by
+            # the end user; handle_owner_mode_utterance refuses any
+            # caller_trust outside PIN_TRUSTED_TIERS before any throttle
+            # consumption or mode-service call.
+            outcome = await handle_owner_mode_utterance(request.query, request.caller_trust, request.room)
+            if outcome is not None:
+                yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': outcome.message})}\n\n"
+                yield f"data: {json.dumps({'stage': 'complete', 'processing_time': time.time() - start_time, 'tool_exec_time': 0, 'llm_time': 0, 'tokens': 0})}\n\n"
+                return
+
             # Get conversation history
             config = await get_config()
             conv_settings = await config.get_conversation_settings()
@@ -7392,6 +7404,18 @@ async def process_query_stream_v2(request: QueryRequest):
             # via the single resolution path every entry point shares.
             authz = await resolve_request_authorization(request.mode, guest_info)
             current_mode = authz.mode
+
+            # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
+            # utterance path -- every entry point runs this, not just
+            # /query. caller_trust is set by the calling SERVICE, never by
+            # the end user; handle_owner_mode_utterance refuses any
+            # caller_trust outside PIN_TRUSTED_TIERS before any throttle
+            # consumption or mode-service call.
+            outcome = await handle_owner_mode_utterance(request.query, request.caller_trust, request.room)
+            if outcome is not None:
+                yield f"data: {json.dumps({'stage': 'streaming', 'sentence_num': 1, 'sentence': outcome.message, 'is_final': True})}\n\n"
+                yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': 1, 'full_response': outcome.message, 'intent': 'mode_override', 'processing_time': time.time() - start_time})}\n\n"
+                return
 
             # Run orchestrator up to LLM synthesis point
             # We need intent classification and RAG data, but will stream the LLM response
@@ -8085,6 +8109,24 @@ async def chat_completions(request: OpenAIChatRequest):
                 # resolution path every entry point shares. OpenAIChatRequest
                 # has no mode/device_id fields at all, so both args are None.
                 authz = await resolve_request_authorization(None, None)
+
+                # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
+                # utterance path -- every entry point runs this. This
+                # streaming branch bypasses process_query() entirely (the
+                # non-streaming branch below delegates to it and already
+                # gets this for free), so it needs its own call.
+                # OpenAIChatRequest carries no caller_trust field, so this
+                # is always None -- PIN_TRUSTED_TIERS refuses it before any
+                # throttle or mode-service call, same as any other
+                # untagged caller (D24).
+                outcome = await handle_owner_mode_utterance(user_message, None, None)
+                if outcome is not None:
+                    pin_request_id = hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8]
+                    yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': outcome.message}, 'finish_reason': None}]})}\n\n"
+                    yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
                 config = await get_config()
                 conv_settings = await config.get_conversation_settings()
                 conversation_history = []

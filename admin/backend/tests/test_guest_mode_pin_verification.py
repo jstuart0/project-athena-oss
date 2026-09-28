@@ -56,8 +56,17 @@ def test_verify_pin_response_has_no_hash(client, db, test_user):
 
 @pytest.mark.parametrize(
     "pin,expected",
-    [("123456", "verified"), ("999999", "invalid"), ("12345", "malformed"), ("abcdef", "malformed")],
-    ids=["correct", "wrong", "malformed-counts", "malformed-nondigit"],
+    [
+        ("123456", "verified"),
+        ("999999", "invalid"),
+        ("12345", "malformed"),
+        ("abcdef", "malformed"),
+        ("１２３４５６", "malformed"),  # ATHENA-69 Pass H (valerie r1, Low):
+        # fullwidth Unicode digits pass str.isdigit() but aren't ASCII 0-9
+        # and can never match a hash derived from an actual ASCII PIN.
+        ("²³⁴⁵⁶⁷", "malformed"),  # superscript digits -- also isdigit()==True
+    ],
+    ids=["correct", "wrong", "malformed-counts", "malformed-nondigit", "malformed-fullwidth-digits", "malformed-superscript-digits"],
 )
 def test_verify_pin_statuses(client, db, test_user, pin, expected):
     _set_pin(db, pin="123456", created_by_id=test_user.id)

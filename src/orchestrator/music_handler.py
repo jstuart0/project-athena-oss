@@ -57,40 +57,33 @@ async def check_music_assistant_players(ha_client: HomeAssistantClient) -> bool:
         return _ma_has_players
 
     try:
-        # Get all HA states and look for MA player entities
-        import httpx
-        ha_url = ha_client.url
-        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-            response = await client.get(
-                f"{ha_url}/api/states",
-                headers=ha_client.headers
+        # Get all HA states via the guard's get_states() read passthrough
+        # (ATHENA-69 D10) and look for MA player entities.
+        states = await ha_client.get_states()
+        # MA players have mass_player_type attribute (player or group)
+        ma_players = [
+            e for e in states
+            if e.get("entity_id", "").startswith("media_player.")
+            and e.get("attributes", {}).get("mass_player_type")
+        ]
+        _ma_has_players = len(ma_players) > 0
+        _ma_config_checked = True
+
+        if not _ma_has_players:
+            logger.warning(
+                "music_assistant_no_players",
+                msg="Music Assistant has no players configured. "
+                    "Music playback will not work. Please add players "
+                    "in Home Assistant → Music Assistant → Settings → Players"
             )
-            if response.status_code == 200:
-                states = response.json()
-                # MA players have mass_player_type attribute (player or group)
-                ma_players = [
-                    e for e in states
-                    if e.get("entity_id", "").startswith("media_player.")
-                    and e.get("attributes", {}).get("mass_player_type")
-                ]
-                _ma_has_players = len(ma_players) > 0
-                _ma_config_checked = True
+        else:
+            logger.info(
+                "music_assistant_players_found",
+                count=len(ma_players),
+                players=[e["entity_id"] for e in ma_players]
+            )
 
-                if not _ma_has_players:
-                    logger.warning(
-                        "music_assistant_no_players",
-                        msg="Music Assistant has no players configured. "
-                            "Music playback will not work. Please add players "
-                            "in Home Assistant → Music Assistant → Settings → Players"
-                    )
-                else:
-                    logger.info(
-                        "music_assistant_players_found",
-                        count=len(ma_players),
-                        players=[e["entity_id"] for e in ma_players]
-                    )
-
-                return _ma_has_players
+        return _ma_has_players
     except Exception as e:
         logger.error("music_assistant_check_failed", error=str(e))
 
@@ -578,14 +571,6 @@ class MusicHandler:
         from orchestrator.mode_permission import ensure_permission_enforcing
 
         self.ha = ensure_permission_enforcing(ha_client)
-        # ATHENA-69 (D10, read-only scope): get_playing_rooms_from_ha below
-        # bulk-fetches /api/states via a raw httpx GET using the client's
-        # own auth headers -- a read, not a write, but the guard's read
-        # allowlist covers only get_state(entity_id) (single-entity), and
-        # `.headers` carries the same bearer token `.token` does, so it
-        # can't be added to that allowlist. Keep an unwrapped reference for
-        # this one call site; every write still goes through self.ha above.
-        self._ha_raw = ha_client
         self.admin = admin_client
         self.account_pool = SpotifyAccountPool(spotify_accounts)
         self.default_room = "home"  # Fallback if no room specified
@@ -635,8 +620,6 @@ class MusicHandler:
         Returns:
             Dict mapping room_name -> entity_id for rooms with playing media
         """
-        import httpx
-
         playing_rooms = {}
 
         try:
@@ -654,42 +637,36 @@ class MusicHandler:
                     # Fallback format: direct entity string
                     entity_to_room[config] = room_name
 
-            # Query HA for all media player states
-            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-                response = await client.get(
-                    f"{self._ha_raw.url}/api/states",
-                    headers=self._ha_raw.headers
-                )
+            # Query HA for all media player states via the guard's
+            # get_states() read passthrough (ATHENA-69 D10).
+            states = await self.ha.get_states()
 
-                if response.status_code == 200:
-                    states = response.json()
+            for entity in states:
+                entity_id = entity.get("entity_id", "")
+                state = entity.get("state", "")
 
-                    for entity in states:
-                        entity_id = entity.get("entity_id", "")
-                        state = entity.get("state", "")
-
-                        # Check if this entity is playing
-                        if entity_id.startswith("media_player.") and state == "playing":
-                            # Check if we know which room this is
-                            if entity_id in entity_to_room:
-                                room = entity_to_room[entity_id]
-                                playing_rooms[room] = entity_id
-                                logger.debug(
-                                    "ha_playing_detected",
-                                    room=room,
-                                    entity_id=entity_id
-                                )
-                            # Also check group entities by room name in entity_id
-                            elif "group" in entity_id.lower():
-                                # Try to match by room name appearing in entity_id
-                                for room_name in room_configs.keys():
-                                    if room_name in entity_id.lower().replace("_", ""):
-                                        playing_rooms[room_name] = entity_id
-                                        break
-                                    # Check without underscores
-                                    if room_name.replace("_", "") in entity_id.lower().replace("_", ""):
-                                        playing_rooms[room_name] = entity_id
-                                        break
+                # Check if this entity is playing
+                if entity_id.startswith("media_player.") and state == "playing":
+                    # Check if we know which room this is
+                    if entity_id in entity_to_room:
+                        room = entity_to_room[entity_id]
+                        playing_rooms[room] = entity_id
+                        logger.debug(
+                            "ha_playing_detected",
+                            room=room,
+                            entity_id=entity_id
+                        )
+                    # Also check group entities by room name in entity_id
+                    elif "group" in entity_id.lower():
+                        # Try to match by room name appearing in entity_id
+                        for room_name in room_configs.keys():
+                            if room_name in entity_id.lower().replace("_", ""):
+                                playing_rooms[room_name] = entity_id
+                                break
+                            # Check without underscores
+                            if room_name.replace("_", "") in entity_id.lower().replace("_", ""):
+                                playing_rooms[room_name] = entity_id
+                                break
 
             if playing_rooms:
                 logger.debug(
@@ -1088,7 +1065,7 @@ class MusicHandler:
             Response message for the user
         """
         # Check if Music Assistant has players configured
-        has_ma_players = await check_music_assistant_players(self._ha_raw)
+        has_ma_players = await check_music_assistant_players(self.ha)
         if not has_ma_players:
             logger.error(
                 "music_play_blocked_no_ma_players",
@@ -1411,7 +1388,7 @@ class MusicHandler:
         """
         # Check if Music Assistant has players configured (for add/clear actions)
         if action in ("add", "clear"):
-            has_ma_players = await check_music_assistant_players(self._ha_raw)
+            has_ma_players = await check_music_assistant_players(self.ha)
             if not has_ma_players:
                 return (
                     "Music queue management is not available. Music Assistant has no players configured. "
@@ -1581,7 +1558,7 @@ class MusicHandler:
             Response message for the user
         """
         # Check if Music Assistant has players configured
-        has_ma_players = await check_music_assistant_players(self._ha_raw)
+        has_ma_players = await check_music_assistant_players(self.ha)
         if not has_ma_players:
             return (
                 "Music playback is not available. Music Assistant has no players configured. "
@@ -1698,7 +1675,7 @@ class MusicHandler:
             Response message for the user
         """
         # Check if Music Assistant has players configured
-        has_ma_players = await check_music_assistant_players(self._ha_raw)
+        has_ma_players = await check_music_assistant_players(self.ha)
         if not has_ma_players:
             return (
                 "Music playback is not available. Music Assistant has no players configured. "

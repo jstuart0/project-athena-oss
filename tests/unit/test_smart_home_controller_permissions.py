@@ -18,6 +18,9 @@ fake itself.
  - test_controller_via_runtime_proxy_single_denial
  - test_unscoped_execute_intent_surfaces_refusal
  - test_scene_permission_denial_does_not_start_fallback
+
+Pass H additions:
+ - test_whole_house_restricted_entity_partial_refusal
 """
 from __future__ import annotations
 
@@ -136,6 +139,18 @@ async def _case_scene_goodbye_fallback(controller, ha_client):
     )
 
 
+async def _case_scene_goodbye_fallback_scene_domain(controller, ha_client):
+    """valerie r1, Low: the D20 fallback-suppression case above only ever
+    exercised the `script.` domain branch of _handle_scene_intent (domain
+    is chosen from the entity_id's prefix, script vs scene, before the
+    denial). A non-existent `scene.` entity takes the sibling branch
+    (domain='scene', service='scene.turn_on') -- same fallback-suppression
+    guarantee, different domain/service pair reaching authorize_ha_write."""
+    return await controller._handle_scene_intent(
+        "activate", {"entity_id": "scene.leaving_nonexistent"}, ha_client, original_query="goodbye"
+    )
+
+
 async def _case_bed_warmer(controller, ha_client, monkeypatch):
     monkeypatch.setattr(shc, "get_config", lambda: MagicMock(ha_bed_warmer_entities=(
         '{"level_left": "select.bed_level_left", "level_right": "select.bed_level_right", '
@@ -162,26 +177,35 @@ async def _case_motion_control_input_boolean(controller, ha_client):
     )
 
 
+# Full expected HA call list per case (valerie r1, Low: previously only
+# the script-leaving-goodbye-guest case asserted this; every case now
+# does). () for every case denied outright before any inner call; the
+# bed-warmer case is the one partial-success case -- switch.turn_on(main
+# power) succeeds (switch is guest-baseline-allowed) before both
+# select.select_option calls are denied (select isn't).
 _HANDLER_CASES = [
-    ("lock-unlock-front", _case_lock_unlock_front, False),
-    ("lock-lock-all", _case_lock_lock_all, False),
-    ("cover-open-garage", _case_cover_open_garage, False),
-    ("fan-turn-on-office", _case_fan_turn_on_office, False),
-    ("scene-leaving-explicit-guest", _case_scene_leaving_explicit, False),
-    ("script-leaving-goodbye-guest", _case_scene_goodbye_fallback, False),
-    ("bed-warmer-guest", _case_bed_warmer, True),
-    ("multi-room-light-restricted-entity-guest", _case_multi_room_light_restricted, True),
-    ("motion-control-input-boolean-guest", _case_motion_control_input_boolean, False),
+    ("lock-unlock-front", _case_lock_unlock_front, False, []),
+    ("lock-lock-all", _case_lock_lock_all, False, []),
+    ("cover-open-garage", _case_cover_open_garage, False, []),
+    ("fan-turn-on-office", _case_fan_turn_on_office, False, []),
+    ("scene-leaving-explicit-guest", _case_scene_leaving_explicit, False, []),
+    ("script-leaving-goodbye-guest", _case_scene_goodbye_fallback, False, []),
+    ("scene-goodbye-fallback-guest", _case_scene_goodbye_fallback_scene_domain, False, []),
+    ("bed-warmer-guest", _case_bed_warmer, True, [
+        (("switch", "turn_on", {"entity_id": "switch.bed_power_main"}), {}),
+    ]),
+    ("multi-room-light-restricted-entity-guest", _case_multi_room_light_restricted, True, []),
+    ("motion-control-input-boolean-guest", _case_motion_control_input_boolean, False, []),
 ]
 
 
 class TestGuestDeniedHandlerCallList:
     @pytest.mark.parametrize(
-        "name,case_fn,needs_monkeypatch",
+        "name,case_fn,needs_monkeypatch,expected_calls",
         _HANDLER_CASES,
         ids=[c[0] for c in _HANDLER_CASES],
     )
-    def test_guest_denied_handler_call_list(self, name, case_fn, needs_monkeypatch, monkeypatch):
+    def test_guest_denied_handler_call_list(self, name, case_fn, needs_monkeypatch, expected_calls, monkeypatch):
         controller = _controller()
         ha_client = _raw_ha_client()
         perms = _guest_perms()
@@ -198,9 +222,7 @@ class TestGuestDeniedHandlerCallList:
 
         result, denials = _run(_drive())
         assert len(denials) >= 1, name
-
-        if name in ("script-leaving-goodbye-guest",):
-            assert ha_client.call_service.await_args_list == [], name
+        assert ha_client.call_service.await_args_list == [mock.call(*args, **kwargs) for args, kwargs in expected_calls], name
 
     def test_call_list_population_floor(self):
         assert len(_HANDLER_CASES) >= 9
@@ -374,3 +396,51 @@ class TestUnscopedExecuteIntent:
         assert "couldn't verify permissions" in result.lower() or "right now" in result.lower()
         ha_client.call_service.assert_not_awaited()
         assert mp.current_ha_scope() is None
+
+
+# ---------------------------------------------------------------------------
+# test_whole_house_restricted_entity_partial_refusal (Pass H)
+# ---------------------------------------------------------------------------
+
+class TestWholeHouseFanOutDenialSurfacing:
+    def test_whole_house_restricted_entity_partial_refusal(self):
+        """Medium (codex full-diff, Pass H): _execute_whole_house_command's
+        asyncio.gather fan-out previously had no return_exceptions=True, so
+        a per-entity guest denial inside an otherwise-allowed domain
+        (light) raised HAWritePermissionDenied straight out of the gather
+        call, past execute_intent's _finish() wrapper entirely, landing on
+        whatever generic "I encountered an error" the caller's own
+        try/except produces -- instead of the partial-refusal text naming
+        what ran. light.kitchen is allowed; light.owner_bedroom is
+        guest-restricted; "turn off all lights" must still turn off the
+        kitchen light and report a partial refusal, not crash."""
+        em = _fake_entity_manager()
+        em.get_all_light_groups = AsyncMock(return_value=[
+            {"friendly_name": "Kitchen", "entity_id": "light.kitchen_group", "members": ["light.kitchen"]},
+            {"friendly_name": "Owner Bedroom", "entity_id": "light.owner_bedroom_group", "members": ["light.owner_bedroom"]},
+        ])
+        controller = _controller(entity_manager=em)
+        ha_client = _raw_ha_client()
+        perms = _guest_perms(allowed_intents=["control"], restricted_entities=[r"^light\.owner_bedroom"])
+
+        async def _drive():
+            with mp.ha_permission_scope(perms, mode="guest") as scope:
+                result = await controller.execute_intent(
+                    {"device_type": "light", "action": "turn_off", "room": "whole_house"},
+                    ha_client,
+                    original_query="turn off all lights",
+                )
+                return result, scope
+
+        result, scope = _run(_drive())
+
+        assert scope.allowed_writes >= 1
+        assert len(scope.denials) >= 1
+        assert "guest mode" in result.lower()
+        assert "did part of that" in result.lower()
+
+        call_list = [
+            (c.args[0], c.args[1], c.args[2]) for c in ha_client.call_service.await_args_list
+        ]
+        assert ("light", "turn_off", {"entity_id": "light.kitchen"}) in call_list
+        assert not any(c[2].get("entity_id") == "light.owner_bedroom" for c in call_list)

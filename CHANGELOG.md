@@ -19,7 +19,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The mode service now requires `X-Service-Key` on every route except `/health` (`MODE_SERVICE_INGRESS_AUTH`, staged via `warn` before `enforce`); previously any caller on the pod network could query or override mode with no authentication at all.
 - jarvis-web's 29 direct device/mode/LiveKit write routes (HTTP and both WebSocket proxies) now require a signed-in owner or operator; an unauthenticated caller gets `403 sign_in_required` (or a WebSocket close before accept) instead of being served as the household owner. `chat-embed`'s relay always forwards guest mode and never forwards the browser's `Authorization` header.
 
-### Changed
+### Upgrade notes (read before deploying)
 
 - Guests lose lock/cover/alarm/camera/automation/script/scene control by default (the new guest permission floor); previously only an admin-configured restriction list applied, and an empty list meant unrestricted.
 - Guest requests to control music playback or the TV are now permission-gated the same way lock/cover `CONTROL` requests already were — previously only that one intent category was checked, so a guest could reach music and TV controls regardless of their allowed-intents configuration.
@@ -27,10 +27,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - SMS-originated requests now get guest permissions instead of inheriting whatever mode the house happened to be in.
 - An empty admin-configured guest allowlist (`allowed_intents`/`allowed_domains`) now means "use the built-in baseline", not "allow everything".
 - The mode service now actually loads the admin backend's guest-mode settings on startup — if calendar guest mode is enabled, every satellite is in guest mode during an active booking (the guest allowlist excludes `control`, so even lights need the owner PIN).
-- The owner voice-PIN override now requires a PIN set in the admin UI, is refused outright from public/unauthenticated surfaces, and locks per caller-trust-tier after repeated failed attempts. A PIN set before this release was hashed with unsalted SHA-256 and must be re-set once in the admin UI — the old hash is treated as "not configured", not silently accepted.
+- The owner voice-PIN override now requires a PIN set in the admin UI, is refused outright from public/unauthenticated surfaces, and locks per caller-trust-tier after repeated failed attempts. A PIN set before this release was hashed with unsalted SHA-256 and must be re-set once in the admin UI — the old hash is treated as "not configured", not silently accepted (the admin UI's guest-mode page now flags this).
 - jarvis-web's `JARVIS_PUBLIC_MODE` (default `guest`) determines whether an unauthenticated caller reaches the household's actual mode at all; set to `household` only for a LAN-only deployment not reachable from the internet.
-- LiveKit browser-facing room tokens now expire after `LIVEKIT_USER_TOKEN_TTL_MINUTES` (default 30) instead of lasting indefinitely; server-side Athena participant tokens are unaffected.
-- Deployment requirement: `SERVICE_API_KEY` on the mode service and `MODE_SERVICE_URL` on the orchestrator and gateway are now required for mode/permission resolution to work at all — without them every request degrades. Roll out admin-backend → mode service → orchestrator → jarvis-web → gateway, with `MODE_SERVICE_INGRESS_AUTH=warn` during the staged window; roll back by setting the mode service back to `warn` first if only it is being reverted.
+- LiveKit browser-facing room tokens now expire after `LIVEKIT_USER_TOKEN_TTL_MINUTES` (default 30) instead of the previous fixed 24-hour lifetime; server-side Athena participant tokens are unaffected (still 24h).
+- Deployment requirement: `SERVICE_API_KEY` on the mode service and `MODE_SERVICE_URL` on the orchestrator and gateway are now required for mode/permission resolution to work at all — without them every request degrades. Roll out admin-backend → mode service → orchestrator → jarvis-web → gateway, with `MODE_SERVICE_INGRESS_AUTH=warn` during the staged window (the shipped template leaves this commented out — code default is `enforce` — uncomment it only for the staged window, then remove it again). To roll back: set the mode service's `MODE_SERVICE_INGRESS_AUTH` to `warn` FIRST, then roll back the image(s) — rolling back an image before re-enabling `warn` can leave a caller that hasn't picked up the new `SERVICE_API_KEY` locked out.
 
 ### Fixed
 

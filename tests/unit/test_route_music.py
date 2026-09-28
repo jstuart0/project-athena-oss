@@ -38,6 +38,7 @@ sys.path.insert(0, "src")
 from orchestrator.nodes import route_music_node  # noqa: E402
 from orchestrator.nodes import _runtime  # noqa: E402
 from orchestrator.state import OrchestratorState, IntentCategory  # noqa: E402
+from orchestrator import mode_permission as mp  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +333,39 @@ class TestContextStorage:
         with patch("orchestrator.nodes.route_music.store_conversation_context", mock_store):
             _run(route_music_node(state))
         mock_store.assert_not_awaited()
+
+
+class TestDenialSurfacing:
+    """ATHENA-69 Pass H (codex full-diff, Medium): route_music_node opens a
+    scope but previously never inspected scope.denials after dispatch -- a
+    HAWritePermissionDenied raised by the guard mid-handler (e.g. a
+    restricted media_player.* entity inside an otherwise-allowed intent)
+    fell into the generic `except Exception` branch and produced "I
+    encountered an error with music playback", not the specific refusal."""
+
+    def setup_method(self):
+        _runtime.reset_for_test()
+
+    def test_restricted_media_player_entity_denial_replaces_answer(self):
+        mh = _make_music_handler()
+
+        async def _deny_side_effect(*a, **kw):
+            scope = mp.current_ha_scope()
+            scope.denials.append(mp.HADenial(
+                domain="media_player", service="media_play",
+                targets=("media_player.owner_bedroom",), reason="entity_or_domain_denied",
+            ))
+            raise mp.HAWritePermissionDenied("media_player.media_play denied (entity_or_domain_denied)")
+
+        mh.handle_play = AsyncMock(side_effect=_deny_side_effect)
+        _runtime.set_music_handler(mh)
+        state = _make_state(mode="guest", permissions={"mode": "guest", "allowed_intents": ["music_play"]})
+
+        result = _run(route_music_node(state))
+
+        assert result.error == "permission_denied"
+        assert "guest mode" in result.answer.lower()
+        assert "encountered an error" not in result.answer.lower()
 
 
 class TestErrorHandlingAndMetrics:

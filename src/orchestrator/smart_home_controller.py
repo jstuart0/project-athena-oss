@@ -4191,9 +4191,14 @@ Do NOT mention rooms that have no current or recent motion."""
                             {"entity_id": light, "brightness": 255}
                         ))
 
-        # Execute all HA API calls in parallel
+        # Execute all HA API calls in parallel. return_exceptions=True
+        # (ATHENA-69 Pass H): a per-entity guest denial (HAWritePermissionDenied)
+        # must not crash the fan-out and skip every sibling call -- the guard
+        # already recorded the denial on the scope before raising, so
+        # execute_intent's _finish() wrapper surfaces the partial refusal
+        # from scope.denials once this returns normally.
         if tasks:
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         # Return contextual response for voice output
         room_count = len(all_light_groups)
@@ -4382,9 +4387,14 @@ Do NOT mention rooms that have no current or recent motion."""
                             {"entity_id": light, "brightness": 255}
                         ))
 
-        # Execute all HA API calls in parallel
+        # Execute all HA API calls in parallel. return_exceptions=True
+        # (ATHENA-69 Pass H): a per-entity guest denial (HAWritePermissionDenied)
+        # must not crash the fan-out and skip every sibling call -- the guard
+        # already recorded the denial on the scope before raising, so
+        # execute_intent's _finish() wrapper surfaces the partial refusal
+        # from scope.denials once this returns normally.
         if tasks:
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         # Return contextual response for voice output
         room_count = len(members)

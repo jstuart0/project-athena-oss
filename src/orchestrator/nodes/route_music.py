@@ -19,6 +19,7 @@ from orchestrator.nodes._runtime import get_music_handler
 from orchestrator.state import IntentCategory, OrchestratorState
 from orchestrator.helpers import store_conversation_context
 from orchestrator.mode_permission import (
+    HAWritePermissionDenied,
     check_intent_permission,
     ha_permission_scope,
     permission_refusal_message,
@@ -68,6 +69,10 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
     """
     start = time.time()
 
+    scope = None
+    n0 = 0
+    w0 = 0
+
     try:
         if not music_handler:
             state.answer = "Music playback is not configured. Please set up Music Assistant in Home Assistant."
@@ -81,6 +86,9 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
             request_id=state.request_id,
             session_id=state.session_id,
         ) as scope:
+            n0 = len(scope.denials)
+            w0 = scope.allowed_writes
+
             # Intent gate (D9): refuse before any Music Assistant call.
             if not check_intent_permission(state.intent, scope.permissions):
                 state.answer = permission_refusal_message(("media_player",), scope)
@@ -201,10 +209,25 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
                     ttl=300  # 5 minutes
                 )
 
+    except HAWritePermissionDenied:
+        # Handled below via scope.denials -- never the generic error text.
+        pass
     except Exception as e:
         logger.error(f"Music execution error: {e}", exc_info=True)
         state.answer = "I encountered an error with music playback. Please try again."
         state.error = str(e)
+
+    # ATHENA-69 Pass H: a denial recorded on the scope during dispatch --
+    # whether it was caught by a handler internally or raised straight
+    # through to the except clause above -- replaces whatever answer text
+    # a handler produced (or the generic error above) with the specific
+    # permission refusal.
+    if scope is not None and len(scope.denials) > n0:
+        denied_domains = tuple(
+            d.domain for d in scope.denials[n0:] if d.reason != "halted_after_denial"
+        )
+        state.answer = permission_refusal_message(denied_domains, scope, partial=scope.allowed_writes > w0)
+        state.error = "permission_denied"
 
     route_music_duration = time.time() - start
     state.node_timings["route_music"] = route_music_duration

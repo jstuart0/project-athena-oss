@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 import asyncpg
 import hmac
 import os
+import re
 import structlog
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -152,6 +153,16 @@ async def verify_owner_pin(payload: VerifyPinRequest, db: Session = Depends(get_
         .first()
     )
     if attempt is None:
+        # Known race (valerie r1, Low -- accepted, not fixed here): two
+        # concurrent first-ever attempts for the same tier can both reach
+        # this branch and both try to INSERT a new row. Whichever loses
+        # raises an IntegrityError on the tier's unique constraint and the
+        # request 500s rather than silently double-inserting or granting
+        # an unlocked verification -- the failure mode is closed, not
+        # open. Not an upsert because SQLAlchemy's ORM-level upsert isn't
+        # portable across SQLite (tests) and PostgreSQL (production)
+        # without dialect-specific statements; the race window is a single
+        # tier's very first verify-pin call ever, not a steady-state path.
         attempt = OwnerPinAttempt(tier=tier, failed_count=0, locked_until=None)
         db.add(attempt)
         db.flush()
@@ -168,7 +179,13 @@ async def verify_owner_pin(payload: VerifyPinRequest, db: Session = Depends(get_
         logger.info("owner_pin_verify", tier=tier, status="locked")
         return VerifyPinResponse(status="locked", locked_until=locked_until_utc.isoformat())
 
-    if not (payload.pin.isdigit() and len(payload.pin) == 6):
+    # ATHENA-69 Pass H (valerie r1, Low): str.isdigit() accepts many
+    # non-ASCII Unicode digit characters (superscripts, Devanagari, etc.)
+    # -- a "PIN" built from those would pass this check but never match
+    # what verify_password compares against (the hash was derived from an
+    # actual 6-ASCII-digit PIN when it was set). An explicit ASCII-digit
+    # regex is the only string this can ever legitimately match.
+    if not re.fullmatch(r"[0-9]{6}", payload.pin):
         _record_pin_failure(db, attempt, tier, now)
         logger.info("owner_pin_verify", tier=tier, status="malformed")
         return VerifyPinResponse(status="malformed", locked_until=None)

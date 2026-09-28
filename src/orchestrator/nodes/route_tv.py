@@ -18,6 +18,7 @@ from orchestrator.nodes._runtime import get_tv_handler
 from orchestrator.state import OrchestratorState
 from orchestrator.helpers import store_conversation_context
 from orchestrator.mode_permission import (
+    HAWritePermissionDenied,
     check_intent_permission,
     ha_permission_scope,
     permission_refusal_message,
@@ -67,6 +68,10 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
     """
     start = time.time()
 
+    scope = None
+    n0 = 0
+    w0 = 0
+
     try:
         if not tv_handler:
             state.answer = "Apple TV control is not configured. Please set up the TV handler."
@@ -80,6 +85,9 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
             request_id=state.request_id,
             session_id=state.session_id,
         ) as scope:
+            n0 = len(scope.denials)
+            w0 = scope.allowed_writes
+
             # Intent gate (D9): refuse before any Apple TV call.
             if not check_intent_permission(state.intent, scope.permissions):
                 state.answer = permission_refusal_message(("media_player",), scope)
@@ -175,10 +183,24 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
                     ttl=300  # 5 minutes
                 )
 
+    except HAWritePermissionDenied:
+        # Handled below via scope.denials -- never the generic error text.
+        pass
     except Exception as e:
         logger.error(f"TV control error: {e}", exc_info=True)
         state.answer = "I encountered an error controlling the TV. Please try again."
         state.error = str(e)
+
+    # ATHENA-69 Pass H: a denial recorded on the scope during dispatch --
+    # whether caught internally by a handler or raised straight through to
+    # the except clause above -- replaces whatever answer text a handler
+    # produced (or the generic error above) with the specific refusal.
+    if scope is not None and len(scope.denials) > n0:
+        denied_domains = tuple(
+            d.domain for d in scope.denials[n0:] if d.reason != "halted_after_denial"
+        )
+        state.answer = permission_refusal_message(denied_domains, scope, partial=scope.allowed_writes > w0)
+        state.error = "permission_denied"
 
     route_tv_duration = time.time() - start
     state.node_timings["route_tv"] = route_tv_duration

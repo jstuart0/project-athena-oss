@@ -9,10 +9,20 @@ Covers apply_guest_baseline, guest_baseline, and parse_json_array_env:
  3.  test_idempotent
  4.  test_non_guest_untouched — owner and degraded dicts unchanged.
  5.  test_scene_in_default_floor — named member: ^scene\\. present.
- 6.  test_invalid_json_env_uses_default_not_empty — for all four JSON
-     fields (the 3 guest_policy fields, plus mode_permission's
-     ha_permission_fallback_restricted_entities, which shares the same
-     parse_json_array_env helper).
+ 6.  "test_invalid_json_env_uses_default_not_empty" is, despite the
+     singular name inherited from the original plan item, actually FOUR
+     separate test methods on TestParseJsonArrayEnvInvalidUsesDefaultNotEmpty
+     below -- one per JSON field (the 3 guest_policy fields, plus
+     mode_permission's ha_permission_fallback_restricted_entities, which
+     shares the same parse_json_array_env helper):
+     test_restricted_entities_invalid_json_uses_default,
+     test_allowed_intents_invalid_json_uses_default,
+     test_allowed_domains_invalid_json_uses_default,
+     test_ha_permission_fallback_restricted_entities_invalid_json_uses_default.
+ 7.  TestAllowedDomainsEmptyEnvTreatedAsUnset (Pass H, codex full-diff,
+     Low) — GUEST_BASELINE_ALLOWED_DOMAINS is the one baseline env var
+     where an explicit "[]" is treated the same as unset, unlike the other
+     two (see class docstring for why).
 
 Patching strategy: AthenaConfig fields are set via monkeypatch.setenv +
 shared.config._clear_cache_for_tests(), matching the pattern in
@@ -144,15 +154,44 @@ class TestParseJsonArrayEnvInvalidUsesDefaultNotEmpty:
         ]
 
     def test_explicit_empty_array_is_honoured_not_default(self, monkeypatch):
-        """An explicit "[]" is a deliberate opt-out, distinct from an
-        unset/invalid value falling back to the default."""
+        """parse_json_array_env's own contract: an explicit "[]" is a
+        deliberate opt-out, distinct from an unset/invalid value falling
+        back to the default. This is the low-level primitive's contract
+        and is unchanged by Pass H -- see TestAllowedDomainsEmptyEnvTreatedAsUnset
+        below for why GUEST_BASELINE_ALLOWED_DOMAINS specifically doesn't
+        pass an explicit "[]" through to this primitive at all anymore."""
         monkeypatch.setenv("GUEST_BASELINE_ALLOWED_DOMAINS", "[]")
         config_module._clear_cache_for_tests()
-        # An empty configured list still falls back to the baseline per
-        # apply_guest_baseline's "empty means baseline" rule (D22) --
-        # parse_json_array_env itself must still return [] here (the
-        # opt-out), which the guest_policy contract test below verifies.
         assert guest_policy.parse_json_array_env("[]", ["default"]) == []
         assert guest_policy.parse_json_array_env("", ["default"]) == ["default"]
         assert guest_policy.parse_json_array_env(None, ["default"]) == ["default"]
         assert guest_policy.parse_json_array_env("not json", ["default"]) == ["default"]
+
+
+class TestAllowedDomainsEmptyEnvTreatedAsUnset:
+    """ATHENA-69 Pass H (codex full-diff, Low): GUEST_BASELINE_ALLOWED_DOMAINS
+    is the one baseline env var where an explicit "[]" has no safe meaning
+    downstream -- check_entity_permission's `if allowed_domains and ...`
+    check would skip domain filtering entirely for an empty list and allow
+    every domain, the opposite of what a deployer setting it to "[]" would
+    intend. Unlike GUEST_BASELINE_RESTRICTED_ENTITIES (floor-disabling is a
+    legitimate, logged opt-out) and GUEST_BASELINE_ALLOWED_INTENTS (an
+    empty allow-list already has the safe deny-by-default meaning), an
+    explicit "[]" for allowed_domains is now treated the same as unset."""
+
+    def test_baseline_allowed_domains_explicit_empty_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("GUEST_BASELINE_ALLOWED_DOMAINS", "[]")
+        config_module._clear_cache_for_tests()
+        assert guest_policy.baseline_allowed_domains() == guest_policy.GUEST_BASELINE_ALLOWED_DOMAINS_DEFAULT
+
+    def test_apply_guest_baseline_explicit_empty_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("GUEST_BASELINE_ALLOWED_DOMAINS", "[]")
+        config_module._clear_cache_for_tests()
+        result = guest_policy.apply_guest_baseline({"mode": "guest"})
+        assert result["allowed_domains"] == guest_policy.GUEST_BASELINE_ALLOWED_DOMAINS_DEFAULT
+
+    def test_baseline_allowed_domains_normal_override_still_honoured(self, monkeypatch):
+        """A non-empty override is unaffected by the empty-env carve-out."""
+        monkeypatch.setenv("GUEST_BASELINE_ALLOWED_DOMAINS", '["light", "fan"]')
+        config_module._clear_cache_for_tests()
+        assert guest_policy.baseline_allowed_domains() == ["light", "fan"]

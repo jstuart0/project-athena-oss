@@ -185,7 +185,7 @@ DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODE_SERVICE_URL` | `http://localhost:8022` | Guest Mode service |
+| `MODE_SERVICE_URL` | `http://localhost:8022` | Mode service (ATHENA-69). **Required** on both the orchestrator and the gateway — without it, mode/permission resolution degrades every request (orchestrator: `get_current_mode`'s outage fallback; gateway: `mode_gate.py`'s fast-path check always returns `False`). See "Mode and permissions" under Module Settings below. |
 | `NOTIFICATIONS_SERVICE_URL` | `http://localhost:8050` | Notifications service |
 | `JARVIS_WEB_URL` | `http://localhost:3001` | Jarvis Web UI |
 | `CONTROL_AGENT_URL` | `http://localhost:8099` | Service management API |
@@ -566,9 +566,13 @@ can never claim owner. The precedence, most to least trusted:
    caller gets guest, plus any device-fingerprint-matched guest
    permissions the admin backend has on file.
 3. The mode service is **unreachable or erroring** → **degraded** (D4):
-   never owner. Degraded permissions are the fallback floor
-   (`HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES`) unioned with the guest
-   baseline — outages fail closed, they never grant control.
+   never owner. Degraded permissions are the fallback list alone
+   (`HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES`, default: locks, covers,
+   alarm panels, cameras, automations, scripts, scenes) — not unioned with
+   the guest baseline. Intents aren't restricted during an outage (owners
+   keep lights, climate, and media); only those entity/domain-level
+   physical-security writes are floored. Outages fail closed, they never
+   grant control.
 
 **Caller table.**
 
@@ -579,7 +583,14 @@ can never claim owner. The precedence, most to least trusted:
 | LiveKit (`livekit_integration.py`) | server-resolved | `household` (a LiveKit room can only be created by a signed-in owner/operator, see below) |
 | jarvis-web, signed-in owner/operator | server-resolved via step 1-3 above | `web_authenticated` |
 | jarvis-web, unauthenticated | forced `guest` (or `JARVIS_PUBLIC_MODE=household`'s legacy behavior) | `web_public` |
-| SMS/admin-UI internal flows (`ha_pipelines.py`, `memories.py`) | untagged | *(none — these aren't voice paths; the PIN branch refuses them but their other behavior is unchanged)* |
+
+`household` is not a physical-presence check — it's every in-cluster caller
+holding the shared `X-Service-Key`: the gateway's satellite/HA-voice path,
+a remote Home Assistant companion-app user reaching HA and then the
+gateway, and any other in-cluster pod that has the key. This is an
+accepted risk of the service-key trust boundary (not closed by this
+campaign), not a claim that `household` implies the caller is physically
+in the house.
 
 `caller_trust` is set **only by server code**, never copied from a request
 body field, and it affects **only** the owner-PIN voice-override branch —
@@ -678,11 +689,20 @@ signal above, not silently hidden.
 either the existing OIDC/Bearer session (unchanged behavior, full
 `has_permission('read')` check) *or* a service key (`X-Service-Key`, used
 by the mode service and orchestrator to fetch config without a human
-session). On the service-key path there's no authenticated user, so the
-permission check is skipped entirely (the key itself is the trust
-boundary) and any config auto-created on that path records
-`created_by_id=None`. The response never includes the PIN hash under
-either path — only `owner_pin_configured` (boolean).
+session) — whichever the request presents: an `X-Service-Key` header takes
+the service-key path, its absence takes the OIDC/Bearer path. On the
+service-key path there's no authenticated user, so the permission check is
+skipped entirely (the key itself is the trust boundary). If no config row
+exists yet, the service-key path returns the built-in defaults and
+**creates nothing** — `created_by_id` is a required column with no user to
+attribute it to on this path, so a row can only ever be created via the
+OIDC/Bearer path. The response never includes the PIN hash under either
+path — only `owner_pin_configured` (and, since Pass H,
+`owner_pin_needs_reset` for a legacy-format hash) as booleans.
+`POST /api/internal/guest-mode/verify-pin` answers `status: "not_configured"`
+for both "no PIN set" and "a legacy pre-D30 hash that can't be verified" --
+it does not distinguish the two in its response; the config route's
+`owner_pin_needs_reset` is where that distinction is surfaced.
 
 **LiveKit browser token TTL.** `LIVEKIT_USER_TOKEN_TTL_MINUTES` (default
 30, clamped 1-1440) bounds how long a browser-facing LiveKit room token
