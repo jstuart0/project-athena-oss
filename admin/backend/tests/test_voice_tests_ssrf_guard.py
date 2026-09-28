@@ -34,6 +34,21 @@ _PRIVATE_HOST = "10.66.66.66"  # RFC1918, never allowlisted unless a test opts i
 _BLOCKED_OLLAMA_URL = "http://169.254.169.254:80"  # link-local IMDS, always blocked
 
 
+def _clear_all_config_caches() -> None:
+    """Belt-and-suspenders cache clear (ATHENA-118 test-isolation note, same
+    fix as test_service_control_ollama.py): some other module in a full-
+    suite run evicts and re-imports shared.config mid-suite, which can
+    leave this file's own `_clear_cache_for_tests` reference pointing at a
+    stale, already-replaced module -- check_ssrf_safe's lazy `from
+    app.services.health_poller import _validate_service_url` would then
+    resolve against the live (different) module's get_config() lru_cache,
+    which this file's import-time reference never touches."""
+    _clear_cache_for_tests()
+    live = sys.modules.get('shared.config')
+    if live is not None and hasattr(live, '_clear_cache_for_tests'):
+        live._clear_cache_for_tests()
+
+
 def _seed_ollama_url(db, url: str) -> None:
     row = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
     if row:
@@ -50,10 +65,10 @@ def _reset(monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     rag_urls._reset_legacy_warning_cache()
-    _clear_cache_for_tests()
+    _clear_all_config_caches()
     yield
     rag_urls._reset_legacy_warning_cache()
-    _clear_cache_for_tests()
+    _clear_all_config_caches()
 
 
 @pytest.fixture
@@ -158,7 +173,7 @@ def test_full_pipeline_rag_enhancement_blocks_unallowlisted_private_host(owner_c
     Ollama-probing test -- loopback is blocked by default."""
     monkeypatch.setenv("DEFAULT_CITY", "Denver")
     monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "localhost")
-    _clear_cache_for_tests()
+    _clear_all_config_caches()
     db.add(RagService(
         name="weather", display_name="Weather", host=_PRIVATE_HOST,
         port=8010, protocol="http", enabled=True,
