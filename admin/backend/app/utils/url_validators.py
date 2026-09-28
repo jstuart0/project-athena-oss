@@ -175,6 +175,55 @@ def is_local_host(hostname: str | None) -> bool:
     return ip.is_loopback or ip.is_private
 
 
+def redact_url_userinfo(url: str) -> str:
+    """`scheme://host:port` only -- strips userinfo, path, query, and
+    fragment before a configured URL is ever written to a log line (codex
+    r2 diff-review High, 2026-09-28: main.py's startup warning and
+    rag_urls.py's local-dev-carveout warning both logged the raw
+    operator-configured Ollama URL verbatim; a URL shaped
+    `http://user:pass@host:port` would put the credential straight into
+    structured log output).
+
+    Never raises: an unparseable URL is returned as the fixed literal
+    `"<unparseable-url>"` rather than risk logging the raw (possibly
+    credential-bearing) input in an exception message. A malformed port
+    (out of range, e.g. `:99999`, or non-numeric, e.g. `:abc`) makes
+    `parsed.port` itself raise `ValueError` -- caught separately (codex r3
+    diff-review Low, 2026-09-28) and handled by stripping userinfo from
+    the raw `netloc` by hand instead of reconstructing from
+    `hostname`/`port`, since `.hostname` and the raising `.port` share the
+    same malformed authority and a hand split is the only piece of that
+    authority guaranteed not to raise.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "<unparseable-url>"
+
+    scheme = parsed.scheme or ""
+    hostname = parsed.hostname or ""
+    if not hostname:
+        return "<unparseable-url>"
+
+    try:
+        port = parsed.port
+    except ValueError:
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        return f"{scheme}://{netloc}" if scheme else netloc
+
+    # urlparse().hostname strips IPv6 brackets; re-bracket so the redacted
+    # form round-trips as a valid authority (unbracketed "::1:8080" is
+    # ambiguous / invalid).
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+
+    netloc = hostname
+    if port:
+        netloc = f"{hostname}:{port}"
+
+    return f"{scheme}://{netloc}" if scheme else netloc
+
+
 def parse_endpoint_url(endpoint_url: str) -> dict:
     """Parse endpoint_url into host/port/protocol/health_endpoint components.
 

@@ -213,6 +213,16 @@ async def register_service(
     Partial-update semantics mean an omitted `enabled` now keeps the row's
     current value, so an operator-disabled row stays disabled across CA
     restarts.
+
+    endpoint_url is ALSO now partial-update-safe on an existing row (xander
+    diff-review Critical, 2026-09-28): shared.service_registry.
+    register_service() self-registers with no location info of its own by
+    design (see that function's comment) -- an existing, seeded row (e.g.
+    ATHENA-119's OSS_SERVICE_REGISTRY "athena-rag-weather") must keep its
+    correct K8s host/port/protocol when a RAG process pings this route with
+    endpoint_url omitted. endpoint_url stays REQUIRED when creating a
+    brand-new row (there is no prior host to fall back to), and unchanged
+    for protocol='tcp', whose host/port validation is independent.
     """
     if not name:
         raise HTTPException(status_code=422, detail="'name' query parameter is required")
@@ -225,6 +235,11 @@ async def register_service(
             detail="'name' must match ^[a-zA-Z0-9_-]{1,64}$",
         )
 
+    existing = db.query(RagService).filter(RagService.name == name).first()
+
+    resolved_endpoint_url: Optional[str] = None
+    parsed: Optional[Dict[str, Any]] = None
+
     if protocol == 'tcp':
         if not host:
             raise HTTPException(status_code=422, detail="'host' is required when protocol='tcp'")
@@ -234,12 +249,8 @@ async def register_service(
             host = validate_host(host)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
-        resolved_endpoint_url: Optional[str] = None
         parsed = {'host': host, 'port': port, 'protocol': 'tcp', 'health_endpoint': None}
-    else:
-        if not endpoint_url:
-            raise HTTPException(status_code=422, detail="'endpoint_url' query parameter is required")
-
+    elif endpoint_url:
         # SSRF protection: validate scheme + host before persisting.
         # The Phase 4 health poller will make HTTP requests to stored endpoint_url
         # values; a stored IMDS or cluster-internal URL would be polled silently.
@@ -257,16 +268,24 @@ async def register_service(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         resolved_endpoint_url = endpoint_url
+    elif existing is None:
+        raise HTTPException(status_code=422, detail="'endpoint_url' query parameter is required")
+    # else: protocol != 'tcp', endpoint_url omitted, existing row found --
+    # partial update (xander diff-review Critical): location fields below
+    # are left untouched.
 
-    display_url = resolved_endpoint_url or f"tcp://{parsed['host']}:{parsed['port']}"
+    if parsed is not None:
+        display_url = resolved_endpoint_url or f"tcp://{parsed['host']}:{parsed['port']}"
+    else:
+        display_url = existing.endpoint_url or f"tcp://{existing.host}:{existing.port}"
 
-    existing = db.query(RagService).filter(RagService.name == name).first()
     if existing:
-        existing.endpoint_url = resolved_endpoint_url
-        existing.host = parsed['host']
-        existing.port = parsed['port']
-        existing.protocol = parsed['protocol']
-        existing.health_endpoint = parsed['health_endpoint']
+        if parsed is not None:
+            existing.endpoint_url = resolved_endpoint_url
+            existing.host = parsed['host']
+            existing.port = parsed['port']
+            existing.protocol = parsed['protocol']
+            existing.health_endpoint = parsed['health_endpoint']
         if display_name is not None:
             existing.display_name = display_name
         # Partial update (codex diff review): each of these is applied only

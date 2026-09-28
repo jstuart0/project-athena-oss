@@ -37,6 +37,7 @@ from app.auth.oidc import (
 )
 from app.utils.rate_limit import login_rate_limit_dep
 from app.utils.sessions import rotate_session_id
+from app.utils.url_validators import redact_url_userinfo
 from app.auth import oidc as oidc_auth
 from app.models import User, RagService
 
@@ -343,6 +344,54 @@ def _is_local_database_url(url: str) -> bool:
     except Exception:
         return False
     return is_local_host(host)
+
+
+async def _warn_if_ollama_url_ssrf_blocked() -> None:
+    """codex diff-review Medium (2026-09-28, batch review): make the Ollama
+    SSRF gate's requirements DISCOVERABLE at boot rather than only as a
+    per-request ssrf_blocked error the operator has to trigger first.
+
+    Runs the exact same check_ollama_ssrf_safe() the model-discovery/
+    voice-test routes use (app.utils.rag_urls) against the currently
+    configured Ollama URL, non-destructively (no actual Ollama request is
+    made). Logs one WARNING, `ollama_url_blocked_by_ssrf_guard`, naming the
+    env var to set, ONLY when the URL would genuinely be blocked -- the
+    not-in-cluster loopback/RFC1918/ULA carve-out check_ollama_ssrf_safe()
+    itself applies means a bare-metal dev's default http://localhost:11434
+    never trips this warning; an in-cluster ClusterIP Ollama host not yet
+    in HEALTH_POLL_ALLOWED_PRIVATE_HOSTS does.
+
+    Never fatal: any exception here is caught and logged, never raised --
+    this is a discoverability aid, not a startup gate.
+    """
+    try:
+        from app.database import get_db_context
+        from app.routes.service_control import get_ollama_url
+        from app.utils.rag_urls import check_ollama_ssrf_safe
+
+        with get_db_context() as db:
+            ollama_url = get_ollama_url(db)
+
+        allowed, reason = await check_ollama_ssrf_safe(f"{ollama_url.rstrip('/')}/api/tags")
+        if not allowed:
+            # codex r2 diff-review High (2026-09-28): never log the raw
+            # configured URL -- a userinfo-bearing form
+            # (http://user:pass@host:port) would put the credential
+            # straight into structured log output. scheme://host:port only.
+            safe_url = redact_url_userinfo(ollama_url)
+            logger.warning(
+                "ollama_url_blocked_by_ssrf_guard",
+                url=safe_url,
+                reason=reason,
+                message=(
+                    f"Configured Ollama URL {safe_url!r} will be refused (ssrf_blocked) "
+                    "by every model-discovery/voice-test probe. If this is an in-cluster "
+                    "Service (e.g. http://ollama:11434), add its hostname or ClusterIP CIDR "
+                    "to HEALTH_POLL_ALLOWED_PRIVATE_HOSTS."
+                ),
+            )
+    except Exception as e:
+        logger.warning("ollama_url_ssrf_check_failed", error=str(e))
 
 
 # Startup event: Initialize database and check connections
@@ -654,6 +703,10 @@ async def startup_event():
     else:
         logger.info("auto_pull_disabled", reason="ATHENA_AUTO_PULL_MODELS=false")
 
+    # codex diff-review Medium (2026-09-28): surface the Ollama SSRF gate's
+    # requirements at boot, not only as a per-request error.
+    await _warn_if_ollama_url_ssrf_blocked()
+
     logger.info("athena_admin_ready", dev_mode=DEV_MODE)
 
     # Start background calendar sync task
@@ -686,10 +739,13 @@ async def ensure_default_model():
             try:
                 response = await client.get(f"{OSS_OLLAMA_URL}/api/tags")
                 if response.status_code != 200:
-                    logger.warning("ollama_not_reachable", url=OSS_OLLAMA_URL)
+                    logger.warning("ollama_not_reachable", url=redact_url_userinfo(OSS_OLLAMA_URL))
                     return
             except Exception as e:
-                logger.warning("ollama_connection_failed", url=OSS_OLLAMA_URL, error=str(e))
+                logger.warning(
+                    "ollama_connection_failed",
+                    url=redact_url_userinfo(OSS_OLLAMA_URL), error=str(e),
+                )
                 return
 
             # Check if model exists

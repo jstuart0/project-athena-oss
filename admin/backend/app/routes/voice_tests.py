@@ -31,7 +31,7 @@ from wyoming.event import Event
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, VoiceTest, VoiceTestFeedback, LLMPerformanceMetric, SystemSetting
-from app.utils.rag_urls import resolve_rag_base_url, check_ssrf_safe
+from app.utils.rag_urls import resolve_rag_base_url, check_ssrf_safe, check_ollama_ssrf_safe
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -425,9 +425,14 @@ async def test_llm_processing(
 
     model = query.model or "phi3:mini"
     ollama_url = get_ollama_url(db)
+    url = f"{ollama_url}/api/generate"
+
+    allowed, reason = await check_ollama_ssrf_safe(url)
+    if not allowed:
+        logger.warning("llm_test_ssrf_blocked", reason=reason)
+        raise HTTPException(status_code=403, detail={"error": "ssrf_blocked", "reason": reason})
 
     try:
-        url = f"{ollama_url}/api/generate"
         payload = {
             "model": model,
             "prompt": query.text,
@@ -624,14 +629,20 @@ async def test_full_pipeline(
     if not query.text:
         raise HTTPException(status_code=400, detail="Query is required")
 
+    ollama_url = get_ollama_url(db)
+    llm_url = f"{ollama_url}/api/generate"
+
+    allowed, reason = await check_ollama_ssrf_safe(llm_url)
+    if not allowed:
+        logger.warning("pipeline_llm_ssrf_blocked", reason=reason)
+        raise HTTPException(status_code=403, detail={"error": "ssrf_blocked", "reason": reason})
+
     try:
         timings = {}
         results = {}
-        ollama_url = get_ollama_url(db)
 
         # 1. LLM Processing
         start = time.time()
-        llm_url = f"{ollama_url}/api/generate"
         async with aiohttp.ClientSession() as session:
             async with session.post(llm_url, json={
                 "model": "phi3:mini",
