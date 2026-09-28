@@ -1028,3 +1028,72 @@ async def test_envelope_carries_confirm_name_for_critical_ca_process_row(db, tes
     body = service_control.ServiceActionRequest(confirm_name=out.confirm_name)
     result = await service_control._run_action("weather-proc", "stop", body, None, db, test_user)
     assert result.success is True
+
+
+# ---------------------------------------------------------------------------
+# F54 (ATHENA-118 codex r4, Low): _dispatch_kubernetes_action's finally must
+# invalidate the inventory cache even when release_lease itself raises --
+# a bare sibling statement after a raising release_lease would never run.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_dispatch_clears_inventory_cache_even_when_release_lease_raises(
+    db, test_user, tesla_row, k8s_env, monkeypatch
+):
+    k8s_env({"athena-rag-tesla": {"replicas": 1, "ready": 1}})
+
+    clear_calls = {"n": 0}
+    real_clear = service_control._clear_inventory_cache
+
+    def _spy_clear():
+        clear_calls["n"] += 1
+        real_clear()
+
+    monkeypatch.setattr(service_control, "_clear_inventory_cache", _spy_clear)
+
+    def _raise_release_lease(*_args, **_kwargs):
+        raise RuntimeError("lease backend unavailable")
+
+    monkeypatch.setattr(service_control, "release_lease", _raise_release_lease)
+
+    with pytest.raises(RuntimeError, match="lease backend unavailable"):
+        await service_control._dispatch_kubernetes_action(
+            "athena-rag-tesla", "stop", db, test_user, None, tesla_row, {},
+        )
+
+    assert clear_calls["n"] == 1, "cache invalidation must still run when release_lease raises"
+
+
+@pytest.mark.asyncio
+async def test_run_action_surfaces_release_lease_raise_as_structured_500_with_cache_cleared(
+    db, test_user, tesla_row, k8s_env, monkeypatch
+):
+    """Route-layer proof: _run_action's own except-Exception wrapper turns
+    the exception _dispatch_kubernetes_action lets through into the
+    structured 500 {"error": "dispatch_failed", "kind": ...} it already
+    guarantees for any other dispatch-time exception -- this fix does not
+    change that contract, it only guarantees the cache invalidation runs
+    first."""
+    k8s_env({"athena-rag-tesla": {"replicas": 1, "ready": 1}})
+
+    clear_calls = {"n": 0}
+    real_clear = service_control._clear_inventory_cache
+
+    def _spy_clear():
+        clear_calls["n"] += 1
+        real_clear()
+
+    monkeypatch.setattr(service_control, "_clear_inventory_cache", _spy_clear)
+
+    def _raise_release_lease(*_args, **_kwargs):
+        raise RuntimeError("lease backend unavailable")
+
+    monkeypatch.setattr(service_control, "release_lease", _raise_release_lease)
+
+    body = service_control.ServiceActionRequest()
+    with pytest.raises(HTTPException) as exc_info:
+        await service_control._run_action("tesla-rag", "stop", body, None, db, test_user)
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == {"error": "dispatch_failed", "kind": "RuntimeError"}
+    assert clear_calls["n"] == 1
