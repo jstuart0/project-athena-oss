@@ -91,19 +91,13 @@ def ms(_mode_service_env):
     ms_main._config_loaded_at = None
     ms_main._service_key_warned = False
     ms_main._admin_http_client = None
-    # ATHENA-127: fresh booking-source state per test, and reset the
-    # module-level lazy admin-bookings client the same way _admin_http_client
-    # is reset above.
+    # ATHENA-127: fresh booking-source state per test (the bookings fetch
+    # shares _admin_http_client, reset above).
     ms_main.booking_sources = ms_main.BookingSources()
-    import mode_service.bookings as ms_bookings
-    ms_bookings._bookings_http_client = None
     yield ms_main
     if ms_main._admin_http_client is not None:
         asyncio.run(ms_main._admin_http_client.aclose())
         ms_main._admin_http_client = None
-    if ms_bookings._bookings_http_client is not None:
-        asyncio.run(ms_bookings._bookings_http_client.aclose())
-        ms_bookings._bookings_http_client = None
 
 
 @pytest.fixture

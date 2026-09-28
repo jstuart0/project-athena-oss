@@ -421,3 +421,120 @@ class TestSingleFlightAndCadence:
         config = {"enabled": True, "calendar_url": "https://example.com/x.ics", "calendar_poll_interval_minutes": 60}
         asyncio.run(bs.refresh(config, now=now, admin_client=_admin_client(_admin_handler(_bookings_payload([]))), ical_client_factory=_ical_factory(handler)))
         assert called["n"] == 1
+
+
+_FIXED_NOW = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+_EMPTY_ICAL = b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"
+
+
+class TestFailSafeReconcile:
+    def test_required_ical_url_emptied_resets_to_never_loaded(self, bs, monkeypatch):
+        """A required iCal source whose URL is cleared must stop reporting
+        the old URL's freshness -- otherwise the house stays `owner` on a
+        feed nobody is reading any more."""
+        monkeypatch.setenv("MODE_BOOKINGS_SOURCE", "ical")
+        config_module._clear_cache_for_tests()
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=None,
+                               ical_client_factory=_ical_factory(lambda r: httpx.Response(200, content=_EMPTY_ICAL))))
+        assert bs.snapshot(config, now=_FIXED_NOW, now_monotonic=time.monotonic()).statuses["ical"] == "fresh"
+
+        emptied = {"enabled": True, "calendar_url": ""}
+        asyncio.run(bs.refresh(emptied, now=_FIXED_NOW, admin_client=None))
+        snapshot = bs.snapshot(emptied, now=_FIXED_NOW, now_monotonic=time.monotonic())
+        assert snapshot.statuses["ical"] == "never_loaded"
+        assert bs._ical.last_good == []
+        assert bs._ical.last_success_at is None
+
+    def test_in_flight_attempt_after_success_does_not_report_fresh(self, bs):
+        """A hung fetch must not keep reporting the previous attempt's
+        `fresh` for as long as it hangs."""
+        asyncio.run(bs.refresh({"enabled": True}, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
+
+        async def run():
+            release = asyncio.Event()
+
+            async def handler(request):
+                await release.wait()
+                return httpx.Response(200, json=_bookings_payload([]))
+
+            task = asyncio.create_task(bs.refresh({"enabled": True}, now=_FIXED_NOW,
+                                                  admin_client=_admin_client(handler)))
+            await asyncio.sleep(0.01)
+            during = bs.snapshot({"enabled": True}, now=_FIXED_NOW, now_monotonic=time.monotonic()).statuses["admin"]
+            release.set()
+            await task
+            after = bs.snapshot({"enabled": True}, now=_FIXED_NOW, now_monotonic=time.monotonic()).statuses["admin"]
+            return during, after
+
+        during, after = asyncio.run(run())
+        assert during == "stale"
+        assert after == "fresh"
+
+    @pytest.mark.parametrize("body", [
+        {},
+        {"bookings": "x"},
+        {"bookings": {}},
+        {"bookings": ""},
+        {"bookings": None},
+        [],
+        {"bookings": [], "suppressed": "x"},
+        {"bookings": [], "suppressed": {}},
+        {"bookings": [{"id": 1}]},
+    ], ids=["empty-object", "bookings-str", "bookings-dict", "bookings-empty-str",
+            "bookings-null", "top-level-list", "suppressed-str", "suppressed-dict", "row-missing-fields"])
+    def test_malformed_200_body_is_failed_attempt_not_zero_bookings(self, bs, body):
+        good_row = _row(1, "k1", _FIXED_NOW - timedelta(hours=1), _FIXED_NOW + timedelta(hours=1))
+        asyncio.run(bs.refresh({"enabled": True}, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([good_row])))))
+        asyncio.run(bs.refresh({"enabled": True}, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(body))))
+        assert bs._admin.last_attempt_ok is False
+        assert [b.id for b in bs._admin.last_good] == [1]
+        assert bs.snapshot({"enabled": True}, now=_FIXED_NOW, now_monotonic=time.monotonic()).statuses["admin"] == "stale"
+
+    def test_admin_label_is_source_and_id(self, bs):
+        row = _row(12, "k12", _FIXED_NOW, _FIXED_NOW + timedelta(days=1), source="lodgify")
+        asyncio.run(bs.refresh({"enabled": True}, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([row])))))
+        assert bs._admin.last_good[0].label == "lodgify #12"
+        # The Booking's own source stays the origin ("admin"): D13's
+        # (source, key) dedupe and non-ical label preference depend on it.
+        assert bs._admin.last_good[0].source == "admin"
+
+    def test_default_ical_fetch_goes_through_safe_get_https_only(self, bs, monkeypatch):
+        import mode_service.bookings as bookings_module
+
+        monkeypatch.setenv("SITESCRAPER_ALLOWED_PRIVATE_HOSTS", "10.9.0.0/16,cal.lan")
+        config_module._clear_cache_for_tests()
+        captured = {}
+
+        async def fake_safe_get(url, **kw):
+            captured["url"] = url
+            captured.update(kw)
+            return httpx.Response(200, content=_EMPTY_ICAL, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(bookings_module, "safe_get", fake_safe_get, raising=False)
+        config = {"enabled": True, "calendar_url": "https://calendar.invalid/x.ics"}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
+        assert captured.get("url") == "https://calendar.invalid/x.ics"
+        assert captured["allowed_schemes"] == frozenset({"https"})
+        assert list(captured["allowed_private_hosts"]) == ["10.9.0.0/16", "cal.lan"]
+        assert bs._ical.last_attempt_ok is True
+
+    def test_default_ical_fetch_refuses_plain_http(self, bs):
+        config = {"enabled": True, "calendar_url": "http://calendar.invalid/x.ics"}
+        with structlog.testing.capture_logs() as logs:
+            asyncio.run(bs.refresh(config, now=_FIXED_NOW,
+                                   admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
+        assert bs._ical.last_attempt_ok is False
+        failures = [e for e in logs if e.get("event") == "mode_bookings_ical_fetch_failed"]
+        assert [e.get("error") for e in failures] == ["SsrfBlockedError"]
+
+    def test_bookings_module_owns_no_http_client(self):
+        import mode_service.bookings as bookings_module
+
+        assert not hasattr(bookings_module, "get_bookings_http_client")
+        assert not hasattr(bookings_module, "_bookings_http_client")

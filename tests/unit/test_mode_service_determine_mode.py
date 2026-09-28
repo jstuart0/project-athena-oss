@@ -63,9 +63,6 @@ def ms(_mode_service_env):
     if ms_main._admin_http_client is not None:
         asyncio.run(ms_main._admin_http_client.aclose())
         ms_main._admin_http_client = None
-    if ms_bookings._bookings_http_client is not None:
-        asyncio.run(ms_bookings._bookings_http_client.aclose())
-        ms_bookings._bookings_http_client = None
 
 
 @pytest.fixture
@@ -228,13 +225,29 @@ class TestMixedFreshnessAuto:
         _stale(ms.booking_sources._ical, now_monotonic, bookings=[booking])
         assert ms.determine_mode(now=now, now_monotonic=now_monotonic) == "guest"
 
-    def test_admin_fresh_no_active_ical_expired_active_is_owner(self, ms):
+    def test_admin_fresh_no_active_ical_expired_active_is_guest(self, ms):
+        """D6 rule 1 (as amended): an advisory source's last-good counts in
+        every state except never_loaded. Expired advisory data can only add
+        guest time; the required source alone decides owner vs degraded."""
         self._with_ical(ms)
         now = datetime.now(timezone.utc)
         now_monotonic = time.monotonic()
         max_age = ms.booking_sources._max_age_seconds(ms.current_config)
         booking = Booking(id=None, key="ical1", source="ical", label="ical abcdef01",
                            start=now - timedelta(hours=1), end=now + timedelta(hours=1), is_test=False)
+        _fresh(ms.booking_sources._admin, now_monotonic, bookings=[])
+        _expired(ms.booking_sources._ical, now_monotonic, max_age, bookings=[booking])
+        assert ms.determine_mode(now=now, now_monotonic=now_monotonic) == "guest"
+
+    def test_admin_fresh_no_active_ical_expired_inactive_is_owner(self, ms):
+        """Control for the case above: expired advisory data with no active
+        booking never degrades the house."""
+        self._with_ical(ms)
+        now = datetime.now(timezone.utc)
+        now_monotonic = time.monotonic()
+        max_age = ms.booking_sources._max_age_seconds(ms.current_config)
+        booking = Booking(id=None, key="ical1", source="ical", label="ical abcdef01",
+                           start=now + timedelta(days=3), end=now + timedelta(days=4), is_test=False)
         _fresh(ms.booking_sources._admin, now_monotonic, bookings=[])
         _expired(ms.booking_sources._ical, now_monotonic, max_age, bookings=[booking])
         assert ms.determine_mode(now=now, now_monotonic=now_monotonic) == "owner"
@@ -385,3 +398,74 @@ class TestDegradedPermissionsMatch:
         resp = client.get("/mode/permissions", headers=_HEADERS)
         expected = ms._degraded_permissions_response()
         assert resp.json() == expected.model_dump()
+
+
+class TestRequiredIcalUrlCleared:
+    def test_cleared_required_url_degrades(self, ms, monkeypatch):
+        monkeypatch.setenv("MODE_BOOKINGS_SOURCE", "ical")
+        config_module._clear_cache_for_tests()
+        now = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        configured = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+
+        def factory(timeout=30.0):
+            return httpx.AsyncClient(
+                transport=httpx.MockTransport(lambda r: httpx.Response(200, content=b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")),
+                timeout=timeout,
+            )
+
+        asyncio.run(ms.booking_sources.refresh(configured, now=now, admin_client=None, ical_client_factory=factory))
+        ms.current_config = configured
+        assert ms.determine_mode(now=now, now_monotonic=time.monotonic()) == "owner"
+
+        ms.current_config = {"enabled": True, "calendar_url": ""}
+        asyncio.run(ms.booking_sources.refresh(ms.current_config, now=now, admin_client=None))
+        assert ms.determine_mode(now=now, now_monotonic=time.monotonic()) == "degraded"
+
+
+class _FakeCache:
+    def __init__(self, *a, **kw):
+        pass
+
+    async def connect(self):
+        return None
+
+    async def disconnect(self):
+        return None
+
+
+class TestLifespanInitialRefresh:
+    def _patch_startup(self, ms, monkeypatch, refresh):
+        async def _noop(*a, **kw):
+            return None
+
+        monkeypatch.setattr(ms, "CacheClient", _FakeCache)
+        monkeypatch.setattr(ms, "load_config", _noop)
+        monkeypatch.setattr(ms, "bookings_refresh_loop", _noop)
+        monkeypatch.setattr(ms, "config_refresh_loop", _noop)
+        monkeypatch.setattr(ms, "_posture_reminder_loop", _noop)
+        monkeypatch.setattr(ms.booking_sources, "refresh", refresh)
+
+    def test_initial_refresh_is_called_with_the_admin_client_and_bounded(self, ms, monkeypatch):
+        calls = []
+
+        async def hanging_refresh(config, *, now, admin_client, **kw):
+            calls.append(admin_client)
+            await asyncio.sleep(3600)
+
+        self._patch_startup(ms, monkeypatch, hanging_refresh)
+        monkeypatch.setattr(ms, "_STARTUP_BOOKINGS_REFRESH_TIMEOUT_SECONDS", 0.2, raising=False)
+
+        async def run():
+            async def enter():
+                async with ms.lifespan(ms.app):
+                    return "served"
+            return await asyncio.wait_for(enter(), timeout=3)
+
+        assert asyncio.run(run()) == "served"
+        assert len(calls) == 1
+        assert calls[0] is ms._admin_http_client
+
+    def test_startup_bound_is_well_under_the_liveness_budget(self, ms):
+        # mode-service.yaml: liveness initialDelaySeconds 10 -- uvicorn
+        # serves nothing until lifespan startup returns.
+        assert 0 < ms._STARTUP_BOOKINGS_REFRESH_TIMEOUT_SECONDS <= 5

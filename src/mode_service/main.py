@@ -68,7 +68,7 @@ from shared.booking_window import active_booking as bw_active_booking, clamp_buf
 # container even though it'd resolve in a test process with `src`
 # manually inserted onto sys.path. Verified by the Phase 3 real-image boot
 # gate and by tests/unit/test_mode_service_bookings.py's import-form check.
-from mode_service.bookings import BookingSources, BookingSnapshot, aclose_bookings_http_client, get_bookings_http_client
+from mode_service.bookings import BookingSources, BookingSnapshot
 
 # Configure logging
 logger = configure_logging("mode-service")
@@ -79,6 +79,12 @@ REDIS_URL = get_config().redis_url
 SERVICE_PORT = int(os.getenv("MODE_SERVICE_PORT", "8021"))
 
 _POSTURE_REMINDER_INTERVAL_SECONDS = 3600
+_BOOKINGS_REFRESH_INTERVAL_SECONDS = 60
+# uvicorn serves nothing (not even /health) until lifespan startup returns,
+# and the liveness probe starts 10 s in: the initial booking refresh may
+# hold startup for at most this long. The admin fetch's own timeout is 3 s;
+# a slow iCal feed (30 s timeout) finishes in the background.
+_STARTUP_BOOKINGS_REFRESH_TIMEOUT_SECONDS = 5.0
 _CONFIG_STALE_AFTER_SECONDS = 15 * 60
 _CONFIG_STALE_LOG_INTERVAL_SECONDS = 10 * 60
 
@@ -96,6 +102,7 @@ active_override: Optional[Dict[str, Any]] = None
 # the legacy iCal fetch (advisory-additive in "auto") with their own
 # freshness state (D6).
 booking_sources = BookingSources()
+_startup_bookings_refresh: Optional[asyncio.Task] = None
 
 # Last-good config tracking (D26/D37/D38).
 _config_loaded = False  # sticky True once any load has ever succeeded
@@ -183,7 +190,7 @@ class ModeOverrideRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
-    global cache
+    global cache, _startup_bookings_refresh
 
     # Startup
     logger.info("mode_service.startup", msg="Starting Mode Service")
@@ -198,12 +205,26 @@ async def lifespan(app: FastAPI):
 
     # ATHENA-127 D9: one booking refresh before serving traffic, so a fresh
     # pod never answers /mode from an empty snapshot when admin is already
-    # reachable.
-    await booking_sources.refresh(
-        current_config,
-        now=datetime.now(timezone.utc),
-        admin_client=get_bookings_http_client(),
+    # reachable -- bounded, and shielded so a slow fetch keeps running in
+    # the background instead of being cancelled (a cancelled iCal attempt
+    # would not be retried until its poll interval elapsed).
+    _startup_bookings_refresh = asyncio.create_task(
+        booking_sources.refresh(
+            current_config,
+            now=datetime.now(timezone.utc),
+            admin_client=_get_admin_http_client(),
+        )
     )
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(_startup_bookings_refresh),
+            timeout=_STARTUP_BOOKINGS_REFRESH_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "mode_bookings_startup_refresh_pending",
+            timeout_seconds=_STARTUP_BOOKINGS_REFRESH_TIMEOUT_SECONDS,
+        )
 
     # Start background tasks
     asyncio.create_task(bookings_refresh_loop())
@@ -218,9 +239,10 @@ async def lifespan(app: FastAPI):
     logger.info("mode_service.shutdown", msg="Shutting down Mode Service")
     if cache:
         await cache.disconnect()
+    if _startup_bookings_refresh is not None and not _startup_bookings_refresh.done():
+        _startup_bookings_refresh.cancel()
     if _admin_http_client is not None:
         await _admin_http_client.aclose()
-    await aclose_bookings_http_client()
 
 
 app = FastAPI(
@@ -673,12 +695,12 @@ async def bookings_refresh_loop():
     -- enabling guest mode must never start from a `never_loaded` snapshot
     (bob M2-i)."""
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(_BOOKINGS_REFRESH_INTERVAL_SECONDS)
         try:
             await booking_sources.refresh(
                 current_config,
                 now=datetime.now(timezone.utc),
-                admin_client=get_bookings_http_client(),
+                admin_client=_get_admin_http_client(),
             )
         except Exception as e:
             logger.error("mode_bookings_refresh_loop_error", error=str(e), exc_info=True)

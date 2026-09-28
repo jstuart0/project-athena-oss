@@ -22,6 +22,7 @@ from icalendar import Calendar
 
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from shared.url_safety import safe_get
 from shared.booking_window import (
     DEFAULT_CHECKIN_TIME,
     DEFAULT_CHECKOUT_TIME,
@@ -38,24 +39,68 @@ logger = structlog.get_logger()
 
 ADMIN_API_URL = get_admin_url()
 
-# Lazily-created HTTP client for the admin bookings fetch, module-level so
-# tests can inject a MockTransport-backed one before calling refresh()
-# (mirrors main.py's `_get_admin_http_client` pattern, D9).
-_bookings_http_client: Optional[httpx.AsyncClient] = None
+_ICAL_TIMEOUT_SECONDS = 30.0
 
 
-def get_bookings_http_client() -> httpx.AsyncClient:
-    global _bookings_http_client
-    if _bookings_http_client is None:
-        _bookings_http_client = httpx.AsyncClient(timeout=3.0)
-    return _bookings_http_client
+class _MalformedAdminResponse(ValueError):
+    """A 200 from the admin bookings endpoint whose body isn't the D3 shape."""
 
 
-async def aclose_bookings_http_client() -> None:
-    global _bookings_http_client
-    if _bookings_http_client is not None:
-        await _bookings_http_client.aclose()
-        _bookings_http_client = None
+def _parse_admin_body(body: Any) -> Tuple[List[Booking], List[Dict[str, Any]]]:
+    """D3 response -> (bookings, suppressed rows). Anything but the exact
+    shape raises, so a truncated or wrong body is a failed attempt, never
+    "zero bookings"."""
+    if not isinstance(body, dict):
+        raise _MalformedAdminResponse("body is not an object")
+    rows = body.get("bookings")
+    suppressed = body.get("suppressed", [])
+    if not isinstance(rows, list) or not isinstance(suppressed, list):
+        raise _MalformedAdminResponse("bookings/suppressed is not a list")
+    bookings = [
+        Booking(
+            id=row["id"],
+            key=row["key"],
+            source="admin",
+            label=f"{row.get('source') or 'admin'} #{row['id']}",
+            start=db_value_to_utc(datetime.fromisoformat(row["checkin"])),
+            end=db_value_to_utc(datetime.fromisoformat(row["checkout"])),
+            is_test=bool(row.get("is_test", False)),
+        )
+        for row in rows
+    ]
+    return bookings, suppressed
+
+
+def _ical_allowlist() -> List[str]:
+    raw = get_config().sitescraper_allowed_private_hosts or ""
+    return [h.strip() for h in raw.split(",") if h.strip()]
+
+
+async def _get_ical(url: str, ical_client_factory) -> httpx.Response:
+    """The iCal URL is admin-stored (Class 1 in shared.url_safety), so the
+    default path is the same https-only, per-hop-revalidated `safe_get`
+    guard admin-backend uses for calendar-source URLs. `ical_client_factory`
+    is the test seam: an injected factory bypasses the guard."""
+    if ical_client_factory is None:
+        return await safe_get(
+            url,
+            allowed_schemes=frozenset({"https"}),
+            allowed_private_hosts=_ical_allowlist(),
+            timeout=_ICAL_TIMEOUT_SECONDS,
+            headers={"User-Agent": "Athena-Mode-Service/1.0"},
+        )
+    async with ical_client_factory(timeout=_ICAL_TIMEOUT_SECONDS) as client:
+        return await client.get(url)
+
+
+def _failure_fields(e: BaseException) -> Dict[str, Any]:
+    """Log fields for a failed fetch: the exception class and, for an HTTP
+    error, the status code. Never `str(e)` -- httpx's HTTPStatusError text
+    embeds the full request URL, and calendar URLs carry access tokens."""
+    fields: Dict[str, Any] = {"error": type(e).__name__}
+    if isinstance(e, httpx.HTTPStatusError):
+        fields["status_code"] = e.response.status_code
+    return fields
 
 
 @dataclass
@@ -97,6 +142,7 @@ class BookingSources:
         self._source_mode = "auto"
         self._ical_misconfigured_warned = False
         self._unknown_source_warned = False
+        self._ical_url: Optional[str] = None
         self._last_admin_window: Optional[Tuple[datetime, datetime]] = None
 
     # ------------------------------------------------------------------
@@ -132,7 +178,7 @@ class BookingSources:
         *,
         now: datetime,
         admin_client: httpx.AsyncClient,
-        ical_client_factory=httpx.AsyncClient,
+        ical_client_factory=None,
     ) -> None:
         cfg = get_config()
         source_mode = cfg.mode_bookings_source
@@ -143,8 +189,17 @@ class BookingSources:
             source_mode = "auto"
         self._source_mode = source_mode
 
-        calendar_url = config.get("calendar_url")
+        calendar_url = config.get("calendar_url") or ""
         ical_active = source_mode == "ical" or (source_mode == "auto" and bool(calendar_url))
+
+        # A cleared or replaced URL invalidates everything learned from the
+        # old one: without this, a required `ical` source whose URL was
+        # emptied keeps classifying from its last success (owner, not
+        # degraded), and a new URL would briefly inherit the old feed's
+        # bookings and freshness.
+        if calendar_url != self._ical_url:
+            self._reset_ical()
+            self._ical_url = calendar_url
 
         tasks = []
         if source_mode in ("auto", "admin"):
@@ -161,6 +216,17 @@ class BookingSources:
         if tasks:
             await asyncio.gather(*tasks)
 
+    def _reset_ical(self) -> None:
+        if self._ical.lock.locked():
+            # An in-flight fetch of the old URL would write its result back
+            # after the reset; a fresh state object orphans that write.
+            self._ical = _SourceState()
+            return
+        self._ical.last_good = []
+        self._ical.last_success_at = None
+        self._ical.last_attempt_at = None
+        self._ical.last_attempt_ok = False
+
     async def _maybe_fetch_admin(
         self, config: Dict[str, Any], now: datetime, admin_client: httpx.AsyncClient
     ) -> None:
@@ -174,7 +240,11 @@ class BookingSources:
         self, config: Dict[str, Any], now: datetime, admin_client: httpx.AsyncClient
     ) -> None:
         start, end, *_ = self._fetch_window(config, now)
-        self._admin.last_attempt_at = time.monotonic()
+        state = self._admin
+        state.last_attempt_at = time.monotonic()
+        # An attempt in progress is not a success: a hung fetch reports
+        # stale (or expired), never the previous attempt's fresh.
+        state.last_attempt_ok = False
         key = get_config().service_api_key
         headers = {"X-Service-Key": key} if key else {}
 
@@ -184,33 +254,19 @@ class BookingSources:
                 params={"start": start.isoformat(), "end": end.isoformat()},
                 headers=headers,
             )
+            response.raise_for_status()
             if response.status_code != 200:
-                raise ValueError(f"admin bookings endpoint returned {response.status_code}")
-            body = response.json()
-            rows = body["bookings"]
-            suppressed_rows = body.get("suppressed", [])
-            bookings = [
-                Booking(
-                    id=row["id"],
-                    key=row["key"],
-                    source="admin",
-                    label=f"admin #{row['id']}",
-                    start=db_value_to_utc(datetime.fromisoformat(row["checkin"])),
-                    end=db_value_to_utc(datetime.fromisoformat(row["checkout"])),
-                    is_test=bool(row.get("is_test", False)),
-                )
-                for row in rows
-            ]
+                raise _MalformedAdminResponse(f"unexpected status {response.status_code}")
+            bookings, suppressed_rows = _parse_admin_body(response.json())
         except Exception as e:
             # Any non-200 (incl. 404), malformed body, or transport error is
             # a FAILED attempt -- never treated as "zero bookings" (R5).
-            self._admin.last_attempt_ok = False
-            logger.error("mode_bookings_admin_fetch_failed", error=str(e))
+            logger.error("mode_bookings_admin_fetch_failed", **_failure_fields(e))
             return
 
-        self._admin.last_good = bookings
-        self._admin.last_success_at = time.monotonic()
-        self._admin.last_attempt_ok = True
+        state.last_good = bookings
+        state.last_success_at = time.monotonic()
+        state.last_attempt_ok = True
         self._suppressed_rows = suppressed_rows
         self._last_admin_window = (start, end)
 
@@ -231,67 +287,67 @@ class BookingSources:
     async def _fetch_ical(
         self, config: Dict[str, Any], now: datetime, ical_client_factory
     ) -> None:
-        self._ical.last_attempt_at = time.monotonic()
+        state = self._ical
+        state.last_attempt_at = time.monotonic()
+        state.last_attempt_ok = False
         calendar_url = config["calendar_url"]
         property_tz, _ = resolve_property_tz(get_config().default_timezone)
         start, end, *_ = self._fetch_window(config, now)
 
         try:
-            async with ical_client_factory(timeout=30.0) as client:
-                response = await client.get(calendar_url)
-                response.raise_for_status()
-                cal = Calendar.from_ical(response.content)
+            response = await _get_ical(calendar_url, ical_client_factory)
+            response.raise_for_status()
+            cal = Calendar.from_ical(response.content)
 
-                bookings: List[Booking] = []
-                for component in cal.walk():
-                    if component.name != "VEVENT":
+            bookings: List[Booking] = []
+            for component in cal.walk():
+                if component.name != "VEVENT":
+                    continue
+                try:
+                    uid = str(component.get("uid", ""))
+                    summary = str(component.get("summary", ""))
+                    dtstart = component.get("dtstart")
+                    dtend = component.get("dtend")
+                    if not dtstart or not dtend:
+                        logger.debug("mode_bookings_ical_event_skipped", reason="missing_dtend")
                         continue
-                    try:
-                        uid = str(component.get("uid", ""))
-                        summary = str(component.get("summary", ""))
-                        dtstart = component.get("dtstart")
-                        dtend = component.get("dtend")
-                        if not dtstart or not dtend:
-                            logger.debug("mode_bookings_ical_event_skipped", reason="missing_dtend")
-                            continue
 
-                        if classify_summary(summary) == "blocked":
-                            continue
-
-                        checkin = feed_value_to_utc(
-                            dtstart.dt, default_hhmm=DEFAULT_CHECKIN_TIME, tz=property_tz
-                        )
-                        checkout = feed_value_to_utc(
-                            dtend.dt, default_hhmm=DEFAULT_CHECKOUT_TIME, tz=property_tz
-                        )
-                        # D6: filter to the fetch window (no server side to
-                        # do this for us, unlike the admin endpoint).
-                        if checkout <= start or checkin >= end:
-                            continue
-
-                        booking_key = hashlib.sha256(f"ical|{uid}".encode()).hexdigest()[:16]
-                        bookings.append(
-                            Booking(
-                                id=None,
-                                key=booking_key,
-                                source="ical",
-                                label=f"ical {booking_key[:8]}",
-                                start=checkin,
-                                end=checkout,
-                                is_test=False,
-                            )
-                        )
-                    except Exception:
-                        logger.debug("mode_bookings_ical_event_skipped", reason="parse_error")
+                    if classify_summary(summary) == "blocked":
                         continue
+
+                    checkin = feed_value_to_utc(
+                        dtstart.dt, default_hhmm=DEFAULT_CHECKIN_TIME, tz=property_tz
+                    )
+                    checkout = feed_value_to_utc(
+                        dtend.dt, default_hhmm=DEFAULT_CHECKOUT_TIME, tz=property_tz
+                    )
+                    # D6: filter to the fetch window (no server side to
+                    # do this for us, unlike the admin endpoint).
+                    if checkout <= start or checkin >= end:
+                        continue
+
+                    booking_key = hashlib.sha256(f"ical|{uid}".encode()).hexdigest()[:16]
+                    bookings.append(
+                        Booking(
+                            id=None,
+                            key=booking_key,
+                            source="ical",
+                            label=f"ical {booking_key[:8]}",
+                            start=checkin,
+                            end=checkout,
+                            is_test=False,
+                        )
+                    )
+                except Exception:
+                    logger.debug("mode_bookings_ical_event_skipped", reason="parse_error")
+                    continue
         except Exception as e:
-            self._ical.last_attempt_ok = False
-            logger.error("mode_bookings_ical_fetch_failed", error=str(e))
+            logger.error("mode_bookings_ical_fetch_failed", **_failure_fields(e))
             return
 
-        self._ical.last_good = bookings
-        self._ical.last_success_at = time.monotonic()
-        self._ical.last_attempt_ok = True
+        state.last_good = bookings
+        state.last_success_at = time.monotonic()
+        state.last_attempt_ok = True
 
     # ------------------------------------------------------------------
     # Snapshot (D6/D13)
@@ -359,7 +415,11 @@ class BookingSources:
             status = self._classify(state, now_monotonic, max_age)
             statuses[name] = status
             counts[name] = len(state.last_good)
-            if status in ("fresh", "stale"):
+            # D6 rule 1 (amended): advisory data counts in every state that
+            # has any. Even expired, it can only ADD guest time; whether the
+            # house is owner or degraded is decided by the required source
+            # alone, so this never weakens the fail-safe.
+            if status != "never_loaded":
                 considered_advisory.extend(state.last_good)
 
         merged = merge(
