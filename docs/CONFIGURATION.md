@@ -8,12 +8,13 @@ Complete reference for all configuration options in Project Athena.
 2. [Required Settings](#required-settings)
 3. [Database Configuration](#database-configuration)
 4. [Service URLs](#service-urls)
-5. [Infrastructure Services](#infrastructure-services)
-6. [Module Settings](#module-settings)
-7. [API Keys](#api-keys)
-8. [Voice Services](#voice-services)
-9. [Security Settings](#security-settings)
-10. [Advanced Settings](#advanced-settings)
+5. [Service Control on Kubernetes](#service-control-on-kubernetes-athena-118)
+6. [Infrastructure Services](#infrastructure-services)
+7. [Module Settings](#module-settings)
+8. [API Keys](#api-keys)
+9. [Voice Services](#voice-services)
+10. [Security Settings](#security-settings)
+11. [Advanced Settings](#advanced-settings)
 
 ---
 
@@ -37,8 +38,8 @@ config.database_url    # DATABASE_URL
 ### Centralized env vars
 
 The vars below are the original Campaign 4 batch, kept for illustration. See
-`src/shared/config.py` for the complete, current field list (41 fields as of
-ATHENA-89) — new fields land there per-PR and this table is not re-synced on
+`src/shared/config.py` for the complete, current field list (42 fields as of
+ATHENA-118) — new fields land there per-PR and this table is not re-synced on
 every addition.
 
 | Env var | AthenaConfig field | Default |
@@ -208,7 +209,8 @@ DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 }
 ```
 
-- `processes` -- keyed by port (as a JSON string). Each entry needs `name`, `dir` (working directory, relative to the Control Agent's checkout), and `cmd` (argv list). `health_path` and `enabled` are optional; `enabled: false` drops the entry (it's parsed but never managed). This is exactly the shape the Control Agent's watchdog and startup registry-sync (`POST /api/service-registry/services`) already used, just no longer hard-coded into the module.
+- `processes` -- keyed by port (as a JSON string). Each entry needs `name`, `dir` (working directory, relative to the Control Agent's checkout), and `cmd` (argv list). `health_path`, `enabled`, and `service_type` are optional; `enabled: false` drops the entry (it's parsed but never managed). This is exactly the shape the Control Agent's watchdog and startup registry-sync (`POST /api/service-registry/services`) already used, just no longer hard-coded into the module.
+  - `service_type` (ATHENA-118, codex diff review r2 Medium #4): one of `rag`, `core`, `infrastructure`. Authoritative when set -- registry-sync forwards it as-is. Falls back to the `-rag`-in-name heuristic when omitted. **Declare this for a RAG service whose name doesn't contain `-rag`** (e.g. `weather`, `sports`) -- otherwise it syncs as `service_type='core'`, which admin-backend's `group_for()` then reads as a non-`rag` group, and Service Control's fail-safe criticality treats every non-`rag` row as critical (owner-only `manage_infrastructure` gate) just like a real infrastructure service.
 - `watchdog_exclude` -- ports the 60-second watchdog should never auto-restart, even if they're in `processes`.
 - `containers` -- the Docker container-name whitelist for the `/docker/*` control endpoints (`is_container_allowed`). Independent of `processes`: a deployment can leave `processes` empty and still manage Docker containers (or vice versa).
 
@@ -251,6 +253,199 @@ Registering a `tcp` row via the admin UI's row editor (or directly via `POST /ap
 
 ---
 
+## Service Control on Kubernetes (ATHENA-118)
+
+`GET /api/service-control` resolves, per registry row, which control plane
+can actually start/stop/restart it: the Control Agent (host-gated — only
+when the row's host equals the Control Agent's own host), Kubernetes
+(opt-in, this section), or `none`. This section covers the Kubernetes half.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERVICE_CONTROL_K8S_ENABLED` | `false` | Opt-in flag (`AthenaConfig.service_control_k8s_enabled`). Inert on its own — also requires `optional/admin-backend-rbac.yaml` and its automount patch file (steps 1 and 3 below). |
+
+A registry row only resolves to Kubernetes when its `host` reduces to a
+Deployment name: a bare RFC1123 label matching the Deployment's name
+exactly (**the Service name must equal the Deployment name** — this repo's
+manifests always pair a Service and Deployment under the same name, so
+this holds by construction, but a hand-edited manifest that names them
+differently will never resolve), or `<label>.<namespace>[.svc[.cluster.local]]`
+with the suffix stripped.
+
+### Opt-in steps
+
+1. Apply the RBAC manifest (namespaced Role, not applied by a plain
+   `kubectl apply -f manifests/athena-prod/` since it lives under `optional/`):
+   ```
+   kubectl apply -f manifests/athena-prod/optional/admin-backend-rbac.yaml
+   ```
+2. Set the flag (`AthenaConfig.service_control_k8s_enabled`, default `false`):
+   ```
+   kubectl -n athena-prod patch cm athena-config --type merge \
+     -p '{"data":{"SERVICE_CONTROL_K8S_ENABLED":"true"}}'
+   ```
+3. Mount a token for the `athena-admin-backend` ServiceAccount (the tracked
+   `admin-backend.yaml` deliberately keeps `automountServiceAccountToken:
+   false` — see below):
+   ```
+   kubectl -n athena-prod patch deploy athena-admin-backend --patch-file \
+     manifests/athena-prod/optional/admin-backend-k8s-control.patch.yaml
+   ```
+
+Without step 1 and step 3, the flag alone is inert: `GET /api/service-control`
+reports `kubernetes.available: false` with a `reason`, and the page shows a
+visible amber banner rather than silently doing nothing:
+
+| Banner `reason` | Meaning | Fix |
+|---|---|---|
+| `not_in_cluster` | admin-backend isn't running inside a Kubernetes pod at all (`KUBERNETES_SERVICE_HOST` unset) — e.g. local dev, or a non-K8s deployment with the flag set by mistake. | Only meaningful inside the cluster; unset the flag outside it. |
+| `no_service_account_token` | In-cluster, but the pod has no mounted SA token (`automountServiceAccountToken: false`, the tracked default). | Apply step 3's patch file. |
+| `forbidden` | The API server rejected a request — the Role (step 1) isn't applied, doesn't cover this action, or the RoleBinding doesn't target the running SA. | Re-apply `admin-backend-rbac.yaml`; check `kubectl auth can-i` for the SA. |
+
+### The exact Role, and why there's no `deployments` patch
+
+`optional/admin-backend-rbac.yaml`'s Role has exactly two rules:
+`apps/deployments` `list` (namespace-wide — `resourceNames` cannot
+restrict `list`, and a Deployment spec carries no Secret values, only
+`secretKeyRef` names; no `get` verb here — the app only ever lists the
+collection, never reads a single Deployment by name outside the `/scale`
+subresource below), and `apps/deployments/scale` `get`/`patch`, scoped
+via `resourceNames` to every Deployment in `manifests/athena-prod/*.yaml`
+minus `athena-admin-backend`/`athena-admin-frontend` (currently 30 names).
+There is **no** `patch`/`update` on the base `deployments` resource
+anywhere — that verb would let a compromised admin-backend rewrite a pod
+template (`command`, secret mounts, `serviceAccountName`): real code
+execution and secret exposure. Without it, the worst this Role permits is
+setting the replica count of the 30 named Deployments — scale-to-0 (DoS) or
+scale-to-large-N (resource pressure; there's no `ResourceQuota` in
+`athena-prod`). `admin/backend/tests/test_admin_backend_rbac_manifest.py` (T10)
+computes the expected `resourceNames` set at **test time** by parsing the
+manifests, so it fails loudly the moment a new RAG service is added without
+updating this file.
+
+Adding a Deployment: re-run the generator (parse `manifests/athena-prod/*.yaml`
+— non-recursive, so `optional/` is excluded by construction — for
+`kind: Deployment` docs in `namespace: athena-prod`, minus the two
+protected names) and update the Role's `resourceNames` list.
+
+### Restart means downtime
+
+There is no rolling restart (it needs `deployments` PATCH, deliberately not
+granted). Restart is: scale to 0 → wait up to 60s for `status.replicas` to
+reach 0 → renew the cross-replica lease (see below) → scale back to the
+remembered count, inside a `finally` guarded by `asyncio.shield`, so no
+exception, timeout, or task cancellation can leave a Deployment at 0 while
+the admin-backend process is alive.
+
+Three distinct ways a restart can fail to complete its scale-back, each
+handled differently:
+
+- **The scale-back PATCH itself fails** (a transient API error): reported
+  as a failure, and an explicit marker (`system_settings` key
+  `service_control.interrupted.<deployment>`) is persisted so the row
+  reads `restart_interrupted` even though the lease was still released
+  normally (see below — an expired-lease check alone would miss this).
+- **Another admin-backend replica takes over the lease mid-wait**: the
+  lease renewal (below) fails atomically, the scale-back is deliberately
+  **skipped** (not raced against whatever the new holder is doing), and
+  the action is audited as `restart_superseded` rather than a plain
+  failure.
+- **The admin-backend process itself dies mid-wait** (its own rollout,
+  OOM, node drain): the Deployment stays at 0 until an operator presses
+  Start.
+
+In every case above, the row shows `manager_note: "restart_interrupted"`
+— derived from the explicit marker **or** an expired restart lease with
+the Deployment still observed at 0 replicas (either signal is
+sufficient) — and Start recalls the remembered count and clears the
+marker. **Any** successful k8s action on the deployment (start, stop, or
+a settled restart) also clears the marker. If an out-of-band `kubectl
+scale` brings the Deployment back up while the marker is still set, the
+badge is dropped and the stale marker is cleared lazily on the next
+envelope read — the observed replica count is authoritative over a
+possibly-stale marker. There's no automatic recovery beyond this, by
+design.
+
+**Don't roll (`kubectl rollout restart`) the admin-backend Deployment
+while a restart lease is unexpired (within the last 90s of a k8s
+restart/stop/start action).** A rolling admin-backend pod replacement
+mid-action orphans the in-flight lease exactly like a crash would — the
+new pod has no memory of the action it interrupted, and the target
+Deployment relies on `restart_interrupted` recovery (press Start) rather
+than resuming automatically.
+
+The pre-stop replica count lives in `system_settings`
+(`service_control.replicas.<deployment>`, clamped 1-10 on read, a stored `0`
+is impossible by construction — `stop`/`restart` only remember when the
+current count is `> 0`).
+
+**Out-of-band scaling during a restart is overwritten**: if something else
+(`kubectl scale`, an HPA, a second operator) changes the replica count while
+a restart is in flight, the scale-back step still writes the count that was
+remembered *before* the restart started — the out-of-band change is
+silently lost. This is a known limitation of "remember, then restore"
+semantics; don't run a restart through this UI while also manually scaling
+the same Deployment.
+
+### The cross-replica lease
+
+When `admin-backend` runs with `replicas: 2`, a k8s start/stop/restart holds
+a lease in `system_settings` (`service_control.lock.<deployment>`, category
+`service_control`, 90s TTL) for the **whole** action, including restart's
+wait — not just the instant of the PATCH. A second replica's action on the
+same Deployment while the lease is held gets 409 `action_in_progress`
+(audited). An expired lease is taken over via a compare-and-swap `UPDATE`
+keyed on the exact previously-observed value, so two replicas racing a
+takeover can't both win. The lease is released, by exact value match, only
+by the holder that acquired it — a stale holder's release can never delete
+a newer holder's lease.
+
+**Renewal before the scale-back PATCH**: a plain read-then-act check right
+before restart's scale-back ("do I still hold the lease?") has a TOCTOU
+gap — a replica could observe itself as owner right at the TTL edge,
+another replica could take over and act on the Deployment in the window
+between that read and the PATCH, and the first replica would scale back
+regardless. Instead, immediately before the scale-back PATCH, the holder
+atomically **renews** the lease (the same compare-and-swap `UPDATE...WHERE
+value=<mine>` primitive the takeover itself uses, extending `expires_at`
+on success). Renewal failing means someone else already has it — the
+scale-back is skipped and the action reads `restart_superseded`, never
+racing the new holder.
+
+### Guardrails
+
+- **Protected** (`athena-admin-backend`, `athena-admin-frontend`): never
+  targetable, in app code and in RBAC.
+- **Critical** (the named set `athena-gateway`, `athena-orchestrator`,
+  `athena-mode-service`, `athena-jarvis-web`, `redis`, `qdrant`, `ollama`,
+  union any Kubernetes-resolved row whose group isn't `rag`, union any
+  **Control-Agent**-resolved row whose group isn't `rag` (the same
+  fail-safe, applied identically to both managers — codex diff review r1
+  Critical #1), union Ollama under any manager): requires the owner-only
+  `manage_infrastructure` permission **and** a typed confirmation
+  (`confirm_name` in the request body, and in the envelope's own
+  `confirm_name` field — never derived client-side from `manager_target`,
+  which for a Control-Agent process is just the bare port number) that
+  must equal the **resolved target's** name — the Deployment label for
+  Kubernetes, the container name or `process:<port>` for Control Agent,
+  `ollama` for Ollama — never an alias row's own name. The owner gate is
+  checked before action-availability, so a non-owner always gets 403
+  `insufficient_role`, never a 409 about an unavailable action.
+- **Target collisions**: if two registry rows (enabled or disabled) resolve
+  to the same Kubernetes target, both are blocked (`manager_note:
+  "target_collision:<name>"`) — an operator can't alias an obscure row onto
+  a critical Deployment to bypass the owner gate.
+
+### Upgrade / reapply warning
+
+`kubectl apply -f manifests/athena-prod/admin-backend.yaml` (or of the whole
+directory) resets `serviceAccountName`/`automountServiceAccountToken` back to
+the tracked base values (no SA token), silently undoing the automount patch.
+**Re-run the patch file (step 3 above) after any such apply**, or Kubernetes
+control goes dark (visible amber banner, not a crash) until you do.
+
+---
+
 ## Infrastructure Services
 
 ### Ollama (LLM)
@@ -265,6 +460,24 @@ Registering a `tcp` row via the admin UI's row editor (or directly via `POST /ap
 ```bash
 OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 ```
+
+**Ollama URL write validation and runtime probes (ATHENA-118)**: `POST
+/api/settings/ollama-url` rejects a scheme other than `http`/`https`, a URL
+over 2048 characters, and a host that's IMDS/link-local/multicast/
+unspecified/`.svc`/`.cluster.local` — loopback is allowed only when the
+admin-backend process is itself running outside a Kubernetes pod. This
+write-boundary check runs **before** the save attempts a reachability
+probe, so a rejected URL never leaks a request to the attacker-controlled
+host first. Every runtime probe of the configured Ollama URL — this route's
+own reachability check, and every Ollama call `service_control.py` makes
+(`/api/version`, `/api/tags`, `/api/ps`, model load/unload) — additionally
+honors the same runtime SSRF allowlist as the health poller:
+`HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` must include the Ollama host before an
+RFC1918/loopback/ULA address is actually reached (otherwise the request is
+refused and the UI reports `ssrf_blocked`). **An in-cluster Ollama needs its
+Service's CIDR or hostname added to `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`**,
+the same as any other in-cluster Service (see "Service Registry Health
+Checks" above) — there is no separate allowlist for Ollama specifically.
 
 ### Redis
 

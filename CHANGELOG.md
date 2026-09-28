@@ -9,7 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+> **Ticket:** ATHENA-118
+
+### Added: Service Control resolves a real manager per row (Control Agent / Kubernetes / none) instead of guessing from a stale `is_running` flag (ATHENA-118)
+
+- **Added — `GET /api/service-control` envelope**: `{services, counts, control_agent, kubernetes}` replaces the old bare list. Each row's run state (`running`/`stopped`/`disabled`) is derived from health + `enabled` (`app/utils/service_state.py`), never the `is_running` column, which is now unwritten (deprecated, kept only for the startup schema gate). **Behavior change**: a row with no manager now returns 409 `action_not_available` on a lifecycle action instead of 200 `success: false`.
+- **Added — `app/services/service_managers.py::resolve_manager`**: per-row manager resolution, Control Agent (host-gated) then Kubernetes then `none`, with server-side grouping (`row.group`) and D10's action table.
+- **Added — `app/services/k8s_control.py`**: a scale-only Kubernetes adapter (`deployments` list, `deployments/scale` get/patch — no `deployments` PATCH anywhere, so no pod-template write is ever possible through this path). Restart is scale-to-0, a bounded 60s wait, then a shielded scale-back in `finally` — brief downtime, not a rolling restart. Opt-in via `SERVICE_CONTROL_K8S_ENABLED` (default `false`) plus `manifests/athena-prod/optional/admin-backend-rbac.yaml` and its automount patch file.
+- **Added — cross-replica lease** (`app/services/service_control_settings.py`, `system_settings` key `service_control.lock.<deployment>`, 90s TTL): serializes k8s actions across admin-backend replicas; contention is 409 `action_in_progress`. Remembered replica counts live in `service_control.replicas.<deployment>` (clamped 1-10, never stores a 0).
+- **Added — owner gate**: a new `manage_infrastructure` permission (owner role only) plus a server-enforced typed confirmation (`confirm_name`, checked against the **resolved target's** name, never an alias row's own name) guard critical targets — the named core-service set, any Kubernetes-resolved **or Control-Agent-resolved** row outside the `rag` group (the same fail-safe applied identically to both managers), and Ollama under any manager. The operator types the Deployment label for Kubernetes, the container name or `process:<port>` for a Control-Agent-managed row, or `ollama` for Ollama — never a row's own display name. The gate is checked before action-availability, so a non-owner always gets 403 `insufficient_role`.
+- **Added — target-collision guard**: two registry rows resolving to the same Kubernetes Deployment block each other (`manager_note: "target_collision:<name>"`).
+- **Fixed** — `/api/service-control/ollama/{start,stop,restart}` are now registered before `/api/service-control/{service_name}/{action}`; the parametrized route previously would have silently shadowed them once resolution against a matching registry row succeeded.
+- All 12 `POST` routes in `service_control.py` now share a dedicated `service_control` rate-limit budget and audit their outcome (including refused 403/409s once resolution has run).
+- **Added (Phase 3) — the Ollama card now goes through the same resolver as every other row.** `GET /ollama/health` gains `manager`/`manager_target`/`manager_note`/`native_actions`/`allowed_actions`/`confirm_required`/`confirm_name`/`row_name` and probes the resolved Ollama URL directly (`/api/version` + `/api/ps`, 5s timeout) — no Control Agent call, `status ∈ {healthy, idle, offline, error, ssrf_blocked}`. `POST /ollama/{start,stop,restart}` dispatch through `resolve_ollama_manager` into the same audited core the generic routes use: CA-managed calls the Control Agent, Kubernetes-managed scales the Deployment, and `manager == 'none'` is refused with 409 `ollama_not_manageable` (audited, zero CA/k8s calls) rather than silently calling `launchd_service_action` regardless of resolvability. **Behavior change**: Ollama is critical under any manager, so these routes now require the owner-only `manage_infrastructure` permission plus a typed confirmation.
+- **Added (Phase 3) — SSRF runtime gate on every admin-backend Ollama request**: `check_ssrf_safe` runs before `/api/version`, `/api/ps`, `/api/tags`, and `/api/generate` (load/unload) in `service_control.py`, and before the reachability probes in `settings.py`'s `GET`/`POST /api/settings/ollama-url`. `POST /api/settings/ollama-url` also validates the URL at the write boundary (scheme, length, IMDS/link-local/multicast/unspecified/`.svc`/`.cluster.local` host blocklist) **before** the reachability test, with a loopback carve-out for bare-metal local dev outside a K8s pod.
+- **Fixed (Phase 3) — `GET /ollama/models` no longer 500s on a `/api/ps` failure**: a `/api/tags` failure is a hard 502 `models_endpoint_unreachable` (there's no model list to render); a `/api/ps` failure alone degrades every model to `loaded: false` with an `X-Athena-Ollama-Ps: unavailable` response header, rather than failing the whole request.
+- **Changed (Phase 4) — the Service Control admin page now reads the unified envelope.** Core/RAG/Infrastructure tables render from server-computed `row.group` (never re-derived from the row name), with a manager badge (Control Agent / Kubernetes / Managed externally / Protected) and native-state text (e.g. `1/1 pods`) alongside the run-state badge. A critical action opens a typed-confirmation dialog (must type the resolved target's exact name before Proceed enables) instead of a plain confirm. **Behavior change**: a 409 from a lifecycle action now surfaces the server's actual reason (`detail.error`) as a toast, rather than a generic failure message.
+- **Removed (Phase 4) — the service restart "Quick Actions" macros** (`voice-pipeline-restart`, `full-stack-restart`, `llm-refresh`): they issued unaudited direct calls to the old per-service routes with no manager awareness, resolution, or owner gating, and had no wiring in `index.html`. The restart-history timeline (previously computed but never rendered — no `#restart-timeline` element existed) is now visible on the page, reading `/api/audit` for `service_start`/`service_stop`/`service_restart` events.
+- **Changed (Phase 4) — the Ollama panel's health/model refresh is now a single `refreshOllamaPanel()` entry point** (`Promise.allSettled` over both loaders), so the status card and the models table never render from a stale pairing of one fresh and one lagging fetch. Fixed an unescaped `ollamaHealth.host` interpolation in the process.
+
+---
+
+## [Unreleased]
+
+> **Ticket:** ATHENA-113
 
 ### Changed: Mission Control's voice-health card is registry-driven, not hard-coded to 5 named services (ATHENA-113 follow-up)
 
@@ -20,7 +43,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+> **Ticket:** ATHENA-113
 > **Codex review:** `.mozart/plans/active/2026-09-27-diagnose-athena-mission-control.codex-r2-delta.md` (High/Medium, BLOCK)
 
 ### Fixed: quick-stats had no SSRF gate at all; the SSRF check validated only the host, never the actual request path/query (ATHENA-113 codex r2 delta)
@@ -34,7 +57,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+> **Ticket:** ATHENA-113
 > **Codex review:** `.mozart/plans/active/2026-09-27-diagnose-athena-mission-control.codex-diff.md` (High, BLOCK)
 
 ### Fixed: Mission Control voice-health card and voice-test RAG probes live-probed operator-resolved URLs without the health poller's SSRF/runtime-DNS allowlist (ATHENA-113 codex follow-up)
@@ -47,7 +70,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-115](https://plane.xmojo.net)
+> **Ticket:** ATHENA-115
 
 ### Fixed: `/ha/conversation` 500'd with NameError AFTER a device command had already executed (ATHENA-115)
 
@@ -58,7 +81,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-112](https://plane.xmojo.net)
+> **Ticket:** ATHENA-112
 > **Campaign:** `2026-09-27-deliver-athena-dashboard-health-and-tcp-poller`
 
 ### Fixed: a disabled service dragged the dashboard's overall health down (ATHENA-112)
@@ -70,7 +93,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-109](https://plane.xmojo.net)
+> **Ticket:** ATHENA-109
 > **Campaign:** `2026-09-27-deliver-athena-dashboard-health-and-tcp-poller`
 > **Commits:** `7de9989`, `fe4544b`, `bd77dfd`, `a2d5e32`, `20d5be6`
 
@@ -86,7 +109,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-114](https://plane.xmojo.net)
+> **Ticket:** ATHENA-114
 > **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md` (S2)
 
 ### Fixed: orchestrator's config_loader never sent X-Service-Key, so admin-panel conversation/clarification config silently never took effect (ATHENA-114)
@@ -99,7 +122,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+> **Ticket:** ATHENA-113
 > **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md`
 
 ### Fixed: Mission Control never loaded on a plain visit — the default landing tab read 'dashboard', not 'mission-control' (ATHENA-113a)
@@ -111,7 +134,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+> **Ticket:** ATHENA-113
 > **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md` (S1)
 
 ### Fixed: Mission Control's voice-health card assumed every RAG shares one host, reporting all of them "unreachable" instead of "not configured" (ATHENA-113b)
@@ -124,7 +147,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-113](https://plane.xmojo.net)
+> **Ticket:** ATHENA-113
 > **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md`
 
 ### Fixed: System Configuration's Gateway/Orchestrator/Ollama cards always read Offline -- GET /api/status probed a pre-Kubernetes "Mac Studio"/"Mac Mini" topology (ATHENA-113c)
@@ -137,7 +160,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-110](https://plane.xmojo.net)
+> **Ticket:** ATHENA-110
 > **Plan:** `.mozart/plans/active/2026-09-27-operate-athena-dashboard-registry-cleanup.md` (P3)
 
 ### Fixed: Control Agent had zero incoming auth on any route; process launch used a shell; services-file `dir` could escape PROJECT_ROOT (ATHENA-110)
@@ -153,7 +176,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** [ATHENA-99](https://plane.xmojo.net)
+> **Ticket:** ATHENA-99
 > **Commits:** `c36dc83` (dashboard badges), `c146353` (Control Agent managed-services config)
 
 ### Fixed: dashboard service badges render "undefined"; Control Agent no longer hard-codes a process list (ATHENA-99)
@@ -167,7 +190,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 > **Plan:** `.mozart/plans/active/2026-09-27-deliver-athena-transit-and-base-knowledge.md`
-> **Ticket:** [ATHENA-90](https://plane.xmojo.net) + [ATHENA-91](https://plane.xmojo.net)
+> **Ticket:** ATHENA-90 + ATHENA-91
 > **Commits:** `5b8b515` (Phase 1 — `search_transit` wiring), `85930aa` (Phase 2 — base-knowledge settings facade), `02fd52e` (P3 — `/public` auth gate, sanitization, transit sort/regex fixes)
 
 ### Transit tool wiring: `search_transit` reaches a real transportation route (ATHENA-90, Phase 1)
@@ -198,7 +221,7 @@ The Admin UI's Memory & Context → Base Knowledge tab called a service-key-gate
 ## [Unreleased]
 
 > **Plan:** `.mozart/plans/active/2026-09-27-deliver-athena-oss-readiness.md`
-> **Ticket:** [ATHENA-89](https://plane.xmojo.net) (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`)
+> **Ticket:** ATHENA-89 (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`)
 > **Commits:** `cea046a` (P0 — leak-gate script), `c23dc27` (P1 — admin-backend/frontend), `ddaf16b` (P2 — region-configurable RAG services), `b16924b` (P3 — gateway/orchestrator session + ingress auth), `13ba5f6` (P3b — gate extension), `88caad4` (P4 — remaining references), `d6825a0` (P5 — CI workflow), `75a5af0` (P7 item 0 — import-cycle fix), `4826214` (P7 items 1–6 — HA entity/room config), `f6e9f51` (P8 — light-group scene fallback, restored satellite name-parse fallback, dropped unused `JARVIS_MEDIA_PLAYERS`)
 
 ### OSS readiness: no maintainer house in runtime code, orchestrator ingress authentication, gateway non-streaming session continuity (ATHENA-89)
@@ -236,7 +259,7 @@ Removes every maintainer-identifying value (home LAN IPs, home domain, home city
 ## [Unreleased]
 
 > **Plan:** `.mozart/plans/active/2026-09-26-deliver-athena-voice-intent-defects.md`
-> **Ticket:** [ATHENA-88](https://plane.xmojo.net) (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`; sibling: ATHENA-87)
+> **Ticket:** ATHENA-88 (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`; sibling: ATHENA-87)
 > **Commits:** `44da391`/`daa8040` (Phase 1 — red/fix), `cbcadfc`/`15d097e` (Phase 2 — red/fix), `33b9229`/`eb8db83` (Phase 3 — red/fix), `ecfa4a8`/`31ff77a` (Phase 4 — red/fix), `8a5e65d` (Phase 4 reconciliation — binding runtime session test), `2475180`/`a47c69c` (Phase 5 — red/fix), `b0d6fb4`, `e403f29`, `fa250db`, `f7922e9`, `629b4aa`, `c2dbada`, `a63180e` (reconciliation round 1 — F36–F42, F34), `cf270eb`, `3c9b050`, `8125ad8`, `d9c20ab`, `64eaa61`, `b7dbb50`, `b028e03` (reconciliation round 2 — F43–F49; `b028e03` corrects `a63180e`'s D13 write)
 
 ### Voice intent defects: sequence-timing false positives, shared streaming session, dining keyword gap, RAG key-name drift, short-turn continuation (ATHENA-88)
@@ -291,7 +314,7 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 ## [Unreleased]
 
 > **Plan:** `.mozart/plans/active/2026-09-26-deliver-athena-post-cutover-defects.md`
-> **Ticket:** [ATHENA-87](https://plane.xmojo.net) (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`)
+> **Ticket:** ATHENA-87 (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`)
 > **Commits:** `567b929`/`eb415f4` (Phase 1 — red/fix), `510c1a2`/`d32cc21` (Phase 2 — red/fix), `1134dfd`/`a4c01d6` (Phase 3 — red/fix), `3e92be2`/`cdd6fe1` (Phase 4 — red/fix)
 
 ### Post-cutover defects: RAG URL parity, streaming think-disable parity, temporal-location filter, gateway LiveKit deps (ATHENA-87)
@@ -345,7 +368,7 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 ## [Unreleased]
 
 > **Plan:** n/a — TINY tier; ATHENA-71's ticket body is the spec
-> **Ticket:** [ATHENA-71](https://plane.xmojo.net)
+> **Ticket:** ATHENA-71
 > **Commits:** `4f0e265` (guard semantics), `12bd012` (fixture fixup), `459d6de` (lexical-detection docstring, exit 2 on git read failure)
 
 ### skip-guard fix: subset + tree-presence in place of set-equality (ATHENA-71)
@@ -360,7 +383,7 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 ## [Unreleased]
 
 > **Plan:** `.mozart/plans/active/2026-09-13-deliver-athena-frontend-escaping.md` (round 3)
-> **Ticket:** [ATHENA-66](https://plane.xmojo.net)
+> **Ticket:** ATHENA-66
 > **Commits:** `0468035`..`9d12d97`..`7411f6e` (Phase 1 — guards + baseline), `03af3df`..`15a09cd` (Phase 2 — callee/param/sink table), `087a47b`..`0df3ff6`..`2a48323` (Phase 3 — 52 wrong-primitive sites + callee-sink closures), `dd1b30d` (Phase 4 — `emerging-intents.js`), `045b6eb`..`e842149`..`9b328f6` (Phase 5 — 18 definitions deleted), `76384cd`, `1e5e284`, `bd23f40` (Phase 6 — 77 unescaped-quoted sites), `89b03ba`, `d8f4021`, `088ac1e`, `d06e33a`, `8c9245a` (Phase 7 — hardening, `immutable` removal, CI)
 
 ### admin-frontend escaping consolidation (ATHENA-66)
@@ -382,7 +405,7 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 ## [Unreleased]
 
 > **Plan:** `.mozart/plans/active/2026-09-13-deliver-athena-frontend-escaping.md` (carved out of round 1)
-> **Ticket:** [ATHENA-67](https://plane.xmojo.net)
+> **Ticket:** ATHENA-67
 > **Commits:** `a482635`, `ed8714f`
 
 ### admin-frontend guest-name XSS hotfix (ATHENA-67)
@@ -416,8 +439,8 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 - **Fixed**: `apps/jarvis-web/Dockerfile` — pinned build tooling (`pip==26.2.1 setuptools==84.0.0 wheel==0.48.0`) added to the `AS builder` stage, above the line that installs the hashed lock.
 - **Fixed**: `apps/jarvis-web/Dockerfile`'s production stage now removes its own factory-installed `pip`/`setuptools`/`wheel` before `COPY --from=builder` copies the pinned versions over — Docker's `COPY` onto an existing directory merges rather than replaces, so without this the base image's `pip==24.0`/`setuptools==79.0.1` (with their own CVEs, including CVE-2026-59890) survived on disk alongside the pinned 26.2.1/84.0.0, and `importlib.metadata`-based tooling resolved the stale, vulnerable one. Verified after the fix: exactly one dist-info per tool, `pip-audit` reports zero vulnerabilities in the finished image. `--no-build-isolation` intentionally **not** added here — this Dockerfile installs no editable package.
 - **Changed**: `README.md` — the two jarvis-web dev-install commands (`:235`, `:347`) repointed from `requirements.txt` to `requirements.in`. Not a fix for a failure: installing the generated `requirements.txt` directly on Apple Silicon succeeds, by silently resolving macOS wheels instead of the x86_64 binaries the image ships — a reproducibility gap, not a break.
-- **Documented, not fixed**: `apps/jarvis-web/backend/main.py:115-122` — `allow_origins=["*"]` + `allow_credentials=True` makes Starlette reflect the request `Origin` header verbatim, defeating same-origin credential protection; most of this app's routes (`/api/welcome`, `/api/climate`, `/api/sensors/*`, `/api/chat`) need no auth at all, so any origin's JavaScript can already read guest PII, HVAC state, and occupancy data regardless of credentials. Tracked in **[ATHENA-64](https://plane.xmojo.net)**; fixing it requires enumerating every legitimate origin that embeds this app, a separate consumer audit.
-- **Ticketed, not fixed**: `apps/jarvis-web/Dockerfile:41-42` copies the builder stage's entire `site-packages` and `/usr/local/bin` into the production image, so the runtime image ships a working `pip` and its entrypoints — a post-RCE hardening gap. Tracked in **[ATHENA-65](https://plane.xmojo.net)**.
+- **Documented, not fixed**: `apps/jarvis-web/backend/main.py:115-122` — `allow_origins=["*"]` + `allow_credentials=True` makes Starlette reflect the request `Origin` header verbatim, defeating same-origin credential protection; most of this app's routes (`/api/welcome`, `/api/climate`, `/api/sensors/*`, `/api/chat`) need no auth at all, so any origin's JavaScript can already read guest PII, HVAC state, and occupancy data regardless of credentials. Tracked in **ATHENA-64**; fixing it requires enumerating every legitimate origin that embeds this app, a separate consumer audit.
+- **Ticketed, not fixed**: `apps/jarvis-web/Dockerfile:41-42` copies the builder stage's entire `site-packages` and `/usr/local/bin` into the production image, so the runtime image ships a working `pip` and its entrypoints — a post-RCE hardening gap. Tracked in **ATHENA-65**.
 
 **Phase 3 — canonicalize the shared dependency declaration:**
 
@@ -443,7 +466,7 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 - **Fixed**: `admin/backend/requirements.in` — three bumps clear the two remaining auth-path advisories: `aiohttp==3.9.1` → `>=3.14.3,<4` (resolves `3.14.3`), `python-jose[cryptography]==3.3.0` → `>=3.5,<4` (resolves `3.5.0`), `python-dotenv==1.0.0` → `>=1.2.3,<2` (resolves `1.2.3`). `starsessions`, `starlette`, and `httpx` deliberately untouched — the starlette major is Phase 7's alone.
 - **Fixed**: build tooling (`pip==26.2.1 setuptools==84.0.0 wheel==0.48.0`) pinned ahead of every dependency install across the remaining 28 Python images — the 5 hand-written Dockerfiles that lacked the full triplet (`admin/backend`, `apps/chat-embed`, `src/gateway`, `src/mode_service`, `src/orchestrator`) and the RAG Dockerfile generator template, regenerated across all 23 RAG service Dockerfiles. `apps/jarvis-web/Dockerfile` already carried this pin from Phase 2. `setuptools==84.0.0` ships zero `pkg_resources/` entries (a real removal, fixing CVE-2026-59890 whose floor is `83.0.0`; no downgrade below that floor is possible without reintroducing it). A direct `import pkg_resources` was checked on seven images: `athena-gateway`, `athena-mode-service`, `athena-orchestrator`, `athena-chat-embed`, `athena-admin-backend`, `athena-rag-sitescraper`, `athena-rag-weather`. It's absent in all seven, and none of them needs it. `athena-orchestrator` and `athena-rag-sitescraper` were additionally checked with unguarded imports of the optional content-fetcher packages (`trafilatura`, `extruct`, `pandas`, `playwright` in `src/shared/content_fetcher.py`) they actually ship.
 - **Added**: `scripts/audit-images.sh` + `make audit-images` (`SCOPE=remediated` scopes to `athena-admin-backend` and `athena-jarvis-web`). Builds each image (`docker buildx build --platform linux/amd64`), freezes its installed package list from its own Python (`pip freeze --all --exclude-editable`), then audits that frozen list from a throwaway venv that never touches the built image, so the reported advisory surface reflects what the pinned build tooling and committed lock actually produce. `pip-audit`'s exit code is captured to a sidecar file rather than swallowed; only rc 0 (clean) or rc 1 (findings) with parseable JSON counts as a result, anything else is `TOOL_ERROR` (exit 2). Carries exactly one `--ignore-vuln`: `PYSEC-2026-1325` (`ecdsa`, transitive via `python-jose[cryptography]`), unreachable under this codebase's HS256-only JWT usage — `admin/backend/app/auth/oidc.py` calls `jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])` with `JWT_ALGORITHM = "HS256"` at both call sites — gated on `scripts/check-jwt-algorithm-guard.py` passing first; a guard failure withholds the allowlist for that run.
-- **Added**: `scripts/check-jwt-algorithm-guard.py` — an AST-based check (immune to a match inside a comment or string) that resolves every python-jose import form (`import jose`, `import jose.jwt`, `from jose import jwt`/`jws`, `from jose.jwt import decode/encode`, `from jose.jws import verify/sign`, and attribute chains built on any of them) to a canonical name, then verifies `JWT_ALGORITHM == "HS256"` (the single top-level literal in `oidc.py`, with no other rebinding permitted), that every `jwt.decode`/`jws.verify` call site under `admin/backend/app` (excluding tests) and `src/shared` passes `algorithms=` naming only `HS256`/`JWT_ALGORITHM`, and that every `jwt.encode`/`jws.sign` call passes `algorithm="HS256"` or `JWT_ALGORITHM`. A non-UTF-8 file or other tool failure exits 2 rather than passing silently. Covered by `tests/unit/test_jwt_algorithm_guard.py` (16 cases). **Known limitation**: dynamic-dispatch forms — an intermediate-variable alias (`x = jwt; x.decode(...)`), a star import, `importlib.import_module`, or `setattr` on `JWT_ALGORITHM` — are not detected; the current tree is clean of all of these, but the guard cannot prove it stays that way. Tracked as **[ATHENA-79](https://plane.xmojo.net)**.
+- **Added**: `scripts/check-jwt-algorithm-guard.py` — an AST-based check (immune to a match inside a comment or string) that resolves every python-jose import form (`import jose`, `import jose.jwt`, `from jose import jwt`/`jws`, `from jose.jwt import decode/encode`, `from jose.jws import verify/sign`, and attribute chains built on any of them) to a canonical name, then verifies `JWT_ALGORITHM == "HS256"` (the single top-level literal in `oidc.py`, with no other rebinding permitted), that every `jwt.decode`/`jws.verify` call site under `admin/backend/app` (excluding tests) and `src/shared` passes `algorithms=` naming only `HS256`/`JWT_ALGORITHM`, and that every `jwt.encode`/`jws.sign` call passes `algorithm="HS256"` or `JWT_ALGORITHM`. A non-UTF-8 file or other tool failure exits 2 rather than passing silently. Covered by `tests/unit/test_jwt_algorithm_guard.py` (16 cases). **Known limitation**: dynamic-dispatch forms — an intermediate-variable alias (`x = jwt; x.decode(...)`), a star import, `importlib.import_module`, or `setattr` on `JWT_ALGORITHM` — are not detected; the current tree is clean of all of these, but the guard cannot prove it stays that way. Tracked as **ATHENA-79**.
 - **Fixed**: `scripts/audit-images.sh`, `scripts/smoke-images.sh`, `scripts/smoke-rag-images.sh`, and `scripts/lock-requirements.sh` each had at least one `set -u` empty-array expansion (e.g. any image with no shared-copy step) that aborted or silently swallowed the script's real exit status under macOS's stock bash 3.2. Fixed to the `"${arr[@]+"${arr[@]}"}"` form; verified directly under bash 3.2.57.
 - **Documented (operator note)**: python-jose 3.5 rejects a `JWT_SECRET`/`SESSION_SECRET_KEY` that contains a PEM header or SSH key-type substring, mistaking it for asymmetric key material — `jwt.encode` raises `JWSError`, `jwt.decode` raises `JWKError`, and neither subclasses `JWTError`, so both escape `oidc.py`'s `except JWTError` handling: login and every authenticated request return `500`, not `401`. Generate these secrets as plain random strings (e.g. `openssl rand -base64 32`, per `docs/CONFIGURATION.md`), never as a copy-pasted key file.
 - **Audit result**: `bash scripts/audit-images.sh --scope remediated` exits 1 (findings), not 0, at the end of Phase 6. `athena-jarvis-web` is clean. `athena-admin-backend` carries 5 distinct unallowlisted advisories on `starlette==0.52.1` (`PYSEC-2026-161`, `PYSEC-2026-248`, `PYSEC-2026-249`, `PYSEC-2026-2280`, `PYSEC-2026-2281`) — the same 5 CVEs disclosed above under Phase 4. Only Phase 7's starlette major clears them; no second `--ignore-vuln` was added for them.
@@ -454,7 +477,7 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 - **Verified**: `starsessions==2.2.1`'s `SessionMiddleware.__init__` signature, `RedisStore(connection=, prefix=)`, and `InMemoryStore()` are unchanged from `2.1.3`; `request.session` behaves identically under `starlette==1.6.0`. No changes needed to `admin/backend/main.py`'s or `app/routes/local_auth.py`'s session-middleware usage. The admin-backend test suite is unchanged from Phase 6 (same one pre-existing wall-clock flake under emulation, see Phase 4; every session/middleware/cookie/OIDC/WebSocket test passes).
 - **Pending, blocking for merge (not for this commit)**: manual confirmation in a browser that the session cookie set by `/api/auth/login` carries `Secure` and `SameSite=Lax`, that `/api/auth/logout` clears it, and that a second, independent browser session is unaffected by the first one's logout.
 - **Fixed**: `scripts/lock-requirements.sh`'s `--upgrade-package`, `--input`, `--output`, and `--constraint` each crashed with an "unbound variable" error when their value was missing, or silently consumed the next flag as their own value. Each now fails cleanly (`FAIL: <flag> requires a value`, non-zero exit); a following token starting with `--` is treated as a missing value too. `--check` combined with `--upgrade`/`--upgrade-package`, in either order, now fails (`FAIL: --check cannot be combined with --upgrade/--upgrade-package`) instead of letting a verification run mutate pins.
-- **Ticketed, not fixed**: `regenerate_session_id()` is never called on login (`admin/backend/app/routes/local_auth.py:167-169`, `main.py:817-818,888-889`) — a pre-existing session-fixation gap, unrelated to and unaffected by this phase's library bump. Tracked as **[ATHENA-80](https://plane.xmojo.net)**.
+- **Ticketed, not fixed**: `regenerate_session_id()` is never called on login (`admin/backend/app/routes/local_auth.py:167-169`, `main.py:817-818,888-889`) — a pre-existing session-fixation gap, unrelated to and unaffected by this phase's library bump. Tracked as **ATHENA-80**.
 - **Revert note**: Phase 7 ships as three commits — `39daf6f`, `449bbfe`, `7b07a31`. To undo it as a group: revert `7b07a31`, then `449bbfe`, then `39daf6f`, in that order. Only `CHANGELOG.md` conflicts (resolvable by restoring the pre-Phase-7 text); reverting `39daf6f` before `7b07a31` instead conflicts in `scripts/lock-requirements.sh`. The result restores `admin/backend/requirements.in` to `starsessions[redis]==2.1.3`, both admin-backend locks (`requirements.txt`, `requirements-test.txt`) to `starlette==0.52.1`/`starsessions==2.1.3`, and `scripts/lock-requirements.sh` to its pre-Phase-7 form. It changes no other image's lock or Dockerfile.
 
 **Phase 8 — lock the remaining 27 images:**
@@ -468,8 +491,8 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 **Phase 9 — the image consumes exactly the lock:**
 
 - **Fixed**: every shared install across all 27 shared-installing images (23 RAG services, `admin/backend`, `src/gateway`, `src/mode_service`, `src/orchestrator`) changed from `pip install --no-cache-dir -e /app/shared` to `pip install --no-cache-dir --no-deps --no-build-isolation -e /app/shared`. `--no-deps` makes the hashed lock — installed in the same stage immediately after — the single source of every installed package version. `--no-build-isolation` closes a second gap: `src/shared/pyproject.toml`'s own build-backend floor (`setuptools>=61.0`, unpinned `wheel`) would otherwise resolve fresh over the network inside an isolated build environment, bypassing the pinned triplet entirely. All 9 of `src/shared/pyproject.toml`'s dependencies are pinned with `==` in all 27 shared-installing locks. The 23 RAG Dockerfiles were regenerated from the generator template (never hand-edited); the 4 hand-written Dockerfiles (`admin/backend`, `src/gateway`, `src/mode_service`, `src/orchestrator`) were edited directly. `apps/chat-embed` and `apps/jarvis-web` install no shared module and are unchanged.
-- **Known limitation**: the four hand-written Dockerfiles' `--no-deps`/`--no-build-isolation` line and the 29 `.in`-to-`.txt` lock syncs have no CI gate — enforcement today is local (`make lock-check`, `scripts/check-build-tooling.py`, `scripts/generate-rag-dockerfiles.py --check`, and `scripts/smoke-images.sh`). The lock content itself is still consumed on every image build regardless, and the 23 generated RAG Dockerfiles keep their drift gate (the generator `--check`). Tracked as **[ATHENA-81](https://plane.xmojo.net)**.
-- **Known limitation**: the `pip`/`setuptools`/`wheel` bootstrap triplet is pinned by version across all 29 images, not by hash — a supply-chain gap one level below the hashed dependency locks. Tracked as **[ATHENA-82](https://plane.xmojo.net)**.
+- **Known limitation**: the four hand-written Dockerfiles' `--no-deps`/`--no-build-isolation` line and the 29 `.in`-to-`.txt` lock syncs have no CI gate — enforcement today is local (`make lock-check`, `scripts/check-build-tooling.py`, `scripts/generate-rag-dockerfiles.py --check`, and `scripts/smoke-images.sh`). The lock content itself is still consumed on every image build regardless, and the 23 generated RAG Dockerfiles keep their drift gate (the generator `--check`). Tracked as **ATHENA-81**.
+- **Known limitation**: the `pip`/`setuptools`/`wheel` bootstrap triplet is pinned by version across all 29 images, not by hash — a supply-chain gap one level below the hashed dependency locks. Tracked as **ATHENA-82**.
 - **Documented**: the orchestrator lock's `httpx2`, `httpcore2`, and `langchain-protocol` entries are legitimate upstream dependencies, not typosquats — `httpx2`/`httpcore2` are pulled in by `langsmith` and by starlette 1.6's own `TestClient`; `langchain-protocol` is pulled in by `langchain-core` and `langgraph-sdk`.
 - **Fixed**: `scripts/audit-images.sh`'s isolated pip-audit venv was created at `/audit-venv`, a path requiring write access to the container filesystem root — 26 of 29 images set a non-root `USER athena`, so the audit could not complete on any of them. Moved the venv into a `mktemp`-created directory under `/tmp`, which every base image in this repo makes world-writable.
 - **Corrected**: `CONTRIBUTING.md`'s httpx version contract now states the current mechanism: httpx is pinned exactly (`httpx==0.28.1`) in every one of the 29 generated locks; for the 27 images compiled against `src/shared/pyproject.toml`, that pin is fixed at lock time by `scripts/lock-requirements.sh`, not at image-install time (the shared install now installs zero dependencies); changing it means editing the `src/shared/pyproject.toml` constraint and running `make lock`.
@@ -480,7 +503,7 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 ## [Unreleased]
 
 > **Plan:** `thoughts/shared/plans/2026-05-15-deliver-auth-deferred-hardening.md` (r2)
-> **Ticket:** [ATHENA-55](https://plane.xmojo.net)
+> **Ticket:** ATHENA-55
 > **Commits:** `179fd8c` (Phase 1), `77f50d6` (Phase 2), `f956be2` (Phase 3), `9b2926e` (Phase 4)
 
 ### auth-deferred-hardening (ATHENA-55)
@@ -611,14 +634,14 @@ so the operator can see the degraded state.  Check logs on first startup after u
 ### Audit-deferred cleanup-batch reconciliation (ATHENA-11 C1)
 
 - **Changed**: `admin-backend DEV_MODE startup gate now allows local-host Postgres with WARNING instead of FATAL (xander:6 carve-out). Production K8s pods still fail fatally via KUBERNETES_SERVICE_HOST guard. See `admin/backend/app/utils/url_validators.py:151` and `admin/backend/main.py:381-426`.`
-- **Fixed**: `Migration 058 clears legacy `oidc_redirect_uri`/`oidc_provider_url` rows in the `secrets` table that were seeded with maintainer-specific xmojo.net values prior to commit `5403a8a`. Requires `ENCRYPTION_KEY` to be set. Supports `DRY_RUN_058=true` for rehearsal. No-op on fresh deployments. (bob:1 follow-up)`
+- **Fixed**: `Migration 058 clears legacy `oidc_redirect_uri`/`oidc_provider_url` rows in the `secrets` table that were seeded with the maintainer's domain values prior to commit `5403a8a`. Requires `ENCRYPTION_KEY` to be set. Supports `DRY_RUN_058=true` for rehearsal. No-op on fresh deployments. (bob:1 follow-up)`
 
 ---
 
 ## [Unreleased]
 
 > **Plans:** `thoughts/shared/plans/active-2026-05-11-deliver-rag-services-table-rename.md`, `thoughts/shared/plans/active-2026-05-11-deliver-health-poller-leader-election.md`
-> **Tickets:** [ATHENA-17](https://plane.xmojo.net), [ATHENA-18](https://plane.xmojo.net)
+> **Tickets:** ATHENA-17, ATHENA-18
 
 ### Rename `rag_services` table to `athena_service_registry` (ATHENA-17)
 
@@ -633,7 +656,7 @@ so the operator can see the degraded state.  Check logs on first startup after u
 ## [Unreleased]
 
 > **Plan:** `thoughts/shared/plans/2026-05-09-deliver-validator-fix-general-info.md`
-> **Ticket:** [ATHENA-39](https://plane.xmojo.net)
+> **Ticket:** ATHENA-39
 
 ### Validator training-knowledge bypass (ATHENA-39)
 
@@ -645,7 +668,7 @@ so the operator can see the degraded state.  Check logs on first startup after u
 ## [Unreleased]
 
 > **Plan:** `thoughts/shared/plans/2026-05-09-deliver-rag-oss-dep-cleanup.md`
-> **Ticket:** [ATHENA-33..38](https://plane.xmojo.net)
+> **Ticket:** ATHENA-33..38
 
 ### RAG OSS dependency cleanup (ATHENA-33..38)
 
@@ -668,7 +691,7 @@ so the operator can see the degraded state.  Check logs on first startup after u
 ## [Unreleased]
 
 > **Plan:** `thoughts/shared/plans/2026-05-08-deliver-service-auth-hardening.md`
-> **Ticket:** [ATHENA-21](https://plane.xmojo.net)
+> **Ticket:** ATHENA-21
 > **Commits:** `3ed22e6` (phase 1), `eb8b305` (phase 2)
 
 ### service-auth hardening (ATHENA-21)
@@ -682,7 +705,7 @@ so the operator can see the degraded state.  Check logs on first startup after u
 ## [Unreleased]
 
 > **Plan:** `thoughts/shared/plans/2026-05-07-deliver-consolidate-service-registry.md`
-> **Ticket:** [ATHENA-1](https://plane.xmojo.net)
+> **Ticket:** ATHENA-1
 > **Commits:** `058d489` → `086e4e1` (phases 1–5)
 
 ### service-registry consolidation (ATHENA-1)
@@ -706,7 +729,7 @@ Closes ATHENA-1.
 ## [Unreleased]
 
 > **Plan:** `thoughts/shared/plans/active-2026-05-06-deliver-auth-rate-limit-bypass.md`
-> **Ticket:** [ATHENA-14](https://plane.xmojo.net)
+> **Ticket:** ATHENA-14
 > **Commits:** `f94c589` → `6e2b8db` (phases 1–4)
 
 ### auth-hardening (ATHENA-14)
@@ -716,14 +739,14 @@ Closes ATHENA-1.
 - **400 ms wall-time floor** (`LOGIN_MINIMUM_DELAY_MS`, default 400) on every failure path. All four failure branches (not-found, inactive, locked, wrong-password) pay full PBKDF2-600k cost via dummy-hash AND sleep until elapsed >= floor, closing the timing side-channel.
 - **Enumeration oracle closed**: all four failure branches now return an identical 401 `"Invalid username or password"`. `403 Account inactive` is no longer emitted — **behavioral change for callers that distinguished inactive-user 403 from wrong-password 401**.
 - **4 new env vars**: `LOGIN_RATE_LIMIT_PER_MINUTE` (default 5), `LOGIN_LOCKOUT_THRESHOLD` (default 10), `LOGIN_LOCKOUT_MINUTES` (default 30), `LOGIN_MINIMUM_DELAY_MS` (default 400). All modelled on `AthenaConfig`; see `.env.example` and `manifests/athena-prod/config.yaml` for commented stubs.
-- **Follow-up tickets** (out of scope for this campaign): [ATHENA-15](https://plane.xmojo.net) — public-route service-key gating for alert-write + tool_calling api-key endpoints; [ATHENA-16](https://plane.xmojo.net) — lockout-DoS mitigation (admin-unlock CLI + email notification on lockout).
+- **Follow-up tickets** (out of scope for this campaign): ATHENA-15 — public-route service-key gating for alert-write + tool_calling api-key endpoints; ATHENA-16 — lockout-DoS mitigation (admin-unlock CLI + email notification on lockout).
 
 ---
 
 ## [Unreleased]
 
 > **Plan:** `thoughts/shared/plans/active-2026-05-06-deliver-security-hardening.md`
-> **Ticket:** [ATHENA-12](https://plane.xmojo.net)
+> **Ticket:** ATHENA-12
 > **Commits:** `762f263` → `41f0b57` (8 commits, phases 1–4)
 
 ### Security
@@ -744,7 +767,7 @@ Closes ATHENA-1.
 ## [Unreleased]
 
 > **Plan:** `thoughts/shared/plans/active-2026-05-06-deliver-audit-deferred-quick-wins.md`
-> **Ticket:** [ATHENA-11](https://plane.xmojo.net)
+> **Ticket:** ATHENA-11
 > **Commits:** phases 1–6
 
 ### Added
@@ -775,7 +798,7 @@ Closes ATHENA-1.
 ## [Unreleased]
 
 > **Plan:** `thoughts/shared/plans/2026-05-06-deliver-orchestrator-refactor.md`
-> **Ticket:** [ATHENA-10](https://plane.xmojo.net)
+> **Ticket:** ATHENA-10
 > **Commits:** `615d7d0` → `14fcb73` (19 commits)
 
 Pure refactor — no behavior change. Decomposed `src/orchestrator/main.py` from 12,409 lines into an 8,758-line core plus 12 sibling modules. Zero new failures introduced; 209 new unit tests added (31 failed / 207 passed → 31 failed / 416 passed).
@@ -817,7 +840,7 @@ Pure refactor — no behavior change. Decomposed `src/orchestrator/main.py` from
 ## [Unreleased]
 
 > **Plan:** `thoughts/shared/plans/2026-05-06-deliver-config-py-rebuild.md`
-> **Ticket:** [ATHENA-7](https://plane.xmojo.net)
+> **Ticket:** ATHENA-7
 > **Commits:** `aaa989d`
 
 ### Added
@@ -851,7 +874,7 @@ Pure refactor — no behavior change. Decomposed `src/orchestrator/main.py` from
 ## [0.3.0] - 2026-05-06 — Admin URL Consolidation
 
 > **Plan:** `thoughts/shared/plans/2026-05-06-deliver-admin-url-consolidation.md`
-> **Ticket:** [ATHENA-3](https://plane.xmojo.net)
+> **Ticket:** ATHENA-3
 > **Commits:** `105f782` → `979812f` (8 commits)
 
 Replaces 32 independent admin-URL resolution sites across 20 files with a single canonical helper. One resolution order, one fallback chain, one startup log line per service.
@@ -899,7 +922,7 @@ All changes are additive or hardening — no features were removed.
 
 ### Added
 
-- `CHANGELOG.md` — this file, tracking changes from the OSS baseline forward ([ATHENA-2](https://plane.xmojo.net))
+- `CHANGELOG.md` — this file, tracking changes from the OSS baseline forward (ATHENA-2)
 - `apps/chat-embed/` — CORS-relay proxy for embedding Athena-backed chat on external websites; documented in README and build scripts
 - GitHub issue and pull request templates (`.github/`)
 - `pytest.ini` — `integration` marker registered; default run (`pytest`) skips live-service tests; `pytest -m integration` selects them
@@ -921,7 +944,7 @@ All changes are additive or hardening — no features were removed.
 ### Fixed
 
 - `docs/INSTALLATION.md` — broken cross-references repaired
-- Hardcoded `xmojo.net` domain references removed from admin OIDC configuration panel — all OIDC fields now derive from environment variables
+- Hardcoded references to the maintainer's domain removed from admin OIDC configuration panel — all OIDC fields now derive from environment variables
 - Hardcoded location defaults (`Baltimore`, MD timezone) removed from RAG services — `DEFAULT_CITY`, `DEFAULT_STATE`, and `DEFAULT_TIMEZONE` are now required from the environment or left blank
 - Hardcoded HA JWT removed from `src/jetson/` — **token revocation in Home Assistant is a required manual step** (the token appears in git history at commit `794096b`; see audit doc for details)
 - Alembic JSONB cast error in Phase 4 migrations corrected (codex r2, `5830a71`)

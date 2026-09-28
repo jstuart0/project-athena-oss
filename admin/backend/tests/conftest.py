@@ -29,6 +29,7 @@ os.environ.setdefault("SERVICE_API_KEY", "test-service-key-for-hardening-tests")
 
 from app.database import Base, get_db
 from app.models import User, UserAPIKey
+from app.auth.oidc import get_current_user
 from main import app
 
 
@@ -100,6 +101,56 @@ def viewer_user(db):
     db.commit()
     db.refresh(user)
     return user
+
+
+@pytest.fixture
+def operator_user(db):
+    """Create an operator user: `read`, `write`, `view_audit` -- notably NOT
+    `manage_infrastructure` (ATHENA-118 / D20). Used to prove the owner gate
+    on critical targets without conflating it with the viewer's 403."""
+    user = User(
+        authentik_id="operator-001",
+        username="operator",
+        email="operator@example.com",
+        full_name="Operator User",
+        role="operator",
+        active=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@pytest.fixture
+def owner_client(client, test_user):
+    """`client` with get_current_user overridden to the owner (`test_user`).
+    Centralized here (ATHENA-118) so every test module shares one
+    definition instead of redeclaring it (mirrors the pre-existing pattern
+    in test_base_knowledge_settings.py, now the single source)."""
+    async def _get_user():
+        return test_user
+    app.dependency_overrides[get_current_user] = _get_user
+    yield client
+    app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.fixture
+def operator_client(client, operator_user):
+    async def _get_user():
+        return operator_user
+    app.dependency_overrides[get_current_user] = _get_user
+    yield client
+    app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.fixture
+def viewer_client(client, viewer_user):
+    async def _get_user():
+        return viewer_user
+    app.dependency_overrides[get_current_user] = _get_user
+    yield client
+    app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.fixture

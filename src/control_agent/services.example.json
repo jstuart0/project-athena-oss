@@ -11,6 +11,13 @@
       "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8010"],
       "health_path": "/health"
     },
+    "8011": {
+      "name": "weather",
+      "dir": "src/rag/weather",
+      "cmd": ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8011"],
+      "health_path": "/health",
+      "service_type": "rag"
+    },
     "8099": {
       "name": "example-disabled-service",
       "dir": "src/rag/example_disabled",

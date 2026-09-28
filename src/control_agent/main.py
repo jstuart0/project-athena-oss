@@ -55,8 +55,16 @@ PROJECT_ROOT = Path.home() / "dev" / "project-athena"
 # state: nothing to watchdog/restart, but Docker containers still
 # controllable):
 #   "processes": {"8000": {"name": ..., "dir": ..., "cmd": [...],
-#                           "health_path"?: ..., "enabled"?: ...}, ...}
-#     -- today's PROCESS_SERVICES shape, keyed by port (as a string)
+#                           "health_path"?: ..., "enabled"?: ...,
+#                           "service_type"?: "rag"|"core"|"infrastructure"}, ...}
+#     -- today's PROCESS_SERVICES shape, keyed by port (as a string).
+#     "service_type" is optional and authoritative when set (registry-sync
+#     forwards it as-is); omitted, it falls back to the "-rag" name
+#     heuristic. Declare it for a RAG service whose name doesn't contain
+#     "-rag" (e.g. "weather") -- otherwise it syncs as service_type='core',
+#     which admin-backend's group_for() then treats as a non-'rag' group,
+#     making it fail-safe-critical (owner-only manage_infrastructure gate)
+#     like any other non-RAG service (codex diff review r2 Medium #4).
 #   "watchdog_exclude": [8028, ...]   -- ports the watchdog should not restart
 #   "containers": ["athena-gateway", ...]  -- Docker container allowlist
 # Unset (the default): nothing is managed. Malformed: log ERROR per
@@ -147,6 +155,27 @@ def _validate_service_entry(port_key: str, entry: object) -> Optional[Tuple[int,
     health_path = entry.get("health_path")
     if isinstance(health_path, str) and health_path:
         config["health_path"] = health_path
+    # codex diff review r2 Medium #4: a CA-managed RAG service whose name
+    # doesn't contain "-rag" (e.g. a short name like "weather") would
+    # otherwise sync as service_type='core' below, which group_for()
+    # (admin-backend) then reads as a non-'rag' group -- fail-safe
+    # Kubernetes/Control-Agent criticality treats every non-'rag' row as
+    # critical, so an ordinary RAG service would wrongly require the
+    # owner-only manage_infrastructure permission to control. Declaring
+    # service_type explicitly here is authoritative; the "-rag" name
+    # heuristic in _upsert_all_services remains only as a fallback for
+    # entries that don't set this.
+    service_type = entry.get("service_type")
+    if service_type is not None:
+        if service_type not in ("rag", "core", "infrastructure"):
+            logger.error(
+                "control_agent_services_file_invalid_entry",
+                port=port,
+                reason="'service_type' must be one of 'rag', 'core', 'infrastructure' when set",
+                value=service_type,
+            )
+            return None
+        config["service_type"] = service_type
     return port, config
 
 
@@ -462,9 +491,13 @@ async def _upsert_all_services(admin_url: str, service_key: str) -> tuple[int, i
         for idx, (port, config) in enumerate(items):
             service_name: str = config["name"]
             endpoint_url = f"http://{ca_host}:{port}"
-            # Derive service_type: names containing "-rag" are RAG services;
-            # everything else is a core service.
-            service_type = "rag" if "-rag" in service_name else "core"
+            # codex diff review r2 Medium #4: an explicit "service_type" in
+            # the services file entry is authoritative (lets a short-named
+            # RAG service like "weather" sync as service_type='rag' even
+            # though its name has no "-rag" substring). Falls back to the
+            # name heuristic (names containing "-rag" are RAG services;
+            # everything else is a core service) when not declared.
+            service_type = config.get("service_type") or ("rag" if "-rag" in service_name else "core")
 
             payload = {
                 "name": service_name,

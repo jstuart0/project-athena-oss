@@ -484,6 +484,11 @@ CONTROL_AGENT_URL=http://your-control-agent-host:8099
 
 The public `manifests/athena-prod/config.yaml` deliberately does **not** enable the Control Agent — it is host-specific infrastructure. Add these vars to your private overlay rather than editing the public manifest.
 
+Service Control can additionally (or instead) manage RAG/core Deployments
+directly through the Kubernetes scale subresource — a separate opt-in flag,
+`SERVICE_CONTROL_K8S_ENABLED`, with its own RBAC and rollout steps. See
+`docs/CONFIGURATION.md` § Service Control on Kubernetes.
+
 ### Starting the Control Agent
 
 On the host that runs Ollama:

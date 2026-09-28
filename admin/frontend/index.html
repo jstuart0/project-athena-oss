@@ -4545,8 +4545,11 @@
                     </div>
                 </div>
 
+                <!-- Manager degraded-mode / neutral banners (D18) -->
+                <div id="service-control-banners" class="space-y-2 mb-6"></div>
+
                 <!-- Service Status Summary -->
-                <div class="grid grid-cols-4 gap-4 mb-6">
+                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
                     <div class="bg-dark-card border border-dark-border rounded-lg p-4">
                         <div class="text-2xl font-bold text-green-400" id="services-running-count">-</div>
                         <div class="text-sm text-gray-400">Running</div>
@@ -4554,6 +4557,10 @@
                     <div class="bg-dark-card border border-dark-border rounded-lg p-4">
                         <div class="text-2xl font-bold text-red-400" id="services-stopped-count">-</div>
                         <div class="text-sm text-gray-400">Stopped</div>
+                    </div>
+                    <div class="bg-dark-card border border-dark-border rounded-lg p-4">
+                        <div class="text-2xl font-bold text-gray-400" id="services-disabled-count">-</div>
+                        <div class="text-sm text-gray-400">Disabled</div>
                     </div>
                     <div class="bg-dark-card border border-dark-border rounded-lg p-4">
                         <div class="text-2xl font-bold text-blue-400" id="ollama-models-loaded">-</div>
@@ -4601,6 +4608,13 @@
                 <div class="mb-6">
                     <h3 class="text-lg font-medium text-white mb-3">Infrastructure</h3>
                     <div id="infrastructure-services-table" class="bg-dark-card border border-dark-border rounded-lg overflow-hidden">
+                        <div class="text-center text-gray-400 py-8">Loading...</div>
+                    </div>
+                </div>
+
+                <!-- Restart Timeline (D15) -->
+                <div class="mb-6">
+                    <div id="restart-timeline" class="bg-dark-card border border-dark-border rounded-lg p-4">
                         <div class="text-center text-gray-400 py-8">Loading...</div>
                     </div>
                 </div>
@@ -4931,7 +4945,7 @@
     <script src="/model-downloads.js?v=20260913"></script>
     <script src="/cloud-providers.js?v=20260913"></script>
     <script src="/service-bypass.js?v=20260913"></script>
-    <script src="/service-control.js?v=20260927b"></script>
+    <script src="/service-control.js?v=20260927d"></script>
     <script src="/gateway-settings.js?v=20260913"></script>
     <script src="/room-groups.js?v=20260913"></script>
     <script src="/guest-context.js?v=20260913"></script>

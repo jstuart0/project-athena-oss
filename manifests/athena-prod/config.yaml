@@ -55,6 +55,7 @@ data:
   # REDIS_URL: ""
   # SEARXNG_BASE_URL: ""
   # SERVICE_API_KEY: ""
+  # SERVICE_CONTROL_K8S_ENABLED: ""
   # SERVICE_REGISTRY_WRITE_PER_MINUTE: ""
   # SESSION_MAX_COUNT: ""
   # SITESCRAPER_ALLOWED_PRIVATE_HOSTS: ""
@@ -163,6 +164,25 @@ data:
   #
   # CONTROL_AGENT_ENABLED: "true"
   # CONTROL_AGENT_URL: "http://your-control-agent-host:8099"
+
+  # Service Control on Kubernetes (ATHENA-118) — opt-in. When true, admin-
+  # backend's Service Control page can start/stop/restart RAG and core
+  # Deployments directly via the Kubernetes scale subresource, in addition
+  # to (or instead of) the Control Agent. Requires:
+  #   1. manifests/athena-prod/optional/admin-backend-rbac.yaml applied
+  #      (namespaced Role: `deployments` list, `deployments/scale`
+  #      get/patch, scoped to a fixed list of Deployment names — no pod-
+  #      template write, ever);
+  #   2. manifests/athena-prod/optional/admin-backend-k8s-control.patch.yaml
+  #      applied (mounts a token for the athena-admin-backend ServiceAccount
+  #      — the base admin-backend.yaml deliberately keeps automount off).
+  # Without both, the flag is inert: the page falls back to "managed
+  # externally" per row and shows a banner if the flag is on but the
+  # client can't be built. See docs/CONFIGURATION.md § Service Control on
+  # Kubernetes for the full opt-in runbook, restart semantics (scale-to-0
+  # then back — brief downtime, not rolling), and the re-run-the-patch-
+  # after-reapply warning.
+  # SERVICE_CONTROL_K8S_ENABLED: "true"
 
   # Local-login brute-force defenses (ATHENA-14) — uncomment to override defaults.
   # Per-IP rate limit on POST /api/auth/local-login (Redis-backed, ignores

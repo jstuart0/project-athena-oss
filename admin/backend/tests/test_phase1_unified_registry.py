@@ -298,20 +298,28 @@ class TestServicesRoute:
 # ---------------------------------------------------------------------------
 
 class TestServiceControlRoute:
+    """ATHENA-118 Phase 1: GET /api/service-control returns the D3 envelope
+    ({services, counts, control_agent, kubernetes}), not a bare list."""
+
     def test_list_services_empty(self, client):
         response = client.get("/api/service-control")
         assert response.status_code == 200
-        assert isinstance(response.json(), list)
+        data = response.json()
+        assert data["services"] == []
+        assert data["counts"] == {"running": 0, "stopped": 0, "disabled": 0}
 
     def test_list_services_with_data(self, client, rag_service):
         response = client.get("/api/service-control")
         assert response.status_code == 200
-        services = response.json()
+        data = response.json()
+        services = data["services"]
         assert len(services) == 1
         svc = services[0]
         # Must have both name and service_name for backward compat
         assert svc["name"] == "weather"
         assert svc["service_name"] == "weather"
+        assert "run_state" in svc
+        assert "manager" in svc
 
     def test_start_service_not_found(self, client):
         response = client.post("/api/service-control/nonexistent/start")
@@ -326,16 +334,14 @@ class TestServiceControlRoute:
         assert response.status_code == 404
 
     def test_start_service_control_agent_disabled(self, client, rag_service):
-        """With CA disabled (default), start returns success=False with expected message."""
+        """ATHENA-118 (D4/D9, intended behavior change): with no Control
+        Agent and no Kubernetes manager, the row resolves to `manager='none'`
+        with an empty native-actions list, so `start` is refused as a 409
+        `action_not_available` rather than a 200 with `success=False`."""
         response = client.post(f"/api/service-control/{rag_service.name}/start")
-        assert response.status_code == 200
+        assert response.status_code == 409
         data = response.json()
-        # CA disabled → docker action returns False
-        assert data["service_name"] == "weather"
-        assert data["action"] == "start"
-        # success may be True or False depending on CA state; key must be present
-        assert "success" in data
-        assert "message" in data
+        assert data["detail"]["error"] == "action_not_available"
 
 
 # ---------------------------------------------------------------------------

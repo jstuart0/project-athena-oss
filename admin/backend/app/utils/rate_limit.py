@@ -148,3 +148,25 @@ async def service_registry_rate_limit_dep(request: Request, response: Response) 
     if limit <= 0:
         return
     await _enforce(request, response, times=limit, window_ms=60000, budget="service_registry")
+
+
+async def service_control_rate_limit_dep(request: Request, response: Response) -> None:
+    """FastAPI dependency for every POST route in service_control.py (D19).
+
+    Dedicated 'service_control' budget so lifecycle actions (start/stop/
+    restart, ollama controls, by-port routes, model load/unload,
+    refresh-status) cannot consume the service_registry write bucket or
+    vice versa. Reuses service_registry_write_per_minute (default 60) —
+    no new AthenaConfig field, since the two budgets share a sane default
+    and can be tuned independently later if needed.
+
+    Resolves LIMITER_ACTIVE at REQUEST time — same pattern as the other
+    deps in this module. No-ops in DEV_MODE / when Redis is down.
+    """
+    if not LIMITER_ACTIVE:
+        return
+    cfg = get_config()
+    limit = cfg.service_registry_write_per_minute
+    if limit <= 0:
+        return
+    await _enforce(request, response, times=limit, window_ms=60000, budget="service_control")

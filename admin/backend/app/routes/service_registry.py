@@ -31,6 +31,7 @@ from app.auth.oidc import get_current_user
 from app.utils.service_auth import verify_service_or_oidc
 from app.utils.rate_limit import service_registry_rate_limit_dep
 from app.utils.url_validators import validate_endpoint_url, parse_endpoint_url, validate_host
+from app.utils.service_state import normalized_health_status
 from shared.config import get_config
 import structlog
 
@@ -88,14 +89,7 @@ async def get_all_services(
     enabled_list = []
     for svc in services:
         d = svc.to_dict()
-        if not d.get('enabled'):
-            # Overrides whatever health_status the poller last cached before
-            # the row was disabled -- that value is no longer being refreshed
-            # and must not be read as current state. (ATHENA-112)
-            d['health_status'] = 'disabled'
-        elif d.get('health_status') is None:
-            # Normalise None health_status to 'pending' for UI legibility.
-            d['health_status'] = 'pending'
+        d['health_status'] = normalized_health_status(d.get('enabled', False), d.get('health_status'))
         service_list.append(d)
         if d.get('enabled'):
             enabled_list.append(d)
@@ -142,10 +136,7 @@ async def get_service(
     if not svc:
         raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
     d = svc.to_dict()
-    if not d.get('enabled'):
-        d['health_status'] = 'disabled'
-    elif d.get('health_status') is None:
-        d['health_status'] = 'pending'
+    d['health_status'] = normalized_health_status(d.get('enabled', False), d.get('health_status'))
     return d
 
 

@@ -1,0 +1,103 @@
+# Service Control on Kubernetes -- opt-in RBAC (ATHENA-118, D7).
+#
+# NOT applied by `kubectl apply -f manifests/athena-prod/` (that glob doesn't
+# recurse into optional/). Apply explicitly, only if you want admin-backend
+# to be able to start/stop/restart Deployments through the Service Control
+# page:
+#
+#   kubectl apply -f manifests/athena-prod/optional/admin-backend-rbac.yaml
+#   kubectl patch cm athena-config --type merge \
+#     -p '{"data":{"SERVICE_CONTROL_K8S_ENABLED":"true"}}'
+#   kubectl patch deploy athena-admin-backend \
+#     --patch-file manifests/athena-prod/optional/admin-backend-k8s-control.patch.yaml
+#
+# Scope, deliberately narrow (D7):
+#   - `deployments` list: read-only, namespace-wide (resourceNames cannot
+#     restrict `list`; Deployment specs carry no secret VALUES, only
+#     secretKeyRef names, so this is metadata exposure, not a data leak).
+#     No `get` verb here -- the app only ever lists the collection
+#     (_gather_kubernetes_inventory) and reads/patches individual
+#     Deployments through the `deployments/scale` subresource below, which
+#     carries its own get/patch grant. codex diff review r1 Medium #6.
+#   - `deployments/scale` get/patch, resourceNames-scoped to the 30
+#     Deployments below (every Deployment in this directory's *.yaml files,
+#     minus athena-admin-backend and athena-admin-frontend, which the app
+#     also refuses to target even if RBAC allowed it).
+#
+# There is NO `patch`/`update` verb on the base `deployments` resource
+# anywhere in this file. That's the verb that would let a compromised
+# admin-backend rewrite a pod template (command, secret mounts,
+# serviceAccountName) -- a real escalation path. Without it, the worst this
+# Role permits is setting the replica count of the 30 named Deployments:
+# scale-to-0 (DoS) or scale-to-large-N (resource pressure, no ResourceQuota
+# bound in this namespace). No code execution, no secret access beyond
+# what `list` on `deployments` already exposes.
+#
+# Adding a Deployment later: re-run the resourceNames generator (parses
+# every `manifests/athena-prod/*.yaml`, kind==Deployment,
+# namespace==athena-prod, minus the two protected names) and update the
+# list below. admin/backend/tests/test_admin_backend_rbac_manifest.py (T10) computes
+# this set at TEST TIME and fails if this file drifts from the manifests.
+# NOTE: this file grants a Role to the EXISTING `athena-admin-backend`
+# ServiceAccount (defined in manifests/athena-prod/serviceaccounts.yaml) --
+# it does not create a new ServiceAccount. That SA gets its token actually
+# mounted only via the opt-in automount patch file (D8), applied
+# separately, so a fresh OSS install that skips both files never mounts a
+# token for it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: athena-admin-backend-service-control
+  namespace: athena-prod
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch"]
+    resourceNames:
+      - athena-gateway
+      - athena-jarvis-web
+      - athena-mode-service
+      - athena-orchestrator
+      - athena-rag-airports
+      - athena-rag-amtrak
+      - athena-rag-brightdata
+      - athena-rag-community
+      - athena-rag-dining
+      - athena-rag-directions
+      - athena-rag-events
+      - athena-rag-flights
+      - athena-rag-media
+      - athena-rag-news
+      - athena-rag-onecall
+      - athena-rag-pricecompare
+      - athena-rag-recipes
+      - athena-rag-seatgeek
+      - athena-rag-serpapi
+      - athena-rag-sitescraper
+      - athena-rag-sports
+      - athena-rag-stocks
+      - athena-rag-streaming
+      - athena-rag-tesla
+      - athena-rag-transportation
+      - athena-rag-weather
+      - athena-rag-websearch
+      - ollama
+      - qdrant
+      - redis
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: athena-admin-backend-service-control
+  namespace: athena-prod
+subjects:
+  - kind: ServiceAccount
+    name: athena-admin-backend
+    namespace: athena-prod
+roleRef:
+  kind: Role
+  name: athena-admin-backend-service-control
+  apiGroup: rbac.authorization.k8s.io
