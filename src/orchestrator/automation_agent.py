@@ -21,6 +21,9 @@ import structlog
 
 from shared.assistant_profile import build_automation_system_prompt
 from orchestrator.utils.constants import DEFAULT_CITY
+# ATHENA-69: orchestrator.mode_permission is imported lazily inside
+# AutomationAgent.__init__ (not at module scope) -- see the identical note
+# in sequence_executor.py.
 
 logger = structlog.get_logger()
 
@@ -350,7 +353,9 @@ class AutomationAgent:
             admin_client: Optional admin client for storing automations
             entity_manager: Optional entity manager for resolving room names to entities
         """
-        self.ha_client = ha_client
+        from orchestrator.mode_permission import ensure_permission_enforcing
+
+        self.ha_client = ensure_permission_enforcing(ha_client)
         self.llm = llm_router
         self.admin = admin_client
         self.entity_manager = entity_manager

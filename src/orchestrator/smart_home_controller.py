@@ -3,6 +3,7 @@ Smart Home Controller with LLM-based intent extraction
 Handles complex commands like "make the living room lights all different colors"
 """
 import asyncio
+import contextlib
 import json
 import random
 from typing import Dict, List, Optional, Tuple
@@ -11,6 +12,11 @@ from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+# ATHENA-69: orchestrator.mode_permission is imported lazily inside each
+# ha_client-accepting method below (not at module scope) -- this module is
+# imported by route_control.py and other lightweight test fixtures that
+# don't need orchestrator.metrics -> prometheus_client as a hard
+# import-time dependency. See the identical note in sequence_executor.py.
 
 
 # Round 17: Response variety templates for natural conversation
@@ -1803,128 +1809,171 @@ Return ONLY valid JSON."""
             ha_client: Home Assistant client
             original_query: The original user query
             device_room: The room the user is speaking from (fallback if room not in intent)
+
+        ATHENA-69: wraps ha_client with the permission-enforcing guard (D1),
+        opens a system-mode scope when none is already open (D3 -- the
+        normal route_control_node call path already has one open), and
+        surfaces any denial recorded on the scope during a dispatched
+        handler's execution as the answer via the local _finish() helper
+        (D2), instead of that handler's own return value. The early
+        reassurance/observational/no-op text returns below are unchanged --
+        they never touch HA and have nothing to surface.
         """
+        from orchestrator.mode_permission import (
+            current_ha_scope,
+            ensure_permission_enforcing,
+            ha_permission_scope,
+            permission_refusal_message,
+        )
 
-        device_type = intent.get('device_type', 'light')
-        room = intent.get('room')
-        action = intent.get('action', 'turn_on')
-        target_scope = intent.get('target_scope', 'group')
-        parameters = intent.get('parameters', {})
+        ha_client = ensure_permission_enforcing(ha_client)
 
-        # Check for queries that should NOT execute light control
-        query_lower = original_query.lower() if original_query else ""
+        scope_cm = ha_permission_scope(None, mode="system") if current_ha_scope() is None else contextlib.nullcontext()
+        with scope_cm:
+            scope = current_ha_scope()
+            n0 = len(scope.denials)
+            w0 = scope.allowed_writes
 
-        # Round 21-30: Reassurance seeking phrases - give supportive response
-        reassurance_patterns = ["tomorrow will be better", "will be better right"]
-        if any(p in query_lower for p in reassurance_patterns):
-            return "Yes, tomorrow is a fresh start! I hope things look up for you. Is there anything I can help with?"
+            def _finish(result: str) -> str:
+                if len(scope.denials) > n0:
+                    denied_domains = tuple(
+                        d.domain for d in scope.denials[n0:] if d.reason != "halted_after_denial"
+                    )
+                    return permission_refusal_message(denied_domains, scope, partial=scope.allowed_writes > w0)
+                return result
 
-        # Round 21-30: Observational/reaction phrases that aren't commands
-        # These get misclassified as CONTROL but user is just commenting/reacting
-        observational_patterns = [
-            "wow they", "wow it", "they actually", "it actually",  # observations
-            "cool thanks", "cool thx", "thanks nerd",  # casual thanks (not color command)
-        ]
-        if any(p in query_lower for p in observational_patterns):
-            return "You're welcome! Is there anything else I can help you with?"
+            device_type = intent.get('device_type', 'light')
+            room = intent.get('room')
+            action = intent.get('action', 'turn_on')
+            target_scope = intent.get('target_scope', 'group')
+            parameters = intent.get('parameters', {})
 
-        # Round 21-30: Sarcastic "impressive" comments about capabilities
-        # "oh you can control lights thats so impressive" - not a command to control lights
-        sarcastic_impressive = [
-            "so impressive", "thats impressive", "that's impressive",
-            "really impressive", "how impressive", "very impressive",
-            "can control lights", "you can control", "you can do",
-        ]
-        if any(p in query_lower for p in sarcastic_impressive):
-            return "Yes, I can help with lights, thermostat, music, finding restaurants, weather, and more. What would you like me to do?"
+            # Check for queries that should NOT execute light control
+            query_lower = original_query.lower() if original_query else ""
 
-        # Single-word reactions (exact match to avoid false positives)
-        if query_lower.strip() in ["shocking", "surprised", "wow", "amazing", "incredible"]:
-            return "Is there anything else I can help you with?"
+            # Round 21-30: Reassurance seeking phrases - give supportive response
+            reassurance_patterns = ["tomorrow will be better", "will be better right"]
+            if any(p in query_lower for p in reassurance_patterns):
+                return "Yes, tomorrow is a fresh start! I hope things look up for you. Is there anything I can help with?"
 
-        # Round 21-30: Impossible physical requests
-        impossible_patterns = [
-            "make me a sandwich", "make a sandwich", "get me a sandwich",
-            "order food", "order pizza", "order for me",
-        ]
-        if any(p in query_lower for p in impossible_patterns):
-            return "I can't do physical tasks like that, but I'm happy to help with smart home controls, finding information, or answering questions!"
+            # Round 21-30: Observational/reaction phrases that aren't commands
+            # These get misclassified as CONTROL but user is just commenting/reacting
+            observational_patterns = [
+                "wow they", "wow it", "they actually", "it actually",  # observations
+                "cool thanks", "cool thx", "thanks nerd",  # casual thanks (not color command)
+            ]
+            if any(p in query_lower for p in observational_patterns):
+                return "You're welcome! Is there anything else I can help you with?"
 
-        # Round 21-30: Phone call requests - explain we can't make calls
-        call_patterns = ["call them", "call him", "call her", "make a call", "phone call"]
-        if any(p in query_lower for p in call_patterns):
-            return "I can't make phone calls, but I can help you find phone numbers or contact information for businesses."
+            # Round 21-30: Sarcastic "impressive" comments about capabilities
+            # "oh you can control lights thats so impressive" - not a command to control lights
+            sarcastic_impressive = [
+                "so impressive", "thats impressive", "that's impressive",
+                "really impressive", "how impressive", "very impressive",
+                "can control lights", "you can control", "you can do",
+            ]
+            if any(p in query_lower for p in sarcastic_impressive):
+                return "Yes, I can help with lights, thermostat, music, finding restaurants, weather, and more. What would you like me to do?"
 
-        # Round 21-30: MQTT/API technical questions - explain capabilities
-        mqtt_api_patterns = [
-            "via mqtt", "support mqtt", "do you support", "do you even support",
-            "api i can hit", "api i can use", "is there an api", "hit directly",
-            "toggle via", "control via",
-        ]
-        if any(p in query_lower for p in mqtt_api_patterns):
-            return ("I control devices through Home Assistant's API, which supports various protocols including MQTT, Zigbee, and Z-Wave. "
-                   "For direct API access, you can use Home Assistant's REST API or WebSocket API.")
+            # Single-word reactions (exact match to avoid false positives)
+            if query_lower.strip() in ["shocking", "surprised", "wow", "amazing", "incredible"]:
+                return "Is there anything else I can help you with?"
 
-        # IoT/technical queries - should NOT execute light control
-        iot_patterns = ["iot", "zigbee", "z-wave", "bandwidth", "latency",
-                       "protocol", " api", "endpoint", "devices online", "devices connected"]
-        if any(p in query_lower for p in iot_patterns):
-            return ("I can control smart home devices like lights, thermostats, locks, and media players. "
-                   "For detailed IoT device status, network diagnostics, or protocol-specific queries, "
-                   "please check your Home Assistant dashboard or network management tools.")
+            # Round 21-30: Impossible physical requests
+            impossible_patterns = [
+                "make me a sandwich", "make a sandwich", "get me a sandwich",
+                "order food", "order pizza", "order for me",
+            ]
+            if any(p in query_lower for p in impossible_patterns):
+                return "I can't do physical tasks like that, but I'm happy to help with smart home controls, finding information, or answering questions!"
 
-        # Use device_room as fallback if room not specified in intent
-        if not room and device_room and device_room not in ["unknown", "guest"]:
-            room = device_room
-            intent['room'] = room  # Update intent so downstream handlers have it
+            # Round 21-30: Phone call requests - explain we can't make calls
+            call_patterns = ["call them", "call him", "call her", "make a call", "phone call"]
+            if any(p in query_lower for p in call_patterns):
+                return "I can't make phone calls, but I can help you find phone numbers or contact information for businesses."
 
-        # Handle climate/thermostat queries
-        if device_type == 'climate':
-            return await self._handle_climate_intent(action, parameters, original_query, ha_client)
+            # Round 21-30: MQTT/API technical questions - explain capabilities
+            mqtt_api_patterns = [
+                "via mqtt", "support mqtt", "do you support", "do you even support",
+                "api i can hit", "api i can use", "is there an api", "hit directly",
+                "toggle via", "control via",
+            ]
+            if any(p in query_lower for p in mqtt_api_patterns):
+                return ("I control devices through Home Assistant's API, which supports various protocols including MQTT, Zigbee, and Z-Wave. "
+                       "For direct API access, you can use Home Assistant's REST API or WebSocket API.")
 
-        # Handle appliance queries (oven, fridge, freezer)
-        if device_type in ['oven', 'fridge', 'freezer', 'appliance']:
-            return await self._handle_appliance_intent(device_type, action, parameters, original_query)
+            # IoT/technical queries - should NOT execute light control
+            iot_patterns = ["iot", "zigbee", "z-wave", "bandwidth", "latency",
+                           "protocol", " api", "endpoint", "devices online", "devices connected"]
+            if any(p in query_lower for p in iot_patterns):
+                return ("I can control smart home devices like lights, thermostats, locks, and media players. "
+                       "For detailed IoT device status, network diagnostics, or protocol-specific queries, "
+                       "please check your Home Assistant dashboard or network management tools.")
 
-        # Handle sensor queries
-        if device_type == 'sensor':
-            return await self._handle_sensor_intent(device_type, parameters, original_query)
+            # Use device_room as fallback if room not specified in intent
+            if not room and device_room and device_room not in ["unknown", "guest"]:
+                room = device_room
+                intent['room'] = room  # Update intent so downstream handlers have it
 
-        # Handle media player queries
-        if device_type in ['media', 'media_player', 'tv', 'speaker']:
-            return await self._handle_media_intent(action, parameters, original_query, room, ha_client)
+            # Handle climate/thermostat queries
+            if device_type == 'climate':
+                return _finish(await self._handle_climate_intent(action, parameters, original_query, ha_client))
 
-        # Handle bed warmer / mattress pad
-        if device_type == 'bed_warmer':
-            return await self._handle_bed_warmer_intent(action, parameters, ha_client, original_query)
+            # Handle appliance queries (oven, fridge, freezer) -- read-only, no ha_client write
+            if device_type in ['oven', 'fridge', 'freezer', 'appliance']:
+                return await self._handle_appliance_intent(device_type, action, parameters, original_query)
 
-        # Handle motion control / lighting automation overrides
-        if device_type == 'motion_control':
-            return await self._handle_motion_control_intent(action, parameters, ha_client, room, original_query)
+            # Handle sensor queries -- read-only
+            if device_type == 'sensor':
+                return await self._handle_sensor_intent(device_type, parameters, original_query)
 
-        # Handle lock control
-        if device_type == 'lock':
-            return await self._handle_lock_intent(action, room, ha_client, original_query)
+            # Handle media player queries
+            if device_type in ['media', 'media_player', 'tv', 'speaker']:
+                return _finish(await self._handle_media_intent(action, parameters, original_query, room, ha_client))
 
-        # Handle fan control
-        if device_type == 'fan':
-            return await self._handle_fan_intent(action, room, ha_client, original_query)
+            # Handle bed warmer / mattress pad
+            if device_type == 'bed_warmer':
+                return _finish(await self._handle_bed_warmer_intent(action, parameters, ha_client, original_query))
 
-        # Handle cover/garage door control
-        if device_type == 'cover':
-            return await self._handle_cover_intent(action, room, ha_client, original_query)
+            # Handle motion control / lighting automation overrides
+            if device_type == 'motion_control':
+                return _finish(await self._handle_motion_control_intent(action, parameters, ha_client, room, original_query))
 
-        # Handle scene/routine activation
-        if device_type == 'scene':
-            return await self._handle_scene_intent(action, parameters, ha_client, original_query)
+            # Handle lock control
+            if device_type == 'lock':
+                return _finish(await self._handle_lock_intent(action, room, ha_client, original_query))
 
-        if device_type != 'light':
-            return "I can only control lights right now. For other devices like security systems, please use the Home Assistant app."
+            # Handle fan control
+            if device_type == 'fan':
+                return _finish(await self._handle_fan_intent(action, room, ha_client, original_query))
 
-        # Round 16: Handle light STATUS query (check which lights are on)
-        if action == 'get_status':
-            return await self._handle_light_status_query(room, ha_client, original_query)
+            # Handle cover/garage door control
+            if device_type == 'cover':
+                return _finish(await self._handle_cover_intent(action, room, ha_client, original_query))
 
+            # Handle scene/routine activation
+            if device_type == 'scene':
+                return _finish(await self._handle_scene_intent(action, parameters, ha_client, original_query))
+
+            if device_type != 'light':
+                return "I can only control lights right now. For other devices like security systems, please use the Home Assistant app."
+
+            # Round 16: Handle light STATUS query (check which lights are on) -- read-only
+            if action == 'get_status':
+                return await self._handle_light_status_query(room, ha_client, original_query)
+
+            return _finish(await self._dispatch_light_or_room_command(
+                room, action, target_scope, parameters, intent, ha_client, original_query
+            ))
+
+    async def _dispatch_light_or_room_command(
+        self, room: Optional[str], action: str, target_scope: str, parameters: Dict,
+        intent: Dict, ha_client, original_query: str = None,
+    ) -> str:
+        """The light/whole-house/multi-room/room-group tail of execute_intent,
+        extracted (ATHENA-69) so execute_intent can apply _finish() once to
+        whichever of these paths returns, rather than wrapping each
+        individual return here. Body otherwise unchanged."""
         # Fallback room extraction if LLM didn't detect it
         if not room and original_query:
             room = self._extract_room_from_query(original_query)
@@ -2001,7 +2050,7 @@ Return ONLY valid JSON."""
             else:
                 # Work with the group
                 target_lights = [light_group['entity_id']]
-        
+
         # Execute action based on type
         # Use brief responses suitable for voice output
         # Parallelize HA API calls for faster response
@@ -2024,7 +2073,7 @@ Return ONLY valid JSON."""
             if len(target_lights) > 3:
                 light_names += f" and {len(target_lights) - 3} more"
             return vary_response(LIGHT_OFF_RESPONSES, lights=light_names)
-        
+
         elif action == "set_color":
             # Check for LLM-generated hs_colors first (new flexible approach)
             hs_colors = parameters.get('hs_colors')
@@ -2221,6 +2270,8 @@ Return ONLY valid JSON."""
 
     async def _handle_climate_intent(self, action: str, parameters: Dict, original_query: str = None, ha_client = None) -> str:
         """Handle climate/thermostat queries and control"""
+        from orchestrator.mode_permission import ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
@@ -3358,6 +3409,8 @@ Do NOT mention rooms that have no current or recent motion."""
 
     async def _handle_media_intent(self, action: str, parameters: Dict, original_query: str = None, room: str = None, ha_client = None) -> str:
         """Handle media player queries and control"""
+        from orchestrator.mode_permission import ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import httpx
         import logging
         from music_handler import get_room_configs, get_room_display_names
@@ -3457,6 +3510,8 @@ Do NOT mention rooms that have no current or recent motion."""
         - Dual-side control with different levels per side
         - Relative adjustments (warmer/cooler)
         """
+        from orchestrator.mode_permission import ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
@@ -3597,6 +3652,8 @@ Do NOT mention rooms that have no current or recent motion."""
         Round 16: Handle light status queries like "any lights left on?"
         Returns which lights are currently on in the specified room/area.
         """
+        from orchestrator.mode_permission import ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
@@ -3654,6 +3711,8 @@ Do NOT mention rooms that have no current or recent motion."""
 
     async def _handle_lock_intent(self, action: str, room: str, ha_client, original_query: str = None) -> str:
         """Handle lock control and status queries"""
+        from orchestrator.mode_permission import ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
@@ -3738,6 +3797,8 @@ Do NOT mention rooms that have no current or recent motion."""
 
     async def _handle_fan_intent(self, action: str, room: str, ha_client, original_query: str = None) -> str:
         """Handle fan control commands"""
+        from orchestrator.mode_permission import ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
@@ -3812,6 +3873,8 @@ Do NOT mention rooms that have no current or recent motion."""
 
     async def _handle_cover_intent(self, action: str, room: str, ha_client, original_query: str = None) -> str:
         """Handle cover/garage door control commands"""
+        from orchestrator.mode_permission import ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
@@ -3879,6 +3942,8 @@ Do NOT mention rooms that have no current or recent motion."""
 
     async def _handle_scene_intent(self, action: str, parameters: Dict, ha_client, original_query: str = None) -> str:
         """Handle scene and routine activation commands"""
+        from orchestrator.mode_permission import HAWritePermissionDenied, ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
@@ -3934,6 +3999,12 @@ Do NOT mention rooms that have no current or recent motion."""
                 else:
                     return f"Done! I've activated the {scene_name} {entity_type}."
 
+            except HAWritePermissionDenied:
+                # ATHENA-69 (D20): a denial must never start the fallback
+                # chain below -- re-raise ahead of the catch-all so the
+                # caller's exception handling (or the outer scope's denial
+                # record) surfaces the refusal, not a substitute write.
+                raise
             except Exception as e:
                 # Scene/script doesn't exist - try a fallback
                 logger.warning(f"Scene/script {entity_id} failed: {e}")
@@ -4013,6 +4084,8 @@ Do NOT mention rooms that have no current or recent motion."""
         Supports exclusions like "all lights except bedroom".
         All HA API calls are parallelized for faster response.
         """
+        from orchestrator.mode_permission import ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 
@@ -4145,6 +4218,8 @@ Do NOT mention rooms that have no current or recent motion."""
         Handles commands like "turn on kitchen and living room lights".
         All HA API calls are parallelized for faster response.
         """
+        from orchestrator.mode_permission import ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import structlog
         logger = structlog.get_logger(__name__)
 
@@ -4210,6 +4285,8 @@ Do NOT mention rooms that have no current or recent motion."""
         includes living room, dining room, and kitchen.
         All HA API calls are parallelized for faster response.
         """
+        from orchestrator.mode_permission import ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import structlog
         logger = structlog.get_logger(__name__)
 
@@ -4452,6 +4529,8 @@ Return ONLY the JSON, no other text."""
         - beta: input_boolean.beta_*, input_number.beta_*
         - master_bedroom: input_boolean.master_bedroom_*, input_number.master_bedroom_*
         """
+        from orchestrator.mode_permission import ensure_permission_enforcing
+        ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
 

@@ -20,6 +20,16 @@ automation-method cases land in Pass B):
  - test_ensure_idempotent_none_and_proxy
  - test_fallback_config_invalid_json_uses_default_not_empty
  - test_intent_write_domains_whole_house_is_light_only
+
+Pass B cases (authorize_automation_config, authorize_sequence, and the
+guard's create_/delete_/disable_automation interception):
+
+ - test_create_automation_with_lock_action_denied_for_guest
+ - test_create_automation_light_only_allowed_when_automation_domain_allowed
+ - test_automation_walker_nested_choose_and_data_entity_id
+ - test_automation_unknown_step_denied_for_guest
+ - test_authorize_sequence_lock_step_denied
+ - test_authorize_sequence_unknown_device_type_denied_for_guest
 """
 from __future__ import annotations
 
@@ -87,6 +97,16 @@ _MATRIX_CASES = [
     ("select-select-option-guest-deny", "select", "select_option", None, "guest", False),
     ("owner-lock-unlock-allow", "lock", "unlock", {"entity_id": "lock.front_door"}, "owner", True),
     ("owner-cover-open-allow", "cover", "open_cover", {"entity_id": "cover.garage_door"}, "owner", True),
+    # Mutation-resistance (tessa, Pass A review): the two homeassistant.*
+    # cases above target entities already denied by the floor regex on
+    # their own, so a mutant that deletes the domain-mismatch companion
+    # check (f"{domain}.all") in authorize_ha_write survives against them.
+    # This case dispatches an entity that WOULD be allowed on its own
+    # (light.kitchen, guest-baseline-allowed) via the generic
+    # "homeassistant" domain -- only the companion check denies it, since
+    # "homeassistant" itself is never in allowed_domains.
+    ("homeassistant-turn-on-light-via-generic-domain-guest-deny", "homeassistant", "turn_on", {"entity_id": "light.kitchen"}, "guest", False),
+    ("homeassistant-turn-on-light-via-generic-domain-owner-allow", "homeassistant", "turn_on", {"entity_id": "light.kitchen"}, "owner", True),
 ]
 
 
@@ -356,3 +376,186 @@ class TestIntentWriteDomains:
 
     def test_intent_write_domains_missing_device_type_is_empty(self):
         assert mp.intent_write_domains({}) == ()
+
+
+# ---------------------------------------------------------------------------
+# Pass B: authorize_automation_config, authorize_sequence, guard automation
+# methods
+# ---------------------------------------------------------------------------
+
+def _isolated_perms(**overrides):
+    """A permissions dict that isolates the automation walker's per-step
+    checks from the D8 guest blanket floor (which always includes
+    ^automation\\. -- so a real guest scope can never pass the outer
+    automation.<id> gate regardless of what a create_automation config
+    contains). mode is deliberately NOT "guest" (normalize_permissions only
+    applies apply_guest_baseline for mode=="guest") and NOT "owner" (which
+    bypasses every check trivially) -- just a scope whose restricted_entities/
+    allowed_domains are set explicitly by the test.
+    """
+    perms = {
+        "mode": "restricted",
+        "restricted_entities": [],
+        "allowed_domains": [],
+        "allowed_intents": [],
+        "restricted_intents": [],
+    }
+    perms.update(overrides)
+    return perms
+
+
+class TestAuthorizeAutomationConfig:
+    def test_create_automation_with_lock_action_denied_for_guest(self):
+        """A real guest is denied outright by the automation.<id> floor
+        (D8) before the walker even inspects the lock action -- this is
+        the production-realistic case."""
+        guest = mp.apply_guest_baseline({"mode": "guest"})
+        config = {"action": [{"service": "lock.unlock", "target": {"entity_id": "lock.front_door"}}]}
+        decision = mp.authorize_automation_config("goodnight", config, guest)
+        assert decision.allowed is False
+
+    def test_create_automation_light_only_allowed_when_automation_domain_allowed(self):
+        perms = _isolated_perms(allowed_domains=["automation", "light"])
+        config = {"action": [{"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}}]}
+        decision = mp.authorize_automation_config("morning_lights", config, perms)
+        assert decision.allowed is True
+
+    def test_automation_walker_nested_choose_and_data_entity_id(self):
+        """Covers the recursive walk through choose[].sequence and the
+        data.entity_id target-normalization path (a lock action nested two
+        levels deep, expressed with the data-wrapped shape) -- denied even
+        though the top-level automation domain is allowed."""
+        perms = _isolated_perms(allowed_domains=["automation", "light"], restricted_entities=[r"^lock\."])
+        config = {
+            "action": [
+                {
+                    "choose": [
+                        {
+                            "conditions": [],
+                            "sequence": [
+                                {"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}},
+                                {"service": "lock.unlock", "data": {"entity_id": "lock.front_door"}},
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+        decision = mp.authorize_automation_config("nested", config, perms)
+        assert decision.allowed is False
+
+    def test_automation_unknown_step_denied_for_guest(self):
+        guest = mp.apply_guest_baseline({"mode": "guest"})
+        config = {"action": [{"event": "custom_event", "event_data": {}}]}
+        decision = mp.authorize_automation_config("custom", config, guest)
+        assert decision.allowed is False
+
+    def test_automation_inert_steps_allowed(self):
+        """Only steps whose keys are a SUBSET of the inert set count --
+        e.g. a bare {"delay": ...} or {"condition": ..., "conditions": ...}
+        (the plan's literal contract: the inert set is exactly {delay,
+        wait_template, wait_for_trigger, condition, conditions, alias,
+        enabled, continue_on_error, stop, variables}; a condition step that
+        also carries entity_id/state (real HA syntax) is NOT a subset and
+        falls to the unknown-step branch instead)."""
+        perms = _isolated_perms(allowed_domains=["automation"])
+        config = {"action": [{"delay": {"seconds": 5}}, {"condition": "and", "conditions": []}]}
+        decision = mp.authorize_automation_config("delay_only", config, perms)
+        assert decision.allowed is True
+
+    def test_automation_device_action_checked_as_domain_all(self):
+        perms = _isolated_perms(allowed_domains=["automation"], restricted_entities=[r"^lock\."])
+        config = {"action": [{"device_id": "abc123", "domain": "lock", "type": "lock"}]}
+        decision = mp.authorize_automation_config("device_action", config, perms)
+        assert decision.allowed is False
+
+
+class TestAuthorizeSequence:
+    def test_authorize_sequence_lock_step_denied(self):
+        guest = mp.apply_guest_baseline({"mode": "guest"})
+        sequence = [{"target": {"entity_id": "lock.front_door"}, "action": "unlock"}]
+        decision = mp.authorize_sequence(sequence, guest)
+        assert decision.allowed is False
+
+    def test_authorize_sequence_unknown_device_type_denied_for_guest(self):
+        guest = mp.apply_guest_baseline({"mode": "guest"})
+        sequence = [{"target": {"device_type": "totally_unknown_thing"}, "action": "turn_on"}]
+        decision = mp.authorize_sequence(sequence, guest)
+        assert decision.allowed is False
+
+    def test_authorize_sequence_owner_unknown_device_type_allowed(self):
+        sequence = [{"target": {"device_type": "totally_unknown_thing"}, "action": "turn_on"}]
+        decision = mp.authorize_sequence(sequence, {"mode": "owner"})
+        assert decision.allowed is True
+
+    def test_authorize_sequence_light_step_allowed_for_guest(self):
+        guest = mp.apply_guest_baseline({"mode": "guest"})
+        sequence = [{"target": {"entity_id": "light.kitchen"}, "action": "turn_on"}]
+        decision = mp.authorize_sequence(sequence, guest)
+        assert decision.allowed is True
+
+    def test_authorize_sequence_denies_whole_sequence_on_first_denied_step(self):
+        guest = mp.apply_guest_baseline({"mode": "guest"})
+        sequence = [
+            {"target": {"entity_id": "light.kitchen"}, "action": "turn_on"},
+            {"target": {"entity_id": "lock.front_door"}, "action": "unlock"},
+            {"target": {"entity_id": "light.office"}, "action": "turn_on"},
+        ]
+        decision = mp.authorize_sequence(sequence, guest)
+        assert decision.allowed is False
+
+
+class TestGuardAutomationMethods:
+    def test_create_automation_denied_never_calls_inner(self):
+        inner = _make_inner()
+        guard = mp.PermissionEnforcingHAClient(inner)
+        guest = mp.apply_guest_baseline({"mode": "guest"})
+        with mp.ha_permission_scope(guest, mode="guest") as scope:
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(guard.create_automation("goodnight", {"action": []}))
+            assert len(scope.denials) == 1
+        inner.create_automation.assert_not_called()
+
+    def test_create_automation_allowed_forwards(self):
+        inner = _make_inner()
+        inner.create_automation = AsyncMock(return_value=True)
+        guard = mp.PermissionEnforcingHAClient(inner)
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner"):
+            result = _run(guard.create_automation("goodnight", {"action": []}))
+        assert result is True
+        inner.create_automation.assert_awaited_once_with("goodnight", {"action": []})
+
+    def test_delete_automation_checks_automation_entity(self):
+        inner = _make_inner()
+        inner.delete_automation = AsyncMock(return_value=True)
+        guard = mp.PermissionEnforcingHAClient(inner)
+        guest = mp.apply_guest_baseline({"mode": "guest"})
+        with mp.ha_permission_scope(guest, mode="guest"):
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(guard.delete_automation("goodnight"))
+        inner.delete_automation.assert_not_awaited()
+
+    def test_disable_automation_checks_automation_entity(self):
+        inner = _make_inner()
+        inner.disable_automation = AsyncMock(return_value=True)
+        guard = mp.PermissionEnforcingHAClient(inner)
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner"):
+            result = _run(guard.disable_automation("goodnight"))
+        assert result is True
+        inner.disable_automation.assert_awaited_once_with("goodnight")
+
+    def test_ha_client_write_surface_is_intercepted(self):
+        """Public async def methods of HomeAssistantClient minus
+        {get_state, health_check, close} equal exactly
+        {call_service, create_automation, delete_automation, disable_automation}."""
+        import inspect
+        from shared.ha_client import HomeAssistantClient
+
+        public_async_methods = {
+            name for name, member in inspect.getmembers(HomeAssistantClient, predicate=inspect.iscoroutinefunction)
+            if not name.startswith("_")
+        }
+        write_methods = public_async_methods - {"get_state", "health_check", "close"}
+        assert write_methods == {"call_service", "create_automation", "delete_automation", "disable_automation"}
+        for name in write_methods:
+            assert hasattr(mp.PermissionEnforcingHAClient, name), f"guard doesn't intercept {name}"

@@ -149,7 +149,9 @@ from orchestrator.mode_permission import (
     activate_owner_override,
     check_entity_permission,
     check_intent_permission,
+    degraded_permissions,
     detect_owner_mode_command,
+    ensure_permission_enforcing,
     extract_pin_from_query,
     get_current_mode,
 )
@@ -1096,11 +1098,24 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning("ha_config_missing", reason="Admin unreachable and HA_URL env var not set")
 
-    # Initialize clients
-    ha_client = HomeAssistantClient(url=ha_url, token=ha_token) if ha_token else None
+    # Initialize clients (ATHENA-69 D1/R2-H1: local first, then wrap, then
+    # register -- ha_client_raw is never registered or handed to a holder
+    # unwrapped; ensure_permission_enforcing is idempotent, so every holder
+    # constructor below wrapping this same local again is a no-op).
+    ha_client_raw = HomeAssistantClient(url=ha_url, token=ha_token) if ha_token else None
+    ha_client = ensure_permission_enforcing(ha_client_raw)
     _runtime.set_ha_client(ha_client)
     if not ha_client:
         logger.warning("ha_client_not_initialized", reason="No token available")
+    if not degraded_permissions()["restricted_entities"]:
+        logger.warning(
+            "ha_permission_fallback_disabled",
+            reason=(
+                "HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES parsed to an "
+                "empty list; a mode-service outage will grant unrestricted "
+                "HA writes instead of the D4 physical-security floor"
+            ),
+        )
 
     # Initialize LLM router with database-driven backend configuration
     llm_router = get_llm_router()

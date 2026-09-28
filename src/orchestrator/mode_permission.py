@@ -699,6 +699,105 @@ def authorize_ha_write(
 
 
 # ---------------------------------------------------------------------------
+# authorize_automation_config (Pass B, D1)
+# ---------------------------------------------------------------------------
+
+_AUTOMATION_INERT_STEP_KEYS = frozenset({
+    "delay", "wait_template", "wait_for_trigger", "condition", "conditions",
+    "alias", "enabled", "continue_on_error", "stop", "variables",
+})
+
+# Keys whose value is itself an action list/steps to recurse into. A step
+# carrying any of these has no domain.service of its own -- it's a
+# control-flow container (choose/parallel/repeat/if-then-else), not a leaf
+# action -- so it is never itself passed to _authorize_automation_step.
+_AUTOMATION_CONTAINER_KEYS = ("sequence", "default", "then", "else", "parallel")
+
+
+def _walk_automation_steps(steps: Any) -> Iterable[Dict[str, Any]]:
+    """Yield every leaf action-step dict in an automation action tree,
+    recursing through sequence/choose[].sequence/default/then/else/
+    parallel/repeat.sequence containers. A container step's `if` condition
+    list is never recursed into -- conditions aren't actions."""
+    if steps is None:
+        return
+    if isinstance(steps, dict):
+        steps = [steps]
+    if not isinstance(steps, (list, tuple)):
+        return
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        is_container = False
+        for key in _AUTOMATION_CONTAINER_KEYS:
+            if key in step:
+                is_container = True
+                yield from _walk_automation_steps(step[key])
+        if isinstance(step.get("choose"), list):
+            is_container = True
+            for choice in step["choose"]:
+                if isinstance(choice, dict) and "sequence" in choice:
+                    yield from _walk_automation_steps(choice["sequence"])
+        repeat = step.get("repeat")
+        if isinstance(repeat, dict) and "sequence" in repeat:
+            is_container = True
+            yield from _walk_automation_steps(repeat["sequence"])
+        if not is_container:
+            yield step
+
+
+def _authorize_automation_step(step: Dict[str, Any], perms: Dict[str, Any]) -> HAWriteDecision:
+    """Classify and authorize a single leaf automation step (see
+    _walk_automation_steps for what counts as a leaf)."""
+    if set(step.keys()) <= _AUTOMATION_INERT_STEP_KEYS:
+        return HAWriteDecision(allowed=True)
+
+    service = step.get("service") or step.get("action")
+    if isinstance(service, str) and "." in service:
+        domain, svc = service.split(".", 1)
+        return authorize_ha_write(domain, svc, step, perms)
+
+    if "scene" in step:
+        return authorize_ha_write("scene", "turn_on", {"entity_id": step["scene"]}, perms)
+
+    if "device_id" in step and "domain" in step:
+        return authorize_ha_write(step["domain"], "_precheck", None, perms)
+
+    # Any other step (including "event") is denied unless the scope is owner.
+    if perms.get("mode") == "owner":
+        return HAWriteDecision(allowed=True)
+    return HAWriteDecision(allowed=False, denied_targets=(), reason="unknown_automation_step")
+
+
+def authorize_automation_config(automation_id: str, config: Dict[str, Any], permissions: Dict[str, Any]) -> HAWriteDecision:
+    """Authorize creating/updating an HA automation (create_automation).
+
+    Requires `automation.<automation_id>` to pass, then walks every leaf
+    step in `config["action"]` (or `config["actions"]`) and authorizes
+    each individually; the first denial denies the whole automation.
+    """
+    perms = normalize_permissions(permissions)
+
+    entity_decision = authorize_ha_write(
+        "automation", "_precheck", {"entity_id": f"automation.{automation_id}"}, perms
+    )
+    if not entity_decision.allowed:
+        return entity_decision
+
+    cfg = config if isinstance(config, dict) else {}
+    actions = cfg.get("action")
+    if actions is None:
+        actions = cfg.get("actions")
+
+    for step in _walk_automation_steps(actions):
+        decision = _authorize_automation_step(step, perms)
+        if not decision.allowed:
+            return decision
+
+    return HAWriteDecision(allowed=True)
+
+
+# ---------------------------------------------------------------------------
 # Coarse per-device-type domain map (D14)
 # ---------------------------------------------------------------------------
 
@@ -746,6 +845,53 @@ def intent_write_domains(intent: Dict[str, Any]) -> Tuple[str, ...]:
     if not device_type:
         return ()
     return CONTROL_DEVICE_DOMAINS.get(device_type, ())
+
+
+# ---------------------------------------------------------------------------
+# authorize_sequence (Pass B, D21)
+# ---------------------------------------------------------------------------
+
+def authorize_sequence(sequence: List[Dict[str, Any]], permissions: Dict[str, Any]) -> HAWriteDecision:
+    """Pre-authorize an entire SequenceExecutor step list before scheduling
+    (D21) -- a guest can't schedule a step they aren't allowed to run now.
+
+    For each step: `target.entity_id` present -> authorize_ha_write on that
+    entity's own domain; otherwise a recognized `target.device_type` ->
+    every domain that device_type writes, each checked as `f"{d}.all"`. A
+    step with neither a resolvable entity nor a recognized device_type is
+    denied unless the scope is owner. Denies the whole sequence on the
+    first denied step.
+    """
+    perms = normalize_permissions(permissions)
+
+    for step in sequence or []:
+        if not isinstance(step, dict):
+            continue
+        target = step.get("target")
+        target = target if isinstance(target, dict) else {}
+        action = step.get("action", "turn_on")
+        entity_id = target.get("entity_id")
+
+        if entity_id:
+            entity_domain = entity_id.split(".")[0] if "." in entity_id else (target.get("device_type") or "light")
+            decision = authorize_ha_write(entity_domain, "_precheck", {"entity_id": entity_id}, perms)
+            if not decision.allowed:
+                return decision
+            continue
+
+        device_type = target.get("device_type")
+        if device_type and device_type in CONTROL_DEVICE_DOMAINS:
+            for domain in CONTROL_DEVICE_DOMAINS[device_type]:
+                decision = authorize_ha_write(domain, "_precheck", None, perms)
+                if not decision.allowed:
+                    return decision
+            continue
+
+        # Neither a resolvable entity nor a recognized device_type.
+        if perms.get("mode") != "owner":
+            return HAWriteDecision(allowed=False, denied_targets=(), reason="unresolvable_sequence_step")
+
+    return HAWriteDecision(allowed=True)
 
 
 # ---------------------------------------------------------------------------
@@ -815,6 +961,22 @@ def permission_refusal_message(
     return f"Sorry, I can't control the {noun} in guest mode."
 
 
+def sequence_refusal_message(decision: HAWriteDecision, scope: "PermissionScope") -> str:
+    """D21: refusal text for a sequence denied at pre-authorization time
+    (before scheduling) -- distinct phrasing from permission_refusal_message
+    since nothing has been attempted yet ("schedule", not "control").
+    """
+    domain = None
+    if decision.denied_targets:
+        first = decision.denied_targets[0]
+        domain = first.split(".")[0] if "." in first else first
+    noun = _noun_for_domains([domain] if domain else [])
+    perm_mode = scope.permissions.get("mode") if scope and scope.permissions else "guest"
+    if perm_mode == "degraded":
+        return f"Sorry, I can't schedule that right now because I couldn't verify permissions -- it includes the {noun}."
+    return f"Sorry, I can't schedule that in guest mode -- it includes the {noun}."
+
+
 # ---------------------------------------------------------------------------
 # PermissionEnforcingHAClient (D1, D20)
 # ---------------------------------------------------------------------------
@@ -824,11 +986,13 @@ class PermissionEnforcingHAClient:
     authorizes every write against the current request's PermissionScope
     before forwarding it to the inner client.
 
-    Pass A: ``call_service`` interception plus the read allowlist only.
-    Pass B adds ``create_automation``/``delete_automation``/
-    ``disable_automation`` (with the automation-config walker) before this
-    class is wired into main.py's lifespan, so no pass ever ships a wired
-    guard that can't service AutomationAgent.
+    Intercepts all four HomeAssistantClient write methods: ``call_service``
+    (Pass A) plus ``create_automation``/``delete_automation``/
+    ``disable_automation`` (Pass B, via ``authorize_automation_config`` for
+    create and the ``automation.<id>`` entity check for delete/disable).
+    Wired into main.py's lifespan and every HA holder constructor in Pass B
+    (``ensure_permission_enforcing`` is idempotent, so double-wrapping is a
+    no-op).
 
     The read allowlist is deliberately narrow: only ``get_state``,
     ``health_check``, ``close``, ``is_configured``, and ``url`` pass
@@ -895,6 +1059,40 @@ class PermissionEnforcingHAClient:
             self._deny(scope, domain, service, decision.denied_targets, decision.reason)
         scope.allowed_writes += 1
         return await self._inner.call_service(domain, service, service_data)
+
+    async def create_automation(self, automation_id: str, config: Dict[str, Any]) -> bool:
+        scope = self._resolve_scope()
+        if scope.halted:
+            self._deny(scope, "automation", "create", (), "halted_after_denial")
+        decision = authorize_automation_config(automation_id, config, scope.permissions)
+        if not decision.allowed:
+            self._deny(scope, "automation", "create", decision.denied_targets, decision.reason)
+        scope.allowed_writes += 1
+        return await self._inner.create_automation(automation_id, config)
+
+    async def delete_automation(self, automation_id: str) -> bool:
+        scope = self._resolve_scope()
+        if scope.halted:
+            self._deny(scope, "automation", "delete", (), "halted_after_denial")
+        decision = authorize_ha_write(
+            "automation", "delete", {"entity_id": f"automation.{automation_id}"}, scope.permissions
+        )
+        if not decision.allowed:
+            self._deny(scope, "automation", "delete", decision.denied_targets, decision.reason)
+        scope.allowed_writes += 1
+        return await self._inner.delete_automation(automation_id)
+
+    async def disable_automation(self, automation_id: str) -> bool:
+        scope = self._resolve_scope()
+        if scope.halted:
+            self._deny(scope, "automation", "disable", (), "halted_after_denial")
+        decision = authorize_ha_write(
+            "automation", "disable", {"entity_id": f"automation.{automation_id}"}, scope.permissions
+        )
+        if not decision.allowed:
+            self._deny(scope, "automation", "disable", decision.denied_targets, decision.reason)
+        scope.allowed_writes += 1
+        return await self._inner.disable_automation(automation_id)
 
 
 def ensure_permission_enforcing(client: Any) -> Any:

@@ -36,10 +36,12 @@ from orchestrator.mode_permission import (
     DEGRADED_INTENT_REFUSAL,
     GUEST_INTENT_REFUSAL,
     authorize_ha_write,
+    authorize_sequence,
     check_intent_permission,
     ha_permission_scope,
     intent_write_domains,
     permission_refusal_message,
+    sequence_refusal_message,
 )
 from orchestrator.ha_status_optimizer import (
     detect_status_query_type,
@@ -314,6 +316,20 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     if sequence_data and sequence_data.get("steps"):
                         steps = sequence_data["steps"]
                         acknowledge = sequence_data.get("acknowledge", "Starting sequence...")
+
+                        # Sequence pre-authorization (D21): deny the whole
+                        # sequence synchronously, before scheduling, when
+                        # any step isn't allowed under the CURRENT scope --
+                        # a background sequence otherwise fires later steps
+                        # with the authorization the request had when it
+                        # was scheduled, so a denied step must never be
+                        # scheduled in the first place.
+                        seq_decision = authorize_sequence(steps, scope.permissions)
+                        if not seq_decision.allowed:
+                            state.answer = sequence_refusal_message(seq_decision, scope)
+                            state.error = "permission_denied"
+                            state.node_timings["route_control"] = time.time() - start
+                            return state
 
                         logger.info(f"Executing sequence with {len(steps)} steps")
 

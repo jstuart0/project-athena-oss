@@ -19,13 +19,33 @@ from unittest import mock
 
 import pytest
 
+# ATHENA-69: smart_home_controller.py's ha_client-accepting methods now
+# lazily import orchestrator.mode_permission (-> orchestrator.metrics ->
+# prometheus_client) at call time. Stub before import, matching the
+# convention used across tests/unit/test_route_control.py and friends.
+for _mod in ("prometheus_client", "langgraph", "langgraph.graph"):
+    if _mod not in sys.modules:
+        sys.modules[_mod] = mock.MagicMock()
+
 sys.path.insert(0, "src")
 
 import orchestrator.smart_home_controller as shc  # noqa: E402
+from orchestrator import mode_permission  # noqa: E402
 
 
 def _controller():
     return shc.SmartHomeController(entity_manager=mock.MagicMock(), llm_router=mock.MagicMock())
+
+
+def _run_as_owner(coro):
+    """ATHENA-69: these tests call _handle_scene_intent directly, bypassing
+    execute_intent's scope-opening -- without an open owner scope, the
+    guard treats the call as unscoped and falls back to a degraded
+    baseline, which denies scene/script writes by the D4 floor regardless
+    of what this test is actually exercising (the light-group fallback
+    logic, not permissions). Open an owner scope for the duration."""
+    with mode_permission.ha_permission_scope({"mode": "owner"}, mode="owner"):
+        return asyncio.run(coro)
 
 
 def _set_light_groups(monkeypatch, raw: str):
@@ -88,7 +108,7 @@ def test_unconfigured_room_never_calls_turn_on_with_all(monkeypatch, query, enti
     _set_light_groups(monkeypatch, "")
     ha_client = _failing_ha_client()
 
-    result = asyncio.run(
+    result = _run_as_owner(
         _controller()._handle_scene_intent("activate", {"entity_id": entity_id}, ha_client, original_query=query)
     )
 
@@ -105,7 +125,7 @@ def test_configured_movie_mode_uses_living_room_group_not_all(monkeypatch):
     _set_light_groups(monkeypatch, '{"living_room": "light.living_room_all", "office": "light.office_all"}')
     ha_client = _failing_ha_client()
 
-    result = asyncio.run(
+    result = _run_as_owner(
         _controller()._handle_scene_intent(
             "activate", {"entity_id": "scene.movie_mode"}, ha_client, original_query="let's watch a movie"
         )
@@ -124,7 +144,7 @@ def test_configured_good_morning_uses_office_group_not_all(monkeypatch):
     _set_light_groups(monkeypatch, '{"living_room": "light.living_room_all", "office": "light.office_all"}')
     ha_client = _failing_ha_client()
 
-    result = asyncio.run(
+    result = _run_as_owner(
         _controller()._handle_scene_intent(
             "activate", {"entity_id": "script.good_morning"}, ha_client, original_query="good morning"
         )
@@ -146,7 +166,7 @@ def test_configured_arriving_home_uses_living_room_group_not_all(monkeypatch):
     _set_light_groups(monkeypatch, '{"living_room": "light.living_room_all", "office": "light.office_all"}')
     ha_client = _failing_ha_client()
 
-    result = asyncio.run(
+    result = _run_as_owner(
         _controller()._handle_scene_intent(
             "activate", {"entity_id": "script.arriving"}, ha_client, original_query="i'm home"
         )

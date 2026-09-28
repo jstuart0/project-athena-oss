@@ -27,6 +27,11 @@ from shared.admin_config import AdminConfigClient
 from shared.admin_url import get_admin_url
 from shared.config import get_config
 from orchestrator.follow_me_audio import get_most_recent_room
+# ATHENA-69: orchestrator.mode_permission is imported lazily inside
+# MusicHandler.__init__ (not at module scope) so callers that only need
+# this module's pure helpers don't pull in
+# orchestrator.mode_permission -> orchestrator.metrics -> prometheus_client
+# as a hard import-time dependency.
 
 logger = structlog.get_logger()
 
@@ -570,7 +575,17 @@ class MusicHandler:
             admin_client: Admin config client for room groups
             spotify_accounts: List of Spotify account IDs (default: 2 accounts)
         """
-        self.ha = ha_client
+        from orchestrator.mode_permission import ensure_permission_enforcing
+
+        self.ha = ensure_permission_enforcing(ha_client)
+        # ATHENA-69 (D10, read-only scope): get_playing_rooms_from_ha below
+        # bulk-fetches /api/states via a raw httpx GET using the client's
+        # own auth headers -- a read, not a write, but the guard's read
+        # allowlist covers only get_state(entity_id) (single-entity), and
+        # `.headers` carries the same bearer token `.token` does, so it
+        # can't be added to that allowlist. Keep an unwrapped reference for
+        # this one call site; every write still goes through self.ha above.
+        self._ha_raw = ha_client
         self.admin = admin_client
         self.account_pool = SpotifyAccountPool(spotify_accounts)
         self.default_room = "home"  # Fallback if no room specified
@@ -642,8 +657,8 @@ class MusicHandler:
             # Query HA for all media player states
             async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
                 response = await client.get(
-                    f"{self.ha.url}/api/states",
-                    headers=self.ha.headers
+                    f"{self._ha_raw.url}/api/states",
+                    headers=self._ha_raw.headers
                 )
 
                 if response.status_code == 200:
@@ -1073,7 +1088,7 @@ class MusicHandler:
             Response message for the user
         """
         # Check if Music Assistant has players configured
-        has_ma_players = await check_music_assistant_players(self.ha)
+        has_ma_players = await check_music_assistant_players(self._ha_raw)
         if not has_ma_players:
             logger.error(
                 "music_play_blocked_no_ma_players",
@@ -1396,7 +1411,7 @@ class MusicHandler:
         """
         # Check if Music Assistant has players configured (for add/clear actions)
         if action in ("add", "clear"):
-            has_ma_players = await check_music_assistant_players(self.ha)
+            has_ma_players = await check_music_assistant_players(self._ha_raw)
             if not has_ma_players:
                 return (
                     "Music queue management is not available. Music Assistant has no players configured. "
@@ -1566,7 +1581,7 @@ class MusicHandler:
             Response message for the user
         """
         # Check if Music Assistant has players configured
-        has_ma_players = await check_music_assistant_players(self.ha)
+        has_ma_players = await check_music_assistant_players(self._ha_raw)
         if not has_ma_players:
             return (
                 "Music playback is not available. Music Assistant has no players configured. "
@@ -1683,7 +1698,7 @@ class MusicHandler:
             Response message for the user
         """
         # Check if Music Assistant has players configured
-        has_ma_players = await check_music_assistant_players(self.ha)
+        has_ma_players = await check_music_assistant_players(self._ha_raw)
         if not has_ma_players:
             return (
                 "Music playback is not available. Music Assistant has no players configured. "

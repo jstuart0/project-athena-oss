@@ -281,7 +281,7 @@ class TestSequenceRouting:
         _runtime.set_sequence_executor(se)
         _runtime.set_automation_agent(None)
         _runtime.set_entity_manager(None)
-        state = _make_state(query="turn on kitchen then dim to 50% after 1 minute")
+        state = _make_state(query="turn on kitchen then dim to 50% after 1 minute", permissions={"mode": "owner"})
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
                   return_value={"enabled": False}),
@@ -328,7 +328,7 @@ class TestSequenceRouting:
         _runtime.set_sequence_executor(None)
         _runtime.set_automation_agent(None)
         _runtime.set_entity_manager(None)
-        state = _make_state(query="run the morning routine")
+        state = _make_state(query="run the morning routine", permissions={"mode": "owner"})
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
                   return_value={"enabled": False}),
@@ -339,6 +339,44 @@ class TestSequenceRouting:
         ):
             result = _run(route_control_node(state))
         assert result.answer == "Sequence executor not available."
+
+    def test_guest_sequence_with_lock_step_refused_before_scheduling(self):
+        """D21: a sequence containing a denied step is refused synchronously,
+        before execute_sequence is ever called -- a background sequence
+        can't be scheduled with authorization it doesn't have."""
+        sc = _make_smart_controller()
+        sc.detect_sequence_intent.return_value = True
+        sc.extract_sequence_intent = AsyncMock(return_value={
+            "steps": [
+                {"target": {"entity_id": "light.kitchen"}, "action": "turn_on"},
+                {"target": {"entity_id": "lock.front_door"}, "action": "unlock"},
+            ],
+            "acknowledge": "On it!",
+        })
+        se = MagicMock()
+        se.execute_sequence = AsyncMock(return_value="done")
+        _runtime.set_smart_controller(sc)
+        _runtime.set_sequence_executor(se)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
+        state = _make_state(
+            query="turn on the kitchen lights then unlock the front door",
+            mode="guest",
+            permissions={"mode": "guest", "allowed_intents": ["control"]},
+        )
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value=False),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+        ):
+            result = _run(route_control_node(state))
+        se.execute_sequence.assert_not_awaited()
+        assert result.error == "permission_denied"
+        assert "schedule" in result.answer.lower()
+        assert "guest mode" in result.answer.lower()
 
 
 class TestContextContinuation:

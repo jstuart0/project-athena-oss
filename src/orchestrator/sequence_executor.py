@@ -9,6 +9,7 @@ Supports:
 - Any entity type: lights, climate, media players, etc.
 """
 import asyncio
+import contextlib
 import logging
 import re
 from datetime import datetime, timedelta
@@ -16,6 +17,12 @@ from typing import Dict, List, Optional, Any
 import json
 
 logger = logging.getLogger(__name__)
+
+# ATHENA-69: imported lazily inside SequenceExecutor (not at module scope)
+# so a caller that only needs the pure has_sequence_timing/
+# detect_sequence_intent helpers below doesn't pull in
+# orchestrator.mode_permission -> orchestrator.metrics -> prometheus_client
+# as a hard import-time dependency.
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +149,10 @@ class SequenceExecutor:
             smart_controller: SmartHomeController instance for executing individual actions
             ha_client: Home Assistant client for direct API calls
         """
+        from orchestrator.mode_permission import ensure_permission_enforcing
+
         self.smart_controller = smart_controller
-        self.ha_client = ha_client
+        self.ha_client = ensure_permission_enforcing(ha_client)
         self._running_sequences: Dict[str, asyncio.Task] = {}
 
     async def execute_sequence(
@@ -203,42 +212,58 @@ class SequenceExecutor:
         sequence: List[Dict],
         session_id: Optional[str] = None
     ):
-        """Execute sequence steps with delays and scheduling."""
-        for i, step in enumerate(sequence):
-            try:
-                step_num = i + 1
-                total_steps = len(sequence)
+        """Execute sequence steps with delays and scheduling.
 
-                # Handle scheduled time (at_time)
-                at_time = step.get('at_time')
-                if at_time:
-                    wait_seconds = self._calculate_wait_until(at_time)
-                    if wait_seconds > 0:
-                        logger.info(f"Sequence step {step_num}/{total_steps}: waiting {wait_seconds}s until {at_time}")
-                        await asyncio.sleep(wait_seconds)
+        ATHENA-69 (D3): runs inside the request's scope when spawned via
+        asyncio.create_task from execute_sequence's background branch --
+        contextvars propagate a copy into the task at creation time, so
+        `current_ha_scope()` is already set here for the normal
+        route_control_node call path. When this is invoked with no scope
+        open (e.g. a future caller that doesn't pre-authorize), a fresh
+        system-mode scope is opened for the duration of the run instead of
+        leaving every write unscoped (which the guard would otherwise
+        treat as a series of independent throwaway baseline scopes, one
+        per call, defeating the latch).
+        """
+        from orchestrator.mode_permission import current_ha_scope, ha_permission_scope
 
-                # Execute the action
-                await self._execute_step(step, step_num, total_steps)
+        scope_cm = ha_permission_scope(None, mode="system") if current_ha_scope() is None else contextlib.nullcontext()
+        with scope_cm:
+            for i, step in enumerate(sequence):
+                try:
+                    step_num = i + 1
+                    total_steps = len(sequence)
 
-                # Handle delay after action
-                delay_after = step.get('delay_after')
-                if delay_after and delay_after > 0:
-                    logger.info(f"Sequence step {step_num}/{total_steps}: waiting {delay_after}s")
-                    await asyncio.sleep(delay_after)
+                    # Handle scheduled time (at_time)
+                    at_time = step.get('at_time')
+                    if at_time:
+                        wait_seconds = self._calculate_wait_until(at_time)
+                        if wait_seconds > 0:
+                            logger.info(f"Sequence step {step_num}/{total_steps}: waiting {wait_seconds}s until {at_time}")
+                            await asyncio.sleep(wait_seconds)
 
-            except asyncio.CancelledError:
-                logger.info(f"Sequence cancelled at step {i+1}")
-                raise
-            except Exception as e:
-                logger.error(f"Error in sequence step {i+1}: {e}")
-                # Continue with next step on error
-                continue
+                    # Execute the action
+                    await self._execute_step(step, step_num, total_steps)
 
-        logger.info(f"Sequence complete: {len(sequence)} steps executed")
+                    # Handle delay after action
+                    delay_after = step.get('delay_after')
+                    if delay_after and delay_after > 0:
+                        logger.info(f"Sequence step {step_num}/{total_steps}: waiting {delay_after}s")
+                        await asyncio.sleep(delay_after)
 
-        # Clean up
-        if session_id and session_id in self._running_sequences:
-            del self._running_sequences[session_id]
+                except asyncio.CancelledError:
+                    logger.info(f"Sequence cancelled at step {i+1}")
+                    raise
+                except Exception as e:
+                    logger.error(f"Error in sequence step {i+1}: {e}")
+                    # Continue with next step on error
+                    continue
+
+            logger.info(f"Sequence complete: {len(sequence)} steps executed")
+
+            # Clean up
+            if session_id and session_id in self._running_sequences:
+                del self._running_sequences[session_id]
 
     async def _execute_step(self, step: Dict, step_num: int, total_steps: int):
         """Execute a single sequence step."""
