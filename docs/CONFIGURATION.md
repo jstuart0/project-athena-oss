@@ -244,6 +244,8 @@ Registering a `tcp` row via the admin UI's row editor (or directly via `POST /ap
 
 **RAG self-registration payload (`shared/service_registry.py::register_service`, ATHENA-108)**: every RAG process pings this same upsert route at startup to confirm it's registered. By default the ping omits `endpoint_url` entirely -- `POST /services` is partial-update-safe for an *existing* row (same semantics `service_type`/`cache_ttl`/`enabled` already have), so a seeded row's `host`/`port`/`protocol`/`endpoint_url` (the correct in-cluster K8s Service DNS name, e.g. `athena-rag-weather`) survive the ping untouched. `endpoint_url` remains required to *create* a brand-new, never-seeded row. Set `SERVICE_REGISTRY_ENDPOINT_URL` only for a deployment shape where the self-reported `http://localhost:<port>` view genuinely is the correct address (e.g. an ad-hoc bare-metal dev RAG service that isn't in `OSS_SERVICE_REGISTRY`) -- setting it against a seeded service overwrites that row's real host on every restart.
 
+**Registry name/host-label normalisation (`shared/service_registry.py::to_rag_registry_name` / `to_rag_host_label`)**: the `name` and `host_label` a RAG connector sends on self-registration are derived from its `SERVICE_NAME`, lower-cased with `-`/`_` stripped, then suffixed `-rag` (name) or prefixed `athena-rag-` (host label) -- so `weather` becomes `weather-rag` / `athena-rag-weather`, and a hyphenated connector name like `price-compare` normalises to `pricecompare-rag` / `athena-rag-pricecompare`, matching its seeded row instead of 422ing. `SERVICE_REGISTRY_NAME` overrides the derived base for a seeded row that doesn't follow this convention. The derived name/host label are validated against the same character-set and length rules the admin route's own validation enforces before anything is sent, and a CI static check fails the build if any RAG connector's registration call site would normalise to a name that collides with another seeded row or another connector's base.
+
 **Dashboard aggregation (ATHENA-112)**: `GET /api/service-registry/services` computes `healthy_services` and `overall_health` over **enabled** rows only. A disabled row is reported with `health_status: "disabled"` regardless of its last cached poller value (which goes stale the moment it's disabled) and is excluded from both the counts and the health rollup. `enabled_services` / `disabled_services` are new response fields; `total_services` still counts every row for backward compatibility.
 
 **Mission Control voice-health card and RAG test probes (ATHENA-113b)**: the admin-backend's dashboard (`admin/backend/app/routes/dashboard.py`) and voice-test routes (`admin/backend/app/routes/voice_tests.py`) resolve each RAG service's URL independently via `app.utils.rag_urls.resolve_rag_url`, instead of assuming every RAG shares one host behind `RAG_HOST`/`RAG_SERVICE_HOST` -- in Kubernetes each RAG is its own Service, so a single shared host is an OSS-First violation and (when unset) reported every RAG as "unreachable" rather than "not configured". Resolution order per service:
@@ -635,7 +637,14 @@ returns an error, the orchestrator falls back to `degraded_permissions()`
 `HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES=[]` — an explicit, logged
 deployer opt-out, never a silent default.
 
-**Owner PIN.** Set in the admin UI (Guest Mode page). Verification lives
+**Owner PIN.** Set in the admin UI's Guest Mode page, which has a dedicated
+Owner PIN section (6-digit input, confirmation input, client-side format
+check). The server independently validates the format — exactly six ASCII
+digits, `re.fullmatch`, no trailing newline — before hashing and storing it,
+rejecting anything else with `422 {"error": "owner_pin_format"}`; a PIN that
+passed only the client-side check could otherwise be stored and then be
+permanently unverifiable, since `verify-pin` (below) applies the same
+fullmatch check before it ever compares against the hash. Verification lives
 **only** in the admin backend (`POST /api/internal/guest-mode/verify-pin`,
 service-key-only — the mode service holds no PIN state and never hashes or
 compares a PIN itself). The hash is PBKDF2-HMAC-SHA256, salted
