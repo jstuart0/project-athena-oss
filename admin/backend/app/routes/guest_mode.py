@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr, field_validator
 from datetime import datetime, timedelta
 import hmac
+import re
 import structlog
 import uuid
 
@@ -44,6 +45,34 @@ def _validate_intent_names(value: Optional[List[str]]) -> Optional[List[str]]:
     if unknown:
         raise ValueError(f"Unknown intent name(s): {', '.join(unknown)}")
     return [v.lower() for v in value]
+
+
+# codex review on ee7e02a (High): GuestModeConfigCreate/Update.owner_pin was a
+# bare Optional[str] -- any non-None value was hashed and stored as-is. A
+# malformed PIN (wrong length, non-digits, or a Unicode digit that isn't
+# ASCII 0-9, e.g. fullwidth/superscript) would hash and save successfully
+# here, then be permanently unverifiable: verify_owner_pin
+# (app/routes/internal.py) classifies anything failing `re.fullmatch(r"[0-9]
+# {6}", pin)` as "malformed" before it ever reaches the hash comparison. The
+# owner would believe they'd set a PIN that can never actually be entered.
+#
+# Not a pydantic field_validator: admin-backend registers no
+# RequestValidationError handler (unlike gateway/orchestrator's
+# shared.errors.register_exception_handlers), so a ValueError raised inside
+# a field_validator surfaces as FastAPI's default list-shaped `detail`, not
+# the {"error": "..."} shape every other route in this file already raises
+# (see service_control.py's HTTPException(..., detail={"error": ...})
+# precedents). Checked explicitly in both route handlers instead, so the
+# response shape is actually {"error": "owner_pin_format"} as the rest of
+# the API already does.
+_OWNER_PIN_FORMAT_RE = re.compile(r"^[0-9]{6}$")
+
+
+def _validate_owner_pin_format(pin: Optional[str]) -> None:
+    if pin is None:
+        return
+    if not _OWNER_PIN_FORMAT_RE.match(pin):
+        raise HTTPException(status_code=422, detail={"error": "owner_pin_format"})
 
 
 async def _guest_mode_config_auth(
@@ -433,6 +462,7 @@ async def create_guest_mode_config(
         raise HTTPException(status_code=400, detail="Guest mode configuration already exists. Use PATCH to update.")
 
     # Hash PIN if provided (PBKDF2-HMAC-SHA256, salted -- D30)
+    _validate_owner_pin_format(config_data.owner_pin)
     owner_pin_hash = hash_password(config_data.owner_pin) if config_data.owner_pin else None
 
     # Create configuration
@@ -491,6 +521,12 @@ async def update_guest_mode_config(
     config = db.query(GuestModeConfig).first()
     if not config:
         raise HTTPException(status_code=404, detail="Guest mode configuration not found")
+
+    # Validated up front, before any field on `config` is mutated: a 422
+    # here must leave `config` untouched, not partially dirtied in-session
+    # from earlier fields in this loop (nothing is committed until the very
+    # end, but the ORM object itself would still carry the partial edits).
+    _validate_owner_pin_format(config_data.owner_pin)
 
     # Store old values for audit
     old_value = config.to_dict()

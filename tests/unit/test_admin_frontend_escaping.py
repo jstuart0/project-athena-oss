@@ -984,9 +984,41 @@ def test_static_set_owner_pin_button_wired_and_bare_expression():
     assert 'onclick="setOwnerPin()"' in source
 
 
-def test_static_set_owner_pin_clears_inputs_on_both_success_and_error():
+def test_static_set_owner_pin_clears_inputs_on_every_exit_path():
+    """codex review on ee7e02a (Medium): the 6-digit-format validation branch
+    previously `return`ed without clearing the inputs -- only the
+    PINs-do-not-match branch and the try/catch paths cleared. Every exit now
+    clears: the two validation-error branches route through showFieldError
+    (which clears as its first statement, finally-style), and the try/catch
+    success/error paths clear directly."""
     fn = _extract_block(GUEST_MODE_JS, "async function setOwnerPin(")
-    # Two calls inside the try block (success path) and one inside the catch
-    # (error path) -- three call sites plus the definition itself.
-    assert fn.count("clearInputs();") >= 2
+
+    show_field_error = _extract_block_from_source(fn, "const showFieldError = (message) => {")
+    assert re.search(r"^\s*clearInputs\(\);", show_field_error, re.MULTILINE), (
+        "showFieldError must clear the inputs as its first action"
+    )
+
+    assert "showFieldError('PIN must be exactly 6 digits.');" in fn
+    assert "showFieldError('PINs do not match.');" in fn
+
+    # Success path (inside try, before the toast) and the catch (error) path
+    # each clear directly -- neither goes through showFieldError since
+    # neither is a field-level validation message.
+    assert re.search(r"clearInputs\(\);\s*safeShowToast\('Owner PIN set', 'success'\);", fn)
     assert re.search(r"catch \(error\) \{\s*clearInputs\(\);", fn)
+
+
+def _extract_block_from_source(source: str, marker: str) -> str:
+    """Like _extract_block, but operates on an already-extracted source
+    string (e.g. a function body) instead of reading a file from disk."""
+    start = source.index(marker)
+    brace_start = source.index("{", start + len(marker) - 1)
+    depth = 0
+    for i in range(brace_start, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:i + 1]
+    raise AssertionError(f"unbalanced braces extracting {marker!r}")

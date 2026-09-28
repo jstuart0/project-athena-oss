@@ -381,7 +381,11 @@ async function setOwnerPin() {
         confirmInput.value = '';
     };
 
+    // Clears both inputs on every validation-error exit path -- codex review
+    // on ee7e02a (Medium): the 6-digit-format branch previously returned
+    // without clearing, leaving a rejected PIN sitting in the field.
     const showFieldError = (message) => {
+        clearInputs();
         errorEl.textContent = message;
         errorEl.classList.remove('hidden');
     };
@@ -395,7 +399,6 @@ async function setOwnerPin() {
     }
     if (pin !== confirmPin) {
         showFieldError('PINs do not match.');
-        clearInputs();
         return;
     }
 
