@@ -13,6 +13,13 @@ Pass A members:
 
 Later passes (B/C/E/F) append their own members to this file; do not remove
 Pass A's cases when doing so.
+
+Pass D's wiring/drift test (test_sms_webhook_tags_caller_trust_sms) lives in
+tests/unit/test_ha_permission_wiring_pass_d.py instead of here -- Passes B
+and E both append to this file on their own branches, and this campaign's
+passes are being built in parallel worktrees merged later, so adding a
+fourth concurrent editor of this exact file just multiplies merge
+conflicts (mozart, 2026-09-28).
 """
 from __future__ import annotations
 
