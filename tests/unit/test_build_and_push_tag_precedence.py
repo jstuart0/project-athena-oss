@@ -7,9 +7,20 @@ invocation, because `source config.env` ran before the script ever looked
 at what the caller had exported. A push could land on — and overwrite — a
 stale tag the caller never asked for.
 
+The tag-collision guard originally probed the registry's `/v2/<repo>/tags/
+list` API directly via curl. codex review flagged two real bugs: (1) the
+URL construction breaks for path-style registries (`REGISTRY=ghcr.io/org`
+needs `https://ghcr.io/v2/org/name/tags/list`, not
+`https://ghcr.io/org/v2/name/tags/list`), and (2) an unreachable/auth-gated
+registry warned and proceeded — silently bypassing the guard for exactly
+the private registries it exists to protect. The guard now shells out to
+`docker manifest inspect` (Docker's own credential store and endpoint
+resolution) and fails CLOSED (refuses) on any error other than a genuine
+"not found", overridable only by --force-tag.
+
 No mocking of the resolution logic itself: each test copies the real
 build-and-push.sh + service-defs.sh into a throwaway PROJECT_ROOT with a
-fixture config.env and stub docker/curl on PATH, then runs the script as a
+fixture config.env and a stub docker on PATH, then runs the script as a
 real subprocess end to end.
 """
 
@@ -27,30 +38,43 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_SH = REPO_ROOT / "scripts" / "build-and-push.sh"
 SERVICE_DEFS_SH = REPO_ROOT / "scripts" / "service-defs.sh"
 
+# Intercepts both plain `docker build|push ...` (logged, always "succeeds")
+# and `docker manifest inspect <image>` (the tag-collision guard):
+#   - FAKE_MANIFEST_EXISTS: space-separated "registry/name:tag" strings that
+#     "exist" (manifest inspect exits 0) — everything else "doesn't exist"
+#     (a fixed-string comparison against the invoked image, matching the
+#     real script's non-regex tag handling).
+#   - FAKE_MANIFEST_ERROR_MODE=authfail: simulate a non-"not found" failure
+#     (auth/network) for any image not in FAKE_MANIFEST_EXISTS. Default
+#     ("notfound", i.e. unset) simulates docker's real "manifest unknown"
+#     not-found message.
 STUB_DOCKER = """#!/bin/bash
 echo "docker $*" >> "$DOCKER_LOG"
-exit 0
-"""
-
-# Stub curl for the tag-collision guard's /v2/<repo>/tags/list probe.
-# FAKE_TAGS_RESPONSE unset => simulate an unreachable/auth-gated registry
-# (both the https and http attempts fail, like the real curl would against
-# a registry with no anonymous /v2/ access). FAKE_TAGS_RESPONSE set => both
-# attempts "succeed" and return that body, exactly like a real registry
-# would for either scheme it happens to serve on.
-STUB_CURL = """#!/bin/bash
-if [ -z "${FAKE_TAGS_RESPONSE:-}" ]; then
-    exit 7
+if [ "$1" = "manifest" ] && [ "$2" = "inspect" ]; then
+    image="$3"
+    if [ -n "${FAKE_MANIFEST_EXISTS:-}" ]; then
+        for existing in $FAKE_MANIFEST_EXISTS; do
+            if [ "$existing" = "$image" ]; then
+                echo '{"schemaVersion":2}'
+                exit 0
+            fi
+        done
+    fi
+    if [ "${FAKE_MANIFEST_ERROR_MODE:-notfound}" = "authfail" ]; then
+        echo 'Error response from daemon: Get "https://example/v2/": unauthorized' >&2
+        exit 1
+    fi
+    echo "manifest unknown" >&2
+    exit 1
 fi
-echo "$FAKE_TAGS_RESPONSE"
 exit 0
 """
 
 
 def _make_sandbox(tmp_path: Path) -> tuple[Path, Path]:
     """Build PROJECT_ROOT/scripts/{build-and-push.sh,service-defs.sh} plus a
-    minimal src/mode_service/Dockerfile, and a stub docker+curl on their own
-    PATH dir. Returns (project_root, bin_dir)."""
+    minimal src/mode_service/Dockerfile, and a stub docker on its own PATH
+    dir. Returns (project_root, bin_dir)."""
     project_root = tmp_path / "project"
     (project_root / "scripts").mkdir(parents=True)
     (project_root / "src" / "mode_service").mkdir(parents=True)
@@ -69,10 +93,9 @@ def _make_sandbox(tmp_path: Path) -> tuple[Path, Path]:
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for tool, body in (("docker", STUB_DOCKER), ("curl", STUB_CURL)):
-        tool_path = bin_dir / tool
-        tool_path.write_text(body, encoding="utf-8")
-        tool_path.chmod(tool_path.stat().st_mode | stat.S_IEXEC)
+    docker_path = bin_dir / "docker"
+    docker_path.write_text(STUB_DOCKER, encoding="utf-8")
+    docker_path.chmod(docker_path.stat().st_mode | stat.S_IEXEC)
 
     return project_root, bin_dir
 
@@ -184,23 +207,24 @@ def test_unknown_flag_rejected(tmp_path):
     assert "Unknown flag" in result.stdout + result.stderr
 
 
-def test_refuses_to_overwrite_existing_tag_and_never_calls_docker(tmp_path):
+def test_refuses_to_overwrite_existing_tag_and_never_calls_docker_build(tmp_path):
     project_root, bin_dir = _make_sandbox(tmp_path)
     _write_config_env(project_root, tag="v1")
     docker_log = tmp_path / "docker.log"
 
     result = _run(
         project_root, bin_dir, docker_log, "mode-service",
-        extra_env={"FAKE_TAGS_RESPONSE": '{"name":"athena-mode-service","tags":["v1","v0"]}'},
+        extra_env={"FAKE_MANIFEST_EXISTS": "localhost:5000/athena-mode-service:v1"},
     )
 
     combined = result.stdout + result.stderr
     assert result.returncode != 0, combined
     assert "already exists" in combined
     assert "--force-tag" in combined
-    assert not docker_log.exists(), (
-        f"guard must fire before any docker build/push, but docker was invoked: "
-        f"{docker_log.read_text() if docker_log.exists() else ''}"
+    log_text = docker_log.read_text() if docker_log.exists() else ""
+    assert "manifest inspect" in log_text, "guard must have checked the registry"
+    assert "docker build" not in log_text, (
+        f"guard must fire before any docker build/push, but docker build was invoked: {log_text}"
     )
 
 
@@ -211,47 +235,77 @@ def test_force_tag_overrides_the_collision_guard(tmp_path):
 
     result = _run(
         project_root, bin_dir, docker_log, "--force-tag", "mode-service",
-        extra_env={"FAKE_TAGS_RESPONSE": '{"name":"athena-mode-service","tags":["v1","v0"]}'},
+        extra_env={"FAKE_MANIFEST_EXISTS": "localhost:5000/athena-mode-service:v1"},
     )
 
     combined = result.stdout + result.stderr
     assert result.returncode == 0, combined
     assert "already exists" not in combined
-    assert docker_log.exists(), "docker build must run once --force-tag bypasses the guard"
-    assert "--pull" in docker_log.read_text()
+    log_text = docker_log.read_text()
+    assert "manifest inspect" not in log_text, "--force-tag must skip the registry check entirely"
+    assert "docker build" in log_text, "docker build must run once --force-tag bypasses the guard"
+    assert "--pull" in log_text
 
 
 def test_non_colliding_tag_proceeds_without_force(tmp_path):
-    """Positive control: a tag that isn't in the registry's list needs no
-    --force-tag at all."""
+    """Positive control: a tag the registry genuinely doesn't have (docker
+    manifest inspect reports "not found") needs no --force-tag at all."""
     project_root, bin_dir = _make_sandbox(tmp_path)
     _write_config_env(project_root, tag="v2")
     docker_log = tmp_path / "docker.log"
 
     result = _run(
         project_root, bin_dir, docker_log, "mode-service",
-        extra_env={"FAKE_TAGS_RESPONSE": '{"name":"athena-mode-service","tags":["v1","v0"]}'},
+        extra_env={"FAKE_MANIFEST_EXISTS": "localhost:5000/athena-mode-service:v1"},
     )
 
     combined = result.stdout + result.stderr
     assert result.returncode == 0, combined
     assert "already exists" not in combined
-    assert docker_log.exists()
+    log_text = docker_log.read_text()
+    assert "manifest inspect" in log_text
+    assert "docker build" in log_text
 
 
-def test_unreachable_registry_warns_but_proceeds(tmp_path):
-    """The tags/list probe against an auth-gated or down registry can't
-    determine collision either way — must warn, not block."""
+def test_unreachable_registry_fails_closed_without_force_tag(tmp_path):
+    """The registry check failing for a reason OTHER than "not found" (auth,
+    network, TLS, ...) must refuse the push, not silently proceed — this is
+    the exact bypass codex flagged in the old curl-based guard."""
     project_root, bin_dir = _make_sandbox(tmp_path)
     _write_config_env(project_root, tag="v1")
     docker_log = tmp_path / "docker.log"
 
-    result = _run(project_root, bin_dir, docker_log, "mode-service")
+    result = _run(
+        project_root, bin_dir, docker_log, "mode-service",
+        extra_env={"FAKE_MANIFEST_ERROR_MODE": "authfail"},
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0, combined
+    assert "Could not verify" in combined
+    assert "--force-tag" in combined
+    log_text = docker_log.read_text() if docker_log.exists() else ""
+    assert "manifest inspect" in log_text
+    assert "docker build" not in log_text, (
+        f"a registry-check failure must block the build, but docker build was invoked: {log_text}"
+    )
+
+
+def test_force_tag_overrides_fail_closed_on_unreachable_registry(tmp_path):
+    project_root, bin_dir = _make_sandbox(tmp_path)
+    _write_config_env(project_root, tag="v1")
+    docker_log = tmp_path / "docker.log"
+
+    result = _run(
+        project_root, bin_dir, docker_log, "--force-tag", "mode-service",
+        extra_env={"FAKE_MANIFEST_ERROR_MODE": "authfail"},
+    )
 
     combined = result.stdout + result.stderr
     assert result.returncode == 0, combined
-    assert "Could not verify" in combined
-    assert docker_log.exists()
+    log_text = docker_log.read_text()
+    assert "manifest inspect" not in log_text, "--force-tag must skip the registry check entirely"
+    assert "docker build" in log_text
 
 
 def test_every_build_passes_pull(tmp_path):
@@ -268,3 +322,19 @@ def test_every_build_passes_pull(tmp_path):
     build_lines = [line for line in log_text.splitlines() if line.startswith("docker build")]
     assert build_lines, log_text
     assert all("--pull" in line for line in build_lines), log_text
+
+
+def test_every_build_passes_apt_cache_bust(tmp_path):
+    """APT_CACHE_BUST is what forces a stale cached apt-get-upgrade layer
+    to actually re-run — every build must pass it."""
+    project_root, bin_dir = _make_sandbox(tmp_path)
+    _write_config_env(project_root, tag="v1")
+    docker_log = tmp_path / "docker.log"
+
+    result = _run(project_root, bin_dir, docker_log, "mode-service")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    log_text = docker_log.read_text()
+    build_lines = [line for line in log_text.splitlines() if line.startswith("docker build")]
+    assert build_lines, log_text
+    assert all("--build-arg APT_CACHE_BUST=" in line for line in build_lines), log_text

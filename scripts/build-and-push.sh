@@ -29,6 +29,15 @@ set -e
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# --pull refreshes the base image tag, but Docker's build-cache for the
+# apt-get-upgrade RUN layer is keyed on (parent layer + instruction text) —
+# if the base image digest hasn't moved since the last build, that RUN
+# layer cache-hits even though Debian's package repos have kept publishing
+# security fixes independently of the base image. APT_CACHE_BUST (consumed
+# by every Dockerfile's upgrade RUN line) forces a fresh apt-get run once
+# per day regardless of layer-cache state.
+APT_CACHE_BUST="$(date -u +%Y%m%d)"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -107,29 +116,41 @@ fi
 log_info "Effective registry: $REGISTRY"
 log_info "Effective tag: $TAG"
 
-# Returns 0 if $REGISTRY/$1:$2 is listed by the registry's v2 tags/list API,
-# 1 if the registry answered but the tag wasn't listed, 2 if the endpoint
-# could not be reached at all (auth-gated registry, e.g. ghcr.io, or the
-# registry is down) — callers must treat 2 as "unknown", not "safe".
+# Returns 0 if $REGISTRY/$1:$2 already exists (docker manifest inspect
+# succeeded — via Docker's own credential store and registry endpoint
+# resolution, not a hand-rolled /v2/ URL, which breaks for path-style
+# registries like ghcr.io/org: REGISTRY="ghcr.io/org" would need
+# https://ghcr.io/v2/org/name/tags/list, not
+# https://ghcr.io/org/v2/name/tags/list). Returns 1 if it confirmed the
+# tag is genuinely absent ("manifest unknown" / "not found" style error —
+# fixed-string matching on docker's own message text, never a regex).
+# Returns 2 for any OTHER failure (auth, network, TLS, daemon error) —
+# callers must fail closed on 2, never treat it as "safe to push".
 tag_exists_in_registry() {
-    local name="$1" tag="$2" proto url resp
-    for proto in https http; do
-        url="${proto}://${REGISTRY}/v2/${name}/tags/list"
-        if resp=$(curl -fsS --max-time 5 "$url" 2>/dev/null); then
-            if printf '%s' "$resp" | grep -q "\"${tag}\""; then
-                return 0
-            fi
+    local name="$1" tag="$2" output
+    # Deliberately a separate statement from the `local` above: a single
+    # `local a=X b=$a` evaluates every right-hand side against the
+    # PRE-existing (enclosing-scope) value of each name before any of the
+    # assignments in that statement land — `${name}`/`${tag}` here would
+    # silently resolve empty if folded into the line above.
+    local image="${REGISTRY}/${name}:${tag}"
+    if output=$(docker manifest inspect "${image}" 2>&1); then
+        return 0
+    fi
+    case "${output}" in
+        *"no such manifest"*|*"manifest unknown"*|*"not found"*|*"NAME_UNKNOWN"*|*"MANIFEST_UNKNOWN"*)
             return 1
-        fi
-    done
+            ;;
+    esac
+    log_warn "docker manifest inspect for ${image} failed for a reason other than 'not found': ${output}"
     return 2
 }
 
 # Refuses (returns 1) a push to $REGISTRY/$name:$TAG that would silently
-# overwrite an existing tag, unless --force-tag was passed. A registry that
-# can't be queried (return 2 above) warns and proceeds — we must not block a
-# build for a check we structurally can't perform against an auth-gated
-# registry.
+# overwrite an existing tag, OR whose existence could not be determined
+# (auth failure, network error, etc.) — unless --force-tag was passed.
+# Fails closed: an unverifiable registry state is treated the same as a
+# confirmed collision, not as "safe to proceed".
 guard_tag_collision() {
     local name="$1"
     if [ "$FORCE_TAG" = "1" ]; then
@@ -142,7 +163,8 @@ guard_tag_collision() {
             return 1
             ;;
         2)
-            log_warn "Could not verify whether $REGISTRY/$name:$TAG already exists (registry unreachable or requires auth) — proceeding."
+            log_error "Could not verify whether $REGISTRY/$name:$TAG already exists (registry check failed — see warning above). Refusing to push without confirmation. Re-run with --force-tag to override."
+            return 1
             ;;
     esac
     return 0
@@ -169,7 +191,7 @@ build_push() {
     fi
 
     log_info "Building $name from $context..."
-    if docker build --pull --platform linux/amd64 -t "$REGISTRY/$name:$TAG" -f "$dockerfile" "$context"; then
+    if docker build --pull --build-arg APT_CACHE_BUST="$APT_CACHE_BUST" --platform linux/amd64 -t "$REGISTRY/$name:$TAG" -f "$dockerfile" "$context"; then
         log_info "Pushing $name..."
         docker push "$REGISTRY/$name:$TAG"
         log_info "$name built and pushed successfully"
@@ -208,7 +230,7 @@ build_push_with_dockerfile() {
     guard_tag_collision "$name" || return 1
 
     log_info "Building $name from $context (Dockerfile: $dockerfile_relpath)..."
-    if docker build --pull --platform linux/amd64 \
+    if docker build --pull --build-arg APT_CACHE_BUST="$APT_CACHE_BUST" --platform linux/amd64 \
         -t "$REGISTRY/$name:$TAG" \
         -f "$dockerfile_abspath" \
         "$context"; then
@@ -236,7 +258,7 @@ build_push_src() {
     guard_tag_collision "$name" || return 1
 
     log_info "Building $name with src/ context..."
-    if docker build --pull --platform linux/amd64 \
+    if docker build --pull --build-arg APT_CACHE_BUST="$APT_CACHE_BUST" --platform linux/amd64 \
         -t "$REGISTRY/$name:$TAG" \
         -f "$dockerfile" \
         "$PROJECT_ROOT/src"; then

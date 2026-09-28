@@ -1,13 +1,21 @@
 name: Container Image Vulnerability Scan
 
-# ATHENA-126: builds athena-mode-service (the smallest Python image, sharing
-# the same python:3.11-slim base and Dockerfile skeleton as every other
-# service image) and runs Trivy against it on every PR touching a
-# Dockerfile or a requirements file. A CRITICAL/HIGH finding with a
-# published fix fails the build; --ignore-unfixed skips advisories with no
-# upstream fix, and .trivyignore (repo root) documents the one exception
-# that IS fixed upstream but can't be cleared from this repo (see that
-# file's header for GHSA-6v7p-g79w-8964).
+# ATHENA-126: builds every Python image (enumerated from
+# scripts/service-defs.sh via scripts/list-python-images.sh — the same
+# source of truth build-and-push.sh and audit-images.sh use) and runs a
+# scoped Trivy scan (scripts/trivy-scoped-scan.sh) against each, on every
+# PR touching a Dockerfile or a requirements file. A CRITICAL/HIGH finding
+# with a published fix fails the build; --ignore-unfixed skips advisories
+# with no upstream fix at all. The one class of exception that IS fixed
+# upstream but can't be cleared from this repo (pip's own internally
+# vendored msgpack/setuptools — see scripts/trivy-scoped-scan.sh's header)
+# is allowed ONLY when the finding's package+version+on-disk-path match
+# exactly — a real top-level dependency landing on the same CVE ID still
+# fails the gate.
+#
+# Actions and the Trivy image are pinned to immutable references (commit
+# SHA / fixed release tag), not a moving major-version tag, so a compromised
+# or mutated upstream release can't silently change what CI runs.
 
 on:
   pull_request:
@@ -16,40 +24,62 @@ on:
       - "**/requirements*.txt"
       - "**/requirements*.in"
       - "scripts/generate-rag-dockerfiles.py"
-      - ".trivyignore"
+      - "scripts/service-defs.sh"
+      - "scripts/list-python-images.sh"
+      - "scripts/trivy-scoped-scan.sh"
       - ".github/workflows/image-scan.yml"
 
 permissions:
   contents: read
 
 jobs:
+  matrix:
+    name: Enumerate Python images
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      images: ${{ steps.list.outputs.images }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: List Python images
+        id: list
+        run: echo "images=$(bash scripts/list-python-images.sh)" >> "${GITHUB_OUTPUT}"
+
   trivy-scan:
-    name: Trivy scan (athena-mode-service)
+    name: Trivy scan (${{ matrix.image.name }})
+    needs: matrix
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        image: ${{ fromJson(needs.matrix.outputs.images) }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Build athena-mode-service
+      - name: Copy shared module (admin-backend only)
+        if: matrix.image.needs_shared_copy
+        run: cp -r src/shared "${{ matrix.image.context }}/shared"
+
+      - name: Build ${{ matrix.image.name }}
         run: |
           docker buildx build --load --pull \
-            -t athena-mode-service:scan \
-            -f src/mode_service/Dockerfile \
-            src
+            --build-arg APT_CACHE_BUST="$(date -u +%Y%m%d)" \
+            -t "${{ matrix.image.name }}:scan" \
+            -f "${{ matrix.image.dockerfile }}" \
+            "${{ matrix.image.context }}"
 
-      - name: Run Trivy (CRITICAL/HIGH, fixed only)
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "${PWD}/.trivyignore:/.trivyignore:ro" \
-            aquasec/trivy:latest image \
-            --exit-code 1 \
-            --severity CRITICAL,HIGH \
-            --ignore-unfixed \
-            --ignorefile /.trivyignore \
-            athena-mode-service:scan
+      - name: Clean up shared module copy
+        if: matrix.image.needs_shared_copy
+        run: rm -rf "${{ matrix.image.context }}/shared"
+
+      - name: Scoped Trivy scan
+        run: bash scripts/trivy-scoped-scan.sh "${{ matrix.image.name }}:scan"

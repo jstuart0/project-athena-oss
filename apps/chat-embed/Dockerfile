@@ -4,8 +4,13 @@ WORKDIR /app
 
 # Apply Debian security updates before anything else installs on top of the
 # base layer (Trivy: perl-base, gzip, libpcre2-8-0 CVEs ship stale in
-# python:3.11-slim until this runs). ATHENA-126.
-RUN apt-get update && apt-get -y --no-install-recommends upgrade && rm -rf /var/lib/apt/lists/*
+# python:3.11-slim until this runs). APT_CACHE_BUST forces a fresh
+# apt-get run even when Docker's layer cache would otherwise reuse a
+# stale result from before newer Debian security patches were published —
+# the base image digest not changing doesn't mean apt's package index
+# hasn't. build-and-push.sh passes today's date on every build. ATHENA-126.
+ARG APT_CACHE_BUST
+RUN echo "$APT_CACHE_BUST" >/dev/null && apt-get update && apt-get -y --no-install-recommends upgrade && rm -rf /var/lib/apt/lists/*
 
 # Pin the installer before it consumes the lock below (Decision 6; A9b
 # asserts the ordering, not just presence). Exact versions are

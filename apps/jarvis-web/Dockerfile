@@ -7,8 +7,11 @@ WORKDIR /app
 # base layer (Trivy: perl-base, gzip, libpcre2-8-0 CVEs ship stale in
 # python:3.11-slim until this runs). This stage's OS layers are discarded by
 # the final COPY --from=builder below, but the pip/site-packages this stage
-# produces are not, so it stays patched too. ATHENA-126.
-RUN apt-get update && apt-get -y --no-install-recommends upgrade && rm -rf /var/lib/apt/lists/*
+# produces are not, so it stays patched too. APT_CACHE_BUST forces a fresh
+# apt-get run even when Docker's layer cache would otherwise reuse a stale
+# result — build-and-push.sh passes today's date on every build. ATHENA-126.
+ARG APT_CACHE_BUST
+RUN echo "$APT_CACHE_BUST" >/dev/null && apt-get update && apt-get -y --no-install-recommends upgrade && rm -rf /var/lib/apt/lists/*
 
 # Pin the installer before it consumes the hashed lock below — hash-checking
 # mode still resolves the PEP 517 build backend for any sdist with whatever
@@ -27,8 +30,11 @@ FROM python:3.11-slim
 
 # Apply Debian security updates before anything else installs on top of the
 # base layer (Trivy: perl-base, gzip, libpcre2-8-0 CVEs ship stale in
-# python:3.11-slim until this runs). ATHENA-126.
-RUN apt-get update && apt-get -y --no-install-recommends upgrade && rm -rf /var/lib/apt/lists/*
+# python:3.11-slim until this runs). APT_CACHE_BUST forces a fresh
+# apt-get run even when Docker's layer cache would otherwise reuse a stale
+# result — build-and-push.sh passes today's date on every build. ATHENA-126.
+ARG APT_CACHE_BUST
+RUN echo "$APT_CACHE_BUST" >/dev/null && apt-get update && apt-get -y --no-install-recommends upgrade && rm -rf /var/lib/apt/lists/*
 
 # Install curl for voice API calls and ffmpeg for audio conversion
 RUN apt-get update && apt-get install -y curl ffmpeg && rm -rf /var/lib/apt/lists/*
