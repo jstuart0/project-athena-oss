@@ -922,3 +922,71 @@ def test_static_request_service_action_uses_confirm_name_not_manager_target():
     fn = _extract_block(SERVICE_CONTROL_JS, "function requestServiceAction(")
     assert "row.confirm_required ? row.confirm_name : null" in fn
     assert "row.manager_target || row.name" not in fn
+
+
+# ---------------------------------------------------------------------------
+# Guest Mode owner PIN (mozart jackson, urgent fix blocking ATHENA-69
+# rollout): admin/frontend/guest-mode.js rendered a "PIN must be set again"
+# notice with no input anywhere to actually set one. setOwnerPin() reads two
+# password inputs, validates client-side, and sends only {owner_pin} to the
+# existing PATCH /api/guest-mode/config endpoint. The PIN itself is never a
+# candidate for HTML/DOM/console interpolation in this file, so these are
+# static source checks (grep-equivalent, not Node/jsdom), matching the
+# service-control.js typed-confirm precedent above.
+# ---------------------------------------------------------------------------
+
+GUEST_MODE_JS = FRONTEND_DIR / "guest-mode.js"
+
+
+def test_static_set_owner_pin_request_body_carries_only_owner_pin():
+    fn = _extract_block(GUEST_MODE_JS, "async function setOwnerPin(")
+    assert "JSON.stringify({ owner_pin: pin })" in fn
+    assert "method: 'PATCH'" in fn
+    assert "/api/guest-mode/config" in fn
+
+
+def test_static_set_owner_pin_validates_six_digits_and_confirmation_match():
+    fn = _extract_block(GUEST_MODE_JS, "async function setOwnerPin(")
+    assert "/^[0-9]{6}$/.test(pin)" in fn
+    assert "pin !== confirmPin" in fn
+
+
+def test_static_owner_pin_value_never_reaches_console_or_innerhtml():
+    """The raw PIN (the `pin`/`confirmPin` locals in setOwnerPin, and the
+    `owner-pin-input`/`owner-pin-confirm` field values) must never be logged
+    or written into rendered HTML anywhere in guest-mode.js."""
+    source = GUEST_MODE_JS.read_text()
+    assert not re.search(r"console\.\w+\([^)]*\b(pin|confirmPin)\b", source)
+    assert not re.search(r"innerHTML\s*[+]?=[^;]*\b(pin|confirmPin)\b", source)
+    # The only interpolation of the *inputs themselves* is reading .value in
+    # setOwnerPin -- never writing a value back into a template literal.
+    assert "${pin}" not in source
+    assert "${confirmPin}" not in source
+
+
+def test_static_owner_pin_inputs_are_password_type_with_no_autocomplete():
+    source = (FRONTEND_DIR / "index.html").read_text()
+    for input_id in ("owner-pin-input", "owner-pin-confirm"):
+        m = re.search(rf'<input[^>]*id="{input_id}"[^>]*>', source)
+        assert m, f"expected an <input id=\"{input_id}\"> in index.html"
+        tag = m.group(0)
+        assert 'type="password"' in tag
+        assert 'autocomplete="off"' in tag
+        assert 'inputmode="numeric"' in tag
+        assert 'pattern="[0-9]{6}"' in tag
+
+
+def test_static_set_owner_pin_button_wired_and_bare_expression():
+    """onclick="setOwnerPin()" takes no arguments -- neither escapeHtml nor
+    escapeJsAttr applies (rule 3, the bare-expression/no-argument case), and
+    there is nothing here for check-handler-escaping.py to flag."""
+    source = (FRONTEND_DIR / "index.html").read_text()
+    assert 'onclick="setOwnerPin()"' in source
+
+
+def test_static_set_owner_pin_clears_inputs_on_both_success_and_error():
+    fn = _extract_block(GUEST_MODE_JS, "async function setOwnerPin(")
+    # Two calls inside the try block (success path) and one inside the catch
+    # (error path) -- three call sites plus the definition itself.
+    assert fn.count("clearInputs();") >= 2
+    assert re.search(r"catch \(error\) \{\s*clearInputs\(\);", fn)

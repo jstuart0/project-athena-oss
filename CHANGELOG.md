@@ -40,6 +40,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The Guest Mode admin page had a "Owner PIN must be set again" notice but no way to actually set one — the input that existed wasn't wired to anything. Added a dedicated Owner PIN section (6-digit input, confirmation input, client-side validation) that saves via the existing partial-update config endpoint and shows whether a PIN is currently configured.
 - `scripts/deploy.sh` refuses to apply manifests that still carry an unconfigured placeholder (any `YOUR_*` or `CONFIGURE_ME*` token) before running any `kubectl` command, so a placeholder manifest can no longer overwrite a live, already-configured deployment. Pass `--allow-placeholders` to apply against a fresh, unconfigured namespace.
 - RAG self-registration no longer overwrites a service registry row's host or type with `localhost`/`api` on startup — it now sends only the fields it owns, with an optional `SERVICE_REGISTRY_ENDPOINT_URL` env var available for an explicit endpoint. The registry upsert route treats endpoint-location fields as partial updates instead of requiring the full set on every call.
 - DEV_MODE's service registry seed types RAG rows as `rag`; previously every seeded row, including the RAG services, was typed `api`.

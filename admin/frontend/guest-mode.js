@@ -294,6 +294,20 @@ async function updateGuestModeStatus() {
             </div>
         ` : '';
 
+        const pinStatusEl = document.getElementById('owner-pin-status-text');
+        if (pinStatusEl) {
+            if (config.owner_pin_needs_reset) {
+                pinStatusEl.textContent = 'PIN must be reset';
+                pinStatusEl.className = 'text-xs text-yellow-400 mb-2';
+            } else if (config.owner_pin_configured) {
+                pinStatusEl.textContent = 'PIN configured';
+                pinStatusEl.className = 'text-xs text-green-400 mb-2';
+            } else {
+                pinStatusEl.textContent = 'PIN not configured';
+                pinStatusEl.className = 'text-xs text-gray-500 mb-2';
+            }
+        }
+
         if (hasCurrentGuests) {
             banner.innerHTML = `
                 <div class="p-4 bg-green-900/20 border border-green-700/50 rounded-lg flex items-center gap-3">
@@ -346,6 +360,59 @@ async function updateGuestModeStatus() {
                 </div>
             </div>
         `;
+    }
+}
+
+// ============================================================================
+// Owner PIN
+// ============================================================================
+
+async function setOwnerPin() {
+    const pinInput = document.getElementById('owner-pin-input');
+    const confirmInput = document.getElementById('owner-pin-confirm');
+    const errorEl = document.getElementById('owner-pin-error');
+    const setBtn = document.getElementById('owner-pin-set-btn');
+
+    const pin = pinInput.value;
+    const confirmPin = confirmInput.value;
+
+    const clearInputs = () => {
+        pinInput.value = '';
+        confirmInput.value = '';
+    };
+
+    const showFieldError = (message) => {
+        errorEl.textContent = message;
+        errorEl.classList.remove('hidden');
+    };
+
+    errorEl.textContent = '';
+    errorEl.classList.add('hidden');
+
+    if (!/^[0-9]{6}$/.test(pin)) {
+        showFieldError('PIN must be exactly 6 digits.');
+        return;
+    }
+    if (pin !== confirmPin) {
+        showFieldError('PINs do not match.');
+        clearInputs();
+        return;
+    }
+
+    setBtn.disabled = true;
+    try {
+        await apiRequest('/api/guest-mode/config', {
+            method: 'PATCH',
+            body: JSON.stringify({ owner_pin: pin })
+        });
+        clearInputs();
+        safeShowToast('Owner PIN set', 'success');
+        updateGuestModeStatus();
+    } catch (error) {
+        clearInputs();
+        safeShowToast(error?.message || 'Failed to set owner PIN', 'error');
+    } finally {
+        setBtn.disabled = false;
     }
 }
 
