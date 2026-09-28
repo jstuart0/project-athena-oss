@@ -10,11 +10,18 @@
 # gate would never fire again even though the risk profile changed
 # completely. Instead this script parses Trivy's own JSON output and only
 # treats a finding as pre-approved when ALL of (VulnerabilityID, PkgName,
-# InstalledVersion) match one of the two rows below AND the package has no
-# on-disk FilePath (i.e. Trivy found it only via pip's bundled CycloneDX
-# SBOM, not a real installed distribution — `--list-all-pkgs` surfaces
-# this). A real top-level package at the same name+version would carry a
-# real FilePath and would NOT match — it fails the gate like anything else.
+# InstalledVersion) match one of the two rows below AND the SPECIFIC
+# package instance that vulnerability was reported against (joined by
+# Trivy's own PkgIdentifier.UID / Identifier.UID, falling back to PkgPath
+# when no UID is present) has no on-disk FilePath — i.e. Trivy found it
+# only via pip's bundled CycloneDX SBOM, not a real installed distribution.
+# Joining by (name, version) alone is NOT enough (codex r2): if pip's
+# vendored copy AND a real top-level package share the exact same
+# name+version, a same-ID/name/version finding for the REAL copy must
+# still fail even though a same-ID/name/version finding for the vendored
+# copy is allowed — so this script also fails closed if ANY package
+# sharing that (name, version) anywhere in the scan carries a FilePath,
+# not just the UID-resolved instance for this specific finding.
 #
 # Known vendored-pip exceptions today (re-check: `pip index versions pip`;
 # remove a row once a released pip vendors the fix):
@@ -95,55 +102,111 @@ import sys
 
 path, image = sys.argv[1], sys.argv[2]
 
-# (VulnerabilityID, PkgName, InstalledVersion) -> ALSO requires no on-disk
-# FilePath (vendored-only) to be allowed. Keep this set to exactly the two
-# rows documented in this script's header — do not widen it to a bare
-# VulnerabilityID or PkgName match.
+# (VulnerabilityID, PkgName, InstalledVersion) -> ALSO requires the
+# UID-resolved package instance to have no on-disk FilePath, AND no
+# sibling package at the same (name, version) anywhere in the scan to
+# have one either. Keep this set to exactly the two rows documented in
+# this script's header — do not widen it to a bare VulnerabilityID or
+# PkgName match.
 ALLOWED = {
     ("GHSA-6v7p-g79w-8964", "msgpack", "1.1.2"),
     ("CVE-2025-47273", "setuptools", "70.3.0"),
 }
 
-with open(path) as f:
-    data = json.load(f)
+try:
+    with open(path) as f:
+        data = json.load(f)
 
-# FilePath lookup from --list-all-pkgs, keyed by (name, version). None
-# means at least one occurrence of that (name, version) has no on-disk
-# FilePath — i.e. it's the vendored-only instance a Vulnerability entry
-# with no path of its own could be describing.
-filepaths: dict[tuple[str, str], str | None] = {}
-for result in data.get("Results", []):
-    for pkg in result.get("Packages", []) or []:
-        key = (pkg.get("Name"), pkg.get("Version"))
-        fp = pkg.get("FilePath") or None
-        if key not in filepaths or fp is None:
-            filepaths[key] = fp
+    results = data.get("Results", [])
+    if not isinstance(results, list):
+        raise TypeError(f"'Results' is {type(results).__name__}, expected a list")
 
-allowed_findings = []
-failing_findings = []
+    # Packages keyed by Identifier.UID — the exact instance a Vulnerability
+    # entry's PkgIdentifier.UID resolves to. Also track, per (name,
+    # version), whether ANY package instance anywhere in the scan carries
+    # a real on-disk FilePath — a sibling real copy at the same
+    # name+version must block the vendored copy's own finding too, even
+    # though the UID-resolved instance for that specific finding is
+    # vendored-only.
+    packages_by_uid: dict[str, dict] = {}
+    has_real_path_for_name_version: set[tuple[str, str]] = set()
 
-for result in data.get("Results", []):
-    for v in result.get("Vulnerabilities", []) or []:
-        vuln_id = v.get("VulnerabilityID")
-        pkg_name = v.get("PkgName")
-        installed = v.get("InstalledVersion")
-        key3 = (vuln_id, pkg_name, installed)
-        fp = filepaths.get((pkg_name, installed))
-        label = f"{pkg_name}=={installed} {vuln_id} (severity={v.get('Severity')})"
-        if key3 in ALLOWED and fp is None:
-            allowed_findings.append(label)
-        else:
-            if key3[:2] in {(a, b) for a, b, _ in ALLOWED}:
-                label += " [DOES NOT MATCH the allowed vendored-copy predicate — real FilePath or version mismatch]"
-            failing_findings.append(label)
+    for result in results:
+        for pkg in result.get("Packages", []) or []:
+            uid = (pkg.get("Identifier") or {}).get("UID")
+            name, version = pkg.get("Name"), pkg.get("Version")
+            fp = pkg.get("FilePath") or None
+            if uid:
+                packages_by_uid[uid] = pkg
+            if fp:
+                has_real_path_for_name_version.add((name, version))
 
-print(f"=== {image} ===")
-print(f"Allowed (documented pip-vendored copies): {len(allowed_findings)}")
-for a in allowed_findings:
-    print(f"   {a}")
-print(f"Failing: {len(failing_findings)}")
-for finding in failing_findings:
-    print(f"   x {finding}")
+    allowed_findings = []
+    failing_findings = []
 
-sys.exit(1 if failing_findings else 0)
+    for result in results:
+        for v in result.get("Vulnerabilities", []) or []:
+            vuln_id = v.get("VulnerabilityID")
+            pkg_name = v.get("PkgName")
+            installed = v.get("InstalledVersion")
+            key3 = (vuln_id, pkg_name, installed)
+            label = f"{pkg_name}=={installed} {vuln_id} (severity={v.get('Severity')})"
+
+            # Resolve THIS finding's specific package instance: exact join
+            # by PkgIdentifier.UID first, falling back to the
+            # vulnerability's own PkgPath field when no UID is present. If
+            # neither resolves, we cannot prove this is the vendored-only
+            # instance — treat as unresolved, never as "allowed".
+            pkg_uid = (v.get("PkgIdentifier") or {}).get("UID")
+            resolved_pkg = packages_by_uid.get(pkg_uid) if pkg_uid else None
+            if resolved_pkg is not None:
+                unresolved = False
+                instance_filepath = resolved_pkg.get("FilePath") or None
+            elif v.get("PkgPath"):
+                unresolved = False
+                instance_filepath = v.get("PkgPath")
+            else:
+                unresolved = True
+                instance_filepath = None
+
+            is_vendored_instance = (not unresolved) and instance_filepath is None
+            has_sibling_real_copy = (pkg_name, installed) in has_real_path_for_name_version
+
+            if key3 in ALLOWED and is_vendored_instance and not has_sibling_real_copy:
+                allowed_findings.append(label)
+            else:
+                if key3 in ALLOWED:
+                    reasons = []
+                    if unresolved:
+                        reasons.append(
+                            "could not resolve the specific package instance "
+                            "(no PkgIdentifier.UID or PkgPath match) -- cannot confirm vendored-only"
+                        )
+                    elif not is_vendored_instance:
+                        reasons.append(f"resolved package instance has a real FilePath ({instance_filepath})")
+                    if has_sibling_real_copy:
+                        reasons.append(
+                            "a real (non-vendored) copy of this name+version is present "
+                            "elsewhere in the image"
+                        )
+                    label += f" [DOES NOT MATCH the allowed vendored-copy predicate: {'; '.join(reasons)}]"
+                failing_findings.append(label)
+
+    print(f"=== {image} ===")
+    print(f"Allowed (documented pip-vendored copies): {len(allowed_findings)}")
+    for a in allowed_findings:
+        print(f"   {a}")
+    print(f"Failing: {len(failing_findings)}")
+    for finding in failing_findings:
+        print(f"   x {finding}")
+
+    sys.exit(1 if failing_findings else 0)
+
+except (AttributeError, TypeError, KeyError) as e:
+    # The JSON parsed (bash already checked that), but its shape doesn't
+    # match what this script expects -- a tool/schema problem, not a
+    # security finding. Must exit 2 (scan error), never 1 (would read as
+    # "gate correctly failed on real findings") or 0 (would read as clean).
+    print(f"FAIL: unexpected JSON schema from trivy for {image}: {e}", file=sys.stderr)
+    sys.exit(2)
 PY

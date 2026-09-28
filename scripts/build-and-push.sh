@@ -121,11 +121,20 @@ log_info "Effective tag: $TAG"
 # resolution, not a hand-rolled /v2/ URL, which breaks for path-style
 # registries like ghcr.io/org: REGISTRY="ghcr.io/org" would need
 # https://ghcr.io/v2/org/name/tags/list, not
-# https://ghcr.io/org/v2/name/tags/list). Returns 1 if it confirmed the
-# tag is genuinely absent ("manifest unknown" / "not found" style error —
-# fixed-string matching on docker's own message text, never a regex).
-# Returns 2 for any OTHER failure (auth, network, TLS, daemon error) —
-# callers must fail closed on 2, never treat it as "safe to push".
+# https://ghcr.io/org/v2/name/tags/list). Returns 1 ONLY if it confirmed
+# the tag is genuinely absent — matched against the specific manifest/name
+# "unknown" markers the Docker distribution spec uses for true absence
+# (MANIFEST_UNKNOWN, NAME_UNKNOWN, "manifest unknown", "no such manifest"),
+# case-insensitively, fixed-string only, never a regex. A bare "not found"
+# substring is deliberately NOT treated as absence (codex r2): an auth,
+# credential-helper, TLS, or registry-routing failure can also contain
+# that phrase (e.g. "repository not found or you do not have access" from
+# an UNAUTHORIZED response), and treating it as "tag absent" would
+# fail-open the guard for exactly those failures. Returns 2 for any OTHER
+# failure — callers must fail closed on 2, never treat it as "safe to
+# push". REGISTRY_INSECURE=1 appends --insecure to the inspect call only
+# (see config.env.example), for a private plain-HTTP registry Docker
+# hasn't been separately configured to trust.
 tag_exists_in_registry() {
     local name="$1" tag="$2" output
     # Deliberately a separate statement from the `local` above: a single
@@ -134,15 +143,21 @@ tag_exists_in_registry() {
     # assignments in that statement land — `${name}`/`${tag}` here would
     # silently resolve empty if folded into the line above.
     local image="${REGISTRY}/${name}:${tag}"
-    if output=$(docker manifest inspect "${image}" 2>&1); then
+    local insecure_flag=()
+    if [ "${REGISTRY_INSECURE:-0}" = "1" ]; then
+        insecure_flag=(--insecure)
+    fi
+    if output=$(docker manifest inspect "${insecure_flag[@]}" "${image}" 2>&1); then
         return 0
     fi
-    case "${output}" in
-        *"no such manifest"*|*"manifest unknown"*|*"not found"*|*"NAME_UNKNOWN"*|*"MANIFEST_UNKNOWN"*)
+    local output_lower
+    output_lower="$(printf '%s' "${output}" | tr '[:upper:]' '[:lower:]')"
+    case "${output_lower}" in
+        *"manifest_unknown"*|*"name_unknown"*|*"manifest unknown"*|*"no such manifest"*)
             return 1
             ;;
     esac
-    log_warn "docker manifest inspect for ${image} failed for a reason other than 'not found': ${output}"
+    log_warn "docker manifest inspect for ${image} failed for a reason other than confirmed tag absence: ${output}"
     return 2
 }
 
