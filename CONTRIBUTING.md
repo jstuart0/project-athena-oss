@@ -191,7 +191,7 @@ to stay complete — when you add a field, add its row here too.
 | `orchestrator_ingress_auth` | `ORCHESTRATOR_INGRESS_AUTH` | `enforce` | `enforce`\|`warn`; gates the orchestrator's query/session routes behind `X-Service-Key` |
 | `music_assistant_url` | `MUSIC_ASSISTANT_URL` | `""` | Empty means Music Assistant isn't configured (no hardcoded-host fallback) |
 | `searxng_base_url` | `SEARXNG_BASE_URL` | `""` | Empty means the SearXNG search provider is disabled |
-| `jarvis_web_url` | `JARVIS_WEB_URL` | `""` | Empty means the smart-home controller's jarvis-web appliance/sensor/media lookups are skipped (ATHENA-128) |
+| `jarvis_web_url` | `JARVIS_WEB_URL` | `""` | Empty means the smart-home controller's jarvis-web appliance/sensor/media lookups are skipped |
 | `transit_region_name` | `TRANSIT_REGION_NAME` | `""` | Cosmetic label for the configured transit region |
 | `transit_gtfs_feeds` | `TRANSIT_GTFS_FEEDS` | `""` | JSON GTFS feed definitions for the transportation RAG service |
 | `transit_static_services` | `TRANSIT_STATIC_SERVICES` | `""` | JSON non-GTFS transit services (fixed schedules) |
@@ -209,6 +209,8 @@ to stay complete — when you add a field, add its row here too.
 | `mode_service_ingress_auth` | `MODE_SERVICE_INGRESS_AUTH` | `enforce` | `enforce`\|`warn`; gates the mode service's `/mode*` routes behind `X-Service-Key` (D15) |
 | `mode_override_lockout_threshold` | `MODE_OVERRIDE_LOCKOUT_THRESHOLD` | `5` | Failed owner-PIN verifications (per trust tier) before that tier locks out (D16/D25) |
 | `mode_override_lockout_minutes` | `MODE_OVERRIDE_LOCKOUT_MINUTES` | `30` | Owner-PIN lockout duration once the threshold is reached |
+| `ha_write_fanout_confirm_threshold` | `HA_WRITE_FANOUT_CONFIRM_THRESHOLD` | `6` | Distinct entities a non-command utterance may write before it needs a confirmation or explicit all/group wording; `0` disables |
+| `ha_write_fanout_hard_limit` | `HA_WRITE_FANOUT_HARD_LIMIT` | `18` | The same bound for plain commands; `0` disables; `0 < hard_limit < threshold` fails startup |
 | `livekit_user_token_ttl_minutes` | `LIVEKIT_USER_TOKEN_TTL_MINUTES` | `30` | TTL (clamped 1-1440) for browser-facing LiveKit room tokens (jarvis-web voice sessions); server-side Athena participant tokens are unaffected (D27) |
 | `override_max_timeout_minutes` | `OVERRIDE_MAX_TIMEOUT_MINUTES` | `240` | Server-side ceiling on `POST /mode/override`'s `timeout_minutes`, applied regardless of PIN outcome; a requested value above this is clamped, never rejected (ATHENA-69 Pass H2) |
 

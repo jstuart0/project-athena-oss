@@ -603,6 +603,14 @@ def seed_oss_features():
             True, False, 53,
             {"cache_ttl_seconds": 86400, "fallback_airports": {"new york": "JFK", "los angeles": "LAX", "chicago": "ORD", "miami": "MIA", "san francisco": "SFO"}}
         ),
+        # Routing Features
+        (
+            "state_question_routing_kill_switch",
+            "State-Question Routing Kill Switch",
+            "Enable to DISABLE state-question routing (emergency revert). While enabled, questions like 'are the office lights on?' go back to the legacy smart-home path instead of a guaranteed read.",
+            "routing",
+            False, False, 70, None
+        ),
         # Voice Features
         (
             "ai_follow_ups_enabled",

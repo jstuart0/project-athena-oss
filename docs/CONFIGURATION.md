@@ -187,7 +187,7 @@ DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 |----------|---------|-------------|
 | `MODE_SERVICE_URL` | `http://localhost:8022` | Mode service (ATHENA-69). **Required** on both the orchestrator and the gateway — without it, mode/permission resolution degrades every request (orchestrator: `get_current_mode`'s outage fallback; gateway: `mode_gate.py`'s fast-path check always returns `False`). See "Mode and permissions" under Module Settings below. |
 | `NOTIFICATIONS_SERVICE_URL` | `http://localhost:8050` | Notifications service |
-| `JARVIS_WEB_URL` | *(empty)* | jarvis-web API base for appliance/sensor/media lookups in the orchestrator's smart-home controller; empty skips them (ATHENA-128). |
+| `JARVIS_WEB_URL` | *(empty)* | jarvis-web API base for appliance/sensor/media lookups in the orchestrator's smart-home controller; empty skips them. |
 | `CONTROL_AGENT_URL` | `http://localhost:8099` | Service management API |
 | `CONTROL_AGENT_SERVICES_FILE` | *(empty)* | Path to a JSON file (read by the Control Agent process itself, not admin-backend) naming which bare processes, watchdog exclusions, and Docker containers this Control Agent may manage. Empty means it manages nothing. See below. |
 
@@ -658,6 +658,54 @@ protects against PIN-guessing; **changing the PIN in the admin UI clears
 the lockout counter** for every tier. The lockout is per-tier
 (`household`/`sms`/`web_authenticated`), never keyed on session id, room,
 or device id, so a caller can't dodge it by rotating identifiers.
+
+**State questions are answered, never written.** A question about device
+state ("are the office lights on or off right now", "is the front door
+locked", "check if the garage is closed") is answered from Home Assistant
+state under a read-only permission scope: the permission guard refuses
+every write for that request before anything else is checked, whatever the
+LLM extracts. Commands phrased as requests ("can you turn off the lights?",
+"make sure the doors are locked", "leave the porch light on") are still
+commands. A status-sounding command ("turn the office lights on", "set the
+temperature to 70") now executes; it used to get a house-wide status read
+back instead. The question/command classifier is English-only.
+
+**Large writes need explicit wording.** One utterance may write at most
+`HA_WRITE_FANOUT_CONFIRM_THRESHOLD` distinct entities (default 6) unless it
+names that scope itself: `all`, `every`, `everything`, `whole`, `entire`,
+`house`, the room group's name, or two or more of the rooms it covers. A
+plain command ("turn off the office lights") is allowed up to
+`HA_WRITE_FANOUT_HARD_LIMIT` (default 18). A target of every entity in a
+domain, area, floor or label (e.g. a missing "good night" scene's fallback
+of every light) is never confirmable: without explicit wording it's always
+answered with the command to say instead. `0` disables either limit; a hard
+limit below the threshold, other than `0`, fails orchestrator startup. An
+HA light group entity counts as one.
+
+Above the bound, what happens depends on the surface:
+
+| Surface | Response |
+|---------|----------|
+| Home Assistant Assist (gateway HA conversation route), LiveKit, jarvis-web chat, SMS | "That would turn off 11 lights in the office. Should I go ahead?" A bare "yes" (or "Yes, please.", "okay do it", "go ahead") within 60 seconds runs exactly those entities; "no" cancels; anything else is treated as a new request. |
+| Wyoming satellites, the OpenAI-compatible `/v1/chat/completions` path, any other caller | "That would turn off 11 lights in the office. To do it, say: turn off all the office lights." Nothing is stored. |
+
+A confirmation is bound to the caller that got the prompt: the caller
+trust tier, device id, room and resolved mode. A "yes" from anyone else on
+the same session gets "I'm not sure what you're agreeing to." and changes
+nothing. The replay runs under the replying turn's own permissions, so a
+mode change in between is enforced. If Home Assistant's gateway
+pre-routing (`ha_intent_prerouting`, off by default) is enabled, it may
+answer a short "yes" itself before it reaches the orchestrator; the
+pending write then simply expires unexecuted.
+
+**Kill switch.** The admin UI feature `state_question_routing_kill_switch`
+(seeded **disabled**) is an emergency revert: **enabling** it turns
+state-question routing **off** and restores the previous routing. It's
+inverted on purpose: the orchestrator treats a missing flag, or an admin
+API it can't reach, as disabled, so an enable-style flag would silently
+switch the protection off on a fresh install or during an outage. The
+read-only guard and the large-write limits stay active either way; to relax
+the limits, set both variables above to `0`.
 Public/unauthenticated callers (`web_public`) can never attempt the PIN at
 all — see the caller table above.
 
