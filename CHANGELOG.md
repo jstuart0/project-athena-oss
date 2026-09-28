@@ -9,9 +9,73 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> **Ticket:** ATHENA-118
+---
 
-### Added: Service Control resolves a real manager per row (Control Agent / Kubernetes / none) instead of guessing from a stale `is_running` flag (ATHENA-118)
+## [0.4.0] - 2026-09-28 — OSS readiness, service control, security hardening
+
+The first release after the house-to-OSS migration. Every deployment-specific value is now configuration, the orchestrator and Control Agent require service authentication, and the admin panel manages services through a real manager (Kubernetes / Control Agent / none) instead of a stale flag.
+
+### Upgrade notes (read before deploying)
+
+- Run `alembic upgrade head`: the `rag_services` table is renamed to `athena_service_registry`; a data migration clears legacy maintainer OIDC values from seeded databases.
+- `SERVICE_API_KEY` is required: by default the orchestrator rejects `/query`, session, and admin-maintenance calls without a matching `X-Service-Key` header (`ORCHESTRATOR_INGRESS_AUTH` defaults to `enforce`); set it to `warn` first if you need to find a caller your own integrations add before relying on the default. Every mutating Control Agent route also requires the header.
+- `/api/base-knowledge/public` now requires service or OIDC authentication.
+- The Control Agent manages nothing unless `CONTROL_AGENT_SERVICES_FILE` is set; `CONTROL_AGENT_ENABLED` defaults to `false`.
+- Service Control: actions on a row with no manager now return 409 `action_not_available` (previously 200 `success:false`); critical targets require the owner role plus a typed confirmation; the restart "Quick Actions" macros are removed.
+- Local login now returns 401 for every failure; the old 403 "account inactive" response is gone.
+
+### Added
+
+- Service Control for Kubernetes: per-row manager resolution, a unified `GET /api/service-control` envelope, an opt-in scale-only Kubernetes adapter (`SERVICE_CONTROL_K8S_ENABLED`, name-scoped Role under `manifests/athena-prod/optional/`), a cross-replica lease, a shielded restart (scale-to-0, bounded wait, guaranteed scale-back), typed confirmation, a target-collision guard, and the Ollama panel routed through the same resolver.
+- Service registry as the single source of truth, with a background health poller, leader election across replicas, TCP health-check mode, a registry Edit modal, and partial-update upsert.
+- Transit tool: `search_transit` now reaches a real transportation route; Memory & Context → Base Knowledge settings save and reload correctly.
+- Orchestrator benchmark observability and a tool-calling A/B harness.
+- Twilio SMS webhook signature validation.
+- A maintainer-leak CI gate (`scripts/check-maintainer-leaks.py`) with a generic private-IP rule, plus frontend-escaping CI gates (uniqueness, callee-sink, and load-order checks).
+- Configuration: 42 centralized `AthenaConfig` env vars, including `HA_SATELLITE_ROOM_MAP`, `HA_TV_ENTITIES`, `HA_MUSIC_PLAYERS`, `HA_BED_WARMER_ENTITIES`, `HA_LIGHT_GROUPS`, `MUSIC_ASSISTANT_URL`, `SEARXNG_BASE_URL`, `TRANSIT_*`, `COMMUNITY_EVENTS_SOURCES`, `DEFAULT_AMTRAK_STATION`, `TRUSTED_PROXY_CIDRS`, `ORCHESTRATOR_INGRESS_AUTH`, `SERVICE_CONTROL_K8S_ENABLED`.
+
+### Changed
+
+- Mission Control is the landing tab; its voice-health card, `/api/status`, and quick-stats are registry-driven instead of hard-coded to five named services.
+- Dashboard health counts enabled services only; a disabled row no longer degrades the overall system status.
+- Orchestrator refactor: state, helpers, mode/permission, URLs, metrics, and ten pipeline nodes extracted from `main.py`; added a validator training-knowledge bypass.
+- Admin-frontend escaping consolidated into one `escape-html.js`.
+- RAG services take every external dependency from configuration; OSS dependency cleanup across all 23 services.
+- Control Agent process list, watchdog exclusions, and container allowlist now come from a services file, and processes are launched without a shell.
+
+### Fixed
+
+- Post-cutover voice defects: RAG URL parity, streaming think-disable parity, a temporal-location filter gap, missing LiveKit/numpy dependencies, sequence-timing false positives, and a dining keyword gap.
+- Home Assistant's `/ha/conversation` route could 500 after the requested device command had already executed (a fast-path formatting bug, not a request failure).
+- Gateway simple-command fast path: a failed Home Assistant call no longer returns a canned success; the request falls through to the orchestrator.
+- The orchestrator's config loader and RAG client never sent the service key, so admin-panel configuration changes silently never took effect.
+- Dashboard badges rendered "undefined"; System Configuration cards always read Offline.
+- The Ollama models endpoint 500'd on a `/api/ps` failure.
+- Guest-name XSS in the admin frontend.
+- Skip-guard and dependency-remediation fixes.
+
+### Security
+
+- Orchestrator ingress authentication on 13 routes.
+- Control Agent inbound authentication on 17 mutating routes.
+- SSRF guard: a shared `safe_request` at every user/admin URL fetch chokepoint, full path+query validation, gates on quick-stats, voice-test probes, and every admin-backend Ollama request, and URL validation at the Ollama-URL write boundary.
+- Auth hardening: per-IP rate limit, per-user lockout, constant-time failure paths, service-auth startup gates, and deferred auth hardening (an OIDC issuer-validation opt-out, short-lived WebSocket tickets).
+- The public base-knowledge endpoint is now gated.
+- No maintainer values in runtime code, enforced by a CI leak gate.
+
+### Removed
+
+- The service restart "Quick Actions" macros (`voice-pipeline-restart`, `full-stack-restart`, `llm-refresh`) and their unaudited direct route calls.
+- The hard-coded Control Agent process list.
+- Maintainer-identifying values (home network details, personal name, hostnames) from tracked runtime code.
+
+### Deprecated
+
+- `athena_service_registry.is_running` is no longer written; run state is derived from health instead.
+
+### Details
+
+#### Added: Service Control resolves a real manager per row (Control Agent / Kubernetes / none) instead of guessing from a stale `is_running` flag
 
 - **Added — `GET /api/service-control` envelope**: `{services, counts, control_agent, kubernetes}` replaces the old bare list. Each row's run state (`running`/`stopped`/`disabled`) is derived from health + `enabled` (`app/utils/service_state.py`), never the `is_running` column, which is now unwritten (deprecated, kept only for the startup schema gate). **Behavior change**: a row with no manager now returns 409 `action_not_available` on a lifecycle action instead of 200 `success: false`.
 - **Added — `app/services/service_managers.py::resolve_manager`**: per-row manager resolution, Control Agent (host-gated) then Kubernetes then `none`, with server-side grouping (`row.group`) and D10's action table.
@@ -28,76 +92,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Removed (Phase 4) — the service restart "Quick Actions" macros** (`voice-pipeline-restart`, `full-stack-restart`, `llm-refresh`): they issued unaudited direct calls to the old per-service routes with no manager awareness, resolution, or owner gating, and had no wiring in `index.html`. The restart-history timeline (previously computed but never rendered — no `#restart-timeline` element existed) is now visible on the page, reading `/api/audit` for `service_start`/`service_stop`/`service_restart` events.
 - **Changed (Phase 4) — the Ollama panel's health/model refresh is now a single `refreshOllamaPanel()` entry point** (`Promise.allSettled` over both loaders), so the status card and the models table never render from a stale pairing of one fresh and one lagging fetch. Fixed an unescaped `ollamaHealth.host` interpolation in the process.
 
----
+#### Changed: Mission Control's voice-health card is registry-driven, not hard-coded to 5 named services
 
-## [Unreleased]
-
-> **Ticket:** ATHENA-113
-
-### Changed: Mission Control's voice-health card is registry-driven, not hard-coded to 5 named services (ATHENA-113 follow-up)
-
-- **Changed — `admin/backend/app/routes/dashboard.py::get_dashboard_data`** no longer hard-codes exactly Gateway, Orchestrator, and 3 named RAGs (arbitrary, from the initial OSS commit). Core services (`gateway`/`orchestrator`) read their service-registry row when one exists (cached health, no probe), falling back to a gated live probe of `GATEWAY_URL`/`ORCHESTRATOR_URL` only when no row is registered. Every **enabled** registry row with `service_type='rag'` is included; **disabled rows are excluded entirely** (not shown, not counted -- distinct from ATHENA-112/113c's "shown labeled disabled" convention, since this card only ever showed configured, active services in the first place). `unconfigured` counts toward "needs attention" (excluded from `healthy_count`) but keeps its own literal status rather than being relabeled `unhealthy` -- not configured and actively failing are different claims. `critical_services` entries now include `last_error`. The bottom Service Status grid renders the same registry-driven set. `mission-control.js` needed no changes -- it was already fully data-driven off the response shape, with no hardcoded count or name assumptions.
+- **Changed — `admin/backend/app/routes/dashboard.py::get_dashboard_data`** no longer hard-codes exactly Gateway, Orchestrator, and 3 named RAGs (arbitrary, from the initial OSS commit). Core services (`gateway`/`orchestrator`) read their service-registry row when one exists (cached health, no probe), falling back to a gated live probe of `GATEWAY_URL`/`ORCHESTRATOR_URL` only when no row is registered. Every **enabled** registry row with `service_type='rag'` is included; **disabled rows are excluded entirely** (not shown, not counted -- distinct from the dashboard health-count fix's "shown labeled disabled" convention, since this card only ever showed configured, active services in the first place). `unconfigured` counts toward "needs attention" (excluded from `healthy_count`) but keeps its own literal status rather than being relabeled `unhealthy` -- not configured and actively failing are different claims. `critical_services` entries now include `last_error`. The bottom Service Status grid renders the same registry-driven set. `mission-control.js` needed no changes -- it was already fully data-driven off the response shape, with no hardcoded count or name assumptions.
 - **Note**: the OSS dev-mode seed (`admin/backend/app/database.py::seed_oss_service_registry`) still tags every seeded row `service_type='api'` (a pre-existing hardcoded literal, not derived from data), so a fresh `DEV_MODE` install's RAG rows won't match `service_type='rag'` until corrected via the admin UI or the Control Agent's startup sync (which does set it correctly, `"rag" if "-rag" in service_name else "core"` in `src/control_agent/main.py::sync_registry_loop`). Flagged as a separate, pre-existing seed-data inconsistency -- out of scope here.
 
----
-
-## [Unreleased]
-
-> **Ticket:** ATHENA-113
-> **Codex review:** `.mozart/plans/active/2026-09-27-diagnose-athena-mission-control.codex-r2-delta.md` (High/Medium, BLOCK)
-
-### Fixed: quick-stats had no SSRF gate at all; the SSRF check validated only the host, never the actual request path/query (ATHENA-113 codex r2 delta)
+#### Fixed: quick-stats had no SSRF gate at all; the SSRF check validated only the host, never the actual request path/query
 
 - **Fixed — `GET /api/dashboard/quick-stats` live-probed Gateway/Orchestrator with no `check_ssrf_safe()` gate**: unlike `get_dashboard_data`, this endpoint's probe loop had no SSRF check at all. Now gated the same way, logging `dashboard_quick_stats_ssrf_blocked` (`url_status="ssrf_blocked"`) and skipping the request when blocked.
 - **Fixed — `app.utils.rag_urls.check_ssrf_safe()` always validated the host with `path=""`**, so the CRLF/NUL/traversal path check it delegates to never actually inspected a real request path or query string. Now derives and validates the full path (including query string) from the given URL.
 - **Fixed — `voice_tests.py::test_rag_query` validated only `base_url` before appending user-supplied text into the request URL**: the final URL (with user text now URL-encoded via `urllib.parse.quote`, closing a request-line-injection vector the raw interpolation left open) is built first, then validated in full, then requested. Blocked responses now carry the exact marker `ssrf_blocked` (`detail={"error": "ssrf_blocked", "reason": ...}`, still 403) instead of only a human-readable `"SSRF guard: ..."` string. `test_full_pipeline`'s RAG-enhancement step's blocked marker is likewise now the exact string `"ssrf_blocked"` (`results["rag_error"]`), with the reason in a separate `rag_error_reason` field.
 - New tests: `check_ssrf_safe` unit tests (real traversal-block proof; a validator spy proving the full path+query reaches it, not an empty placeholder); `test_quick_stats_blocks_ssrf_unsafe_gateway_with_no_network_call` (asserts zero network calls and the `ssrf_blocked` marker via captured logs).
 
----
-
-## [Unreleased]
-
-> **Ticket:** ATHENA-113
-> **Codex review:** `.mozart/plans/active/2026-09-27-diagnose-athena-mission-control.codex-diff.md` (High, BLOCK)
-
-### Fixed: Mission Control voice-health card and voice-test RAG probes live-probed operator-resolved URLs without the health poller's SSRF/runtime-DNS allowlist (ATHENA-113 codex follow-up)
+#### Fixed: Mission Control voice-health card and voice-test RAG probes live-probed operator-resolved URLs without the health poller's SSRF/runtime-DNS allowlist
 
 - **Fixed — `admin/backend/app/routes/dashboard.py`'s voice-health card no longer live-probes RAG services at all**: it now reads each RAG's `health_status`/`last_error` straight from the service-registry cache (same cached state `GET /api/service-registry/services` reads, kept fresh by the background poller) -- `healthy`/`unhealthy`/`disabled`/`pending`/`unconfigured` states preserved, `not_configured` when no registry row exists. This removes both the SSRF surface (a registry/env-resolved host is operator data only at write time; DNS can change afterward) and the per-page-load probe fan-out the poller was already doing on its own interval.
 - **Fixed — Gateway/Orchestrator's remaining live probes, and every remaining live probe in `admin/backend/app/routes/voice_tests.py` (`test_rag_query`, `test_full_pipeline`'s RAG-enhancement step), now validate the resolved URL first**: new `app.utils.rag_urls.check_ssrf_safe()` imports (not reimplements) `app.services.health_poller._validate_service_url` -- the same allowlist (`HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`, the k8s control-plane hostname block, CRLF/NUL/traversal path rejection) the background poller and the service-registry quick-checks already use. A blocked URL reports `ssrf_blocked` (403 for `test_rag_query`, a `results.rag_error` string for `test_full_pipeline`) instead of ever calling out. New tests: `admin/backend/tests/test_voice_tests_ssrf_guard.py` (blocked case asserts the transport is never constructed; allowed case is a regression that the probe still fires when the SSRF check passes); `admin/backend/tests/test_rag_url_resolution.py`'s dashboard tests rewritten for the cache-read behavior (healthy/unhealthy/disabled/not-configured/pending).
-- Dropped a stale `(studio)` comment in `admin/frontend/system-config.js` (ATHENA-113c's registry names are bare, not the pre-migration `"gateway (studio)"` shape).
+- Dropped a stale `(studio)` comment in `admin/frontend/system-config.js` (registry names are bare now, not the pre-migration `"gateway (studio)"` shape).
 
----
-
-## [Unreleased]
-
-> **Ticket:** ATHENA-115
-
-### Fixed: `/ha/conversation` 500'd with NameError AFTER a device command had already executed (ATHENA-115)
+#### Fixed: `/ha/conversation` 500'd with NameError AFTER a device command had already executed
 
 - **Fixed — `src/gateway/main.py::ha_conversation`** raised `NameError: name 'HAResponseContent' is not defined` on the `ha_simple_command_fastpath` and `ha_intent_prerouting` (HOME intent) fast paths -- both execute the requested Home Assistant command (e.g. turning on a light) and only fail while formatting the reply, so hank reproduced this live as "light turns on, response 500s". `HAResponseContent`/`HASpeechContent`/`HAPlainSpeech` were never defined anywhere in this codebase (`git log -S` traces them to the initial OSS commit and no later commit ever added them) -- `HAConversationResponse.response` is a plain `Dict[str, Any]`, not a nested pydantic model. New shared `_ha_response_payload(speech_text, language)` helper builds that dict directly, matching the shape the orchestrator-routed success path already built correctly (also refactored onto the same helper, removing the duplication). New tests: `tests/unit/test_gateway_nonstream_continuity.py` (`test_ATHENA_115_*`) drive `/ha/conversation` end-to-end through the fastpath, prerouted-HOME, and mocked-orchestrator-reply paths, asserting a 200 with HA's expected response shape.
 - **Images affected**: gateway (`src/gateway/main.py`).
 
----
+#### Fixed: `/ha/conversation` fast path reports the real HA outcome; no canned success on failure
 
-## [Unreleased]
+- **Fixed — `src/gateway/simple_commands.py::execute_simple_command`**: the `turn_on`/`turn_off` branches posted to Home Assistant's service-call endpoint and ignored the response entirely — httpx does not raise on a non-2xx status unless `raise_for_status()` is called, so an HA 403 still returned the canned "I've turned off the office light." with `success=True` even though the call never reached HA. Both branches now check `resp.status_code` and treat `>=400` as failure, logging `simple_command_ha_call_failed` and returning `None` (the existing "execution failed" signal) so the request falls through to the orchestrator instead of echoing a false success.
 
-> **Ticket:** ATHENA-112
 > **Campaign:** `2026-09-27-deliver-athena-dashboard-health-and-tcp-poller`
 
-### Fixed: a disabled service dragged the dashboard's overall health down (ATHENA-112)
+#### Fixed: a disabled service dragged the dashboard's overall health down
 
 - **Fixed — `overall_health` and `healthy_services` counted disabled rows** (`admin/backend/app/routes/service_registry.py::get_all_services`): a service an operator deliberately turned off (still carrying a stale `unhealthy` from before it was disabled) could flip the dashboard to "degraded"/"unhealthy" even though nothing live was actually failing. Both are now computed over **enabled** rows only. New response fields `enabled_services` / `disabled_services`; `total_services` is unchanged (still counts every row) for backward compatibility. A disabled row's `health_status` in the response is now always the literal `"disabled"`, overriding whatever the poller last cached before it was turned off.
 - **Changed — dashboard cards** (`admin/frontend/app.js`, `admin/frontend/index.html`): the middle stat card now reads "Enabled Services" (`N` or `N (K disabled)` when any rows are disabled) instead of "Total Services". The Core/RAG/Database service grid only lists enabled rows; disabled rows are grouped separately in a muted "Disabled" section at the bottom showing each row's `last_error`, and are never counted toward any group or the overall health rollup.
 
----
-
-## [Unreleased]
-
-> **Ticket:** ATHENA-109
 > **Campaign:** `2026-09-27-deliver-athena-dashboard-health-and-tcp-poller`
 > **Commits:** `7de9989`, `fe4544b`, `bd77dfd`, `a2d5e32`, `20d5be6`
 
-### Added: TCP health-check mode for registry rows; registry Edit modal; partial-update upsert (ATHENA-109)
+#### Added: TCP health-check mode for registry rows; registry Edit modal; partial-update upsert
 
 - **Added — `protocol=tcp` health-check mode** (`admin/backend/app/services/health_poller.py`): a raw TCP connect to `host:port` within `HEALTH_POLL_TIMEOUT_SECONDS`, for services that don't speak HTTP or have no health endpoint. For a row whose `name` contains `redis`, the poller additionally sends a Redis `PING\r\n` after connecting and requires a `+PONG` **or** `-NOAUTH` reply (a password-protected Redis still proves it's up and speaking the protocol) within the same timeout; any other reply is `unhealthy` / `last_error=tcp_bad_banner`. Every other `tcp` row is a plain connect with no banner read. Shares the same `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` SSRF allowlist as `http(s)` rows. See `docs/CONFIGURATION.md`'s "Service Registry Health Checks" section for the full state matrix.
 - **Added — registry row Edit modal** (`admin/frontend/service-control.js`): operators can edit an existing row's protocol/host/port/display_name/cache settings in place, rather than delete-and-recreate.
@@ -105,65 +137,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Fixed — `admin/frontend/integrations.js` read the service-registry envelope (`{services, total_services, ...}`) as if it were the bare array itself**: `ragStatus?.find(...)` silently resolved `undefined` against a plain object, so a RAG service integration never read "connected" via this fallback path. Now reads `(ragStatus?.services || []).find(...)`. Commit `20d5be6` restored this fix's test, dropped during an earlier commit split in the same campaign.
 - **Fixed — `GET /services/{service_name}` (single-service lookup) didn't apply the disabled-row override**: it now reports `health_status: "disabled"` for a disabled row, matching `GET /services`'s list behavior instead of a stale cached value.
 
----
-
-## [Unreleased]
-
-> **Ticket:** ATHENA-114
-> **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md` (S2)
-
-### Fixed: orchestrator's config_loader never sent X-Service-Key, so admin-panel conversation/clarification config silently never took effect (ATHENA-114)
+#### Fixed: orchestrator's config_loader never sent X-Service-Key, so admin-panel conversation/clarification config silently never took effect
 
 - **Fixed — `src/orchestrator/config_loader.py`'s `ConversationConfig` built its own `httpx.AsyncClient` with no headers at all**: every `/api/internal/config/*` route requires `X-Service-Key` (`admin/backend/app/routes/internal.py`), so every fetch (`get_conversation_settings`, `get_clarification_settings`, `get_clarification_types`, `get_sports_teams`, `get_device_rules`, `get_all_config`) and the `/api/internal/analytics/log` POST 422'd and silently fell back to hardcoded defaults on every cache-refresh cycle -- 5x/hr in production logs from the orchestrator pod. Now attaches `X-Service-Key: <SERVICE_API_KEY>` at client-construction time (same pattern as `main.py`/`self_building_tools.py`), with a one-time WARNING when `SERVICE_API_KEY` is unset. New MockTransport tests: `tests/unit/test_orchestrator_config_loader_service_key.py`.
 - **Extended** `tests/unit/test_orchestrator_callers_send_service_key.py`'s static AST scan to `src/orchestrator` (previously unscanned), with `/api/internal/config/*` and `/api/internal/analytics/log` added to its gated-route pattern. Excludes `main.py`/`smart_home_controller.py` (confirmed zero relevant call sites; excluded for scan performance, not correctness).
 - **Fixed — `src/orchestrator/rag_client.py::fetch_service_urls_from_registry()` had the same bug**: its `httpx.AsyncClient` for `/api/internal/config/rag-services` also sent no `X-Service-Key`, 422'ing and silently falling back to the hardcoded `RAG_SERVICE_URL_MAP` constants -- found by the widened AST scan above (originally flagged as a scope item and excluded; now fixed in the same pattern as `config_loader.py`, exclusion removed). New MockTransport tests: `tests/unit/test_orchestrator_rag_client_service_key.py`.
 
----
-
-## [Unreleased]
-
-> **Ticket:** ATHENA-113
-> **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md`
-
-### Fixed: Mission Control never loaded on a plain visit — the default landing tab read 'dashboard', not 'mission-control' (ATHENA-113a)
+#### Fixed: Mission Control never loaded on a plain visit — the default landing tab read 'dashboard', not 'mission-control'
 
 - **Fixed — `admin/frontend/app.js`'s no-hash fallback defaulted to the wrong tab**: `index.html` declares Mission Control as the default landing page in two places (the sidebar button's pre-applied `sidebar-item-active` class and comment at `:1531-1534`, and the `#tab-mission-control` container's "(Default Landing Page)" comment at `:1882`), but `app.js`'s `const initialTab = hash || 'dashboard'` (present since the initial OSS commit, `794096b`) sent every plain visit to the separate "Service Status" Dashboard tab instead. `Athena.pages.MissionControl.init()` — and its one dependency, `GET /api/dashboard` — never ran unless a user explicitly clicked "Mission Control" or navigated to `#mission-control`, which is exactly what a 6-hour admin-backend log window with zero genuine `/api/dashboard` hits showed. Now defaults to `'mission-control'`; `#dashboard` deep links and the keyboard shortcut are unchanged. New static test: `tests/unit/test_admin_frontend_default_tab.py`.
-- Cache-buster: `app.js` bumped `?v=20260927b` → `?v=20260927f` (main advanced to `e` via ATHENA-112/109 while this campaign was in flight; `f` avoids the collision).
+- Cache-buster: `app.js` bumped `?v=20260927b` → `?v=20260927f` (main advanced to `e` via a sibling campaign while this one was in flight; `f` avoids the collision).
 
----
-
-## [Unreleased]
-
-> **Ticket:** ATHENA-113
-> **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md` (S1)
-
-### Fixed: Mission Control's voice-health card assumed every RAG shares one host, reporting all of them "unreachable" instead of "not configured" (ATHENA-113b)
+#### Fixed: Mission Control's voice-health card assumed every RAG shares one host, reporting all of them "unreachable" instead of "not configured"
 
 - **Fixed — `admin/backend/app/routes/dashboard.py` probed Weather/Sports/Dining RAG health via a single `RAG_HOST` + hardcoded port** (`:8010`/`:8017`/`:8019`): in Kubernetes each RAG is its own Service, so this single-shared-host assumption is an OSS-First violation, and with `RAG_HOST` unset (the normal case for a per-Service deployment) it built malformed `:port/health` URLs and reported every RAG "unreachable". New `app.utils.rag_urls.resolve_rag_url` resolves each RAG independently: service-registry row → canonical `RAG_<NAME>_URL` env var (spelling matches `src/orchestrator/urls.py`) → legacy `RAG_HOST`/`RAG_SERVICE_HOST` + port (one-time WARNING) → `not_configured` (amber), no longer conflated with a genuine probe failure.
 - **Same treatment for `admin/backend/app/routes/voice_tests.py`**: `_rag_probe_url` (the full-pipeline test's auto-detected RAG probe) and `test_rag_query` (the manual "Test RAG" panel) both resolved through the same module-level `RAG_SERVICE_HOST` single-host assumption; both now resolve via the shared helper. `test_rag_query` returns 503 with a clear "not configured" message instead of attempting a request against a broken URL.
 - See `docs/CONFIGURATION.md`'s new "Mission Control voice-health card and RAG test probes" note for the full resolution order.
 
----
+#### Fixed: System Configuration's Gateway/Orchestrator/Ollama cards always read Offline -- GET /api/status probed a pre-Kubernetes "Mac Studio"/"Mac Mini" topology
 
-## [Unreleased]
-
-> **Ticket:** ATHENA-113
-> **Investigation:** `.mozart/investigations/active/2026-09-27-diagnose-athena-mission-control.md`
-
-### Fixed: System Configuration's Gateway/Orchestrator/Ollama cards always read Offline -- GET /api/status probed a pre-Kubernetes "Mac Studio"/"Mac Mini" topology (ATHENA-113c)
-
-- **Fixed — `admin/backend/main.py::get_system_status`** probed `MAC_STUDIO_IP`/`MAC_MINI_IP` (both default `localhost`) directly for gateway/orchestrator/RAG/ollama and a separate voice-host port map -- a deployment topology from before gateway and orchestrator moved into Kubernetes and Ollama moved to an operator-chosen host, so every check reported `error`/timeout regardless of real health. The service registry (`athena_service_registry`, the same cached `health_status` `GET /api/service-registry/services` already reads) is now the source of truth for every registered service; Gateway, Orchestrator, Ollama, and SearXNG (no registry row by default -- the OSS seed list only covers RAG services) are each checked directly via their own env-configured URL only when the registry has no row for them. Disabled-row handling and `overall_health` reuse `service_registry._overall_health` (ATHENA-112's enabled-only rollup) instead of a second, drifting implementation -- `overall_health`'s bottom label is now `"unhealthy"` (was `"critical"`), matching that shared helper. Dead `MAC_STUDIO_IP`/`MAC_MINI_IP`/`SERVICE_PORTS`/`MAC_MINI_PORTS`/`socket` import removed. New tests: `admin/backend/tests/test_system_status_registry.py`.
+- **Fixed — `admin/backend/main.py::get_system_status`** probed `MAC_STUDIO_IP`/`MAC_MINI_IP` (both default `localhost`) directly for gateway/orchestrator/RAG/ollama and a separate voice-host port map -- a deployment topology from before gateway and orchestrator moved into Kubernetes and Ollama moved to an operator-chosen host, so every check reported `error`/timeout regardless of real health. The service registry (`athena_service_registry`, the same cached `health_status` `GET /api/service-registry/services` already reads) is now the source of truth for every registered service; Gateway, Orchestrator, Ollama, and SearXNG (no registry row by default -- the OSS seed list only covers RAG services) are each checked directly via their own env-configured URL only when the registry has no row for them. Disabled-row handling and `overall_health` reuse `service_registry._overall_health` (the enabled-only rollup) instead of a second, drifting implementation -- `overall_health`'s bottom label is now `"unhealthy"` (was `"critical"`), matching that shared helper. Dead `MAC_STUDIO_IP`/`MAC_MINI_IP`/`SERVICE_PORTS`/`MAC_MINI_PORTS`/`socket` import removed. New tests: `admin/backend/tests/test_system_status_registry.py`.
 - **Changed — `admin/frontend/system-config.js`**: new `mapServiceStatusToUiBucket` classifies each `/api/status` entry into `healthy` / `unhealthy` / `neutral` / `offline`; `disabled`/`unconfigured`/`not configured`/`pending` now render as a neutral gray "Not Configured" state instead of red "Offline" -- an operator choice or a transient state is not the same claim as "this is down". New Node test: `tests/unit/test_admin_frontend_system_config_status_mapping.py`. Cache-buster: `system-config.js` `?v=20260913` → `?v=20260927`.
 - **Note**: `voice-pipelines.js`'s STT/TTS component-health cards (which also read `GET /api/status`, matching on `whisper`/`piper`/`stt`/`tts`) now show "not configured" for those components rather than a stale probe result, since the old `MAC_MINI_PORTS` voice-host probing is gone and no registry rows exist for them by default. `renderComponentRow` already degrades gracefully for an absent service (gray "not configured"), so this is a behavior improvement, not a regression -- flagging it as an observed side effect of this fix, not a new capability.
 
----
-
-## [Unreleased]
-
-> **Ticket:** ATHENA-110
-> **Plan:** `.mozart/plans/active/2026-09-27-operate-athena-dashboard-registry-cleanup.md` (P3)
-
-### Fixed: Control Agent had zero incoming auth on any route; process launch used a shell; services-file `dir` could escape PROJECT_ROOT (ATHENA-110)
+#### Fixed: Control Agent had zero incoming auth on any route; process launch used a shell; services-file `dir` could escape PROJECT_ROOT
 
 - **Fixed — every Control Agent route was reachable by anyone on the LAN with no authentication** (`src/control_agent/main.py`, new `src/control_agent/auth.py`): xander's review (F2, 2026-09-27-operate-athena-dashboard-registry-cleanup) found this Critical pre-existing gap — anyone able to reach port 8099 could stop Ollama or any managed process/container. New `require_service_caller` FastAPI dependency (mirrors `orchestrator/ingress_auth.py`'s constant-time `X-Service-Key` check, with no `DEV_MODE` bypass — the Control Agent has no such concept) is now applied to all 17 mutating routes: `/process/start|stop|restart/{port}`, `/docker/start|stop|restart/{container_name}`, `/ollama/start|stop|restart`, `/huggingface/download` (POST), `/huggingface/download/{job_id}` (DELETE), `/huggingface/import-to-ollama`, `/huggingface/downloaded` (DELETE), `/watchdog/enable|disable|exclude/{port}|include/{port}`. A missing or wrong key returns 401; an unset `SERVICE_API_KEY` returns 503 on every mutating route (fail-closed) with a one-time startup WARNING. Read-only routes (health/status/list/search endpoints, `/debug-logs/*`) are unchanged.
 - **Fixed — admin-backend and the orchestrator now send `X-Service-Key` on every Control Agent call**: new `app.utils.service_auth.control_agent_headers()` helper wired into `service_control.py`'s three Control Agent client constructions (docker/process/ollama actions, plus the read-only containers-status and ollama-health clients) and `model_downloads.py`'s single `call_control_agent` helper (covers all `/huggingface/*` calls). The orchestrator's own gateway-keepalive caller (`ensure_gateway_running` in `src/orchestrator/main.py`) — previously building an unheadered client for `/process/status` and `/process/start` — now reuses its existing `_SERVICE_API_KEY`.
@@ -172,28 +169,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Added — services-file permission warning**: `CONTROL_AGENT_SERVICES_FILE` is checked for group/world-writable permissions at load time; a writable file logs one WARNING (still loads — warn, not refuse, since it names commands and containers this Control Agent may execute/control).
 - See `docs/CONFIGURATION.md` and `CLAUDE.md`'s Control Agent section for the full route list and the admin-backend/orchestrator caller wiring.
 
----
-
-## [Unreleased]
-
-> **Ticket:** ATHENA-99
 > **Commits:** `c36dc83` (dashboard badges), `c146353` (Control Agent managed-services config)
 
-### Fixed: dashboard service badges render "undefined"; Control Agent no longer hard-codes a process list (ATHENA-99)
+#### Fixed: dashboard service badges render "undefined"; Control Agent no longer hard-codes a process list
 
 - **Fixed — dashboard service badges rendered the literal text "undefined"** (`admin/frontend/app.js`): the service-registry API returns `health_status` (server-normalised: `NULL` → `pending`) and, after DC10, `unconfigured` — not `status`, a field two dashboard render sites read that the API has never sent. New `serviceStatus(service)` helper (`service?.health_status ?? service?.status ?? 'unknown'`) used by both the Dashboard tab's per-group cards and the RAG Services tab's registry cards; badge classes now cover `healthy` / `unhealthy`|`error` / `offline` / `disabled` / `pending` / `unconfigured` (amber, matching service-control.js's existing "Needs Setup") / `unknown` (gray). Status text now goes through `escapeHtml`.
 - **Fixed — Control Agent hard-coded every house process, a Docker container whitelist, and a watchdog-exclude list** (`src/control_agent/main.py`): this is why the 60s watchdog relaunched a retired house stack as bare processes after its containers were stopped, and the startup registry sync re-registered them — the module always had *something* to manage regardless of what a deployment actually wanted. New `CONTROL_AGENT_SERVICES_FILE` (OSS-First: unset by default, so nothing is managed) points at a JSON file with three independent, all-optional keys: `processes` (today's port-keyed shape: `name`/`dir`/`cmd`/optional `health_path`/`enabled`), `watchdog_exclude` (ports), and `containers` (the Docker allowlist, replacing the previously hard-coded, partly-stale `ALLOWED_CONTAINERS` set). A malformed file or a single bad entry logs one ERROR and falls back to managing nothing for that piece — the process never crashes over a bad config file. See `src/control_agent/services.example.json` and `docs/CONFIGURATION.md`.
 - **Breaking for Control Agent operators**: a deployment that relies on the Control Agent's watchdog, its startup registry sync, or its Docker container control must now set `CONTROL_AGENT_SERVICES_FILE` explicitly — the built-in process list and container whitelist are gone.
 
----
-
-## [Unreleased]
-
-> **Plan:** `.mozart/plans/active/2026-09-27-deliver-athena-transit-and-base-knowledge.md`
-> **Ticket:** ATHENA-90 + ATHENA-91
 > **Commits:** `5b8b515` (Phase 1 — `search_transit` wiring), `85930aa` (Phase 2 — base-knowledge settings facade), `02fd52e` (P3 — `/public` auth gate, sanitization, transit sort/regex fixes)
 
-### Transit tool wiring: `search_transit` reaches a real transportation route (ATHENA-90, Phase 1)
+#### Transit tool wiring: `search_transit` reaches a real transportation route
 
 `search_transit` (defined in `rag_tools.py` since an earlier campaign) had no `endpoint_map`/`service_name_map` entry, so a call went out as `POST {transportation}/search` — a route the transportation service has never had. It's now wired to a new dispatch route, gated so it only reaches the LLM on transit-phrased queries, and registered so it can be toggled from the Admin UI.
 
@@ -203,7 +189,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Added — `tool_registry` seed** (`admin/backend/alembic/versions/059_seed_search_transit_tool.py`): a data-only, `ON CONFLICT DO NOTHING` migration so `search_transit` can be toggled on the Admin UI tools page, matching the pattern already used for the other RAG tools. Run `alembic upgrade head` to apply.
 - **Documentation**: `docs/CONFIGURATION.md`'s Transit section now states the feed `type` vocabulary the tool's `transit_type` filter matches by prefix, and that departures use container-local time.
 
-### Memory & Context → Base Knowledge saves and re-loads; `/public` gated behind service auth (ATHENA-91, Phases 2-3)
+#### Memory & Context → Base Knowledge saves and re-loads; `/public` gated behind service auth
 
 The Admin UI's Memory & Context → Base Knowledge tab called a service-key-gated `/api/internal` path a browser could never authenticate against, so every save silently failed. It now has its own typed facade, and a related pre-existing gap — the read-only `/api/base-knowledge/public` route serving every base-knowledge row, including a home address, with **no authentication at all** — is closed in the same reconciliation pass (xander FIX, found in diff review).
 
@@ -216,15 +202,9 @@ The Admin UI's Memory & Context → Base Knowledge tab called a service-key-gate
 - **Fixed — `is_transit_query`'s keyword gate** (`src/orchestrator/helpers.py`): "train my dog" / "train the new hire" (the verb sense) no longer misclassifies as transit-related; "commuter rail" and "rail schedule/line/station" now do.
 - **Documentation**: `docs/CONFIGURATION.md` documents the `/api/base-knowledge/public` service-key requirement alongside the existing orchestrator ingress-auth section.
 
----
-
-## [Unreleased]
-
-> **Plan:** `.mozart/plans/active/2026-09-27-deliver-athena-oss-readiness.md`
-> **Ticket:** ATHENA-89 (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`)
 > **Commits:** `cea046a` (P0 — leak-gate script), `c23dc27` (P1 — admin-backend/frontend), `ddaf16b` (P2 — region-configurable RAG services), `b16924b` (P3 — gateway/orchestrator session + ingress auth), `13ba5f6` (P3b — gate extension), `88caad4` (P4 — remaining references), `d6825a0` (P5 — CI workflow), `75a5af0` (P7 item 0 — import-cycle fix), `4826214` (P7 items 1–6 — HA entity/room config), `f6e9f51` (P8 — light-group scene fallback, restored satellite name-parse fallback, dropped unused `JARVIS_MEDIA_PLAYERS`)
 
-### OSS readiness: no maintainer house in runtime code, orchestrator ingress authentication, gateway non-streaming session continuity (ATHENA-89)
+#### OSS readiness: no maintainer house in runtime code, orchestrator ingress authentication, gateway non-streaming session continuity
 
 Removes every maintainer-identifying value (home LAN IPs, home domain, home city, home-dir paths, a legacy namespace FQDN, home coordinates, the maintainer's name, and the maintainer's host names) from the tracked tree's runtime behavior, adds a CI gate that stops them from returning, and closes the gap where Home Assistant's non-streaming path lost session continuity (parent F97) and the orchestrator accepted query/session requests from any caller.
 
@@ -252,19 +232,13 @@ Removes every maintainer-identifying value (home LAN IPs, home domain, home city
   - `/v1/responses` now returns 400 for `previous_response_id` instead of silently ignoring it.
   - Every live OpenAI-compatible session id resets once, the first time a conversation is seen after this ships.
 - **Known limitation (pre-existing, unrelated)**: `tests/unit/test_price_compare.py::TestPriceResult::test_to_dict_includes_all_fields` remains red; untouched by this change.
-- **Operator note**: these are code fixes only. `athena-orchestrator`, `athena-gateway`, `athena-admin-backend`, `athena-jarvis-web`, and `athena-rag-transportation` need to be rebuilt and rolled by digest to take effect in `athena-prod` — that roll is hank's, under the parent campaign (ATHENA-86).
+- **Operator note**: these are code fixes only. `athena-orchestrator`, `athena-gateway`, `athena-admin-backend`, `athena-jarvis-web`, and `athena-rag-transportation` need to be rebuilt and rolled by digest to take effect in `athena-prod` — that roll is hank's, under the parent house-cutover campaign.
 
----
-
-## [Unreleased]
-
-> **Plan:** `.mozart/plans/active/2026-09-26-deliver-athena-voice-intent-defects.md`
-> **Ticket:** ATHENA-88 (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`; sibling: ATHENA-87)
 > **Commits:** `44da391`/`daa8040` (Phase 1 — red/fix), `cbcadfc`/`15d097e` (Phase 2 — red/fix), `33b9229`/`eb8db83` (Phase 3 — red/fix), `ecfa4a8`/`31ff77a` (Phase 4 — red/fix), `8a5e65d` (Phase 4 reconciliation — binding runtime session test), `2475180`/`a47c69c` (Phase 5 — red/fix), `b0d6fb4`, `e403f29`, `fa250db`, `f7922e9`, `629b4aa`, `c2dbada`, `a63180e` (reconciliation round 1 — F36–F42, F34), `cf270eb`, `3c9b050`, `8125ad8`, `d9c20ab`, `64eaa61`, `b7dbb50`, `b028e03` (reconciliation round 2 — F43–F49; `b028e03` corrects `a63180e`'s D13 write)
 
-### Voice intent defects: sequence-timing false positives, shared streaming session, dining keyword gap, RAG key-name drift, short-turn continuation (ATHENA-88)
+#### Voice intent defects: sequence-timing false positives, shared streaming session, dining keyword gap, RAG key-name drift, short-turn continuation
 
-Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover investigation 2), plus the short-turn continuation rule that was the actual misroute mechanism behind one of them.
+Four defects found after the house cutover (`dick`'s post-cutover investigation 2), plus the short-turn continuation rule that was the actual misroute mechanism behind one of them.
 
 - **Fixed — sequence-timing matcher and multi-intent splitter** (`src/orchestrator/sequence_executor.py`, `src/orchestrator/smart_home_controller.py`, `src/orchestrator/search_providers/intent_classifier.py`): `detect_sequence_intent` matched bare substrings (`'at '`, `'in '`, `'then'`, `'times'`, `'tonight'`, …), so a question like "what place has happy hour and outdoor seating?" was misdetected as a timed device sequence and routed around multi-intent splitting. Both `sequence_executor.detect_sequence_intent` and `SmartHomeController.detect_sequence_intent` now call one word-boundary matcher, `has_sequence_timing`.
   - Bare `at <number>` (no meridiem or `o'clock`) and a handful of other bare temporal words (`tonight`, `tomorrow`, `later`, `again`, …) only count as sequence timing when the query starts with an imperative device verb (`turn`, `set`, `dim`, `play`, …) — so "the restaurant at 5 north main street" and "what time does the store open tomorrow" are no longer sequences, while "turn off the lights at 5" and "turn on the fan at seven" still are. `at <number>` with an explicit meridiem/`o'clock` (`"at 5pm"`, `"at seven o'clock"`) always counts, with no verb required.
@@ -307,28 +281,22 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
   - Explicit session ids must match `explicit-<1-55 chars>` (≤ 64 chars total); anything else falls back to the fingerprint.
   - Outside `DEV_MODE`, the orchestrator now refuses to start when `SERVICE_API_KEY` is empty or the placeholder value — see the session section above.
   - A turn with no explicit anaphora no longer gets referential handling from an embedded substring (e.g. a bare "and") — see the continuation section above.
-  - These are code fixes only. `athena-orchestrator` and `athena-gateway` still need to be rebuilt and rolled by digest to take effect in `athena-prod` — that roll is hank's, under the parent campaign (ATHENA-86).
+  - These are code fixes only. `athena-orchestrator` and `athena-gateway` still need to be rebuilt and rolled by digest to take effect in `athena-prod` — that roll is hank's, under the parent house-cutover campaign.
 
----
-
-## [Unreleased]
-
-> **Plan:** `.mozart/plans/active/2026-09-26-deliver-athena-post-cutover-defects.md`
-> **Ticket:** ATHENA-87 (parent: ATHENA-86, `2026-09-25-operate-athena-house-oss-migration`)
 > **Commits:** `567b929`/`eb415f4` (Phase 1 — red/fix), `510c1a2`/`d32cc21` (Phase 2 — red/fix), `1134dfd`/`a4c01d6` (Phase 3 — red/fix), `3e92be2`/`cdd6fe1` (Phase 4 — red/fix)
 
-### Post-cutover defects: RAG URL parity, streaming think-disable parity, temporal-location filter, gateway LiveKit deps (ATHENA-87)
+#### Post-cutover defects: RAG URL parity, streaming think-disable parity, temporal-location filter, gateway LiveKit deps
 
 - **Fixed**: RAG service URLs were read from three disagreeing env-var spellings across `orchestrator/urls.py`, `rag_tools.py`, and `utils/constants.py` — 10 of the 23 names the live Deployment sets were read by no module at all, so `search_events`'s SerpAPI/SeatGeek/Community sub-providers dialed localhost on every call. `urls.py` is now the single resolver: canonical `RAG_<NAME>_URL` wins; the legacy `<NAME>_RAG_URL` spelling is still accepted (logs `rag_url_legacy_env_name` at WARNING; `rag_url_env_conflict` at WARNING if both are set and differ); a blank value counts as unset. Five default ports were also corrected for local dev with the env unset: flights 8012→8013, events 8013→8014, streaming 8014→8015, news 8015→8016, stocks 8016→8012 — plus `MODE_SERVICE_URL` (8021→8022) and directions (8022→8030).
 - **Fixed**: `LLMRouter`'s Ollama streaming path (`_generate_ollama_stream`) never disabled qwen3 "thinking" or forwarded the `/no_think` prefix, unlike the non-streaming path. Both now build through a shared `_build_ollama_generate_payload`, so a streaming and non-streaming request to `/api/generate` are identical except `stream`. `generate_stream` also now forwards `system_prompt` to the Ollama, OpenAI, Anthropic, and Google streaming branches (previously hard-coded to `None` or omitted on three of the four), matching what non-streaming `generate()` already sent.
 - **Fixed**: the retrieve-node temporal-location filter now excludes "right now", "currently", "at the moment", "this morning/afternoon/evening", "later", and "later today" from being treated as location entities (previously only "today", "tonight", and "now" were filtered) — these phrases now fall back to `DEFAULT_LOCATION` instead of being geocoded and failing.
-- **Fixed**: `src/gateway/livekit_service.py` imports `numpy` and the LiveKit SDK without either declared in `src/gateway/requirements.in`/`.txt`, so `/livekit/*` routes silently 404'd — or, once `numpy` resolved locally but the SDK didn't, silently reported `enabled:false` with no visible error. `numpy`, `livekit`, and `livekit-api` are now declared gateway dependencies; the lock was regenerated with `scripts/lock-requirements.sh` (ATHENA-63's tooling): `numpy==2.4.6`, `livekit==1.1.20`, `livekit-api==1.2.1`, plus transitives, with no pre-existing gateway pin moved. An import failure in either the routes module or the SDK now logs at ERROR (`livekit_routes_import_failed` / `livekit_sdk_import_failed`) once `configure_logging` has run, instead of at INFO before it. `scripts/smoke-images.sh` gained a gateway-only gate that fails the image build if it can't import both.
+- **Fixed**: `src/gateway/livekit_service.py` imports `numpy` and the LiveKit SDK without either declared in `src/gateway/requirements.in`/`.txt`, so `/livekit/*` routes silently 404'd — or, once `numpy` resolved locally but the SDK didn't, silently reported `enabled:false` with no visible error. `numpy`, `livekit`, and `livekit-api` are now declared gateway dependencies; the lock was regenerated with `scripts/lock-requirements.sh` (tooling from the dependency-remediation work): `numpy==2.4.6`, `livekit==1.1.20`, `livekit-api==1.2.1`, plus transitives, with no pre-existing gateway pin moved. An import failure in either the routes module or the SDK now logs at ERROR (`livekit_routes_import_failed` / `livekit_sdk_import_failed`) once `configure_logging` has run, instead of at INFO before it. `scripts/smoke-images.sh` gained a gateway-only gate that fails the image build if it can't import both.
 - **Follow-up**: `generate_stream` still has no `BackendType.AUTO` branch — non-streaming `generate()` handles AUTO, but the streaming path falls through to the MLX/unknown-backend branch. A separate routing gap, not a parity fix of the request Ollama receives; not fixed here.
 - **Follow-up**: `test_flag_on_startup_logs_sdk_status_before_gated_init` doesn't independently prove the log-before-init ordering (the code implements it in `gateway/main.py`; the aggregate test suite covers the operator-visible behavior). Left for the backlog.
 - **Known limitation (pre-existing, unrelated)**: `tests/unit/test_price_compare.py::TestPriceResult::test_to_dict_includes_all_fields` remains red; untouched by this change.
-- **Operator note**: these are code fixes only. `athena-orchestrator` and `athena-gateway` still need to be rebuilt and rolled by digest to take effect in `athena-prod` — that roll is hank's, under the parent campaign (ATHENA-86).
+- **Operator note**: these are code fixes only. `athena-orchestrator` and `athena-gateway` still need to be rebuilt and rolled by digest to take effect in `athena-prod` — that roll is hank's, under the parent house-cutover campaign.
 
-### Operations — house cutover to athena-prod (ATHENA-86)
+#### Operations — house cutover to athena-prod
 
 - **Operations**: a Home-Assistant-integrated deployment previously running on Docker Compose / launchd
   was migrated onto this repo's OSS build (Kubernetes, digest-pinned images), carrying forward its
@@ -341,15 +309,9 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
   (only meaningful if a Control Agent process is actually running somewhere reachable); `ATHENA_SEED_DEFAULTS`
   (set `false` once real configuration exists — `true` UPSERTs OSS default rows over it on every restart).
 
----
-
-## [Unreleased]
-
-> **Plan:** `.mozart/plans/active/2026-09-14-deliver-athena-twilio-webhook-signature.md`
-> **Ticket:** ATHENA-72
 > **Commits:** `71d152d` (Phase 1), `253f9a1` (Phase 2 — merge and revert as one unit), `ae0396f` (drop the superseded str-mocked test)
 
-### Twilio SMS webhook signature validation (ATHENA-72)
+#### Twilio SMS webhook signature validation
 
 - **Fixed**: signature validation raised `RuntimeError: Stream consumed` (500) on every signed request when `TWILIO_AUTH_TOKEN` was set, and its re-parse dropped blank and repeated params. It now validates the parsed form.
 - **Fixed**: the validation URL was Host-derived `http://…`, which Twilio's validator never matches behind a TLS-terminating proxy.
@@ -360,33 +322,22 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
   - Logs carry `path`, not `url`.
 - **Operator note**:
   - Enabling signature validation needs both variables.
-  - The Admin UI "Auth Token" field isn't persisted (ATHENA-75).
-  - Until a deployment sets both, the webhook still accepts unsigned requests; the post-merge action is ATHENA-76.
+  - The Admin UI "Auth Token" field isn't persisted.
+  - Until a deployment sets both, the webhook still accepts unsigned requests; the post-merge action is tracked separately.
 
----
-
-## [Unreleased]
-
-> **Plan:** n/a — TINY tier; ATHENA-71's ticket body is the spec
-> **Ticket:** ATHENA-71
+> **Plan:** n/a — TINY tier
 > **Commits:** `4f0e265` (guard semantics), `12bd012` (fixture fixup), `459d6de` (lexical-detection docstring, exit 2 on git read failure)
 
-### skip-guard fix: subset + tree-presence in place of set-equality (ATHENA-71)
+#### skip-guard fix: subset + tree-presence in place of set-equality
 
-- **Fixed**: `scripts/check-no-new-test-skips.py` (added by ATHENA-66) asserted set *equality* between skips added in `base..HEAD` and a pinned allowlist — true only while the originating campaign branch was unmerged. Once merged, every subsequent `base..HEAD` diff added no skips, and an empty added-set can never equal a non-empty pinned set, so the gate went permanently red (CI run 34845479251 on `8302271`). Now enforces two obligations independently: (a) skips added in `base..HEAD` must be a **subset** of the pinned allowlist (diff-scoped); (b) every pinned skip must still be **present in HEAD's tree** via `git ls-tree`/`git show`, checked regardless of `--base` (tree-scoped).
+- **Fixed**: `scripts/check-no-new-test-skips.py` (added by the frontend-escaping campaign) asserted set *equality* between skips added in `base..HEAD` and a pinned allowlist — true only while the originating campaign branch was unmerged. Once merged, every subsequent `base..HEAD` diff added no skips, and an empty added-set can never equal a non-empty pinned set, so the gate went permanently red (CI run 34845479251 on `8302271`). Now enforces two obligations independently: (a) skips added in `base..HEAD` must be a **subset** of the pinned allowlist (diff-scoped); (b) every pinned skip must still be **present in HEAD's tree** via `git ls-tree`/`git show`, checked regardless of `--base` (tree-scoped).
 - **Fixed**: `.github/workflows/frontend-escaping.yml` — on `push`, the guard now diffs against `github.event.before` (falling back to `--base HEAD` for a branch's first push, whose `before` is the all-zeros SHA) instead of `origin/main`, so it verifies what the push actually introduced instead of a vacuous base-equals-HEAD comparison.
 - **Fixed**: `check_tree_presence`'s `git show` failure on a path `git ls-tree` already confirmed exists at HEAD now exits 2 ("could not run"), distinct from exit 1 for a pinned skip genuinely missing from HEAD's tree.
 - **Documented**: the script's docstring now states detection is lexical (substring match, no AST) — a ratchet against carelessness, not a control against a motivated bypass — and spells out how to retire a pinned skip: remove it from `SANCTIONED` in the same change that removes the skip.
 
----
-
-## [Unreleased]
-
-> **Plan:** `.mozart/plans/active/2026-09-13-deliver-athena-frontend-escaping.md` (round 3)
-> **Ticket:** ATHENA-66
 > **Commits:** `0468035`..`9d12d97`..`7411f6e` (Phase 1 — guards + baseline), `03af3df`..`15a09cd` (Phase 2 — callee/param/sink table), `087a47b`..`0df3ff6`..`2a48323` (Phase 3 — 52 wrong-primitive sites + callee-sink closures), `dd1b30d` (Phase 4 — `emerging-intents.js`), `045b6eb`..`e842149`..`9b328f6` (Phase 5 — 18 definitions deleted), `76384cd`, `1e5e284`, `bd23f40` (Phase 6 — 77 unescaped-quoted sites), `89b03ba`, `d8f4021`, `088ac1e`, `d06e33a`, `8c9245a` (Phase 7 — hardening, `immutable` removal, CI)
 
-### admin-frontend escaping consolidation (ATHENA-66)
+#### admin-frontend escaping consolidation
 
 - **Added**: `admin/frontend/escape-html.js` is now the **only** file in `admin/frontend/` defining `escapeHtml`/`escapeJsAttr` — 20 definitions (7 closure-local, 2 entity-map, 11 DOM-round-trip) consolidated to 1, enforced by `scripts/check-escape-html-uniqueness.py` at absolute zero (name-matched forms, a body-shape scan for a hand-rolled entity map under any name, getter/`defineProperty`/computed-name forms — all path-scoped-excluding the canonical file itself).
 - **Added**: `Object.defineProperty` freezes `window.escapeHtml`/`window.escapeJsAttr` against runtime overwrite (a console paste, a lazily-injected script) — the one threat static analysis can't see. Declaration drift and tag-order drift remain the uniqueness script's and the load-order harness's jobs respectively; three threats, three mechanisms, documented in `admin/frontend/README.md`.
@@ -395,30 +346,22 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 - **Fixed**: the 2 verified callee-sink defects (`app.js`'s `revealSecret`, `escalation.js`'s `showCloneEscalationPresetModal`) where a handler argument was delivered to a callee that re-rendered it into an unescaped `.innerHTML`. Mechanized via `scripts/check-callee-sinks.py` — a fail-closed classifier over every converted handler argument, with `unresolved` treated as a violation until adjudicated in `admin/frontend/.callee-sink-adjudications.json`.
 - **Fixed**: 6 raw LLM-fed interpolations in `emerging-intents.js` (`display_name`, `canonical_name`, `description`) now `escapeHtml`-wrapped. Provenance: LLM output shaped by user input via prompt injection against the intent classifier, with no CSP backstop (`script-src 'unsafe-inline'`).
 - **Fixed**: `app.js`'s `infoIcon` — a 21st in-tree hand-rolled entity-map implementation whose escaping was undone by a `getAttribute` read-back before reaching `innerHTML`. Escaping moved to the sink.
-- **Changed**: `admin/frontend/nginx.conf` no longer sends `immutable` in `Cache-Control` (kept `public`, `expires 1h`) — `immutable` means a browser does not revalidate even on a user-initiated reload (RFC 8246), which is exactly what made ATHENA-67's hotfix unrecoverable for an hour on warm-cache clients.
+- **Changed**: `admin/frontend/nginx.conf` no longer sends `immutable` in `Cache-Control` (kept `public`, `expires 1h`) — `immutable` means a browser does not revalidate even on a user-initiated reload (RFC 8246), which is exactly what made the guest-name XSS hotfix unrecoverable for an hour on warm-cache clients.
 - **Added**: `.github/workflows/frontend-escaping.yml` now runs the full absolute-zero gate set (handler escaping, callee sinks, uniqueness, wiring parity, hardening) plus the D10 wide-population ratchets (`data-attribute` ≤344, `innerhtml-sink` ≤442, `bare-expression` ≤169, and `emerging-intents.js` text-node ≤19) on every PR and on push to `main`.
 - **Note**: the wide out-of-scope populations — 344 unescaped data-bearing plain-attribute interpolations (44 files), 442 `.innerHTML =` assignments (52 files) and 169 bare-expression handler interpolations — are ratcheted at their measured values, not fixed. Escaping in this frontend remains the exception, not the rule; tracked as a follow-up.
-- **Note**: `apps/jarvis-web/` carries the same defect class (including a 22nd definition, unescaped OSM place names, and the same Lodgify `guest_name` reaching an end-user-facing chat surface) and is **not** covered by this campaign's guards. Tracked as ATHENA-68.
+- **Note**: `apps/jarvis-web/` carries the same defect class (including a 22nd definition, unescaped OSM place names, and the same Lodgify `guest_name` reaching an end-user-facing chat surface) and is **not** covered by this campaign's guards. Tracked as a follow-up.
 
----
-
-## [Unreleased]
-
-> **Plan:** `.mozart/plans/active/2026-09-13-deliver-athena-frontend-escaping.md` (carved out of round 1)
-> **Ticket:** ATHENA-67
 > **Commits:** `a482635`, `ed8714f`
 
-### admin-frontend guest-name XSS hotfix (ATHENA-67)
+#### admin-frontend guest-name XSS hotfix
 
 - **Fixed**: live reflected-XSS in `guest-context.js` and `memory-context.js` — a Lodgify-sourced guest name reached an `on*=` handler attribute unescaped. Introduced `admin/frontend/escape-html.js` (an IIFE, loaded as the **last** local `<script>` tag) so `window.escapeHtml`/`window.escapeJsAttr` resolve to its implementation regardless of the other files still declaring their own local copies — classic scripts, later tag wins.
 - **Added**: `scripts/check-frontend-escape-load-order.js` — a Node `vm` harness that loads the real `index.html` tag order and asserts `escape-html.js` is the terminal definition.
 - **Added**: `scripts/check-frontend-cache-busters.py` — a changed `.js` file whose `?v=` did not move never reaches a warm-cache browser; three-valued exit (`0` clean, `1` findings, `2` could-not-run). Bumped `guest-context.js` and `memory-context.js`'s busters so the fix in this release actually reaches clients that had already cached the vulnerable version.
 
-> **Plan:** `.mozart/plans/active/2026-09-12-deliver-athena-dependency-remediation.md`
-> **Ticket:** ATHENA-63
 > **Commits:** `1657900` (Phase 1), `8bd26fd` (Phase 2), `8fb9b7e` (Phase 3), `689fd11`, `657ea56` (Phase 4), `93b2643` (Phase 5), `8c33829` (Phase 5 follow-up), `6814b6f`, `d9ff720`, `c84672c`, `e11e244`, `3e359ee`, `4df47b8` (Phase 6), `39daf6f`, `449bbfe`, `7b07a31` (Phase 7), `ccccd47` (Phase 8), `21a4b45`, `b3b9a9e`, `32df611` (Phase 9), `9f0dacd` (merge into the campaign branch), `5b765f5`, `95b4423` (documentation and changelog corrections)
 
-### dependency remediation (ATHENA-63)
+#### dependency remediation
 
 **Phase 1 — repair the verification harness:**
 
@@ -427,7 +370,7 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 - **Fixed**: `scripts/generate-rag-dockerfiles.py` — strict `--check` now treats a missing RAG service directory or Dockerfile as drift; previously a deleted service Dockerfile silently passed as "no drift detected."
 - **Added**: `scripts/smoke-images.sh` — generalizes the RAG-only image smoke harness to all 29 Python images in the repo (the 23 RAG images plus admin-backend, chat-embed, jarvis-web, gateway, mode-service, orchestrator). Supports `--list`, `--list-excluded`, `--service <name>`, `--dry-run`.
 - **Added**: `scripts/lock-requirements.sh` — a single `uv pip compile` wrapper for every image's dependency lock, so no two locks can be produced by a slightly different invocation. Discovers and compiles every `requirements.in` (including a `requirements-test.in`) in dependency order. `--check` detects a `requirements.in` that was edited without recompiling its lock; `--upgrade` recompiles every lock against current upstream versions; `--upgrade-package NAME` (repeatable, added in Phase 7) scopes an upgrade to named packages only, since a plain recompile preserves an already-satisfied pin even after its ceiling lifts.
-- **Added**: `scripts/check-build-tooling.py` — asserts the pinned build-tooling triplet (`pip==26.2.1 setuptools==84.0.0 wheel==0.48.0`) precedes every dependency install in a Dockerfile stage. `make check-build-tooling` was added in Phase 6 once the triplet had a repo-wide population to check; CI wiring is tracked in ATHENA-60.
+- **Added**: `scripts/check-build-tooling.py` — asserts the pinned build-tooling triplet (`pip==26.2.1 setuptools==84.0.0 wheel==0.48.0`) precedes every dependency install in a Dockerfile stage. `make check-build-tooling` was added in Phase 6 once the triplet had a repo-wide population to check; CI wiring is tracked separately.
 - **Added**: `Makefile` targets `smoke-images`, `lock`, `lock-upgrade`, `lock-check` (developer conveniences — CI and other automation should call the underlying `scripts/*.sh` directly, since `make` collapses every non-zero recipe exit code to `2`).
 
 **Phase 2 — close the unauthenticated upload exposure at jarvis-web's `POST /api/voice/transcribe`** (`apps/jarvis-web/backend/main.py`, no auth dependency, fully attacker-controlled request body). Three changes were needed to close it:
@@ -439,12 +382,12 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 - **Fixed**: `apps/jarvis-web/Dockerfile` — pinned build tooling (`pip==26.2.1 setuptools==84.0.0 wheel==0.48.0`) added to the `AS builder` stage, above the line that installs the hashed lock.
 - **Fixed**: `apps/jarvis-web/Dockerfile`'s production stage now removes its own factory-installed `pip`/`setuptools`/`wheel` before `COPY --from=builder` copies the pinned versions over — Docker's `COPY` onto an existing directory merges rather than replaces, so without this the base image's `pip==24.0`/`setuptools==79.0.1` (with their own CVEs, including CVE-2026-59890) survived on disk alongside the pinned 26.2.1/84.0.0, and `importlib.metadata`-based tooling resolved the stale, vulnerable one. Verified after the fix: exactly one dist-info per tool, `pip-audit` reports zero vulnerabilities in the finished image. `--no-build-isolation` intentionally **not** added here — this Dockerfile installs no editable package.
 - **Changed**: `README.md` — the two jarvis-web dev-install commands (`:235`, `:347`) repointed from `requirements.txt` to `requirements.in`. Not a fix for a failure: installing the generated `requirements.txt` directly on Apple Silicon succeeds, by silently resolving macOS wheels instead of the x86_64 binaries the image ships — a reproducibility gap, not a break.
-- **Documented, not fixed**: `apps/jarvis-web/backend/main.py:115-122` — `allow_origins=["*"]` + `allow_credentials=True` makes Starlette reflect the request `Origin` header verbatim, defeating same-origin credential protection; most of this app's routes (`/api/welcome`, `/api/climate`, `/api/sensors/*`, `/api/chat`) need no auth at all, so any origin's JavaScript can already read guest PII, HVAC state, and occupancy data regardless of credentials. Tracked in **ATHENA-64**; fixing it requires enumerating every legitimate origin that embeds this app, a separate consumer audit.
-- **Ticketed, not fixed**: `apps/jarvis-web/Dockerfile:41-42` copies the builder stage's entire `site-packages` and `/usr/local/bin` into the production image, so the runtime image ships a working `pip` and its entrypoints — a post-RCE hardening gap. Tracked in **ATHENA-65**.
+- **Documented, not fixed**: `apps/jarvis-web/backend/main.py:115-122` — `allow_origins=["*"]` + `allow_credentials=True` makes Starlette reflect the request `Origin` header verbatim, defeating same-origin credential protection; most of this app's routes (`/api/welcome`, `/api/climate`, `/api/sensors/*`, `/api/chat`) need no auth at all, so any origin's JavaScript can already read guest PII, HVAC state, and occupancy data regardless of credentials. Tracked separately; fixing it requires enumerating every legitimate origin that embeds this app, a separate consumer audit.
+- **Ticketed, not fixed**: `apps/jarvis-web/Dockerfile:41-42` copies the builder stage's entire `site-packages` and `/usr/local/bin` into the production image, so the runtime image ships a working `pip` and its entrypoints — a post-RCE hardening gap. Tracked separately.
 
 **Phase 3 — canonicalize the shared dependency declaration:**
 
-- **Fixed**: deleted `src/shared/requirements.txt` — a duplicate of `src/shared/pyproject.toml`'s `dependencies` array with zero consumers anywhere in the tree outside the ATHENA-63 planning documents. `pyproject.toml` is now the sole source of shared's dependency spec.
+- **Fixed**: deleted `src/shared/requirements.txt` — a duplicate of `src/shared/pyproject.toml`'s `dependencies` array with zero consumers anywhere in the tree outside this campaign's planning documents. `pyproject.toml` is now the sole source of shared's dependency spec.
 - **Changed**: relocated the `httpx~=0.28` upgrade warning (the private `_pool` API dependency in `url_safety.py`'s `_build_pinned_transport`) from the deleted flat file to a comment directly above the pin in `pyproject.toml`, and recorded the same contract in `CONTRIBUTING.md`'s SSRF guard section.
 
 **Phase 4 — resolve the admin-backend dependency graph, and commit the lock that was tested:**
@@ -466,7 +409,7 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 - **Fixed**: `admin/backend/requirements.in` — three bumps clear the two remaining auth-path advisories: `aiohttp==3.9.1` → `>=3.14.3,<4` (resolves `3.14.3`), `python-jose[cryptography]==3.3.0` → `>=3.5,<4` (resolves `3.5.0`), `python-dotenv==1.0.0` → `>=1.2.3,<2` (resolves `1.2.3`). `starsessions`, `starlette`, and `httpx` deliberately untouched — the starlette major is Phase 7's alone.
 - **Fixed**: build tooling (`pip==26.2.1 setuptools==84.0.0 wheel==0.48.0`) pinned ahead of every dependency install across the remaining 28 Python images — the 5 hand-written Dockerfiles that lacked the full triplet (`admin/backend`, `apps/chat-embed`, `src/gateway`, `src/mode_service`, `src/orchestrator`) and the RAG Dockerfile generator template, regenerated across all 23 RAG service Dockerfiles. `apps/jarvis-web/Dockerfile` already carried this pin from Phase 2. `setuptools==84.0.0` ships zero `pkg_resources/` entries (a real removal, fixing CVE-2026-59890 whose floor is `83.0.0`; no downgrade below that floor is possible without reintroducing it). A direct `import pkg_resources` was checked on seven images: `athena-gateway`, `athena-mode-service`, `athena-orchestrator`, `athena-chat-embed`, `athena-admin-backend`, `athena-rag-sitescraper`, `athena-rag-weather`. It's absent in all seven, and none of them needs it. `athena-orchestrator` and `athena-rag-sitescraper` were additionally checked with unguarded imports of the optional content-fetcher packages (`trafilatura`, `extruct`, `pandas`, `playwright` in `src/shared/content_fetcher.py`) they actually ship.
 - **Added**: `scripts/audit-images.sh` + `make audit-images` (`SCOPE=remediated` scopes to `athena-admin-backend` and `athena-jarvis-web`). Builds each image (`docker buildx build --platform linux/amd64`), freezes its installed package list from its own Python (`pip freeze --all --exclude-editable`), then audits that frozen list from a throwaway venv that never touches the built image, so the reported advisory surface reflects what the pinned build tooling and committed lock actually produce. `pip-audit`'s exit code is captured to a sidecar file rather than swallowed; only rc 0 (clean) or rc 1 (findings) with parseable JSON counts as a result, anything else is `TOOL_ERROR` (exit 2). Carries exactly one `--ignore-vuln`: `PYSEC-2026-1325` (`ecdsa`, transitive via `python-jose[cryptography]`), unreachable under this codebase's HS256-only JWT usage — `admin/backend/app/auth/oidc.py` calls `jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])` with `JWT_ALGORITHM = "HS256"` at both call sites — gated on `scripts/check-jwt-algorithm-guard.py` passing first; a guard failure withholds the allowlist for that run.
-- **Added**: `scripts/check-jwt-algorithm-guard.py` — an AST-based check (immune to a match inside a comment or string) that resolves every python-jose import form (`import jose`, `import jose.jwt`, `from jose import jwt`/`jws`, `from jose.jwt import decode/encode`, `from jose.jws import verify/sign`, and attribute chains built on any of them) to a canonical name, then verifies `JWT_ALGORITHM == "HS256"` (the single top-level literal in `oidc.py`, with no other rebinding permitted), that every `jwt.decode`/`jws.verify` call site under `admin/backend/app` (excluding tests) and `src/shared` passes `algorithms=` naming only `HS256`/`JWT_ALGORITHM`, and that every `jwt.encode`/`jws.sign` call passes `algorithm="HS256"` or `JWT_ALGORITHM`. A non-UTF-8 file or other tool failure exits 2 rather than passing silently. Covered by `tests/unit/test_jwt_algorithm_guard.py` (16 cases). **Known limitation**: dynamic-dispatch forms — an intermediate-variable alias (`x = jwt; x.decode(...)`), a star import, `importlib.import_module`, or `setattr` on `JWT_ALGORITHM` — are not detected; the current tree is clean of all of these, but the guard cannot prove it stays that way. Tracked as **ATHENA-79**.
+- **Added**: `scripts/check-jwt-algorithm-guard.py` — an AST-based check (immune to a match inside a comment or string) that resolves every python-jose import form (`import jose`, `import jose.jwt`, `from jose import jwt`/`jws`, `from jose.jwt import decode/encode`, `from jose.jws import verify/sign`, and attribute chains built on any of them) to a canonical name, then verifies `JWT_ALGORITHM == "HS256"` (the single top-level literal in `oidc.py`, with no other rebinding permitted), that every `jwt.decode`/`jws.verify` call site under `admin/backend/app` (excluding tests) and `src/shared` passes `algorithms=` naming only `HS256`/`JWT_ALGORITHM`, and that every `jwt.encode`/`jws.sign` call passes `algorithm="HS256"` or `JWT_ALGORITHM`. A non-UTF-8 file or other tool failure exits 2 rather than passing silently. Covered by `tests/unit/test_jwt_algorithm_guard.py` (16 cases). **Known limitation**: dynamic-dispatch forms — an intermediate-variable alias (`x = jwt; x.decode(...)`), a star import, `importlib.import_module`, or `setattr` on `JWT_ALGORITHM` — are not detected; the current tree is clean of all of these, but the guard cannot prove it stays that way. Tracked as a follow-up.
 - **Fixed**: `scripts/audit-images.sh`, `scripts/smoke-images.sh`, `scripts/smoke-rag-images.sh`, and `scripts/lock-requirements.sh` each had at least one `set -u` empty-array expansion (e.g. any image with no shared-copy step) that aborted or silently swallowed the script's real exit status under macOS's stock bash 3.2. Fixed to the `"${arr[@]+"${arr[@]}"}"` form; verified directly under bash 3.2.57.
 - **Documented (operator note)**: python-jose 3.5 rejects a `JWT_SECRET`/`SESSION_SECRET_KEY` that contains a PEM header or SSH key-type substring, mistaking it for asymmetric key material — `jwt.encode` raises `JWSError`, `jwt.decode` raises `JWKError`, and neither subclasses `JWTError`, so both escape `oidc.py`'s `except JWTError` handling: login and every authenticated request return `500`, not `401`. Generate these secrets as plain random strings (e.g. `openssl rand -base64 32`, per `docs/CONFIGURATION.md`), never as a copy-pasted key file.
 - **Audit result**: `bash scripts/audit-images.sh --scope remediated` exits 1 (findings), not 0, at the end of Phase 6. `athena-jarvis-web` is clean. `athena-admin-backend` carries 5 distinct unallowlisted advisories on `starlette==0.52.1` (`PYSEC-2026-161`, `PYSEC-2026-248`, `PYSEC-2026-249`, `PYSEC-2026-2280`, `PYSEC-2026-2281`) — the same 5 CVEs disclosed above under Phase 4. Only Phase 7's starlette major clears them; no second `--ignore-vuln` was added for them.
@@ -477,7 +420,7 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 - **Verified**: `starsessions==2.2.1`'s `SessionMiddleware.__init__` signature, `RedisStore(connection=, prefix=)`, and `InMemoryStore()` are unchanged from `2.1.3`; `request.session` behaves identically under `starlette==1.6.0`. No changes needed to `admin/backend/main.py`'s or `app/routes/local_auth.py`'s session-middleware usage. The admin-backend test suite is unchanged from Phase 6 (same one pre-existing wall-clock flake under emulation, see Phase 4; every session/middleware/cookie/OIDC/WebSocket test passes).
 - **Pending, blocking for merge (not for this commit)**: manual confirmation in a browser that the session cookie set by `/api/auth/login` carries `Secure` and `SameSite=Lax`, that `/api/auth/logout` clears it, and that a second, independent browser session is unaffected by the first one's logout.
 - **Fixed**: `scripts/lock-requirements.sh`'s `--upgrade-package`, `--input`, `--output`, and `--constraint` each crashed with an "unbound variable" error when their value was missing, or silently consumed the next flag as their own value. Each now fails cleanly (`FAIL: <flag> requires a value`, non-zero exit); a following token starting with `--` is treated as a missing value too. `--check` combined with `--upgrade`/`--upgrade-package`, in either order, now fails (`FAIL: --check cannot be combined with --upgrade/--upgrade-package`) instead of letting a verification run mutate pins.
-- **Ticketed, not fixed**: `regenerate_session_id()` is never called on login (`admin/backend/app/routes/local_auth.py:167-169`, `main.py:817-818,888-889`) — a pre-existing session-fixation gap, unrelated to and unaffected by this phase's library bump. Tracked as **ATHENA-80**.
+- **Ticketed, not fixed**: `regenerate_session_id()` is never called on login (`admin/backend/app/routes/local_auth.py:167-169`, `main.py:817-818,888-889`) — a pre-existing session-fixation gap, unrelated to and unaffected by this phase's library bump. Tracked as a follow-up.
 - **Revert note**: Phase 7 ships as three commits — `39daf6f`, `449bbfe`, `7b07a31`. To undo it as a group: revert `7b07a31`, then `449bbfe`, then `39daf6f`, in that order. Only `CHANGELOG.md` conflicts (resolvable by restoring the pre-Phase-7 text); reverting `39daf6f` before `7b07a31` instead conflicts in `scripts/lock-requirements.sh`. The result restores `admin/backend/requirements.in` to `starsessions[redis]==2.1.3`, both admin-backend locks (`requirements.txt`, `requirements-test.txt`) to `starlette==0.52.1`/`starsessions==2.1.3`, and `scripts/lock-requirements.sh` to its pre-Phase-7 form. It changes no other image's lock or Dockerfile.
 
 **Phase 8 — lock the remaining 27 images:**
@@ -491,22 +434,17 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 **Phase 9 — the image consumes exactly the lock:**
 
 - **Fixed**: every shared install across all 27 shared-installing images (23 RAG services, `admin/backend`, `src/gateway`, `src/mode_service`, `src/orchestrator`) changed from `pip install --no-cache-dir -e /app/shared` to `pip install --no-cache-dir --no-deps --no-build-isolation -e /app/shared`. `--no-deps` makes the hashed lock — installed in the same stage immediately after — the single source of every installed package version. `--no-build-isolation` closes a second gap: `src/shared/pyproject.toml`'s own build-backend floor (`setuptools>=61.0`, unpinned `wheel`) would otherwise resolve fresh over the network inside an isolated build environment, bypassing the pinned triplet entirely. All 9 of `src/shared/pyproject.toml`'s dependencies are pinned with `==` in all 27 shared-installing locks. The 23 RAG Dockerfiles were regenerated from the generator template (never hand-edited); the 4 hand-written Dockerfiles (`admin/backend`, `src/gateway`, `src/mode_service`, `src/orchestrator`) were edited directly. `apps/chat-embed` and `apps/jarvis-web` install no shared module and are unchanged.
-- **Known limitation**: the four hand-written Dockerfiles' `--no-deps`/`--no-build-isolation` line and the 29 `.in`-to-`.txt` lock syncs have no CI gate — enforcement today is local (`make lock-check`, `scripts/check-build-tooling.py`, `scripts/generate-rag-dockerfiles.py --check`, and `scripts/smoke-images.sh`). The lock content itself is still consumed on every image build regardless, and the 23 generated RAG Dockerfiles keep their drift gate (the generator `--check`). Tracked as **ATHENA-81**.
-- **Known limitation**: the `pip`/`setuptools`/`wheel` bootstrap triplet is pinned by version across all 29 images, not by hash — a supply-chain gap one level below the hashed dependency locks. Tracked as **ATHENA-82**.
+- **Known limitation**: the four hand-written Dockerfiles' `--no-deps`/`--no-build-isolation` line and the 29 `.in`-to-`.txt` lock syncs have no CI gate — enforcement today is local (`make lock-check`, `scripts/check-build-tooling.py`, `scripts/generate-rag-dockerfiles.py --check`, and `scripts/smoke-images.sh`). The lock content itself is still consumed on every image build regardless, and the 23 generated RAG Dockerfiles keep their drift gate (the generator `--check`). Tracked as a follow-up.
+- **Known limitation**: the `pip`/`setuptools`/`wheel` bootstrap triplet is pinned by version across all 29 images, not by hash — a supply-chain gap one level below the hashed dependency locks. Tracked as a follow-up.
 - **Documented**: the orchestrator lock's `httpx2`, `httpcore2`, and `langchain-protocol` entries are legitimate upstream dependencies, not typosquats — `httpx2`/`httpcore2` are pulled in by `langsmith` and by starlette 1.6's own `TestClient`; `langchain-protocol` is pulled in by `langchain-core` and `langgraph-sdk`.
 - **Fixed**: `scripts/audit-images.sh`'s isolated pip-audit venv was created at `/audit-venv`, a path requiring write access to the container filesystem root — 26 of 29 images set a non-root `USER athena`, so the audit could not complete on any of them. Moved the venv into a `mktemp`-created directory under `/tmp`, which every base image in this repo makes world-writable.
 - **Corrected**: `CONTRIBUTING.md`'s httpx version contract now states the current mechanism: httpx is pinned exactly (`httpx==0.28.1`) in every one of the 29 generated locks; for the 27 images compiled against `src/shared/pyproject.toml`, that pin is fixed at lock time by `scripts/lock-requirements.sh`, not at image-install time (the shared install now installs zero dependencies); changing it means editing the `src/shared/pyproject.toml` constraint and running `make lock`.
 - **Fixed (Security)**: `POST /api/auth/local-login`, `POST /api/auth/ws-ticket`, and all 6 service-registry write endpoints returned `500` on every request once the rate limiter was active (i.e. whenever Redis was reachable at startup — production), because `fastapi-limiter==0.1.6`'s route-introspection crashes under FastAPI 0.141.1's `_IncludedRouter` wrapper. `admin/backend/app/utils/rate_limit.py` no longer calls `fastapi_limiter.depends.RateLimiter`; the replacement enforces the same per-route, per-budget limits directly against Redis without touching `request.app.routes`. A lost Lua script cache (Redis restart, failover, or `SCRIPT FLUSH`) is now recovered transparently instead of crashing; a mid-request Redis outage now fails open (the request proceeds normally, logged) rather than returning `500`.
 
----
-
-## [Unreleased]
-
 > **Plan:** `thoughts/shared/plans/2026-05-15-deliver-auth-deferred-hardening.md` (r2)
-> **Ticket:** ATHENA-55
 > **Commits:** `179fd8c` (Phase 1), `77f50d6` (Phase 2), `f956be2` (Phase 3), `9b2926e` (Phase 4)
 
-### auth-deferred-hardening (ATHENA-55)
+#### auth-deferred-hardening
 
 - **Added**: `OIDC_VALIDATE_ISS` env flag (default `true`, opt-out). When set to `false`, the issuer-**mismatch** startup gate (branch (d) in `_enforce_oidc_runtime_gates`) is softened from `SystemExit` to `logger.warning`, and authlib's own `iss` check is relaxed via `claims_options={"iss": {"essential": False}}` on the OIDC callback at `main.py:815`. **Scope is deliberately narrow**: the flag relaxes issuer *mismatch* only — it does **not** let the service boot with an empty/placeholder issuer, an unreachable IdP, or a discovery doc missing the `issuer` field (those branches remain fatal `SystemExit` regardless of the flag). Startup emits `oidc_iss_validation_disabled` warning when the flag is false; flag state is exposed on `GET /api/auth/methods` as `"oidc_iss_validation"` for runtime observability. **Audience validation note**: authlib (which this codebase uses for the OIDC callback) validates the `aud` claim via `IDToken.validate_azp` against the registered `OIDC_CLIENT_ID`; `OIDC_VALIDATE_ISS=false` has no effect on audience validation.
 
@@ -522,7 +460,7 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
   - **Upgrade-time capability fallback**: WS close 4001 + `ticketMintStatus === 200` + `!legacyRetried` → one retry with legacy session JWT (mixed-rollout gap where a new pod mints the ticket but an old pod handles the WS upgrade and rejects `aud="ws"`). 4003, second 4001, or mint status ≠ 200 → fail loudly. `legacyRetried` resets per `connectWebSocket()` invocation.
   - `console.log` logs host+path only (never `?token=` query string) — xander C-2.
 
-- **Operational note — deploy ordering (ATHENA-55)**: the admin **backend** (`athena-admin-backend`, `replicas: 2`, RollingUpdate) must be fully rolled out to the ticket-aware image **before** the new admin-frontend image is promoted. Both deployments roll independently with no `sessionAffinity`; the capability fallback above covers the residual window (e.g. a backend pod restart mid-frontend-rollout). Gate: `kubectl rollout status deployment/athena-admin-backend -n athena-prod`.
+- **Operational note — deploy ordering**: the admin **backend** (`athena-admin-backend`, `replicas: 2`, RollingUpdate) must be fully rolled out to the ticket-aware image **before** the new admin-frontend image is promoted. Both deployments roll independently with no `sessionAffinity`; the capability fallback above covers the residual window (e.g. a backend pod restart mid-frontend-rollout). Gate: `kubectl rollout status deployment/athena-admin-backend -n athena-prod`.
 
 - **Security review follow-ups (xander mid-build, same campaign):**
   - **(M-1) Origin policy documented**: absent `Origin` header (non-browser clients — curl, scripts, monitors) is now explicitly **allowed** on WS upgrade. Non-browser clients have no CSRF surface; the Origin check defends against browser-based cross-origin upgrades only. Only a PRESENT-but-mismatched Origin closes 4003. A startup log line (`websocket_origin_absent_allowed`) confirms the policy at runtime. Tests: `TestWsOriginPolicy`.
@@ -532,38 +470,33 @@ Four defects found after the ATHENA-86 house cutover (`dick`'s post-cutover inve
 
 - **Follow-up (Phase 6, next release — out of scope)**: remove legacy `?token=` session-JWT acceptance from `websocket.py` and the frontend 404-fallback. Tracked as a follow-up; not built here.
 
----
-
-## [Unreleased]
-
 > **Plan:** `thoughts/shared/plans/active/2026-06-12-deliver-rbac-ssrf-partial.md` (r4)
-> **Ticket:** ATHENA-59 (Phase 0 — shared SSRF guard)
 
-### SSRF guard: shared safe_request helper wired into user/admin URL fetch chokepoints (ATHENA-59 Phase 0)
+#### SSRF guard: shared safe_request helper wired into user/admin URL fetch chokepoints
 
-- **Added** (`ATHENA-59`): `src/shared/url_safety.py` — canonical SSRF guard module. Exports `validate_url_not_private` (sync, never-raises, never-reads-env), `safe_request`/`safe_get`/`safe_post` (async, IP-pinned transport, per-hop revalidation, ~10 MB cap), `SsrfBlockedError`, `UrlSafetyResult` (frozen dataclass). DNS-rebinding mitigated via `_PinnedNetworkBackend` that dials the validated IP while httpcore's TLS layer preserves SNI hostname. POST 301/302/303 redirects downgrade to GET and strip body/credential headers on cross-origin hops; POST 307/308 redirects are refused.
-- **Changed** (`ATHENA-59`): `src/rag/site_scraper/main.py` — `is_url_allowed` now performs literal-IP detection and domain allow/block matching (`_domain_matches`); it does NOT call `validate_url_not_private` (DNS-resolving guard lives in the async fetch path via `safe_get` to avoid blocking the event loop). `blocked_domains` and `allowed_domains` substring matching replaced with exact-host/suffix matching (`_domain_matches`) to close attacker bypass via `evil.com.attacker.net` (xander H-1).
-- **Changed** (`ATHENA-59`): `admin/backend/app/routes/calendar_sources.py` — `fetch_ical_data` now uses `safe_get(allowed_schemes=frozenset({"https"}))` — enforces HTTPS on every redirect hop.
-- **Changed** (`ATHENA-59`): `src/shared/content_fetcher.py` — default client changed to `follow_redirects=False`; all HTTP fetches on user-supplied URLs route through `safe_get`; Playwright paths gated behind `CONTENT_FETCHER_ALLOW_BROWSER_FETCH` (default `false`).
-- **Changed** (`ATHENA-59`): `admin/backend/app/routes/tool_calling.py` — MCP discovery POST for Class-1 sources (request body / feature-flag DB rows) replaced with `safe_post`; Class-3 (N8N_MCP_URL env) kept exempt.
-- **Changed** (`ATHENA-59`): `src/shared/tool_registry.py` — MCP POST for Class-1 feature-flag rows replaced with `safe_post`; Class-3 (N8N_MCP_URL env) kept exempt.
-- **Changed** (`ATHENA-59`): `admin/backend/app/services/health_poller.py` — `_validate_service_url` promoted to `async def`; local `_PRIVATE_NETS` duplicate retired; IPv6 bare addresses bracketed before URL construction; delegates to shared `validate_url_not_private`.
-- **Changed** (`ATHENA-59`): `admin/backend/app/routes/services.py` — all 5 `aiohttp.ClientSession.get()` calls in connector health checks set `allow_redirects=False`; missing `await` on Redis SSRF guard call fixed.
-- **Changed** (`ATHENA-59`): `admin/backend/app/routes/rag_connectors.py` — all 6 `session.get()` calls set `allow_redirects=False`.
-- **Changed** (`ATHENA-59`): `admin/backend/app/routes/music_config.py` — `HA_URL` hardcoded fallback `http://192.168.10.168:8123` removed; empty default with startup log warning (OSS-First rule).
-- **Added** (`ATHENA-59`): `src/shared/config.py` — `sitescraper_allowed_private_hosts` (str, default `""`), `content_fetcher_allow_browser_fetch` (bool, default `false`).
-- **Added** (`ATHENA-59`): `tests/unit/test_url_safety.py` — 69 tests covering all SSRF guard contracts, IP-pinning PoC, POST redirect semantics, safe_request/safe_get/safe_post wrappers.
-- **Fixed** (`ATHENA-59`): Health poller `TestSSRFGuard` tests updated to `asyncio.run()` for async `_validate_service_url`; `test_phase4_reconcile.py` and `test_codex_r2_reconcile.py` updated similarly.
-- **Fixed** (`ATHENA-59`): Streaming size cap in `safe_request` now iterates `aiter_bytes()` and aborts before buffering the full body (H-1 gate fix — previous `aread()`-then-check defeated the cap).
-- **Fixed** (`ATHENA-59`): `discover_mcp_tools` reads `N8N_MCP_URL` env exactly once into a local before URL resolution and Class-1/Class-3 classification to prevent mismatch (H-3 gate fix).
-- **Fixed** (`ATHENA-59`): `_domain_matches` in `site_scraper/main.py` strips trailing dots on both domain and pattern (M-3 gate fix — trailing dot previously bypassed exact-match).
-- **Fixed** (`ATHENA-59`): `is_url_allowed` in `site_scraper/main.py` no longer calls blocking `socket.getaddrinfo` synchronously from async handlers; DNS-resolving guard lives only in the async `safe_get` fetch path (M-1 gate fix).
-- **Fixed** (`ATHENA-59`): `/health` endpoint `browser_rendering` field now reflects `HAS_PLAYWRIGHT AND CONTENT_FETCHER_ALLOW_BROWSER_FETCH` gate (IAN-9).
-- **Added** (`ATHENA-59`): TLS SNI PoC tests prove `_PinnedNetworkBackend` dials the pinned IP and the httpcore pool uses the original hostname for SNI (H-2 gate fix).
-- **Added** (`ATHENA-59`): IPv6 ULA URL-form parametrized tests (`http://[fc00::1]/`, `http://[fd00::1]/`) confirm ULA addresses are blocked (M-4 gate fix).
-- **Added** (`ATHENA-59`): Tool registry localhost:5678 default fail-closed test — asserts `SsrfBlockedError` is caught, `_mcp_tools` stays empty, and `mcp_tool_registry_ssrf_blocked` log fires (IAN item 10).
+- **Added**: `src/shared/url_safety.py` — canonical SSRF guard module. Exports `validate_url_not_private` (sync, never-raises, never-reads-env), `safe_request`/`safe_get`/`safe_post` (async, IP-pinned transport, per-hop revalidation, ~10 MB cap), `SsrfBlockedError`, `UrlSafetyResult` (frozen dataclass). DNS-rebinding mitigated via `_PinnedNetworkBackend` that dials the validated IP while httpcore's TLS layer preserves SNI hostname. POST 301/302/303 redirects downgrade to GET and strip body/credential headers on cross-origin hops; POST 307/308 redirects are refused.
+- **Changed**: `src/rag/site_scraper/main.py` — `is_url_allowed` now performs literal-IP detection and domain allow/block matching (`_domain_matches`); it does NOT call `validate_url_not_private` (DNS-resolving guard lives in the async fetch path via `safe_get` to avoid blocking the event loop). `blocked_domains` and `allowed_domains` substring matching replaced with exact-host/suffix matching (`_domain_matches`) to close attacker bypass via `evil.com.attacker.net` (xander H-1).
+- **Changed**: `admin/backend/app/routes/calendar_sources.py` — `fetch_ical_data` now uses `safe_get(allowed_schemes=frozenset({"https"}))` — enforces HTTPS on every redirect hop.
+- **Changed**: `src/shared/content_fetcher.py` — default client changed to `follow_redirects=False`; all HTTP fetches on user-supplied URLs route through `safe_get`; Playwright paths gated behind `CONTENT_FETCHER_ALLOW_BROWSER_FETCH` (default `false`).
+- **Changed**: `admin/backend/app/routes/tool_calling.py` — MCP discovery POST for Class-1 sources (request body / feature-flag DB rows) replaced with `safe_post`; Class-3 (N8N_MCP_URL env) kept exempt.
+- **Changed**: `src/shared/tool_registry.py` — MCP POST for Class-1 feature-flag rows replaced with `safe_post`; Class-3 (N8N_MCP_URL env) kept exempt.
+- **Changed**: `admin/backend/app/services/health_poller.py` — `_validate_service_url` promoted to `async def`; local `_PRIVATE_NETS` duplicate retired; IPv6 bare addresses bracketed before URL construction; delegates to shared `validate_url_not_private`.
+- **Changed**: `admin/backend/app/routes/services.py` — all 5 `aiohttp.ClientSession.get()` calls in connector health checks set `allow_redirects=False`; missing `await` on Redis SSRF guard call fixed.
+- **Changed**: `admin/backend/app/routes/rag_connectors.py` — all 6 `session.get()` calls set `allow_redirects=False`.
+- **Changed**: `admin/backend/app/routes/music_config.py` — `HA_URL` hardcoded fallback `http://192.168.10.168:8123` removed; empty default with startup log warning (OSS-First rule).
+- **Added**: `src/shared/config.py` — `sitescraper_allowed_private_hosts` (str, default `""`), `content_fetcher_allow_browser_fetch` (bool, default `false`).
+- **Added**: `tests/unit/test_url_safety.py` — 69 tests covering all SSRF guard contracts, IP-pinning PoC, POST redirect semantics, safe_request/safe_get/safe_post wrappers.
+- **Fixed**: Health poller `TestSSRFGuard` tests updated to `asyncio.run()` for async `_validate_service_url`; `test_phase4_reconcile.py` and `test_codex_r2_reconcile.py` updated similarly.
+- **Fixed**: Streaming size cap in `safe_request` now iterates `aiter_bytes()` and aborts before buffering the full body (H-1 gate fix — previous `aread()`-then-check defeated the cap).
+- **Fixed**: `discover_mcp_tools` reads `N8N_MCP_URL` env exactly once into a local before URL resolution and Class-1/Class-3 classification to prevent mismatch (H-3 gate fix).
+- **Fixed**: `_domain_matches` in `site_scraper/main.py` strips trailing dots on both domain and pattern (M-3 gate fix — trailing dot previously bypassed exact-match).
+- **Fixed**: `is_url_allowed` in `site_scraper/main.py` no longer calls blocking `socket.getaddrinfo` synchronously from async handlers; DNS-resolving guard lives only in the async `safe_get` fetch path (M-1 gate fix).
+- **Fixed**: `/health` endpoint `browser_rendering` field now reflects `HAS_PLAYWRIGHT AND CONTENT_FETCHER_ALLOW_BROWSER_FETCH` gate (IAN-9).
+- **Added**: TLS SNI PoC tests prove `_PinnedNetworkBackend` dials the pinned IP and the httpcore pool uses the original hostname for SNI (H-2 gate fix).
+- **Added**: IPv6 ULA URL-form parametrized tests (`http://[fc00::1]/`, `http://[fd00::1]/`) confirm ULA addresses are blocked (M-4 gate fix).
+- **Added**: Tool registry localhost:5678 default fail-closed test — asserts `SsrfBlockedError` is caught, `_mcp_tools` stays empty, and `mcp_tool_registry_ssrf_blocked` log fires (IAN item 10).
 
-#### Deployer migration guide (ATHENA-59 Phase 0)
+##### Deployer migration guide
 
 **Behavior changes from this release — action required before upgrading:**
 
@@ -604,111 +537,76 @@ gracefully: per-hop SSRF validation remains active, but the IP-pinned transport 
 disabled and a `url_safety_pinned_transport_unavailable` structured-log warning fires
 so the operator can see the degraded state.  Check logs on first startup after upgrade.
 
----
-
-## [Unreleased]
-
-> **Ticket:** ATHENA-57
 > **Commits:** `67075c1` (Phases 1/1b — observability), `a780bfa` (Phase 2 — harness), `d6213a8` (codex r2 + valerie reconciliation)
 
-### Orchestrator benchmark observability + tool-calling harness (ATHENA-57)
+#### Orchestrator benchmark observability + tool-calling harness
 
-- **Added** (`ATHENA-57`): `skip_semantic_cache` field on `POST /query` request body (`OrchestratorState`). When `true`, the semantic-cache lookup and write are both skipped for that request. This prevents cached responses from contaminating repeated benchmark runs. The field is also included in `QueryResponse.metadata` so callers can confirm it was honoured.
-- **Added** (`ATHENA-57`): `metadata.model_component_used` — the actual model tag used by the tool-calling node for the turn (e.g. `"qwen3:4b"`). Populated from the component model assignment resolved at query time; falls back to `null` when the tool-call node was not reached.
-- **Added** (`ATHENA-57`): `metadata.model_component_name` — the component-model config name resolved by the router (e.g. `"tool_calling_simple"`). Separate from `model_component_used` to distinguish the router's component decision from the actual model tag.
-- **Fixed** (`ATHENA-57`): helper-cache invalidation in the tool-calling node — a stale cache entry could return the prior turn's component assignment after a model config change. Cache is now keyed on the component name so config changes are picked up on the next turn.
-- **Added** (`ATHENA-57`): `scripts/bench_tool_calling.py` — benchmark harness for A/B tool-calling trials. Sends each query from `bench/query_set.yaml` N times against a live orchestrator (`--n` runs per query, default 20), records per-turn JSONL rows, and writes results to `bench/results/`. Key bindings per run: `temperature=0.1`, `skip_semantic_cache=true`. Pass `--self-test` to validate query-set, scoring logic, and fallback attribution without a live host.
-- **Added** (`ATHENA-57`): `scripts/bench_report.py` — aggregates one or two JSONL result files into a human-readable per-component and per-cell summary (correct-tool rate, false-positive rate, p50/p90 latency). Pass one file for a single-cell summary; pass two for an A/B diff.
-- **Added** (`ATHENA-57`): `bench/query_set.yaml` — 40-query synthetic benchmark set covering all tool-calling components (simple, complex, super-complex) plus none-tagged turns for false-positive measurement. No real user data.
-- **Added** (`ATHENA-57`): `bench/README.md` — JSONL schema, decision gates (Gate 1: correct-tool rate +5pp; Gate 2: FP rate ≤ 15% absolute and ≤ qwen3+5pp relative; Gate 3: p90 latency ≤ incumbent × 1.10), environment contract, attribution-fallback rule, and committed-results policy.
+- **Added**: `skip_semantic_cache` field on `POST /query` request body (`OrchestratorState`). When `true`, the semantic-cache lookup and write are both skipped for that request. This prevents cached responses from contaminating repeated benchmark runs. The field is also included in `QueryResponse.metadata` so callers can confirm it was honoured.
+- **Added**: `metadata.model_component_used` — the actual model tag used by the tool-calling node for the turn (e.g. `"qwen3:4b"`). Populated from the component model assignment resolved at query time; falls back to `null` when the tool-call node was not reached.
+- **Added**: `metadata.model_component_name` — the component-model config name resolved by the router (e.g. `"tool_calling_simple"`). Separate from `model_component_used` to distinguish the router's component decision from the actual model tag.
+- **Fixed**: helper-cache invalidation in the tool-calling node — a stale cache entry could return the prior turn's component assignment after a model config change. Cache is now keyed on the component name so config changes are picked up on the next turn.
+- **Added**: `scripts/bench_tool_calling.py` — benchmark harness for A/B tool-calling trials. Sends each query from `bench/query_set.yaml` N times against a live orchestrator (`--n` runs per query, default 20), records per-turn JSONL rows, and writes results to `bench/results/`. Key bindings per run: `temperature=0.1`, `skip_semantic_cache=true`. Pass `--self-test` to validate query-set, scoring logic, and fallback attribution without a live host.
+- **Added**: `scripts/bench_report.py` — aggregates one or two JSONL result files into a human-readable per-component and per-cell summary (correct-tool rate, false-positive rate, p50/p90 latency). Pass one file for a single-cell summary; pass two for an A/B diff.
+- **Added**: `bench/query_set.yaml` — 40-query synthetic benchmark set covering all tool-calling components (simple, complex, super-complex) plus none-tagged turns for false-positive measurement. No real user data.
+- **Added**: `bench/README.md` — JSONL schema, decision gates (Gate 1: correct-tool rate +5pp; Gate 2: FP rate ≤ 15% absolute and ≤ qwen3+5pp relative; Gate 3: p90 latency ≤ incumbent × 1.10), environment contract, attribution-fallback rule, and committed-results policy.
 
-**Status:** Benchmark executed 2026-06-12. Decision: **NO-SWAP** — gemma4 QAT challengers failed all three gates; qwen3:4b-instruct-2507-q4_K_M remains on all tool-calling components; config unchanged. See [`bench/results/ATHENA-57-DECISION.md`](bench/results/ATHENA-57-DECISION.md).
-
----
-
-## [Unreleased]
+**Status:** Benchmark executed 2026-06-12. Decision: **NO-SWAP** — gemma4 QAT challengers failed all three gates; qwen3:4b-instruct-2507-q4_K_M remains on all tool-calling components; config unchanged. See the committed benchmark decision record in `bench/results/`.
 
 > **Plan:** `thoughts/shared/plans/2026-05-15-deliver-audit-deferred-cleanup-batch.md`
-> **Tickets:** ATHENA-11 (C1 cleanup-batch — Phase 2 + Phase 5 reconciliation)
 
-### Audit-deferred cleanup-batch reconciliation (ATHENA-11 C1)
+#### Audit-deferred cleanup-batch reconciliation
 
 - **Changed**: `admin-backend DEV_MODE startup gate now allows local-host Postgres with WARNING instead of FATAL (xander:6 carve-out). Production K8s pods still fail fatally via KUBERNETES_SERVICE_HOST guard. See `admin/backend/app/utils/url_validators.py:151` and `admin/backend/main.py:381-426`.`
 - **Fixed**: `Migration 058 clears legacy `oidc_redirect_uri`/`oidc_provider_url` rows in the `secrets` table that were seeded with the maintainer's domain values prior to commit `5403a8a`. Requires `ENCRYPTION_KEY` to be set. Supports `DRY_RUN_058=true` for rehearsal. No-op on fresh deployments. (bob:1 follow-up)`
 
----
-
-## [Unreleased]
-
 > **Plans:** `thoughts/shared/plans/active-2026-05-11-deliver-rag-services-table-rename.md`, `thoughts/shared/plans/active-2026-05-11-deliver-health-poller-leader-election.md`
-> **Tickets:** ATHENA-17, ATHENA-18
 
-### Rename `rag_services` table to `athena_service_registry` (ATHENA-17)
+#### Rename `rag_services` table to `athena_service_registry`
 
-- **Changed** (`ATHENA-17`): Alembic migration `057_rename_rag_services_to_athena_service_registry.py` renames the `rag_services` table to `athena_service_registry`. No data loss; downgrade restores the original name. SQLAlchemy model `RagService` updated to `__tablename__ = "athena_service_registry"`. All ORM queries, route docstrings, and YAML comments updated to reference the new table name.
+- **Changed**: Alembic migration `057_rename_rag_services_to_athena_service_registry.py` renames the `rag_services` table to `athena_service_registry`. No data loss; downgrade restores the original name. SQLAlchemy model `RagService` updated to `__tablename__ = "athena_service_registry"`. All ORM queries, route docstrings, and YAML comments updated to reference the new table name.
 
-### Health-poller leader election (ATHENA-18)
+#### Health-poller leader election
 
-- **Added** (`ATHENA-18`): Redis SETNX-based leader election in `admin/backend/app/services/health_poller.py`. With `replicas: 2`, only one replica polls and writes health columns per cycle; the non-leader yields the iteration. A strict-abort per-cycle heartbeat task (every `HEARTBEAT_INTERVAL_SECONDS=20`) renews the lease atomically via Lua check-and-set and cancels the in-flight `_poll_all_services` task if the lease cannot be renewed, preventing any replica from writing after lease loss. New env var: `ATHENA_NAMESPACE` (default `athena-prod`, introduced by ATHENA-59 Phase 1 via downward API injection) — the Redis lease key is namespaced using this value so concurrent deployments in different namespaces do not share a lease. Leader election otherwise uses the existing `REDIS_URL`. `HEALTH_POLL_INTERVAL_SECONDS` must remain < 40s (`LEASE_TTL_SECONDS`); startup raises `SystemExit FATAL` if this invariant is violated.
-
----
-
-## [Unreleased]
+- **Added**: Redis SETNX-based leader election in `admin/backend/app/services/health_poller.py`. With `replicas: 2`, only one replica polls and writes health columns per cycle; the non-leader yields the iteration. A strict-abort per-cycle heartbeat task (every `HEARTBEAT_INTERVAL_SECONDS=20`) renews the lease atomically via Lua check-and-set and cancels the in-flight `_poll_all_services` task if the lease cannot be renewed, preventing any replica from writing after lease loss. New env var: `ATHENA_NAMESPACE` (default `athena-prod`, introduced in a prior phase of the SSRF-guard work via downward API injection) — the Redis lease key is namespaced using this value so concurrent deployments in different namespaces do not share a lease. Leader election otherwise uses the existing `REDIS_URL`. `HEALTH_POLL_INTERVAL_SECONDS` must remain < 40s (`LEASE_TTL_SECONDS`); startup raises `SystemExit FATAL` if this invariant is violated.
 
 > **Plan:** `thoughts/shared/plans/2026-05-09-deliver-validator-fix-general-info.md`
-> **Ticket:** ATHENA-39
 
-### Validator training-knowledge bypass (ATHENA-39)
+#### Validator training-knowledge bypass
 
-- **Fixed** (`ATHENA-39`): `src/orchestrator/nodes/validate_node` — validator no longer rejects GENERAL_INFO and conversation-context responses synthesized from LLM training knowledge when no retrieved data and no base knowledge are available. Previously, `validate.py:189`'s fact-check prompt ("ANY specific factual claims are likely hallucinations" when no Retrieved Data is present) caused false-positive Layer 4 rejections for responses that `synthesize_node` itself explicitly allowed using training knowledge (`synthesize.py:129-144` for `GENERAL_INFO`, `synthesize.py:152-166` for any intent with conversation history). First-turn current-domain queries (WEATHER, SPORTS, STOCKS, NEWS, etc.) with no RAG data continue to run the LLM fact-check because their synthesize branch (`synthesize.py:167-179`) tells the model not to invent specifics — Layer 4 protection is correctly aligned there. WEBSEARCH is carved out even with conversation context (freshness implied by intent).
-- **Added** (`ATHENA-39`): new Prometheus metric label `validation_counter{passed="true", reason="training_knowledge_fallback"}` for observability of the bypass path. No env var or API change.
-
----
-
-## [Unreleased]
+- **Fixed**: `src/orchestrator/nodes/validate_node` — validator no longer rejects GENERAL_INFO and conversation-context responses synthesized from LLM training knowledge when no retrieved data and no base knowledge are available. Previously, `validate.py:189`'s fact-check prompt ("ANY specific factual claims are likely hallucinations" when no Retrieved Data is present) caused false-positive Layer 4 rejections for responses that `synthesize_node` itself explicitly allowed using training knowledge (`synthesize.py:129-144` for `GENERAL_INFO`, `synthesize.py:152-166` for any intent with conversation history). First-turn current-domain queries (WEATHER, SPORTS, STOCKS, NEWS, etc.) with no RAG data continue to run the LLM fact-check because their synthesize branch (`synthesize.py:167-179`) tells the model not to invent specifics — Layer 4 protection is correctly aligned there. WEBSEARCH is carved out even with conversation context (freshness implied by intent).
+- **Added**: new Prometheus metric label `validation_counter{passed="true", reason="training_knowledge_fallback"}` for observability of the bypass path. No env var or API change.
 
 > **Plan:** `thoughts/shared/plans/2026-05-09-deliver-rag-oss-dep-cleanup.md`
-> **Ticket:** ATHENA-33..38
 
-### RAG OSS dependency cleanup (ATHENA-33..38)
+#### RAG OSS dependency cleanup
 
-- **Fixed** (`ATHENA-33`): `src/rag/sports/requirements.txt` — added `feedparser>=6.0.10`. Service had `import feedparser` but the package was missing, causing CrashLoopBackOff at startup.
-- **Fixed** (`ATHENA-34`): `src/rag/community_events/main.py` — replaced `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB` env-var reads with `COMMUNITY_EVENTS_REDIS_URL` (default `redis://redis:6379/1`). The kubelet auto-injects `REDIS_PORT=tcp://<svc-ip>:6379` for any K8s Service named `redis`, which broke the `int(os.getenv("REDIS_PORT"))` cast at import time. The new URL-based approach is unambiguous and immune to the injection.
-- **Fixed** (`ATHENA-35`): `src/rag/price_compare/Dockerfile` — `providers/` subpackage is now COPYd to `/app/providers` (the WORKDIR, matching `from providers.base import ...`). Previously it was copied to `/app/rag_service/providers/` (unreachable on `sys.path`). Fix is encoded in `scripts/generate-rag-dockerfiles.py` via the new `SERVICE_EXTRA_COPIES` dict so future `--force` regeneration doesn't clobber it.
-- **Fixed** (`ATHENA-36`): `src/rag/site_scraper/main.py` — `ContentFetcher` is now imported from `shared.content_fetcher` (not `orchestrator.search_providers.content_fetcher`, which was never in the site_scraper image). `ContentFetcher` moved to `src/shared/content_fetcher.py`; backward-compat shim at the old path re-exports all public symbols. See ATHENA-36-followup for shim removal.
-- **Fixed** (`ATHENA-37`): `src/rag/tesla/requirements.txt` — added `asyncpg>=0.29.0`. Service startup no longer crashes on import. Pool creation is now gated behind `TESLAMATE_ENABLED` (default `false`); when disabled the service starts cleanly and query endpoints return HTTP 503 with a clear remediation message. `/health` returns 200 regardless of DB state.
-- **Fixed** (`ATHENA-38`): `src/rag/transportation/requirements.txt` — added `beautifulsoup4>=4.12.0`. Service had `from bs4 import BeautifulSoup` but the package was missing.
-- **Added** (`ATHENA-35`): `scripts/generate-rag-dockerfiles.py` — `SERVICE_EXTRA_COPIES` dict for service-specific subpackage COPY entries; `--service <name>` flag to regenerate a single service; `--check` and `--check-advisory` flags for drift detection.
+- **Fixed**: `src/rag/sports/requirements.txt` — added `feedparser>=6.0.10`. Service had `import feedparser` but the package was missing, causing CrashLoopBackOff at startup.
+- **Fixed**: `src/rag/community_events/main.py` — replaced `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB` env-var reads with `COMMUNITY_EVENTS_REDIS_URL` (default `redis://redis:6379/1`). The kubelet auto-injects `REDIS_PORT=tcp://<svc-ip>:6379` for any K8s Service named `redis`, which broke the `int(os.getenv("REDIS_PORT"))` cast at import time. The new URL-based approach is unambiguous and immune to the injection.
+- **Fixed**: `src/rag/price_compare/Dockerfile` — `providers/` subpackage is now COPYd to `/app/providers` (the WORKDIR, matching `from providers.base import ...`). Previously it was copied to `/app/rag_service/providers/` (unreachable on `sys.path`). Fix is encoded in `scripts/generate-rag-dockerfiles.py` via the new `SERVICE_EXTRA_COPIES` dict so future `--force` regeneration doesn't clobber it.
+- **Fixed**: `src/rag/site_scraper/main.py` — `ContentFetcher` is now imported from `shared.content_fetcher` (not `orchestrator.search_providers.content_fetcher`, which was never in the site_scraper image). `ContentFetcher` moved to `src/shared/content_fetcher.py`; backward-compat shim at the old path re-exports all public symbols. A follow-up removes the backward-compat shim.
+- **Fixed**: `src/rag/tesla/requirements.txt` — added `asyncpg>=0.29.0`. Service startup no longer crashes on import. Pool creation is now gated behind `TESLAMATE_ENABLED` (default `false`); when disabled the service starts cleanly and query endpoints return HTTP 503 with a clear remediation message. `/health` returns 200 regardless of DB state.
+- **Fixed**: `src/rag/transportation/requirements.txt` — added `beautifulsoup4>=4.12.0`. Service had `from bs4 import BeautifulSoup` but the package was missing.
+- **Added**: `scripts/generate-rag-dockerfiles.py` — `SERVICE_EXTRA_COPIES` dict for service-specific subpackage COPY entries; `--service <name>` flag to regenerate a single service; `--check` and `--check-advisory` flags for drift detection.
 - **Added**: `scripts/service-defs.sh` — single source of truth for `RAG_SERVICES`, `CORE_SRC_SERVICES`, `ADMIN_SERVICES` arrays; sourced by both `build-and-push.sh` and `smoke-rag-images.sh`.
 - **Added**: `scripts/smoke-rag-images.sh` — builds all 23 RAG images and verifies `python -c "import main"` for each. Full-sweep (not fail-fast); `--service <name>` for single-service runs.
 - **Added**: `Makefile` with `smoke-rags` target (`make smoke-rags SERVICE=<name>`).
 - **Added**: `.github/workflows/rag-smoke.yml` — PR-gated CI check on `src/rag/**` and `src/shared/**` changes.
-- **Added**: `.github/workflows/rag-generator-drift.yml` — advisory-only CI check for generator/Dockerfile drift (always exits 0 until ATHENA-36b).
+- **Added**: `.github/workflows/rag-generator-drift.yml` — advisory-only CI check for generator/Dockerfile drift (always exits 0 until enforcement is turned on).
 - **Added**: `CONTRIBUTING.md` — "Adding or modifying a RAG service" checklist (6 items).
 
----
-
-## [Unreleased]
-
 > **Plan:** `thoughts/shared/plans/2026-05-08-deliver-service-auth-hardening.md`
-> **Ticket:** ATHENA-21
 > **Commits:** `3ed22e6` (phase 1), `eb8b305` (phase 2)
 
-### service-auth hardening (ATHENA-21)
+#### service-auth hardening
 
 - **Fixed**: `verify_service_or_oidc` no longer silently falls through to OIDC when `SERVICE_API_KEY` is unset and a caller sends a non-empty `X-Service-Key` header. The helper now returns HTTP 503 with body `{"detail": "Service authentication not configured"}`. The `WWW-Authenticate` header is intentionally absent — this is a server-side misconfiguration signal, not an authentication challenge; retrying with credentials will not help. (`admin/backend/app/utils/service_auth.py`, `3ed22e6`)
 - **Behavioral change for callers**: any `verify_service_or_oidc`-protected endpoint (service-registry write endpoints: POST, toggle, refresh, delete, poll-now, check) will now return 503 instead of the previous silent OIDC fallthrough when a non-empty `X-Service-Key` is sent to a deployment where `SERVICE_API_KEY` is unset. Callers that send no `X-Service-Key` header are unaffected.
-- **Startup gate — behavioral tests added**: the existing production gate (`_INSECURE_DEFAULTS` loop in `admin/backend/main.py`) that already raises `SystemExit` when `SERVICE_API_KEY` is empty **or** set to the placeholder `dev-service-key-change-in-production` now has dedicated behavioral regression tests pinned to ATHENA-21 (`TestAthena21StartupGate` in `test_security_hardening.py`). The prior static-source-scan test that asserted the gate's existence by reading `main.py` source text has been demoted via comment as superseded. (`eb8b305`)
-
----
-
-## [Unreleased]
+- **Startup gate — behavioral tests added**: the existing production gate (`_INSECURE_DEFAULTS` loop in `admin/backend/main.py`) that already raises `SystemExit` when `SERVICE_API_KEY` is empty **or** set to the placeholder `dev-service-key-change-in-production` now has dedicated behavioral regression tests (`TestAthena21StartupGate` in `test_security_hardening.py`). The prior static-source-scan test that asserted the gate's existence by reading `main.py` source text has been demoted via comment as superseded. (`eb8b305`)
 
 > **Plan:** `thoughts/shared/plans/2026-05-07-deliver-consolidate-service-registry.md`
-> **Ticket:** ATHENA-1
 > **Commits:** `058d489` → `086e4e1` (phases 1–5)
 
-### service-registry consolidation (ATHENA-1)
+#### service-registry consolidation
 
 - 5-phase architectural refactor consolidating 3 service-definition tables across 2 databases into a single source-of-truth `rag_services` table in the admin DB.
 - New `RagService` SQLAlchemy model (`admin/backend/app/models.py`) replaces `ServiceRegistry` + `AthenaService` + `ServerConfig` as the canonical service definition. The 3 deprecated tables are renamed `*_deprecated` in migration 055 and scheduled for hard drop in migration 056 after a 7-day maintenance window.
@@ -722,138 +620,111 @@ so the operator can see the degraded state.  Check logs on first startup after u
 - **Removed**: `admin/backend/app/routes/servers.py` route module, `ServerConfig` model, and the "Servers" tab in the admin UI. The "server" concept was a pre-consolidation artifact with no remaining callers after Phase 5.
 - **Behavioral change**: `health_status` column values normalized to `'healthy'`/`'unhealthy'`/`'unknown'`/`'pending'`. Previous mixed values (`'online'`/`'degraded'`/`'offline'`) from legacy code paths are no longer emitted.
 
-Closes ATHENA-1.
-
----
-
-## [Unreleased]
-
 > **Plan:** `thoughts/shared/plans/active-2026-05-06-deliver-auth-rate-limit-bypass.md`
-> **Ticket:** ATHENA-14
 > **Commits:** `f94c589` → `6e2b8db` (phases 1–4)
 
-### auth-hardening (ATHENA-14)
+#### auth-hardening
 
 - **Per-IP rate limit** on `POST /api/auth/local-login` via fastapi-limiter (Redis-backed). Default: 5 requests/minute/IP. Custom identifier uses `request.client.host` only — `X-Forwarded-For` is ignored to defeat IP-rotation bypass. Returns 429 on breach. Configurable via `LOGIN_RATE_LIMIT_PER_MINUTE`; set to 0 to disable (lockout + timing floor still apply).
 - **Per-username DB lockout**: `users.failed_login_count` is incremented atomically on each wrong-password attempt. Account locks (`users.locked_until` set) once `LOGIN_LOCKOUT_THRESHOLD` cumulative failures are reached (default 10). Lockout window is `LOGIN_LOCKOUT_MINUTES` (default 30 min). Lockout is idempotent — past-threshold attempts do not extend the window. Successful login resets the counter. Manual unlock: `UPDATE users SET failed_login_count=0, locked_until=NULL WHERE username='<name>';`
 - **400 ms wall-time floor** (`LOGIN_MINIMUM_DELAY_MS`, default 400) on every failure path. All four failure branches (not-found, inactive, locked, wrong-password) pay full PBKDF2-600k cost via dummy-hash AND sleep until elapsed >= floor, closing the timing side-channel.
 - **Enumeration oracle closed**: all four failure branches now return an identical 401 `"Invalid username or password"`. `403 Account inactive` is no longer emitted — **behavioral change for callers that distinguished inactive-user 403 from wrong-password 401**.
 - **4 new env vars**: `LOGIN_RATE_LIMIT_PER_MINUTE` (default 5), `LOGIN_LOCKOUT_THRESHOLD` (default 10), `LOGIN_LOCKOUT_MINUTES` (default 30), `LOGIN_MINIMUM_DELAY_MS` (default 400). All modelled on `AthenaConfig`; see `.env.example` and `manifests/athena-prod/config.yaml` for commented stubs.
-- **Follow-up tickets** (out of scope for this campaign): ATHENA-15 — public-route service-key gating for alert-write + tool_calling api-key endpoints; ATHENA-16 — lockout-DoS mitigation (admin-unlock CLI + email notification on lockout).
-
----
-
-## [Unreleased]
+- **Follow-up work** (out of scope for this campaign): public-route service-key gating for alert-write + tool_calling api-key endpoints; lockout-DoS mitigation (admin-unlock CLI + email notification on lockout).
 
 > **Plan:** `thoughts/shared/plans/active-2026-05-06-deliver-security-hardening.md`
-> **Ticket:** ATHENA-12
 > **Commits:** `762f263` → `41f0b57` (8 commits, phases 1–4)
 
-### Security
+#### Security
 
 - **Phase 1** (xander:6): admin-backend now exits at startup if `DEV_MODE=true` AND `DATABASE_URL` is a non-SQLite URL. `DEV_MODE` auto-creates an unauthenticated `dev-admin` user with `role=owner` on every unauthenticated request — running this against a real database is a misconfiguration that would silently provision a privileged account. The startup gate fires before `init_db()` so no partial state is produced. Error message names both env vars and the resolution. (`762f263`, `ea623d0`)
 - **Phase 2** (xander:13 + codex-M2): `_INSECURE_DEFAULTS` rejection dict now covers `OIDC_CLIENT_ID`. Two placeholder values are rejected: `"demo-mode"` (previously handled by an ad-hoc `if` block, now folded into the canonical dict) and `"CONFIGURE_ME_OIDC_CLIENT_ID"` (the placeholder emitted by `scripts/create-secrets.sh:127-132`, which documented backend rejection that was never enforced). Whitespace-bypass closed: `OIDC_CLIENT_ID` is read via `get_config().oidc_client_id` (pydantic-stripped), so `" demo-mode"` no longer evades the gate. (`0117a25`)
 - **Phase 2 reconcile** (xander:16 + xander:17): `DEMO_MODE=true` with `DEV_MODE=false` now raises `SystemExit` at startup — closes a separate privilege-escalation path through `auth_login`'s demo-bypass branch. Empty `OIDC_CLIENT_ID` is now rejected before `oauth.register()` is called, preventing authlib registration with a blank client ID. (`6115ecb`)
 - **Phase 3** (xander:3 + MED-A + MED-E): OIDC ID-token `iss`, `aud`, and `exp` validation re-enabled. The `claims_options={"essential": False, ...}` override that disabled authlib's built-in claim validation was removed; authlib now enforces `iss`/`aud`/`exp` by default. Two new fail-closed startup gates added: (1) a runtime-issuer assertion that fires after `configure_oauth_client()` loads the DB-stored OIDC config, catching a tampered or empty issuer that would slip past the env-var gate; (2) a discovery-doc gate that fetches and validates the IdP's `.well-known/openid-configuration` at startup — if the document is unreachable or omits `issuer`, the backend exits rather than registering with a client whose `iss` validation would be silently skipped by authlib. **Operational note for deployers upgrading from a prior release:** the admin-backend now requires the IdP to be reachable at startup. An unreachable or non-conformant IdP causes `SystemExit("FATAL: OIDC discovery metadata fetch failed")`. Sequence pod startup behind an init container or readiness gate that verifies IdP connectivity. If your IdP's `iss` claim does not match `OIDC_ISSUER` exactly, align them before upgrading — tokens with a mismatched issuer will now be rejected. (`85f35f7`, `701fbe9`)
-- **Phase 4** (xander:4): JWT is no longer passed as `?token=<jwt>` in the OIDC callback redirect URL or the `DEMO_MODE` redirect URL. The backend now writes the JWT to the server session and redirects to `<FRONTEND_URL>?logged_in=1`. The admin frontend detects `?logged_in=1`, clears any stale `localStorage.auth_token` (preventing cross-user contamination on shared devices), and fetches the JWT from the existing `/api/auth/session-token` endpoint. The `?token=` URL query parameter is no longer emitted; the `?logged_in=1` hint is idempotent and carries no credentials. Closes the JWT-leak-via-URL chain: 8-hour bearer tokens are no longer written to reverse-proxy access logs, browser history, or `Referer` headers on every admin login. Note: the `admin-jarvis.js` WebSocket URL (`?token=` in upgrade request) was a related but distinct exposure requiring a backend protocol change; it was deferred to a separate Plane ticket at the time of this release — **closed by ATHENA-55** (see above, cross-ref Notes). (`33db179`, `41f0b57`)
+- **Phase 4** (xander:4): JWT is no longer passed as `?token=<jwt>` in the OIDC callback redirect URL or the `DEMO_MODE` redirect URL. The backend now writes the JWT to the server session and redirects to `<FRONTEND_URL>?logged_in=1`. The admin frontend detects `?logged_in=1`, clears any stale `localStorage.auth_token` (preventing cross-user contamination on shared devices), and fetches the JWT from the existing `/api/auth/session-token` endpoint. The `?token=` URL query parameter is no longer emitted; the `?logged_in=1` hint is idempotent and carries no credentials. Closes the JWT-leak-via-URL chain: 8-hour bearer tokens are no longer written to reverse-proxy access logs, browser history, or `Referer` headers on every admin login. Note: the `admin-jarvis.js` WebSocket URL (`?token=` in upgrade request) was a related but distinct exposure requiring a backend protocol change; it was deferred to a separate Plane ticket at the time of this release — closed by later auth-hardening work (see above, cross-ref Notes). (`33db179`, `41f0b57`)
 
-### Notes
+#### Notes
 
-- This is **Campaign 2 of 6** in the audit-deferred security-hardening sequence. Findings closed: xander:3, xander:4, xander:6, xander:13 (audit-named scope) plus xander:16, xander:17 (pre-existing findings pulled into Campaign 2 by user direction). The admin-jarvis.js WebSocket query-token (codex-H2) was explicitly out of scope in this campaign — **closed by ATHENA-55** (see ATHENA-55 entry above).
+- This is **Campaign 2 of 6** in the audit-deferred security-hardening sequence. Findings closed: xander:3, xander:4, xander:6, xander:13 (audit-named scope) plus xander:16, xander:17 (pre-existing findings pulled into Campaign 2 by user direction). The admin-jarvis.js WebSocket query-token (codex-H2) was explicitly out of scope in this campaign — closed by later auth-hardening work (see the auth-deferred-hardening entry above).
 - `pytest-httpserver>=1.0.8` was added to `admin/backend/requirements.txt` (annotated `# test-only`) to support OIDC validation tests that drive authlib against a real fixture issuer. Splitting dev and production requirements is deferred to a future campaign (HIGH-E).
 
----
-
-## [Unreleased]
-
 > **Plan:** `thoughts/shared/plans/active-2026-05-06-deliver-audit-deferred-quick-wins.md`
-> **Ticket:** ATHENA-11
 > **Commits:** phases 1–6
 
-### Added
+#### Added
 
-- `admin/backend/alembic/versions/053_clear_legacy_gateway_config_ips.py` — data migration that clears legacy maintainer-IP defaults (`http://192.168.10.167:*`) from `gateway_config.orchestrator_url` and `gateway_config.ollama_fallback_url` rows; handles exact and trailing-slash variants. (audit bob:1 follow-up, ATHENA-11 Phase 5)
-- `manifests/athena-prod/ollama-model-pull-job.yaml` — Ollama model-pull Job extracted into its own manifest file. `scripts/deploy.sh` now accepts a `--first-run` flag; the Job apply/wait is gated behind `FIRST_RUN=true` so normal re-deploys skip it. (audit otto:11/12, ATHENA-11 Phase 3)
+- `admin/backend/alembic/versions/053_clear_legacy_gateway_config_ips.py` — data migration that clears legacy maintainer-IP defaults (`http://192.168.10.167:*`) from `gateway_config.orchestrator_url` and `gateway_config.ollama_fallback_url` rows; handles exact and trailing-slash variants. (audit bob:1 follow-up)
+- `manifests/athena-prod/ollama-model-pull-job.yaml` — Ollama model-pull Job extracted into its own manifest file. `scripts/deploy.sh` now accepts a `--first-run` flag; the Job apply/wait is gated behind `FIRST_RUN=true` so normal re-deploys skip it. (audit otto:11/12)
 
-### Changed
+#### Changed
 
-- **control-agent**: Control Agent is now opt-in via `CONTROL_AGENT_ENABLED` (default `false`). OSS deployers no longer see Control-Agent connection errors out of the box. Existing Mac-Studio-equipped deployments must set `CONTROL_AGENT_ENABLED=true` (and `CONTROL_AGENT_URL=<host>:8099`) in their env or kubeconfig overlay. Disabled-path responses are per-endpoint: 503 for download mutations, structured logs for orchestrator keepalive, neutral typed responses for service-control queries. (audit bob:4, ATHENA-11 Phase 6)
-- `docs/INSTALLATION.md`: `imagePullPolicy: Always` documented as dev-default; first-run vs. normal deploy flow clarified. (audit otto:11/12, ATHENA-11 Phase 3)
+- **control-agent**: Control Agent is now opt-in via `CONTROL_AGENT_ENABLED` (default `false`). OSS deployers no longer see Control-Agent connection errors out of the box. Existing Mac-Studio-equipped deployments must set `CONTROL_AGENT_ENABLED=true` (and `CONTROL_AGENT_URL=<host>:8099`) in their env or kubeconfig overlay. Disabled-path responses are per-endpoint: 503 for download mutations, structured logs for orchestrator keepalive, neutral typed responses for service-control queries. (audit bob:4)
+- `docs/INSTALLATION.md`: `imagePullPolicy: Always` documented as dev-default; first-run vs. normal deploy flow clarified. (audit otto:11/12)
 
-### Fixed
+#### Fixed
 
-- **a11y**: added `for=`/`id=` associations to ~426 admin-frontend `<label>` elements across 28 files (WCAG 1.3.1, 4.1.2). Display-only label misuse converted to `<p>`/`<span>`. Wrapping labels (~41 residual) left as-is per containment rule. (audit ruby:1, ATHENA-11 Phase 4)
+- **a11y**: added `for=`/`id=` associations to ~426 admin-frontend `<label>` elements across 28 files (WCAG 1.3.1, 4.1.2). Display-only label misuse converted to `<p>`/`<span>`. Wrapping labels (~41 residual) left as-is per containment rule. (audit ruby:1)
 
-### Removed
+#### Removed
 
-- Deleted dead stub directories under `apps/`: `gateway/`, `orchestrator/`, `rag/`, `share-service/`, `shared/`, `validators/`. These were README-only placeholders with zero importers (verified by librarian agent at HEAD `03736ee`). The live `apps/jarvis-web/` (Jarvis voice/chat web UI) and `apps/chat-embed/` (CORS-relay proxy) are unchanged. (audit bob:6 / librarian:8, ATHENA-11 Phase 2)
+- Deleted dead stub directories under `apps/`: `gateway/`, `orchestrator/`, `rag/`, `share-service/`, `shared/`, `validators/`. These were README-only placeholders with zero importers (verified by librarian agent at HEAD `03736ee`). The live `apps/jarvis-web/` (Jarvis voice/chat web UI) and `apps/chat-embed/` (CORS-relay proxy) are unchanged. (audit bob:6 / librarian:8)
 
-### Notes
+#### Notes
 
 - This is **Campaign 1 of 6** in the audit-deferred remediation sequence. Subsequent campaigns cover: security-hardening (OIDC `iss` validation, JWT URL removal, SQLite `DEV_MODE` — xander); rate-limiting (`fastapi-limiter`); network policies + RBAC (otto:10); `BaseRAGService` migration (librarian:2/4); and remaining UI scope (ruby:2–10). Changes here are self-contained; none of those campaigns depend on this one shipping first.
-- Per-endpoint disabled-path route tests for Phase 6 (`debug_logs` status, `model_downloads` helper + create/retry/delete gates, `service_control` containers/ollama-health shape) are deferred — `admin/backend` lacks route-level test scaffolding at HEAD. (#ATHENA-11)
-
----
-
-## [Unreleased]
+- Per-endpoint disabled-path route tests for Phase 6 (`debug_logs` status, `model_downloads` helper + create/retry/delete gates, `service_control` containers/ollama-health shape) are deferred — `admin/backend` lacks route-level test scaffolding at HEAD.
 
 > **Plan:** `thoughts/shared/plans/2026-05-06-deliver-orchestrator-refactor.md`
-> **Ticket:** ATHENA-10
 > **Commits:** `615d7d0` → `14fcb73` (19 commits)
 
 Pure refactor — no behavior change. Decomposed `src/orchestrator/main.py` from 12,409 lines into an 8,758-line core plus 12 sibling modules. Zero new failures introduced; 209 new unit tests added (31 failed / 207 passed → 31 failed / 416 passed).
 
-### Added
+#### Added
 
-- `src/orchestrator/nodes/_runtime.py` — runtime singleton accessor (`_runtime.get_X()` / `_runtime.set_X()` / `_runtime.is_ready()` / `_runtime.missing_required()` / `_runtime.required_singletons()`). Singletons are set by lifespan, read at call time. Tests install fakes via setters directly. (#ATHENA-10)
-- `src/orchestrator/urls.py` — 15 module-level service URL constants previously scattered in `main.py`'s constant block. (#ATHENA-10)
-- `src/orchestrator/metrics.py` — 7 Prometheus metric declarations (`request_counter`, `request_duration`, `node_duration`, `tool_call_breakdown`, `validation_counter`, `hallucination_counter`, `validation_layer_duration`) moved verbatim from `main.py`. (#ATHENA-10)
-- `src/orchestrator/helpers.py` — 17 stateless helper functions extracted from `main.py`. Helpers that need runtime singletons call `_runtime.get_X()` at call time (Pattern 1). (#ATHENA-10)
-- `src/orchestrator/mode_permission.py` — 6 mode/permission helpers (`get_current_mode`, `detect_owner_mode_command`, `extract_pin_from_query`, `activate_owner_override`, `check_intent_permission`, `check_entity_permission`) plus `OWNER_MODE_PATTERNS` constant. (#ATHENA-10)
-- `src/orchestrator/nodes/route_info.py` — `route_info_node` (33 LOC, zero runtime dependencies). (#ATHENA-10)
-- `src/orchestrator/nodes/send_sms.py` — `send_sms_node`. (#ATHENA-10)
-- `src/orchestrator/nodes/notification_pref.py` — `notification_pref_node`. (#ATHENA-10)
-- `src/orchestrator/nodes/synthesize.py` — `synthesize_node`. (#ATHENA-10)
-- `src/orchestrator/nodes/validate.py` — `validate_node`. (#ATHENA-10)
-- `src/orchestrator/nodes/finalize.py` — `finalize_node`. (#ATHENA-10)
-- `src/orchestrator/nodes/route_control.py` — `route_control_node`. (#ATHENA-10)
-- `src/orchestrator/nodes/route_music.py` — `route_music_node`. (#ATHENA-10)
-- `src/orchestrator/nodes/route_tv.py` — `route_tv_node`. (#ATHENA-10)
-- `src/orchestrator/nodes/retrieve.py` — `retrieve_node` (largest single extraction; 538 LOC body). (#ATHENA-10)
-- 209 new unit tests across `tests/unit/test_helpers.py`, `test_mode_permission.py`, `test_route_info.py`, `test_send_sms_node.py`, `test_notification_pref.py`, `test_synthesize.py`, `test_validate.py`, `test_finalize.py`, `test_route_control.py`, `test_route_music.py`, `test_route_tv.py`, `test_retrieve.py`, `test_health_probes.py`. (#ATHENA-10)
+- `src/orchestrator/nodes/_runtime.py` — runtime singleton accessor (`_runtime.get_X()` / `_runtime.set_X()` / `_runtime.is_ready()` / `_runtime.missing_required()` / `_runtime.required_singletons()`). Singletons are set by lifespan, read at call time. Tests install fakes via setters directly.
+- `src/orchestrator/urls.py` — 15 module-level service URL constants previously scattered in `main.py`'s constant block.
+- `src/orchestrator/metrics.py` — 7 Prometheus metric declarations (`request_counter`, `request_duration`, `node_duration`, `tool_call_breakdown`, `validation_counter`, `hallucination_counter`, `validation_layer_duration`) moved verbatim from `main.py`.
+- `src/orchestrator/helpers.py` — 17 stateless helper functions extracted from `main.py`. Helpers that need runtime singletons call `_runtime.get_X()` at call time (Pattern 1).
+- `src/orchestrator/mode_permission.py` — 6 mode/permission helpers (`get_current_mode`, `detect_owner_mode_command`, `extract_pin_from_query`, `activate_owner_override`, `check_intent_permission`, `check_entity_permission`) plus `OWNER_MODE_PATTERNS` constant.
+- `src/orchestrator/nodes/route_info.py` — `route_info_node` (33 LOC, zero runtime dependencies).
+- `src/orchestrator/nodes/send_sms.py` — `send_sms_node`.
+- `src/orchestrator/nodes/notification_pref.py` — `notification_pref_node`.
+- `src/orchestrator/nodes/synthesize.py` — `synthesize_node`.
+- `src/orchestrator/nodes/validate.py` — `validate_node`.
+- `src/orchestrator/nodes/finalize.py` — `finalize_node`.
+- `src/orchestrator/nodes/route_control.py` — `route_control_node`.
+- `src/orchestrator/nodes/route_music.py` — `route_music_node`.
+- `src/orchestrator/nodes/route_tv.py` — `route_tv_node`.
+- `src/orchestrator/nodes/retrieve.py` — `retrieve_node` (largest single extraction; 538 LOC body).
+- 209 new unit tests across `tests/unit/test_helpers.py`, `test_mode_permission.py`, `test_route_info.py`, `test_send_sms_node.py`, `test_notification_pref.py`, `test_synthesize.py`, `test_validate.py`, `test_finalize.py`, `test_route_control.py`, `test_route_music.py`, `test_route_tv.py`, `test_retrieve.py`, `test_health_probes.py`.
 
-### Changed
+#### Changed
 
-- `src/orchestrator/main.py` reduced from 12,409 → 8,758 lines (−3,651, ~29%). The 10 extracted node functions and 17 helpers are imported back into `main.py`'s graph builder; runtime behavior is byte-identical. (#ATHENA-10)
-- `src/orchestrator/main.py` runtime singletons: 97 bare module-level reads migrated to `_runtime.get_X()` call-time accessors. 16 bare `Optional[X] = None` module-level declarations removed. `global` keyword removed from lifespan. Lifespan dual-write removed (Phase 1.2 scaffolding); `_runtime.set_X()` is now the sole write path. (#ATHENA-10)
-- 6 bare-except blocks in `health_check` and `readiness_probe` replaced with `except Exception as e` + structured log with `exc_info=e`. (#ATHENA-10)
+- `src/orchestrator/main.py` reduced from 12,409 → 8,758 lines (−3,651, ~29%). The 10 extracted node functions and 17 helpers are imported back into `main.py`'s graph builder; runtime behavior is byte-identical.
+- `src/orchestrator/main.py` runtime singletons: 97 bare module-level reads migrated to `_runtime.get_X()` call-time accessors. 16 bare `Optional[X] = None` module-level declarations removed. `global` keyword removed from lifespan. Lifespan dual-write removed (Phase 1.2 scaffolding); `_runtime.set_X()` is now the sole write path.
+- 6 bare-except blocks in `health_check` and `readiness_probe` replaced with `except Exception as e` + structured log with `exc_info=e`.
 
-### Notes
+#### Notes
 
-- `src/orchestrator/state.py` is now the canonical source for `OrchestratorState`, `IntentCategory`, `ModelTier`, and `ConversationContext`. Duplicate definitions that had accumulated in `main.py` were removed in commit `8034360` (Phase 1.1). (#ATHENA-10)
-- `classify_node` (2,473 lines), `tool_call_node`, route handlers, and streaming functions remain in `main.py`. Extraction is deferred: `classify_node` to Campaign 2; `tool_call_node` to Campaign 1.3; route handlers to Campaign 1.5. (#ATHENA-10)
-- 14 proxy-class instances across `nodes/` share a common `__getattr__`-defers-to-`_runtime.get_X()` shape. Promotion to a shared `orchestrator.nodes._proxy.runtime_proxy()` factory is deferred to Campaign 2. (#ATHENA-10)
-- xander (security review) on Phase 3.1 surfaced 2 HIGH + 3 MEDIUM + 3 LOW pre-existing findings on the permission/PIN surface. All pre-existing; none introduced by this refactor. Tracked for a follow-up security-hardening campaign. (#ATHENA-10)
-
----
-
-## [Unreleased]
+- `src/orchestrator/state.py` is now the canonical source for `OrchestratorState`, `IntentCategory`, `ModelTier`, and `ConversationContext`. Duplicate definitions that had accumulated in `main.py` were removed in commit `8034360` (Phase 1.1).
+- `classify_node` (2,473 lines), `tool_call_node`, route handlers, and streaming functions remain in `main.py`. Extraction is deferred: `classify_node` to Campaign 2; `tool_call_node` to Campaign 1.3; route handlers to Campaign 1.5.
+- 14 proxy-class instances across `nodes/` share a common `__getattr__`-defers-to-`_runtime.get_X()` shape. Promotion to a shared `orchestrator.nodes._proxy.runtime_proxy()` factory is deferred to Campaign 2.
+- xander (security review) on Phase 3.1 surfaced 2 HIGH + 3 MEDIUM + 3 LOW pre-existing findings on the permission/PIN surface. All pre-existing; none introduced by this refactor. Tracked for a follow-up security-hardening campaign.
 
 > **Plan:** `thoughts/shared/plans/2026-05-06-deliver-config-py-rebuild.md`
-> **Ticket:** ATHENA-7
 > **Commits:** `aaa989d`
 
-### Added
+#### Added
 
-- `AthenaConfig` (`src/shared/config.py`) — canonical pydantic-settings `BaseSettings` object centralizing 11 env vars: `OLLAMA_URL`, `LLM_SERVICE_URL`, `REDIS_URL`, `DATABASE_URL`, `SERVICE_API_KEY`, `DEFAULT_TIMEZONE`, `DEFAULT_CITY`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `DEMO_MODE`, `DEV_MODE`. Read via `get_config()`. `admin_url` is a computed field that delegates to Campaign 3's `get_admin_url()` and is not env-loadable via `ADMIN_URL`. (#ATHENA-7)
+- `AthenaConfig` (`src/shared/config.py`) — canonical pydantic-settings `BaseSettings` object centralizing 11 env vars: `OLLAMA_URL`, `LLM_SERVICE_URL`, `REDIS_URL`, `DATABASE_URL`, `SERVICE_API_KEY`, `DEFAULT_TIMEZONE`, `DEFAULT_CITY`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `DEMO_MODE`, `DEV_MODE`. Read via `get_config()`. `admin_url` is a computed field that delegates to Campaign 3's `get_admin_url()` and is not env-loadable via `ADMIN_URL`.
 - `pydantic-settings>=2.1.0,<3.0` dependency (required by `AthenaConfig`).
 - `CONTRIBUTING.md` Configuration Guidelines section updated to recommend the `AthenaConfig` extension pattern for new env vars.
 
-### Removed
+#### Removed
 
-- **`admin/frontend/router.js`**: deleted (~200 lines of dead navigation code that paralleled the live `showTab()` system; no callers besides one in `command-palette.js`, now updated). (audit follow-up: dexter:7, ATHENA-9)
+- **`admin/frontend/router.js`**: deleted (~200 lines of dead navigation code that paralleled the live `showTab()` system; no callers besides one in `command-palette.js`, now updated). (audit follow-up: dexter:7)
 
-### Changed
+#### Changed
 
 - **LLM endpoint precedence** (`admin-backend`): when both `OLLAMA_URL` and
   `LLM_SERVICE_URL` are set, `LLM_SERVICE_URL` now wins at the database
@@ -865,16 +736,18 @@ Pure refactor — no behavior change. Decomposed `src/orchestrator/main.py` from
   `kubectl -n athena-prod exec -it deploy/athena-admin-backend -- psql $DATABASE_URL -c "SELECT key, value FROM system_settings WHERE key='ollama_url';"`
   See Campaign 4 plan, Phase 2a-ii.
 
-- **`REDIS_URL` default** changed from `redis://localhost:6379` (mixed across call sites) to `redis://redis:6379/0` (in-cluster DNS shortname, consistent with `manifests/athena-prod/config.yaml`). Production deployments are unaffected — the manifest sets `REDIS_URL` explicitly. Local-dev users should add `REDIS_URL=redis://localhost:6379` to their `.env` file — see `.env.example`. (#ATHENA-7)
+- **`REDIS_URL` default** changed from `redis://localhost:6379` (mixed across call sites) to `redis://redis:6379/0` (in-cluster DNS shortname, consistent with `manifests/athena-prod/config.yaml`). Production deployments are unaffected — the manifest sets `REDIS_URL` explicitly. Local-dev users should add `REDIS_URL=redis://localhost:6379` to their `.env` file — see `.env.example`.
 
-- **Qdrant**: PersistentVolumeClaim is now the default storage backend (was `emptyDir`, which silently lost all conversation memory on every pod restart). Deployers must replace `YOUR_STORAGE_CLASS` in `manifests/athena-prod/qdrant.yaml` with their cluster's StorageClass before applying. Existing `emptyDir`-based deployments will lose their current Qdrant data on the next apply — see `docs/INSTALLATION.md` for migration notes. (audit follow-up: otto:3, ATHENA-8)
+- **Qdrant**: PersistentVolumeClaim is now the default storage backend (was `emptyDir`, which silently lost all conversation memory on every pod restart). Deployers must replace `YOUR_STORAGE_CLASS` in `manifests/athena-prod/qdrant.yaml` with their cluster's StorageClass before applying. Existing `emptyDir`-based deployments will lose their current Qdrant data on the next apply — see `docs/INSTALLATION.md` for migration notes. (audit follow-up: otto:3)
+
+---
+
 
 ---
 
 ## [0.3.0] - 2026-05-06 — Admin URL Consolidation
 
 > **Plan:** `thoughts/shared/plans/2026-05-06-deliver-admin-url-consolidation.md`
-> **Ticket:** ATHENA-3
 > **Commits:** `105f782` → `979812f` (8 commits)
 
 Replaces 32 independent admin-URL resolution sites across 20 files with a single canonical helper. One resolution order, one fallback chain, one startup log line per service.
@@ -914,7 +787,6 @@ Replaces 32 independent admin-URL resolution sites across 20 files with a single
 
 > **Audit document:** `thoughts/shared/audits/2026-05-05-audit-athena-oss-comprehensive.md`
 > **Plan:** `thoughts/shared/plans/2026-05-05-audit-athena-oss-comprehensive.md`
-> **Ticket:** ATHENA-2
 > **Commits:** `9f4c40e` → `5830a71` (13 commits)
 
 This release bundles all changes from the comprehensive OSS audit conducted 2026-05-05.
@@ -922,7 +794,7 @@ All changes are additive or hardening — no features were removed.
 
 ### Added
 
-- `CHANGELOG.md` — this file, tracking changes from the OSS baseline forward (ATHENA-2)
+- `CHANGELOG.md` — this file, tracking changes from the OSS baseline forward
 - `apps/chat-embed/` — CORS-relay proxy for embedding Athena-backed chat on external websites; documented in README and build scripts
 - GitHub issue and pull request templates (`.github/`)
 - `pytest.ini` — `integration` marker registered; default run (`pytest`) skips live-service tests; `pytest -m integration` selects them
@@ -1030,7 +902,8 @@ The following variables were added to `.env.example` and are required or recomme
 
 ---
 
-[Unreleased]: https://github.com/jstuart0/project-athena-oss/compare/979812f...HEAD
+[Unreleased]: https://github.com/jstuart0/project-athena-oss/compare/HEAD...HEAD
+[0.4.0]: https://github.com/jstuart0/project-athena-oss/compare/979812f...HEAD
 [0.3.0]: https://github.com/jstuart0/project-athena-oss/compare/5830a71...979812f
 [0.2.0]: https://github.com/jstuart0/project-athena-oss/compare/7f5387b...5830a71
 [0.1.0]: https://github.com/jstuart0/project-athena-oss/commit/7f5387b
