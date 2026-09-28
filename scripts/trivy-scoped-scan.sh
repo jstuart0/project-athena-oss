@@ -117,7 +117,14 @@ try:
     with open(path) as f:
         data = json.load(f)
 
-    results = data.get("Results", [])
+    # `data.get("Results", [])` cannot distinguish "genuinely zero results"
+    # from "no Results key at all" -- both produce an empty list, so a
+    # malformed report missing the key entirely (e.g. `{}`) would silently
+    # print "Failing: 0" and exit 0 (codex r3). "Results" must be present
+    # AND a list before this scan is accepted as a real Trivy report.
+    if "Results" not in data:
+        raise KeyError("'Results' key is missing from the trivy report")
+    results = data["Results"]
     if not isinstance(results, list):
         raise TypeError(f"'Results' is {type(results).__name__}, expected a list")
 

@@ -327,13 +327,14 @@ def test_malformed_json_fails_closed_not_open(tmp_path):
     "bad_payload",
     [
         pytest.param("[]", id="top-level-array-not-object"),
+        pytest.param("{}", id="missing-results-key-entirely"),
         pytest.param('{"Results": "not-a-list"}', id="results-is-a-string"),
         pytest.param('{"Results": [{"Vulnerabilities": "not-a-list"}]}', id="vulnerabilities-is-a-string"),
         pytest.param('{"Results": [{"Packages": [{"Identifier": "not-a-dict"}]}]}', id="identifier-is-a-string"),
     ],
 )
 def test_schema_failure_after_json_validity_check_exits_2_not_1(tmp_path, bad_payload):
-    """codex r2: valid JSON that doesn't match the shape this script
+    """codex r2/r3: valid JSON that doesn't match the shape this script
     expects is a TOOL/schema problem, not a security finding, and must
     exit 2 (scan error) -- never 1 (reads as 'gate correctly failed on
     real findings') or 0 (reads as clean)."""
