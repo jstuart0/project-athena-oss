@@ -11,6 +11,22 @@ under test only uses the yielded `db` to call get_ollama_url(db), which is
 independently monkeypatched below) -- this isolates the test from
 main.py's own engine/get_db_context DB wiring, which is a different
 SQLAlchemy engine than conftest.py's test `db` fixture.
+
+Patches are applied to freshly re-resolved module objects (`import
+app.database as db_mod` at the START of each patch call, not once at
+collection time), never pytest's monkeypatch string-path form
+("app.database.get_db_context"). Two independent full-suite-only failure
+modes, both closed by this: (1) the string form resolves via
+getattr(sys.modules['app'], 'database'), which breaks whenever some other
+module evicts and re-imports `app`/`shared` submodules mid-suite (e.g.
+test_rate_limit_active.py's own documented FastAPI-version-regression
+repro) and the fresh `app` package hasn't had `.database` re-bound as an
+attribute yet; (2) even a plain module-level `import app.database as
+db_mod` captured once at THIS file's collection time can go stale if that
+same eviction happens later, before this file's tests run -- re-importing
+inside the patch call instead always resolves whatever is CURRENTLY in
+sys.modules, matching exactly what main.py's own local `from app.database
+import get_db_context` resolves against at call time.
 """
 from __future__ import annotations
 
@@ -66,14 +82,18 @@ def _capture_warnings(monkeypatch):
     return calls
 
 
+def _patch_db_and_ollama_url(monkeypatch, url):
+    import app.database as db_mod
+    from app.routes import service_control as sc_mod
+    monkeypatch.setattr(db_mod, "get_db_context", _fake_db_context)
+    monkeypatch.setattr(sc_mod, "get_ollama_url", lambda db: url)
+
+
 @pytest.mark.asyncio
 async def test_no_warning_for_bare_metal_loopback_default(monkeypatch):
     """The OSS default (http://localhost:11434, not in a K8s pod) is
     covered by the carve-out -- no warning."""
-    monkeypatch.setattr("app.database.get_db_context", _fake_db_context)
-    monkeypatch.setattr(
-        "app.routes.service_control.get_ollama_url", lambda db: "http://localhost:11434"
-    )
+    _patch_db_and_ollama_url(monkeypatch, "http://localhost:11434")
     calls = _capture_warnings(monkeypatch)
 
     await main_module._warn_if_ollama_url_ssrf_blocked()
@@ -84,10 +104,7 @@ async def test_no_warning_for_bare_metal_loopback_default(monkeypatch):
 @pytest.mark.asyncio
 async def test_warning_fires_for_in_cluster_url_without_allowlist(monkeypatch):
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
-    monkeypatch.setattr("app.database.get_db_context", _fake_db_context)
-    monkeypatch.setattr(
-        "app.routes.service_control.get_ollama_url", lambda db: "http://ollama:11434"
-    )
+    _patch_db_and_ollama_url(monkeypatch, "http://ollama:11434")
     calls = _capture_warnings(monkeypatch)
 
     await main_module._warn_if_ollama_url_ssrf_blocked()
@@ -103,10 +120,7 @@ async def test_no_warning_once_in_cluster_url_is_allowlisted(monkeypatch):
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
     monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "ollama")
     _clear_all_config_caches()
-    monkeypatch.setattr("app.database.get_db_context", _fake_db_context)
-    monkeypatch.setattr(
-        "app.routes.service_control.get_ollama_url", lambda db: "http://ollama:11434"
-    )
+    _patch_db_and_ollama_url(monkeypatch, "http://ollama:11434")
     calls = _capture_warnings(monkeypatch)
 
     await main_module._warn_if_ollama_url_ssrf_blocked()
@@ -121,8 +135,10 @@ async def test_never_raises_on_internal_error(monkeypatch):
     def _boom(db):
         raise RuntimeError("db unreachable")
 
-    monkeypatch.setattr("app.database.get_db_context", _fake_db_context)
-    monkeypatch.setattr("app.routes.service_control.get_ollama_url", _boom)
+    import app.database as db_mod
+    from app.routes import service_control as sc_mod
+    monkeypatch.setattr(db_mod, "get_db_context", _fake_db_context)
+    monkeypatch.setattr(sc_mod, "get_ollama_url", _boom)
     calls = _capture_warnings(monkeypatch)
 
     await main_module._warn_if_ollama_url_ssrf_blocked()  # must not raise
