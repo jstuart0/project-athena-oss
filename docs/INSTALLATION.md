@@ -33,7 +33,7 @@ Before running `deploy.sh` or `kubectl apply`, confirm each item:
 - [ ] **`SERVICE_API_KEY` set** — the shared service-to-service key is in your secrets/env; it must be the same value across all services
 - [ ] **`ALLOWED_CALLBACK_HOSTS` set** — if using the Control Agent for model downloads, this is non-empty
 - [ ] **Manifest placeholders substituted** — manifests in `manifests/athena-prod/` contain `YOUR_REGISTRY` and similar placeholders; substitute them before applying
-- [ ] **Container images built and pushed** — run `scripts/build-and-push.sh` to build all images for `linux/amd64` and push to your registry
+- [ ] **Container images built and pushed** — run `scripts/build-and-push.sh` to build all images for `linux/amd64` and push to your registry. Every build now pulls a fresh `python:3.11-slim` and applies Debian security updates at build time, so rebuild (don't just re-push an old tag) after pulling a new `main` to pick up OS-level CVE fixes.
 - [ ] **HA token reviewed** — if upgrading from a deployment that used the Jetson edge module, revoke the Home Assistant token that was in git history at commit `794096b`
 
 The `deploy.sh` script enforces items 3 through 5 automatically: it will abort with an actionable error if the namespace or required secrets are missing.
