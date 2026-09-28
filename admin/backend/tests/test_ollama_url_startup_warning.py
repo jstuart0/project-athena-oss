@@ -28,14 +28,28 @@ import main as main_module
 from shared.config import _clear_cache_for_tests
 
 
+def _clear_all_config_caches() -> None:
+    """Belt-and-suspenders cache clear (ATHENA-118 test-isolation note, same
+    fix as test_service_control_ollama.py / test_voice_tests_ssrf_guard.py):
+    some other module in a full-suite run evicts and re-imports shared.config
+    mid-suite, which can leave this file's own `_clear_cache_for_tests`
+    reference pointing at a stale, already-replaced module -- check_ssrf_safe's
+    lazy get_config() import would then resolve against a DIFFERENT (live)
+    module's lru_cache this file's own reference never touches."""
+    _clear_cache_for_tests()
+    live = sys.modules.get('shared.config')
+    if live is not None and hasattr(live, '_clear_cache_for_tests'):
+        live._clear_cache_for_tests()
+
+
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
     monkeypatch.delenv("IN_CLUSTER", raising=False)
     monkeypatch.delenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", raising=False)
-    _clear_cache_for_tests()
+    _clear_all_config_caches()
     yield
-    _clear_cache_for_tests()
+    _clear_all_config_caches()
 
 
 @contextmanager
@@ -88,7 +102,7 @@ async def test_warning_fires_for_in_cluster_url_without_allowlist(monkeypatch):
 async def test_no_warning_once_in_cluster_url_is_allowlisted(monkeypatch):
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
     monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "ollama")
-    _clear_cache_for_tests()
+    _clear_all_config_caches()
     monkeypatch.setattr("app.database.get_db_context", _fake_db_context)
     monkeypatch.setattr(
         "app.routes.service_control.get_ollama_url", lambda db: "http://ollama:11434"

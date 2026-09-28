@@ -37,14 +37,26 @@ from app.utils.rag_urls import check_ollama_ssrf_safe
 from shared.config import _clear_cache_for_tests
 
 
+def _clear_all_config_caches() -> None:
+    """Belt-and-suspenders cache clear (ATHENA-118 test-isolation note, same
+    fix as test_service_control_ollama.py / test_voice_tests_ssrf_guard.py):
+    some other module in a full-suite run evicts and re-imports shared.config
+    mid-suite, which can leave this file's own `_clear_cache_for_tests`
+    reference pointing at a stale, already-replaced module."""
+    _clear_cache_for_tests()
+    live = sys.modules.get('shared.config')
+    if live is not None and hasattr(live, '_clear_cache_for_tests'):
+        live._clear_cache_for_tests()
+
+
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
     monkeypatch.delenv("IN_CLUSTER", raising=False)
     monkeypatch.delenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", raising=False)
-    _clear_cache_for_tests()
+    _clear_all_config_caches()
     yield
-    _clear_cache_for_tests()
+    _clear_all_config_caches()
 
 
 @pytest.mark.asyncio
@@ -58,7 +70,7 @@ async def test_bare_metal_loopback_dev_allowed_without_allowlist(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rfc1918_dev_host_allowed_outside_cluster_without_allowlist():
-    allowed, reason = await check_ollama_ssrf_safe("http://192.168.1.50:11434/api/tags")
+    allowed, reason = await check_ollama_ssrf_safe("http://10.55.55.55:11434/api/tags")
     assert allowed is True
     assert reason == ""
 
@@ -90,7 +102,7 @@ async def test_in_cluster_clusterip_service_still_blocked_without_allowlist(monk
 async def test_in_cluster_clusterip_service_allowed_once_allowlisted(monkeypatch):
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
     monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "10.96.5.20")
-    _clear_cache_for_tests()
+    _clear_all_config_caches()
     allowed, reason = await check_ollama_ssrf_safe("http://10.96.5.20:11434/api/tags")
     assert allowed is True
     assert reason == ""
@@ -136,7 +148,7 @@ async def test_carveout_does_not_fire_and_no_warning_when_allowed_normally(monke
         lambda event, **kw: calls.append((event, kw)),
     )
     monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "localhost")
-    _clear_cache_for_tests()
+    _clear_all_config_caches()
 
     allowed, reason = await check_ollama_ssrf_safe("http://localhost:11434/api/tags")
 
