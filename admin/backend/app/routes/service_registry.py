@@ -58,6 +58,44 @@ _WRITE_DEPS = [
 ]
 
 
+def _resolve_by_name_or_host_label(
+    db: Session, name: str, host_label: Optional[str]
+) -> Optional[RagService]:
+    """Match an existing row by `name`; if none found and `host_label` is
+    given, fall back to a case-insensitive match on the row's `host`
+    column. `host` is NOT a unique column (two rows can legitimately share
+    one, e.g. a decommissioned duplicate never cleaned up) -- if host_label
+    matches more than one row, refuses to guess which one the caller meant
+    and raises 409 `host_label_ambiguous` instead of silently updating an
+    arbitrary match. (codex diff-review Medium, ATHENA-108 follow-up)
+    """
+    existing = db.query(RagService).filter(RagService.name == name).first()
+    if existing is not None or not host_label:
+        return existing
+
+    host_matches = db.query(RagService).filter(
+        func.lower(RagService.host) == host_label.lower()
+    ).limit(2).all()
+    if len(host_matches) > 1:
+        logger.warning(
+            "service_registry_host_label_ambiguous",
+            host_label=host_label,
+            requested_name=name,
+            matched_names=[row.name for row in host_matches],
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "host_label_ambiguous",
+                "message": (
+                    f"host_label {host_label!r} matches more than one "
+                    "registry row; refusing to update an arbitrary one"
+                ),
+            },
+        )
+    return host_matches[0] if host_matches else None
+
+
 # ---------------------------------------------------------------------------
 # GET /services — list all services (cached health; no inline pings)
 # ---------------------------------------------------------------------------
@@ -240,7 +278,10 @@ async def register_service(
     When no row matches `name`, host_label is used as a fallback lookup key
     against the row's `host` column (case-insensitive). It is a match key
     only -- never stored -- so a match-by-host still returns the row's own
-    `name`, not the caller's derived one.
+    `name`, not the caller's derived one. `host` is not a unique column: if
+    host_label matches more than one row, the upsert refuses to guess and
+    returns 409 `host_label_ambiguous` rather than updating an arbitrary
+    match (codex diff-review Medium, follow-up).
     """
     if not name:
         raise HTTPException(status_code=422, detail="'name' query parameter is required")
@@ -252,17 +293,13 @@ async def register_service(
             status_code=422,
             detail="'name' must match ^[a-zA-Z0-9_-]{1,64}$",
         )
-    if host_label is not None and not _HOST_LABEL_RE.match(host_label):
+    if host_label is not None and not _HOST_LABEL_RE.fullmatch(host_label):
         raise HTTPException(
             status_code=422,
             detail="'host_label' must match ^[a-zA-Z0-9_.-]{1,255}$",
         )
 
-    existing = db.query(RagService).filter(RagService.name == name).first()
-    if existing is None and host_label:
-        existing = db.query(RagService).filter(
-            func.lower(RagService.host) == host_label.lower()
-        ).first()
+    existing = _resolve_by_name_or_host_label(db, name, host_label)
 
     resolved_endpoint_url: Optional[str] = None
     parsed: Optional[Dict[str, Any]] = None
@@ -383,20 +420,39 @@ async def toggle_service(
     request: Request,
     response: Response,
     service_name: str,
+    host_label: Optional[str] = None,
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Toggle the enabled state of a service."""
-    svc = db.query(RagService).filter(RagService.name == service_name).first()
+    """Toggle the enabled state of a service.
+
+    host_label (ATHENA-108 follow-up): same fallback as POST /services --
+    shared.service_registry.unregister_service() posts the "-rag"-derived
+    name, which may not match an existing row's actual `name`; host_label
+    locates it by host instead (ambiguity-safe, see
+    _resolve_by_name_or_host_label). The response always reports the
+    matched row's own name.
+    """
+    if host_label is not None and not _HOST_LABEL_RE.fullmatch(host_label):
+        raise HTTPException(
+            status_code=422,
+            detail="'host_label' must match ^[a-zA-Z0-9_.-]{1,255}$",
+        )
+    svc = _resolve_by_name_or_host_label(db, service_name, host_label)
     if not svc:
         raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
 
     svc.enabled = not svc.enabled
     db.commit()
-    logger.info("service_registry_toggled", service=service_name, enabled=svc.enabled)
+    logger.info(
+        "service_registry_toggled",
+        service=svc.name,
+        requested_name=service_name,
+        enabled=svc.enabled,
+    )
     return {
-        'service': service_name,
+        'service': svc.name,
         'enabled': svc.enabled,
-        'message': f"Service {service_name} has been {'enabled' if svc.enabled else 'disabled'}",
+        'message': f"Service {svc.name} has been {'enabled' if svc.enabled else 'disabled'}",
     }
 
 
