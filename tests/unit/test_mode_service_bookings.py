@@ -26,10 +26,9 @@ NY = ZoneInfo("America/New_York")
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _restore_structlog_after_module():
-    snapshot = structlog.get_config()
+def _restore_structlog_after_module(isolated_structlog):
+    """See tests/unit/conftest.py::isolated_structlog."""
     yield
-    structlog.configure(**snapshot)
 
 
 @pytest.fixture(autouse=True)
@@ -399,16 +398,39 @@ class TestSingleFlightAndCadence:
         asyncio.run(run())
         assert call_count["n"] == 1
 
-    def test_loop_fetches_when_enabled_is_false(self, bs):
-        now = datetime.now(timezone.utc)
-        called = {"n": 0}
+    def test_loop_fetches_when_enabled_is_false(self, bs, monkeypatch):
+        """One real bookings_refresh_loop iteration (sleep patched), with
+        guest mode disabled: the loop still calls refresh (D9)."""
+        from mode_service import main as ms_main
 
-        def handler(request):
-            called["n"] += 1
-            return httpx.Response(200, json=_bookings_payload([]))
+        class _Stop(Exception):
+            pass
 
-        asyncio.run(bs.refresh({"enabled": False}, now=now, admin_client=_admin_client(handler)))
-        assert called["n"] == 1
+        sleeps = []
+        calls = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) > 1:
+                raise _Stop
+
+        async def spy_refresh(config, *, now, admin_client, **kw):
+            calls.append((dict(config), admin_client))
+
+        monkeypatch.setattr(ms_main, "current_config", {"enabled": False})
+        monkeypatch.setattr(ms_main, "booking_sources", bs)
+        monkeypatch.setattr(ms_main, "_admin_http_client", None)
+        monkeypatch.setattr(bs, "refresh", spy_refresh)
+        monkeypatch.setattr(ms_main.asyncio, "sleep", fake_sleep)
+
+        with pytest.raises(_Stop):
+            asyncio.run(ms_main.bookings_refresh_loop())
+
+        assert sleeps == [60, 60]
+        assert len(calls) == 1
+        assert calls[0][0] == {"enabled": False}
+        assert calls[0][1] is ms_main._admin_http_client
+        asyncio.run(ms_main._admin_http_client.aclose())
 
     def test_first_tick_fetches_ical_immediately(self, bs):
         now = datetime.now(timezone.utc)
@@ -538,3 +560,66 @@ class TestFailSafeReconcile:
 
         assert not hasattr(bookings_module, "get_bookings_http_client")
         assert not hasattr(bookings_module, "_bookings_http_client")
+
+
+class TestCoverageGaps:
+    """tessa's coverage gaps: each test here is paired with the mutant it
+    kills in the reconcile report."""
+
+    def test_clamped_buffer_before_bounds_the_request_window(self, bs):
+        captured = {}
+
+        def handler(request):
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json=_bookings_payload([]))
+
+        config = {"enabled": True, "buffer_before_checkin_hours": 500, "calendar_poll_interval_minutes": 10}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=_admin_client(handler)))
+        end = datetime.fromisoformat(captured["params"]["end"])
+        max_age = bs._max_age_seconds(config)
+        assert end - _FIXED_NOW == timedelta(seconds=max_age) + timedelta(hours=168) + timedelta(hours=1)
+
+    def test_max_age_boundary_is_exclusive(self, bs):
+        config = {"enabled": True, "calendar_poll_interval_minutes": 10}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
+        max_age = bs._max_age_seconds(config)
+        success = bs._admin.last_success_at
+        at_limit = bs.snapshot(config, now=_FIXED_NOW, now_monotonic=success + max_age)
+        past_limit = bs.snapshot(config, now=_FIXED_NOW, now_monotonic=success + max_age + 0.5)
+        assert at_limit.statuses["admin"] == "fresh"
+        assert past_limit.statuses["admin"] == "expired"
+
+    def test_ical_not_refetched_before_its_poll_interval(self, bs):
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            return httpx.Response(200, content=_EMPTY_ICAL)
+
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics", "calendar_poll_interval_minutes": 10}
+        admin = _admin_client(_admin_handler(_bookings_payload([])))
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=admin, ical_client_factory=_ical_factory(handler)))
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=admin, ical_client_factory=_ical_factory(handler)))
+        assert calls["n"] == 1
+
+        bs._ical.last_attempt_at -= 601
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=admin, ical_client_factory=_ical_factory(handler)))
+        assert calls["n"] == 2
+
+    def test_ical_events_outside_the_fetch_window_are_dropped(self, bs, monkeypatch):
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "UTC")
+        config_module._clear_cache_for_tests()
+        ical = (
+            "BEGIN:VCALENDAR\r\n"
+            "BEGIN:VEVENT\r\nUID:inside@example.com\r\n"
+            "DTSTART;VALUE=DATE:20260630\r\nDTEND;VALUE=DATE:20260702\r\nSUMMARY:Reserved\r\nEND:VEVENT\r\n"
+            "BEGIN:VEVENT\r\nUID:long-past@example.com\r\n"
+            "DTSTART;VALUE=DATE:20260601\r\nDTEND;VALUE=DATE:20260605\r\nSUMMARY:Reserved\r\nEND:VEVENT\r\n"
+            "BEGIN:VEVENT\r\nUID:far-future@example.com\r\n"
+            "DTSTART;VALUE=DATE:20261201\r\nDTEND;VALUE=DATE:20261205\r\nSUMMARY:Reserved\r\nEND:VEVENT\r\n"
+            "END:VCALENDAR\r\n"
+        ).encode()
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=_admin_client(_admin_handler(_bookings_payload([]))),
+                               ical_client_factory=_ical_factory(lambda r: httpx.Response(200, content=ical))))
+        assert [b.start.date().isoformat() for b in bs._ical.last_good] == ["2026-06-30"]

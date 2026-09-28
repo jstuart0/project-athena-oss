@@ -49,24 +49,9 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _restore_structlog_after_module():
-    """Importing mode_service.main calls shared.logging_config.configure_logging(),
-    which globally replaces structlog's processors list and rebinds the
-    "service" contextvar (shared/logging_config.py:104-117) -- a process-wide
-    side effect. In production each service is its own process, so this never
-    collides; in this shared pytest session it would otherwise leak
-    "mode-service" into every later-running test file's log assertions.
-
-    Module-scoped (not function-scoped): restoring after *every* test would
-    invalidate mode_service.main.logger's cache_logger_on_first_use snapshot
-    mid-file, breaking this file's own structlog.testing.capture_logs()
-    tests. Snapshot once before this file's first test, restore once after
-    its last -- leaves the rest of the session untouched by this file's
-    import of mode_service.main.
-    """
-    snapshot = structlog.get_config()
+def _restore_structlog_after_module(isolated_structlog):
+    """See tests/unit/conftest.py::isolated_structlog."""
     yield
-    structlog.configure(**snapshot)
 
 
 @pytest.fixture(autouse=True)

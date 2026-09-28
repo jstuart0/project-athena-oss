@@ -31,22 +31,9 @@ _HEADERS = {"X-Service-Key": _SERVICE_KEY}
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _restore_structlog_after_module():
-    """Importing mode_service.main (and, in the parity test, orchestrator.
-    ingress_auth) calls shared.logging_config.configure_logging(), which
-    globally replaces structlog's processors list and rebinds the
-    "service" contextvar (shared/logging_config.py:104-117) -- a
-    process-wide side effect. In production each service is its own
-    process, so this never collides; in this shared pytest session it
-    would otherwise leak into every later-running test file's log
-    assertions. Module-scoped: snapshot once before this file's first
-    test, restore once after its last -- a function-scoped restore would
-    invalidate mode_service.main.logger's cache_logger_on_first_use
-    snapshot mid-file.
-    """
-    snapshot = structlog.get_config()
+def _restore_structlog_after_module(isolated_structlog):
+    """See tests/unit/conftest.py::isolated_structlog."""
     yield
-    structlog.configure(**snapshot)
 
 
 @pytest.fixture(autouse=True)

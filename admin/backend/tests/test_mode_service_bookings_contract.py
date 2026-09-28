@@ -19,6 +19,18 @@ from shared.config import _clear_cache_for_tests, get_config
 
 import mode_service.bookings as ms_bookings
 
+# Pinned clock and zone: the iCal twin's day pair and the fetch window must
+# not depend on when the suite runs.
+_NOW = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _utc_property_zone(monkeypatch):
+    monkeypatch.setenv("DEFAULT_TIMEZONE", "UTC")
+    _clear_cache_for_tests()
+    yield
+    _clear_cache_for_tests()
+
 
 def _make_event(db, **kwargs):
     defaults = dict(
@@ -51,7 +63,7 @@ class TestSeamContract:
         _clear_cache_for_tests()
         service_key = get_config().service_api_key
 
-        now = datetime.now(timezone.utc)
+        now = _NOW
         confirmed = _make_event(
             db, external_id="lodgify_1", checkin=now, checkout=now + timedelta(days=1)
         )
@@ -87,14 +99,17 @@ class TestSeamContract:
         ids = {b.id for b in bs._admin.last_good}
         assert ids == {confirmed.id, test_row.id}
 
-        test_booking = next(b for b in bs._admin.last_good if b.id == test_row.id)
-        assert test_booking.is_test is True
+        by_id = {b.id: b for b in bs._admin.last_good}
+        assert by_id[test_row.id].is_test is True
+        assert by_id[confirmed.id].is_test is False
+        for booking in by_id.values():
+            assert booking.start == _NOW
+            assert booking.end == _NOW + timedelta(days=1)
 
-        snapshot = bs.snapshot(config, now=now, now_monotonic=0.0)
-        suppressed_pairs = {
-            (row["checkin"], row["checkout"]) for row in bs._suppressed_rows
-        }
-        assert len(bs._suppressed_rows) == 1  # the soft-deleted row only (blocked doesn't suppress)
+        # The soft-deleted row only (blocked doesn't suppress), as UTC instants.
+        assert bs._suppressed_rows == [
+            {"checkin": _NOW.isoformat(), "checkout": (_NOW + timedelta(days=1)).isoformat()}
+        ]
 
     def test_wrong_key_is_recorded_as_failed_not_empty(self, client, db, monkeypatch):
         """Both sides read SERVICE_API_KEY from the same process env, so an
@@ -105,7 +120,7 @@ class TestSeamContract:
         from main import app
 
         _clear_cache_for_tests()
-        now = datetime.now(timezone.utc)
+        now = _NOW
         _make_event(db, external_id="lodgify_2", checkin=now, checkout=now + timedelta(days=1))
 
         real_cfg = get_config()
@@ -126,7 +141,7 @@ class TestEndToEndSuppression:
     different UID) end-to-end -- admin over ASGI, iCal over MockTransport."""
 
     def _seed_twin(self, owner_client, db):
-        now = datetime.now(timezone.utc)
+        now = _NOW
         admin_row = _make_event(
             db,
             external_id="lodgify_9",
@@ -174,6 +189,7 @@ class TestEndToEndSuppression:
 
         bs, snapshot = self._run_refresh(app, now, ical_bytes)
         assert bs._admin.last_good == []
+        assert len(bs._ical.last_good) == 1  # the twin was loaded, so its absence below is suppression
         assert snapshot.bookings == []
 
     def test_cancel_via_patch_suppresses_ical_twin(self, owner_client, db):
@@ -187,6 +203,7 @@ class TestEndToEndSuppression:
 
         bs, snapshot = self._run_refresh(app, now, ical_bytes)
         assert bs._admin.last_good == []
+        assert len(bs._ical.last_good) == 1
         assert snapshot.bookings == []
 
     def test_control_without_delete_is_guest_with_one_merged_booking(self, owner_client, db):
@@ -201,5 +218,6 @@ class TestEndToEndSuppression:
         admin_row, now, ical_bytes = self._seed_twin(owner_client, db)
 
         bs, snapshot = self._run_refresh(app, now, ical_bytes)
+        assert len(bs._ical.last_good) == 1
         assert len(snapshot.bookings) == 1
         assert active_booking(snapshot.bookings, now, _td(hours=2), _td(hours=1)) is not None

@@ -30,10 +30,9 @@ NY = ZoneInfo("America/New_York")
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _restore_structlog_after_module():
-    snapshot = structlog.get_config()
+def _restore_structlog_after_module(isolated_structlog):
+    """See tests/unit/conftest.py::isolated_structlog."""
     yield
-    structlog.configure(**snapshot)
 
 
 @pytest.fixture(autouse=True)
@@ -469,3 +468,16 @@ class TestLifespanInitialRefresh:
         # mode-service.yaml: liveness initialDelaySeconds 10 -- uvicorn
         # serves nothing until lifespan startup returns.
         assert 0 < ms._STARTUP_BOOKINGS_REFRESH_TIMEOUT_SECONDS <= 5
+
+
+class TestBufferClampWiring:
+    def test_raw_500h_buffer_behaves_as_168h(self, ms):
+        now = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        now_monotonic = time.monotonic()
+        # Checks in 200 h from now: inside a raw 500 h buffer, outside 168 h.
+        booking = Booking(id=1, key="k1", source="admin", label="admin #1",
+                           start=now + timedelta(hours=200), end=now + timedelta(hours=260), is_test=False)
+        _fresh(ms.booking_sources._admin, now_monotonic, bookings=[booking])
+        ms.current_config = {"enabled": True, "buffer_before_checkin_hours": 500, "buffer_after_checkout_hours": 1}
+        assert ms.determine_mode(now=now, now_monotonic=now_monotonic) == "owner"
+        assert ms.determine_mode(now=now + timedelta(hours=33), now_monotonic=now_monotonic) == "guest"

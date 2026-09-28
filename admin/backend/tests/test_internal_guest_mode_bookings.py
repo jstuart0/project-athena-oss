@@ -245,25 +245,46 @@ class TestSyncedRowDelete:
         assert len(bookings_resp.json()["suppressed"]) == 1
 
     def test_resync_does_not_resurrect_deleted_row(self, owner_client, db):
-        now = datetime.now(timezone.utc)
+        """Drives the real sync upsert over a soft-deleted synced row the
+        feed still lists: it stays deleted and out of `bookings`."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from app.models import CalendarSource
+        from app.services.calendar_sync import sync_single_source
+
+        source = CalendarSource(name="Feed", source_type="generic_ical", ical_url="https://example.com/f.ics")
+        db.add(source)
+        db.commit()
+        db.refresh(source)
+
+        checkin = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         event = _make_event(
             db,
-            external_id="lodgify_2",
-            source="lodgify",
-            checkin=now,
-            checkout=now + timedelta(days=1),
-            created_by="lodgify_api_sync",
+            external_id="resurrect-me@example.com",
+            source="generic_ical",
+            source_id=source.id,
+            checkin=checkin,
+            checkout=checkin + timedelta(days=2),
+            created_by="ical_sync",
         )
-        owner_client.delete(f"/api/guest-mode/events/{event.id}")
-        db.refresh(event)
-        assert event.deleted_at is not None
+        assert owner_client.delete(f"/api/guest-mode/events/{event.id}").status_code == 200
 
-        # Simulate the upsert's existing-row branch: it must never touch
-        # deleted_at (verified at calendar_sync.py / calendar_sources.py).
-        event.title = "Re-synced title"
-        db.commit()
+        feed = (
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:resurrect-me@example.com\n"
+            f"DTSTART;VALUE=DATE:{checkin:%Y%m%d}\n"
+            f"DTEND;VALUE=DATE:{checkin + timedelta(days=2):%Y%m%d}\n"
+            "SUMMARY:Reserved\nEND:VEVENT\nEND:VCALENDAR\n"
+        )
+        with patch("app.routes.calendar_sources.fetch_ical_data", new=AsyncMock(return_value=feed)):
+            assert asyncio.run(sync_single_source(source.id, db)) is True
+
         db.refresh(event)
         assert event.deleted_at is not None
+        assert event.synced_at is not None
+        body = owner_client.get(BOOKINGS_URL, params=_default_window(checkin), headers=_headers()).json()
+        assert event.id not in {b["id"] for b in body["bookings"]}
+        assert len(body["suppressed"]) == 1
 
     def test_viewer_client_forbidden(self, viewer_client, db):
         now = datetime.now(timezone.utc)
@@ -364,3 +385,23 @@ class TestEditStatusValidation:
         db.refresh(event)
         assert event.status == "blocked"
         assert event.notes == "owner note"
+
+
+class TestContractBoundaries:
+    def test_naive_end_is_422(self, client):
+        now = datetime.now(timezone.utc)
+        resp = client.get(
+            BOOKINGS_URL, params={"start": _iso(now), "end": "2099-07-01T00:00:00"}, headers=_headers()
+        )
+        assert resp.status_code == 422
+
+    def test_exactly_62_days_is_allowed_and_one_second_more_is_not(self, client):
+        start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        ok = client.get(BOOKINGS_URL, params={"start": _iso(start), "end": _iso(start + timedelta(days=62))}, headers=_headers())
+        over = client.get(
+            BOOKINGS_URL,
+            params={"start": _iso(start), "end": _iso(start + timedelta(days=62, seconds=1))},
+            headers=_headers(),
+        )
+        assert ok.status_code == 200
+        assert over.status_code == 422

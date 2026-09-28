@@ -129,13 +129,15 @@ class TestIcalTimezone:
         monkeypatch.setenv("DEFAULT_TIMEZONE", "America/New_York")
         config_module._clear_cache_for_tests()
 
+        # Non-default times, so a parser that ignores the kwargs and falls
+        # back to 16:00/11:00 fails here.
         events = parse_ical_events(
-            _ICAL_DATE_ONLY, "generic_ical", checkin_time="16:00", checkout_time="11:00"
+            _ICAL_DATE_ONLY, "generic_ical", checkin_time="15:00", checkout_time="10:00"
         )
         assert len(events) == 1
         e = events[0]
-        assert e["checkin"].isoformat() == "2026-07-01T20:00:00+00:00"
-        assert e["checkout"].isoformat() == "2026-07-05T15:00:00+00:00"
+        assert e["checkin"].isoformat() == "2026-07-01T19:00:00+00:00"
+        assert e["checkout"].isoformat() == "2026-07-05T14:00:00+00:00"
 
     def test_tzid_value_unchanged(self, monkeypatch):
         monkeypatch.setenv("DEFAULT_TIMEZONE", "America/New_York")
@@ -173,62 +175,113 @@ class TestIcalTimezone:
         assert events[0]["status"] == "blocked"
 
 
-class TestUpsertStatusRule:
-    def test_reclassifies_existing_confirmed_to_blocked(self, db):
-        source = CalendarSource(
-            name="Test", source_type="generic_ical", ical_url="https://example.com/x.ics"
+_ICAL_UPSERT = """BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:reclass-1@example.com
+DTSTART;VALUE=DATE:20260801
+DTEND;VALUE=DATE:20260803
+SUMMARY:Blocked
+END:VEVENT
+BEGIN:VEVENT
+UID:owner-cancelled-1@example.com
+DTSTART;VALUE=DATE:20260810
+DTEND;VALUE=DATE:20260812
+SUMMARY:Reserved
+END:VEVENT
+BEGIN:VEVENT
+UID:soft-deleted-1@example.com
+DTSTART;VALUE=DATE:20260820
+DTEND;VALUE=DATE:20260822
+SUMMARY:Reserved
+END:VEVENT
+BEGIN:VEVENT
+UID:new-stay-1@example.com
+DTSTART;VALUE=DATE:20260901
+DTEND;VALUE=DATE:20260905
+SUMMARY:Reserved
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def _seed_upsert_rows(db):
+    """A source with non-default times plus three existing rows the feed
+    re-lists: a confirmed row the feed now marks Blocked, an owner-cancelled
+    row, and an owner soft-deleted row."""
+    source = CalendarSource(
+        name="Upsert", source_type="generic_ical", ical_url="https://example.com/u.ics",
+        default_checkin_time="15:00", default_checkout_time="10:00",
+    )
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+
+    def row(uid, status, deleted_at=None):
+        event = CalendarEvent(
+            external_id=uid, source="generic_ical", source_id=source.id, title="Guest",
+            checkin=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            checkout=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            status=status, created_by="ical_sync", deleted_at=deleted_at,
         )
-        db.add(source)
-        db.commit()
-        db.refresh(source)
+        db.add(event)
+        return event
 
-        existing = CalendarEvent(
-            external_id="blocked-1@example.com",
-            source="generic_ical",
-            source_id=source.id,
-            title="Blocked",
-            checkin=datetime(2026, 8, 1, tzinfo=timezone.utc),
-            checkout=datetime(2026, 8, 3, tzinfo=timezone.utc),
-            status="confirmed",
-            created_by="ical_sync",
-        )
-        db.add(existing)
-        db.commit()
+    reclass = row("reclass-1@example.com", "confirmed")
+    cancelled = row("owner-cancelled-1@example.com", "cancelled")
+    deleted = row("soft-deleted-1@example.com", "confirmed", deleted_at=datetime(2026, 7, 1, tzinfo=timezone.utc))
+    db.commit()
+    return source, reclass, cancelled, deleted
 
-        event_data = {"status": "blocked"}
-        if existing.status in ("confirmed", "blocked"):
-            existing.status = event_data.get("status", existing.status)
-        db.commit()
-        db.refresh(existing)
-        assert existing.status == "blocked"
 
-    def test_never_overwrites_owner_set_cancelled(self, db):
-        source = CalendarSource(
-            name="Test", source_type="generic_ical", ical_url="https://example.com/y.ics"
-        )
-        db.add(source)
-        db.commit()
-        db.refresh(source)
+def _assert_upsert_outcome(db, reclass, cancelled, deleted):
+    from shared.booking_window import db_value_to_utc
 
-        existing = CalendarEvent(
-            external_id="cancelled-1@example.com",
-            source="generic_ical",
-            source_id=source.id,
-            title="Some Guest",
-            checkin=datetime(2026, 8, 1, tzinfo=timezone.utc),
-            checkout=datetime(2026, 8, 3, tzinfo=timezone.utc),
-            status="cancelled",
-            created_by="ical_sync",
-        )
-        db.add(existing)
-        db.commit()
+    for event in (reclass, cancelled, deleted):
+        db.refresh(event)
+    assert reclass.status == "blocked"
+    assert cancelled.status == "cancelled"
+    assert deleted.deleted_at is not None
+    # The feed still rewrites times on existing rows, with the source's own
+    # 15:00/10:00 in New York (EDT, UTC-4).
+    assert db_value_to_utc(cancelled.checkin).isoformat() == "2026-08-10T19:00:00+00:00"
+    assert db_value_to_utc(cancelled.checkout).isoformat() == "2026-08-12T14:00:00+00:00"
 
-        event_data = {"status": "confirmed"}
-        if existing.status in ("confirmed", "blocked"):
-            existing.status = event_data.get("status", existing.status)
-        db.commit()
-        db.refresh(existing)
-        assert existing.status == "cancelled"
+    new_row = db.query(CalendarEvent).filter(CalendarEvent.external_id == "new-stay-1@example.com").one()
+    assert new_row.status == "confirmed"
+    assert db_value_to_utc(new_row.checkin).isoformat() == "2026-09-01T19:00:00+00:00"
+    assert db_value_to_utc(new_row.checkout).isoformat() == "2026-09-05T14:00:00+00:00"
+
+
+class TestRealUpsertStatusRule:
+    """D11 through the two real upsert loops (not a re-implementation of
+    the rule): confirmed -> blocked is reclassified, an owner-set cancelled
+    is never overwritten, a soft-deleted row stays deleted."""
+
+    @pytest.mark.asyncio
+    async def test_sync_single_source(self, db, monkeypatch):
+        from app.services.calendar_sync import sync_single_source
+
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "America/New_York")
+        config_module._clear_cache_for_tests()
+        source, reclass, cancelled, deleted = _seed_upsert_rows(db)
+
+        with patch("app.routes.calendar_sources.fetch_ical_data", new=AsyncMock(return_value=_ICAL_UPSERT)):
+            assert await sync_single_source(source.id, db) is True
+
+        _assert_upsert_outcome(db, reclass, cancelled, deleted)
+
+    def test_sync_route(self, owner_client, db, monkeypatch):
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "America/New_York")
+        config_module._clear_cache_for_tests()
+        source, reclass, cancelled, deleted = _seed_upsert_rows(db)
+
+        with patch("app.routes.calendar_sources.fetch_ical_data", new=AsyncMock(return_value=_ICAL_UPSERT)):
+            resp = owner_client.post(f"/api/calendar-sources/{source.id}/sync")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True, resp.json()
+
+        _assert_upsert_outcome(db, reclass, cancelled, deleted)
 
 
 class TestSyncAllActuallySyncs:

@@ -7,6 +7,7 @@ UTC case is a no-op guard only.
 from __future__ import annotations
 
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -326,3 +327,31 @@ class TestLogOncePerValue:
                 assert bw.is_active(inverted, inverted.start, timedelta(0), timedelta(0)) is False
             assert bw.is_active(other, other.start, timedelta(0), timedelta(0)) is False
         assert self._count(logs, "mode_booking_invalid_window") == 2
+
+
+class TestNaiveDbValueIsUtcRegardlessOfHostZone:
+    def test_naive_is_utc_under_a_non_utc_host_tz(self, monkeypatch):
+        if not hasattr(time, "tzset"):
+            pytest.skip("time.tzset unavailable on this platform")
+        monkeypatch.setenv("TZ", "America/New_York")
+        time.tzset()
+        try:
+            naive = datetime(2026, 7, 1, 20, 0)
+            assert bw.db_value_to_utc(naive) == datetime(2026, 7, 1, 20, 0, tzinfo=timezone.utc)
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+
+
+class TestMergeIsTest:
+    def test_is_test_only_when_every_member_is_test(self):
+        start = datetime(2026, 7, 1, 20, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 5, 15, 0, tzinfo=timezone.utc)
+        admin_test = _booking(start, end, source="admin", key="a", is_test=True)
+        ical_real = _booking(start, end, source="ical", key="i", is_test=False, booking_id=None)
+        ical_test = _booking(start, end, source="ical", key="i", is_test=True, booking_id=None)
+
+        mixed = bw.merge([admin_test], [ical_real], suppressed_pairs=set(), tz=NY)
+        both = bw.merge([admin_test], [ical_test], suppressed_pairs=set(), tz=NY)
+        assert [b.is_test for b in mixed] == [False]
+        assert [b.is_test for b in both] == [True]

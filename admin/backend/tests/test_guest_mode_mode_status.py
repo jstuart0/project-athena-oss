@@ -80,6 +80,9 @@ class TestReachable:
         assert data["property_timezone"] == "America/New_York"
         assert data["property_timezone_valid"] is True
         assert captured["url"] == "http://mode-service.test/mode"
+        from shared.config import get_config
+        assert get_config().service_api_key
+        assert captured["headers"].get("x-service-key") == get_config().service_api_key
 
 
 class TestSsrfBlocked:
