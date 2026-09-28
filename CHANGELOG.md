@@ -15,6 +15,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The Ollama SSRF gate now also covers the remaining operator-configured Ollama probes — model discovery and the admin panel's Ollama test actions — not just the RAG probes and reachability checks it already covered. A not-in-cluster carve-out keeps `localhost`/private-host Ollama working for bare-metal development; an in-cluster Ollama still needs its host allowlisted via `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`. Startup logs a non-fatal `ollama_url_blocked_by_ssrf_guard` warning when the configured Ollama URL would be blocked.
 - Configured URLs (Ollama, Redis, Qdrant, and registry endpoints) are redacted to `scheme://host:port` before being written to admin-backend logs, so credentials embedded in a URL are never logged.
 - RAG services now send `X-Service-Key` when self-registering and unregistering with the service registry; both calls previously had no header and were silently rejected with 401.
+- Home Assistant writes are now authorized against the request's server-derived permissions before they're sent. Previously guest and device-identified-guest requests could lock, unlock, open, or close restricted devices; a client-supplied `mode` could claim owner; a mode-service outage granted owner; the mode service's override endpoint granted owner without a PIN and without authentication; anyone could exhaust the owner-PIN attempts from the public chat; and unauthenticated jarvis-web callers were served in the household's mode and could drive climate, media, appliances, music, and voice rooms directly.
+- The mode service now requires `X-Service-Key` on every route except `/health` (`MODE_SERVICE_INGRESS_AUTH`, staged via `warn` before `enforce`); previously any caller on the pod network could query or override mode with no authentication at all.
+- jarvis-web's 29 direct device/mode/LiveKit write routes (HTTP and both WebSocket proxies) now require a signed-in owner or operator; an unauthenticated caller gets `403 sign_in_required` (or a WebSocket close before accept) instead of being served as the household owner. `chat-embed`'s relay always forwards guest mode and never forwards the browser's `Authorization` header.
+
+### Changed
+
+- Guests lose lock/cover/alarm/camera/automation/script/scene control by default (the new guest permission floor); previously only an admin-configured restriction list applied, and an empty list meant unrestricted.
+- Guest requests to control music playback or the TV are now permission-gated the same way lock/cover `CONTROL` requests already were — previously only that one intent category was checked, so a guest could reach music and TV controls regardless of their allowed-intents configuration.
+- A mode-service outage now puts the house in a distinct "degraded" state — never owner, never unrestricted — instead of the previous unrestricted-owner fallback. Physical control at the Home Assistant device (or the HA app/UI directly) is the fallback during that window.
+- SMS-originated requests now get guest permissions instead of inheriting whatever mode the house happened to be in.
+- An empty admin-configured guest allowlist (`allowed_intents`/`allowed_domains`) now means "use the built-in baseline", not "allow everything".
+- The mode service now actually loads the admin backend's guest-mode settings on startup — if calendar guest mode is enabled, every satellite is in guest mode during an active booking (the guest allowlist excludes `control`, so even lights need the owner PIN).
+- The owner voice-PIN override now requires a PIN set in the admin UI, is refused outright from public/unauthenticated surfaces, and locks per caller-trust-tier after repeated failed attempts. A PIN set before this release was hashed with unsalted SHA-256 and must be re-set once in the admin UI — the old hash is treated as "not configured", not silently accepted.
+- jarvis-web's `JARVIS_PUBLIC_MODE` (default `guest`) determines whether an unauthenticated caller reaches the household's actual mode at all; set to `household` only for a LAN-only deployment not reachable from the internet.
+- LiveKit browser-facing room tokens now expire after `LIVEKIT_USER_TOKEN_TTL_MINUTES` (default 30) instead of lasting indefinitely; server-side Athena participant tokens are unaffected.
+- Deployment requirement: `SERVICE_API_KEY` on the mode service and `MODE_SERVICE_URL` on the orchestrator and gateway are now required for mode/permission resolution to work at all — without them every request degrades. Roll out admin-backend → mode service → orchestrator → jarvis-web → gateway, with `MODE_SERVICE_INGRESS_AUTH=warn` during the staged window; roll back by setting the mode service back to `warn` first if only it is being reverted.
 
 ### Fixed
 
@@ -23,6 +39,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - DEV_MODE's service registry seed types RAG rows as `rag`; previously every seeded row, including the RAG services, was typed `api`.
 - Service-control inventory cache is now invalidated even when releasing the action lease raises, instead of leaving a stale cache entry behind.
 - RAG self-registration now posts the `<name>-rag` registry name and a `host_label` hint, matching the convention seeded/renamed registry rows actually use — connectors registering with their bare short name (e.g. `weather`) were silently rejected with 422 and never landed in the registry. The upsert route now also matches an existing row by host when the posted name doesn't, so a registry row is never duplicated or renamed by a self-registration ping. A RAG connector's registration log now reports failure honestly instead of always claiming success.
+- A guest query whose intent isn't gated by a specific control node but is still blocked by the guest permission check (e.g. a Tesla-vehicle query) no longer 500s — the response the orchestrator was building for that refusal didn't match its own response model.
 
 ---
 

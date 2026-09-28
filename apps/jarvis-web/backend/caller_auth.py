@@ -2,7 +2,7 @@
 route gate.
 
 Pre-ATHENA-69, every jarvis-web caller (including anonymous internet
-traffic on jarvis.xmojo.net) was served in the household's mode and could
+traffic on jarvis.your-domain) was served in the household's mode and could
 reach every direct device/mode/LiveKit route. This module reverses that:
 unauthenticated callers are guests and refused on writes; only a caller
 holding a Bearer token that the admin backend's GET /api/auth/me confirms

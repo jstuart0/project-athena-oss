@@ -32,6 +32,10 @@ spec:
           value: "8000"
         - name: ORCHESTRATOR_SERVICE_URL
           value: "http://athena-orchestrator:8001"
+        # ATHENA-69 (D23): required by mode_gate.py's fast-path check.
+        # Without it, fast_path_allowed() always returns False.
+        - name: MODE_SERVICE_URL
+          value: "http://athena-mode-service:8022"
         - name: LLM_SERVICE_URL
           valueFrom:
             configMapKeyRef:

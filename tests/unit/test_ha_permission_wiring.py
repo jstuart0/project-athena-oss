@@ -653,17 +653,11 @@ class TestOrchestratorQueryCallersTagCallerTrust:
     """D24 fail-closed contract: every real /query or /query/stream caller
     is enumerated (population is set-equal, always -- a caller that
     disappears or a new untagged caller that appears both fail this test),
-    and every caller already expected to carry a caller_trust tag by this
-    point in the implementation-pass sequence carries the right one.
+    and every caller carries the right caller_trust tag.
 
-    As of Pass E, only the three gateway sites (this pass) are tagged.
-    sms_webhook.py's tag lands in Pass D and jarvis-web's in Pass F --
-    this worktree ran Pass E directly after Pass A (Pass E's only
-    dependency per the plan's pass table), so both are still untagged
-    right now. Rather than fail until D and F land, an as-yet-untagged
-    PENDING member is accepted with value None; once its owning pass
-    lands, this same test starts enforcing the exact value with no edit
-    required here."""
+    Passes D (sms_webhook.py) and F (jarvis-web) have both landed on this
+    branch -- there is no longer a pending/untagged member. Every value
+    below is enforced unconditionally."""
 
     EXPECTED_POPULATION = {
         ("src/gateway/main.py", "route_to_orchestrator"),
@@ -674,7 +668,7 @@ class TestOrchestratorQueryCallersTagCallerTrust:
         ("apps/jarvis-web/backend/main.py", "chat_stream"),
     }
 
-    # Exact literal caller_trust value once tagged.
+    # Exact literal caller_trust value.
     EXPECTED_LITERAL_TAG = {
         ("src/gateway/main.py", "route_to_orchestrator"): "household",
         ("src/gateway/wyoming_bridge.py", "_process_query"): "household",
@@ -690,13 +684,6 @@ class TestOrchestratorQueryCallersTagCallerTrust:
         ("apps/jarvis-web/backend/main.py", "chat_stream"),
     }
 
-    # Not yet landed as of Pass E (owning pass in parentheses).
-    PENDING_UNTIL_OWNING_PASS = {
-        ("admin/backend/app/routes/sms_webhook.py", "route_to_orchestrator"),  # Pass D
-        ("apps/jarvis-web/backend/main.py", "chat"),  # Pass F
-        ("apps/jarvis-web/backend/main.py", "chat_stream"),  # Pass F
-    }
-
     def test_orchestrator_query_callers_tag_caller_trust(self):
         found = _scan_query_callers()
 
@@ -704,14 +691,10 @@ class TestOrchestratorQueryCallersTagCallerTrust:
 
         for member, expected in self.EXPECTED_LITERAL_TAG.items():
             actual = found[member]
-            if member in self.PENDING_UNTIL_OWNING_PASS and actual is None:
-                continue
             assert actual == expected, f"{member}: expected {expected!r}, got {actual!r}"
 
         for member in self.JARVIS_WEB_MEMBERS:
             actual = found[member]
-            if actual is None:
-                continue  # Pass F not landed yet
             assert actual == "caller.trust", f"{member}: expected caller.trust, got {actual!r}"
 
         # Named member (M3): the wiring test must resolve json=<Name> back

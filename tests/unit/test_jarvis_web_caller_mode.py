@@ -430,6 +430,63 @@ class TestPublicMode:
         assert len(household_warnings) >= 2
 
 
+class TestModeGuestNameSuppression:
+    """D31 (tessa's Pass F mutation review, High): GET /api/mode is a read
+    (never gated by require_owner_caller), but a web_public caller must
+    not learn the current guest's name from it."""
+
+    def test_mode_guest_name_suppressed_for_web_public(self, client):
+        class _GuestAsyncClient(_RoutedAsyncClient):
+            async def get(self, url, *a, **kw):
+                if "current-guest" in url:
+                    return _FakeResponse(200, {"has_guest": True, "guest_name": "Alice", "id": "g1"})
+                return await super().get(url, *a, **kw)
+
+        with mock.patch.object(jarvis_main.httpx, "AsyncClient", _GuestAsyncClient):
+            resp = client.get("/api/mode")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["has_guest"] is True
+        assert body["guest_name"] is None
+
+    def test_mode_guest_name_present_for_authenticated_owner(self, client):
+        _install_role("owner")
+
+        class _GuestAsyncClient(_RoutedAsyncClient):
+            async def get(self, url, *a, **kw):
+                if "current-guest" in url:
+                    return _FakeResponse(200, {"has_guest": True, "guest_name": "Alice", "id": "g1"})
+                return await super().get(url, *a, **kw)
+
+        with mock.patch.object(jarvis_main.httpx, "AsyncClient", _GuestAsyncClient):
+            resp = client.get("/api/mode", headers=_bearer())
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["has_guest"] is True
+        assert body["guest_name"] == "Alice"
+
+    def test_current_guest_call_sends_service_key(self, client):
+        """D31: get_current_guest()'s outbound call to admin's
+        internal current-guest endpoint must carry X-Service-Key."""
+        captured_headers = []
+
+        class _SpyAsyncClient(_RoutedAsyncClient):
+            async def get(self, url, headers=None, **kw):
+                if "current-guest" in url:
+                    captured_headers.append(headers or {})
+                return await super().get(url, headers=headers, **kw)
+
+        with mock.patch.object(jarvis_main.httpx, "AsyncClient", _SpyAsyncClient):
+            resp = client.get("/api/mode")
+
+        assert resp.status_code == 200
+        assert len(captured_headers) == 1
+        assert captured_headers[0].get("X-Service-Key") == jarvis_main.SERVICE_API_KEY
+        assert jarvis_main.SERVICE_API_KEY  # the assertion above is vacuous if this is empty/None
+
+
 # ---------------------------------------------------------------------------
 # owner_only route gate
 # ---------------------------------------------------------------------------
@@ -482,9 +539,25 @@ class TestOwnerOnlyRouteGate:
         assert resp.json()["detail"] == "sign_in_required"
 
     def test_owner_only_routes_refuse_unauthenticated_named_member(self, client):
-        resp = client.post("/api/climate/mode/heat")
+        """tessa's Pass F mutation review, Medium: 403 + detail alone
+        doesn't prove the handler body never ran -- spy on the outbound HA
+        call count too, so a mutation that lets the request fall through
+        to set_hvac_mode() (which would itself 503 without HA_TOKEN,
+        possibly masquerading as an unrelated-looking failure) is caught
+        at the source instead."""
+        calls = []
+
+        class _SpyAsyncClient(_RoutedAsyncClient):
+            async def post(self, url, *a, **kw):
+                calls.append(url)
+                return await super().post(url, *a, **kw)
+
+        with mock.patch.object(jarvis_main.httpx, "AsyncClient", _SpyAsyncClient):
+            resp = client.post("/api/climate/mode/heat")
+
         assert resp.status_code == 403
         assert resp.json()["detail"] == "sign_in_required"
+        assert calls == []
 
     @pytest.mark.parametrize("route_key", _owner_only_http_routes())
     @pytest.mark.parametrize("role", ["owner", "operator"])

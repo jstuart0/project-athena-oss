@@ -546,6 +546,181 @@ entry yet. This is a diagnostic log line only; it never blocks startup.
 | `MIN_TEMP` | `65` | Minimum guest temperature |
 | `MAX_TEMP` | `75` | Maximum guest temperature |
 
+### Mode and permissions (ATHENA-69)
+
+Every Home Assistant write the orchestrator makes is authorized against the
+**request's server-derived mode and permissions** before it's sent — never
+against a client-supplied `mode` field, and never against whatever the
+orchestrator most recently saw for a different caller.
+
+**How mode is determined.** `resolve_request_authorization()` is the single
+resolution point, called at every entry point (`/query`, `/query/stream`,
+`/query/stream/v2`, `/v1/chat/completions`). A caller's own `mode` field can
+only *narrow* an owner-mode house down to guest for that one request — it
+can never claim owner. The precedence, most to least trusted:
+
+1. The mode service reports the house is in **owner** mode (no guest
+   booking active, or an active voice-PIN override) → the caller gets
+   owner unless it explicitly asked to narrow to guest.
+2. The mode service reports **guest** mode (a booking is active) → the
+   caller gets guest, plus any device-fingerprint-matched guest
+   permissions the admin backend has on file.
+3. The mode service is **unreachable or erroring** → **degraded** (D4):
+   never owner. Degraded permissions are the fallback floor
+   (`HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES`) unioned with the guest
+   baseline — outages fail closed, they never grant control.
+
+**Caller table.**
+
+| Caller | Mode source | `caller_trust` sent to the orchestrator |
+|--------|-------------|------------------------------------------|
+| Gateway (satellite/HA voice) | server-resolved via step 1-3 above | `household` — the gateway's fast path (`mode_gate.py`) only takes effect while the house is actually in owner mode |
+| SMS (`sms_webhook.py`) | server-resolved | `sms` |
+| LiveKit (`livekit_integration.py`) | server-resolved | `household` (a LiveKit room can only be created by a signed-in owner/operator, see below) |
+| jarvis-web, signed-in owner/operator | server-resolved via step 1-3 above | `web_authenticated` |
+| jarvis-web, unauthenticated | forced `guest` (or `JARVIS_PUBLIC_MODE=household`'s legacy behavior) | `web_public` |
+| SMS/admin-UI internal flows (`ha_pipelines.py`, `memories.py`) | untagged | *(none — these aren't voice paths; the PIN branch refuses them but their other behavior is unchanged)* |
+
+`caller_trust` is set **only by server code**, never copied from a request
+body field, and it affects **only** the owner-PIN voice-override branch —
+mode and permissions themselves come entirely from the table above. Only
+`household`, `sms`, and `web_authenticated` may attempt the owner-PIN
+utterance ("switch to owner mode, pin 123456"); `web_public` and untagged
+callers are refused before any throttle or mode-service call, with zero
+counter increments. A surface may only ever *say* "owner mode" in a
+response if the request actually resolved to owner via the table above —
+narration never leads permission.
+
+**Guest floor and allowlist baselines.** Every guest's `restricted_entities`
+always includes `GUEST_BASELINE_RESTRICTED_ENTITIES` (a floor, unioned in,
+never replaceable by admin config) — by default this covers locks, covers,
+alarm panels, cameras, automations, scripts, and scenes, leaving
+lights/climate/media usable. Separately, `allowed_intents` and
+`allowed_domains`: an **empty admin-configured list means "use the
+baseline"**, never "allow everything" — `GUEST_BASELINE_ALLOWED_INTENTS`
+(default weather/time/general_info/news/recipes/streaming) and
+`GUEST_BASELINE_ALLOWED_DOMAINS` (default light/media_player/switch/climate)
+apply whenever the admin UI's guest allowlist is empty.
+
+> **Guest-allowed `switch` entities can drive locks or garage-door relays
+> inside Home Assistant.** The `switch` domain is guest-allowed by default
+> (baseline above) because most `switch.*` entities are lamps and small
+> appliances — but HA lets a `switch` entity be wired to a physical-security
+> relay. This is deployment-dependent and the guard cannot see HA's own
+> entity wiring; if any of your `switch.*` entities control a lock or gate,
+> remove `switch` from `GUEST_BASELINE_ALLOWED_DOMAINS` (and the admin UI's
+> allowed-domains list) for your deployment.
+>
+> `notify.*` and `template.*` service calls are not gated by the permission
+> guard — they aren't reachable via any current intent's write path, so
+> this is a documented gap rather than an active hole. Don't add a new
+> code path that calls `notify.*`/`template.*` with guest-controllable
+> arguments without gating it first.
+
+**Degraded (outage) behavior.** When the mode service can't be reached or
+returns an error, the orchestrator falls back to `degraded_permissions()`
+— never owner, never unrestricted. `ha_permission_fallback_disabled`
+(logged once at startup) fires only if you deliberately set
+`HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES=[]` — an explicit, logged
+deployer opt-out, never a silent default.
+
+**Owner PIN.** Set in the admin UI (Guest Mode page). Verification lives
+**only** in the admin backend (`POST /api/internal/guest-mode/verify-pin`,
+service-key-only — the mode service holds no PIN state and never hashes or
+compares a PIN itself). The hash is PBKDF2-HMAC-SHA256, salted
+(`admin/backend/app/utils/passwords.py`). **If you set a PIN before this
+version**, it was stored as an unsalted SHA-256 hash; that legacy format is
+detected and treated as "PIN must be re-set" (`verify-pin` returns
+`pin_not_configured` for it) — the admin UI prompts you to set a fresh PIN
+once. A per-trust-tier lockout (`MODE_OVERRIDE_LOCKOUT_THRESHOLD` failed
+attempts within the window locks that tier for `MODE_OVERRIDE_LOCKOUT_MINUTES`)
+protects against PIN-guessing; **changing the PIN in the admin UI clears
+the lockout counter** for every tier. The lockout is per-tier
+(`household`/`sms`/`web_authenticated`), never keyed on session id, room,
+or device id, so a caller can't dodge it by rotating identifiers.
+Public/unauthenticated callers (`web_public`) can never attempt the PIN at
+all — see the caller table above.
+>
+> **PIN-change recovery depends on the admin backend and OIDC being up.**
+> If both are down, you can't set or verify a new PIN through the UI.
+> Physical control at the Home Assistant device (or the HA app/UI directly)
+> is the fallback during that window — this campaign doesn't add an
+> out-of-band PIN-reset path. The D28 posture reminders below are
+> candidates for promotion to metrics/gauges once ATHENA's monitoring
+> stack (`MODULE_MONITORING`) is generally deployed; for now they're
+> log-only.
+
+**Mode-service ingress auth.** `MODE_SERVICE_INGRESS_AUTH` gates the mode
+service's `/mode*` routes behind `X-Service-Key`, mirroring
+`ORCHESTRATOR_INGRESS_AUTH`'s three-value contract (`enforce` default in
+code, `warn` in the shipped template for a staged rollout). While `warn` is
+active, the mode service logs `mode_service_ingress_auth_warn_active` at
+startup and **every hour** — this is the signal to watch for during
+rollout; don't leave a production deployment on `warn` indefinitely.
+
+**Last-good config and staleness (D37).** The mode service polls the admin
+backend for guest-mode config; on a fetch failure it keeps serving the
+last config it successfully loaded rather than failing every request.
+`GET /health` reports `config_source` (`"admin"` — the last poll
+succeeded; `"last_good"` — currently serving a stale cached config after a
+failed poll; `"none"` — no successful load yet since startup, i.e. cold
+start, D38: `/mode` reports `mode="degraded"` until the first successful
+load) and `config_age_seconds` (how old the currently-served config is).
+Once that age exceeds 15 minutes, the mode service logs
+`mode_service_config_stale` (ERROR) every 10 minutes until a fresh load
+succeeds. **A tightening saved in the admin UI while admin-backend is down
+is not applied until admin-backend comes back** — the mode service keeps
+the older, possibly more permissive config in the meantime; this is an
+accepted residual risk, surfaced by `config_age_seconds` and the stale-log
+signal above, not silently hidden.
+
+**`GET /api/guest-mode/config`'s dual auth path.** This route now accepts
+either the existing OIDC/Bearer session (unchanged behavior, full
+`has_permission('read')` check) *or* a service key (`X-Service-Key`, used
+by the mode service and orchestrator to fetch config without a human
+session). On the service-key path there's no authenticated user, so the
+permission check is skipped entirely (the key itself is the trust
+boundary) and any config auto-created on that path records
+`created_by_id=None`. The response never includes the PIN hash under
+either path — only `owner_pin_configured` (boolean).
+
+**LiveKit browser token TTL.** `LIVEKIT_USER_TOKEN_TTL_MINUTES` (default
+30, clamped 1-1440) bounds how long a browser-facing LiveKit room token
+stays valid for *joining* a room — it doesn't disconnect an
+already-connected participant early. Server-side Athena participant
+tokens are unaffected (they pass an explicit 24-hour TTL).
+
+**jarvis-web (`JARVIS_PUBLIC_MODE`).** See [Service URLs](#service-urls)
+above and `manifests/athena-prod/jarvis-web.yaml`'s inline comment. Default
+`guest`: an unauthenticated caller is a guest and every owner_only write
+route (climate, media, Apple TV, appliances, music playback, LiveKit room
+management, mode changes — 29 routes total, HTTP and the two WebSocket
+proxies) answers `403 {"detail":"sign_in_required"}` (or closes the
+WebSocket upgrade with code 1008 before accepting it). `household` is the
+legacy pre-ATHENA-69 behavior for a LAN-only deployment: every caller gets
+the household's actual mode and the write-route gate is bypassed.
+
+**Reads are never gated.** Only *writes* go through the permission guard
+and the jarvis-web sign-in gate. `GET` routes — climate/media/appliance/
+Apple TV/sensor state, `/api/mode`, `/livekit/config`, music config — stay
+open to every caller, authenticated or not. This matters beyond jarvis-web
+itself: the **orchestrator directly reads several jarvis-web GET routes**
+for voice answers (`smart_home_controller.py`, hardcoded to jarvis-web's
+in-cluster/co-located URL) — `GET /api/appliances/oven`,
+`GET /api/appliances/fridge`, `GET /api/sensors/motion`,
+`GET /api/sensors/illuminance`, `GET /api/sensors/summary`, and
+`GET /api/media` — none of which are gated, so this integration keeps
+working unchanged regardless of `JARVIS_PUBLIC_MODE` or who's signed in.
+(`GET /api/mode` is the one partial exception: it suppresses the guest's
+name from its response for a `web_public` caller, but still returns
+`mode`/`has_guest`/etc. — see D31.)
+
+**Denial observability.** Every guard-refused Home Assistant write
+increments the `athena_ha_write_denied_total{domain, scope_mode}` Prometheus
+counter, regardless of which entry point or node produced it — alert on a
+sustained rise if you want to notice a caller hammering a write it doesn't
+have.
+
 ### Monitoring
 
 | Variable | Default | Description |

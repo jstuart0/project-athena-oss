@@ -74,6 +74,16 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
+        # JARVIS_PUBLIC_MODE (ATHENA-69, D18/D19) -- OSS template, commented
+        # out (default "guest" applies). An unauthenticated caller is a
+        # guest and refused on every owner_only write route (403
+        # sign_in_required). Set to "household" only for a LAN-only
+        # deployment not reachable from the internet -- it restores the
+        # pre-ATHENA-69 behavior of serving every caller in the household's
+        # actual mode and bypasses the write-route sign-in gate. Logs
+        # jarvis_public_mode_household_active hourly while active.
+        # - name: JARVIS_PUBLIC_MODE
+        #   value: "household"
         resources:
           requests:
             memory: "128Mi"
