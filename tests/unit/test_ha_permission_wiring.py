@@ -959,3 +959,92 @@ class TestWebsocketsImportableInCI:
         is a tripwire: if it silently stops being a dependency, the 35/33
         population-size branch in the test above goes untested in CI."""
         import websockets  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
+# Pass H2 (xander delta review, item 2)
+# ---------------------------------------------------------------------------
+
+
+class TestSensorAndStatusFastPathsNeverCallService:
+    """route_control_node's sensor/presence fast paths
+    (nodes/route_control.py, the `device_type == "sensor"` branch and the
+    presence-pattern branch) both dispatch to
+    SmartHomeController._handle_sensor_intent, and the HA status-bulk-query
+    fast path dispatches to ha_status_optimizer.optimize_status_query.
+    Neither opens an ha_permission_scope -- both run BEFORE/OUTSIDE the
+    permission scope, which is only correct because they are read-only
+    (sensors, not switches/locks/etc). A future edit that adds a write --
+    even an innocuous-looking one, e.g. clearing a stale sensor cache via a
+    HA service call -- would silently bypass the guard entirely. This is a
+    drift tripwire, not a coverage test: it asserts neither function's body
+    ever references `call_service` anywhere in the tree.
+    """
+
+    def _assert_no_call_service(self, path: Path, func_name: str, node: ast.AST) -> None:
+        offenders = [
+            inner.lineno
+            for inner in ast.walk(node)
+            if isinstance(inner, ast.Attribute) and inner.attr == "call_service"
+        ]
+        assert offenders == [], (
+            f"{func_name} in {path.relative_to(REPO_ROOT)} references "
+            f".call_service at line(s) {offenders} -- it runs before/outside "
+            f"ha_permission_scope, so any write here bypasses the guard "
+            f"entirely."
+        )
+
+    def test_handle_sensor_intent_never_calls_service(self):
+        funcs = _controller_functions()
+        node = funcs.get("_handle_sensor_intent")
+        assert node is not None, "missing SmartHomeController._handle_sensor_intent"
+        self._assert_no_call_service(_CONTROLLER_PATH, "_handle_sensor_intent", node)
+
+    def test_optimize_status_query_never_calls_service(self):
+        path = SRC / "orchestrator" / "ha_status_optimizer.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        node = None
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.AsyncFunctionDef) and candidate.name == "optimize_status_query":
+                node = candidate
+                break
+        assert node is not None, "missing optimize_status_query"
+        self._assert_no_call_service(path, "optimize_status_query", node)
+
+    def test_route_control_fast_paths_route_to_handle_sensor_intent(self):
+        """Belt and suspenders: confirm the two fast-path branches in
+        route_control_node actually dispatch through _handle_sensor_intent
+        (and not some other, unaudited path) before the scope opens."""
+        path = SRC / "orchestrator" / "nodes" / "route_control.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        node = None
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.AsyncFunctionDef) and candidate.name == "route_control_node":
+                node = candidate
+                break
+        assert node is not None, "missing route_control_node"
+
+        scope_open_line = None
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.With)
+                and any(
+                    isinstance(item.context_expr, ast.Call)
+                    and isinstance(item.context_expr.func, ast.Name)
+                    and item.context_expr.func.id == "ha_permission_scope"
+                    for item in inner.items
+                )
+            ):
+                scope_open_line = inner.lineno if scope_open_line is None else min(scope_open_line, inner.lineno)
+
+        sensor_call_lines = [
+            inner.lineno
+            for inner in ast.walk(node)
+            if isinstance(inner, ast.Attribute) and inner.attr == "_handle_sensor_intent"
+        ]
+        assert len(sensor_call_lines) >= 2, "expected both fast-path branches to call _handle_sensor_intent"
+        if scope_open_line is not None:
+            assert all(line < scope_open_line for line in sensor_call_lines), (
+                "a _handle_sensor_intent call site moved inside/after the "
+                "permission scope -- fast paths must run before it opens"
+            )

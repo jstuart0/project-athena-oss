@@ -124,3 +124,76 @@ class TestModePermissionsParam:
         ms.current_config = {}
         resp = client.get("/mode/permissions", params={"mode": "guest"}, headers=_HEADERS)
         assert "scene" not in resp.json()["allowed_domains"]
+
+
+class TestGetPermissionsUnknownModeFailsClosed:
+    """ATHENA-69 Pass H2 (xander delta review, High): get_permissions()'s
+    old tail was an unconditional else -- any effective_mode that wasn't
+    literally "degraded"/"guest" fell through to the unrestricted owner
+    branch. determine_mode() now only ever returns "owner"/"guest"
+    (validated), so this simulates a stored/computed value bypassing that
+    validation (e.g. a future caller of determine_mode that forgets the
+    Literal-typed request model) to prove get_permissions() itself fails
+    closed as a second, independent layer -- belt and suspenders.
+    """
+
+    def test_unknown_stored_mode_yields_degraded_not_owner(self, ms, client, monkeypatch):
+        monkeypatch.setattr(ms, "determine_mode", lambda: "bogus-mode")
+        ms.current_config = {}
+
+        resp = client.get("/mode/permissions", headers=_HEADERS)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["mode"] == "degraded"
+        assert body["allowed_intents"] == []
+        assert body["allowed_domains"] == []
+        assert r"^lock\." in body["restricted_entities"]
+
+    def test_unknown_stored_mode_is_never_unrestricted(self, ms, client, monkeypatch):
+        """The specific exploit shape: an unvalidated mode string must never
+        produce owner's `restricted_entities: []` / unrestricted response."""
+        monkeypatch.setattr(ms, "determine_mode", lambda: "Owner")
+        ms.current_config = {}
+
+        resp = client.get("/mode/permissions", headers=_HEADERS)
+
+        body = resp.json()
+        assert body["mode"] != "owner"
+        assert body["restricted_entities"] != []
+
+
+class TestDegradedPermissionsParity:
+    """ATHENA-69 Pass H2 (xander delta review, Info->fix): the mode
+    service's cold-start/fallback degraded response must match the
+    orchestrator's D4 outage fallback (orchestrator.mode_permission.
+    degraded_permissions()) exactly -- floor the seven physical-security
+    domains, no intent/domain narrowing beyond that. Before this fix the
+    mode service reused the narrower guest baseline, so the same failure
+    class (system can't determine real permissions) produced two different
+    security postures depending on which layer detected it.
+
+    Deliberately does NOT import `orchestrator.mode_permission` here:
+    importing the orchestrator package in-process has previously leaked
+    structlog global config into this file's sibling test module (the
+    `_restore_structlog_after_module` fixture above documents exactly this
+    class of process-wide side effect). Instead this asserts the mode
+    service's degraded shape against the same source-of-truth constant
+    (`GUEST_BASELINE_RESTRICTED_ENTITIES_DEFAULT`) and the literal shape
+    `orchestrator.mode_permission.degraded_permissions()` returns (verified
+    by reading both implementations side by side; see PR/commit notes).
+    """
+
+    def test_mode_service_degraded_matches_orchestrator_shape(self, ms, client, monkeypatch):
+        from shared.guest_policy import GUEST_BASELINE_RESTRICTED_ENTITIES_DEFAULT
+
+        monkeypatch.setattr(ms, "determine_mode", lambda: "bogus-mode")
+        ms.current_config = {}
+        resp = client.get("/mode/permissions", headers=_HEADERS)
+        ms_degraded = resp.json()
+
+        assert ms_degraded["mode"] == "degraded"
+        assert ms_degraded["allowed_intents"] == []
+        assert ms_degraded["allowed_domains"] == []
+        assert ms_degraded["restricted_intents"] == []
+        assert ms_degraded["restricted_entities"] == GUEST_BASELINE_RESTRICTED_ENTITIES_DEFAULT

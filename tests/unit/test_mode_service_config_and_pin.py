@@ -345,6 +345,87 @@ class TestOwnerOverridePinFlow:
         assert calls == []
 
 
+class TestOverrideModeInvalidValues:
+    """ATHENA-69 Pass H2 (xander delta review, High): ModeOverrideRequest.mode
+    was a bare `str` -- POST /mode/override {"mode":"Owner", ...} (or any
+    other non-exact-"owner" value) with a valid service key skipped the
+    entire PIN-required branch (only literal `== "owner"` was checked) and
+    got stored verbatim; get_permissions()'s old unconditional-else branch
+    then granted unrestricted (owner) permissions to it with zero PIN
+    attempts. A Literal rejects every case below with 422 before
+    override_mode's body ever runs."""
+
+    @pytest.mark.parametrize(
+        "bad_mode",
+        ["Owner", "OWNER", " owner", "owner ", "admin", "", "guest ", "Guest"],
+    )
+    def test_non_exact_mode_value_rejected_with_422(self, ms, client, bad_mode):
+        calls = []
+        ms._admin_http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: (calls.append(1), httpx.Response(200, json={"status": "verified"}))[-1])
+        )
+
+        resp = client.post("/mode/override", json={"mode": bad_mode}, headers=_HEADERS)
+
+        assert resp.status_code == 422
+        assert calls == []
+        assert ms.active_override is None
+
+
+class TestOverrideTimeoutCapped:
+    """ATHENA-69 Pass H2 (xander delta review, High): timeout_minutes was
+    unbounded -- POST /mode/override {"mode":"owner","timeout_minutes":999999}
+    with a valid PIN granted an effectively-permanent override. Server-side
+    cap via AthenaConfig.override_max_timeout_minutes (default 240),
+    applied regardless of PIN outcome."""
+
+    def test_requested_timeout_over_cap_is_clamped(self, ms, client):
+        ms.current_config = {"owner_pin_configured": True}
+        ms._admin_http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"status": "verified"}))
+        )
+
+        resp = client.post(
+            "/mode/override",
+            json={"mode": "owner", "voice_pin": "123456", "timeout_minutes": 999999},
+            headers=_HEADERS,
+        )
+
+        assert resp.status_code == 200
+        assert "240 minutes" in resp.json()["message"]
+        expires_at = ms.active_override["expires_at"]
+        activated_at = ms.active_override["activated_at"]
+        assert (expires_at - activated_at).total_seconds() <= 240 * 60 + 1
+
+    def test_requested_timeout_under_cap_is_unaffected(self, ms, client):
+        ms.current_config = {"owner_pin_configured": True}
+        ms._admin_http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"status": "verified"}))
+        )
+
+        resp = client.post(
+            "/mode/override",
+            json={"mode": "owner", "voice_pin": "123456", "timeout_minutes": 30},
+            headers=_HEADERS,
+        )
+
+        assert resp.status_code == 200
+        assert "30 minutes" in resp.json()["message"]
+
+    def test_guest_override_timeout_also_capped(self, ms, client):
+        """The cap applies regardless of PIN outcome -- guest overrides
+        need no PIN at all but must still be bounded."""
+        resp = client.post(
+            "/mode/override",
+            json={"mode": "guest", "timeout_minutes": 999999},
+            headers=_HEADERS,
+        )
+        assert resp.status_code == 200
+        expires_at = ms.active_override["expires_at"]
+        activated_at = ms.active_override["activated_at"]
+        assert (expires_at - activated_at).total_seconds() <= 240 * 60 + 1
+
+
 class TestColdStart:
     """D38 (codex r3): until the first successful admin-config load, /mode
     must never report owner, and /health must show config_source="none" and
@@ -362,7 +443,13 @@ class TestColdStart:
 
         perms_resp = client.get("/mode/permissions", headers=_HEADERS).json()
         assert perms_resp["mode"] == "degraded"
-        assert perms_resp["allowed_intents"] != []  # conversation allowed
+        # ATHENA-69 Pass H2 (xander delta review, Info->fix): degraded now
+        # matches orchestrator.mode_permission.degraded_permissions() --
+        # allowed_intents=[] means UNRESTRICTED (conversation and every
+        # other intent still allowed), not "only these intents". Only the
+        # entity floor narrows anything during cold start.
+        assert perms_resp["allowed_intents"] == []  # unrestricted = conversation allowed
+        assert perms_resp["allowed_domains"] == []  # unrestricted beyond the entity floor
         assert r"^lock\." in perms_resp["restricted_entities"]  # physical security denied
 
         health = client.get("/health").json()

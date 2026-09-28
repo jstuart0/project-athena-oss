@@ -46,7 +46,12 @@ from shared.logging_config import configure_logging
 from shared.cache import CacheClient
 from shared.admin_url import get_admin_url
 from shared.config import get_config
-from shared.guest_policy import apply_guest_baseline, guest_baseline
+from shared.guest_policy import (
+    GUEST_BASELINE_RESTRICTED_ENTITIES_DEFAULT,
+    apply_guest_baseline,
+    guest_baseline,
+    parse_json_array_env,
+)
 from shared.service_ingress_auth import make_require_service_caller
 
 # Configure logging
@@ -135,7 +140,13 @@ class PermissionsResponse(BaseModel):
 
 class ModeOverrideRequest(BaseModel):
     """Request to override mode."""
-    mode: str  # 'owner' or 'guest'
+    # ATHENA-69 Pass H2 (xander delta review, High): was a bare `str` --
+    # any non-"owner" value (a typo, "Owner", "admin") silently skipped
+    # the entire PIN-required branch below and got stored verbatim, and
+    # get_permissions()'s fallthrough "else: unrestricted" branch then
+    # granted owner permissions to it with zero PIN attempts. A Literal
+    # rejects anything else with 422 before this body ever runs.
+    mode: Literal["owner", "guest"]
     voice_pin: Optional[str] = None
     timeout_minutes: Optional[int] = None
     voice_device_id: Optional[str] = None
@@ -249,17 +260,28 @@ async def get_current_mode():
 
 
 def _degraded_permissions_response() -> PermissionsResponse:
-    """Physical-security domains denied, conversation allowed (D4/D38):
-    reuses the same floor/baseline shape as a guest, but reported under
-    mode="degraded" so a caller can't mistake this for an intentional
-    guest-mode grant.
+    """Physical-security domains denied, everything else unrestricted
+    (D4/D38). ATHENA-69 Pass H2 (xander delta review, Info->fix): must
+    match orchestrator.mode_permission.degraded_permissions() exactly --
+    the entity floor alone (HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES),
+    no intent narrowing, no domain restriction. This previously reused the
+    full guest baseline (GUEST_BASELINE_ALLOWED_INTENTS/_DOMAINS, a
+    DIFFERENT, deliberately narrower allowlist), so an owner hitting a
+    cold mode service (this endpoint reachable, config not yet loaded) was
+    denied lights/media/climate that the orchestrator's own outage
+    fallback (an unreachable mode service) would have kept -- the same
+    failure class produced two different outcomes depending on which
+    layer detected it.
     """
-    baseline = guest_baseline()
+    fallback_entities = parse_json_array_env(
+        get_config().ha_permission_fallback_restricted_entities,
+        GUEST_BASELINE_RESTRICTED_ENTITIES_DEFAULT,
+    )
     return PermissionsResponse(
         mode="degraded",
-        allowed_intents=baseline["allowed_intents"],
-        restricted_entities=baseline["restricted_entities"],
-        allowed_domains=baseline["allowed_domains"],
+        allowed_intents=[],
+        restricted_entities=fallback_entities,
+        allowed_domains=[],
         restricted_intents=[],
         max_queries_per_minute=current_config.get('max_queries_per_minute_guest', 10),
     )
@@ -299,15 +321,26 @@ async def get_permissions(mode: Optional[Literal["guest"]] = Query(None)):
             max_queries_per_minute=current_config.get('max_queries_per_minute_guest', 10),
         )
 
-    # Owner mode - unrestricted
-    return PermissionsResponse(
-        mode="owner",
-        allowed_intents=[],  # Empty = all allowed
-        restricted_entities=[],  # Empty = none restricted
-        allowed_domains=[],  # Empty = all allowed
-        restricted_intents=[],
-        max_queries_per_minute=current_config.get('max_queries_per_minute_owner', 100)
-    )
+    if effective_mode == "owner":
+        # Owner mode - unrestricted
+        return PermissionsResponse(
+            mode="owner",
+            allowed_intents=[],  # Empty = all allowed
+            restricted_entities=[],  # Empty = none restricted
+            allowed_domains=[],  # Empty = all allowed
+            restricted_intents=[],
+            max_queries_per_minute=current_config.get('max_queries_per_minute_owner', 100)
+        )
+
+    # ATHENA-69 Pass H2 (xander delta review, High): the unrestricted
+    # branch above used to be an unconditional else -- any effective_mode
+    # value that wasn't literally "degraded" or "guest" fell through to it
+    # and got owner permissions. Explicit "owner" check above; anything
+    # else (should be unreachable now that determine_mode()/_refresh_mode()
+    # validate the stored value, and ModeOverrideRequest.mode is a Literal)
+    # fails closed to degraded rather than defaulting open.
+    logger.error("get_permissions_unknown_effective_mode", effective_mode=effective_mode)
+    return _degraded_permissions_response()
 
 
 async def _verify_owner_pin(pin: str, tier: str) -> Dict[str, Any]:
@@ -393,8 +426,21 @@ async def override_mode(request: ModeOverrideRequest):
             device=request.voice_device_id
         )
 
-    # Set override
-    timeout_minutes = request.timeout_minutes or current_config.get('override_timeout_minutes', 60)
+    # Set override. ATHENA-69 Pass H2 (xander delta review, High): the
+    # requested/configured duration is capped server-side regardless of
+    # how the PIN check went above -- a caller-supplied timeout_minutes
+    # was previously unbounded (e.g. 999999), letting a single successful
+    # override (or, before the Literal fix above, none at all) grant
+    # effectively-permanent owner mode.
+    requested_timeout_minutes = request.timeout_minutes or current_config.get('override_timeout_minutes', 60)
+    max_timeout_minutes = get_config().override_max_timeout_minutes
+    timeout_minutes = min(requested_timeout_minutes, max_timeout_minutes)
+    if timeout_minutes != requested_timeout_minutes:
+        logger.warning(
+            "mode_service.override.timeout_clamped",
+            requested=requested_timeout_minutes,
+            clamped_to=timeout_minutes,
+        )
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=timeout_minutes)
 
     active_override = {
@@ -578,7 +624,19 @@ def determine_mode() -> str:
     # Check for active override
     if active_override:
         if datetime.now(timezone.utc) < active_override['expires_at']:
-            return active_override['mode']
+            stored_mode = active_override['mode']
+            if stored_mode not in ("owner", "guest"):
+                # ATHENA-69 Pass H2 (xander delta review, High): belt and
+                # suspenders alongside ModeOverrideRequest.mode's Literal --
+                # a stored value that predates this fix, or that somehow
+                # reached this dict outside override_mode(), must not be
+                # returned verbatim. Treat as if there were no override at
+                # all (fall through to calendar-based determination) rather
+                # than propagating an unvalidated mode string.
+                logger.error("active_override_invalid_mode_discarded", stored_mode=stored_mode)
+                active_override = None
+            else:
+                return stored_mode
         else:
             # Override expired
             active_override = None

@@ -642,7 +642,7 @@ compares a PIN itself). The hash is PBKDF2-HMAC-SHA256, salted
 (`admin/backend/app/utils/passwords.py`). **If you set a PIN before this
 version**, it was stored as an unsalted SHA-256 hash; that legacy format is
 detected and treated as "PIN must be re-set" (`verify-pin` returns
-`pin_not_configured` for it) — the admin UI prompts you to set a fresh PIN
+`not_configured` for it) — the admin UI prompts you to set a fresh PIN
 once. A per-trust-tier lockout (`MODE_OVERRIDE_LOCKOUT_THRESHOLD` failed
 attempts within the window locks that tier for `MODE_OVERRIDE_LOCKOUT_MINUTES`)
 protects against PIN-guessing; **changing the PIN in the admin UI clears
@@ -651,7 +651,16 @@ the lockout counter** for every tier. The lockout is per-tier
 or device id, so a caller can't dodge it by rotating identifiers.
 Public/unauthenticated callers (`web_public`) can never attempt the PIN at
 all — see the caller table above.
->
+
+**Override duration cap.** `POST /mode/override`'s `timeout_minutes` is
+clamped server-side to `OVERRIDE_MAX_TIMEOUT_MINUTES` (default 240 / 4
+hours), applied regardless of the PIN outcome — a caller-supplied value
+above the cap is silently reduced to the cap, never rejected. Every
+non-`"owner"`/`"guest"` value for the request's `mode` field (a typo, a
+different case, an empty string) is rejected with 422 before any PIN check
+runs; a stored override value that somehow predates that validation is
+discarded (treated as no override) rather than trusted.
+
 > **PIN-change recovery depends on the admin backend and OIDC being up.**
 > If both are down, you can't set or verify a new PIN through the UI.
 > Physical control at the Home Assistant device (or the HA app/UI directly)

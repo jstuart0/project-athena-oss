@@ -385,6 +385,12 @@ data:
   # MODE_OVERRIDE_LOCKOUT_THRESHOLD: "5"
   # MODE_OVERRIDE_LOCKOUT_MINUTES: "30"
 
+  # OVERRIDE_MAX_TIMEOUT_MINUTES (ATHENA-69 Pass H2, xander delta review,
+  # High): server-side ceiling on POST /mode/override's timeout_minutes,
+  # applied regardless of PIN outcome -- a caller-supplied value above this
+  # is clamped, never rejected. Default 240 (4 hours).
+  # OVERRIDE_MAX_TIMEOUT_MINUTES: "240"
+
   # JARVIS_PUBLIC_MODE (D18/D19): jarvis-web (not this ConfigMap -- set on
   # the athena-jarvis-web Deployment, see jarvis-web.yaml). "guest"
   # (default) treats every unauthenticated caller as a guest; "household"

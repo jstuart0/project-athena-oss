@@ -103,11 +103,16 @@ def test_guest_mode_config_includes_restricted_intents(client, db):
 
 
 def test_legacy_pin_hash_reports_needs_reset(client, db):
-    """ATHENA-69 Pass H (valerie r1, Medium): a legacy unsalted-SHA256 PIN
-    (pre-D30) can never be verified by POST verify-pin -- it always
-    answers "not_configured" for that hash format. The config response
-    must say so distinctly from "no PIN at all", so the admin UI can
-    prompt for a fresh PIN rather than imply the existing one still works."""
+    """ATHENA-69 Pass H (valerie r1, Medium) / Pass H2 (valerie r2,
+    Medium): a legacy unsalted-SHA256 PIN (pre-D30) can never be verified
+    by POST verify-pin -- it always answers "not_configured" for that hash
+    format. The config response must say so distinctly from "no PIN at
+    all" via owner_pin_needs_reset, AND owner_pin_configured must now
+    report False for it too (Pass H2) -- reporting True previously let a
+    PIN-gated owner-override request believe a PIN existed when every
+    verify-pin attempt against it was guaranteed to fail, instead of
+    failing fast with a clear "PIN must be re-set" at the override call
+    site (mode_service/main.py's owner_pin_configured gate)."""
     resp = client.get(CONFIG_URL)
     assert resp.status_code == 200
     assert resp.json()["owner_pin_configured"] is False
@@ -119,7 +124,7 @@ def test_legacy_pin_hash_reports_needs_reset(client, db):
 
     resp2 = client.get(CONFIG_URL)
     body2 = resp2.json()
-    assert body2["owner_pin_configured"] is True
+    assert body2["owner_pin_configured"] is False
     assert body2["owner_pin_needs_reset"] is True
 
     config.owner_pin = "pbkdf2_sha256$600000$deadbeef$cafebabe"

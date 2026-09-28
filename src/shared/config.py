@@ -495,6 +495,16 @@ class AthenaConfig(BaseSettings):
     mode_override_lockout_threshold: int = Field(default=5)
     mode_override_lockout_minutes: int = Field(default=30)
 
+    # override_max_timeout_minutes: ATHENA-69 Pass H2 (xander delta review,
+    #   High). Server-side ceiling on POST /mode/override's timeout_minutes,
+    #   applied regardless of PIN outcome -- a caller (or a caller-supplied
+    #   value alone, previously unbounded) could otherwise request an
+    #   owner-mode override lasting effectively forever
+    #   (timeout_minutes=999999). Requested values above this are clamped,
+    #   never rejected outright (a too-long request still gets the
+    #   maximum, not a hard failure).
+    override_max_timeout_minutes: int = Field(default=240)
+
     # livekit_user_token_ttl_minutes: D27. TTL for browser-facing LiveKit
     #   room tokens minted for jarvis-web voice sessions (clamped 1-1440 by
     #   the gateway's generate_room_token). Server-side Athena tokens are

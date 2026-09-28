@@ -299,6 +299,15 @@ def _config_response(config: GuestModeConfig, config_source: str = "admin") -> G
     auto-conversion) because `owner_pin_configured` and `config_source` are
     computed, not columns.
     """
+    # ATHENA-69 Pass H (valerie r1, Medium) / Pass H2 (valerie r2, Medium):
+    # a legacy unsalted-SHA256 PIN (pre-D30) can never be verified -- POST
+    # verify-pin always answers "not_configured" for it
+    # (internal.py:137-141). owner_pin_configured must agree: reporting
+    # `true` for a hash that verify-pin will always reject let a PIN-gated
+    # owner-override request believe a PIN existed when every attempt was
+    # guaranteed to fail closed at verify-pin instead of failing fast with
+    # a clear "PIN must be re-set" at the override call site.
+    owner_pin_needs_reset = bool(config.owner_pin) and not config.owner_pin.startswith("pbkdf2_sha256$")
     return GuestModeConfigResponse(
         id=config.id,
         enabled=config.enabled,
@@ -320,13 +329,8 @@ def _config_response(config: GuestModeConfig, config_source: str = "admin") -> G
         created_by=config.creator.username if config.creator else None,
         created_at=config.created_at,
         updated_at=config.updated_at,
-        owner_pin_configured=config.owner_pin is not None,
-        # ATHENA-69 Pass H (valerie r1, Medium): a legacy unsalted-SHA256
-        # PIN (pre-D30) can never be verified -- POST verify-pin always
-        # answers "not_configured" for it (internal.py:137-141). Flag it
-        # distinctly so the admin UI can prompt for a fresh PIN instead of
-        # implying an override PIN is usable when it isn't.
-        owner_pin_needs_reset=bool(config.owner_pin) and not config.owner_pin.startswith("pbkdf2_sha256$"),
+        owner_pin_configured=config.owner_pin is not None and not owner_pin_needs_reset,
+        owner_pin_needs_reset=owner_pin_needs_reset,
         config_source=config_source,
     )
 

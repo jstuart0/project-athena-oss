@@ -209,6 +209,7 @@ to stay complete — when you add a field, add its row here too.
 | `mode_override_lockout_threshold` | `MODE_OVERRIDE_LOCKOUT_THRESHOLD` | `5` | Failed owner-PIN verifications (per trust tier) before that tier locks out (D16/D25) |
 | `mode_override_lockout_minutes` | `MODE_OVERRIDE_LOCKOUT_MINUTES` | `30` | Owner-PIN lockout duration once the threshold is reached |
 | `livekit_user_token_ttl_minutes` | `LIVEKIT_USER_TOKEN_TTL_MINUTES` | `30` | TTL (clamped 1-1440) for browser-facing LiveKit room tokens (jarvis-web voice sessions); server-side Athena participant tokens are unaffected (D27) |
+| `override_max_timeout_minutes` | `OVERRIDE_MAX_TIMEOUT_MINUTES` | `240` | Server-side ceiling on `POST /mode/override`'s `timeout_minutes`, applied regardless of PIN outcome; a requested value above this is clamped, never rejected (ATHENA-69 Pass H2) |
 
 ## Fetching user-supplied or admin-supplied URLs (SSRF guard)
 

@@ -4084,7 +4084,7 @@ Do NOT mention rooms that have no current or recent motion."""
         Supports exclusions like "all lights except bedroom".
         All HA API calls are parallelized for faster response.
         """
-        from orchestrator.mode_permission import ensure_permission_enforcing
+        from orchestrator.mode_permission import HAWritePermissionDenied, ensure_permission_enforcing
         ha_client = ensure_permission_enforcing(ha_client)
         import logging
         logger = logging.getLogger(__name__)
@@ -4198,7 +4198,24 @@ Do NOT mention rooms that have no current or recent motion."""
         # execute_intent's _finish() wrapper surfaces the partial refusal
         # from scope.denials once this returns normally.
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # ATHENA-69 Pass H2 (xander delta review, Medium): return_exceptions
+            # alone also swallows a GENUINE failure (e.g. httpx.ConnectError)
+            # into this function's normal "Done!" reply below --
+            # HAWritePermissionDenied is safe to absorb (already recorded on
+            # scope.denials, above, and surfaced by _finish()); anything else
+            # means some of these HA calls silently never happened, and the
+            # caller must be told that instead of congratulated.
+            unexpected_errors = [
+                r for r in results
+                if isinstance(r, BaseException) and not isinstance(r, HAWritePermissionDenied)
+            ]
+            if unexpected_errors:
+                logger.error(
+                    f"whole_house_command_partial_failure: action={action}, "
+                    f"errors={len(unexpected_errors)}, sample={unexpected_errors[0]!r}"
+                )
+                return "I ran into a problem controlling the lights. Please try again."
 
         # Return contextual response for voice output
         room_count = len(all_light_groups)
@@ -4223,7 +4240,7 @@ Do NOT mention rooms that have no current or recent motion."""
         Handles commands like "turn on kitchen and living room lights".
         All HA API calls are parallelized for faster response.
         """
-        from orchestrator.mode_permission import ensure_permission_enforcing
+        from orchestrator.mode_permission import HAWritePermissionDenied, ensure_permission_enforcing
         ha_client = ensure_permission_enforcing(ha_client)
         import structlog
         logger = structlog.get_logger(__name__)
@@ -4267,9 +4284,30 @@ Do NOT mention rooms that have no current or recent motion."""
             all_light_names.append(group_name)
             total_count += len(members)
 
-        # Execute all tasks in parallel
+        # Execute all tasks in parallel. return_exceptions=True (ATHENA-69
+        # Pass H2, xander delta review, Medium): a per-entity guest denial
+        # (HAWritePermissionDenied) must not crash the fan-out -- the guard
+        # already recorded the denial on the scope before raising, so
+        # _dispatch_light_or_room_command's caller's _finish() wrapper
+        # surfaces the partial refusal from scope.denials once this returns
+        # normally. Any OTHER exception (e.g. httpx.ConnectError) must NOT
+        # be silently absorbed into the "Done!" reply below -- some of
+        # these HA calls didn't actually happen.
         if all_tasks:
-            await asyncio.gather(*all_tasks, return_exceptions=True)
+            results = await asyncio.gather(*all_tasks, return_exceptions=True)
+            unexpected_errors = [
+                r for r in results
+                if isinstance(r, BaseException) and not isinstance(r, HAWritePermissionDenied)
+            ]
+            if unexpected_errors:
+                logger.error(
+                    "multi_room_command_partial_failure",
+                    action=action,
+                    rooms=rooms,
+                    error_count=len(unexpected_errors),
+                    sample_error=str(unexpected_errors[0]),
+                )
+                return "I ran into a problem controlling the lights. Please try again."
 
         # Build response
         room_list = ' and '.join(all_light_names)

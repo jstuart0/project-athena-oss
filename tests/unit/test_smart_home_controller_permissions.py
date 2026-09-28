@@ -29,6 +29,8 @@ import sys
 import unittest.mock as mock
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
+
 for _mod in ("prometheus_client", "langgraph", "langgraph.graph"):
     if _mod not in sys.modules:
         sys.modules[_mod] = mock.MagicMock()
@@ -444,3 +446,69 @@ class TestWholeHouseFanOutDenialSurfacing:
         ]
         assert ("light", "turn_off", {"entity_id": "light.kitchen"}) in call_list
         assert not any(c[2].get("entity_id") == "light.owner_bedroom" for c in call_list)
+
+
+# ---------------------------------------------------------------------------
+# Pass H2 (xander delta review, item 4): a genuine (non-permission)
+# exception inside the gather fan-out must surface an error reply, not a
+# false "Done!".
+# ---------------------------------------------------------------------------
+
+class TestFanOutGenuineErrorNotSwallowed:
+    def test_whole_house_connect_error_surfaces_as_error_not_done(self):
+        """return_exceptions=True alone would silently absorb a real HA
+        transport failure (httpx.ConnectError) into "Done! I've turned off
+        lights in 2 rooms." -- owner scope, no permission denials in play,
+        so the ONLY reason this must not say "Done!" is the connection
+        error on light.owner_bedroom."""
+        em = _fake_entity_manager()
+        em.get_all_light_groups = AsyncMock(return_value=[
+            {"friendly_name": "Kitchen", "entity_id": "light.kitchen_group", "members": ["light.kitchen"]},
+            {"friendly_name": "Owner Bedroom", "entity_id": "light.owner_bedroom_group", "members": ["light.owner_bedroom"]},
+        ])
+        controller = _controller(entity_manager=em)
+        ha_client = _raw_ha_client()
+
+        async def _flaky_call_service(domain, service, data):
+            if data.get("entity_id") == "light.owner_bedroom":
+                raise httpx.ConnectError("connection refused")
+            return {"ok": True}
+
+        ha_client.call_service = AsyncMock(side_effect=_flaky_call_service)
+
+        async def _drive():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner"):
+                return await controller.execute_intent(
+                    {"device_type": "light", "action": "turn_off", "room": "whole_house"},
+                    ha_client,
+                    original_query="turn off all lights",
+                )
+
+        result = _run(_drive())
+
+        assert "done" not in result.lower()
+        assert "problem" in result.lower()
+        call_list = [
+            (c.args[0], c.args[1], c.args[2]) for c in ha_client.call_service.await_args_list
+        ]
+        assert ("light", "turn_off", {"entity_id": "light.kitchen"}) in call_list
+
+    def test_multi_room_connect_error_surfaces_as_error_not_done(self):
+        """Same guarantee for _execute_multi_room_command's own gather
+        (smart_home_controller.py:4272) -- a genuine transport failure
+        must not be reported as success."""
+        controller = _controller()
+        ha_client = _raw_ha_client()
+        ha_client.call_service = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+
+        async def _drive():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner"):
+                return await controller._execute_multi_room_command(
+                    ["kitchen"], "turn_on", "group", {}, {"device_type": "light", "action": "turn_on"},
+                    ha_client, "turn on the kitchen lights",
+                )
+
+        result = _run(_drive())
+
+        assert "done" not in result.lower()
+        assert "problem" in result.lower()
