@@ -8,6 +8,7 @@ Architecture:
     Service -> Admin API (HTTP) -> PostgreSQL (athena database)
 """
 import os
+import re
 import time
 import httpx
 from typing import Optional, Dict
@@ -24,6 +25,50 @@ _url_cache: Dict[str, str] = {}
 _cache_time: Dict[str, float] = {}
 _CACHE_TTL = 30.0
 
+# Mirrors admin/backend/app/routes/service_registry.py's `_SERVICE_NAME_RE`/
+# `_HOST_LABEL_RE` exactly (duplicated, not imported -- this module ships
+# inside every RAG connector's own process, which has no dependency on the
+# admin-backend package). Bounds the `name`/`host_label` to_rag_registry_name()/
+# to_rag_host_label() derive -- including from an operator-supplied
+# SERVICE_REGISTRY_NAME override -- BEFORE it's ever sent, so a malformed
+# value fails loudly here with a clear error instead of a confusing 422 from
+# the admin route's own (identical) validation. Keep in sync if either
+# upstream pattern changes.
+_SERVICE_NAME_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
+_HOST_LABEL_RE = re.compile(r'^[a-zA-Z0-9_.-]{1,255}$')
+
+
+def _normalize_rag_base(service_name: str) -> str:
+    """Canonical base for a RAG connector's registry ``name``/``host_label``.
+
+    Lower-cases, strips a trailing "-rag" suffix (case-insensitive), then
+    removes every "-"/"_" separator -- so "price-compare", "Price_Compare",
+    and "PRICE-COMPARE-RAG" all collapse to the same "pricecompare" base
+    that OSS_SERVICE_REGISTRY's short ``name`` column uses. "weather-rag"
+    -> "weather" (unchanged, no separators to strip); "price-compare" ->
+    "pricecompare" (ATHENA-108 follow-up 2 -- a connector whose
+    ``SERVICE_NAME`` used a hyphen the seeded row's name/host never had
+    silently 422'd on every registration attempt).
+    """
+    base = service_name.lower()
+    if base.endswith("-rag"):
+        base = base[: -len("-rag")]
+    return base.replace("-", "").replace("_", "")
+
+
+def _get_service_registry_name_override() -> str:
+    """SERVICE_REGISTRY_NAME overrides the base _normalize_rag_base() would
+    otherwise derive, for a deployer whose seeded row doesn't follow the
+    lower-case/strip-separators convention (e.g. a custom or renamed row).
+    When set, it IS the base used to build both the registry ``name`` and
+    ``host_label`` -- no further normalisation is applied to it. Empty by
+    default."""
+    try:
+        from shared.config import get_config
+        return get_config().service_registry_name or ""
+    except Exception:
+        return os.getenv("SERVICE_REGISTRY_NAME", "")
+
 
 def to_rag_registry_name(service_name: str) -> str:
     """Registry ``name`` for a RAG connector's self-registration.
@@ -31,25 +76,47 @@ def to_rag_registry_name(service_name: str) -> str:
     Every RAG registry row (seeded via OSS_SERVICE_REGISTRY or created by an
     operator) is matched by admin/backend/app/database.py::_infer_oss_service_type
     and the Control Agent's registry-sync using the same "-rag" suffix
-    convention on the identifying string. Bare connector names like
-    "weather" (what every ``src/rag/*/main.py`` passes today) become
-    "weather-rag"; a name that already carries the suffix is left alone so
-    this is idempotent.
+    convention on the identifying string. The base is
+    _get_service_registry_name_override() when SERVICE_REGISTRY_NAME is
+    set, else _normalize_rag_base(service_name) -- so "weather" becomes
+    "weather-rag" and "price-compare" becomes "pricecompare-rag". Applying
+    the same base twice is a no-op, so this is idempotent.
     """
-    return service_name if service_name.endswith("-rag") else f"{service_name}-rag"
+    base = _get_service_registry_name_override() or _normalize_rag_base(service_name)
+    name = f"{base}-rag"
+    if not _SERVICE_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"Derived registry name {name!r} (base {base!r}, from "
+            f"{'SERVICE_REGISTRY_NAME' if _get_service_registry_name_override() else 'service_name'}"
+            f") does not match {_SERVICE_NAME_RE.pattern!r} -- the admin "
+            "route's own name validation would reject it too. If "
+            "SERVICE_REGISTRY_NAME is set, check its value."
+        )
+    return name
 
 
 def to_rag_host_label(service_name: str) -> str:
     """K8s DNS service host hint for a RAG connector's self-registration.
 
     Mirrors OSS_SERVICE_REGISTRY's host column convention
-    (``athena-rag-<name>``), e.g. "weather" -> "athena-rag-weather". Sent
-    alongside ``name`` so the admin upsert can still locate an existing
-    seeded row by host when the derived registry name doesn't match it
-    (ATHENA-108 follow-up).
+    (``athena-rag-<name>``), e.g. "weather" -> "athena-rag-weather" and
+    "price-compare" -> "athena-rag-pricecompare". Sent alongside ``name`` so
+    the admin upsert can still locate an existing seeded row by host when
+    the derived registry name doesn't match it (ATHENA-108 follow-up). Uses
+    the same base as to_rag_registry_name() (override or
+    _normalize_rag_base()), so the two stay consistent.
     """
-    base = service_name[:-len("-rag")] if service_name.endswith("-rag") else service_name
-    return f"athena-rag-{base}"
+    base = _get_service_registry_name_override() or _normalize_rag_base(service_name)
+    host_label = f"athena-rag-{base}"
+    if not _HOST_LABEL_RE.fullmatch(host_label):
+        raise ValueError(
+            f"Derived host_label {host_label!r} (base {base!r}, from "
+            f"{'SERVICE_REGISTRY_NAME' if _get_service_registry_name_override() else 'service_name'}"
+            f") does not match {_HOST_LABEL_RE.pattern!r} -- the admin "
+            "route's own host_label validation would reject it too. If "
+            "SERVICE_REGISTRY_NAME is set, check its value."
+        )
+    return host_label
 
 
 def _get_service_api_key() -> str:

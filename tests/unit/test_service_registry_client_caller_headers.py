@@ -241,7 +241,16 @@ async def test_register_service_never_sends_service_type_api(monkeypatch):
 @pytest.mark.parametrize("bare,expected", [
     ("weather", "weather-rag"),
     ("weather-rag", "weather-rag"),
-    ("site-scraper", "site-scraper-rag"),
+    # ATHENA-108 follow-up 2: a connector name with a hyphen the seeded
+    # row's name/host never had (e.g. "price-compare" vs seeded
+    # "pricecompare") must normalise to the seeded base, not carry the
+    # hyphen through.
+    ("site-scraper", "sitescraper-rag"),
+    ("price-compare", "pricecompare-rag"),
+    ("price-compare-rag", "pricecompare-rag"),
+    ("price_compare", "pricecompare-rag"),
+    ("Price-Compare", "pricecompare-rag"),
+    ("SITE_SCRAPER", "sitescraper-rag"),
 ])
 def test_to_rag_registry_name_derivation(bare, expected):
     assert service_registry_module.to_rag_registry_name(bare) == expected
@@ -250,9 +259,96 @@ def test_to_rag_registry_name_derivation(bare, expected):
 @pytest.mark.parametrize("bare,expected", [
     ("weather", "athena-rag-weather"),
     ("weather-rag", "athena-rag-weather"),
+    ("site-scraper", "athena-rag-sitescraper"),
+    ("price-compare", "athena-rag-pricecompare"),
+    ("price_compare", "athena-rag-pricecompare"),
+    ("Price-Compare-RAG", "athena-rag-pricecompare"),
 ])
 def test_to_rag_host_label_derivation(bare, expected):
     assert service_registry_module.to_rag_host_label(bare) == expected
+
+
+def test_service_registry_name_override_bypasses_normalization(monkeypatch):
+    """SERVICE_REGISTRY_NAME lets a deployer whose seeded row doesn't
+    follow the lower-case/strip-separators convention pin the exact base,
+    skipping _normalize_rag_base() entirely."""
+    monkeypatch.setenv("SERVICE_REGISTRY_NAME", "Custom_Row")
+    from shared.config import _clear_cache_for_tests as _cfg_clear
+    _cfg_clear()
+    try:
+        assert service_registry_module.to_rag_registry_name("price-compare") == "Custom_Row-rag"
+        assert service_registry_module.to_rag_host_label("price-compare") == "athena-rag-Custom_Row"
+    finally:
+        monkeypatch.delenv("SERVICE_REGISTRY_NAME", raising=False)
+        _cfg_clear()
+
+
+# ---------------------------------------------------------------------------
+# codex follow-up (2026-09-28, Low): to_rag_registry_name()/to_rag_host_label()
+# must bound the derived name/host_label with the same regex the admin
+# route's own validation uses (_SERVICE_NAME_RE/_HOST_LABEL_RE), failing
+# early with a clear error rather than sending a value the route would 422
+# on anyway -- most reachable via a misconfigured SERVICE_REGISTRY_NAME.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad_override", [
+    "has spaces",
+    "has/slash",
+    "has.dot",  # invalid for `name` even though host_label allows dots
+    "x" * 61,  # -> "<61 x's>-rag" is 65 chars, over _SERVICE_NAME_RE's 64 cap
+])
+def test_to_rag_registry_name_rejects_invalid_override(monkeypatch, bad_override):
+    monkeypatch.setenv("SERVICE_REGISTRY_NAME", bad_override)
+    from shared.config import _clear_cache_for_tests as _cfg_clear
+    _cfg_clear()
+    try:
+        with pytest.raises(ValueError, match="does not match"):
+            service_registry_module.to_rag_registry_name("weather")
+    finally:
+        monkeypatch.delenv("SERVICE_REGISTRY_NAME", raising=False)
+        _cfg_clear()
+
+
+@pytest.mark.parametrize("bad_override", [
+    "has spaces",
+    "has/slash",
+    "x" * 245,  # -> "athena-rag-<245 x's>" is 256 chars, over _HOST_LABEL_RE's 255 cap
+])
+def test_to_rag_host_label_rejects_invalid_override(monkeypatch, bad_override):
+    monkeypatch.setenv("SERVICE_REGISTRY_NAME", bad_override)
+    from shared.config import _clear_cache_for_tests as _cfg_clear
+    _cfg_clear()
+    try:
+        with pytest.raises(ValueError, match="does not match"):
+            service_registry_module.to_rag_host_label("weather")
+    finally:
+        monkeypatch.delenv("SERVICE_REGISTRY_NAME", raising=False)
+        _cfg_clear()
+
+
+def test_service_registry_name_override_boundary_length(monkeypatch):
+    """Positive control: a 60-char override (name becomes exactly 64 chars,
+    _SERVICE_NAME_RE's cap) is accepted; 61 chars is rejected -- proves the
+    bound is the same 64-char cap the admin route enforces, not an
+    arbitrarily looser one."""
+    from shared.config import _clear_cache_for_tests as _cfg_clear
+
+    monkeypatch.setenv("SERVICE_REGISTRY_NAME", "x" * 60)
+    _cfg_clear()
+    try:
+        assert service_registry_module.to_rag_registry_name("weather") == ("x" * 60) + "-rag"
+    finally:
+        monkeypatch.delenv("SERVICE_REGISTRY_NAME", raising=False)
+        _cfg_clear()
+
+    monkeypatch.setenv("SERVICE_REGISTRY_NAME", "x" * 61)
+    _cfg_clear()
+    try:
+        with pytest.raises(ValueError, match="does not match"):
+            service_registry_module.to_rag_registry_name("weather")
+    finally:
+        monkeypatch.delenv("SERVICE_REGISTRY_NAME", raising=False)
+        _cfg_clear()
 
 
 @pytest.mark.asyncio
