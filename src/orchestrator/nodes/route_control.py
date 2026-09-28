@@ -49,6 +49,13 @@ from orchestrator.ha_status_optimizer import (
     should_skip_synthesis,
 )
 from orchestrator.automation_agent import should_use_automation_agent
+from orchestrator.mode_permission import READ_ONLY_REFUSAL
+from orchestrator.metrics import state_question_routed_total
+from orchestrator.utterance_kind import (
+    UtteranceKind,
+    classify_utterance,
+)
+from orchestrator.utterance_kind import UNKNOWN_CLASSIFICATION as _KILL_SWITCH_CLASSIFICATION
 
 logger = structlog.get_logger(__name__)
 
@@ -175,13 +182,38 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 state.node_timings["route_control"] = time.time() - start
                 return state
 
+        # ATHENA-128 (D15, 3.2(a)): classify once, before the bulk block.
+        # ``real_uk`` is what the gate reads (scope.utterance) -- always
+        # the true classification, even when the kill switch is on, so the
+        # IMPERATIVE/explicit-scope exemptions keep working. ``uk`` drives
+        # every OTHER routing decision in this node and is substituted to
+        # UNKNOWN when the kill switch is enabled (legacy behaviour).
+        kill_switch_config = await get_feature_config("state_question_routing_kill_switch")
+        state_question_kill_switch = kill_switch_config.get("enabled", False)
+        real_uk = classify_utterance(state.query)
+        uk = _KILL_SWITCH_CLASSIFICATION if state_question_kill_switch else real_uk
+
         # HA STATUS QUERY OPTIMIZATION (2026-01-12)
         # Detect status queries and use optimized bulk HA state queries
         # This saves 1-3 seconds by avoiding per-entity queries and LLM synthesis
         status_bulk_config = await get_feature_config("status_bulk_query")
         status_skip_config = await get_feature_config("status_skip_synthesis")
 
-        if status_bulk_config.get("enabled", True) and detect_status_query_type(state.query):
+        # ATHENA-128 (D5, 3.2(b)): only a room-less, non-referent
+        # STATE_QUESTION reaches the bulk optimizer. Legacy gating
+        # (detect_status_query_type alone) returns when the kill switch is
+        # on.
+        if state_question_kill_switch:
+            bulk_eligible = detect_status_query_type(state.query)
+        else:
+            bulk_eligible = (
+                uk.kind == UtteranceKind.STATE_QUESTION
+                and not uk.room
+                and not uk.needs_referent
+                and detect_status_query_type(state.query)
+            )
+
+        if status_bulk_config.get("enabled", True) and bulk_eligible:
             try:
                 # Check if we have HA entity access via global entity_manager
                 if entity_manager:
@@ -207,6 +239,9 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                             state.answer = templated_response
                             state.skip_synthesis = True
                             status_duration = time.time() - status_start
+                            state_question_routed_total.labels(
+                                device_type=uk.device_type or "unknown", path="bulk_optimizer"
+                            ).inc()
 
                             logger.info(
                                 "status_query_optimized",
@@ -243,6 +278,8 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 mode=state.mode,
                 request_id=state.request_id,
                 session_id=state.session_id,
+                read_only=(uk.kind == UtteranceKind.STATE_QUESTION),
+                utterance=real_uk,
             ) as scope:
                 # Intent gate (D9): refuse CONTROL before any dispatch --
                 # the automation agent, sequence detection, or intent
@@ -260,6 +297,60 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         request_id=state.request_id,
                         session_id=state.session_id,
                     )
+                    state.node_timings["route_control"] = time.time() - start
+                    return state
+
+                # ATHENA-128 (D6, 3.2(d)): state-question dispatch. A
+                # non-referent STATE_QUESTION is answered with a get_status
+                # read here, under the read-only scope opened above, before
+                # the automation agent / sequence / continuation / LLM
+                # extraction chain ever runs. needs_referent=True questions
+                # (e.g. "did those come back on?") fall through to that
+                # chain unchanged -- still under the same read-only scope.
+                if uk.kind == UtteranceKind.STATE_QUESTION and not uk.needs_referent:
+                    state_question_intent = {
+                        "device_type": uk.device_type or "light",
+                        "room": uk.room,
+                        "action": "get_status",
+                        "target_scope": "group",
+                        "parameters": {},
+                    }
+                    sq_denials_before = len(scope.denials)
+                    sq_result = await smart_controller.execute_intent(
+                        state_question_intent, ha_client, original_query=state.query, device_room=state.room
+                    )
+                    if len(scope.denials) > sq_denials_before and any(
+                        d.reason == "read_only_scope" for d in scope.denials[sq_denials_before:]
+                    ):
+                        state.answer = READ_ONLY_REFUSAL
+                        state.error = "state_question_write_blocked"
+                        logger.error(
+                            "state_question_write_blocked",
+                            query=state.query[:80],
+                            device_type=uk.device_type,
+                            room=uk.room,
+                            request_id=state.request_id,
+                            session_id=state.session_id,
+                        )
+                        state_question_routed_total.labels(
+                            device_type=uk.device_type or "unknown", path="write_blocked"
+                        ).inc()
+                    else:
+                        state.answer = sq_result
+                        state.retrieved_data = {"intent": state_question_intent}
+                        state_question_routed_total.labels(
+                            device_type=uk.device_type or "unknown", path="get_status_dispatch"
+                        ).inc()
+                        if state.session_id and "couldn't" not in sq_result.lower():
+                            await store_conversation_context(
+                                session_id=state.session_id,
+                                intent="control",
+                                query=state.query,
+                                entities={"room": uk.room, "device_type": uk.device_type or "light"},
+                                parameters=state_question_intent,
+                                response=sq_result,
+                                ttl=300,
+                            )
                     state.node_timings["route_control"] = time.time() - start
                     return state
 
@@ -402,7 +493,8 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         device_room=state.room,
                         prev_query=prev_query,
                         prev_response=prev_response,
-                        prev_intent_entities=prev_intent_for_llm
+                        prev_intent_entities=prev_intent_for_llm,
+                        utterance=uk,
                     )
                     new_room = new_intent.get('room')
 
@@ -430,16 +522,22 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         intent['room'] = prev["entities"]["room"]
 
                     # Handle reversal patterns - "turn them back on", "turn it back off"
+                    # ATHENA-128 (3.2(e)): skipped for STATE_QUESTION -- a
+                    # referent question ("did those come back on?") must
+                    # never have its coerced get_status action clobbered
+                    # into a write by this override.
                     query_lower = state.query.lower()
-                    if "back on" in query_lower or "on again" in query_lower:
-                        intent["action"] = "turn_on"
-                        logger.info("Context reversal: detected 'back on' - setting action to turn_on")
-                    elif "back off" in query_lower or "off again" in query_lower:
-                        intent["action"] = "turn_off"
-                        logger.info("Context reversal: detected 'back off' - setting action to turn_off")
+                    if uk.kind != UtteranceKind.STATE_QUESTION:
+                        if "back on" in query_lower or "on again" in query_lower:
+                            intent["action"] = "turn_on"
+                            logger.info("Context reversal: detected 'back on' - setting action to turn_on")
+                        elif "back off" in query_lower or "off again" in query_lower:
+                            intent["action"] = "turn_off"
+                            logger.info("Context reversal: detected 'back off' - setting action to turn_off")
 
-                    # Handle modifier-based adjustments
-                    if "modifier" in ref_info.get("ref_types", []):
+                    # Handle modifier-based adjustments (ATHENA-128: also
+                    # skipped for STATE_QUESTION, same rationale)
+                    if uk.kind != UtteranceKind.STATE_QUESTION and "modifier" in ref_info.get("ref_types", []):
                         if "brighter" in query_lower:
                             # Increase brightness
                             current_brightness = intent.get("parameters", {}).get("brightness", 200)
@@ -457,7 +555,8 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                                 device_room=state.room,
                                 prev_query=prev_query,
                                 prev_response=prev_response,
-                                prev_intent_entities=prev_intent_for_llm
+                                prev_intent_entities=prev_intent_for_llm,
+                                utterance=uk,
                             )
                             if prev.get("entities", {}).get("room"):
                                 intent['room'] = prev["entities"]["room"]
@@ -467,11 +566,19 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     if not intent.get('device_type'):
                         intent['device_type'] = prev_params.get('device_type', 'light')
                     if not intent.get('action'):
-                        intent['action'] = prev_params.get('action', 'set_color')
+                        intent['action'] = 'get_status' if uk.kind == UtteranceKind.STATE_QUESTION else prev_params.get('action', 'set_color')
+
+                    # ATHENA-128 (bob r2 (5)): forced after the whole merge
+                    # -- covers the case where the LLM's intent lacked
+                    # device_type (so the :505 merge was skipped entirely)
+                    # and prev_params['action'] (a write) survived into
+                    # `intent` from the :502 copy.
+                    if uk.kind == UtteranceKind.STATE_QUESTION:
+                        intent["action"] = "get_status"
                 else:
                     # Normal extraction - no context continuation
                     # Pass device room for context when query doesn't specify room
-                    intent = await smart_controller.extract_intent(state.query, device_room=state.room)
+                    intent = await smart_controller.extract_intent(state.query, device_room=state.room, utterance=uk)
 
                 logger.info(f"Extracted intent: {intent}")
 
@@ -509,7 +616,19 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     state.answer = permission_refusal_message(
                         denied_domains, scope, partial=scope.allowed_writes > writes_before
                     )
-                    state.error = "permission_denied"
+                    # ATHENA-128 (3.2(g)): a referent question (e.g. "did
+                    # those come back on?") is dispatched through this same
+                    # extraction chain under the read-only scope opened
+                    # above -- if it was denied for read_only_scope, use
+                    # the write_blocked classification/metric instead of
+                    # the generic permission_denied one.
+                    if any(d.reason == "read_only_scope" for d in scope.denials[denials_before:]):
+                        state.error = "state_question_write_blocked"
+                        state_question_routed_total.labels(
+                            device_type=uk.device_type or "unknown", path="write_blocked"
+                        ).inc()
+                    else:
+                        state.error = "permission_denied"
                 else:
                     state.answer = result
                     state.retrieved_data = {"intent": intent}

@@ -561,3 +561,17 @@ class TestIngressAuthAndProxyFields:
     def test_C2_orchestrator_ingress_auth_reads_env(self, monkeypatch):
         monkeypatch.setenv("ORCHESTRATOR_INGRESS_AUTH", "warn")
         assert _TestConfig().orchestrator_ingress_auth == "warn"
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-128 3.5: jarvis_web_url
+# ---------------------------------------------------------------------------
+
+class TestJarvisWebUrl:
+    def test_jarvis_web_url_default_empty(self, monkeypatch):
+        monkeypatch.delenv("JARVIS_WEB_URL", raising=False)
+        assert _TestConfig().jarvis_web_url == ""
+
+    def test_jarvis_web_url_reads_env(self, monkeypatch):
+        monkeypatch.setenv("JARVIS_WEB_URL", "http://jarvis-web:3001")
+        assert _TestConfig().jarvis_web_url == "http://jarvis-web:3001"

@@ -191,6 +191,7 @@ to stay complete — when you add a field, add its row here too.
 | `orchestrator_ingress_auth` | `ORCHESTRATOR_INGRESS_AUTH` | `enforce` | `enforce`\|`warn`; gates the orchestrator's query/session routes behind `X-Service-Key` |
 | `music_assistant_url` | `MUSIC_ASSISTANT_URL` | `""` | Empty means Music Assistant isn't configured (no hardcoded-host fallback) |
 | `searxng_base_url` | `SEARXNG_BASE_URL` | `""` | Empty means the SearXNG search provider is disabled |
+| `jarvis_web_url` | `JARVIS_WEB_URL` | `""` | Empty means the smart-home controller's jarvis-web appliance/sensor/media lookups are skipped (ATHENA-128) |
 | `transit_region_name` | `TRANSIT_REGION_NAME` | `""` | Cosmetic label for the configured transit region |
 | `transit_gtfs_feeds` | `TRANSIT_GTFS_FEEDS` | `""` | JSON GTFS feed definitions for the transportation RAG service |
 | `transit_static_services` | `TRANSIT_STATIC_SERVICES` | `""` | JSON non-GTFS transit services (fixed schedules) |

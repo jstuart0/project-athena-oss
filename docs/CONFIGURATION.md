@@ -187,7 +187,7 @@ DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 |----------|---------|-------------|
 | `MODE_SERVICE_URL` | `http://localhost:8022` | Mode service (ATHENA-69). **Required** on both the orchestrator and the gateway — without it, mode/permission resolution degrades every request (orchestrator: `get_current_mode`'s outage fallback; gateway: `mode_gate.py`'s fast-path check always returns `False`). See "Mode and permissions" under Module Settings below. |
 | `NOTIFICATIONS_SERVICE_URL` | `http://localhost:8050` | Notifications service |
-| `JARVIS_WEB_URL` | `http://localhost:3001` | Jarvis Web UI |
+| `JARVIS_WEB_URL` | *(empty)* | jarvis-web API base for appliance/sensor/media lookups in the orchestrator's smart-home controller; empty skips them (ATHENA-128). |
 | `CONTROL_AGENT_URL` | `http://localhost:8099` | Service management API |
 | `CONTROL_AGENT_SERVICES_FILE` | *(empty)* | Path to a JSON file (read by the Control Agent process itself, not admin-backend) naming which bare processes, watchdog exclusions, and Docker containers this Control Agent may manage. Empty means it manages nothing. See below. |
 

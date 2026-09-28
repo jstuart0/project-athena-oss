@@ -373,6 +373,13 @@ class AthenaConfig(BaseSettings):
     #   (default) means the SearXNG search provider is disabled and its
     #   admin status reads "not configured" with no network probe made.
     searxng_base_url: str = Field(default="")
+    # jarvis_web_url: jarvis-web API base for the appliance/sensor/media
+    #   lookups in smart_home_controller.py (ATHENA-128 3.5). Empty
+    #   (default) means those lookups are skipped and each site takes its
+    #   existing error/unavailable branch -- the effective in-cluster
+    #   behaviour today, since the previous hardcoded localhost:3001 isn't
+    #   reachable from the orchestrator pod. Example: http://jarvis-web:3001.
+    jarvis_web_url: str = Field(default="")
 
     # ------------------------------------------------------------------
     # Region-configurable RAG services (ATHENA-89 / D2, D3)

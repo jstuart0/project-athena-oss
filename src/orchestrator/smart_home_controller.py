@@ -12,11 +12,14 @@ from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside each
 # ha_client-accepting method below (not at module scope) -- this module is
 # imported by route_control.py and other lightweight test fixtures that
 # don't need orchestrator.metrics -> prometheus_client as a hard
 # import-time dependency. See the identical note in sequence_executor.py.
+# ATHENA-128: orchestrator.metrics is imported lazily for the same reason
+# (state_question_routed_total, inside extract_intent below).
 
 
 # Round 17: Response variety templates for natural conversation
@@ -125,7 +128,8 @@ class SmartHomeController:
     
     async def extract_intent(self, query: str, light_count: int = 3, device_room: str = None,
                               prev_query: str = None, prev_response: str = None,
-                              prev_intent_entities: Dict = None) -> Dict:
+                              prev_intent_entities: Dict = None,
+                              utterance: Optional[UtteranceClassification] = None) -> Dict:
         """Use LLM to extract structured intent from natural language query
 
         Args:
@@ -135,9 +139,17 @@ class SmartHomeController:
             prev_query: Previous user query (for context in follow-ups)
             prev_response: Previous assistant response (for context in corrections like "no, just my side")
             prev_intent_entities: Previous intent entities (device_type, room, action, parameters) for context
+            utterance: ATHENA-128 -- the caller's classify_utterance() result.
+                route_control_node always passes this. When None (no
+                non-route_control caller exists today), classified locally
+                so the 3.3(b)/(c) guarantees still hold standalone.
         """
         import logging
         logger = logging.getLogger(__name__)
+        from .metrics import state_question_routed_total
+
+        if utterance is None:
+            utterance = classify_utterance(query)
 
         query_lower = query.lower()
 
@@ -1503,13 +1515,48 @@ Return ONLY the JSON, no other text."""
                 text = text.split('```')[1].split('```')[0].strip()
 
             intent = json.loads(text)
+            # 3.3(b): post-LLM coercion. A STATE_QUESTION never leaves this
+            # function with a write action, even if the LLM (or a hostile
+            # one) returned one -- this is the coercion path referent
+            # questions and other non-3.2-dispatched questions rely on.
+            if utterance.kind == UtteranceKind.STATE_QUESTION and intent.get("action") != "get_status":
+                logger.info(
+                    "state_question_llm_action_coerced",
+                    original_action=intent.get("action"),
+                    query=query[:80],
+                )
+                intent["action"] = "get_status"
+                state_question_routed_total.labels(
+                    device_type=intent.get("device_type") or utterance.device_type or "unknown",
+                    path="llm_coerced",
+                ).inc()
             return intent
         except json.JSONDecodeError as e:
-            # Fallback to simple parsing
+            # 3.3(c): fallback parsing when the LLM didn't return valid
+            # JSON. Never defaults to a write for a non-imperative
+            # utterance -- an IMPERATIVE without explicit on/off vocabulary
+            # falls back to today's is_turn_on/is_turn_off heuristic;
+            # STATE_QUESTION and UNKNOWN always answer get_status.
+            if utterance.kind == UtteranceKind.IMPERATIVE:
+                if utterance.target_state == "on":
+                    fallback_action = "turn_on"
+                elif utterance.target_state == "off":
+                    fallback_action = "turn_off"
+                elif is_turn_on:
+                    fallback_action = "turn_on"
+                elif is_turn_off:
+                    fallback_action = "turn_off"
+                else:
+                    fallback_action = "get_status"
+            else:
+                fallback_action = "get_status"
+                state_question_routed_total.labels(
+                    device_type=utterance.device_type or "unknown", path="json_fallback"
+                ).inc()
             return {
-                "device_type": "light",
+                "device_type": utterance.device_type or "light",
                 "room": None,
-                "action": "turn_on" if "turn on" in query.lower() else "turn_off",
+                "action": fallback_action,
                 "target_scope": "group",
                 "parameters": {}
             }
@@ -1932,6 +1979,12 @@ Return ONLY valid JSON."""
             if device_type == 'sensor':
                 return await self._handle_sensor_intent(device_type, parameters, original_query)
 
+            # Handle media player state questions (3.4): route to the HA
+            # state read instead of the jarvis-web HTTP path used by
+            # _handle_media_intent.
+            if device_type in ['media', 'media_player', 'tv', 'speaker'] and action == 'get_status':
+                return await self._handle_entity_state_query('media_player', room, original_query)
+
             # Handle media player queries
             if device_type in ['media', 'media_player', 'tv', 'speaker']:
                 return _finish(await self._handle_media_intent(action, parameters, original_query, room, ha_client))
@@ -1959,6 +2012,12 @@ Return ONLY valid JSON."""
             # Handle scene/routine activation
             if device_type == 'scene':
                 return _finish(await self._handle_scene_intent(action, parameters, ha_client, original_query))
+
+            # Handle switch state questions (3.4): switch has no dedicated
+            # handler today, so route its get_status read before the
+            # "only lights" refusal.
+            if device_type == 'switch' and action == 'get_status':
+                return await self._handle_entity_state_query('switch', room, original_query)
 
             if device_type != 'light':
                 return "I can only control lights right now. For other devices like security systems, please use the Home Assistant app."
@@ -2426,9 +2485,12 @@ Return ONLY valid JSON."""
         logger = logging.getLogger(__name__)
 
         # Use jarvis-web API for appliance queries (it has the full implementation)
-        jarvis_url = "http://localhost:3001"  # jarvis-web external URL
+        jarvis_url = get_config().jarvis_web_url
 
         query_lower = (original_query or "").lower()
+
+        if not jarvis_url:
+            return "I couldn't check the appliance status right now."
 
         try:
             async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2478,7 +2540,7 @@ Return ONLY valid JSON."""
         import logging
         logger = logging.getLogger(__name__)
 
-        jarvis_url = "http://localhost:3001"
+        jarvis_url = get_config().jarvis_web_url
         query_lower = (original_query or "").lower()
 
         # Check for occupancy estimation queries
@@ -2528,18 +2590,22 @@ Return ONLY valid JSON."""
             if healthy_sensors:
                 return await self._format_motion_status(healthy_sensors, is_last_motion_query)
 
-            # Fallback to jarvis-web
-            try:
-                async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-                    response = await client.get(f"{jarvis_url}/api/sensors/motion")
-                    if response.status_code == 200:
-                        data = response.json()
-                        active_rooms = data.get('active_rooms', [])
-                        if active_rooms:
-                            return f"Motion detected in: {', '.join(active_rooms)}."
-                        return "No motion detected in any room right now."
-            except:
-                pass
+            # Fallback to jarvis-web (skipped when JARVIS_WEB_URL is unset --
+            # ATHENA-128 3.5 -- the effective in-cluster behaviour today,
+            # since the previous hardcoded host isn't reachable from the
+            # orchestrator pod)
+            if jarvis_url:
+                try:
+                    async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                        response = await client.get(f"{jarvis_url}/api/sensors/motion")
+                        if response.status_code == 200:
+                            data = response.json()
+                            active_rooms = data.get('active_rooms', [])
+                            if active_rooms:
+                                return f"Motion detected in: {', '.join(active_rooms)}."
+                            return "No motion detected in any room right now."
+                except:
+                    pass
 
         try:
             async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2547,6 +2613,8 @@ Return ONLY valid JSON."""
                     pass
 
                 elif 'light' in query_lower or 'bright' in query_lower or 'dark' in query_lower or 'lux' in query_lower:
+                    if not jarvis_url:
+                        return "I couldn't check the sensor status right now."
                     response = await client.get(f"{jarvis_url}/api/sensors/illuminance")
                     if response.status_code == 200:
                         data = response.json()
@@ -2561,6 +2629,8 @@ Return ONLY valid JSON."""
                     return await self._get_window_sensor_status()
 
                 # Default: get summary
+                if not jarvis_url:
+                    return "I couldn't check the sensor status right now."
                 response = await client.get(f"{jarvis_url}/api/sensors/summary")
                 if response.status_code == 200:
                     data = response.json()
@@ -3421,7 +3491,7 @@ Do NOT mention rooms that have no current or recent motion."""
         from music_handler import get_room_configs, get_room_display_names
         logger = logging.getLogger(__name__)
 
-        jarvis_url = "http://localhost:3001"
+        jarvis_url = get_config().jarvis_web_url
         query_lower = (original_query or "").lower()
 
         # Handle TV power on/off commands
@@ -3456,6 +3526,9 @@ Do NOT mention rooms that have no current or recent motion."""
             except Exception as e:
                 logger.error(f"TV control error: {e}")
                 return "I couldn't control the TV right now."
+
+        if not jarvis_url:
+            return "I couldn't check media player status right now."
 
         try:
             async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -3696,7 +3769,7 @@ Do NOT mention rooms that have no current or recent motion."""
 
             if not lights_on:
                 if room:
-                    return f"No lights are currently on {room}."
+                    return f"No lights are currently on in the {room}."
                 else:
                     return "No lights are currently on anywhere in the house."
 
@@ -3713,6 +3786,65 @@ Do NOT mention rooms that have no current or recent motion."""
         except Exception as e:
             logger.error(f"Light status query error: {e}")
             return "I couldn't check the light status right now."
+
+    _ENTITY_STATE_QUERY_NOUNS = {"switch": "switch", "media_player": "media player"}
+    _ENTITY_STATE_ON_STATES = frozenset({
+        "on", "playing", "running", "open", "unlocked", "heating", "cooling",
+    })
+
+    async def _handle_entity_state_query(self, domain: str, room: Optional[str], original_query: str = None) -> str:
+        """ATHENA-128 3.4: generic read-only entity-state answer for
+        domains that don't have their own status handler (switch,
+        media_player). Never touches ha_client -- entity_manager only.
+        """
+        noun = self._ENTITY_STATE_QUERY_NOUNS.get(domain, domain)
+        try:
+            all_entities = await self.entity_manager.get_entities()
+            entities = {k: v for k, v in all_entities.items() if k.startswith(f"{domain}.")}
+
+            if not entities:
+                if room:
+                    return f"I couldn't find a {noun} in the {room}."
+                return f"I couldn't find any {noun}s in the home automation system."
+
+            room_lower = (room or "").lower()
+            matched = []
+            for entity_id, state_data in entities.items():
+                friendly_name = state_data.get("attributes", {}).get(
+                    "friendly_name", entity_id.split(".")[-1].replace("_", " ")
+                )
+                if room:
+                    entity_lower = entity_id.lower()
+                    friendly_lower = friendly_name.lower()
+                    if room_lower not in entity_lower and room_lower not in friendly_lower:
+                        continue
+                matched.append((friendly_name, state_data.get("state", "unknown")))
+
+            if not matched:
+                if room:
+                    return f"I couldn't find a {noun} in the {room}."
+                return f"I couldn't find any {noun}s."
+
+            if len(matched) == 1:
+                name, state = matched[0]
+                return f"The {name} is {state}."
+
+            on_list = [name for name, state in matched if state in self._ENTITY_STATE_ON_STATES]
+            if not on_list:
+                if room:
+                    return f"No {noun}s are currently on in the {room}."
+                return f"No {noun}s are currently on."
+
+            if len(on_list) == 1:
+                names = on_list[0]
+            elif len(on_list) <= 5:
+                names = ", ".join(on_list[:-1]) + f" and {on_list[-1]}"
+            else:
+                names = ", ".join(on_list[:3]) + f" and {len(on_list) - 3} more"
+            return f"{len(on_list)} of {len(matched)} {noun}s are on: {names}."
+        except Exception as e:
+            logger.error(f"Entity state query error ({domain}): {e}")
+            return f"I couldn't check the {noun} status right now."
 
     async def _handle_lock_intent(self, action: str, room: str, ha_client, original_query: str = None) -> str:
         """Handle lock control and status queries"""

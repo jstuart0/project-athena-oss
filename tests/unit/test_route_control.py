@@ -519,7 +519,13 @@ class TestNormalExtraction:
             patch("orchestrator.nodes.route_control.store_conversation_context", new_callable=AsyncMock),
         ):
             result = _run(route_control_node(state))
-        sc.extract_intent.assert_awaited_once_with("turn on the kitchen lights", device_room="living room")
+        # ATHENA-128 3.2(f): extract_intent now also receives the
+        # classify_utterance() result as `utterance` -- asserted loosely
+        # (mock.ANY) since its exact value is the classifier's contract,
+        # not route_control's.
+        sc.extract_intent.assert_awaited_once_with(
+            "turn on the kitchen lights", device_room="living room", utterance=mock.ANY
+        )
         assert result.answer == "Done! Lights on."
         assert result.retrieved_data == {"intent": {"device_type": "light", "action": "turn_on", "room": "living room"}}
 

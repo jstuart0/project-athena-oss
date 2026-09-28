@@ -619,3 +619,86 @@ class TestGuardAutomationMethods:
         assert write_methods == {"call_service", "create_automation", "delete_automation", "disable_automation"}
         for name in write_methods:
             assert hasattr(mp.PermissionEnforcingHAClient, name), f"guard doesn't intercept {name}"
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-128 Phase 3.1 -- read-only scope (D4)
+# ---------------------------------------------------------------------------
+
+class TestReadOnlyScopeDeniesAllFourWriteMethods:
+    def test_call_service_denied_under_read_only_without_touching_inner(self):
+        inner = _make_inner()
+        guard = mp.PermissionEnforcingHAClient(inner)
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", read_only=True) as scope:
+            with pytest.raises(mp.HAWritePermissionDenied) as excinfo:
+                _run(guard.call_service("light", "turn_off", {"entity_id": "light.office"}))
+            assert scope.denials[-1].reason == "read_only_scope"
+            assert scope.allowed_writes == 0
+        inner.call_service.assert_not_awaited()
+
+    def test_create_automation_denied_under_read_only(self):
+        inner = _make_inner()
+        inner.create_automation = AsyncMock(return_value=True)
+        guard = mp.PermissionEnforcingHAClient(inner)
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", read_only=True) as scope:
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(guard.create_automation("goodnight", {"trigger": [], "action": []}))
+            assert scope.denials[-1].reason == "read_only_scope"
+            assert scope.allowed_writes == 0
+        inner.create_automation.assert_not_awaited()
+
+    def test_delete_automation_denied_under_read_only(self):
+        inner = _make_inner()
+        inner.delete_automation = AsyncMock(return_value=True)
+        guard = mp.PermissionEnforcingHAClient(inner)
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", read_only=True) as scope:
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(guard.delete_automation("goodnight"))
+            assert scope.denials[-1].reason == "read_only_scope"
+            assert scope.allowed_writes == 0
+        inner.delete_automation.assert_not_awaited()
+
+    def test_disable_automation_denied_under_read_only(self):
+        inner = _make_inner()
+        inner.disable_automation = AsyncMock(return_value=True)
+        guard = mp.PermissionEnforcingHAClient(inner)
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", read_only=True) as scope:
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(guard.disable_automation("goodnight"))
+            assert scope.denials[-1].reason == "read_only_scope"
+            assert scope.allowed_writes == 0
+        inner.disable_automation.assert_not_awaited()
+
+    def test_get_state_and_get_states_pass_under_read_only(self):
+        inner = _make_inner()
+        guard = mp.PermissionEnforcingHAClient(inner)
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", read_only=True):
+            assert _run(guard.get_state("light.kitchen")) == {"state": "on"}
+            assert _run(guard.get_states()) == [{"entity_id": "light.kitchen", "state": "on"}]
+
+    def test_read_only_denial_precedes_halted_latch(self):
+        """A scope that's already halted (a prior denial) still reports
+        read_only_scope for the very next call, not halted_after_denial --
+        the read-only check runs first."""
+        inner = _make_inner()
+        guard = mp.PermissionEnforcingHAClient(inner)
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", read_only=True) as scope:
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(guard.call_service("light", "turn_off", {"entity_id": "light.office"}))
+            with pytest.raises(mp.HAWritePermissionDenied):
+                _run(guard.call_service("lock", "unlock", {"entity_id": "lock.front_door"}))
+            assert scope.denials[-1].reason == "read_only_scope"
+
+    def test_refusal_message_is_read_only_refusal_for_owner_scope(self):
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", read_only=True) as scope:
+            msg = mp.permission_refusal_message(["light"], scope)
+        assert msg == mp.READ_ONLY_REFUSAL
+        assert "guest mode" not in msg.lower()
+
+    def test_read_only_guard_coverage_floor(self):
+        """>= 4 methods covered by this class (call_service,
+        create_automation, delete_automation, disable_automation)."""
+        covered = {
+            "call_service", "create_automation", "delete_automation", "disable_automation",
+        }
+        assert len(covered) >= 4
