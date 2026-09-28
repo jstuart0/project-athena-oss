@@ -14,11 +14,14 @@ import re
 import structlog
 import uuid
 
+import httpx
+
 from app.database import get_db
 from app.auth.oidc import get_current_user, optional_security
 from app.models import User, GuestModeConfig, CalendarEvent, ModeOverride, AuditLog, OwnerPinAttempt
 from app.routes.internal import require_service_key_401
 from app.utils.passwords import hash_password
+from app.utils.rag_urls import check_ssrf_safe
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -700,6 +703,58 @@ async def get_upcoming_guests(
     ).order_by(CalendarEvent.checkin.asc()).all()
 
     return {"entries": [GuestEntryResponse.from_orm_event(e) for e in entries]}
+
+
+@router.get("/mode-status")
+async def get_mode_status(
+    current_user: User = Depends(get_current_user),
+):
+    """ATHENA-127 D7: proxy the mode service's actual decision for the
+    Guest Mode page. Always answers 200 -- reachability/errors are reported
+    in the body (`reachable: false`), not as an HTTP error, since a mode
+    service outage is exactly the state this panel needs to show.
+
+    The mode-service URL is operator-set (`MODE_SERVICE_URL`), so it goes
+    through the same `check_ssrf_safe` live-probe guard every other
+    operator-URL probe in this codebase uses (rag_urls.py) -- DNS can
+    change after the URL was configured.
+    """
+    if not current_user.has_permission('read'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    mode_service_url = get_config().mode_service_url
+    if not mode_service_url:
+        return {"reachable": False, "error": "mode_service_url_unset"}
+
+    url = f"{mode_service_url}/mode"
+    allowed, reason = await check_ssrf_safe(url)
+    if not allowed:
+        return {"reachable": False, "error": "ssrf_blocked", "detail": reason}
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(
+                url, headers={"X-Service-Key": get_config().service_api_key}
+            )
+            response.raise_for_status()
+            body = response.json()
+    except httpx.HTTPStatusError as e:
+        return {"reachable": False, "error": "http_error", "detail": str(e.response.status_code)}
+    except Exception as e:
+        return {"reachable": False, "error": type(e).__name__, "detail": str(e)}
+
+    return {
+        "reachable": True,
+        "mode": body.get("mode"),
+        "reason": body.get("reason"),
+        "override_active": body.get("override_active"),
+        "events_count": body.get("events_count"),
+        "bookings_source": body.get("bookings_source"),
+        "bookings_status": body.get("bookings_status"),
+        "bookings_age_seconds": body.get("bookings_age_seconds"),
+        "property_timezone": body.get("property_timezone"),
+        "property_timezone_valid": body.get("property_timezone_valid"),
+    }
 
 
 @router.get("/events/{event_id}", response_model=CalendarEventResponse)

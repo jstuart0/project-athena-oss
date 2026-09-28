@@ -10,9 +10,9 @@ proxy route DECORATOR string must not match (it's this repo's own route
 definition, not a call out to the mode service).
 
 Phase 3 floor: >= 3 gated call sites (`load_config`, `_verify_owner_pin`,
-the bookings.py admin fetch). Phase 4 raises the floor to >= 4 once the
-admin `GET /api/guest-mode/mode-status` proxy is added, with the proxy as
-a second named member.
+the bookings.py admin fetch). Phase 4 raises the floor to >= 4 with the
+admin `GET /api/guest-mode/mode-status` proxy (guest_mode.py) as a second
+named member.
 """
 from __future__ import annotations
 
@@ -150,12 +150,23 @@ def _analyse_source(source: str, path_label: str = "<memory>"):
     results = []
     for call_node, scope, callee in scanner.call_sites:
         arg_nodes = list(call_node.args) + [kw.value for kw in call_node.keywords]
+        bindings_for_gate = _local_name_bindings(scope, source)
         gated = False
         for arg in arg_nodes:
             arg_text = ast.get_source_segment(source, arg) or ""
             if _ROUTE_PATTERN.search(arg_text):
                 gated = True
                 break
+            # A bare Name argument (e.g. `url` built as
+            # f"{mode_service_url}/mode" a few lines earlier) -- resolve
+            # one hop against every RHS ever assigned to that name in this
+            # scope (guest_mode.py's mode-status proxy builds its URL this
+            # way, rather than inlining the literal into the call).
+            if isinstance(arg, ast.Name):
+                bound_text = bindings_for_gate.get(arg.id, "")
+                if _ROUTE_PATTERN.search(bound_text):
+                    gated = True
+                    break
         if not gated:
             continue
 
@@ -194,7 +205,7 @@ def _find_gated_call_sites():
 
 def test_population_floor_met():
     by_file, flat = _find_gated_call_sites()
-    assert len(flat) >= 3, [(str(p.relative_to(REPO_ROOT)), r["line"]) for p, r in flat]
+    assert len(flat) >= 4, [(str(p.relative_to(REPO_ROOT)), r["line"]) for p, r in flat]
 
 
 def test_named_members_present():
@@ -203,6 +214,7 @@ def test_named_members_present():
     expected_named = {
         "src/mode_service/bookings.py",
         "src/mode_service/main.py",
+        "admin/backend/app/routes/guest_mode.py",
     }
     missing = expected_named - rel_names
     assert not missing, f"expected named callers not matched by the scan: {missing}"

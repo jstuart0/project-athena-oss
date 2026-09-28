@@ -244,8 +244,8 @@ async function loadGuestHistory(offset = 0) {
                             class="text-blue-400 hover:text-blue-300 text-sm">
                             Edit
                         </button>
-                        ${entry.created_by === 'manual' && !entry.deleted_at ? `
-                            <button onclick="deleteGuestEntry(${entry.id})"
+                        ${!entry.deleted_at ? `
+                            <button onclick="deleteGuestEntry(${entry.id}, '${escapeJsAttr(entry.created_by)}')"
                                 class="text-red-400 hover:text-red-300 text-sm">
                                 Delete
                             </button>
@@ -268,15 +268,53 @@ async function loadGuestHistory(offset = 0) {
     }
 }
 
+// ATHENA-127 D7: the Guest Mode page shows the mode service's OWN decision,
+// not just a DB-derived guess -- see docs/CONFIGURATION.md "Guest-mode
+// booking source" for the precedence/freshness model this banner reflects.
+function _modeStatusWarnings(modeStatus, hasCurrentGuests) {
+    const warnings = [];
+    if (hasCurrentGuests && modeStatus.reachable && modeStatus.mode === 'owner' && !modeStatus.override_active) {
+        warnings.push('The database lists a current stay, but the mode service reports owner mode with no active override.');
+    }
+    if (!modeStatus.reachable) {
+        warnings.push(modeStatus.error === 'ssrf_blocked'
+            ? 'The mode service URL is blocked by the SSRF allowlist (HEALTH_POLL_ALLOWED_PRIVATE_HOSTS).'
+            : 'The mode service is unreachable.');
+    }
+    if (modeStatus.reachable && modeStatus.mode === 'degraded') {
+        warnings.push('The mode service reports degraded mode -- booking data is unavailable or stale beyond the configured limit.');
+    }
+    if (modeStatus.reachable && ['expired', 'never_loaded'].includes(modeStatus.bookings_status)) {
+        warnings.push(`Booking data is ${modeStatus.bookings_status}.`);
+    }
+    if (modeStatus.reachable && modeStatus.property_timezone_valid === false) {
+        warnings.push('The configured property timezone is invalid; booking times are being treated as UTC.');
+    }
+    return warnings;
+}
+
 async function updateGuestModeStatus() {
     const banner = document.getElementById('guest-mode-status-banner');
 
     try {
         const config = await apiRequest('/api/guest-mode/config');
         const currentData = await apiRequest('/api/guest-mode/events/current');
+        let modeStatus;
+        try {
+            modeStatus = await apiRequest('/api/guest-mode/mode-status');
+        } catch (e) {
+            modeStatus = { reachable: false, error: 'proxy_request_failed' };
+        }
 
         const hasCurrentGuests = currentData.entries.length > 0;
-        const isEnabled = config.enabled;
+
+        // bob L10: the manual-entry modal shows the property timezone next
+        // to the (browser-local) time inputs.
+        const tzNoteEl = document.getElementById('guest-modal-timezone-note');
+        if (tzNoteEl) {
+            const zone = (modeStatus.reachable && modeStatus.property_timezone) ? modeStatus.property_timezone : 'UTC';
+            tzNoteEl.textContent = `Times are entered in your browser's timezone; property timezone is ${zone}.`;
+        }
 
         // ATHENA-69 Pass H (valerie r1, Medium): a pre-D30 legacy PIN hash
         // can never be verified -- POST verify-pin always answers
@@ -308,46 +346,55 @@ async function updateGuestModeStatus() {
             }
         }
 
-        if (hasCurrentGuests) {
-            banner.innerHTML = `
-                <div class="p-4 bg-green-900/20 border border-green-700/50 rounded-lg flex items-center gap-3">
-                    <span class="text-2xl">🏠</span>
+        const warnings = _modeStatusWarnings(modeStatus, hasCurrentGuests);
+        const warningBanner = warnings.length ? `
+            <div class="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-200 text-sm mt-3 space-y-1">
+                ${warnings.map(w => `<div>⚠️ ${escapeHtml(w)}</div>`).join('')}
+            </div>
+        ` : '';
+
+        let primaryBanner;
+        if (modeStatus.reachable) {
+            const modeLabels = { guest: ['Guest', 'green', '🏠'], owner: ['Owner', 'blue', '🔑'], degraded: ['Degraded', 'red', '⚠️'] };
+            const [modeLabel, color, icon] = modeLabels[modeStatus.mode] || [modeStatus.mode || 'Unknown', 'gray', '❔'];
+            const ageText = typeof modeStatus.bookings_age_seconds === 'number'
+                ? `${Math.round(modeStatus.bookings_age_seconds)}s ago`
+                : 'unknown';
+
+            primaryBanner = `
+                <div class="p-4 bg-${color}-900/20 border border-${color}-700/50 rounded-lg flex items-center gap-3">
+                    <span class="text-2xl">${icon}</span>
                     <div>
-                        <div class="text-green-200 font-medium">Guest Mode Active</div>
-                        <div class="text-green-300/70 text-sm">
-                            ${currentData.entries.length} guest(s) currently staying
+                        <div class="text-${color}-200 font-medium">Mode: ${escapeHtml(modeLabel)}</div>
+                        <div class="text-${color}-300/70 text-sm">${escapeHtml(modeStatus.reason || '')}</div>
+                        <div class="text-${color}-300/50 text-xs mt-1">
+                            Source: ${escapeHtml(modeStatus.bookings_source || 'n/a')}
+                            &middot; Bookings: ${modeStatus.events_count ?? 0}
+                            &middot; Last fetch: ${escapeHtml(ageText)}
+                            &middot; Timezone: ${escapeHtml(modeStatus.property_timezone || 'UTC')}
+                        </div>
+                        <div class="text-${color}-300/70 text-xs mt-1">
+                            DB: ${currentData.entries.length} guest(s) currently staying
                         </div>
                     </div>
                 </div>
-                ${pinResetNotice}
-            `;
-        } else if (isEnabled) {
-            banner.innerHTML = `
-                <div class="p-4 bg-blue-900/20 border border-blue-700/50 rounded-lg flex items-center gap-3">
-                    <span class="text-2xl">📅</span>
-                    <div>
-                        <div class="text-blue-200 font-medium">Guest Mode Ready</div>
-                        <div class="text-blue-300/70 text-sm">
-                            System is monitoring calendar for upcoming guests
-                        </div>
-                    </div>
-                </div>
-                ${pinResetNotice}
             `;
         } else {
-            banner.innerHTML = `
-                <div class="p-4 bg-gray-900/20 border border-gray-700/50 rounded-lg flex items-center gap-3">
-                    <span class="text-2xl">⏸️</span>
+            primaryBanner = `
+                <div class="p-4 bg-yellow-900/20 border border-yellow-700/50 rounded-lg flex items-center gap-3">
+                    <span class="text-2xl">⚠️</span>
                     <div>
-                        <div class="text-gray-200 font-medium">Guest Mode Disabled</div>
-                        <div class="text-gray-300/70 text-sm">
-                            Enable guest mode to track rental bookings
+                        <div class="text-yellow-200 font-medium">Mode service unreachable</div>
+                        <div class="text-yellow-300/70 text-sm">${escapeHtml(modeStatus.error || 'unknown error')}</div>
+                        <div class="text-yellow-300/70 text-xs mt-1">
+                            DB: ${currentData.entries.length} guest(s) currently staying
                         </div>
                     </div>
                 </div>
-                ${pinResetNotice}
             `;
         }
+
+        banner.innerHTML = `${primaryBanner}${warningBanner}${pinResetNotice}`;
     } catch (error) {
         banner.innerHTML = `
             <div class="p-4 bg-yellow-900/20 border border-yellow-700/50 rounded-lg flex items-center gap-3">
@@ -597,8 +644,13 @@ async function saveGuestEntry(event) {
     }
 }
 
-async function deleteGuestEntry(id) {
-    if (!confirm('Are you sure you want to delete this guest entry? This action cannot be undone.')) {
+async function deleteGuestEntry(id, createdBy) {
+    // ATHENA-127 step 6b: synced (iCal/Lodgify) rows are now deletable too --
+    // a fixed, non-interpolated string, so no escaping is needed for confirm().
+    const confirmMessage = createdBy === 'manual'
+        ? 'Are you sure you want to delete this guest entry? This action cannot be undone.'
+        : 'This booking came from a calendar sync. Deleting hides it from guest mode permanently; re-syncing will not bring it back. Continue?';
+    if (!confirm(confirmMessage)) {
         return;
     }
 
