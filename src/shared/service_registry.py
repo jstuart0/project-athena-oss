@@ -38,6 +38,18 @@ def _get_service_api_key() -> str:
         return os.getenv("SERVICE_API_KEY", "")
 
 
+def _get_service_registry_endpoint_url() -> str:
+    """SERVICE_REGISTRY_ENDPOINT_URL override for register_service()'s
+    payload (xander diff-review Critical, 2026-09-28). Empty by default --
+    see the field's own docstring in shared.config.AthenaConfig for why
+    that's the safe default."""
+    try:
+        from shared.config import get_config
+        return get_config().service_registry_endpoint_url or ""
+    except Exception:
+        return os.getenv("SERVICE_REGISTRY_ENDPOINT_URL", "")
+
+
 async def get_service_url(service_name: str) -> Optional[str]:
     """
     Get service URL from registry via Admin API.
@@ -97,7 +109,11 @@ async def register_service(
 
     Args:
         service_name: Name of the service
-        port: Port the service is running on
+        port: Port the service is running on. Kept for call-site compatibility
+            (18 RAG connectors pass it) and used by startup_service()'s
+            kill_process_on_port(); no longer interpolated into a payload
+            URL here (xander diff-review Critical, 2026-09-28 -- see the
+            comment below on why endpoint_url is omitted by default).
         description: Service description
         metadata: Optional metadata dict
 
@@ -105,9 +121,6 @@ async def register_service(
         True if registration succeeded
     """
     try:
-        # Use localhost for service URLs (environment-agnostic)
-        service_url = f"http://localhost:{port}"
-
         service_key = _get_service_api_key()
         if not service_key:
             logger.warning(
@@ -115,20 +128,48 @@ async def register_service(
                 "rejected with 401 by the admin API's X-Service-Key write gate."
             )
 
+        # xander diff-review Critical (2026-09-28): this client owns only
+        # its own identity, never its network location. The POST
+        # /api/service-registry/services upsert unconditionally overwrote
+        # host/port/protocol/endpoint_url on an EXISTING row before
+        # ATHENA-108 fixed the 401 -- once auth actually worked, every RAG
+        # startup was silently stomping its own seeded K8s host
+        # ("athena-rag-weather") with this process's own view of itself
+        # ("http://localhost:<port>"), breaking k8s manager resolution.
+        #
+        # Every caller of register_service()/startup_service() in this repo
+        # is a RAG connector under src/rag/* (confirmed by repo-wide grep),
+        # so service_type is always "rag" here -- the "-rag"-in-name rule
+        # _infer_oss_service_type()/the Control Agent's sync apply to the
+        # K8s DNS host string doesn't discriminate anything against the
+        # short service_name this function receives ("weather", not
+        # "athena-rag-weather"), so reusing it literally would misclassify
+        # every real caller as "core".
+        #
+        # endpoint_url is included ONLY when SERVICE_REGISTRY_ENDPOINT_URL
+        # is explicitly set -- omitted by default so the upsert's partial-
+        # update semantics (ATHENA-109) leave an existing row's host/port/
+        # protocol untouched. A brand-new, never-seeded service name still
+        # needs SOME endpoint_url to be created at all; set the env var for
+        # that deployment shape.
+        params = {
+            "name": service_name,
+            "display_name": description or service_name.replace('-', ' ').title(),
+            "service_type": "rag",
+        }
+        explicit_endpoint_url = _get_service_registry_endpoint_url()
+        if explicit_endpoint_url:
+            params["endpoint_url"] = explicit_endpoint_url
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{ADMIN_API_URL}/api/service-registry/services",
-                params={
-                    "name": service_name,
-                    "endpoint_url": service_url,
-                    "display_name": description or service_name.replace('-', ' ').title(),
-                    "service_type": "api"
-                },
+                params=params,
                 headers={"X-Service-Key": service_key},
             )
 
             if response.status_code in (200, 201):
-                logger.info(f"Service registered: {service_name} → {service_url}")
+                logger.info(f"Service registered: {service_name}")
                 return True
             else:
                 logger.error(f"Service registration failed: {response.status_code}")

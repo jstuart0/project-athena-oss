@@ -577,6 +577,97 @@ class TestSeedOssServiceRegistry:
 
 
 # ---------------------------------------------------------------------------
+# xander diff-review Critical (2026-09-28): shared.service_registry.
+# register_service()'s self-registration payload must never overwrite a
+# seeded row's host/port/type with its own "http://localhost:<port>"/
+# hardcoded-'api' view of itself. Integration-style: hits the REAL POST
+# /api/service-registry/services upsert route (not a mock) with exactly the
+# payload shape register_service() now sends -- no endpoint_url, service_
+# type='rag' -- against a DB seeded the way ATHENA-119's real startup does.
+# ---------------------------------------------------------------------------
+
+class TestRegisterServicePreservesSeededRow:
+    def test_startup_registration_of_seeded_rag_row_keeps_host_and_type(self, client, db):
+        db.add(RagService(
+            name="weather", display_name="Weather Service",
+            host="athena-rag-weather", port=8010, protocol="http",
+            endpoint_url="http://athena-rag-weather:8010",
+            service_type="rag", cache_ttl=600, enabled=True,
+        ))
+        db.commit()
+
+        # Exactly register_service()'s payload shape post-fix: name,
+        # display_name, service_type -- no endpoint_url.
+        resp = client.post(
+            "/api/service-registry/services",
+            params={"name": "weather", "display_name": "Weather Service", "service_type": "rag"},
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["action"] == "updated"
+
+        row = db.query(RagService).filter(RagService.name == "weather").first()
+        assert row.host == "athena-rag-weather", "seeded K8s host must survive a self-registration ping"
+        assert row.port == 8010
+        assert row.endpoint_url == "http://athena-rag-weather:8010"
+        assert row.service_type == "rag"
+
+    def test_registration_without_endpoint_url_on_new_row_still_422s(self, client, db):
+        """No prior row to fall back to -- endpoint_url stays required to
+        CREATE a row, matching the route's own docstring."""
+        resp = client.post(
+            "/api/service-registry/services",
+            params={"name": "brand-new-unseeded-svc", "service_type": "rag"},
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 422
+        assert db.query(RagService).filter(RagService.name == "brand-new-unseeded-svc").first() is None
+
+    def test_house_shaped_rows_all_untouched_by_a_bare_rag_ping(self, client, db):
+        """All 23 OSS_SERVICE_REGISTRY athena-rag-* rows, seeded the way
+        seed_oss_service_registry() really does (host/type included), must
+        be byte-for-byte unchanged after every one of them receives the
+        exact ping register_service() sends. Only the actual RAG-typed
+        entries are pinged here -- "mode" (service_type='core') is not a
+        shared.service_registry.register_service() caller (confirmed by
+        repo grep: src/mode_service/main.py never imports it), so pinging
+        it with service_type='rag' would test a call that never happens in
+        production, not this fix."""
+        for name, display_name, host, port, protocol, cache_ttl, enabled in OSS_SERVICE_REGISTRY:
+            db.add(RagService(
+                name=name, display_name=display_name, host=host, port=port,
+                protocol=protocol, endpoint_url=f"{protocol}://{host}:{port}",
+                service_type=_infer_oss_service_type(host),
+                cache_ttl=cache_ttl, enabled=enabled,
+            ))
+        db.commit()
+
+        before = {
+            row.name: (row.host, row.port, row.endpoint_url, row.service_type)
+            for row in db.query(RagService).all()
+        }
+
+        rag_entries = [e for e in OSS_SERVICE_REGISTRY if _infer_oss_service_type(e[2]) == "rag"]
+        assert len(rag_entries) >= 20, "sanity: most OSS_SERVICE_REGISTRY entries are RAG services"
+        for name, display_name, host, port, protocol, cache_ttl, enabled in rag_entries:
+            resp = client.post(
+                "/api/service-registry/services",
+                params={"name": name, "display_name": display_name, "service_type": "rag"},
+                headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+            )
+            assert resp.status_code == 200, resp.text
+
+        db.expire_all()
+        after = {
+            row.name: (row.host, row.port, row.endpoint_url, row.service_type)
+            for row in db.query(RagService).all()
+        }
+        assert before.keys() == after.keys()
+        for name in before:
+            assert before[name] == after[name], f"{name!r} changed: {before[name]} -> {after[name]}"
+
+
+# ---------------------------------------------------------------------------
 # Rate limit dep + AthenaConfig field
 # ---------------------------------------------------------------------------
 

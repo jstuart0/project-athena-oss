@@ -125,3 +125,60 @@ async def test_unregister_service_warns_and_sends_empty_header_when_key_unset(mo
     assert ok is False
     assert len(transport.requests) == 1
     assert transport.requests[0].headers.get("X-Service-Key", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# xander diff-review Critical (2026-09-28): register_service()'s payload
+# must never claim ownership of network location it doesn't have --
+# service_type is always 'rag' (never 'api'), and endpoint_url is included
+# ONLY when SERVICE_REGISTRY_ENDPOINT_URL is explicitly set.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_register_service_payload_omits_endpoint_url_by_default(monkeypatch):
+    monkeypatch.setenv("SERVICE_API_KEY", "test-service-key-athena-108")
+    monkeypatch.delenv("SERVICE_REGISTRY_ENDPOINT_URL", raising=False)
+    _clear_cache_for_tests()
+    transport = _RecordingTransport(status_code=200)
+    _patch_async_client(monkeypatch, transport)
+
+    ok = await service_registry_module.register_service("weather", 8010, "Weather Service")
+
+    assert ok is True
+    assert len(transport.requests) == 1
+    query = dict(transport.requests[0].url.params)
+    assert "endpoint_url" not in query
+    assert query["service_type"] == "rag"
+    assert query["name"] == "weather"
+
+
+@pytest.mark.asyncio
+async def test_register_service_payload_includes_endpoint_url_when_env_set(monkeypatch):
+    monkeypatch.setenv("SERVICE_API_KEY", "test-service-key-athena-108")
+    monkeypatch.setenv("SERVICE_REGISTRY_ENDPOINT_URL", "http://weather-dev-box:8010")
+    _clear_cache_for_tests()
+    transport = _RecordingTransport(status_code=200)
+    _patch_async_client(monkeypatch, transport)
+
+    ok = await service_registry_module.register_service("weather", 8010, "Weather Service")
+
+    assert ok is True
+    query = dict(transport.requests[0].url.params)
+    assert query["endpoint_url"] == "http://weather-dev-box:8010"
+
+
+@pytest.mark.asyncio
+async def test_register_service_never_sends_service_type_api(monkeypatch):
+    """Regression pin for the xander Critical finding: this payload must
+    never again ship the hardcoded, wrong 'api' service_type."""
+    monkeypatch.setenv("SERVICE_API_KEY", "test-service-key-athena-108")
+    _clear_cache_for_tests()
+    transport = _RecordingTransport(status_code=200)
+    _patch_async_client(monkeypatch, transport)
+
+    for name in ("weather", "amtrak", "tesla", "site-scraper", "price-compare"):
+        transport.requests.clear()
+        await service_registry_module.register_service(name, 8010, "x")
+        query = dict(transport.requests[0].url.params)
+        assert query["service_type"] == "rag", f"{name!r}: {query}"
+        assert query["service_type"] != "api"
