@@ -17,6 +17,8 @@ from datetime import datetime
 import httpx
 import structlog
 
+from gateway.mode_gate import fast_path_allowed
+
 logger = structlog.get_logger("gateway.simple_commands")
 
 # Simple command patterns
@@ -100,6 +102,15 @@ async def execute_simple_command(
     """
     Execute simple command directly against HA API.
 
+    ATHENA-69 D17: for turn_on/turn_off, this bypasses the orchestrator (and
+    therefore every server-derived permission check) to call HA directly.
+    Two independent gates apply before any HA call: the resolved entity must
+    be a light (CONTROL_DEVICE_DOMAINS parity with the orchestrator's
+    whole-house scope), and the mode service must confirm the house is
+    currently in owner mode (fast_path_allowed(), fail-closed). Either gate
+    failing returns None -- the caller already falls through to the
+    orchestrator, which re-derives mode/permissions itself.
+
     Returns:
         Response text if successful, None if failed
     """
@@ -108,6 +119,20 @@ async def execute_simple_command(
     if command_type == "turn_on":
         device = params["device"]
         entity_id = _resolve_device_to_entity(device)
+        if entity_id and not entity_id.startswith("light."):
+            logger.info(
+                "simple_command_fast_path_refused",
+                command="turn_on", device=device, entity_id=entity_id,
+                reason="not_light_domain",
+            )
+            return None
+        if entity_id and not await fast_path_allowed():
+            logger.info(
+                "simple_command_fast_path_refused",
+                command="turn_on", device=device, entity_id=entity_id,
+                reason="mode_service_not_owner",
+            )
+            return None
         if entity_id:
             try:
                 if ha_client:
@@ -144,6 +169,20 @@ async def execute_simple_command(
     elif command_type == "turn_off":
         device = params["device"]
         entity_id = _resolve_device_to_entity(device)
+        if entity_id and not entity_id.startswith("light."):
+            logger.info(
+                "simple_command_fast_path_refused",
+                command="turn_off", device=device, entity_id=entity_id,
+                reason="not_light_domain",
+            )
+            return None
+        if entity_id and not await fast_path_allowed():
+            logger.info(
+                "simple_command_fast_path_refused",
+                command="turn_off", device=device, entity_id=entity_id,
+                reason="mode_service_not_owner",
+            )
+            return None
         if entity_id:
             try:
                 if ha_client:

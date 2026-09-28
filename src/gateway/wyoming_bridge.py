@@ -523,6 +523,10 @@ if WYOMING_AVAILABLE:
                     'room': self.interface_name,
                     'session_id': session_id,
                     'interface_type': 'voice',  # Enables TTS text normalization
+                    # ATHENA-69 D24: set server-side only, never forwarded
+                    # from a satellite's request -- trusted for the
+                    # orchestrator's owner-mode PIN override path.
+                    'caller_trust': 'household',
                 }
 
                 # Include interruption context if this was a barge-in

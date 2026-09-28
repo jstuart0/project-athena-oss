@@ -1205,7 +1205,12 @@ async def route_to_orchestrator(
                 "mode": "owner",  # Default to owner mode
                 "room": device_id or "unknown",  # Use device_id as room if available
                 "temperature": request.temperature,
-                "model": MODEL_MAPPING.get(request.model, "phi3:mini")
+                "model": MODEL_MAPPING.get(request.model, "phi3:mini"),
+                # ATHENA-69 D24: set server-side only -- this gateway call is
+                # service-key-authenticated, never a value forwarded from an
+                # inbound request. Trusted for the orchestrator's owner-mode
+                # PIN override path.
+                "caller_trust": "household",
             }
 
             # Include session_id if provided (for conversation context)

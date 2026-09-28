@@ -22,7 +22,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+import gateway.simple_commands as sc  # noqa: E402
 from gateway.simple_commands import execute_simple_command  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fast_path_always_allowed(monkeypatch):
+    """ATHENA-69 D17 gated execute_simple_command on fast_path_allowed()
+    (a mode-service call). These tests are about propagating the real HA
+    outcome, not about the gate (covered by test_gateway_fast_path_guard.py)
+    -- keep the gate open so the pre-existing assertions below still
+    exercise the HA call path unchanged."""
+    monkeypatch.setattr(sc, "fast_path_allowed", mock.AsyncMock(return_value=True))
 
 
 class _StatusClient:
