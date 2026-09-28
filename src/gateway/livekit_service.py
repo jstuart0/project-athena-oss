@@ -307,7 +307,7 @@ class LiveKitService:
         room_name: str,
         participant_name: str,
         participant_identity: Optional[str] = None,
-        duration_hours: int = 24
+        ttl_minutes: Optional[int] = None
     ) -> str:
         """
         Generate a LiveKit access token for a participant.
@@ -316,13 +316,28 @@ class LiveKitService:
             room_name: Name of the room to join
             participant_name: Display name for the participant
             participant_identity: Unique identifier (defaults to generated)
-            duration_hours: Token validity duration
+            ttl_minutes: Token validity in minutes. None (the default) uses
+                AthenaConfig.livekit_user_token_ttl_minutes (ATHENA-69 D27,
+                default 30) -- the three browser-facing call sites rely on
+                this default. The two server-side Athena participant
+                tokens pass an explicit ttl_minutes=24 * 60 to keep their
+                prior unbounded-session behavior. Either way the value is
+                clamped to 1-1440 minutes. A shorter TTL only bounds
+                *joining* a room -- per the LiveKit SDK, an access token is
+                consulted at connection time only; it doesn't disconnect a
+                participant already connected to the room when it expires.
+                The room-mint gate (D19: only a signed-in owner/operator
+                can mint a room) is the primary control on browser access.
 
         Returns:
             JWT token string for LiveKit connection
         """
         if not self.is_available:
             raise RuntimeError("LiveKit not configured")
+
+        if ttl_minutes is None:
+            ttl_minutes = get_config().livekit_user_token_ttl_minutes
+        ttl_minutes = max(1, min(1440, ttl_minutes))
 
         identity = participant_identity or f"user_{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}"
 
@@ -340,7 +355,7 @@ class LiveKitService:
             AccessToken(self.api_key, self.api_secret)
             .with_identity(identity)
             .with_name(participant_name)
-            .with_ttl(timedelta(hours=duration_hours))
+            .with_ttl(timedelta(minutes=ttl_minutes))
             .with_grants(grants)
         )
 
@@ -396,11 +411,13 @@ class LiveKitService:
                 participant_identity=f"user_{room_name}"
             )
 
-            # Generate token for Athena (server-side participant)
+            # Generate token for Athena (server-side participant) -- not
+            # browser-facing, keeps the prior 24h TTL explicitly (D27).
             athena_token = self.generate_room_token(
                 room_name=room_name,
                 participant_name="Athena",
-                participant_identity=f"athena_{room_name}"
+                participant_identity=f"athena_{room_name}",
+                ttl_minutes=24 * 60
             )
 
             logger.info("livekit_room_created", room_name=room_name)
