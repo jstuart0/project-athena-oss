@@ -711,12 +711,19 @@ directly.
   admin backend's `calendar_events` (fed by `calendar_sources`, incl.
   Lodgify) as the **required** source, plus the legacy `calendar_url`
   iCal feed (if the Guest Mode page has one set) as **advisory-additive**
-  — its bookings can add guest time while fresh or stale, but its own
-  freshness never degrades the house, and its data is dropped once it's
-  `expired`. `admin`: admin only, no legacy iCal at all. `ical`: the
-  legacy URL is the only, required, source (for a deployment with no
+  — its last successful fetch keeps adding guest time in every state
+  (fresh, stale, even expired), but its own freshness never degrades the
+  house. `admin`: admin only, no legacy iCal at all. `ical`: the legacy
+  URL is the only, required, source (for a deployment with no
   admin-managed bookings) — an empty `calendar_url` in this mode is
-  `never_loaded` forever (logged once, `mode_bookings_source_misconfigured`).
+  `never_loaded` (logged once, `mode_bookings_source_misconfigured`), and
+  clearing or replacing the URL discards everything learned from the old
+  one, so the house degrades rather than trusting a feed nobody reads.
+- **Legacy iCal URL rules.** The mode service fetches `calendar_url`
+  through the same SSRF guard admin-backend applies to calendar-source
+  URLs: `https://` only, private/loopback targets blocked unless listed
+  in `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`, every redirect re-validated. A
+  plain `http://` URL is a failed fetch (never loaded).
 - **Freshness.** Per source: `never_loaded` (no successful fetch ever) →
   age of the last success > `MODE_BOOKINGS_MAX_AGE_SECONDS` (default
   21600s / 6h, clamped to `[max(300, 2 x the iCal poll interval),
@@ -727,9 +734,16 @@ directly.
   clock, from the last-good snapshot, with no new fetch needed.
 - **Precedence.** Config never loaded → `degraded`. An active, unexpired
   override → that mode. `enabled == false` → `owner` (bookings are still
-  fetched in the background, just not consulted). Any active considered
-  booking → `guest`. The required source `fresh` or `stale` → `owner`.
-  Otherwise → `degraded`.
+  fetched in the background, just not consulted). Any active booking from
+  a considered source → `guest`: the required source and an advisory
+  source are both considered in every state except `never_loaded`, since
+  old data can only add guest time. The required source `fresh` or
+  `stale` → `owner`. Otherwise → `degraded`. Only the required source's
+  status can produce `degraded`.
+- **Startup.** The mode service waits at most 5 s for its first booking
+  refresh before it starts serving; a slower fetch (e.g. a slow iCal feed)
+  finishes in the background and the house reports from whatever has
+  loaded so far.
 - **The stale-lookahead residual.** While the required source is merely
   `stale` (a fetch failure after a prior success, still within
   `max_age`), a booking created, moved earlier, or **extended** after

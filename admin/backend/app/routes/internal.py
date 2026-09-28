@@ -38,7 +38,7 @@ from app.utils.passwords import verify_password
 from app.database import get_db
 from app.models import GuestModeConfig, OwnerPinAttempt, RagService, CalendarEvent
 from shared.config import get_config
-from shared.booking_window import db_value_to_utc, resolve_property_tz
+from shared.booking_window import booking_key, db_value_to_utc, resolve_property_tz
 
 logger = structlog.get_logger()
 
@@ -235,14 +235,6 @@ class BookingsResponse(BaseModel):
     suppressed: List[SuppressedRow]
 
 
-def _booking_key(source: str, external_id: str) -> str:
-    """D3: opaque, non-reversible identifier -- never the raw external_id
-    (which may embed a guest email/token for some providers)."""
-    import hashlib
-
-    return hashlib.sha256(f"{source}|{external_id}".encode()).hexdigest()[:16]
-
-
 def _utc_query_bound(value: datetime, dialect_name: str) -> datetime:
     """An aware bound -> the UTC instant to compare stored checkin/checkout
     against. The columns are `DateTime(timezone=True)`: timestamptz on
@@ -308,7 +300,7 @@ async def get_internal_bookings(
     bookings = [
         BookingRow(
             id=r.id,
-            key=_booking_key(r.source, r.external_id),
+            key=booking_key(r.source, r.external_id),
             source=r.source,
             checkin=db_value_to_utc(r.checkin).isoformat(),
             checkout=db_value_to_utc(r.checkout).isoformat(),

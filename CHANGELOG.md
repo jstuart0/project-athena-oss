@@ -19,6 +19,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Date-only and floating (no explicit timezone) booking times from a calendar feed are now localised to the configured property timezone instead of being silently treated as UTC — a real check-in/check-out time could previously be off by several hours depending on the deployment's timezone.
 - A feed entry marked as a block (`Blocked`, `Closed Period`, `Not available`, etc. — an owner blocking dates for personal use) is no longer counted as a guest stay.
+- Editing a blocked booking on the Guest Mode page no longer clears its status; the Edit dialog offers "Blocked (not a stay)" and the API rejects unknown status values.
+- The mode service's legacy iCal URL is now fetched through the same SSRF guard as calendar sources (`https://` only; private hosts need `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`), and fetch failures no longer log the calendar URL.
 
 ### Security
 

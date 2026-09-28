@@ -10,7 +10,6 @@ directly -- never a relative `.booking_window` or a bare `booking_window`.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -27,6 +26,7 @@ from shared.booking_window import (
     DEFAULT_CHECKIN_TIME,
     DEFAULT_CHECKOUT_TIME,
     Booking,
+    booking_key,
     classify_summary,
     clamp_buffer_hours,
     db_value_to_utc,
@@ -326,13 +326,13 @@ class BookingSources:
                     if checkout <= start or checkin >= end:
                         continue
 
-                    booking_key = hashlib.sha256(f"ical|{uid}".encode()).hexdigest()[:16]
+                    key = booking_key("ical", uid)
                     bookings.append(
                         Booking(
                             id=None,
-                            key=booking_key,
+                            key=key,
                             source="ical",
-                            label=f"ical {booking_key[:8]}",
+                            label=f"ical {key[:8]}",
                             start=checkin,
                             end=checkout,
                             is_test=False,

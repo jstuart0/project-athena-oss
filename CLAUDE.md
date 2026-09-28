@@ -189,8 +189,10 @@ While guest mode is enabled, the mode service decides guest vs owner from
 polling the legacy single-iCal `calendar_url` field directly. `MODE_BOOKINGS_SOURCE`
 (`auto` default / `admin` / `ical`) picks the source(s): in `auto`, admin
 is required and a configured legacy `calendar_url` is advisory-additive
-only — it can add guest time but its own freshness never degrades the
-house. Precedence: an active unexpired override wins; `enabled == false` →
+only — its last-good bookings add guest time in every state except
+`never_loaded` (even `expired`), but its own freshness never degrades the
+house; it's fetched https-only through `shared.url_safety.safe_get`.
+Precedence: an active unexpired override wins; `enabled == false` →
 owner; any active considered booking → guest; the required source `fresh`
 or `stale` → owner; otherwise → `degraded`. `MODE_BOOKINGS_MAX_AGE_SECONDS`
 (default 21600s / 6h) bounds how long a source's last success is trusted

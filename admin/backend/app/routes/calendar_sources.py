@@ -10,7 +10,7 @@ Lodgify API Integration:
 - When a Lodgify API key is available, we fetch full guest details via API
 - API returns type: "Booking" for real guests, "ClosedPeriod" for manual blocks
 """
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.orm import Session
@@ -138,20 +138,11 @@ def get_lodgify_api_key(db: Session) -> Optional[str]:
         return None
 
 
-def parse_time_string(time_str: str) -> Tuple[int, int]:
-    """Parse 'HH:MM' time string to (hour, minute) tuple."""
-    try:
-        parts = time_str.split(':')
-        return int(parts[0]), int(parts[1])
-    except (ValueError, IndexError):
-        return 16, 0  # Default to 4:00 PM
-
-
 async def fetch_lodgify_reservations(
     api_key: str,
     timeout: float = 30.0,
-    checkin_time: str = '16:00',
-    checkout_time: str = '11:00'
+    checkin_time: str = DEFAULT_CHECKIN_TIME,
+    checkout_time: str = DEFAULT_CHECKOUT_TIME
 ) -> List[dict]:
     """
     Fetch reservations from Lodgify API with pagination support.

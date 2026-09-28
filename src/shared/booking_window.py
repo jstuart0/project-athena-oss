@@ -14,6 +14,7 @@ normalize round-trip -- those give different answers for a nonexistent
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo as TZInfo
 from typing import Iterable, Literal, Optional
@@ -48,6 +49,12 @@ def _log_once(level: str, event: str, value, **fields) -> None:
 
 def _reset_log_latches_for_tests() -> None:
     _logged_once.clear()
+
+
+def booking_key(source: str, external_id: str) -> str:
+    """D3: the opaque booking key both services put on the wire. A hash, so
+    no provider UID (which can embed a guest email or token) is exposed."""
+    return hashlib.sha256(f"{source}|{external_id}".encode()).hexdigest()[:16]
 
 
 def resolve_property_tz(name: Optional[str]) -> tuple[TZInfo, bool]:

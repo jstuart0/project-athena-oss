@@ -355,3 +355,23 @@ class TestMergeIsTest:
         both = bw.merge([admin_test], [ical_test], suppressed_pairs=set(), tz=NY)
         assert [b.is_test for b in mixed] == [False]
         assert [b.is_test for b in both] == [True]
+
+
+class TestBookingKey:
+    def test_byte_identical_to_the_d3_formula(self):
+        import hashlib
+
+        for source, external_id in [("lodgify", "lodgify_9001"), ("ical", "1418fb94e984-zq@example.org@airbnb.com"),
+                                    ("manual", "manual_ab12"), ("ical", "")]:
+            expected = hashlib.sha256(f"{source}|{external_id}".encode()).hexdigest()[:16]
+            assert bw.booking_key(source, external_id) == expected
+
+    def test_both_services_use_the_shared_helper(self):
+        import inspect
+
+        import mode_service.bookings as ms_bookings
+
+        assert "hashlib" not in inspect.getsource(ms_bookings)
+        internal_src = open("admin/backend/app/routes/internal.py").read()
+        assert "hashlib.sha256(f\"{source}|" not in internal_src
+        assert "booking_key(" in internal_src
