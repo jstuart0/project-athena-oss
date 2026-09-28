@@ -259,6 +259,18 @@ can actually start/stop/restart it: the Control Agent (host-gated — only
 when the row's host equals the Control Agent's own host), Kubernetes
 (opt-in, this section), or `none`. This section covers the Kubernetes half.
 
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERVICE_CONTROL_K8S_ENABLED` | `false` | Opt-in flag (`AthenaConfig.service_control_k8s_enabled`). Inert on its own — also requires `optional/admin-backend-rbac.yaml` and its automount patch file (steps 1 and 3 below). |
+
+A registry row only resolves to Kubernetes when its `host` reduces to a
+Deployment name: a bare RFC1123 label matching the Deployment's name
+exactly (**the Service name must equal the Deployment name** — this repo's
+manifests always pair a Service and Deployment under the same name, so
+this holds by construction, but a hand-edited manifest that names them
+differently will never resolve), or `<label>.<namespace>[.svc[.cluster.local]]`
+with the suffix stripped.
+
 ### Opt-in steps
 
 1. Apply the RBAC manifest (namespaced Role, not applied by a plain
@@ -280,9 +292,14 @@ when the row's host equals the Control Agent's own host), Kubernetes
    ```
 
 Without step 1 and step 3, the flag alone is inert: `GET /api/service-control`
-reports `kubernetes.available: false` with a `reason` (`not_in_cluster`,
-`no_service_account_token`, or `forbidden`), and the page shows a visible
-amber banner rather than silently doing nothing.
+reports `kubernetes.available: false` with a `reason`, and the page shows a
+visible amber banner rather than silently doing nothing:
+
+| Banner `reason` | Meaning | Fix |
+|---|---|---|
+| `not_in_cluster` | admin-backend isn't running inside a Kubernetes pod at all (`KUBERNETES_SERVICE_HOST` unset) — e.g. local dev, or a non-K8s deployment with the flag set by mistake. | Only meaningful inside the cluster; unset the flag outside it. |
+| `no_service_account_token` | In-cluster, but the pod has no mounted SA token (`automountServiceAccountToken: false`, the tracked default). | Apply step 3's patch file. |
+| `forbidden` | The API server rejected a request — the Role (step 1) isn't applied, doesn't cover this action, or the RoleBinding doesn't target the running SA. | Re-apply `admin-backend-rbac.yaml`; check `kubectl auth can-i` for the SA. |
 
 ### The exact Role, and why there's no `deployments` patch
 
@@ -325,6 +342,14 @@ The pre-stop replica count lives in `system_settings`
 (`service_control.replicas.<deployment>`, clamped 1-10 on read, a stored `0`
 is impossible by construction — `stop`/`restart` only remember when the
 current count is `> 0`).
+
+**Out-of-band scaling during a restart is overwritten**: if something else
+(`kubectl scale`, an HPA, a second operator) changes the replica count while
+a restart is in flight, the scale-back step still writes the count that was
+remembered *before* the restart started — the out-of-band change is
+silently lost. This is a known limitation of "remember, then restore"
+semantics; don't run a restart through this UI while also manually scaling
+the same Deployment.
 
 ### The cross-replica lease
 
@@ -381,6 +406,24 @@ control goes dark (visible amber banner, not a crash) until you do.
 ```bash
 OLLAMA_URL=http://ollama.gpu-workloads.svc.cluster.local:11434
 ```
+
+**Ollama URL write validation and runtime probes (ATHENA-118)**: `POST
+/api/settings/ollama-url` rejects a scheme other than `http`/`https`, a URL
+over 2048 characters, and a host that's IMDS/link-local/multicast/
+unspecified/`.svc`/`.cluster.local` — loopback is allowed only when the
+admin-backend process is itself running outside a Kubernetes pod. This
+write-boundary check runs **before** the save attempts a reachability
+probe, so a rejected URL never leaks a request to the attacker-controlled
+host first. Every runtime probe of the configured Ollama URL — this route's
+own reachability check, and every Ollama call `service_control.py` makes
+(`/api/version`, `/api/tags`, `/api/ps`, model load/unload) — additionally
+honors the same runtime SSRF allowlist as the health poller:
+`HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` must include the Ollama host before an
+RFC1918/loopback/ULA address is actually reached (otherwise the request is
+refused and the UI reports `ssrf_blocked`). **An in-cluster Ollama needs its
+Service's CIDR or hostname added to `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`**,
+the same as any other in-cluster Service (see "Service Registry Health
+Checks" above) — there is no separate allowlist for Ollama specifically.
 
 ### Redis
 
