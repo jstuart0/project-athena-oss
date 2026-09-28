@@ -12,9 +12,13 @@
 #     --patch-file manifests/athena-prod/optional/admin-backend-k8s-control.patch.yaml
 #
 # Scope, deliberately narrow (D7):
-#   - `deployments` get/list: read-only, namespace-wide (resourceNames
-#     cannot restrict `list`; Deployment specs carry no secret VALUES, only
+#   - `deployments` list: read-only, namespace-wide (resourceNames cannot
+#     restrict `list`; Deployment specs carry no secret VALUES, only
 #     secretKeyRef names, so this is metadata exposure, not a data leak).
+#     No `get` verb here -- the app only ever lists the collection
+#     (_gather_kubernetes_inventory) and reads/patches individual
+#     Deployments through the `deployments/scale` subresource below, which
+#     carries its own get/patch grant. codex diff review r1 Medium #6.
 #   - `deployments/scale` get/patch, resourceNames-scoped to the 30
 #     Deployments below (every Deployment in this directory's *.yaml files,
 #     minus athena-admin-backend and athena-admin-frontend, which the app
@@ -48,7 +52,7 @@ metadata:
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list"]
+    verbs: ["list"]
   - apiGroups: ["apps"]
     resources: ["deployments/scale"]
     verbs: ["get", "patch"]

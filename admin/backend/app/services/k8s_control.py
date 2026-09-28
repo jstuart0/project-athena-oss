@@ -86,6 +86,10 @@ class ScaleStatus:
 class ActionResult:
     success: bool
     message: str
+    # restart only: 'ok' (scale-back PATCH landed), 'skipped' (lease lost,
+    # scale-back deliberately not attempted), 'failed' (PATCH itself
+    # errored), or None for stop/start (codex diff review r1 Critical #3/#4)
+    scaleback: Optional[str] = None
 
 
 def _bracket_if_ipv6(host: str) -> str:
@@ -254,7 +258,13 @@ class K8sDeploymentClient:
             raise
         return ActionResult(success=True, message="started")
 
-    async def restart(self, name: str, remember: Callable[[int], None], recall: Callable[[], int]) -> ActionResult:
+    async def restart(
+        self,
+        name: str,
+        remember: Callable[[int], None],
+        recall: Callable[[], int],
+        still_owner: Optional[Callable[[], bool]] = None,
+    ) -> ActionResult:
         self._validate_name(name)
         scale = await self.get_scale(name)
         n = scale.spec_replicas
@@ -264,27 +274,52 @@ class K8sDeploymentClient:
         remember(n)
         await self.set_replicas(name, 0, resource_version=scale.resource_version)
 
+        settled = False
+        scaleback = 'ok'
         try:
             start_time = self._clock()
-            settled = False
             while (self._clock() - start_time) < self._wait_timeout:
                 await self._sleep_fn(self._poll_interval)
                 current = await self.get_scale(name)
                 if current.status_replicas == 0:
                     settled = True
                     break
-            if settled:
-                return ActionResult(success=True, message="restarted")
-            return ActionResult(
-                success=False,
-                message=f"pods did not terminate within {int(self._wait_timeout)}s; scaled back to {n}",
-            )
         finally:
             # D11: the scale-back MUST land regardless of how we got here
             # (timeout, exception, or the caller's task being cancelled).
             # asyncio.shield means a cancellation of the code awaiting this
-            # `finally` does not cancel the PATCH itself.
-            await asyncio.shield(self.set_replicas(name, n))
+            # `finally` does not cancel the PATCH itself. codex diff review
+            # r1 Critical #3: but ONLY when we still hold the lease -- if
+            # another replica has taken over (still_owner() false), a
+            # scale-back here would race and possibly resurrect a
+            # deployment the new holder already stopped on purpose.
+            if still_owner is not None and not still_owner():
+                scaleback = 'skipped'
+            else:
+                try:
+                    await asyncio.shield(self.set_replicas(name, n))
+                except Exception:  # noqa: BLE001 -- reported via scaleback, not re-raised
+                    scaleback = 'failed'
+
+        if scaleback == 'skipped':
+            return ActionResult(
+                success=False,
+                message="restart superseded by another admin-backend replica; scale-back skipped",
+                scaleback=scaleback,
+            )
+        if scaleback == 'failed':
+            return ActionResult(
+                success=False,
+                message=f"pods terminated but the scale-back to {n} replicas failed",
+                scaleback=scaleback,
+            )
+        if settled:
+            return ActionResult(success=True, message="restarted", scaleback=scaleback)
+        return ActionResult(
+            success=False,
+            message=f"pods did not terminate within {int(self._wait_timeout)}s; scaled back to {n}",
+            scaleback=scaleback,
+        )
 
 
 _client_cache: Optional[tuple] = None  # (client_or_None, reason_or_None)

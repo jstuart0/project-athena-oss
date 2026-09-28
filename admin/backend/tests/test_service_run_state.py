@@ -142,3 +142,31 @@ def test_normalized_health_status_never_polled_is_pending():
 
 def test_normalized_health_status_passes_through_real_value():
     assert normalized_health_status(True, "healthy") == "healthy"
+
+
+# ---------------------------------------------------------------------------
+# codex diff review r1 Medium #5: ServiceResponse was silently dropping
+# protocol/endpoint_url/health_status/health_message/last_response_time_ms
+# via `extra="ignore"` even though RagService.to_dict() already produces
+# them -- service-control.js's TCP-vs-HTTP row editor and health-status
+# rendering both read these fields from the envelope directly.
+# ---------------------------------------------------------------------------
+
+def test_envelope_carries_protocol_and_health_fields_for_a_tcp_row(client, db):
+    tcp_row = RagService(
+        name="redis-tcp", display_name="Redis", host="redis.athena-prod.svc",
+        port=6379, protocol="tcp", enabled=True, health_status="healthy",
+        health_message="tcp connect ok", last_response_time_ms=12,
+    )
+    db.add(tcp_row)
+    db.commit()
+
+    response = client.get("/api/service-control")
+    assert response.status_code == 200
+    row = next(r for r in response.json()["services"] if r["name"] == "redis-tcp")
+
+    assert row["protocol"] == "tcp"
+    assert row["health_status"] == "healthy"
+    assert row["health_message"] == "tcp connect ok"
+    assert row["last_response_time_ms"] == 12
+    assert row["endpoint_url"] is None

@@ -177,10 +177,16 @@ def test_unmanaged_row_returns_409_action_not_available(owner_client, db, unmana
 # ---------------------------------------------------------------------------
 
 def test_ca_docker_stop_dispatches_exactly_once_and_audits(owner_client, db, piper_row, monkeypatch):
+    # piper_row is service_type="infrastructure" -- codex diff review r1
+    # Critical #1 makes any non-rag CA-managed row critical (same fail-safe
+    # as the Kubernetes path), so this now requires the typed confirmation.
     transport = _ca_transport_for_piper(running=True)
     _patch_async_client(monkeypatch, transport)
 
-    response = owner_client.post(f"/api/service-control/{piper_row.name}/stop")
+    response = owner_client.post(
+        f"/api/service-control/{piper_row.name}/stop",
+        json={"confirm_name": "athena-piper-tts"},
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -205,7 +211,7 @@ def test_client_supplied_target_override_ignored(owner_client, db, piper_row, mo
 
     response = owner_client.post(
         f"/api/service-control/{piper_row.name}/stop",
-        json={"target": "athena-admin-backend"},
+        json={"target": "athena-admin-backend", "confirm_name": "athena-piper-tts"},
     )
 
     assert response.status_code == 200
@@ -224,7 +230,10 @@ def test_is_running_column_unchanged_after_stop(owner_client, db, piper_row, mon
     _patch_async_client(monkeypatch, transport)
 
     before = piper_row.is_running
-    response = owner_client.post(f"/api/service-control/{piper_row.name}/stop")
+    response = owner_client.post(
+        f"/api/service-control/{piper_row.name}/stop",
+        json={"confirm_name": "athena-piper-tts"},
+    )
     assert response.status_code == 200
 
     db.refresh(piper_row)
@@ -245,7 +254,10 @@ def test_audit_write_failure_does_not_break_the_response(owner_client, db, piper
     monkeypatch.setattr(db, "commit", _raise_commit)
 
     with structlog.testing.capture_logs() as logs:
-        response = owner_client.post(f"/api/service-control/{piper_row.name}/stop")
+        response = owner_client.post(
+            f"/api/service-control/{piper_row.name}/stop",
+            json={"confirm_name": "athena-piper-tts"},
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -262,7 +274,10 @@ def test_audit_old_value_is_pre_action_state(owner_client, db, piper_row, monkey
     transport = _ca_transport_for_piper(running=True)
     _patch_async_client(monkeypatch, transport)
 
-    response = owner_client.post(f"/api/service-control/{piper_row.name}/stop")
+    response = owner_client.post(
+        f"/api/service-control/{piper_row.name}/stop",
+        json={"confirm_name": "athena-piper-tts"},
+    )
     assert response.status_code == 200
 
     audit = db.query(AuditLog).filter(AuditLog.resource_id == piper_row.id).one()
@@ -601,16 +616,18 @@ async def test_k8s_target_collision_blocks_both_rows_in_envelope(db, test_user, 
 
     k8s_env({"athena-orchestrator": {"replicas": 2, "ready": 2}})
 
-    inv = await sm.gather_inventory(fresh=True)
-    permissions = test_user.get_permissions()
-    res1 = sm.resolve_manager(row1, inv, permissions)
-    res2 = sm.resolve_manager(row2, inv, permissions)
-    # Envelope-level collision handling lives in list_services; verify both
-    # rows resolve to the SAME target here (the precondition the envelope's
-    # collision check keys on).
-    assert res1.manager == "kubernetes"
-    assert res2.manager == "kubernetes"
-    assert res1.target == res2.target == "athena-orchestrator"
+    # codex diff review r1 Low #8: this test previously stopped at the
+    # precondition (both rows resolve to the same target) without ever
+    # calling the envelope the collision guard actually lives in --
+    # exercise GET /api/service-control (list_services) directly.
+    envelope = await service_control.list_services(None, db, test_user)
+    row1_out = next(r for r in envelope.services if r.name == "orchestrator-a")
+    row2_out = next(r for r in envelope.services if r.name == "orchestrator-b")
+
+    for row_out in (row1_out, row2_out):
+        assert row_out.manager_note is not None
+        assert row_out.manager_note.startswith("target_collision:")
+        assert row_out.actions == []
 
 
 # ---------------------------------------------------------------------------
@@ -766,3 +783,121 @@ async def test_k8s_stop_already_at_zero_is_idempotent_at_route_layer(db, test_us
     assert message == "already stopped"
     assert replicas_after == 0
     assert [r for r in transport.requests if r.method == "PATCH"] == []
+
+
+# ---------------------------------------------------------------------------
+# codex diff review r1 Critical #1 (route-level): a CA-managed row whose
+# group isn't 'rag' (piper_row is service_type="infrastructure") is now
+# critical -- an operator (write, no manage_infrastructure) gets 403
+# regardless of confirm_name; an owner without confirm_name gets 409
+# confirmation_required, never a bare 200.
+# ---------------------------------------------------------------------------
+
+def test_ca_docker_non_rag_row_operator_gets_403_insufficient_role(operator_client, db, piper_row, monkeypatch):
+    transport = _ca_transport_for_piper(running=True)
+    _patch_async_client(monkeypatch, transport)
+
+    response = operator_client.post(
+        f"/api/service-control/{piper_row.name}/stop",
+        json={"confirm_name": "athena-piper-tts"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["error"] == "insufficient_role"
+    # Inventory listing (process/list, docker/list) happens during
+    # resolution regardless -- the assertion that matters is that the
+    # actual MUTATING dispatch call never fires.
+    assert not any(r.url.path == "/docker/stop/athena-piper-tts" for r in transport.requests)
+
+
+def test_ca_docker_non_rag_row_owner_without_confirm_gets_409(owner_client, db, piper_row, monkeypatch):
+    transport = _ca_transport_for_piper(running=True)
+    _patch_async_client(monkeypatch, transport)
+
+    response = owner_client.post(f"/api/service-control/{piper_row.name}/stop")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "confirmation_required"
+    assert not any(r.url.path == "/docker/stop/athena-piper-tts" for r in transport.requests)
+
+
+# ---------------------------------------------------------------------------
+# codex diff review r1 Critical #3: lease-aware scale-back, route-layer
+# wiring (unit-level coverage of restart()'s own still_owner behavior lives
+# in test_k8s_control.py).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_restart_superseded_audits_distinctly_and_skips_scaleback(
+    db, test_user, tesla_row, k8s_env, monkeypatch
+):
+    transport = k8s_env({"athena-rag-tesla": {"replicas": 1, "ready": 1}})
+    monkeypatch.setattr(service_control, "still_holds_lease", lambda *a, **k: False)
+
+    success, message, replicas_after = await service_control._dispatch_kubernetes_action(
+        "athena-rag-tesla", "restart", db, test_user, None, tesla_row, {},
+    )
+
+    assert success is False
+    assert "superseded" in message
+    patch_calls = [r for r in transport.requests if r.method == "PATCH"]
+    assert len(patch_calls) == 1  # only the initial scale-to-0 -- no scale-back raced
+
+    rows = db.query(AuditLog).filter(
+        AuditLog.resource_id == tesla_row.id, AuditLog.error_message == "restart_superseded"
+    ).all()
+    assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# codex diff review r1 Critical #4: an explicit interrupted marker, since
+# releasing the lease in _dispatch_kubernetes_action's own finally means an
+# expired-lease check alone would never catch a scale-back PATCH failure.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_restart_scaleback_patch_failure_marks_interrupted_and_start_clears_it(
+    db, test_user, tesla_row, k8s_env, monkeypatch
+):
+    transport = k8s_env({"athena-rag-tesla": {"replicas": 1, "ready": 1}})
+    real_handler = transport.handler
+    patch_count = {"n": 0}
+
+    def _fail_second_patch(request):
+        if request.method == "PATCH":
+            patch_count["n"] += 1
+            if patch_count["n"] == 2:
+                return httpx.Response(500, json={})
+        return real_handler(request)
+
+    monkeypatch.setattr(kc, "_test_transport", httpx.MockTransport(_fail_second_patch))
+    kc._clear_client_cache()
+
+    success, message, replicas_after = await service_control._dispatch_kubernetes_action(
+        "athena-rag-tesla", "restart", db, test_user, None, tesla_row, {},
+    )
+    assert success is False
+    assert "scale-back" in message
+
+    from app.services.service_control_settings import read_interrupted
+
+    assert read_interrupted(db, "athena-rag-tesla") is True
+
+    sm._clear_inventory_cache()
+    envelope = await service_control.list_services(None, db, test_user)
+    row = next(r for r in envelope.services if r.name == "tesla-rag")
+    assert row.manager_note == "restart_interrupted"
+
+    # A successful start clears the marker (real handler, no more injected failure).
+    kc._clear_client_cache()
+    monkeypatch.setattr(kc, "_test_transport", httpx.MockTransport(real_handler))
+    body = service_control.ServiceActionRequest()
+    result = await service_control._run_action("tesla-rag", "start", body, None, db, test_user)
+    assert result.success is True
+
+    assert read_interrupted(db, "athena-rag-tesla") is False
+
+    sm._clear_inventory_cache()
+    envelope2 = await service_control.list_services(None, db, test_user)
+    row2 = next(r for r in envelope2.services if r.name == "tesla-rag")
+    assert row2.manager_note != "restart_interrupted"

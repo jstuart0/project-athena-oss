@@ -438,3 +438,80 @@ def test_k8s_kubernetes_unavailable_note_carries_reason():
     res = sm.resolve_manager(row, inv, {"read", "write"})
     assert res.manager == "none"
     assert res.note == "kubernetes_unavailable:forbidden"
+
+
+# ---------------------------------------------------------------------------
+# codex diff review r1 Critical #1: criticality follows the TARGET under
+# every manager, not just Kubernetes. A CA-managed docker/process row whose
+# group isn't 'rag' (the same fail-safe already applied to the k8s path)
+# must resolve critical=True, with confirm_name naming the resolved target.
+# ---------------------------------------------------------------------------
+
+def test_ca_docker_non_rag_row_is_critical_fail_safe():
+    row = _row(name="redis", host=CA_HOST, port=None, service_type="infrastructure", container_name="athena-redis")
+    inv = _inventory(containers=[{"name": "athena-redis", "running": True, "ports": []}])
+    res = sm.resolve_manager(row, inv, {"read", "write"})
+    assert res.manager == "control_agent"
+    assert res.kind == "docker"
+    assert res.critical is True
+    assert res.confirm_name == "athena-redis"
+    assert res.actions == []  # no manage_infrastructure in the passed permission set
+
+
+def test_ca_process_non_rag_row_is_critical_with_process_confirm_name():
+    row = _row(name="redis", host=CA_HOST, port=8010, service_type="infrastructure")
+    inv = _inventory(processes=[{"port": 8010, "running": True}])
+    res = sm.resolve_manager(row, inv, {"read", "write", "manage_infrastructure"})
+    assert res.manager == "control_agent"
+    assert res.kind == "process"
+    assert res.critical is True
+    assert res.confirm_name == "process:8010"
+    assert res.actions == ["stop", "restart"]  # gated actions ARE populated for an owner
+
+
+def test_ca_rag_row_stays_non_critical():
+    row = _row(name="athena-rag-weather", host=CA_HOST, port=None, container_name="athena-rag-weather", service_type="rag")
+    inv = _inventory(containers=[{"name": "athena-rag-weather", "running": True, "ports": []}])
+    res = sm.resolve_manager(row, inv, {"read", "write"})
+    assert res.manager == "control_agent"
+    assert res.critical is False
+    assert res.actions == ["stop", "restart"]  # ungated -- no owner permission needed
+
+
+# ---------------------------------------------------------------------------
+# codex diff review r1 Critical #2: a CA process/container occupying
+# Ollama's own port resolves kind='ollama' (critical=True) BEFORE the
+# generic process/docker branches, even when the row isn't literally named
+# 'ollama'.
+# ---------------------------------------------------------------------------
+
+def test_ca_process_on_ollama_port_resolves_ollama_kind_even_when_unnamed():
+    row = _row(name="local-llm", host=CA_HOST, port=11434, service_type="infrastructure")
+    inv = _inventory(processes=[{"port": 11434, "running": True}])
+    res = sm.resolve_manager(row, inv, {"read", "write"}, ollama_port=11434)
+    assert res.manager == "control_agent"
+    assert res.kind == "ollama"
+    assert res.critical is True
+    assert res.confirm_name == "ollama"
+
+
+def test_ca_container_on_ollama_port_resolves_ollama_kind_even_when_unnamed():
+    # Registry rows for a docker-managed service carry `port` set to the
+    # container's published port (matching every other docker-resolution
+    # fixture in this file) -- this is the row shape the ollama_port
+    # comparison is actually written against.
+    row = _row(name="local-llm", host=CA_HOST, port=11434, container_name="some-other-name", service_type="infrastructure")
+    inv = _inventory(containers=[{"name": "some-other-name", "running": True, "ports": ["11434:11434/tcp"]}])
+    res = sm.resolve_manager(row, inv, {"read", "write"}, ollama_port=11434)
+    assert res.manager == "control_agent"
+    assert res.kind == "ollama"
+    assert res.critical is True
+    assert res.confirm_name == "ollama"
+
+
+def test_ca_named_ollama_row_resolves_ollama_kind_without_port_hint():
+    row = _row(name="ollama", host=CA_HOST, port=11434, service_type="infrastructure")
+    inv = _inventory(processes=[{"port": 11434, "running": True}])
+    res = sm.resolve_manager(row, inv, {"read", "write"})  # no ollama_port passed
+    assert res.kind == "ollama"
+    assert res.critical is True

@@ -349,10 +349,24 @@ def _try_kubernetes(row: RagService, inv: Inventory, permissions: Set[str]) -> O
     return resolution
 
 
+def _get_ollama_port(db) -> Optional[int]:
+    """The configured Ollama URL's port, or None if it can't be read (e.g.
+    no db session available). Local import mirrors resolve_ollama_manager's
+    own trick to avoid a module-load cycle with app.routes.service_control."""
+    if db is None:
+        return None
+    from app.routes.service_control import get_ollama_url  # local import: avoid a module-load cycle
+    try:
+        return urlparse(get_ollama_url(db)).port
+    except Exception:  # noqa: BLE001 -- never let a port lookup break resolution
+        return None
+
+
 def resolve_manager(
     row: RagService,
     inv: Inventory,
     permissions: Optional[Set[str]] = None,
+    ollama_port: Optional[int] = None,
 ) -> ManagerResolution:
     """Resolve the manager for a single registry row (D4).
 
@@ -360,6 +374,15 @@ def resolve_manager(
     unreachability/docker-unavailability notes apply ONLY to rows whose
     host actually equals the CA host -- a non-CA row must still get a
     chance at Kubernetes resolution even when the CA happens to be down.
+
+    codex diff review r1 (Critical #1/#2): criticality must follow the
+    TARGET under every manager, not just Kubernetes -- a CA-managed
+    process/container resolving to a named-critical or non-`rag` row is
+    exactly as dangerous to stop/restart as a Kubernetes Deployment, and
+    Ollama specifically must be recognised (and forced critical) BEFORE the
+    generic process/docker branches, so a CA process/container that
+    happens to occupy Ollama's own port is never resolved as a
+    non-critical generic process/container.
     """
     permissions = permissions or set()
     ca = inv.control_agent
@@ -371,6 +394,40 @@ def resolve_manager(
             if not ca.reachable:
                 return ManagerResolution(manager='none', note='control_agent_unreachable')
 
+            is_ollama_row = bool(row.name and row.name.lower() == 'ollama') or (
+                ollama_port is not None and row.port == ollama_port
+            )
+            if is_ollama_row:
+                for proc in ca.processes:
+                    if proc.get('port') == row.port:
+                        running = bool(proc.get('running'))
+                        native_state = 'process running' if running else 'process stopped'
+                        native_actions = ['stop', 'restart'] if running else ['start']
+                        return _gate_for_user(
+                            'control_agent', 'ollama', str(row.port), native_state,
+                            native_actions, permissions, critical=True, confirm_name='ollama',
+                        )
+                for container in ca.containers:
+                    if (row.container_name and container.get('name') == row.container_name) or (
+                        row.port in _docker_host_published_port(container.get('ports'))
+                    ):
+                        running = bool(container.get('running'))
+                        native_state = 'container up' if running else 'container stopped'
+                        native_actions = ['stop', 'restart'] if running else ['start']
+                        return _gate_for_user(
+                            'control_agent', 'ollama', container.get('name'), native_state,
+                            native_actions, permissions, critical=True, confirm_name='ollama',
+                        )
+                return _gate_for_user(
+                    'control_agent', 'ollama', 'ollama', None,
+                    ['start', 'stop', 'restart'], permissions,
+                    critical=True, confirm_name='ollama',
+                )
+
+            critical = bool(row.name) and (
+                row.name.lower() in CRITICAL_DEPLOYMENTS or group_for(row) != 'rag'
+            )
+
             for proc in ca.processes:
                 if proc.get('port') == row.port:
                     running = bool(proc.get('running'))
@@ -378,7 +435,8 @@ def resolve_manager(
                     native_actions = ['stop', 'restart'] if running else ['start']
                     return _gate_for_user(
                         'control_agent', 'process', str(row.port), native_state,
-                        native_actions, permissions, critical=False, confirm_name=None,
+                        native_actions, permissions, critical=critical,
+                        confirm_name=f'process:{row.port}',
                     )
 
             if not ca.docker_available:
@@ -391,7 +449,8 @@ def resolve_manager(
                     native_actions = ['stop', 'restart'] if running else ['start']
                     return _gate_for_user(
                         'control_agent', 'docker', container.get('name'), native_state,
-                        native_actions, permissions, critical=False, confirm_name=None,
+                        native_actions, permissions, critical=critical,
+                        confirm_name=container.get('name'),
                     )
 
             for container in ca.containers:
@@ -401,15 +460,10 @@ def resolve_manager(
                     native_actions = ['stop', 'restart'] if running else ['start']
                     return _gate_for_user(
                         'control_agent', 'docker', container.get('name'), native_state,
-                        native_actions, permissions, critical=False, confirm_name=None,
+                        native_actions, permissions, critical=critical,
+                        confirm_name=container.get('name'),
                     )
 
-            if row.name and row.name.lower() == 'ollama':
-                return _gate_for_user(
-                    'control_agent', 'ollama', 'ollama', None,
-                    ['start', 'stop', 'restart'], permissions,
-                    critical=True, confirm_name='ollama',
-                )
             # CA host matched but nothing resolved inside -- deliberately
             # falls through to the generic terminal return below, not to
             # Kubernetes: a row whose host IS the CA's own host is never a
@@ -464,4 +518,11 @@ def resolve_ollama_manager(
     if matched is None:
         matched = RagService(name='ollama', host=parsed.hostname, port=ollama_port, enabled=True)
 
-    return resolve_manager(matched, inv, permissions=permissions), row_name
+    # Ollama is critical under every manager (bob r2 M3): the Control Agent
+    # branch above forces critical=True via the is_ollama_row check, and
+    # the Kubernetes branch's own fail-safe (label in CRITICAL_DEPLOYMENTS
+    # or group_for(row) != 'rag') is always true for an 'ollama'-named row
+    # (group_for never classifies it 'rag'), so no separate assertion is
+    # needed here -- asserted instead by test_service_control_ollama.py.
+    resolution = resolve_manager(matched, inv, permissions=permissions, ollama_port=ollama_port)
+    return resolution, row_name

@@ -779,3 +779,93 @@ async def test_gather_inventory_wrong_sa_forbidden_on_list(monkeypatch, tmp_path
     assert inv.available is False
     assert inv.reason == "forbidden"
     kc._clear_client_cache()
+
+
+# ---------------------------------------------------------------------------
+# codex diff review r1 Critical #3/#4: lease-aware scale-back.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_restart_lease_lost_mid_wait_skips_scaleback_patch(tmp_path):
+    """`still_owner` returning False right before the scale-back means
+    another admin-backend replica has taken over the lease -- the
+    scale-back PATCH must NOT be sent (it would race whatever replica B is
+    doing). Only the initial scale-to-0 PATCH is scripted; if restart()
+    tried to send a second PATCH the scripted transport would raise on an
+    exhausted script, failing the test."""
+    clock = _FakeClock()
+
+    async def sleep_and_advance(seconds):
+        clock.advance(seconds)
+
+    client, transport = _fake_token_client(
+        tmp_path,
+        [
+            ("GET", "/scale", 200, {"spec": {"replicas": 2}, "status": {"replicas": 2}, "metadata": {"resourceVersion": "rv-3"}}),
+            ("PATCH", "/scale", 200, {}),  # scale to 0
+            ("GET", "/scale", 200, {"spec": {"replicas": 0}, "status": {"replicas": 0}, "metadata": {"resourceVersion": "rv-4"}}),  # settled
+        ],
+        clock=clock, sleep_fn=sleep_and_advance,
+    )
+    result = await client.restart(
+        "athena-rag-tesla", remember=lambda n: None, recall=lambda: 2,
+        still_owner=lambda: False,
+    )
+
+    assert result.success is False
+    assert result.scaleback == "skipped"
+    patch_calls = [r for r in transport.requests if r.method == "PATCH"]
+    assert len(patch_calls) == 1  # only the initial scale-to-0 -- no scale-back
+
+
+@pytest.mark.asyncio
+async def test_restart_still_owner_true_scales_back_normally(tmp_path):
+    """The mirror-image positive control: still_owner() returning True
+    behaves exactly like the pre-existing (no still_owner passed) path."""
+    clock = _FakeClock()
+
+    async def sleep_and_advance(seconds):
+        clock.advance(seconds)
+
+    client, transport = _fake_token_client(
+        tmp_path,
+        [
+            ("GET", "/scale", 200, {"spec": {"replicas": 2}, "status": {"replicas": 2}, "metadata": {"resourceVersion": "rv-3"}}),
+            ("PATCH", "/scale", 200, {}),
+            ("GET", "/scale", 200, {"spec": {"replicas": 0}, "status": {"replicas": 0}, "metadata": {"resourceVersion": "rv-4"}}),
+            ("PATCH", "/scale", 200, {}),  # the scale-back
+        ],
+        clock=clock, sleep_fn=sleep_and_advance,
+    )
+    result = await client.restart(
+        "athena-rag-tesla", remember=lambda n: None, recall=lambda: 2,
+        still_owner=lambda: True,
+    )
+
+    assert result.success is True
+    assert result.scaleback == "ok"
+    assert len([r for r in transport.requests if r.method == "PATCH"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_restart_scaleback_patch_failure_reports_failed_not_raised(tmp_path):
+    clock = _FakeClock()
+
+    async def sleep_and_advance(seconds):
+        clock.advance(seconds)
+
+    client, transport = _fake_token_client(
+        tmp_path,
+        [
+            ("GET", "/scale", 200, {"spec": {"replicas": 2}, "status": {"replicas": 2}, "metadata": {"resourceVersion": "rv-3"}}),
+            ("PATCH", "/scale", 200, {}),  # scale to 0
+            ("GET", "/scale", 200, {"spec": {"replicas": 0}, "status": {"replicas": 0}, "metadata": {"resourceVersion": "rv-4"}}),  # settled
+            ("PATCH", "/scale", 500, {}),  # the scale-back PATCH itself fails
+        ],
+        clock=clock, sleep_fn=sleep_and_advance,
+    )
+    result = await client.restart("athena-rag-tesla", remember=lambda n: None, recall=lambda: 2)
+
+    assert result.success is False
+    assert result.scaleback == "failed"
+    assert "scale-back" in result.message

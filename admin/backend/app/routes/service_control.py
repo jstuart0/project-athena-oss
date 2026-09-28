@@ -32,6 +32,7 @@ from app.routes.services import create_audit_log
 from app.services.service_managers import (
     CONTROL_AGENT_URL,
     ManagerResolution,
+    _get_ollama_port,
     gather_inventory,
     group_for,
     resolve_manager,
@@ -41,11 +42,15 @@ from app.services.k8s_control import K8sControlError, get_k8s_client
 from app.services.service_control_settings import (
     LeaseBusy,
     acquire_lease,
+    clear_interrupted,
+    mark_interrupted,
+    read_interrupted,
     read_lease,
     lease_is_expired,
     recall_replicas,
     release_lease,
     remember_replicas,
+    still_holds_lease,
 )
 from shared.config import get_config
 
@@ -94,6 +99,16 @@ class ServiceResponse(BaseModel):
     last_error: Optional[str] = None
     auto_start: bool = True
     enabled: bool = True
+    # P4b (ruby H2): these already exist on RagService.to_dict() but were
+    # missing here, so `extra="ignore"` silently dropped them from the
+    # envelope -- the frontend's health-status rendering had nothing to
+    # read. Purely additive; every existing consumer of ServiceControlRow
+    # already tolerates unknown-but-present fields.
+    protocol: Optional[str] = None
+    endpoint_url: Optional[str] = None
+    health_status: Optional[str] = None
+    health_message: Optional[str] = None
+    last_response_time_ms: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -236,7 +251,7 @@ async def _run_action(
 
     inv = await gather_inventory(fresh=True)
     permissions = current_user.get_permissions()
-    resolution = resolve_manager(service, inv, permissions)
+    resolution = resolve_manager(service, inv, permissions, ollama_port=_get_ollama_port(db))
 
     return await _execute_resolved_action(action, body, request, db, current_user, resolution, service, permissions, inv=inv)
 
@@ -447,6 +462,9 @@ async def _dispatch_kubernetes_action(
         remembered['n'] = n
         return n
 
+    def _still_owner() -> bool:
+        return still_holds_lease(LEASE_SESSION_FACTORY, lease)
+
     try:
         if action == 'stop':
             result = await client.stop(deployment_name, remember=_remember)
@@ -454,11 +472,32 @@ async def _dispatch_kubernetes_action(
         elif action == 'start':
             result = await client.start(deployment_name, recall=_recall)
             replicas_after = remembered.get('n') if result.success else None
+            if result.success:
+                # codex diff review r1 Critical #4: the operator's recovery
+                # action succeeded, so the row stops reading as interrupted.
+                clear_interrupted(LEASE_SESSION_FACTORY, deployment_name)
         else:  # restart
-            result = await client.restart(deployment_name, remember=_remember, recall=_recall)
+            result = await client.restart(
+                deployment_name, remember=_remember, recall=_recall, still_owner=_still_owner,
+            )
             # D11: the scale-back always targets the remembered count,
             # regardless of whether the bounded wait settled or timed out.
             replicas_after = remembered.get('n')
+            if result.scaleback == 'skipped':
+                # codex diff review r1 Critical #3: another replica took
+                # over the lease mid-wait -- our own scale-back was
+                # deliberately not attempted, so B's own in-flight action
+                # is never raced. Audited distinctly from a plain failure.
+                _audit_lifecycle(
+                    db, current_user, request, f"service_{action}", service,
+                    old_value, {}, success=False, error_message='restart_superseded',
+                )
+            elif result.scaleback == 'failed':
+                # codex diff review r1 Critical #4: the lease was released
+                # (below, in this function's own finally) regardless of
+                # whether the scale-back PATCH landed, so restart_interrupted
+                # can't rely solely on an expired lease to catch this case.
+                mark_interrupted(LEASE_SESSION_FACTORY, deployment_name)
         return result.success, result.message, replicas_after
     except K8sControlError as exc:
         if exc.kind == 'forbidden':
@@ -490,8 +529,9 @@ async def list_services(
 
     inv = await gather_inventory(fresh=False)
     permissions = current_user.get_permissions()
+    ollama_port = _get_ollama_port(db)
 
-    resolutions = [(svc, resolve_manager(svc, inv, permissions)) for svc in services]
+    resolutions = [(svc, resolve_manager(svc, inv, permissions, ollama_port=ollama_port)) for svc in services]
 
     # D4.4: any Kubernetes target reached by >=2 rows (enabled or disabled)
     # blocks all of them, so an aliased row can't hijack a critical target.
@@ -508,14 +548,19 @@ async def list_services(
             # D11: an expired restart lease whose Deployment is stuck at 0
             # replicas means the admin-backend process died mid-wait --
             # surface it so an operator presses Start rather than assuming
-            # the service is just "stopped".
+            # the service is just "stopped". codex diff review r1 Critical
+            # #4: this alone misses the case where the scale-back PATCH
+            # failed (the lease is still released in _dispatch_kubernetes_
+            # action's own finally regardless), so an explicit marker in
+            # system_settings is checked too -- either signal is sufficient.
             lease_info = read_lease(db, resolution.target)
-            if (
+            lease_expired_mid_restart = bool(
                 lease_info
                 and lease_info.get('action') == 'restart'
                 and resolution.k8s_replicas == 0
                 and lease_is_expired(lease_info)
-            ):
+            )
+            if lease_expired_mid_restart or read_interrupted(db, resolution.target):
                 resolution.note = 'restart_interrupted'
 
         run_state = derive_run_state(svc.enabled, svc.health_status, resolution.k8s_replicas)

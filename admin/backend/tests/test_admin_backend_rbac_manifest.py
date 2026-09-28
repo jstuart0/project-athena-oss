@@ -81,7 +81,11 @@ def test_role_has_exactly_two_rules_correctly_shaped():
     deployments_rule = next(r for r in rules if r["resources"] == ["deployments"])
     scale_rule = next(r for r in rules if r["resources"] == ["deployments/scale"])
 
-    assert set(deployments_rule["verbs"]) == {"get", "list"}
+    # codex diff review r1 Medium #6: `get` on the base `deployments`
+    # resource is unused -- inventory only ever calls list_deployments()
+    # (the `list` verb), and per-Deployment reads/patches go through the
+    # `deployments/scale` subresource, which carries its own get/patch.
+    assert set(deployments_rule["verbs"]) == {"list"}
     assert "resourceNames" not in deployments_rule  # can't restrict list; not attempted
 
     assert set(scale_rule["verbs"]) == {"get", "patch"}

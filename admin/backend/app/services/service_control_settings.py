@@ -200,3 +200,60 @@ def lease_is_expired(lease_info: dict, now: Callable[[], datetime] = _utcnow) ->
         return datetime.fromisoformat(expires_at_str) <= now()
     except (TypeError, ValueError):
         return True
+
+
+def still_holds_lease(session_factory: Callable[[], Session], lease: Lease) -> bool:
+    """True iff `lease`'s exact value is still the one stored for its key --
+    i.e. no other replica has taken over since it was acquired (codex diff
+    review r1 Critical #3). Uses its own session, mirroring acquire/
+    release_lease, so this reads the current cross-replica truth rather
+    than a possibly-stale value from the caller's own request session."""
+    session = session_factory()
+    try:
+        row = session.query(SystemSetting).filter(SystemSetting.key == lease.key).first()
+        return row is not None and row.value == lease.value
+    finally:
+        session.close()
+
+
+def _interrupted_key(deployment: str) -> str:
+    return f"service_control.interrupted.{deployment}"
+
+
+def mark_interrupted(session_factory: Callable[[], Session], deployment: str) -> None:
+    """Persist an explicit 'this restart didn't complete its scale-back'
+    marker (codex diff review r1 Critical #4) -- set when the scale-back
+    PATCH itself fails, or when the lease was lost before the scale-back
+    could run. `restart_interrupted` must not depend SOLELY on an expired
+    lease: if the scale-back PATCH fails, release_lease still runs in the
+    dispatcher's own `finally`, so an expired-lease check alone would never
+    catch this case."""
+    key = _interrupted_key(deployment)
+    session = session_factory()
+    try:
+        existing = session.query(SystemSetting).filter(SystemSetting.key == key).first()
+        if existing is None:
+            session.add(SystemSetting(key=key, value="1", category=_CATEGORY))
+        else:
+            existing.value = "1"
+        session.commit()
+    finally:
+        session.close()
+
+
+def clear_interrupted(session_factory: Callable[[], Session], deployment: str) -> None:
+    """A successful `start` clears the marker -- the operator's recovery
+    action succeeded, so the row should stop reading as interrupted."""
+    key = _interrupted_key(deployment)
+    session = session_factory()
+    try:
+        session.query(SystemSetting).filter(SystemSetting.key == key).delete(synchronize_session=False)
+        session.commit()
+    finally:
+        session.close()
+
+
+def read_interrupted(db: Session, deployment: str) -> bool:
+    key = _interrupted_key(deployment)
+    row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+    return row is not None and row.value == "1"
