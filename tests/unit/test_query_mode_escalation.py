@@ -274,6 +274,43 @@ class TestPostGraphCheckSkippedWhenNodeRefused:
         # message was never substituted in).
         assert resp.json()["answer"] != "I'm sorry, that feature is not available in guest mode."
 
+    def test_early_return_response_validates_when_intent_blocked_without_node_refusal(self, client, monkeypatch):
+        """tessa's Pass C mutation review, item 3: the OTHER (non-M8) trigger
+        for the post-graph early-return -- an intent no node gates (TESLA is
+        documented as "owner mode only - blocked for guests") reaching
+        classification with error=None -- must still construct a valid
+        QueryResponse. Before this fix the branch passed model_used/
+        reasoning_path/node_timings/total_time (none are QueryResponse
+        fields) and omitted the required request_id/processing_time,
+        raising a pydantic ValidationError (surfaced by TestClient as a
+        raised exception, i.e. a 500) on every guest query hitting this
+        path -- not just under an M8-guard mutation."""
+        _install_mode_client(server_mode="guest")
+        graph = _FakeGraph({
+            "intent": SimpleNamespace(value="tesla"),
+            "error": None,
+            "node_timings": {"classify": 0.01},
+            "request_id": "req-tesla-1",
+        })
+        monkeypatch.setattr(_main_module, "orchestrator_graph", graph)
+
+        check_spy = mock.MagicMock(wraps=mode_permission.check_intent_permission)
+        monkeypatch.setattr(_main_module, "check_intent_permission", check_spy)
+
+        resp = client.post(
+            "/query",
+            json={"query": "is my tesla charged", "mode": "guest", "room": "kitchen"},
+            headers=_service_headers(),
+        )
+
+        assert resp.status_code == 200
+        check_spy.assert_called_once()
+        body = resp.json()
+        assert body["answer"] == "I'm sorry, that feature is not available in guest mode."
+        assert body["request_id"] == "req-tesla-1"
+        assert body["session_id"]
+        assert isinstance(body["processing_time"], float)
+
 
 class TestQueryPinBranchUsesTrustHelper:
     def test_query_pin_branch_uses_trust_helper(self, client, monkeypatch):

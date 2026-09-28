@@ -337,6 +337,40 @@ class TestActivateOwnerOverride:
         assert "Mode service unavailable" in msg
         assert data is None
 
+    @pytest.mark.parametrize("health_json", [{}, {"pin_authority": "old"}])
+    def test_owner_override_refused_when_mode_service_lacks_admin_pin_authority(self, health_json):
+        """D33 (tessa Pass C mutation review, High): a mode service that
+        hasn't yet reported pin_authority == "admin" (missing field, or an
+        older/other value) must refuse the override with zero calls to the
+        override endpoint -- never fall through and send the PIN to a mode
+        service that might still hash-compare it locally (pre-D25)."""
+        client = _install_mode_client(health_response=_make_response(200, health_json))
+
+        success, msg, data = _run(mode_permission.activate_owner_override(
+            "123456", caller_tier="household"
+        ))
+
+        assert success is False
+        assert data is None
+        assert "isn't available right now" in msg
+        client.post.assert_not_called()
+
+    def test_override_call_timeout_exceeds_admin_verify_timeout(self):
+        """D34 (tessa Pass C mutation review, High): the override POST's
+        timeout must stay ordered override(5.0) > mode-service-to-admin
+        verify(3.0, Pass D) > permission-fetch(2.5, mode_client default) --
+        a regression back to 2.5 must go red here."""
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"message": "Owner mode active."}
+        client = _install_mode_client(post_return=resp)
+
+        _run(mode_permission.activate_owner_override("123456", caller_tier="household"))
+
+        _, kwargs = client.post.call_args
+        assert kwargs["timeout"] == 5.0
+        assert kwargs["timeout"] > 3.0 > 2.5, "D34 timeout ordering: override > admin verify > permission fetch"
+
 
 # ---------------------------------------------------------------------------
 # check_intent_permission

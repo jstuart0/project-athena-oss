@@ -6725,11 +6725,13 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 answer="I'm sorry, that feature is not available in guest mode.",
                 intent=intent.value if hasattr(intent, "value") else str(intent),
                 confidence=1.0,
+                citations=[],
+                request_id=final_state.get("request_id")
+                or hashlib.md5(f"denied_{time.time()}".encode()).hexdigest()[:8],
                 session_id=session.session_id,
-                model_used="permission_check",
-                reasoning_path=["Permission check: Intent blocked in guest mode"],
-                node_timings=final_state.get("node_timings", {}),
-                total_time=time.time() - initial_state.start_time
+                processing_time=time.time() - initial_state.start_time,
+                metadata={"model_used": "permission_check", "reasoning_path": ["Permission check: Intent blocked in guest mode"]},
+                timings=final_state.get("node_timings", {}),
             )
 
         # Track permission check timing
