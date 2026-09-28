@@ -249,9 +249,10 @@ kubectl config current-context
 # namespace that already has house-specific values.
 # Prefer `./scripts/deploy.sh deploy` over this raw kubectl command: it
 # refuses (non-zero exit) if any manifest it is about to apply still
-# contains an unconfigured YOUR_REGISTRY/CONFIGURE_ME-class placeholder,
-# unless you pass --allow-placeholders (fresh, unconfigured namespace
-# only). The raw `kubectl apply -f` below has no such guard.
+# contains an unconfigured YOUR_*/CONFIGURE_ME*-class placeholder (image
+# registry, storage class, etc.), unless you pass --allow-placeholders
+# (fresh, unconfigured namespace only). The raw `kubectl apply -f` below
+# has no such guard.
 kubectl apply -f manifests/athena-prod/
 
 # Check deployment status

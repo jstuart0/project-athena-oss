@@ -191,3 +191,59 @@ def test_no_placeholders_deploys_cleanly_without_flag(tmp_path):
     assert "Refusing to deploy" not in combined
     assert "Deployment complete!" in combined
     assert kubectl_log.exists()
+
+
+# ---------------------------------------------------------------------------
+# codex diff-review High (2026-09-28): the fixture tests above prove the
+# guard's LOGIC works, but the guard is only as good as the pattern it
+# scans for -- manifests/athena-prod/ollama.yaml also ships
+# `storageClassName: YOUR_STORAGE_CLASS`, which the original
+# YOUR_REGISTRY|CONFIGURE_ME pattern never matched. This test runs the
+# REAL deploy.sh against the REAL, shipped manifests/athena-prod/
+# directory (no fixture substitution) and asserts it refuses -- proving
+# the guard actually covers the placeholder set this repo ships, not just
+# a fixture built to match whatever the guard happens to check today.
+# ---------------------------------------------------------------------------
+
+def test_guard_refuses_against_the_real_shipped_manifests():
+    assert (REPO_ROOT / "manifests" / "athena-prod" / "ollama.yaml").exists(), (
+        "sanity: this test must run against the real repo tree"
+    )
+
+    env = dict(os.environ)
+    kubectl_log = REPO_ROOT / "tests" / "unit" / ".tmp_kubectl_log_for_real_manifest_test"
+    if kubectl_log.exists():
+        kubectl_log.unlink()
+
+    bin_dir = kubectl_log.parent / ".tmp_bin_for_real_manifest_test"
+    bin_dir.mkdir(exist_ok=True)
+    kubectl_stub = bin_dir / "kubectl"
+    kubectl_stub.write_text(STUB_KUBECTL, encoding="utf-8")
+    kubectl_stub.chmod(kubectl_stub.stat().st_mode | stat.S_IEXEC)
+
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["KUBECTL_LOG"] = str(kubectl_log)
+    env.pop("REGISTRY", None)
+
+    try:
+        result = subprocess.run(
+            ["bash", str(DEPLOY_SH), "deploy"],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode != 0, combined
+        assert "Refusing to deploy" in combined
+        assert "YOUR_REGISTRY" in combined
+        assert "YOUR_STORAGE_CLASS" in combined, (
+            "the broadened YOUR_[A-Z_]+ pattern must catch ollama.yaml's "
+            "storageClassName placeholder, not just YOUR_REGISTRY"
+        )
+        assert not kubectl_log.exists(), "guard must fire before any kubectl call"
+    finally:
+        if kubectl_log.exists():
+            kubectl_log.unlink()
+        shutil.rmtree(bin_dir, ignore_errors=True)

@@ -28,13 +28,14 @@
 #                        namespace that already has house-specific values.
 #
 # Placeholder guard:
-#   manifests/athena-prod/*.yaml ship with unconfigured image references
-#   (YOUR_REGISTRY/...) and other CONFIGURE_ME-class placeholders. Applying
-#   them as-is against an already-running namespace overwrites live
-#   deployments with those placeholders and takes the namespace down. Before
-#   applying anything, deploy_manifests() scans every manifest file it is
-#   about to apply and refuses (non-zero exit) if any uncommented
-#   YOUR_REGISTRY or CONFIGURE_ME string remains. Pass --allow-placeholders to
+#   manifests/athena-prod/*.yaml ship with unconfigured values -- image
+#   references (YOUR_REGISTRY/...), storage classes (YOUR_STORAGE_CLASS),
+#   and other YOUR_*/CONFIGURE_ME*-class placeholders. Applying them as-is
+#   against an already-running namespace overwrites live deployments with
+#   those placeholders and takes the namespace down. Before applying
+#   anything, deploy_manifests() scans every manifest file it is about to
+#   apply and refuses (non-zero exit) if any uncommented YOUR_<ANYTHING> or
+#   CONFIGURE_ME<anything> string remains. Pass --allow-placeholders to
 #   bypass this on a fresh, unconfigured namespace only.
 #
 # Environment variables (or set in config.env):
@@ -152,7 +153,7 @@ check_manifest_placeholders() {
         [ -f "$path" ] || continue
         while IFS= read -r line; do
             [ -n "$line" ] && hits+=("$f: $line")
-        done < <(grep -vE '^[[:space:]]*#' "$path" | grep -E 'YOUR_REGISTRY|CONFIGURE_ME' || true)
+        done < <(grep -vE '^[[:space:]]*#' "$path" | grep -E 'YOUR_[A-Z_]+|CONFIGURE_ME[A-Z_]*' || true)
     done
 
     if [ "${#hits[@]}" -eq 0 ]; then
@@ -160,7 +161,7 @@ check_manifest_placeholders() {
     fi
 
     if [[ "$ALLOW_PLACEHOLDERS" == "true" ]]; then
-        log_warn "Manifests still contain unconfigured placeholders (YOUR_REGISTRY / CONFIGURE_ME)."
+        log_warn "Manifests still contain unconfigured placeholders (YOUR_* / CONFIGURE_ME*)."
         log_warn "Proceeding because --allow-placeholders was passed. This is safe ONLY against a fresh, unconfigured namespace."
         local hit
         for hit in "${hits[@]}"; do
@@ -169,7 +170,7 @@ check_manifest_placeholders() {
         return 0
     fi
 
-    log_error "Refusing to deploy: manifests still contain unconfigured placeholders (YOUR_REGISTRY / CONFIGURE_ME)."
+    log_error "Refusing to deploy: manifests still contain unconfigured placeholders (YOUR_* / CONFIGURE_ME*)."
     log_error "Applying these against an already-configured namespace will overwrite live images/config with placeholder defaults and take the namespace down."
     local hit
     for hit in "${hits[@]}"; do
