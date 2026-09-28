@@ -154,6 +154,10 @@ class SequenceExecutor:
         self.smart_controller = smart_controller
         self.ha_client = ensure_permission_enforcing(ha_client)
         self._running_sequences: Dict[str, asyncio.Task] = {}
+        # ATHENA-128 4.7: per-session step results for the admin/debug
+        # view -- includes refused_fanout entries the background branch
+        # has no other surface for.
+        self._last_results: Dict[str, List[Dict]] = {}
 
     async def execute_sequence(
         self,
@@ -204,7 +208,11 @@ class SequenceExecutor:
             return ack
         else:
             # Execute synchronously
-            await self._execute_sequence_steps(sequence, session_id)
+            step_results = await self._execute_sequence_steps(sequence, session_id)
+            refused = [r for r in step_results if r.get("status") == "refused_fanout"]
+            if refused:
+                skipped_text = " ".join(f"Skipped: {r['message']}" for r in refused)
+                return f"Sequence complete. {skipped_text}"
             return "Sequence complete."
 
     async def _execute_sequence_steps(
@@ -226,6 +234,9 @@ class SequenceExecutor:
         per call, defeating the latch).
         """
         from orchestrator.mode_permission import current_ha_scope, ha_permission_scope
+        from orchestrator import write_fanout
+
+        step_results: List[Dict] = []
 
         scope_cm = ha_permission_scope(None, mode="system") if current_ha_scope() is None else contextlib.nullcontext()
         with scope_cm:
@@ -242,8 +253,24 @@ class SequenceExecutor:
                             logger.info(f"Sequence step {step_num}/{total_steps}: waiting {wait_seconds}s until {at_time}")
                             await asyncio.sleep(wait_seconds)
 
-                    # Execute the action
-                    await self._execute_step(step, step_num, total_steps)
+                    # Execute the action. ATHENA-128 4.7: can_carry_pending
+                    # is False here (outside pending_carrier, D16), so a
+                    # fan-out block always returns the rewording refusal,
+                    # never a dangling "Should I go ahead?" prompt.
+                    result = await self._execute_step(step, step_num, total_steps)
+                    blk = write_fanout.take_block()
+                    if blk is not None:
+                        domains = sorted({w.domain for w in blk.writes})
+                        n = sum(len(w.entity_ids) for w in blk.writes)
+                        logger.warning(
+                            f"sequence_step_fanout_refused: step={step_num}/{total_steps} "
+                            f"domains={domains} n={n}"
+                        )
+                        step_results.append({
+                            "step": step_num,
+                            "status": "refused_fanout",
+                            "message": result,
+                        })
 
                     # Handle delay after action
                     delay_after = step.get('delay_after')
@@ -264,6 +291,10 @@ class SequenceExecutor:
             # Clean up
             if session_id and session_id in self._running_sequences:
                 del self._running_sequences[session_id]
+            if session_id:
+                self._last_results[session_id] = step_results
+
+        return step_results
 
     async def _execute_step(self, step: Dict, step_num: int, total_steps: int):
         """Execute a single sequence step."""
@@ -279,10 +310,13 @@ class SequenceExecutor:
         logger.info(f"Executing step {step_num}/{total_steps}: {action} on {device_type} in {room or entity_id}")
 
         if entity_id:
-            # Direct entity control
+            # Direct entity control -- single target, never fan-out gated.
             await self._execute_direct_action(entity_id, action, parameters)
+            return None
         else:
-            # Use smart controller for room-based control
+            # Use smart controller for room-based control. ATHENA-128 4.7:
+            # the result (a gate rewording, on a fan-out block) is
+            # returned instead of discarded.
             intent = {
                 'device_type': device_type,
                 'room': room,
@@ -291,7 +325,7 @@ class SequenceExecutor:
                 'parameters': parameters,
                 'color_description': parameters.get('color_description')
             }
-            await self.smart_controller.execute_intent(intent, self.ha_client)
+            return await self.smart_controller.execute_intent(intent, self.ha_client)
 
     async def _execute_direct_action(self, entity_id: str, action: str, parameters: Dict):
         """Execute action directly on an entity."""

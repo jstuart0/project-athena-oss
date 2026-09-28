@@ -388,7 +388,11 @@ class TestControlDeviceDomainsEqualHandlerWrites:
         "lock": "_handle_lock_intent",
         "fan": "_handle_fan_intent",
         "cover": "_handle_cover_intent",
-        "scene": "_handle_scene_intent",
+        # ATHENA-128 4.3: the good_night/leaving/morning/home fallback
+        # (light/lock domains) was extracted from _handle_scene_intent
+        # into _run_scene_fallback so it could be gated once at its top --
+        # the domain surface for "scene" now spans both functions.
+        "scene": ("_handle_scene_intent", "_run_scene_fallback"),
         "whole_house": "_execute_whole_house_command",
         "light": "_dispatch_light_or_room_command",
         "oven": "_handle_appliance_intent",
@@ -431,10 +435,14 @@ class TestControlDeviceDomainsEqualHandlerWrites:
     def test_control_device_domains_equal_handler_writes(self):
         funcs = _controller_functions()
         mismatches = {}
-        for device_type, handler_name in self._DEVICE_TYPE_TO_HANDLER.items():
-            node = funcs.get(handler_name)
-            assert node is not None, f"missing handler {handler_name}"
-            actual = self._literal_call_service_domains(node)
+        for device_type, handler_names in self._DEVICE_TYPE_TO_HANDLER.items():
+            if isinstance(handler_names, str):
+                handler_names = (handler_names,)
+            actual = set()
+            for handler_name in handler_names:
+                node = funcs.get(handler_name)
+                assert node is not None, f"missing handler {handler_name}"
+                actual |= self._literal_call_service_domains(node)
             expected = set(mp.CONTROL_DEVICE_DOMAINS.get(device_type, ()))
             if actual != expected:
                 mismatches[device_type] = (expected, actual)

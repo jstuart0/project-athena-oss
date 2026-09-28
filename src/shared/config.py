@@ -55,7 +55,7 @@ from __future__ import annotations
 import functools
 import logging
 
-from pydantic import Field, computed_field, field_validator
+from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from shared.admin_url import get_admin_url
@@ -529,6 +529,24 @@ class AthenaConfig(BaseSettings):
     #   bounds *joining* a room; it doesn't disconnect an already-connected
     #   participant.
     livekit_user_token_ttl_minutes: int = Field(default=30)
+
+    # ha_write_fanout_confirm_threshold / ha_write_fanout_hard_limit
+    #   (ATHENA-128, D7/D11): bounds on how many distinct HA entities a
+    #   single utterance may write without naming that scope explicitly.
+    #   0 disables the corresponding bound entirely (never confirm /
+    #   never hard-block on count alone). A non-zero hard_limit must be
+    #   >= threshold -- see the model_validator below.
+    ha_write_fanout_confirm_threshold: int = Field(default=6, ge=0)
+    ha_write_fanout_hard_limit: int = Field(default=18, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_fanout_limits(self) -> "AthenaConfig":
+        if 0 < self.ha_write_fanout_hard_limit < self.ha_write_fanout_confirm_threshold:
+            raise ValueError(
+                "ha_write_fanout_hard_limit must be >= ha_write_fanout_confirm_threshold "
+                "when non-zero (0 disables the hard limit)"
+            )
+        return self
 
     # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern
