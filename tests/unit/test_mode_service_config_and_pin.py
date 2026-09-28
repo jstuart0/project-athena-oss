@@ -23,6 +23,20 @@ from fastapi.testclient import TestClient
 
 from shared import config as config_module
 from shared.guest_policy import guest_baseline
+from shared.booking_window import Booking
+
+
+def _seed_admin_booking(ms, start, end, *, key="evt-1"):
+    """ATHENA-127: simulate a fresh, successful admin fetch with one active
+    booking, without going through BookingSources.refresh()'s HTTP path --
+    these tests only care about determine_mode()'s consumption of the
+    snapshot, not the fetch itself (that's test_mode_service_bookings.py)."""
+    state = ms.booking_sources._admin
+    state.last_good = [
+        Booking(id=1, key=key, source="admin", label=f"admin #1", start=start, end=end, is_test=False)
+    ]
+    state.last_success_at = time.monotonic()
+    state.last_attempt_ok = True
 
 _SERVICE_KEY = "test-mode-service-key"
 _HEADERS = {"X-Service-Key": _SERVICE_KEY}
@@ -70,7 +84,6 @@ def ms(_mode_service_env):
 
     ms_main.ADMIN_API_URL = "http://admin.test"
     ms_main.current_config = {}
-    ms_main.current_events = []
     ms_main.current_mode = "owner"
     ms_main.active_override = None
     ms_main._config_loaded = True
@@ -78,10 +91,19 @@ def ms(_mode_service_env):
     ms_main._config_loaded_at = None
     ms_main._service_key_warned = False
     ms_main._admin_http_client = None
+    # ATHENA-127: fresh booking-source state per test, and reset the
+    # module-level lazy admin-bookings client the same way _admin_http_client
+    # is reset above.
+    ms_main.booking_sources = ms_main.BookingSources()
+    import mode_service.bookings as ms_bookings
+    ms_bookings._bookings_http_client = None
     yield ms_main
     if ms_main._admin_http_client is not None:
         asyncio.run(ms_main._admin_http_client.aclose())
         ms_main._admin_http_client = None
+    if ms_bookings._bookings_http_client is not None:
+        asyncio.run(ms_bookings._bookings_http_client.aclose())
+        ms_bookings._bookings_http_client = None
 
 
 @pytest.fixture
@@ -172,11 +194,7 @@ class TestLastGoodConfig:
 class TestModeRecomputedPerRead:
     def test_disabling_guest_mode_returns_owner_without_restart(self, ms, client, monkeypatch):
         now = ms.datetime.now(ms.timezone.utc)
-        ms.current_events = [{
-            "uid": "evt-1", "summary": "Guest stay",
-            "dtstart": now - ms.timedelta(hours=1),
-            "dtend": now + ms.timedelta(hours=1),
-        }]
+        _seed_admin_booking(ms, now - ms.timedelta(hours=1), now + ms.timedelta(hours=1))
         ms.current_config = {"enabled": True, "buffer_before_checkin_hours": 0, "buffer_after_checkout_hours": 0}
         assert client.get("/mode", headers=_HEADERS).json()["mode"] == "guest"
 
@@ -202,11 +220,7 @@ class TestModeRecomputedPerRead:
 
     def test_admin_blip_during_booking_stays_guest(self, ms, client, monkeypatch):
         now = ms.datetime.now(ms.timezone.utc)
-        ms.current_events = [{
-            "uid": "evt-1", "summary": "Guest stay",
-            "dtstart": now - ms.timedelta(hours=1),
-            "dtend": now + ms.timedelta(hours=1),
-        }]
+        _seed_admin_booking(ms, now - ms.timedelta(hours=1), now + ms.timedelta(hours=1))
         ms.current_config = {"enabled": True, "buffer_before_checkin_hours": 0, "buffer_after_checkout_hours": 0}
         assert client.get("/mode", headers=_HEADERS).json()["mode"] == "guest"
 

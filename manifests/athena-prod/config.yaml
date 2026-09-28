@@ -49,9 +49,12 @@ data:
   # LOGIN_LOCKOUT_THRESHOLD: ""
   # LOGIN_MINIMUM_DELAY_MS: ""
   # LOGIN_RATE_LIMIT_PER_MINUTE: ""
+  # MODE_BOOKINGS_MAX_AGE_SECONDS: ""
+  # MODE_BOOKINGS_SOURCE: ""
   # MODE_OVERRIDE_LOCKOUT_MINUTES: ""
   # MODE_OVERRIDE_LOCKOUT_THRESHOLD: ""
   # MODE_SERVICE_INGRESS_AUTH: ""
+  # MODE_SERVICE_URL: ""
   # MUSIC_ASSISTANT_URL: ""
   # NEW_CONVERSATION_PER_MINUTE_PER_IP: ""
   # NEW_CONVERSATION_RESET_GRACE_SECONDS: ""
@@ -385,6 +388,35 @@ data:
   # holds no PIN state after D25. Defaults 5 and 30.
   # MODE_OVERRIDE_LOCKOUT_THRESHOLD: "5"
   # MODE_OVERRIDE_LOCKOUT_MINUTES: "30"
+
+  # MODE_BOOKINGS_SOURCE (ATHENA-127 D1): which booking source(s) the mode
+  # service reads to decide guest vs owner. "auto" (default, code default --
+  # left commented so a fresh install starts there): admin is required, the
+  # legacy CALENDAR_URL iCal feed (if the Guest Mode page has one set) is
+  # advisory-additive. "admin": admin only. "ical": the legacy iCal URL is
+  # the only, required, source.
+  # MODE_BOOKINGS_SOURCE: "auto"
+
+  # MODE_BOOKINGS_MAX_AGE_SECONDS (D6): how long a booking source's last
+  # successful fetch is trusted before it's classified "expired" (at which
+  # point the house goes degraded rather than trusting stale-forever data).
+  # Clamped at use to [max(300, 2x the iCal poll interval), 604800]. Default
+  # 21600 (6h). The runtime lever during an admin-backend outage (R2):
+  # `kubectl -n athena-prod set env deploy/athena-mode-service
+  # MODE_BOOKINGS_MAX_AGE_SECONDS=<n>` (this restarts the pod, so it only
+  # helps once the outage is already over -- the restart itself loses
+  # last-good state).
+  # MODE_BOOKINGS_MAX_AGE_SECONDS: "21600"
+
+  # Also note: DEFAULT_TIMEZONE (Personalization section above) governs how
+  # date-only and floating booking times are localised into real instants
+  # (D4/D5) for BOTH admin-backend's calendar sync and the mode service's
+  # own legacy-iCal parsing. Changing it requires restarting both
+  # deployments, then a re-sync (per-source or "Sync all" on the Calendar
+  # Sources page). The admin UI's mode-status panel (GET
+  # /api/guest-mode/mode-status) also needs HEALTH_POLL_ALLOWED_PRIVATE_HOSTS
+  # (Networking section) to cover the mode service's ClusterIP/CIDR, or it
+  # reports "ssrf_blocked" instead of the live mode.
 
   # OVERRIDE_MAX_TIMEOUT_MINUTES (ATHENA-69 Pass H2, xander delta review,
   # High): server-side ceiling on POST /mode/override's timeout_minutes,

@@ -64,11 +64,11 @@ def ms(_mode_service_env):
     from mode_service import main as ms_main
 
     ms_main.current_config = {}
-    ms_main.current_events = []
     ms_main.current_mode = "owner"
     ms_main.active_override = None
     ms_main._config_loaded = True
     ms_main._last_load_ok = True
+    ms_main.booking_sources = ms_main.BookingSources()
     return ms_main
 
 
