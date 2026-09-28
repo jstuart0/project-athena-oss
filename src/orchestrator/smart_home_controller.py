@@ -1385,7 +1385,7 @@ Number of lights to control: {light_count}{room_context}
 
 Return JSON with this structure:
 {{
-    "device_type": "light|switch|scene|climate|oven|fridge|freezer|sensor|media_player|bed_warmer|lock",
+    "device_type": "light|switch|scene|climate|oven|fridge|freezer|sensor|media_player|bed_warmer|lock|cover|fan",
     "room": "room name or null (use 'whole_house' for all rooms)",
     "excluded_rooms": ["list of rooms to exclude"] or null,
     "action": "turn_on|turn_off|set_color|set_brightness|set_temperature|set_level|get_status|play|pause|stop|warm_bed|increase|decrease|lock|unlock",
@@ -1413,7 +1413,7 @@ DEVICE TYPE DETECTION:
 - bed_warmer: bed warmer, mattress pad, bed heater, warm the bed, heated bed
 - lock: door lock, lock, unlock, front door lock, back door lock, deadbolt
 
-STATUS QUERIES: For questions like "what is", "what's", "check", "tell me about", use action "get_status".
+STATUS QUERIES: Questions about current state (e.g. "what is", "what's", "check", "tell me about", "is X on", "are the Y lights on or off", "is the door locked") are NEVER actions: always use action "get_status", even when the words on/off/lock/open appear. A question never turns anything on or off.
 
 For hs_colors: hue is 0-360 (red=0, green=120, blue=240), saturation is 0-100.
 IMPORTANT:
@@ -1429,7 +1429,12 @@ Examples:
 "what is the thermostat set to" -> {{"device_type": "climate", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
 "check the fridge temperature" -> {{"device_type": "fridge", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
 "is the oven on" -> {{"device_type": "oven", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
-"where is there motion" -> {{"device_type": "sensor", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"are the office lights on" -> {{"device_type": "light", "room": "office", "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"are the kitchen lights currently on or off" -> {{"device_type": "light", "room": "kitchen", "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"is the bedroom lamp off" -> {{"device_type": "light", "room": "bedroom", "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"is the hallway switch on" -> {{"device_type": "switch", "room": "hallway", "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"is the garage door open" -> {{"device_type": "cover", "room": "garage", "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"where is there motion" ->{{"device_type": "sensor", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
 "what's playing on the TV" -> {{"device_type": "media_player", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
 "turn on the office lights" -> {{"device_type": "light", "room": "office", "action": "turn_on", "target_scope": "group", "parameters": {{}}, "color_description": null}}
 "turn on all lights except the bedroom" -> {{"device_type": "light", "room": "whole_house", "excluded_rooms": ["bedroom"], "action": "turn_on", "target_scope": "group", "parameters": {{}}, "color_description": null}}
