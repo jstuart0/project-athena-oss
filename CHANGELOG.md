@@ -22,6 +22,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - RAG self-registration no longer overwrites a service registry row's host or type with `localhost`/`api` on startup — it now sends only the fields it owns, with an optional `SERVICE_REGISTRY_ENDPOINT_URL` env var available for an explicit endpoint. The registry upsert route treats endpoint-location fields as partial updates instead of requiring the full set on every call.
 - DEV_MODE's service registry seed types RAG rows as `rag`; previously every seeded row, including the RAG services, was typed `api`.
 - Service-control inventory cache is now invalidated even when releasing the action lease raises, instead of leaving a stale cache entry behind.
+- RAG self-registration now posts the `<name>-rag` registry name and a `host_label` hint, matching the convention seeded/renamed registry rows actually use — connectors registering with their bare short name (e.g. `weather`) were silently rejected with 422 and never landed in the registry. The upsert route now also matches an existing row by host when the posted name doesn't, so a registry row is never duplicated or renamed by a self-registration ping. A RAG connector's registration log now reports failure honestly instead of always claiming success.
 
 ---
 

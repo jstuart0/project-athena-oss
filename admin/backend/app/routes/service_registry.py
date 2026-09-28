@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -43,6 +44,13 @@ router = APIRouter(prefix="/api/service-registry", tags=["service-registry"])
 # Rejects names that could break out of single-quoted JS string literals.
 # (codex r2 M-5 / xander L-2)
 _SERVICE_NAME_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
+
+# Loose sanity check on host_label (ATHENA-108 follow-up): it is a match
+# key only -- never persisted -- but is still worth bounding so a caller
+# can't probe with pathological input. Hostnames may contain dots
+# (K8s DNS names never do, but this stays permissive rather than coupling
+# to that convention).
+_HOST_LABEL_RE = re.compile(r'^[a-zA-Z0-9_.-]{1,255}$')
 
 _WRITE_DEPS = [
     Depends(verify_service_or_oidc),
@@ -170,6 +178,7 @@ async def register_service(
     response: Response,
     db: Session = Depends(get_db),
     name: str = "",
+    host_label: Optional[str] = None,
     endpoint_url: str = "",
     display_name: Optional[str] = None,
     service_type: Optional[str] = None,
@@ -223,6 +232,15 @@ async def register_service(
     endpoint_url omitted. endpoint_url stays REQUIRED when creating a
     brand-new row (there is no prior host to fall back to), and unchanged
     for protocol='tcp', whose host/port validation is independent.
+
+    host_label (ATHENA-108 follow-up): shared.service_registry.
+    register_service() now derives `name` as "<connector>-rag" -- a value
+    that doesn't match a row seeded/renamed under a different convention
+    (e.g. a plain connector name whose host is "athena-rag-<connector>").
+    When no row matches `name`, host_label is used as a fallback lookup key
+    against the row's `host` column (case-insensitive). It is a match key
+    only -- never stored -- so a match-by-host still returns the row's own
+    `name`, not the caller's derived one.
     """
     if not name:
         raise HTTPException(status_code=422, detail="'name' query parameter is required")
@@ -234,8 +252,17 @@ async def register_service(
             status_code=422,
             detail="'name' must match ^[a-zA-Z0-9_-]{1,64}$",
         )
+    if host_label is not None and not _HOST_LABEL_RE.match(host_label):
+        raise HTTPException(
+            status_code=422,
+            detail="'host_label' must match ^[a-zA-Z0-9_.-]{1,255}$",
+        )
 
     existing = db.query(RagService).filter(RagService.name == name).first()
+    if existing is None and host_label:
+        existing = db.query(RagService).filter(
+            func.lower(RagService.host) == host_label.lower()
+        ).first()
 
     resolved_endpoint_url: Optional[str] = None
     parsed: Optional[Dict[str, Any]] = None
@@ -304,12 +331,21 @@ async def register_service(
         # Do NOT touch updated_at explicitly — let onupdate handle it so it only
         # advances on this config-change write.
         db.commit()
-        logger.info("service_registry_updated", service=name)
+        # Matched-by-host_label rows keep their own `name` (never renamed by
+        # this upsert) -- report the row that was actually touched, not the
+        # caller's derived name, so a mismatched match is never masked.
+        matched_name = existing.name
+        logger.info(
+            "service_registry_updated",
+            service=matched_name,
+            requested_name=name,
+            matched_by="host_label" if matched_name != name else "name",
+        )
         return {
-            'service': name,
+            'service': matched_name,
             'action': 'updated',
             'url': display_url,
-            'message': f"Service {name} has been updated",
+            'message': f"Service {matched_name} has been updated",
         }
     else:
         svc = RagService(

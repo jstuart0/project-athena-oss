@@ -34,8 +34,11 @@ async def lifespan(app: FastAPI):
 
     # Register in service registry
     try:
-        await register_service(SERVICE_NAME, SERVICE_PORT, "Flight tracking and airline information")
-        logger.info(f"Service registered: {SERVICE_NAME} on port {SERVICE_PORT}")
+        registered = await register_service(SERVICE_NAME, SERVICE_PORT, "Flight tracking and airline information")
+        if registered:
+            logger.info(f"Service registered: {SERVICE_NAME} on port {SERVICE_PORT}")
+        else:
+            logger.warning(f"Service registration failed: {SERVICE_NAME} on port {SERVICE_PORT}")
     except Exception as e:
         logger.error(f"Failed to register service: {e}")
 
