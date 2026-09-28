@@ -168,11 +168,15 @@ def test_ollama_routes_registered_before_generic_service_name_routes():
 
 
 def test_ollama_start_reaches_the_dedicated_handler_not_the_generic_dispatcher(owner_client, db, monkeypatch):
-    """No RagService row named 'ollama' exists in this DB. If /ollama/start
-    were shadowed by /{service_name}/start, _run_action's row lookup would
-    404. The dedicated handler never queries the registry at all, so it
-    must return 200 (CA disabled -> success=False, but still 200)."""
+    """No RagService row named 'ollama' exists in this DB, and no Control
+    Agent/Kubernetes manager is configured. If /ollama/start were shadowed
+    by /{service_name}/start, _run_action's row lookup would 404 (no
+    'ollama' registry row). Phase 3 routes /ollama/start through
+    resolve_ollama_manager instead (D12), which resolves the synthetic
+    Ollama row to manager='none' and refuses with 409
+    `ollama_not_manageable` -- a distinct signal from the 404 a shadowed
+    route would produce, proving the dedicated handler (not _run_action's
+    row-based dispatch) served this request."""
     response = owner_client.post("/api/service-control/ollama/start")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["service_name"] == "ollama"
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "ollama_not_manageable"

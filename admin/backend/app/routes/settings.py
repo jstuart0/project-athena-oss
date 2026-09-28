@@ -16,6 +16,8 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, Secret, SystemSetting
 from app.utils.encryption import encrypt_value, decrypt_value
+from app.utils.url_validators import validate_host, is_local_host
+from app.utils.rag_urls import check_ssrf_safe
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -805,6 +807,39 @@ class OllamaUrlResponse(BaseModel):
     error: Optional[str] = None
 
 
+def _validate_ollama_url_write(url: str) -> None:
+    """D21 write-boundary gate: same rules as validate_endpoint_url (scheme,
+    length, host SSRF blocklist), with one carve-out -- loopback is accepted
+    ONLY when the process is not in a K8s pod (is_local_host's own check),
+    so bare-metal local dev can still save http://localhost:11434.
+
+    Raises HTTPException(422) with the validator's message on failure.
+    """
+    if not url:
+        raise HTTPException(status_code=422, detail="ollama_url is required")
+    if len(url) > 2048:
+        raise HTTPException(status_code=422, detail="ollama_url exceeds 2048 characters")
+
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        raise HTTPException(status_code=422, detail=f"ollama_url scheme '{scheme}' is not allowed; use http or https")
+    try:
+        _ = parsed.port
+    except ValueError:
+        raise HTTPException(status_code=422, detail="ollama_url has a malformed authority")
+
+    hostname = parsed.hostname or ""
+    if hostname in ("localhost", "127.0.0.1", "::1") and is_local_host(hostname):
+        return
+
+    try:
+        validate_host(hostname)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
 @router.get("/ollama-url", response_model=OllamaUrlResponse)
 async def get_ollama_url(
     db: Session = Depends(get_db)
@@ -821,7 +856,6 @@ async def get_ollama_url(
         - version: Ollama version if reachable
     """
     import httpx
-    import os
 
     try:
         # Get from system_settings
@@ -832,20 +866,27 @@ async def get_ollama_url(
         # Fallback to environment variable if not in DB
         ollama_url = setting.value if setting else get_config().ollama_url
 
-        # Check if Ollama is reachable
+        # Check if Ollama is reachable (D21: SSRF gate before every probe --
+        # a stored value can be a pre-existing bad one, or the OLLAMA_URL
+        # env fallback, neither of which the write-time gate ever saw)
         is_reachable = False
         version = None
         error = None
 
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(f"{ollama_url}/api/version")
-                if response.status_code == 200:
-                    is_reachable = True
-                    data = response.json()
-                    version = data.get("version")
-        except Exception as e:
-            error = str(e)
+        version_url = f"{ollama_url}/api/version"
+        allowed, reason = await check_ssrf_safe(version_url)
+        if not allowed:
+            error = f"ssrf_blocked: {reason}"
+        else:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(version_url)
+                    if response.status_code == 200:
+                        is_reachable = True
+                        data = response.json()
+                        version = data.get("version")
+            except Exception as e:
+                error = str(e)
 
         return OllamaUrlResponse(
             ollama_url=ollama_url,
@@ -885,22 +926,31 @@ async def save_ollama_url(
 
     # Validate URL format
     url = settings.ollama_url.strip().rstrip('/')
-    if not url.startswith(('http://', 'https://')):
-        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
+    # D21: full SSRF write-boundary validation (scheme, length, host
+    # blocklist incl. IMDS/link-local/multicast/unspecified/.svc/
+    # .cluster.local, loopback allowed only outside a K8s pod) BEFORE the
+    # reachability test below -- a validator that ran second would still
+    # 422, but would leak a probe to the attacker-controlled host first.
+    _validate_ollama_url_write(url)
 
     try:
-        # Test connectivity before saving
+        # Test connectivity before saving (D21: SSRF gate first)
         is_reachable = False
         version = None
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(f"{url}/api/version")
-                if response.status_code == 200:
-                    is_reachable = True
-                    data = response.json()
-                    version = data.get("version")
-        except Exception as e:
-            logger.warning("ollama_url_not_reachable", url=url, error=str(e))
+        version_url = f"{url}/api/version"
+        allowed, reason = await check_ssrf_safe(version_url)
+        if not allowed:
+            logger.warning("ollama_url_reachability_test_ssrf_blocked", url=url, reason=reason)
+        else:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(version_url)
+                    if response.status_code == 200:
+                        is_reachable = True
+                        data = response.json()
+                        version = data.get("version")
+            except Exception as e:
+                logger.warning("ollama_url_not_reachable", url=url, error=str(e))
 
         # Save to system_settings
         setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()

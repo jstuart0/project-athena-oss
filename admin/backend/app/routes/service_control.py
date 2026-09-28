@@ -12,7 +12,8 @@ route through one audited `_run_action` core (D9/D10/D20).
 
 from datetime import datetime
 from typing import List, Optional, Tuple
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
+from urllib.parse import urlparse
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import structlog
@@ -25,6 +26,7 @@ from app.auth.oidc import get_current_user
 from app.utils.service_auth import control_agent_headers
 from app.utils.rate_limit import service_control_rate_limit_dep
 from app.utils.service_state import derive_run_state
+from app.utils.rag_urls import check_ssrf_safe
 from app.routes.service_registry import _SERVICE_NAME_RE
 from app.routes.services import create_audit_log
 from app.services.service_managers import (
@@ -33,6 +35,7 @@ from app.services.service_managers import (
     gather_inventory,
     group_for,
     resolve_manager,
+    resolve_ollama_manager,
 )
 from app.services.k8s_control import K8sControlError, get_k8s_client
 from app.services.service_control_settings import (
@@ -217,14 +220,10 @@ async def _run_action(
     db: Session,
     current_user: User,
 ) -> ServiceActionResponse:
-    """Shared lifecycle-action core for start/stop/restart (D9/D10/D20).
-
-    Order (mozart r3a amendment): permission -> name validation -> row
-    lookup -> resolution -> the manage_infrastructure gate for a critical
-    target (403, evaluated BEFORE action availability) -> action-not-
-    available (409, native/un-gated actions) -> typed confirm (409) ->
-    dispatch -> audit. Only steps at or after resolution write an audit row.
-    """
+    """Lifecycle-action core for the generic /{service_name}/{action}
+    routes (D9/D10/D20): permission -> name validation -> row lookup ->
+    resolution -> _execute_resolved_action (the shared post-resolution
+    core, also used by the Ollama routes, D12)."""
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
@@ -239,12 +238,89 @@ async def _run_action(
     permissions = current_user.get_permissions()
     resolution = resolve_manager(service, inv, permissions)
 
+    return await _execute_resolved_action(action, body, request, db, current_user, resolution, service, permissions, inv=inv)
+
+
+async def _run_ollama_action(
+    action: str,
+    body: ServiceActionRequest,
+    request: Optional[Request],
+    db: Session,
+    current_user: User,
+) -> ServiceActionResponse:
+    """Ollama lifecycle-action core (D12): resolves through
+    resolve_ollama_manager (CA-host-match / Kubernetes / synthetic row),
+    then shares the exact same post-resolution core as the generic
+    routes. `manager == 'none'` is refused with 409 `ollama_not_manageable`
+    rather than the generic `action_not_available` (D12), before any CA or
+    k8s call."""
+    if not current_user.has_permission('write'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    inv = await gather_inventory(fresh=True)
+    permissions = current_user.get_permissions()
+    resolution, row_name = resolve_ollama_manager(db, inv, permissions)
+    service = db.query(RagService).filter(RagService.name == row_name).first() if row_name else None
+
+    return await _execute_resolved_action(
+        action, body, request, db, current_user, resolution, service, permissions,
+        unmanaged_error='ollama_not_manageable', audit_name='ollama', inv=inv,
+    )
+
+
+def _kubernetes_target_counts(db: Session, inv, permissions: set) -> dict:
+    """D4.4: how many registry rows (enabled OR disabled) resolve to each
+    Kubernetes target. Shared by the envelope (list_services) and the
+    action core below, so a collision blocks both display AND dispatch --
+    xander P2 Medium #1 found that only the display side was guarded."""
+    counts: dict = {}
+    for svc in db.query(RagService).all():
+        res = resolve_manager(svc, inv, permissions)
+        if res.manager == 'kubernetes' and res.target:
+            counts[res.target] = counts.get(res.target, 0) + 1
+    return counts
+
+
+async def _execute_resolved_action(
+    action: str,
+    body: ServiceActionRequest,
+    request: Optional[Request],
+    db: Session,
+    current_user: User,
+    resolution: ManagerResolution,
+    service: Optional[RagService],
+    permissions: set,
+    unmanaged_error: Optional[str] = None,
+    audit_name: Optional[str] = None,
+    inv=None,
+) -> ServiceActionResponse:
+    """Shared post-resolution dispatch/audit core (D9/D10/D20/D12).
+
+    Order (mozart r3a amendment, xander P2 fix #1): the manage_infrastructure
+    gate for a critical target (403, evaluated BEFORE action availability) ->
+    target-collision (409, closes the dispatch-side gap the envelope's own
+    collision guard didn't cover) -> action-not-available (409, native/
+    un-gated actions) -> typed confirm (409) -> dispatch -> audit. Only
+    steps at or after resolution write an audit row. `unmanaged_error`
+    (e.g. Ollama's `ollama_not_manageable`) short-circuits with 409 before
+    the generic action-availability check when the manager is `none` --
+    distinct from a resolvable-but-currently-unavailable action.
+    """
+    name = audit_name or (service.name if service else "unknown")
+
     old_value = {
-        "run_state": derive_run_state(service.enabled, service.health_status, resolution.k8s_replicas),
-        "health_status": service.health_status,
+        "run_state": derive_run_state(service.enabled, service.health_status, resolution.k8s_replicas) if service else None,
+        "health_status": service.health_status if service else None,
         "native_state": resolution.native_state,
         "k8s_replicas": resolution.k8s_replicas,
     }
+
+    if unmanaged_error and resolution.manager == 'none':
+        _audit_lifecycle(
+            db, current_user, request, f"service_{action}", service,
+            old_value, {}, success=False, error_message=unmanaged_error,
+        )
+        raise HTTPException(status_code=409, detail={"error": unmanaged_error, "manager_note": resolution.note})
 
     if resolution.critical and 'manage_infrastructure' not in permissions:
         _audit_lifecycle(
@@ -252,6 +328,16 @@ async def _run_action(
             old_value, {}, success=False, error_message='insufficient_role',
         )
         raise HTTPException(status_code=403, detail={"error": "insufficient_role"})
+
+    if inv is not None and resolution.manager == 'kubernetes' and resolution.target:
+        target_counts = _kubernetes_target_counts(db, inv, permissions)
+        if target_counts.get(resolution.target, 0) > 1:
+            collision_note = f"target_collision:{resolution.target}"
+            _audit_lifecycle(
+                db, current_user, request, f"service_{action}", service,
+                old_value, {}, success=False, error_message=collision_note,
+            )
+            raise HTTPException(status_code=409, detail={"error": collision_note})
 
     if action not in resolution.native_actions:
         _audit_lifecycle(
@@ -272,18 +358,37 @@ async def _run_action(
 
     replicas_after = resolution.k8s_replicas
 
-    if resolution.kind == 'process':
-        success, message = await process_service_action(service.port, action)
-    elif resolution.kind == 'docker':
-        success, message = await docker_service_action(service.container_name, action)
-    elif resolution.kind == 'ollama':
-        success, message = await launchd_service_action("ollama", action)
-    elif resolution.kind == 'kubernetes':
-        success, message, replicas_after = await _dispatch_kubernetes_action(
-            resolution.target, action, db, current_user, request, service, old_value,
+    try:
+        if resolution.kind == 'process':
+            success, message = await process_service_action(int(resolution.target), action)
+        elif resolution.kind == 'docker':
+            success, message = await docker_service_action(resolution.target, action)
+        elif resolution.kind == 'ollama':
+            success, message = await launchd_service_action("ollama", action)
+        elif resolution.kind == 'kubernetes':
+            success, message, replicas_after = await _dispatch_kubernetes_action(
+                resolution.target, action, db, current_user, request, service, old_value,
+            )
+        else:
+            success, message = False, f"'{name}' is not managed by any control plane"
+    except HTTPException:
+        # A deliberate, already-audited refusal raised by nested dispatch
+        # code (e.g. _dispatch_kubernetes_action's 409 action_in_progress
+        # on lease contention) -- propagate as-is, never re-wrap as a 500.
+        raise
+    except Exception as exc:  # noqa: BLE001 -- xander P2 fix #2: any dispatch-time
+        # exception (token-file FileNotFoundError/OSError, a remember/
+        # recall DB error, a lease OperationalError, ...) must still audit
+        # and return a structured response, never a bare unaudited 500.
+        # _dispatch_kubernetes_action's own finally already released the
+        # lease regardless of exception type before this is reached.
+        error_kind = type(exc).__name__
+        logger.error("service_control_dispatch_failed", action=action, service=name, error_kind=error_kind)
+        _audit_lifecycle(
+            db, current_user, request, f"service_{action}", service,
+            old_value, {}, success=False, error_message=error_kind,
         )
-    else:
-        success, message = False, f"Service '{service.name}' is not managed by any control plane"
+        raise HTTPException(status_code=500, detail={"error": "dispatch_failed", "kind": error_kind})
 
     new_value = {
         "manager": resolution.manager,
@@ -294,10 +399,10 @@ async def _run_action(
     }
     _audit_lifecycle(db, current_user, request, f"service_{action}", service, old_value, new_value, success=success)
 
-    logger.info(f"service_{action}", service=service_name, success=success, user=current_user.username)
+    logger.info(f"service_{action}", service=name, success=success, user=current_user.username)
 
     return ServiceActionResponse(
-        service_name=service_name,
+        service_name=name,
         action=action,
         success=success,
         message=message,
@@ -310,7 +415,7 @@ async def _dispatch_kubernetes_action(
     db: Session,
     current_user: User,
     request: Optional[Request],
-    service: RagService,
+    service: Optional[RagService],
     old_value: dict,
 ) -> Tuple[bool, str, Optional[int]]:
     """Kubernetes dispatch (D11): acquires the cross-replica lease around
@@ -356,6 +461,11 @@ async def _dispatch_kubernetes_action(
             replicas_after = remembered.get('n')
         return result.success, result.message, replicas_after
     except K8sControlError as exc:
+        if exc.kind == 'forbidden':
+            return False, (
+                f"Not permitted by the cluster Role for deployment '{deployment_name}' "
+                "— see docs/CONFIGURATION.md § Service Control on Kubernetes"
+            ), None
         return False, f"Kubernetes API error ({exc.kind}): {exc.message}", None
     finally:
         release_lease(LEASE_SESSION_FACTORY, lease)
@@ -385,10 +495,9 @@ async def list_services(
 
     # D4.4: any Kubernetes target reached by >=2 rows (enabled or disabled)
     # blocks all of them, so an aliased row can't hijack a critical target.
-    target_counts: dict = {}
-    for _svc, resolution in resolutions:
-        if resolution.manager == 'kubernetes' and resolution.target:
-            target_counts[resolution.target] = target_counts.get(resolution.target, 0) + 1
+    # Shared with _execute_resolved_action so the dispatch side enforces
+    # the exact same collision the envelope displays (xander P2 fix #1).
+    target_counts = _kubernetes_target_counts(db, inv, permissions)
 
     rows = []
     running = stopped = disabled = 0
@@ -472,17 +581,12 @@ async def refresh_all_service_status(
     return {"message": "Health check refresh started", "status": "pending"}
 
 
-# ATHENA-118 mid-build fix (tessa P1, Medium #2): the literal /ollama/*
-# routes MUST be registered before the parametrized /{service_name}/*
-# routes below. Starlette matches routes in registration order, and
-# /{service_name}/start matches ANY first path segment -- including
-# "ollama" -- so if it were registered first, POST /ollama/start would be
-# silently swallowed by _run_action (dispatching against a RagService row
-# literally named "ollama", 404 if none exists) instead of ever reaching
-# the dedicated Ollama handlers below. Phase 3 rewrites these handlers to
-# go through _run_action explicitly (D12); until then, this ordering is
-# the only thing making them reachable at all. test_service_control_route_
-# parity.py pins this explicitly.
+# The literal /ollama/* routes MUST be registered before the parametrized
+# /{service_name}/* routes below. Starlette matches routes in registration
+# order, and /{service_name}/start matches ANY first path segment --
+# including "ollama" -- so if it were registered first, POST /ollama/start
+# would be silently swallowed by _run_action instead of ever reaching the
+# handlers below. test_service_control_route_parity.py pins this.
 class OllamaHealthResponse(BaseModel):
     healthy: bool
     status: str
@@ -491,6 +595,44 @@ class OllamaHealthResponse(BaseModel):
     version: Optional[str] = None
     timestamp: str
     host: Optional[str] = None
+    manager: str = "none"
+    manager_target: Optional[str] = None
+    manager_note: Optional[str] = None
+    native_actions: List[str] = []
+    allowed_actions: List[str] = []
+    confirm_required: bool = False
+    confirm_name: Optional[str] = None
+    row_name: Optional[str] = None
+
+
+def _ollama_health_response(
+    resolution: ManagerResolution,
+    row_name: Optional[str],
+    host: str,
+    *,
+    status: str,
+    api_reachable: bool,
+    models_loaded: int = 0,
+    version: Optional[str] = None,
+    manager_note: Optional[str] = None,
+) -> OllamaHealthResponse:
+    return OllamaHealthResponse(
+        healthy=status in ("healthy", "idle"),
+        status=status,
+        api_reachable=api_reachable,
+        models_loaded=models_loaded,
+        version=version,
+        timestamp=datetime.utcnow().isoformat(),
+        host=host,
+        manager=resolution.manager,
+        manager_target=resolution.target,
+        manager_note=manager_note if manager_note is not None else resolution.note,
+        native_actions=resolution.native_actions,
+        allowed_actions=resolution.actions,
+        confirm_required=resolution.confirm_required,
+        confirm_name=resolution.confirm_name,
+        row_name=row_name,
+    )
 
 
 @router.get("/ollama/health", response_model=OllamaHealthResponse)
@@ -498,125 +640,87 @@ async def get_ollama_health(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Get Ollama health status via Control Agent.
-
-    Returns actual API reachability, not just brew services status.
-    """
+    """Get Ollama health status via a direct probe of the resolved Ollama
+    URL (D12) -- no Control Agent call. Controls (manager/actions/confirm)
+    come from resolve_ollama_manager, the same resolver every other row
+    uses (D4/D9/D20)."""
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    if not get_config().control_agent_enabled:
-        return OllamaHealthResponse(
-            healthy=False,
-            status="control_agent_disabled",
-            api_reachable=False,
-            models_loaded=0,
-            version=None,
-            timestamp=datetime.utcnow().isoformat(),
-            host=None,
-        )
 
-    # Get centralized Ollama URL for display
     ollama_url = get_ollama_url(db)
+    host = urlparse(ollama_url).netloc or ollama_url
+
+    inv = await gather_inventory(fresh=False)
+    permissions = current_user.get_permissions()
+    resolution, row_name = resolve_ollama_manager(db, inv, permissions)
+
+    version_url = f"{ollama_url}/api/version"
+    allowed, reason = await check_ssrf_safe(version_url)
+    if not allowed:
+        return _ollama_health_response(
+            resolution, row_name, host,
+            status="ssrf_blocked", api_reachable=False, manager_note=reason,
+        )
 
     try:
-        async with httpx.AsyncClient(timeout=10.0, headers=control_agent_headers()) as client:
-            response = await client.get(f"{CONTROL_AGENT_URL}/ollama/health")
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            version_response = await client.get(version_url)
+            if version_response.status_code != 200:
+                return _ollama_health_response(resolution, row_name, host, status="offline", api_reachable=False)
+            version = version_response.json().get("version")
 
-            if response.status_code == 200:
-                data = response.json()
-                data['host'] = ollama_url
-                return OllamaHealthResponse(**data)
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail="Control Agent error"
-                )
+            ps_url = f"{ollama_url}/api/ps"
+            allowed_ps, _reason_ps = await check_ssrf_safe(ps_url)
+            models_loaded = 0
+            if allowed_ps:
+                ps_response = await client.get(ps_url)
+                if ps_response.status_code == 200:
+                    models_loaded = len(ps_response.json().get("models", []))
 
-    except httpx.ConnectError:
-        # Control Agent not reachable - return unhealthy status
-        from datetime import datetime
-        return OllamaHealthResponse(
-            healthy=False,
-            status="control_agent_offline",
-            api_reachable=False,
-            models_loaded=0,
-            version=None,
-            timestamp=datetime.utcnow().isoformat(),
-            host=ollama_url
+        status = "healthy" if models_loaded > 0 else "idle"
+        return _ollama_health_response(
+            resolution, row_name, host,
+            status=status, api_reachable=True, models_loaded=models_loaded, version=version,
         )
+
+    except (httpx.ConnectError, httpx.TimeoutException):
+        return _ollama_health_response(resolution, row_name, host, status="offline", api_reachable=False)
     except Exception as e:
         logger.error("ollama_health_check_failed", error=str(e))
-        from datetime import datetime
-        return OllamaHealthResponse(
-            healthy=False,
-            status="error",
-            api_reachable=False,
-            models_loaded=0,
-            version=None,
-            timestamp=datetime.utcnow().isoformat(),
-            host=ollama_url
-        )
+        return _ollama_health_response(resolution, row_name, host, status="error", api_reachable=False)
 
 
 @router.post("/ollama/start", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
 async def start_ollama(
-    current_user: User = Depends(get_current_user)
+    request: Request,
+    body: Optional[ServiceActionRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """Start Ollama service via Control Agent."""
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    success, message = await launchd_service_action("ollama", "start")
-
-    logger.info("ollama_start", success=success, user=current_user.username)
-
-    return ServiceActionResponse(
-        service_name="ollama",
-        action="start",
-        success=success,
-        message=message
-    )
+    """Start Ollama, dispatched through resolve_ollama_manager (D12)."""
+    return await _run_ollama_action("start", body or ServiceActionRequest(), request, db, current_user)
 
 
 @router.post("/ollama/stop", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
 async def stop_ollama(
-    current_user: User = Depends(get_current_user)
+    request: Request,
+    body: Optional[ServiceActionRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """Stop Ollama service via Control Agent."""
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    success, message = await launchd_service_action("ollama", "stop")
-
-    logger.info("ollama_stop", success=success, user=current_user.username)
-
-    return ServiceActionResponse(
-        service_name="ollama",
-        action="stop",
-        success=success,
-        message=message
-    )
+    """Stop Ollama, dispatched through resolve_ollama_manager (D12)."""
+    return await _run_ollama_action("stop", body or ServiceActionRequest(), request, db, current_user)
 
 
 @router.post("/ollama/restart", response_model=ServiceActionResponse, dependencies=[Depends(service_control_rate_limit_dep)])
 async def restart_ollama(
-    current_user: User = Depends(get_current_user)
+    request: Request,
+    body: Optional[ServiceActionRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """Restart Ollama service via Control Agent."""
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    success, message = await launchd_service_action("ollama", "restart")
-
-    logger.info("ollama_restart", success=success, user=current_user.username)
-
-    return ServiceActionResponse(
-        service_name="ollama",
-        action="restart",
-        success=success,
-        message=message
-    )
+    """Restart Ollama, dispatched through resolve_ollama_manager (D12)."""
+    return await _run_ollama_action("restart", body or ServiceActionRequest(), request, db, current_user)
 
 
 @router.post("/{service_name}/start", response_model=ServiceActionResponse)
@@ -698,42 +802,58 @@ async def get_containers_status(
 # Ollama Model Control Routes
 @router.get("/ollama/models", response_model=List[OllamaModelResponse])
 async def list_ollama_models(
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """List all models available in Ollama."""
+    """List all models available in Ollama (D21 SSRF gate on both calls;
+    D12 timeout 10s). A /api/tags failure is a hard 502 -- there's no
+    model list to render. A /api/ps failure alone degrades to every model
+    reporting loaded=False, flagged via a response header rather than
+    failing the whole request -- the model list itself is still real."""
     if not current_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # Use centralized Ollama URL from system_settings
     ollama_url = get_ollama_url(db)
+    tags_url = f"{ollama_url}/api/tags"
+
+    allowed, reason = await check_ssrf_safe(tags_url)
+    if not allowed:
+        raise HTTPException(status_code=403, detail={"error": "ssrf_blocked", "reason": reason})
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Get available models
-            tags_response = await client.get(f"{ollama_url}/api/tags")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            tags_response = await client.get(tags_url)
             tags_response.raise_for_status()
             available = tags_response.json().get("models", [])
-
-            # Get currently loaded models
-            ps_response = await client.get(f"{ollama_url}/api/ps")
-            ps_response.raise_for_status()
-            loaded_models = [m["name"] for m in ps_response.json().get("models", [])]
-
-        models = []
-        for model in available:
-            models.append(OllamaModelResponse(
-                name=model["name"],
-                size=model.get("size", 0),
-                loaded=model["name"] in loaded_models,
-                modified_at=model.get("modified_at", "")
-            ))
-
-        return models
-
     except Exception as e:
         logger.error("ollama_models_list_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
+        raise HTTPException(status_code=502, detail={"error": "models_endpoint_unreachable", "reason": str(e)})
+
+    loaded_models: List[str] = []
+    ps_url = f"{ollama_url}/api/ps"
+    ps_allowed, _ps_reason = await check_ssrf_safe(ps_url)
+    if ps_allowed:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                ps_response = await client.get(ps_url)
+                ps_response.raise_for_status()
+                loaded_models = [m["name"] for m in ps_response.json().get("models", [])]
+        except Exception as e:
+            logger.warning("ollama_ps_failed_degrading", error=str(e))
+            response.headers["X-Athena-Ollama-Ps"] = "unavailable"
+    else:
+        response.headers["X-Athena-Ollama-Ps"] = "unavailable"
+
+    return [
+        OllamaModelResponse(
+            name=model["name"],
+            size=model.get("size", 0),
+            loaded=model["name"] in loaded_models,
+            modified_at=model.get("modified_at", ""),
+        )
+        for model in available
+    ]
 
 
 @router.post(
@@ -750,14 +870,21 @@ async def load_ollama_model(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # Use centralized Ollama URL from system_settings
     ollama_url = get_ollama_url(db)
+    generate_url = f"{ollama_url}/api/generate"
+
+    allowed, reason = await check_ssrf_safe(generate_url)
+    if not allowed:
+        return ModelActionResponse(
+            model_name=model_name, action="load", success=False,
+            message=f"Blocked by SSRF guard: {reason}",
+        )
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             # Send a simple generate request to load the model
             response = await client.post(
-                f"{ollama_url}/api/generate",
+                generate_url,
                 json={"model": model_name, "prompt": "hello", "stream": False}
             )
             response.raise_for_status()
@@ -795,14 +922,21 @@ async def unload_ollama_model(
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # Use centralized Ollama URL from system_settings
     ollama_url = get_ollama_url(db)
+    generate_url = f"{ollama_url}/api/generate"
+
+    allowed, reason = await check_ssrf_safe(generate_url)
+    if not allowed:
+        return ModelActionResponse(
+            model_name=model_name, action="unload", success=False,
+            message=f"Blocked by SSRF guard: {reason}",
+        )
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Ollama unloads via generate with keep_alive=0
             response = await client.post(
-                f"{ollama_url}/api/generate",
+                generate_url,
                 json={"model": model_name, "prompt": "", "keep_alive": 0}
             )
             response.raise_for_status()

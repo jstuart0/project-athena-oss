@@ -390,9 +390,10 @@ async def test_ollama_kind_owner_correct_confirm_value_proceeds(db, test_user, o
 # ---------------------------------------------------------------------------
 
 import json as _json  # noqa: E402
+from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone  # noqa: E402
 
 from app.services import k8s_control as kc  # noqa: E402
-from app.services.service_control_settings import acquire_lease, release_lease  # noqa: E402
+from app.services.service_control_settings import acquire_lease, release_lease, remember_replicas  # noqa: E402
 from tests.conftest import TestingSessionLocal  # noqa: E402
 
 
@@ -610,3 +611,158 @@ async def test_k8s_target_collision_blocks_both_rows_in_envelope(db, test_user, 
     assert res1.manager == "kubernetes"
     assert res2.manager == "kubernetes"
     assert res1.target == res2.target == "athena-orchestrator"
+
+
+# ---------------------------------------------------------------------------
+# xander P2 review, Medium #1: the D4.4 collision guard was envelope-only --
+# _run_action resolved a single row fresh and would have dispatched anyway.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_k8s_target_collision_blocks_dispatch_not_just_the_envelope(db, test_user, k8s_env):
+    row1 = RagService(
+        name="tesla-a", display_name="Tesla A", host="athena-rag-tesla",
+        port=None, service_type="rag", enabled=True,
+    )
+    row2 = RagService(
+        name="tesla-b", display_name="Tesla B", host="athena-rag-tesla.athena-prod.svc",
+        port=None, service_type="rag", enabled=True,
+    )
+    db.add_all([row1, row2])
+    db.commit()
+
+    transport = k8s_env({"athena-rag-tesla": {"replicas": 1, "ready": 1}})
+    body = service_control.ServiceActionRequest()
+
+    for row_name in ("tesla-a", "tesla-b"):
+        with pytest.raises(HTTPException) as exc_info:
+            await service_control._run_action(row_name, "stop", body, None, db, test_user)
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail["error"] == "target_collision:athena-rag-tesla"
+
+    assert [r for r in transport.requests if r.method == "PATCH"] == []
+    rows = db.query(AuditLog).all()
+    assert len(rows) == 2
+    assert all(r.success is False and r.error_message == "target_collision:athena-rag-tesla" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# xander P2 review, Medium #2: a non-K8sControlError exception escaping
+# dispatch (token file I/O, a remember/recall DB error, a lease OperationalError)
+# must still audit and return a structured response, never a bare 500.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_dispatch_exception_is_audited_and_returns_structured_500(db, test_user, tesla_row, k8s_env, monkeypatch):
+    k8s_env({"athena-rag-tesla": {"replicas": 1, "ready": 1}})
+
+    # Succeeds for the FIRST call (gather_inventory's list_deployments, used
+    # for resolution) so the row still resolves manager='kubernetes'; fails
+    # from the second call onward (inside dispatch itself) -- isolating the
+    # exception to the dispatch phase this test targets, not resolution.
+    call_count = {"n": 0}
+
+    def _flaky_read_token(self):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return "tok-k8s"
+        raise FileNotFoundError("token file vanished mid-request")
+
+    monkeypatch.setattr(kc.K8sDeploymentClient, "_read_token", _flaky_read_token)
+
+    body = service_control.ServiceActionRequest()
+    with pytest.raises(HTTPException) as exc_info:
+        await service_control._run_action("tesla-rag", "stop", body, None, db, test_user)
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == {"error": "dispatch_failed", "kind": "FileNotFoundError"}
+
+    rows = db.query(AuditLog).filter(AuditLog.resource_id == tesla_row.id).all()
+    assert len(rows) == 1
+    assert rows[0].success is False
+    assert rows[0].error_message == "FileNotFoundError"
+    assert "token file vanished" not in (rows[0].error_message or "")  # never str(exc), only the type name
+
+    # The lease was released despite the exception (its own finally ran).
+    from app.services.service_control_settings import read_lease
+    assert read_lease(db, "athena-rag-tesla") is None
+
+
+# ---------------------------------------------------------------------------
+# xander P2 review, Low #4: the documented forbidden-RBAC message.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_k8s_forbidden_error_has_the_documented_message(db, test_user, tesla_row, k8s_env, monkeypatch):
+    transport = k8s_env({"athena-rag-tesla": {"replicas": 1, "ready": 1}})
+
+    real_handler = transport.handler
+
+    def _forbidden_handler(request):
+        if request.method == "PATCH":
+            return httpx.Response(403, json={})
+        return real_handler(request)
+
+    transport.handler = _forbidden_handler
+    monkeypatch.setattr(kc, "_test_transport", httpx.MockTransport(transport.handler))
+    kc._clear_client_cache()
+
+    body = service_control.ServiceActionRequest()
+    result = await service_control._run_action("tesla-rag", "stop", body, None, db, test_user)
+
+    assert result.success is False
+    assert "Not permitted by the cluster Role for deployment 'athena-rag-tesla'" in result.message
+    assert "docs/CONFIGURATION.md" in result.message
+
+
+# ---------------------------------------------------------------------------
+# tessa P2 mid-build Medium: restart_interrupted had zero coverage.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_restart_interrupted_marker_shows_and_clears_after_start(db, test_user, tesla_row, k8s_env):
+    k8s_env({"athena-rag-tesla": {"replicas": 0, "ready": 0}})
+
+    remember_replicas(db, "athena-rag-tesla", 3)
+    past = _datetime.now(_timezone.utc) - _timedelta(seconds=200)
+    acquire_lease(
+        TestingSessionLocal, "athena-rag-tesla", "restart", target_replicas=0,
+        ttl=1, now=lambda: past,
+    )  # already expired relative to real now()
+
+    envelope = await service_control.list_services(None, db, test_user)
+    row = next(r for r in envelope.services if r.name == "tesla-rag")
+    assert row.manager_note == "restart_interrupted"
+    assert row.actions == ["start"]
+
+    body = service_control.ServiceActionRequest()
+    result = await service_control._run_action("tesla-rag", "start", body, None, db, test_user)
+    assert result.success is True
+
+    sm._clear_inventory_cache()  # list_services' fresh=False cache would otherwise mask the update
+    envelope2 = await service_control.list_services(None, db, test_user)
+    row2 = next(r for r in envelope2.services if r.name == "tesla-rag")
+    assert row2.manager_note != "restart_interrupted"
+    assert row2.run_state == "running" or row2.k8s_replicas == 3
+
+
+# ---------------------------------------------------------------------------
+# tessa P2 mid-build Low: T8 #26 restated at the route layer.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_k8s_stop_already_at_zero_is_idempotent_at_route_layer(db, test_user, tesla_row, k8s_env):
+    """T8 #26, restated at the route layer (not just the bare adapter, T5):
+    a stop that reaches _dispatch_kubernetes_action -- the exact function
+    _run_action calls -- with the Deployment already at 0 replicas (e.g. an
+    out-of-band scale-down between resolution and dispatch) is a clean
+    idempotent 200, not a spurious failure, and never sends a PATCH."""
+    transport = k8s_env({"athena-rag-tesla": {"replicas": 0, "ready": 0}})
+
+    success, message, replicas_after = await service_control._dispatch_kubernetes_action(
+        "athena-rag-tesla", "stop", db, test_user, None, tesla_row, {},
+    )
+    assert success is True
+    assert message == "already stopped"
+    assert replicas_after == 0
+    assert [r for r in transport.requests if r.method == "PATCH"] == []

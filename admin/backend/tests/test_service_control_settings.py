@@ -86,3 +86,40 @@ def test_lease_row_uses_service_control_category(db):
     assert row is not None
     assert row.category == "service_control"
     release_lease(TestingSessionLocal, lease)
+
+
+# ---------------------------------------------------------------------------
+# xander P2 review, Low #3: SQLite lock contention (two genuinely separate
+# connections, not the StaticPool-shared single connection the rest of this
+# file uses) can surface a losing race as OperationalError ("database is
+# locked") instead of IntegrityError. acquire_lease must treat it the same
+# way -- LeaseBusy, not a crash.
+# ---------------------------------------------------------------------------
+
+def test_acquire_lease_treats_operational_error_as_losing_race(tmp_path):
+    import os as _os
+    from sqlalchemy import create_engine, text
+    from app.database import Base
+
+    db_path = tmp_path / "lease_two_engines.db"
+    engine_a = create_engine(f"sqlite:///{db_path}", connect_args={"timeout": 0.2})
+    engine_b = create_engine(f"sqlite:///{db_path}", connect_args={"timeout": 0.2})
+    Base.metadata.create_all(bind=engine_a)
+
+    from sqlalchemy.orm import sessionmaker
+    SessionA = sessionmaker(bind=engine_a)
+    SessionB = sessionmaker(bind=engine_b)
+
+    session_a = SessionA()
+    session_a.execute(text("BEGIN IMMEDIATE"))
+    session_a.add(SystemSetting(key="service_control.lock.holder-a", value="{}", category="service_control"))
+    session_a.flush()
+
+    try:
+        with pytest.raises(LeaseBusy):
+            acquire_lease(SessionB, "athena-rag-tesla", "stop", target_replicas=0)
+    finally:
+        session_a.rollback()
+        session_a.close()
+        engine_a.dispose()
+        engine_b.dispose()

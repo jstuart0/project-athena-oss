@@ -326,6 +326,88 @@ async def test_restart_cancellation_during_wait_still_scales_back(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_restart_second_cancellation_while_scaleback_patch_in_flight_still_completes(tmp_path):
+    """tessa P2 mid-build High: dropping `asyncio.shield` around the
+    `finally`'s scale-back PATCH leaves every existing test green, because
+    the prior cancellation test only ever cancels once, before the
+    scale-back PATCH has even been sent -- the shield's actual job (a
+    SECOND cancellation landing while the shielded PATCH is genuinely
+    in-flight, waiting on the transport) was never exercised. This test
+    blocks the transport's response to the scale-back PATCH on its own
+    event, delivers a second cancel while that PATCH is in flight, and
+    proves the PATCH still completes with the remembered replica count
+    regardless."""
+    clock = _FakeClock()
+    poll_release = asyncio.Event()
+    patch_in_flight = asyncio.Event()
+    patch_release = asyncio.Event()
+    patch_count = {"n": 0}
+    patch_completed = {"done": False}
+
+    async def blocking_sleep(_seconds):
+        await poll_release.wait()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={
+                "spec": {"replicas": 2}, "status": {"replicas": 2}, "metadata": {"resourceVersion": "rv"},
+            })
+        # PATCH
+        patch_count["n"] += 1
+        if patch_count["n"] == 1:
+            return httpx.Response(200, json={})  # scale-to-0
+        # The must-land scale-back PATCH: block until released. If the
+        # second cancellation reaches this coroutine (the bug this test
+        # exists to catch), CancelledError propagates out of
+        # `patch_release.wait()` and `patch_completed["done"]` is NEVER
+        # set -- distinct from merely being entered, which happens either way.
+        patch_in_flight.set()
+        await patch_release.wait()
+        patch_completed["done"] = True
+        return httpx.Response(200, json={})
+
+    (tmp_path / "token").write_text("tok-fake")
+    client = kc.K8sDeploymentClient(
+        api_base="https://k8s.test:443", namespace="athena-prod",
+        token_path=str(tmp_path / "token"), ca_path="/nonexistent/ca.crt",
+        transport=httpx.MockTransport(handler), protected_names=frozenset(),
+        clock=clock, sleep_fn=blocking_sleep,
+    )
+
+    task = asyncio.ensure_future(client.restart("athena-rag-tesla", remember=lambda n: None, recall=lambda: 2))
+    await asyncio.sleep(0.05)  # let it reach the blocked poll-loop sleep
+    task.cancel()  # first cancellation: unblocks the poll sleep's wait()
+
+    # Let the CancelledError propagate into the `finally` clause, which
+    # starts the shielded scale-back PATCH -- wait until that PATCH is
+    # actually in flight (blocked on the transport) before cancelling again.
+    for _ in range(50):
+        if patch_in_flight.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert patch_in_flight.is_set(), "scale-back PATCH never reached the transport"
+
+    task.cancel()  # second cancellation: must NOT abort the in-flight shielded PATCH
+    patch_release.set()  # let the blocked PATCH response through
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Give the shielded scale-back task a moment to actually finish running
+    # in the background (it's independent of `task`'s own completion).
+    for _ in range(50):
+        if patch_completed["done"]:
+            break
+        await asyncio.sleep(0.01)
+
+    assert patch_count["n"] == 2
+    assert patch_completed["done"] is True, (
+        "the scale-back PATCH was entered but never completed -- the second "
+        "cancellation reached it, meaning asyncio.shield isn't protecting it"
+    )
+
+
+@pytest.mark.asyncio
 async def test_no_request_targets_base_deployment_resource_except_list_get(tmp_path):
     """Invariant scan (T5.8): every recorded request across every scenario
     above either is the list GET, or ends in /scale."""

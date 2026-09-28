@@ -224,6 +224,12 @@ async def _gather_kubernetes_inventory() -> KubernetesInventory:
         deployments = await client.list_deployments()
     except K8sControlError as exc:
         return KubernetesInventory(enabled=True, available=False, reason=exc.kind, namespace=client.namespace)
+    except Exception as exc:  # noqa: BLE001 -- inventory gathering must never
+        # crash the page (D14's "never raise" principle, extended past
+        # K8sControlError): a token-file read failure or any other
+        # unexpected error degrades to unavailable, not a 500.
+        logger.error("k8s_inventory_gather_failed", error_kind=type(exc).__name__)
+        return KubernetesInventory(enabled=True, available=False, reason="unavailable", namespace=client.namespace)
     return KubernetesInventory(
         enabled=True,
         available=True,
@@ -419,13 +425,20 @@ def resolve_manager(
     return ManagerResolution(manager='none', note='managed_externally')
 
 
-def resolve_ollama_manager(db, inv: Inventory, permissions: Optional[Set[str]] = None) -> ManagerResolution:
+def resolve_ollama_manager(
+    db, inv: Inventory, permissions: Optional[Set[str]] = None,
+) -> Tuple[ManagerResolution, Optional[str]]:
     """Resolve the manager for the Ollama card (D12).
 
     Picks the registry row whose (normalize_host(host), port) equals the
     Ollama URL's, else a row named 'ollama', else a synthetic row -- and
     runs the same resolve_manager. Ollama is critical under any manager
-    (bob r2 M3), enforced inside resolve_manager's 'ollama' kind branch.
+    (bob r2 M3), enforced inside resolve_manager's 'ollama' kind branch and
+    by the k8s fail-safe critical set (D9) for the in-cluster case.
+
+    Returns (resolution, row_name) -- row_name is None for the synthetic
+    row (no registry row backs it), so callers never try to look up or
+    audit against a nonexistent RagService id.
     """
     from app.routes.service_control import get_ollama_url  # local import: avoid a module-load cycle
 
@@ -434,20 +447,21 @@ def resolve_ollama_manager(db, inv: Inventory, permissions: Optional[Set[str]] =
     ollama_host = normalize_host(parsed.hostname)
     ollama_port = parsed.port
 
-    row = (
+    candidates = (
         db.query(RagService)
         .filter(RagService.host.isnot(None))
         .all()
     )
     matched = None
-    for candidate in row:
+    for candidate in candidates:
         if normalize_host(candidate.host) == ollama_host and candidate.port == ollama_port:
             matched = candidate
             break
     if matched is None:
-        matched = next((c for c in row if (c.name or '').lower() == 'ollama'), None)
+        matched = next((c for c in candidates if (c.name or '').lower() == 'ollama'), None)
 
+    row_name = matched.name if matched is not None else None
     if matched is None:
         matched = RagService(name='ollama', host=parsed.hostname, port=ollama_port, enabled=True)
 
-    return resolve_manager(matched, inv, permissions=permissions)
+    return resolve_manager(matched, inv, permissions=permissions), row_name

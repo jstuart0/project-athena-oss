@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.models import SystemSetting
@@ -116,16 +116,27 @@ def acquire_lease(
         try:
             session.commit()
             return Lease(key=key, holder=holder, value=value)
-        except IntegrityError:
+        except (IntegrityError, OperationalError):
+            # SQLite serializes writers: a genuine unique-key collision
+            # raises IntegrityError, but two connections racing the same
+            # INSERT at the same instant can instead surface as
+            # OperationalError ("database is locked") -- both mean
+            # "someone else is contending for this lease right now"
+            # (xander P2 Low #3), not a crash.
             session.rollback()
 
         existing = session.query(SystemSetting).filter(SystemSetting.key == key).first()
         if existing is None:
             # Raced with a concurrent release between the failed INSERT and
-            # this read -- retry the INSERT once.
-            session.add(SystemSetting(key=key, value=value, category=_CATEGORY))
-            session.commit()
-            return Lease(key=key, holder=holder, value=value)
+            # this read -- retry the INSERT once. A second writer landing
+            # in this exact window is itself a losing race, not a crash.
+            try:
+                session.add(SystemSetting(key=key, value=value, category=_CATEGORY))
+                session.commit()
+                return Lease(key=key, holder=holder, value=value)
+            except (IntegrityError, OperationalError):
+                session.rollback()
+                raise LeaseBusy(f"a service-control action is already in progress for '{deployment}'")
 
         observed_value = existing.value
         expired = True
