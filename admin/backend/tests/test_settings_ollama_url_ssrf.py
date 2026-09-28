@@ -103,10 +103,10 @@ def test_rfc1918_house_value_is_saved(owner_client, db, monkeypatch):
     transport = _RecordingTransport()
     _patch_async_client(monkeypatch, transport)
 
-    response = owner_client.post("/api/settings/ollama-url", json={"ollama_url": "http://192.168.10.108:11434"})
+    response = owner_client.post("/api/settings/ollama-url", json={"ollama_url": "http://192.0.2.10:11434"})
 
     assert response.status_code == 200
-    assert _stored_ollama_url(db) == "http://192.168.10.108:11434"
+    assert _stored_ollama_url(db) == "http://192.0.2.10:11434"
 
 
 def test_non_http_scheme_rejected(owner_client, db, monkeypatch):
@@ -143,7 +143,7 @@ def _seed_ollama_url(db, url: str) -> None:
 
 def test_get_ollama_url_reports_ssrf_blocked_for_stored_private_host_zero_requests(client, db, monkeypatch):
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
-    _seed_ollama_url(db, "http://192.168.10.108:11434")
+    _seed_ollama_url(db, "http://192.0.2.10:11434")
     transport = _RecordingTransport()
     _patch_async_client(monkeypatch, transport)
 
@@ -159,9 +159,9 @@ def test_get_ollama_url_reports_ssrf_blocked_for_stored_private_host_zero_reques
 
 def test_get_ollama_url_probes_when_host_is_allowed(client, db, monkeypatch):
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
-    monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "192.168.10.108")
+    monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "192.0.2.10")
     _clear_all_config_caches()
-    _seed_ollama_url(db, "http://192.168.10.108:11434")
+    _seed_ollama_url(db, "http://192.0.2.10:11434")
     transport = _RecordingTransport()
     _patch_async_client(monkeypatch, transport)
 

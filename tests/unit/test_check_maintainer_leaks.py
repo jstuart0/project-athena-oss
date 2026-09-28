@@ -94,21 +94,41 @@ def test_L1_fail_lan_exact_redacted_output(tmp_path):
     _add(repo)
     proc = _run(repo)
     assert proc.returncode == 1
-    assert proc.stdout.strip() == "FAIL src/foo.py:1 [maintainer-lan]"
+    # valerie's audit: a 192.168.x.x literal under src/ now also fires the
+    # generic rule (scoped, always FAIL) alongside the maintainer-specific
+    # 192.168.10.x rule -- both lines, same line number, both redacted.
+    lines = sorted(proc.stdout.strip().splitlines())
+    assert lines == [
+        "FAIL src/foo.py:1 [generic-rfc1918-192-168]",
+        "FAIL src/foo.py:1 [maintainer-lan]",
+    ]
     assert "192.168" not in proc.stdout
 
 
 # ── L2 / L3: WARN-class paths never affect exit code ────────────────────────
 
 
-@pytest.mark.parametrize("rel", ["docs/x.md", "tests/unit/test_x.py"])
-def test_L2_L3_warn_class_paths(tmp_path, rel):
+def test_L2_docs_path_stays_warn_class(tmp_path):
     repo = _init_repo(tmp_path)
-    _write(repo, rel, f'x = "{_PROBE_LAN_IP}"\n')
+    _write(repo, "docs/x.md", f'x = "{_PROBE_LAN_IP}"\n')
     _add(repo)
     proc = _run(repo)
     assert proc.returncode == 0
-    assert f"WARN {rel}:1 [maintainer-lan]" in proc.stdout
+    assert "WARN docs/x.md:1 [maintainer-lan]" in proc.stdout
+
+
+def test_L3_tests_path_maintainer_lan_still_warns_but_generic_rule_now_fails(tmp_path):
+    """valerie's audit: tests/** stays WARN-class for maintainer-lan (the
+    house-specific rule), but the new generic-rfc1918-192-168 rule is
+    scoped to fire (always FAIL) inside tests/ regardless -- closing the
+    exact loophole that let 10 house IPs sit undetected in test files."""
+    repo = _init_repo(tmp_path)
+    _write(repo, "tests/unit/test_x.py", f'x = "{_PROBE_LAN_IP}"\n')
+    _add(repo)
+    proc = _run(repo)
+    assert proc.returncode == 1
+    assert "WARN tests/unit/test_x.py:1 [maintainer-lan]" in proc.stdout
+    assert "FAIL tests/unit/test_x.py:1 [generic-rfc1918-192-168]" in proc.stdout
 
 
 # ── L4: allowlist suppression + stale-entry detection ───────────────────────
@@ -121,8 +141,12 @@ def test_L4_allowlist_suppresses_fail_hit(tmp_path):
         repo,
         "scripts/.maintainer-leak-allowlist",
         # DC14 item 4: the substring column is the exact full stripped
-        # line, not an arbitrary fragment.
-        f'src/foo.py\tmaintainer-lan\tx = "{_PROBE_LAN_IP}"\tsuppressed for test\n',
+        # line, not an arbitrary fragment. Both rules that fire on this
+        # line (maintainer-lan and the generic rfc1918 rule, valerie's
+        # audit) each need their own entry -- an allowlist entry is scoped
+        # to one rule id.
+        f'src/foo.py\tmaintainer-lan\tx = "{_PROBE_LAN_IP}"\tsuppressed for test\n'
+        f'src/foo.py\tgeneric-rfc1918-192-168\tx = "{_PROBE_LAN_IP}"\tsuppressed for test\n',
     )
     _add(repo)
     proc = _run(repo)
@@ -218,7 +242,8 @@ def test_L14_exact_full_line_does_suppress(tmp_path):
     _write(
         repo,
         "scripts/.maintainer-leak-allowlist",
-        f'src/foo.py\tmaintainer-lan\tip = "{_PROBE_LAN_IP}"  # unrelated inline comment\tfull line, suppresses\n',
+        f'src/foo.py\tmaintainer-lan\tip = "{_PROBE_LAN_IP}"  # unrelated inline comment\tfull line, suppresses\n'
+        f'src/foo.py\tgeneric-rfc1918-192-168\tip = "{_PROBE_LAN_IP}"  # unrelated inline comment\tfull line, suppresses\n',
     )
     _add(repo)
     proc = _run(repo)

@@ -926,9 +926,12 @@ async function requestServiceAction(name, action) {
     }
 
     // D9/D20: a critical target requires typing the RESOLVED target's name
-    // (manager_target — always equal to the server's confirm_name), never
-    // the row's own display name when the row is an alias.
-    const requireTyped = row.confirm_required ? (row.manager_target || row.name) : null;
+    // -- codex diff review r2 High #1: this is row.confirm_name, server-
+    // resolved and NEVER derived client-side. row.manager_target is not a
+    // safe substitute: for a Control-Agent process it's just the bare
+    // port number, while confirm_name is 'process:<port>' -- guessing from
+    // manager_target would mean an owner could never actually confirm.
+    const requireTyped = row.confirm_required ? row.confirm_name : null;
     const displayName = row.display_name || row.name;
 
     let message;

@@ -263,7 +263,7 @@ class K8sDeploymentClient:
         name: str,
         remember: Callable[[int], None],
         recall: Callable[[], int],
-        still_owner: Optional[Callable[[], bool]] = None,
+        renew_lease: Optional[Callable[[], bool]] = None,
     ) -> ActionResult:
         self._validate_name(name)
         scale = await self.get_scale(name)
@@ -289,11 +289,17 @@ class K8sDeploymentClient:
             # (timeout, exception, or the caller's task being cancelled).
             # asyncio.shield means a cancellation of the code awaiting this
             # `finally` does not cancel the PATCH itself. codex diff review
-            # r1 Critical #3: but ONLY when we still hold the lease -- if
-            # another replica has taken over (still_owner() false), a
-            # scale-back here would race and possibly resurrect a
-            # deployment the new holder already stopped on purpose.
-            if still_owner is not None and not still_owner():
+            # r1 Critical #3 / r2 High #2: but ONLY when the lease is
+            # atomically RENEWED first -- a plain read-then-act check (was
+            # still_owner()) has a TOCTOU gap: we could observe ourselves
+            # as owner right at the TTL edge, another replica could take
+            # over and stop the Deployment in the gap between that read
+            # and this PATCH, and we'd resurrect it regardless. renew_lease
+            # is a compare-and-swap (same primitive as acquire_lease's own
+            # takeover) that either extends OUR lease atomically or fails
+            # because someone else already took over -- there is no window
+            # between "check" and "act" for a second replica to land in.
+            if renew_lease is not None and not renew_lease():
                 scaleback = 'skipped'
             else:
                 try:

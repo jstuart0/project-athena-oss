@@ -50,7 +50,7 @@ from app.services.service_control_settings import (
     recall_replicas,
     release_lease,
     remember_replicas,
-    still_holds_lease,
+    renew_lease,
 )
 from shared.config import get_config
 
@@ -122,8 +122,22 @@ class ServiceControlRow(ServiceResponse):
     manager_target: Optional[str] = None
     manager_note: Optional[str] = None
     native_state: Optional[str] = None
+    # native_actions is the manager's real, ungated availability (what the
+    # 409 action_not_available check is measured against); actions/
+    # allowed_actions is the per-user-gated list the UI renders from (D20 --
+    # an operator never sees a dead button for a critical target).
+    # allowed_actions is a plan-D3-named alias of actions, not a second
+    # independent gate -- both always carry the same value.
+    native_actions: List[str] = []
     actions: List[str] = []
+    allowed_actions: List[str] = []
     confirm_required: bool = False
+    # codex diff review r2 High #1: the server-resolved confirm target --
+    # `process:<port>` for a CA process, the container name for CA docker,
+    # 'ollama' for Ollama, the Deployment label for Kubernetes. The
+    # frontend must type-confirm against THIS value, never guess it from
+    # manager_target (which, for a CA process, is just the port number).
+    confirm_name: Optional[str] = None
     k8s_replicas: Optional[int] = None
     k8s_ready_replicas: Optional[int] = None
 
@@ -146,6 +160,7 @@ class KubernetesStatus(BaseModel):
     enabled: bool = False
     available: bool = False
     reason: Optional[str] = "disabled"
+    namespace: Optional[str] = None  # plan step 13 (valerie)
 
 
 class ServiceControlListResponse(BaseModel):
@@ -153,6 +168,11 @@ class ServiceControlListResponse(BaseModel):
     counts: ServiceControlCounts
     control_agent: ControlAgentStatus
     kubernetes: KubernetesStatus
+    # D3 (valerie): the registry row name backing the Ollama card's own
+    # resolution, or None when no registry row backs it (the synthetic
+    # row resolve_ollama_manager falls back to) -- lets the frontend
+    # correlate the Ollama panel with a table row without a second lookup.
+    ollama_row: Optional[str] = None
 
 
 class ServiceActionRequest(BaseModel):
@@ -372,6 +392,7 @@ async def _execute_resolved_action(
         raise HTTPException(status_code=409, detail={"error": "confirmation_required"})
 
     replicas_after = resolution.k8s_replicas
+    dispatch_error_code: Optional[str] = None
 
     try:
         if resolution.kind == 'process':
@@ -381,7 +402,7 @@ async def _execute_resolved_action(
         elif resolution.kind == 'ollama':
             success, message = await launchd_service_action("ollama", action)
         elif resolution.kind == 'kubernetes':
-            success, message, replicas_after = await _dispatch_kubernetes_action(
+            success, message, replicas_after, dispatch_error_code = await _dispatch_kubernetes_action(
                 resolution.target, action, db, current_user, request, service, old_value,
             )
         else:
@@ -412,7 +433,10 @@ async def _execute_resolved_action(
         "message": message,
         "replicas_after": replicas_after,
     }
-    _audit_lifecycle(db, current_user, request, f"service_{action}", service, old_value, new_value, success=success)
+    _audit_lifecycle(
+        db, current_user, request, f"service_{action}", service, old_value, new_value,
+        success=success, error_message=dispatch_error_code,
+    )
 
     logger.info(f"service_{action}", service=name, success=success, user=current_user.username)
 
@@ -432,15 +456,23 @@ async def _dispatch_kubernetes_action(
     request: Optional[Request],
     service: Optional[RagService],
     old_value: dict,
-) -> Tuple[bool, str, Optional[int]]:
+) -> Tuple[bool, str, Optional[int], Optional[str]]:
     """Kubernetes dispatch (D11): acquires the cross-replica lease around
     the WHOLE action (including restart's bounded wait), releases it in
     `finally`. Lease contention -> 409 `action_in_progress`, audited, raised
     here directly (distinct from _run_action's other refusals, since it can
-    only be known after we've committed to dispatching)."""
+    only be known after we've committed to dispatching).
+
+    Returns (success, message, replicas_after, error_code). error_code is
+    None for a plain success/failure and 'restart_superseded' when the
+    scale-back was skipped because another replica took over the lease --
+    valerie's audit (T9): this must NOT audit here itself, or the caller's
+    own single trailing audit call produces a SECOND row for the same
+    request. error_code is threaded back so the caller's one audit call
+    can carry the right error_message."""
     client, reason = get_k8s_client()
     if client is None:
-        return False, f"Kubernetes control is unavailable ({reason})", None
+        return False, f"Kubernetes control is unavailable ({reason})", None, None
 
     try:
         lease = acquire_lease(LEASE_SESSION_FACTORY, deployment_name, action, target_replicas=0)
@@ -462,13 +494,20 @@ async def _dispatch_kubernetes_action(
         remembered['n'] = n
         return n
 
-    def _still_owner() -> bool:
-        return still_holds_lease(LEASE_SESSION_FACTORY, lease)
+    def _renew_lease() -> bool:
+        return renew_lease(LEASE_SESSION_FACTORY, lease)
 
+    error_code: Optional[str] = None
     try:
         if action == 'stop':
             result = await client.stop(deployment_name, remember=_remember)
             replicas_after = 0 if result.success else remembered.get('n')
+            if result.success:
+                # codex diff review r2 Medium #3: clear on ANY successful
+                # k8s action for this deployment, not just start -- a stop
+                # or a settled restart are equally valid evidence the row
+                # isn't wedged.
+                clear_interrupted(LEASE_SESSION_FACTORY, deployment_name)
         elif action == 'start':
             result = await client.start(deployment_name, recall=_recall)
             replicas_after = remembered.get('n') if result.success else None
@@ -478,7 +517,7 @@ async def _dispatch_kubernetes_action(
                 clear_interrupted(LEASE_SESSION_FACTORY, deployment_name)
         else:  # restart
             result = await client.restart(
-                deployment_name, remember=_remember, recall=_recall, still_owner=_still_owner,
+                deployment_name, remember=_remember, recall=_recall, renew_lease=_renew_lease,
             )
             # D11: the scale-back always targets the remembered count,
             # regardless of whether the bounded wait settled or timed out.
@@ -487,25 +526,26 @@ async def _dispatch_kubernetes_action(
                 # codex diff review r1 Critical #3: another replica took
                 # over the lease mid-wait -- our own scale-back was
                 # deliberately not attempted, so B's own in-flight action
-                # is never raced. Audited distinctly from a plain failure.
-                _audit_lifecycle(
-                    db, current_user, request, f"service_{action}", service,
-                    old_value, {}, success=False, error_message='restart_superseded',
-                )
+                # is never raced. valerie's audit (T9): do NOT audit here --
+                # the caller's single trailing audit call carries this code,
+                # so exactly one audit row is written per request.
+                error_code = 'restart_superseded'
             elif result.scaleback == 'failed':
                 # codex diff review r1 Critical #4: the lease was released
                 # (below, in this function's own finally) regardless of
                 # whether the scale-back PATCH landed, so restart_interrupted
                 # can't rely solely on an expired lease to catch this case.
                 mark_interrupted(LEASE_SESSION_FACTORY, deployment_name)
-        return result.success, result.message, replicas_after
+            elif result.success:
+                clear_interrupted(LEASE_SESSION_FACTORY, deployment_name)
+        return result.success, result.message, replicas_after, error_code
     except K8sControlError as exc:
         if exc.kind == 'forbidden':
             return False, (
                 f"Not permitted by the cluster Role for deployment '{deployment_name}' "
                 "— see docs/CONFIGURATION.md § Service Control on Kubernetes"
-            ), None
-        return False, f"Kubernetes API error ({exc.kind}): {exc.message}", None
+            ), None, None
+        return False, f"Kubernetes API error ({exc.kind}): {exc.message}", None, None
     finally:
         release_lease(LEASE_SESSION_FACTORY, lease)
 
@@ -560,8 +600,16 @@ async def list_services(
                 and resolution.k8s_replicas == 0
                 and lease_is_expired(lease_info)
             )
-            if lease_expired_mid_restart or read_interrupted(db, resolution.target):
+            marker_set = read_interrupted(db, resolution.target)
+            if resolution.k8s_replicas == 0 and (lease_expired_mid_restart or marker_set):
                 resolution.note = 'restart_interrupted'
+            elif marker_set and resolution.k8s_replicas != 0:
+                # codex diff review r2 Medium #3: an out-of-band `kubectl
+                # scale` recovery means the marker is stale -- the observed
+                # replica count already proves the row isn't wedged, so
+                # drop the badge and clear the marker lazily rather than
+                # letting it resurface on the next restart.
+                clear_interrupted(LEASE_SESSION_FACTORY, resolution.target)
 
         run_state = derive_run_state(svc.enabled, svc.health_status, resolution.k8s_replicas)
         if run_state == 'disabled':
@@ -578,11 +626,26 @@ async def list_services(
         row['manager_target'] = resolution.target
         row['manager_note'] = resolution.note
         row['native_state'] = resolution.native_state
+        row['native_actions'] = resolution.native_actions
         row['actions'] = resolution.actions
+        row['allowed_actions'] = resolution.actions
         row['confirm_required'] = resolution.confirm_required
+        # codex diff review r2 High #1: confirm_name is the server-resolved
+        # target the frontend must type-confirm against -- for a CA process
+        # this is 'process:<port>', not the row's own manager_target (which
+        # for a process is just the bare port number). Never derived
+        # client-side.
+        row['confirm_name'] = resolution.confirm_name
         row['k8s_replicas'] = resolution.k8s_replicas
         row['k8s_ready_replicas'] = resolution.k8s_ready_replicas
         rows.append(row)
+
+    # D3 (valerie): the row backing the Ollama card's own resolution, so the
+    # frontend can correlate the panel with a table row without a second
+    # lookup. resolve_ollama_manager's own resolution is discarded here --
+    # list_services already resolved every registry row above; this call
+    # only needs which row_name (if any) backs the Ollama card.
+    _, ollama_row_name = resolve_ollama_manager(db, inv, permissions)
 
     return ServiceControlListResponse(
         services=rows,
@@ -596,7 +659,9 @@ async def list_services(
             enabled=inv.kubernetes.enabled if inv.kubernetes else False,
             available=inv.kubernetes.available if inv.kubernetes else False,
             reason=inv.kubernetes.reason if inv.kubernetes else 'disabled',
+            namespace=inv.kubernetes.namespace if inv.kubernetes else None,
         ),
+        ollama_row=ollama_row_name,
     )
 
 

@@ -787,7 +787,7 @@ async def test_gather_inventory_wrong_sa_forbidden_on_list(monkeypatch, tmp_path
 
 @pytest.mark.asyncio
 async def test_restart_lease_lost_mid_wait_skips_scaleback_patch(tmp_path):
-    """`still_owner` returning False right before the scale-back means
+    """`renew_lease` returning False right before the scale-back means
     another admin-backend replica has taken over the lease -- the
     scale-back PATCH must NOT be sent (it would race whatever replica B is
     doing). Only the initial scale-to-0 PATCH is scripted; if restart()
@@ -809,7 +809,7 @@ async def test_restart_lease_lost_mid_wait_skips_scaleback_patch(tmp_path):
     )
     result = await client.restart(
         "athena-rag-tesla", remember=lambda n: None, recall=lambda: 2,
-        still_owner=lambda: False,
+        renew_lease=lambda: False,
     )
 
     assert result.success is False
@@ -819,9 +819,9 @@ async def test_restart_lease_lost_mid_wait_skips_scaleback_patch(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_restart_still_owner_true_scales_back_normally(tmp_path):
-    """The mirror-image positive control: still_owner() returning True
-    behaves exactly like the pre-existing (no still_owner passed) path."""
+async def test_restart_renew_lease_true_scales_back_normally(tmp_path):
+    """The mirror-image positive control: renew_lease() returning True
+    behaves exactly like the pre-existing (no renew_lease passed) path."""
     clock = _FakeClock()
 
     async def sleep_and_advance(seconds):
@@ -839,7 +839,7 @@ async def test_restart_still_owner_true_scales_back_normally(tmp_path):
     )
     result = await client.restart(
         "athena-rag-tesla", remember=lambda n: None, recall=lambda: 2,
-        still_owner=lambda: True,
+        renew_lease=lambda: True,
     )
 
     assert result.success is True

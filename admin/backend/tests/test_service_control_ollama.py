@@ -256,13 +256,13 @@ def test_ssrf_blocked_host_zero_requests_across_all_call_sites(owner_client, db,
 
 
 def test_rfc1918_allowlisted_host_is_probed_normally(owner_client, db, monkeypatch):
-    monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "192.168.10.108")
+    monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "192.0.2.10")
     _clear_all_config_caches()
-    _set_ollama_url(db, "http://192.168.10.108:11434")
+    _set_ollama_url(db, "http://192.0.2.10:11434")
 
     transport = _MultiHostTransport({
-        ("192.168.10.108", "/api/version"): (200, {"version": "0.5.1"}),
-        ("192.168.10.108", "/api/ps"): (200, {"models": []}),
+        ("192.0.2.10", "/api/version"): (200, {"version": "0.5.1"}),
+        ("192.0.2.10", "/api/ps"): (200, {"models": []}),
     })
     _patch_async_client(monkeypatch, transport)
 

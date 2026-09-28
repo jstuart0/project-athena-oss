@@ -19,6 +19,7 @@ os.environ.setdefault("DEV_MODE", "true")
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("SERVICE_API_KEY", "test-svc-key-athena-118")
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -29,6 +30,7 @@ from app.services.service_control_settings import (
     acquire_lease,
     read_lease,
     release_lease,
+    renew_lease,
 )
 from tests.conftest import TestingSessionLocal
 
@@ -123,3 +125,43 @@ def test_acquire_lease_treats_operational_error_as_losing_race(tmp_path):
         session_a.close()
         engine_a.dispose()
         engine_b.dispose()
+
+
+# ---------------------------------------------------------------------------
+# codex diff review r2 High #2: renew_lease replaces the read-then-act
+# still_holds_lease check with an atomic compare-and-swap.
+# ---------------------------------------------------------------------------
+
+def test_renew_lease_succeeds_and_extends_expiry_when_still_owner(db):
+    lease = acquire_lease(TestingSessionLocal, "athena-rag-tesla", "restart", target_replicas=0)
+    original_value = lease.value
+
+    ok = renew_lease(TestingSessionLocal, lease)
+
+    assert ok is True
+    assert lease.value != original_value  # mutated to the renewed value
+    stored = read_lease(db, "athena-rag-tesla")
+    assert stored == json.loads(lease.value)
+
+    # release_lease must still work against the RENEWED value.
+    release_lease(TestingSessionLocal, lease)
+    assert read_lease(db, "athena-rag-tesla") is None
+
+
+def test_renew_lease_fails_and_leaves_the_takeover_alone_when_superseded(db):
+    """Simulates A's renewal failing because B took over mid-wait -- the
+    real scenario codex diff review r2 High #2 exists to close: no PATCH
+    may follow a failed renewal, and B's own lease must be untouched."""
+    lease_a = acquire_lease(
+        TestingSessionLocal, "athena-rag-tesla", "restart", target_replicas=0,
+        ttl=1, now=lambda: datetime.now(timezone.utc) - timedelta(seconds=200),
+    )  # already expired relative to real now()
+
+    lease_b = acquire_lease(TestingSessionLocal, "athena-rag-tesla", "stop", target_replicas=0)
+
+    ok = renew_lease(TestingSessionLocal, lease_a)
+
+    assert ok is False
+    current = read_lease(db, "athena-rag-tesla")
+    assert current["holder"] == lease_b.holder
+    assert current["action"] == "stop"

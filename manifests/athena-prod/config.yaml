@@ -170,7 +170,7 @@ data:
   # Deployments directly via the Kubernetes scale subresource, in addition
   # to (or instead of) the Control Agent. Requires:
   #   1. manifests/athena-prod/optional/admin-backend-rbac.yaml applied
-  #      (namespaced Role: `deployments` get/list, `deployments/scale`
+  #      (namespaced Role: `deployments` list, `deployments/scale`
   #      get/patch, scoped to a fixed list of Deployment names — no pod-
   #      template write, ever);
   #   2. manifests/athena-prod/optional/admin-backend-k8s-control.patch.yaml

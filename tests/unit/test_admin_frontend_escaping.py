@@ -910,3 +910,15 @@ def test_static_typed_confirm_input_built_via_create_element_and_text_content():
     assert "document.createElement('input')" in modal_fn
     assert "label.textContent = `Type \"${requireTyped}\" to confirm:`;" in modal_fn
     assert "typedConfirmMatches(requireTyped" in modal_fn
+
+
+def test_static_request_service_action_uses_confirm_name_not_manager_target():
+    """codex diff review r2 High #1: the typed-confirm target must be
+    row.confirm_name (server-resolved, e.g. 'process:8010' for a Control
+    Agent process) -- never derived from row.manager_target, which for a
+    CA process is just the bare port number and would make an owner
+    unable to ever type a matching confirmation."""
+    source = SERVICE_CONTROL_JS.read_text()
+    fn = _extract_block(SERVICE_CONTROL_JS, "function requestServiceAction(")
+    assert "row.confirm_required ? row.confirm_name : null" in fn
+    assert "row.manager_target || row.name" not in fn

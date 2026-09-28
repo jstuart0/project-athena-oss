@@ -319,3 +319,97 @@ async def test_registry_sync_loop_no_ops_with_one_info_line_when_unconfigured(mo
     await module.sync_registry_loop()
 
     assert logged == ["no_managed_services_configured"]
+
+
+# ---------------------------------------------------------------------------
+# codex diff review r2 Medium #4: an explicit "service_type" in a services-
+# file process entry is authoritative for the RAG/core/infrastructure
+# classification -- a short-named RAG service (no "-rag" substring) would
+# otherwise sync as service_type='core', making group_for() classify it
+# non-'rag' and Service Control's fail-safe criticality treat it as owner-
+# gated critical, same as a real infrastructure service.
+# ---------------------------------------------------------------------------
+
+def test_service_type_declared_rag_is_accepted_for_a_short_name(monkeypatch, tmp_path):
+    services_path = tmp_path / "services.json"
+    services_path.write_text(json.dumps({
+        "processes": {
+            "8011": {
+                "name": "weather", "dir": "src/rag/weather", "cmd": ["x"],
+                "service_type": "rag",
+            },
+        },
+    }))
+    module = _import_control_agent("_test_ca_service_type_rag", monkeypatch, str(services_path))
+    assert module.PROCESS_SERVICES[8011]["service_type"] == "rag"
+
+
+def test_service_type_invalid_value_rejects_the_entry(monkeypatch, tmp_path, caplog):
+    services_path = tmp_path / "services.json"
+    services_path.write_text(json.dumps({
+        "processes": {
+            "8011": {
+                "name": "weather", "dir": "src/rag/weather", "cmd": ["x"],
+                "service_type": "bogus",
+            },
+        },
+    }))
+    module = _import_control_agent("_test_ca_service_type_bad", monkeypatch, str(services_path))
+    assert module.PROCESS_SERVICES == {}
+
+
+def test_service_type_omitted_falls_back_to_name_heuristic(monkeypatch, tmp_path):
+    services_path = tmp_path / "services.json"
+    services_path.write_text(json.dumps({
+        "processes": {
+            "8010": {"name": "example-rag", "dir": "src/rag/example", "cmd": ["x"]},
+        },
+    }))
+    module = _import_control_agent("_test_ca_service_type_fallback", monkeypatch, str(services_path))
+    assert "service_type" not in module.PROCESS_SERVICES[8010]
+
+
+@pytest.mark.asyncio
+async def test_registry_sync_forwards_declared_service_type_for_short_named_rag(monkeypatch, tmp_path):
+    services_path = tmp_path / "services.json"
+    services_path.write_text(json.dumps({
+        "processes": {
+            "8011": {
+                "name": "weather", "dir": "src/rag/weather", "cmd": ["x"],
+                "service_type": "rag",
+            },
+            "8000": {"name": "example-gateway", "dir": "src/gateway", "cmd": ["x"]},
+        },
+    }))
+    module = _import_control_agent("_test_ca_sync_service_type", monkeypatch, str(services_path))
+    monkeypatch.setenv("CONTROL_AGENT_URL", "http://ca-host:8099")
+
+    posted = {}
+
+    class _FakeResponse:
+        status_code = 200
+        text = ""
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, headers=None, params=None):
+            posted[params["name"]] = params["service_type"]
+            return _FakeResponse()
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _FakeAsyncClient)
+
+    count_ok, count_skip = await module._upsert_all_services("http://admin:8080", "test-key")
+
+    assert count_ok == 2
+    # "weather" has no "-rag" substring -- without the declared
+    # service_type it would sync as 'core'.
+    assert posted["weather"] == "rag"
+    assert posted["example-gateway"] == "core"

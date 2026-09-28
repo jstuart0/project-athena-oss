@@ -776,10 +776,11 @@ async def test_k8s_stop_already_at_zero_is_idempotent_at_route_layer(db, test_us
     idempotent 200, not a spurious failure, and never sends a PATCH."""
     transport = k8s_env({"athena-rag-tesla": {"replicas": 0, "ready": 0}})
 
-    success, message, replicas_after = await service_control._dispatch_kubernetes_action(
+    success, message, replicas_after, error_code = await service_control._dispatch_kubernetes_action(
         "athena-rag-tesla", "stop", db, test_user, None, tesla_row, {},
     )
     assert success is True
+    assert error_code is None
     assert message == "already stopped"
     assert replicas_after == 0
     assert [r for r in transport.requests if r.method == "PATCH"] == []
@@ -823,30 +824,34 @@ def test_ca_docker_non_rag_row_owner_without_confirm_gets_409(owner_client, db, 
 
 # ---------------------------------------------------------------------------
 # codex diff review r1 Critical #3: lease-aware scale-back, route-layer
-# wiring (unit-level coverage of restart()'s own still_owner behavior lives
+# wiring (unit-level coverage of restart()'s own renew_lease behavior lives
 # in test_k8s_control.py).
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_restart_superseded_audits_distinctly_and_skips_scaleback(
+async def test_restart_superseded_audits_exactly_once_through_the_route(
     db, test_user, tesla_row, k8s_env, monkeypatch
 ):
+    """valerie's audit (T9): _dispatch_kubernetes_action must NOT audit the
+    superseded outcome itself -- exercised through _run_action (the actual
+    route-level entry point), not the dispatch function directly, so a
+    regression that re-adds a second audit call inside the dispatch
+    function is caught here rather than only at the unit level."""
     transport = k8s_env({"athena-rag-tesla": {"replicas": 1, "ready": 1}})
-    monkeypatch.setattr(service_control, "still_holds_lease", lambda *a, **k: False)
+    monkeypatch.setattr(service_control, "renew_lease", lambda *a, **k: False)
 
-    success, message, replicas_after = await service_control._dispatch_kubernetes_action(
-        "athena-rag-tesla", "restart", db, test_user, None, tesla_row, {},
-    )
+    body = service_control.ServiceActionRequest()
+    result = await service_control._run_action("tesla-rag", "restart", body, None, db, test_user)
 
-    assert success is False
-    assert "superseded" in message
+    assert result.success is False
+    assert "superseded" in result.message
     patch_calls = [r for r in transport.requests if r.method == "PATCH"]
     assert len(patch_calls) == 1  # only the initial scale-to-0 -- no scale-back raced
 
     rows = db.query(AuditLog).filter(
         AuditLog.resource_id == tesla_row.id, AuditLog.error_message == "restart_superseded"
     ).all()
-    assert len(rows) == 1
+    assert len(rows) == 1, f"expected exactly one audit row, found {len(rows)}"
 
 
 # ---------------------------------------------------------------------------
@@ -873,10 +878,11 @@ async def test_restart_scaleback_patch_failure_marks_interrupted_and_start_clear
     monkeypatch.setattr(kc, "_test_transport", httpx.MockTransport(_fail_second_patch))
     kc._clear_client_cache()
 
-    success, message, replicas_after = await service_control._dispatch_kubernetes_action(
+    success, message, replicas_after, error_code = await service_control._dispatch_kubernetes_action(
         "athena-rag-tesla", "restart", db, test_user, None, tesla_row, {},
     )
     assert success is False
+    assert error_code is None  # a scale-back PATCH failure is not restart_superseded
     assert "scale-back" in message
 
     from app.services.service_control_settings import read_interrupted
@@ -901,3 +907,32 @@ async def test_restart_scaleback_patch_failure_marks_interrupted_and_start_clear
     envelope2 = await service_control.list_services(None, db, test_user)
     row2 = next(r for r in envelope2.services if r.name == "tesla-rag")
     assert row2.manager_note != "restart_interrupted"
+
+
+# ---------------------------------------------------------------------------
+# codex diff review r2 High #1 (envelope-level): the frontend must read
+# confirm_name directly off the envelope row rather than guessing from
+# manager_target.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_envelope_carries_confirm_name_for_critical_ca_process_row(db, test_user, monkeypatch):
+    row = RagService(
+        name="weather-proc", display_name="Weather", host="localhost", port=8010,
+        service_type="infrastructure", enabled=True, health_status="healthy",
+    )
+    db.add(row)
+    db.commit()
+
+    transport = _RecordingTransport({
+        "/process/list": (200, [{"port": 8010, "name": "weather-proc", "running": True}]),
+        "/docker/list": (200, []),
+    })
+    _patch_async_client(monkeypatch, transport)
+
+    envelope = await service_control.list_services(None, db, test_user)
+    out = next(r for r in envelope.services if r.name == "weather-proc")
+
+    assert out.confirm_required is True
+    assert out.confirm_name == "process:8010"
+    assert out.native_actions == out.actions == out.allowed_actions

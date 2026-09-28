@@ -49,7 +49,7 @@ def _row(**overrides) -> RagService:
         id=1,
         name="weather-rag",
         display_name="Weather RAG",
-        host="192.168.10.108",
+        host="192.0.2.10",
         port=8010,
         container_name=None,
         service_type="rag",
@@ -190,6 +190,11 @@ def test_ollama_row_ca_host_match_resolves_ollama_kind():
     [
         pytest.param("amtrak-rag", "api", "athena-amtrak", "rag", id="amtrak_rag_by_name_suffix"),
         pytest.param("weather", "api", "athena-rag-weather", "rag", id="weather_rag_by_host_prefix"),
+        # codex diff review r2 Medium #4: a CA-managed row on localhost has
+        # neither an "-rag" name suffix nor an "athena-rag-" host prefix --
+        # service_type='rag' (forwarded by CA sync when the services file
+        # entry declares it) is the ONLY signal group_for can use here.
+        pytest.param("weather", "rag", "localhost", "rag", id="weather_rag_by_declared_service_type_ca_host"),
         pytest.param("redis", "infrastructure", "redis", "infrastructure", id="redis_is_infrastructure"),
         pytest.param("orchestrator", "core", "athena-orchestrator", "core", id="orchestrator_is_core"),
     ],

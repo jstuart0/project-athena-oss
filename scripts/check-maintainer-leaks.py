@@ -115,6 +115,27 @@ BUILTIN_RULES: list[tuple[str, re.Pattern]] = [
 ]
 BUILTIN_RULE_IDS = frozenset(rid for rid, _ in BUILTIN_RULES)
 
+# valerie's audit (ATHENA-118 P2d): a generic RFC1918 192.168.0.0/16
+# literal is FAIL-class whenever it appears in the repo's actual code/test/
+# manifest surface, regardless of that file's normal WARN/FAIL path
+# classification (docs/**, tests/**, *.example normally downgrade to WARN
+# -- a private-network literal in these directories is far more likely to
+# be a real house value copy-pasted into a test than an inert doc
+# example). Deliberately narrower in scope than maintainer-lan (which is
+# specifically the maintainer's own 192.168.10.x subnet, checked
+# everywhere including docs): this rule only applies inside
+# GENERIC_RFC1918_SCOPE_PREFIXES. Outside those directories (docs/,
+# top-level *.md, etc.) it does not fire at all -- a real doc example
+# there is legitimate and unaffected. A hit that IS a legitimate
+# placeholder within these directories (e.g. an intentionally-private
+# example in a committed fixture) is not exempted by path class; it must
+# clear scripts/.maintainer-leak-allowlist like any other FAIL-class hit.
+GENERIC_RFC1918_SCOPE_PREFIXES = ("admin/", "src/", "tests/", "apps/", "manifests/")
+GENERIC_RFC1918_RULE: tuple[str, re.Pattern] = (
+    "generic-rfc1918-192-168",
+    re.compile(r"\b192\.168\.\d{1,3}\.\d{1,3}\b"),
+)
+
 
 class ConfigError(Exception):
     """Raised for any condition that makes the gate unable to run (rc 2)."""
@@ -266,6 +287,7 @@ def scan_file(root: Path, rel_path: str, extra_rules: list[tuple[str, re.Pattern
         return []
     text = raw.decode("utf-8", errors="replace")
     path_class = classify_path(rel_path)
+    generic_rfc1918_scoped = rel_path.startswith(GENERIC_RFC1918_SCOPE_PREFIXES)
 
     hits: list[Hit] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
@@ -275,6 +297,10 @@ def scan_file(root: Path, rel_path: str, extra_rules: list[tuple[str, re.Pattern
         for rule_id, regex in extra_rules:
             if regex.search(line):
                 hits.append(Hit(rel_path, lineno, rule_id, line.strip(), "FAIL", True))
+        if generic_rfc1918_scoped:
+            generic_id, generic_regex = GENERIC_RFC1918_RULE
+            if generic_regex.search(line):
+                hits.append(Hit(rel_path, lineno, generic_id, line.strip(), "FAIL", False))
     return hits
 
 

@@ -31,7 +31,7 @@
 # Role permits is setting the replica count of the 30 named Deployments:
 # scale-to-0 (DoS) or scale-to-large-N (resource pressure, no ResourceQuota
 # bound in this namespace). No code execution, no secret access beyond
-# what `get`/`list` on `deployments` already exposes.
+# what `list` on `deployments` already exposes.
 #
 # Adding a Deployment later: re-run the resourceNames generator (parses
 # every `manifests/athena-prod/*.yaml`, kind==Deployment,

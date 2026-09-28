@@ -209,7 +209,8 @@ DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 }
 ```
 
-- `processes` -- keyed by port (as a JSON string). Each entry needs `name`, `dir` (working directory, relative to the Control Agent's checkout), and `cmd` (argv list). `health_path` and `enabled` are optional; `enabled: false` drops the entry (it's parsed but never managed). This is exactly the shape the Control Agent's watchdog and startup registry-sync (`POST /api/service-registry/services`) already used, just no longer hard-coded into the module.
+- `processes` -- keyed by port (as a JSON string). Each entry needs `name`, `dir` (working directory, relative to the Control Agent's checkout), and `cmd` (argv list). `health_path`, `enabled`, and `service_type` are optional; `enabled: false` drops the entry (it's parsed but never managed). This is exactly the shape the Control Agent's watchdog and startup registry-sync (`POST /api/service-registry/services`) already used, just no longer hard-coded into the module.
+  - `service_type` (ATHENA-118, codex diff review r2 Medium #4): one of `rag`, `core`, `infrastructure`. Authoritative when set -- registry-sync forwards it as-is. Falls back to the `-rag`-in-name heuristic when omitted. **Declare this for a RAG service whose name doesn't contain `-rag`** (e.g. `weather`, `sports`) -- otherwise it syncs as `service_type='core'`, which admin-backend's `group_for()` then reads as a non-`rag` group, and Service Control's fail-safe criticality treats every non-`rag` row as critical (owner-only `manage_infrastructure` gate) just like a real infrastructure service.
 - `watchdog_exclude` -- ports the 60-second watchdog should never auto-restart, even if they're in `processes`.
 - `containers` -- the Docker container-name whitelist for the `/docker/*` control endpoints (`is_container_allowed`). Independent of `processes`: a deployment can leave `processes` empty and still manage Docker containers (or vice versa).
 
@@ -304,9 +305,11 @@ visible amber banner rather than silently doing nothing:
 ### The exact Role, and why there's no `deployments` patch
 
 `optional/admin-backend-rbac.yaml`'s Role has exactly two rules:
-`apps/deployments` `get`/`list` (namespace-wide — `resourceNames` cannot
+`apps/deployments` `list` (namespace-wide — `resourceNames` cannot
 restrict `list`, and a Deployment spec carries no Secret values, only
-`secretKeyRef` names), and `apps/deployments/scale` `get`/`patch`, scoped
+`secretKeyRef` names; no `get` verb here — the app only ever lists the
+collection, never reads a single Deployment by name outside the `/scale`
+subresource below), and `apps/deployments/scale` `get`/`patch`, scoped
 via `resourceNames` to every Deployment in `manifests/athena-prod/*.yaml`
 minus `athena-admin-backend`/`athena-admin-frontend` (currently 30 names).
 There is **no** `patch`/`update` on the base `deployments` resource
@@ -315,7 +318,7 @@ template (`command`, secret mounts, `serviceAccountName`): real code
 execution and secret exposure. Without it, the worst this Role permits is
 setting the replica count of the 30 named Deployments — scale-to-0 (DoS) or
 scale-to-large-N (resource pressure; there's no `ResourceQuota` in
-`athena-prod`). `tests/unit/test_admin_backend_rbac_manifest.py` (T10)
+`athena-prod`). `admin/backend/tests/test_admin_backend_rbac_manifest.py` (T10)
 computes the expected `resourceNames` set at **test time** by parsing the
 manifests, so it fails loudly the moment a new RAG service is added without
 updating this file.
@@ -329,14 +332,47 @@ protected names) and update the Role's `resourceNames` list.
 
 There is no rolling restart (it needs `deployments` PATCH, deliberately not
 granted). Restart is: scale to 0 → wait up to 60s for `status.replicas` to
-reach 0 → scale back to the remembered count, inside a `finally` guarded by
-`asyncio.shield`, so no exception, timeout, or task cancellation can leave a
-Deployment at 0 while the admin-backend process is alive. **If the
-admin-backend process itself dies mid-wait** (its own rollout, OOM, node
-drain), the Deployment stays at 0 until an operator presses Start — the row
-shows `manager_note: "restart_interrupted"` (an expired restart lease plus
-the Deployment still at 0 replicas) and Start recalls the remembered count.
-There's no automatic recovery, by design.
+reach 0 → renew the cross-replica lease (see below) → scale back to the
+remembered count, inside a `finally` guarded by `asyncio.shield`, so no
+exception, timeout, or task cancellation can leave a Deployment at 0 while
+the admin-backend process is alive.
+
+Three distinct ways a restart can fail to complete its scale-back, each
+handled differently:
+
+- **The scale-back PATCH itself fails** (a transient API error): reported
+  as a failure, and an explicit marker (`system_settings` key
+  `service_control.interrupted.<deployment>`) is persisted so the row
+  reads `restart_interrupted` even though the lease was still released
+  normally (see below — an expired-lease check alone would miss this).
+- **Another admin-backend replica takes over the lease mid-wait**: the
+  lease renewal (below) fails atomically, the scale-back is deliberately
+  **skipped** (not raced against whatever the new holder is doing), and
+  the action is audited as `restart_superseded` rather than a plain
+  failure.
+- **The admin-backend process itself dies mid-wait** (its own rollout,
+  OOM, node drain): the Deployment stays at 0 until an operator presses
+  Start.
+
+In every case above, the row shows `manager_note: "restart_interrupted"`
+— derived from the explicit marker **or** an expired restart lease with
+the Deployment still observed at 0 replicas (either signal is
+sufficient) — and Start recalls the remembered count and clears the
+marker. **Any** successful k8s action on the deployment (start, stop, or
+a settled restart) also clears the marker. If an out-of-band `kubectl
+scale` brings the Deployment back up while the marker is still set, the
+badge is dropped and the stale marker is cleared lazily on the next
+envelope read — the observed replica count is authoritative over a
+possibly-stale marker. There's no automatic recovery beyond this, by
+design.
+
+**Don't roll (`kubectl rollout restart`) the admin-backend Deployment
+while a restart lease is unexpired (within the last 90s of a k8s
+restart/stop/start action).** A rolling admin-backend pod replacement
+mid-action orphans the in-flight lease exactly like a crash would — the
+new pod has no memory of the action it interrupted, and the target
+Deployment relies on `restart_interrupted` recovery (press Start) rather
+than resuming automatically.
 
 The pre-stop replica count lives in `system_settings`
 (`service_control.replicas.<deployment>`, clamped 1-10 on read, a stored `0`
@@ -364,19 +400,37 @@ takeover can't both win. The lease is released, by exact value match, only
 by the holder that acquired it — a stale holder's release can never delete
 a newer holder's lease.
 
+**Renewal before the scale-back PATCH**: a plain read-then-act check right
+before restart's scale-back ("do I still hold the lease?") has a TOCTOU
+gap — a replica could observe itself as owner right at the TTL edge,
+another replica could take over and act on the Deployment in the window
+between that read and the PATCH, and the first replica would scale back
+regardless. Instead, immediately before the scale-back PATCH, the holder
+atomically **renews** the lease (the same compare-and-swap `UPDATE...WHERE
+value=<mine>` primitive the takeover itself uses, extending `expires_at`
+on success). Renewal failing means someone else already has it — the
+scale-back is skipped and the action reads `restart_superseded`, never
+racing the new holder.
+
 ### Guardrails
 
 - **Protected** (`athena-admin-backend`, `athena-admin-frontend`): never
   targetable, in app code and in RBAC.
 - **Critical** (the named set `athena-gateway`, `athena-orchestrator`,
   `athena-mode-service`, `athena-jarvis-web`, `redis`, `qdrant`, `ollama`,
-  union any Kubernetes-resolved row whose group isn't `rag`, union Ollama
-  under any manager): requires the owner-only `manage_infrastructure`
-  permission **and** a typed confirmation (`confirm_name` in the request
-  body) that must equal the **resolved target's** name — not an alias row's
-  own name. The owner gate is checked before action-availability, so a
-  non-owner always gets 403 `insufficient_role`, never a 409 about an
-  unavailable action.
+  union any Kubernetes-resolved row whose group isn't `rag`, union any
+  **Control-Agent**-resolved row whose group isn't `rag` (the same
+  fail-safe, applied identically to both managers — codex diff review r1
+  Critical #1), union Ollama under any manager): requires the owner-only
+  `manage_infrastructure` permission **and** a typed confirmation
+  (`confirm_name` in the request body, and in the envelope's own
+  `confirm_name` field — never derived client-side from `manager_target`,
+  which for a Control-Agent process is just the bare port number) that
+  must equal the **resolved target's** name — the Deployment label for
+  Kubernetes, the container name or `process:<port>` for Control Agent,
+  `ollama` for Ollama — never an alias row's own name. The owner gate is
+  checked before action-availability, so a non-owner always gets 403
+  `insufficient_role`, never a 409 about an unavailable action.
 - **Target collisions**: if two registry rows (enabled or disabled) resolve
   to the same Kubernetes target, both are blocked (`manager_note:
   "target_collision:<name>"`) — an operator can't alias an obscure row onto

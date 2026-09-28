@@ -202,16 +202,47 @@ def lease_is_expired(lease_info: dict, now: Callable[[], datetime] = _utcnow) ->
         return True
 
 
-def still_holds_lease(session_factory: Callable[[], Session], lease: Lease) -> bool:
-    """True iff `lease`'s exact value is still the one stored for its key --
-    i.e. no other replica has taken over since it was acquired (codex diff
-    review r1 Critical #3). Uses its own session, mirroring acquire/
-    release_lease, so this reads the current cross-replica truth rather
-    than a possibly-stale value from the caller's own request session."""
+def renew_lease(
+    session_factory: Callable[[], Session],
+    lease: Lease,
+    ttl: int = LEASE_TTL_SECONDS,
+    now: Callable[[], datetime] = _utcnow,
+) -> bool:
+    """Atomic compare-and-swap renewal (codex diff review r2 High #2,
+    replacing the read-then-act `still_holds_lease`): conditionally UPDATEs
+    the lease row to a fresh `expires_at` ONLY if its value still exactly
+    matches `lease.value` -- the same primitive acquire_lease's own
+    takeover uses, so a second replica racing this renewal can't also
+    succeed. Returns True (and mutates `lease.value` to the renewed value,
+    so a subsequent release_lease matches it) iff the row was still ours;
+    False means another replica has already taken over.
+
+    A plain read (does the stored value still equal mine?) has a TOCTOU
+    gap: replica A could observe itself as owner right at the TTL edge,
+    replica B could take over and act on the Deployment in the window
+    between that read and A's own subsequent PATCH, and A would then act
+    on stale authority regardless. The UPDATE...WHERE here closes that
+    window -- it is the check and the extension in one atomic statement."""
+    key = lease.key
+    old_value = lease.value
+    try:
+        observed = json.loads(old_value)
+    except (TypeError, ValueError):
+        observed = {}
+    expires_at = now() + timedelta(seconds=ttl)
+    new_value = json.dumps({**observed, "expires_at": expires_at.isoformat()}, sort_keys=True)
+
     session = session_factory()
     try:
-        row = session.query(SystemSetting).filter(SystemSetting.key == lease.key).first()
-        return row is not None and row.value == lease.value
+        rowcount = (
+            session.query(SystemSetting)
+            .filter(SystemSetting.key == key, SystemSetting.value == old_value)
+            .update({"value": new_value}, synchronize_session=False)
+        )
+        session.commit()
+        if rowcount == 1:
+            lease.value = new_value
+        return rowcount == 1
     finally:
         session.close()
 
