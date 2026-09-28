@@ -70,6 +70,29 @@ def test_verify_pin_statuses_no_pin_configured(client, db, test_user):
     assert resp.json()["status"] == "not_configured"
 
 
+def test_legacy_sha256_hash_reads_as_not_configured(client, db, test_user):
+    """D30: a pre-ATHENA-69 unsalted-SHA256 owner_pin (no "pbkdf2_sha256$"
+    prefix) can't be verified against the new hash scheme -- it must read
+    as not_configured, never verified or invalid, and the attempt must not
+    be counted. Without the explicit format guard, verify_password's own
+    "algorithm != pbkdf2_sha256" parse failure would instead return False
+    for *any* PIN (including the correct plaintext one), surfacing as
+    "invalid" and silently counting toward the lockout threshold.
+    """
+    import hashlib
+
+    config = db.query(GuestModeConfig).first()
+    if not config:
+        config = GuestModeConfig(enabled=False, calendar_source="ical", created_by_id=test_user.id)
+        db.add(config)
+    config.owner_pin = hashlib.sha256("123456".encode()).hexdigest()
+    db.commit()
+
+    resp = client.post(VERIFY_URL, json={"pin": "123456", "tier": "household"}, headers={"X-Service-Key": _service_key()})
+    assert resp.json()["status"] == "not_configured"
+    assert db.query(OwnerPinAttempt).filter(OwnerPinAttempt.tier == "household").count() == 0
+
+
 def test_missing_pin_config_does_not_count(client, db, test_user):
     key = _service_key()
     client.post(VERIFY_URL, json={"pin": "123456", "tier": "household"}, headers={"X-Service-Key": key})

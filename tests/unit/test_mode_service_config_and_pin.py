@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
+import unittest.mock as umock
 
 sys.path.insert(0, "src")
 
@@ -398,3 +400,52 @@ class TestColdStart:
         health = client.get("/health").json()
         assert health["config_source"] == "admin"
         assert health["ready"] is True
+
+
+class TestStaleConfigAlert:
+    """D37 (bob r2 M4): ERROR log mode_service_config_stale once age >
+    _CONFIG_STALE_AFTER_SECONDS, throttled to at most once per
+    _CONFIG_STALE_LOG_INTERVAL_SECONDS. Drives `_check_config_staleness()`
+    directly (the function config_refresh_loop calls after every
+    load_config()) with scaled-down thresholds instead of the loop's real
+    60 s sleep, and real (sub-second) sleeps to cross the throttle window
+    deterministically.
+    """
+
+    def test_stale_alert_fires_once_then_throttled_then_fires_again(self, ms, monkeypatch):
+        monkeypatch.setattr(ms, "_CONFIG_STALE_AFTER_SECONDS", 0.01)
+        monkeypatch.setattr(ms, "_CONFIG_STALE_LOG_INTERVAL_SECONDS", 0.2)
+        ms._config_loaded = True
+        ms._config_loaded_at = time.monotonic() - 1.0  # well past the 0.01s threshold
+        ms._last_stale_log_at = None
+
+        mock_logger = umock.MagicMock()
+        monkeypatch.setattr(ms, "logger", mock_logger)
+
+        def _stale_calls():
+            return [c for c in mock_logger.error.call_args_list if c.args[:1] == ("mode_service_config_stale",)]
+
+        ms._check_config_staleness()
+        assert len(_stale_calls()) == 1
+
+        # Immediately again: still inside the throttle window -> no new log.
+        ms._check_config_staleness()
+        assert len(_stale_calls()) == 1
+
+        # After the throttle window elapses, it fires again.
+        time.sleep(0.25)
+        ms._check_config_staleness()
+        assert len(_stale_calls()) == 2
+
+    def test_stale_alert_silent_while_config_fresh(self, ms, monkeypatch):
+        monkeypatch.setattr(ms, "_CONFIG_STALE_AFTER_SECONDS", 500)
+        ms._config_loaded = True
+        ms._config_loaded_at = time.monotonic()  # fresh
+        ms._last_stale_log_at = None
+
+        mock_logger = umock.MagicMock()
+        monkeypatch.setattr(ms, "logger", mock_logger)
+
+        ms._check_config_staleness()
+        stale_calls = [c for c in mock_logger.error.call_args_list if c.args[:1] == ("mode_service_config_stale",)]
+        assert stale_calls == []

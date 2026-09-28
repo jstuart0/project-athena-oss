@@ -474,27 +474,36 @@ async def load_config():
             logger.warning("mode_service.config.load_failed", error=str(e), using="defaults")
 
 
+def _check_config_staleness() -> None:
+    """After a load attempt, log a throttled ERROR if the config hasn't
+    refreshed successfully in over `_CONFIG_STALE_AFTER_SECONDS` (D37).
+
+    Split out of config_refresh_loop so the throttling logic is directly
+    testable without waiting on the loop's real 60 s outer sleep.
+    """
+    global _last_stale_log_at
+
+    age = _config_age_seconds()
+    if (
+        _config_loaded
+        and age is not None
+        and age > _CONFIG_STALE_AFTER_SECONDS
+        and (
+            _last_stale_log_at is None
+            or (time.monotonic() - _last_stale_log_at) >= _CONFIG_STALE_LOG_INTERVAL_SECONDS
+        )
+    ):
+        logger.error("mode_service_config_stale", config_age_seconds=age)
+        _last_stale_log_at = time.monotonic()
+
+
 async def config_refresh_loop():
     """Periodically refresh configuration from admin API, and log a stale
     warning if a successful load hasn't happened in a while (D37)."""
-    global _last_stale_log_at
-
     while True:
         await asyncio.sleep(60)  # Check every 60 seconds
         await load_config()
-
-        age = _config_age_seconds()
-        if (
-            _config_loaded
-            and age is not None
-            and age > _CONFIG_STALE_AFTER_SECONDS
-            and (
-                _last_stale_log_at is None
-                or (time.monotonic() - _last_stale_log_at) >= _CONFIG_STALE_LOG_INTERVAL_SECONDS
-            )
-        ):
-            logger.error("mode_service_config_stale", config_age_seconds=age)
-            _last_stale_log_at = time.monotonic()
+        _check_config_staleness()
 
 
 async def _posture_reminder_loop(interval: float) -> None:

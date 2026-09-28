@@ -1,5 +1,6 @@
-"""ATHENA-69 D25/D39: dual-auth (X-Service-Key OR OIDC/API-key) for
-GET /api/guest-mode/config.
+"""ATHENA-69 D25/D31/D39: dual-auth (X-Service-Key OR OIDC/API-key) for
+GET /api/guest-mode/config, and service-key-only auth for
+GET /api/guest-mode/internal/current-guest.
 
 Covers:
  - a valid X-Service-Key gets 200 without any user/permission check.
@@ -11,6 +12,8 @@ Covers:
  - a service-key fetch against an empty DB never auto-creates a row (D39 --
    created_by_id is NOT NULL, so a service-key caller has no user to
    attribute one to).
+ - GET /api/guest-mode/internal/current-guest requires X-Service-Key (D31 --
+   previously open to any caller on the cluster network).
 """
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ from app.models import GuestModeConfig
 from shared.config import _clear_cache_for_tests, get_config
 
 CONFIG_URL = "/api/guest-mode/config"
+CURRENT_GUEST_URL = "/api/guest-mode/internal/current-guest"
 
 
 def test_guest_mode_config_accepts_service_key(client, db):
@@ -114,3 +118,23 @@ def test_service_key_auto_create_has_no_creator(client, db):
     assert body["id"] is None
 
     assert db.query(GuestModeConfig).count() == 0
+
+
+def test_current_guest_requires_service_key(client, db):
+    resp = client.get(CURRENT_GUEST_URL)
+    assert resp.status_code == 401
+
+
+def test_current_guest_wrong_key_401(client, db):
+    resp = client.get(CURRENT_GUEST_URL, headers={"X-Service-Key": "definitely-wrong"})
+    assert resp.status_code == 401
+
+
+def test_current_guest_with_service_key_returns_200(client, db):
+    _clear_cache_for_tests()
+    key = get_config().service_api_key
+    assert key, "conftest.py must set SERVICE_API_KEY for this test to be meaningful"
+
+    resp = client.get(CURRENT_GUEST_URL, headers={"X-Service-Key": key})
+    assert resp.status_code == 200
+    assert resp.json() == {"has_guest": False}
