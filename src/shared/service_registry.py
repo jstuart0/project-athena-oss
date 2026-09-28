@@ -25,6 +25,19 @@ _cache_time: Dict[str, float] = {}
 _CACHE_TTL = 30.0
 
 
+def _get_service_api_key() -> str:
+    """SERVICE_API_KEY for the X-Service-Key header POST /api/service-registry/services
+    requires (ATHENA-108). Prefer get_config() -- the centralized,
+    pydantic-settings-backed source of truth -- and fall back to the raw
+    env var if shared.config isn't importable in this process (e.g. a
+    standalone script running outside the full app environment)."""
+    try:
+        from shared.config import get_config
+        return get_config().service_api_key or ""
+    except Exception:
+        return os.getenv("SERVICE_API_KEY", "")
+
+
 async def get_service_url(service_name: str) -> Optional[str]:
     """
     Get service URL from registry via Admin API.
@@ -95,6 +108,13 @@ async def register_service(
         # Use localhost for service URLs (environment-agnostic)
         service_url = f"http://localhost:{port}"
 
+        service_key = _get_service_api_key()
+        if not service_key:
+            logger.warning(
+                f"SERVICE_API_KEY is unset; registration of {service_name} will be "
+                "rejected with 401 by the admin API's X-Service-Key write gate."
+            )
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{ADMIN_API_URL}/api/service-registry/services",
@@ -103,7 +123,8 @@ async def register_service(
                     "endpoint_url": service_url,
                     "display_name": description or service_name.replace('-', ' ').title(),
                     "service_type": "api"
-                }
+                },
+                headers={"X-Service-Key": service_key},
             )
 
             if response.status_code in (200, 201):

@@ -130,6 +130,13 @@ _ROUTE_PATTERN = re.compile(
     # scan must not newly surface as a widened-_SCAN_ROOTS side effect.
     r"""|/api/internal/config/[a-zA-Z\-]+"""
     r"""|/api/internal/analytics/log"""
+    # ATHENA-108: shared.service_registry.register_service() POSTs here to
+    # self-register every RAG/service process. Scoped to the bare
+    # "/services" literal (trailing quote/`?`) so it matches only this call
+    # site, not the sibling GET .../url or POST .../toggle routes on the
+    # same router -- those are pre-existing, out-of-scope gaps this ticket
+    # does not touch.
+    r"""|/api/service-registry/services["'?]"""
 )
 
 _HTTP_METHODS = {"get", "post", "put", "delete", "stream", "request"}
