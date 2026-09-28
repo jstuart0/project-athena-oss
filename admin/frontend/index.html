@@ -3838,6 +3838,7 @@
                 <div id="guest-mode-status-banner" class="mb-6">
                     <!-- Dynamic status banner will be inserted here -->
                 </div>
+                <div id="guest-mode-status-live" role="status" class="sr-only"></div>
 
                 <!-- Guest Mode Settings Section -->
                 <div class="bg-dark-card border border-dark-border rounded-lg p-6 mb-6">
@@ -4758,6 +4759,7 @@
                             <option value="confirmed">Confirmed</option>
                             <option value="pending">Pending</option>
                             <option value="cancelled">Cancelled</option>
+                            <option value="blocked">Blocked (not a stay)</option>
                         </select>
                     </div>
                 </div>
@@ -4765,12 +4767,12 @@
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-400 mb-2">Check-in Date *</label>
-                        <input type="datetime-local" id="guest-checkin" required
+                        <input type="datetime-local" id="guest-checkin" required aria-describedby="guest-modal-timezone-note"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-400 mb-2">Check-out Date *</label>
-                        <input type="datetime-local" id="guest-checkout" required
+                        <input type="datetime-local" id="guest-checkout" required aria-describedby="guest-modal-timezone-note"
                             class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     </div>
                 </div>
