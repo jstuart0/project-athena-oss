@@ -24,13 +24,23 @@ if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from app.auth.oidc import get_current_user
-from app.models import RagService
+from app.models import RagService, SystemSetting
 from app.routes import voice_tests as voice_tests_module
 from app.utils import rag_urls
 from main import app
 from shared.config import _clear_cache_for_tests
 
 _PRIVATE_HOST = "10.66.66.66"  # RFC1918, never allowlisted unless a test opts in
+_BLOCKED_OLLAMA_URL = "http://169.254.169.254:80"  # link-local IMDS, always blocked
+
+
+def _seed_ollama_url(db, url: str) -> None:
+    row = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
+    if row:
+        row.value = url
+    else:
+        db.add(SystemSetting(key="ollama_url", value=url, category="llm"))
+    db.commit()
 
 
 @pytest.fixture(autouse=True)
@@ -139,8 +149,15 @@ def test_full_pipeline_rag_enhancement_blocks_unallowlisted_private_host(owner_c
     network for a private, non-allowlisted registry host -- the LLM step
     ahead of it in the same pipeline legitimately uses aiohttp too, so this
     asserts by URL (the private RAG host is never requested), not by
-    forbidding ClientSession construction outright."""
+    forbidding ClientSession construction outright.
+
+    ATHENA-122: the pipeline's LLM step now runs through check_ssrf_safe too
+    (before this RAG step is ever reached), so the default ollama_url
+    (http://localhost:11434) must be explicitly allowlisted here the same
+    way test_service_control_ollama.py's _allow_host() does for every other
+    Ollama-probing test -- loopback is blocked by default."""
     monkeypatch.setenv("DEFAULT_CITY", "Denver")
+    monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "localhost")
     _clear_cache_for_tests()
     db.add(RagService(
         name="weather", display_name="Weather", host=_PRIVATE_HOST,
@@ -190,3 +207,60 @@ def test_full_pipeline_rag_enhancement_blocks_unallowlisted_private_host(owner_c
     assert results.get("rag_error_reason", "") != ""
     assert "private ip" in results["rag_error_reason"].lower()
     assert not any(_PRIVATE_HOST in u for u in requested_urls), requested_urls
+
+
+def test_llm_test_endpoint_blocks_private_ollama_host_with_no_network_call(owner_client, db, monkeypatch):
+    """ATHENA-122: POST /api/voice-tests/llm/test probes the operator-set
+    ollama_url without going through check_ssrf_safe first. A blocked host
+    must 403 before aiohttp.ClientSession is ever constructed."""
+    _seed_ollama_url(db, _BLOCKED_OLLAMA_URL)
+    monkeypatch.setattr(voice_tests_module.aiohttp, "ClientSession", _never_called_session)
+
+    response = owner_client.post("/api/voice-tests/llm/test", json={"text": "hello"})
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["error"] == "ssrf_blocked"
+
+
+def test_llm_test_endpoint_allows_allowed_ollama_host_and_probes_it(owner_client, db, monkeypatch):
+    _seed_ollama_url(db, "http://192.0.2.10:11434")
+    ssrf_spy = AsyncMock(return_value=(True, ""))
+    monkeypatch.setattr(voice_tests_module, "check_ssrf_safe", ssrf_spy)
+
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.json = AsyncMock(return_value={"response": "hi", "eval_count": 1})
+
+    mock_post_ctx = MagicMock()
+    mock_post_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_post_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(return_value=mock_post_ctx)
+    mock_session_ctx = MagicMock()
+    mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(voice_tests_module.aiohttp, "ClientSession", MagicMock(return_value=mock_session_ctx))
+
+    response = owner_client.post("/api/voice-tests/llm/test", json={"text": "hello"})
+
+    assert response.status_code == 200, response.text
+    assert ssrf_spy.called
+    assert ssrf_spy.call_args.args[0] == "http://192.0.2.10:11434/api/generate"
+    assert mock_session.post.called
+    assert mock_session.post.call_args.args[0] == "http://192.0.2.10:11434/api/generate"
+
+
+def test_pipeline_test_endpoint_blocks_private_ollama_host_with_no_network_call(owner_client, db, monkeypatch):
+    """ATHENA-122: POST /api/voice-tests/pipeline/test's first (LLM) step
+    probes the operator-set ollama_url without going through
+    check_ssrf_safe. A blocked host must 403 before the pipeline's LLM step
+    -- and therefore before aiohttp.ClientSession is ever constructed for
+    any stage of the pipeline."""
+    _seed_ollama_url(db, _BLOCKED_OLLAMA_URL)
+    monkeypatch.setattr(voice_tests_module.aiohttp, "ClientSession", _never_called_session)
+
+    response = owner_client.post("/api/voice-tests/pipeline/test", json={"text": "hello"})
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["error"] == "ssrf_blocked"

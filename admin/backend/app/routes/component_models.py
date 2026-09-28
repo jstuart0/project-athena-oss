@@ -16,6 +16,7 @@ import httpx
 from app.database import get_db
 from app.models import ComponentModelAssignment, User, LLMBackend, CloudLLMProvider, ExternalAPIKey, SystemSetting
 from app.auth.oidc import get_current_user
+from app.utils.rag_urls import check_ssrf_safe
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -245,29 +246,35 @@ async def get_available_models(
 
     # Use centralized Ollama URL from system_settings
     ollama_url = get_ollama_url(db)
+    tags_url = f"{ollama_url}/api/tags"
 
     # Fetch Ollama models
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(f"{ollama_url}/api/tags")
-            response.raise_for_status()
-            data = response.json()
+    ssrf_allowed, ssrf_reason = await check_ssrf_safe(tags_url)
+    if not ssrf_allowed:
+        logger.warning("ollama_model_discovery_ssrf_blocked", reason=ssrf_reason)
+        # Continue to cloud models, same as any other Ollama-unreachable case.
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(tags_url)
+                response.raise_for_status()
+                data = response.json()
 
-        for model in data.get("models", []):
-            details = model.get("details", {})
-            models.append(AvailableModel(
-                name=model["name"],
-                size=model.get("size", 0),
-                modified_at=model.get("modified_at", ""),
-                family=details.get("family"),
-                parameter_size=details.get("parameter_size"),
-                quantization=details.get("quantization_level"),
-                backend_type="ollama"
-            ))
+            for model in data.get("models", []):
+                details = model.get("details", {})
+                models.append(AvailableModel(
+                    name=model["name"],
+                    size=model.get("size", 0),
+                    modified_at=model.get("modified_at", ""),
+                    family=details.get("family"),
+                    parameter_size=details.get("parameter_size"),
+                    quantization=details.get("quantization_level"),
+                    backend_type="ollama"
+                ))
 
-    except Exception as e:
-        logger.warning("ollama_model_discovery_failed", error=str(e))
-        # Continue to cloud models even if Ollama fails
+        except Exception as e:
+            logger.warning("ollama_model_discovery_failed", error=str(e))
+            # Continue to cloud models even if Ollama fails
 
     # Fetch cloud models from enabled providers
     cloud_providers = db.query(CloudLLMProvider).filter(
@@ -404,10 +411,16 @@ async def validate_model_exists(model_name: str, db: Session) -> bool:
     # Check Ollama for local models
     # Use centralized Ollama URL from system_settings
     ollama_url = get_ollama_url(db)
+    tags_url = f"{ollama_url}/api/tags"
+
+    ssrf_allowed, ssrf_reason = await check_ssrf_safe(tags_url)
+    if not ssrf_allowed:
+        logger.warning("model_validation_ssrf_blocked", model=model_name, reason=ssrf_reason)
+        return False
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{ollama_url}/api/tags")
+            response = await client.get(tags_url)
             response.raise_for_status()
             data = response.json()
 
