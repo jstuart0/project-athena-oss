@@ -9,16 +9,37 @@ Byte-identical move of 6 mode/permission helpers:
   - check_entity_permission  (Pattern 2 — accepts permissions dict)
 
 See thoughts/shared/plans/2026-05-06-deliver-orchestrator-refactor.md Phase 3.1.
+
+ATHENA-69 (HA write authorization) adds the guard module below the 6
+original helpers: ``HAWriteDecision``/``HADenial``/``HAWritePermissionDenied``,
+``authorize_ha_write``, ``normalize_permissions``, ``degraded_permissions``,
+the per-request ``PermissionScope``/``ha_permission_scope``/
+``current_ha_scope`` contextvar machinery, ``PermissionEnforcingHAClient``
+(the chokepoint wrapper around ``HomeAssistantClient``),
+``ensure_permission_enforcing``, ``CONTROL_DEVICE_DOMAINS``/
+``intent_write_domains`` (the coarse per-device-type domain map used for the
+node-level pre-check), and ``permission_refusal_message`` plus the
+``GUEST_INTENT_REFUSAL``/``DEGRADED_INTENT_REFUSAL`` constants. Pass A lands
+the guard with ``call_service`` interception only (read allowlist, no
+automation methods); Pass B adds ``authorize_automation_config``,
+``authorize_sequence``, and the three automation methods on the guard, then
+wires it into lifespan. See
+.mozart/plans/active/2026-09-28-deliver-athena-ha-permission-gap.md.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import re
-from typing import Any, Dict, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import structlog
 
-from orchestrator.nodes._runtime import get_mode_client
+from orchestrator.metrics import ha_write_denied_total
 from orchestrator.state import IntentCategory
+from shared.config import get_config
+from shared.guest_policy import apply_guest_baseline, parse_json_array_env
 
 logger = structlog.get_logger(__name__)
 
@@ -31,9 +52,25 @@ class _ModeClientProxy:
     main.py's lifespan, so we cannot bind it at import time.  This proxy
     resolves the current value on every attribute lookup, keeping the function
     bodies byte-identical.
+
+    ATHENA-69: ``get_mode_client`` is imported lazily inside ``__getattr__``
+    rather than at module scope. ``orchestrator.nodes._runtime`` is a
+    submodule of the ``orchestrator.nodes`` package, and importing it forces
+    ``orchestrator/nodes/__init__.py`` to run first if it hasn't already --
+    that ``__init__.py`` imports ``route_control_node``, which imports names
+    from this module. Whichever of ``orchestrator.mode_permission`` /
+    ``orchestrator.nodes`` is imported *first* in a process determines
+    whether that cycle resolves cleanly or raises ImportError on a
+    partially-initialized module -- a real, pre-existing hazard this module
+    already had before ATHENA-69, now surfaced by tests that import
+    ``orchestrator.mode_permission`` directly and in isolation. Deferring
+    the import to call time (this proxy already promises "resolves the
+    current value on every attribute lookup") removes the module-scope
+    forward reference entirely, independent of test collection order.
     """
 
     def __getattr__(self, name: str):  # type: ignore[override]
+        from orchestrator.nodes._runtime import get_mode_client
         return getattr(get_mode_client(), name)
 
 
@@ -86,17 +123,18 @@ async def get_current_mode() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.warning(f"Failed to get mode from mode service: {e}")
-        # Default to owner mode on error (safe default)
+        # D4: the mode service is unreachable or rejecting. This is NOT a
+        # safe-default-to-owner: an unreachable mode service must not grant
+        # unrestricted HA writes. The reported "mode" stays "owner" (so
+        # prompts/memory/UI copy are unchanged), but "permissions" is the
+        # degraded set -- physical-security domains stay denied even though
+        # the household is nominally in owner mode. See
+        # degraded_permissions() below and D4 in the ATHENA-69 plan.
         return {
             "mode": "owner",
-            "permissions": {
-                "mode": "owner",
-                "allowed_intents": [],
-                "restricted_entities": [],
-                "allowed_domains": [],
-                "max_queries_per_minute": 100
-            },
+            "permissions": degraded_permissions(),
             "override_active": False,
+            "degraded": True,
             "reason": "Mode service unavailable"
         }
 
@@ -387,3 +425,489 @@ def check_entity_permission(entity_id: str, permissions: Dict[str, Any]) -> bool
         mode=mode
     )
     return True
+
+
+# ============================================================================
+# ATHENA-69: HA write authorization guard
+# ============================================================================
+#
+# Everything below this line is new for ATHENA-69 (Pass A). See the module
+# docstring and the plan's Design section for the full contract. Pass A
+# lands: HAWriteDecision/HADenial/HAWritePermissionDenied, authorize_ha_write,
+# normalize_permissions, degraded_permissions, PermissionScope/
+# ha_permission_scope/current_ha_scope, PermissionEnforcingHAClient (call_service
+# interception + read allowlist only -- automation methods are Pass B),
+# ensure_permission_enforcing, CONTROL_DEVICE_DOMAINS/intent_write_domains,
+# permission_refusal_message, GUEST_INTENT_REFUSAL, DEGRADED_INTENT_REFUSAL.
+
+_ha_permission_scope_var: "contextvars.ContextVar[Optional[PermissionScope]]" = contextvars.ContextVar(
+    "athena_ha_permission_scope", default=None
+)
+
+# Identity sentinel for ensure_permission_enforcing (D3/D1). A module-level
+# object() rather than a class-level True/False flag so identity comparison
+# (`is _GUARD_SENTINEL`) can't be spoofed by a MagicMock's auto-attribute
+# behavior -- a MagicMock will happily return a *new* MagicMock for
+# `.athena_ha_guard`, but it can never equal this specific object by identity
+# unless it's actually the guard (or a proxy that forwards to it).
+_GUARD_SENTINEL = object()
+
+
+@dataclass(frozen=True)
+class HAWriteDecision:
+    """The result of authorizing one HA write (authorize_ha_write /
+    authorize_automation_config / authorize_sequence)."""
+    allowed: bool
+    denied_targets: Tuple[str, ...] = ()
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class HADenial:
+    """One recorded denial on a PermissionScope."""
+    domain: str
+    service: str
+    targets: Tuple[str, ...]
+    reason: str
+
+
+class HAWritePermissionDenied(Exception):
+    """Raised by PermissionEnforcingHAClient when a write is denied.
+
+    The only new exception type ATHENA-69 introduces. Callers that swallow
+    exceptions broadly (e.g. _handle_scene_intent's activation try/except)
+    must re-raise this one ahead of their catch-all so a denial can't start
+    a fallback write chain (D2, wired in Pass B).
+    """
+
+
+@dataclass
+class PermissionScope:
+    """Per-request authorization state, held in a ContextVar for the
+    lifetime of one `with ha_permission_scope(...):` block.
+
+    ``permissions`` is always the *normalized* dict (see
+    normalize_permissions) -- never the raw, possibly-empty/mode-less dict a
+    caller passed in. ``mode`` is the scope's declared mode (typically
+    ``state.mode``, or "system" for an unscoped/background write) and can
+    legitimately differ from ``permissions["mode"]`` (e.g. a degraded outage
+    reports mode="owner" at the OrchestratorState level but
+    permissions["mode"] == "degraded").
+    """
+    permissions: Dict[str, Any]
+    mode: str
+    request_id: Optional[str] = None
+    session_id: Optional[str] = None
+    denials: List[HADenial] = field(default_factory=list)
+    allowed_writes: int = 0
+    halted: bool = False
+
+
+def degraded_permissions() -> Dict[str, Any]:
+    """The permission set used when the mode service is unreachable/
+    rejecting, or when `permissions` is missing/empty/mode-less (D4, D5).
+
+    Never "owner": entity-level writes to the D4 fallback domains (locks,
+    covers, alarm panels, cameras, automations, scripts, scenes by default)
+    stay denied; intents are NOT restricted by default (allowed_intents and
+    restricted_intents are both empty), matching D4's "owners keep lights,
+    climate, media during an outage" -- only entity/domain-level physical-
+    security writes are floored.
+    """
+    fallback_entities = parse_json_array_env(
+        get_config().ha_permission_fallback_restricted_entities,
+        [
+            r"^lock\.", r"^cover\.", r"^alarm_control_panel\.", r"^camera\.",
+            r"^automation\.", r"^script\.", r"^scene\.",
+        ],
+    )
+    return {
+        "mode": "degraded",
+        "restricted_entities": fallback_entities,
+        "allowed_domains": [],
+        "allowed_intents": [],
+        "restricted_intents": [],
+    }
+
+
+def normalize_permissions(permissions: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Normalize a raw permissions dict for use by the guard (D5).
+
+    Missing / empty / no "mode" key -> degraded_permissions(). Never
+    manufactures "owner" from nothing. ``mode == "guest"`` gets the guest
+    floor/baseline unioned in via apply_guest_baseline (D8/D22). Any other
+    mode (including an already-normalized "owner" or "degraded") is
+    returned as a shallow copy, unmodified.
+    """
+    if not permissions or not permissions.get("mode"):
+        return degraded_permissions()
+    if permissions.get("mode") == "guest":
+        return apply_guest_baseline(permissions)
+    return dict(permissions)
+
+
+@contextlib.contextmanager
+def ha_permission_scope(
+    permissions: Optional[Dict[str, Any]],
+    *,
+    mode: str = "system",
+    request_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+):
+    """Open a new PermissionScope for the duration of the with-block.
+
+    ``permissions`` is normalized on entry (D5) -- callers pass the raw
+    ``state.permissions`` and never need to normalize it themselves.
+    ``ha_permission_scope(None, mode="system")`` opens a baseline
+    (degraded) scope for a system-initiated write with no request context
+    (D3) -- e.g. a background sequence step or the follow-me service.
+
+    A scope must never span an ``await`` that yields control back to a
+    different logical request's context without a per-task copy (asyncio
+    tasks/gather copy the current context, so this holds for
+    create_task/gather fan-outs); it must never span an actual generator
+    ``yield`` (resetting a contextvars.Token set in a different context
+    raises) -- a drift test asserts no bare `yield` appears inside a `with
+    ha_permission_scope(` block anywhere in the tree.
+    """
+    scope = PermissionScope(
+        permissions=normalize_permissions(permissions),
+        mode=mode,
+        request_id=request_id,
+        session_id=session_id,
+    )
+    token = _ha_permission_scope_var.set(scope)
+    try:
+        yield scope
+    finally:
+        _ha_permission_scope_var.reset(token)
+
+
+def current_ha_scope() -> Optional[PermissionScope]:
+    """The PermissionScope open in the current context, or None."""
+    return _ha_permission_scope_var.get()
+
+
+# ---------------------------------------------------------------------------
+# Target normalization + authorize_ha_write
+# ---------------------------------------------------------------------------
+
+_AREA_DEVICE_FLOOR_LABEL_KEYS = ("area_id", "device_id", "floor_id", "label_id")
+
+
+def _split_entity_ids(value: Any) -> List[str]:
+    """Split an entity_id value (str, comma-separated str, or list) into a
+    list of stripped entity-id strings. Non-string list elements are
+    dropped rather than raising -- HA payloads are caller-controlled."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    return []
+
+
+def _has_area_device_floor_label(d: Any) -> bool:
+    return isinstance(d, dict) and any(key in d for key in _AREA_DEVICE_FLOOR_LABEL_KEYS)
+
+
+def _as_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _extract_targets(domain: str, service_data: Optional[Dict[str, Any]]) -> List[str]:
+    """Normalize a call_service payload into a list of pseudo-targets.
+
+    See the Design section's "Target normalization (hidden)" for the full
+    contract: entity_id may be read from the top level, ``target``,
+    ``data``, or ``data.target``; "all"/a missing entity/an area-device-
+    floor-label target all become ``f"{domain}.all"``; a bare id without a
+    domain becomes ``f"{domain}.{id}"``.
+    """
+    data = _as_dict(service_data)
+    target_block = _as_dict(data.get("target"))
+    data_block = _as_dict(data.get("data"))
+    data_target_block = _as_dict(data_block.get("target"))
+
+    if (
+        _has_area_device_floor_label(data)
+        or _has_area_device_floor_label(target_block)
+        or _has_area_device_floor_label(data_block)
+        or _has_area_device_floor_label(data_target_block)
+    ):
+        return [f"{domain}.all"]
+
+    entity_values = (
+        _split_entity_ids(data.get("entity_id"))
+        or _split_entity_ids(target_block.get("entity_id"))
+        or _split_entity_ids(data_block.get("entity_id"))
+        or _split_entity_ids(data_target_block.get("entity_id"))
+    )
+
+    if not entity_values:
+        return [f"{domain}.all"]
+
+    targets: List[str] = []
+    for raw in entity_values:
+        if raw == "all":
+            pseudo = f"{domain}.all"
+            if pseudo not in targets:
+                targets.append(pseudo)
+            continue
+        if "." in raw:
+            targets.append(raw)
+        else:
+            targets.append(f"{domain}.{raw}")
+    return targets
+
+
+def authorize_ha_write(
+    domain: str,
+    service: str,
+    service_data: Optional[Dict[str, Any]],
+    permissions: Dict[str, Any],
+) -> HAWriteDecision:
+    """Authorize one HA write (call_service-shaped) against `permissions`.
+
+    Pure. Normalizes ``permissions`` itself (D5) so a caller can pass a raw
+    or already-normalized dict interchangeably. Every normalized target
+    (see _extract_targets) goes through check_entity_permission; any
+    denial denies the whole call. When the target's own domain differs
+    from the service's declared domain (e.g. `homeassistant.turn_on` with
+    `lock.front`), both the entity itself and `f"{domain}.all"` (the
+    service's own declared domain, as a pseudo-target) are checked -- a
+    generic dispatch service can never reach an entity via a domain that
+    wouldn't itself be authorized.
+    """
+    perms = normalize_permissions(permissions)
+    targets = _extract_targets(domain, service_data)
+
+    extra_targets: List[str] = []
+    for target in targets:
+        target_domain = target.split(".")[0] if "." in target else domain
+        if target_domain != domain:
+            fallback = f"{domain}.all"
+            if fallback not in targets and fallback not in extra_targets:
+                extra_targets.append(fallback)
+    targets = targets + extra_targets
+
+    denied = [t for t in targets if not check_entity_permission(t, perms)]
+    if denied:
+        return HAWriteDecision(allowed=False, denied_targets=tuple(denied), reason="entity_or_domain_denied")
+    return HAWriteDecision(allowed=True, denied_targets=(), reason="")
+
+
+# ---------------------------------------------------------------------------
+# Coarse per-device-type domain map (D14)
+# ---------------------------------------------------------------------------
+
+# Maps a SmartHomeController `device_type` (as it appears on the intent dict
+# route_control_node builds) to *exactly* the set of HA domains that
+# device_type's handler writes via call_service, derived from each handler's
+# literal call_service first-argument domains (smart_home_controller.py).
+# whole_house is not a real device_type (it's the room=="whole_house" marker
+# nested inside the "light" dispatch) but is listed separately here because
+# it's used by name in the sequence/automation walkers (Pass B) where a step
+# can name it directly. A device_type absent from this map (including an
+# unrecognized/missing one, which the real controller refuses with "I can
+# only control lights right now") maps to `()` -- no known write, so the
+# coarse pre-check never blocks a read-only or unrecognized intent.
+CONTROL_DEVICE_DOMAINS: Dict[str, Tuple[str, ...]] = {
+    "light": ("light",),
+    "whole_house": ("light",),
+    "climate": ("climate",),
+    "oven": (),
+    "fridge": (),
+    "freezer": (),
+    "appliance": (),
+    "sensor": (),
+    "media": ("media_player",),
+    "media_player": ("media_player",),
+    "tv": ("media_player",),
+    "speaker": ("media_player",),
+    "bed_warmer": ("switch", "select"),
+    "motion_control": ("input_boolean", "input_number"),
+    "lock": ("lock",),
+    "fan": ("fan",),
+    "cover": ("cover",),
+    "scene": ("scene", "script", "light", "lock"),
+}
+
+
+def intent_write_domains(intent: Dict[str, Any]) -> Tuple[str, ...]:
+    """The HA domains `intent` would write, for the node-level coarse
+    pre-check (D14) and (Pass B) the sequence walker's device-type steps.
+
+    `()` for a missing/unrecognized device_type or a read-only one (e.g.
+    `sensor`, `appliance`) -- the coarse check never blocks those.
+    """
+    device_type = intent.get("device_type") if isinstance(intent, dict) else None
+    if not device_type:
+        return ()
+    return CONTROL_DEVICE_DOMAINS.get(device_type, ())
+
+
+# ---------------------------------------------------------------------------
+# Refusal text (D2, D9)
+# ---------------------------------------------------------------------------
+
+GUEST_INTENT_REFUSAL = "Sorry, I can't do that in guest mode."
+DEGRADED_INTENT_REFUSAL = "Sorry, I can't do that right now because I couldn't verify permissions."
+
+_DOMAIN_NOUNS: Dict[str, str] = {
+    "light": "lights",
+    "lock": "locks",
+    "cover": "covers",
+    "climate": "thermostat",
+    "media_player": "media player",
+    "switch": "switch",
+    "select": "bed warmer",
+    "scene": "scene",
+    "script": "routine",
+    "fan": "fan",
+    "input_boolean": "motion settings",
+    "input_number": "motion settings",
+    "alarm_control_panel": "alarm",
+    "camera": "camera",
+    "automation": "automation",
+}
+
+
+def _noun_for_domains(domains: Iterable[str]) -> str:
+    names: List[str] = []
+    seen = set()
+    for d in domains:
+        noun = _DOMAIN_NOUNS.get(d, d)
+        if noun not in seen:
+            seen.add(noun)
+            names.append(noun)
+    if not names:
+        return "device"
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def permission_refusal_message(
+    domains: Iterable[str],
+    scope: "PermissionScope",
+    *,
+    partial: bool = False,
+) -> str:
+    """A TTS-safe refusal for a denied HA write. Never includes entity ids.
+
+    ``domains`` should exclude any denial whose reason is
+    "halted_after_denial" -- the latch's downstream denials describe the
+    scope being closed, not a fresh reason worth naming. Phrasing is keyed
+    on ``scope.permissions["mode"]`` (the normalized permission mode, which
+    can be "degraded" even when ``scope.mode`` reports "owner" during a D4
+    outage), not ``scope.mode`` itself.
+    """
+    noun = _noun_for_domains(domains)
+    perm_mode = scope.permissions.get("mode") if scope and scope.permissions else "guest"
+    if perm_mode == "degraded":
+        if partial:
+            return f"I did part of that, but I can't control the {noun} right now because I couldn't verify permissions."
+        return f"Sorry, I can't control the {noun} right now because I couldn't verify permissions."
+    if partial:
+        return f"I did part of that, but I can't control the {noun} in guest mode."
+    return f"Sorry, I can't control the {noun} in guest mode."
+
+
+# ---------------------------------------------------------------------------
+# PermissionEnforcingHAClient (D1, D20)
+# ---------------------------------------------------------------------------
+
+class PermissionEnforcingHAClient:
+    """Wraps a HomeAssistantClient (or any compatible object) and
+    authorizes every write against the current request's PermissionScope
+    before forwarding it to the inner client.
+
+    Pass A: ``call_service`` interception plus the read allowlist only.
+    Pass B adds ``create_automation``/``delete_automation``/
+    ``disable_automation`` (with the automation-config walker) before this
+    class is wired into main.py's lifespan, so no pass ever ships a wired
+    guard that can't service AutomationAgent.
+
+    The read allowlist is deliberately narrow: only ``get_state``,
+    ``health_check``, ``close``, ``is_configured``, and ``url`` pass
+    through. Any other attribute access (``client``, ``token``, an
+    unintercepted write method) raises AttributeError -- the raw
+    authenticated transport is never reachable through the guard.
+    """
+
+    _athena_ha_guard = _GUARD_SENTINEL
+
+    _READ_ALLOWLIST = frozenset({"get_state", "health_check", "close", "is_configured", "url"})
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._READ_ALLOWLIST:
+            return getattr(self._inner, name)
+        raise AttributeError(
+            f"PermissionEnforcingHAClient does not expose '{name}'. Only "
+            f"{sorted(self._READ_ALLOWLIST)} pass through unauthorized; "
+            "writes go through call_service (and, from Pass B, "
+            "create_automation/delete_automation/disable_automation)."
+        )
+
+    def _resolve_scope(self) -> PermissionScope:
+        scope = current_ha_scope()
+        if scope is None:
+            # D3: a bare guard call with no open scope (e.g. a call made
+            # before the caller opened one) gets a fresh throwaway baseline
+            # scope used only for this decision and its log -- never a
+            # process-global scope object.
+            scope = PermissionScope(permissions=degraded_permissions(), mode="system")
+        return scope
+
+    def _deny(self, scope: PermissionScope, domain: str, service: str, targets: Tuple[str, ...], reason: str) -> None:
+        scope.denials.append(HADenial(domain=domain, service=service, targets=tuple(targets), reason=reason))
+        scope.halted = True
+        logger.warning(
+            "ha_write_denied",
+            domain=domain,
+            service=service,
+            targets=list(targets),
+            scope_mode=scope.mode,
+            permissions_mode=scope.permissions.get("mode"),
+            reason=reason,
+            request_id=scope.request_id,
+            session_id=scope.session_id,
+        )
+        ha_write_denied_total.labels(domain=domain, scope_mode=scope.mode).inc()
+        raise HAWritePermissionDenied(f"{domain}.{service} denied ({reason})")
+
+    async def call_service(
+        self,
+        domain: str,
+        service: str,
+        service_data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        scope = self._resolve_scope()
+        if scope.halted:
+            self._deny(scope, domain, service, (), "halted_after_denial")
+        decision = authorize_ha_write(domain, service, service_data, scope.permissions)
+        if not decision.allowed:
+            self._deny(scope, domain, service, decision.denied_targets, decision.reason)
+        scope.allowed_writes += 1
+        return await self._inner.call_service(domain, service, service_data)
+
+
+def ensure_permission_enforcing(client: Any) -> Any:
+    """Idempotently wrap `client` in a PermissionEnforcingHAClient.
+
+    None -> None. Already the guard (or a proxy that forwards attribute
+    access to it, e.g. _HAClientProxy) -> the same object, by identity via
+    `_athena_ha_guard is _GUARD_SENTINEL` -- a plain MagicMock can't match
+    this because it manufactures a *new* mock attribute rather than the
+    real sentinel object. Anything else -> wrapped.
+    """
+    if client is None:
+        return None
+    if getattr(client, "_athena_ha_guard", None) is _GUARD_SENTINEL:
+        return client
+    return PermissionEnforcingHAClient(client)

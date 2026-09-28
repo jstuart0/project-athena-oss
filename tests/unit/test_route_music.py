@@ -55,6 +55,8 @@ def _make_state(
     room: str | None = "living room",
     intent: IntentCategory | None = IntentCategory.MUSIC_PLAY,
     interface_type: str | None = None,
+    mode: str = "owner",
+    permissions: dict | None = None,
     timing_tracker=None,
 ) -> OrchestratorState:
     state = OrchestratorState(query=query)
@@ -62,6 +64,8 @@ def _make_state(
     state.room = room
     state.intent = intent
     state.interface_type = interface_type
+    state.mode = mode
+    state.permissions = permissions if permissions is not None else {"mode": "owner"}
     state.timing_tracker = timing_tracker
     state.node_timings = {}
     state.retrieved_data = {}
@@ -118,6 +122,39 @@ class TestMusicHandlerNotInitialised:
         state = _make_state()
         result = _run(route_music_node(state))
         assert isinstance(result.node_timings.get("route_music"), float)
+
+
+class TestIntentPermissionGate:
+    """ATHENA-69 (D9): the intent gate refuses MUSIC_PLAY/MUSIC_CONTROL
+    before any Music Assistant call when the current scope denies it."""
+
+    def setup_method(self):
+        _runtime.reset_for_test()
+
+    def test_guest_intent_denied_no_ha_call(self):
+        mh = _make_music_handler()
+        _runtime.set_music_handler(mh)
+        state = _make_state(
+            mode="guest",
+            permissions={"mode": "guest", "allowed_intents": ["weather"]},
+        )
+        result = _run(route_music_node(state))
+        mh.parse_music_play_intent.assert_not_awaited()
+        mh.handle_play.assert_not_awaited()
+        assert result.error == "permission_denied"
+        assert "guest mode" in result.answer.lower()
+
+    def test_owner_proceeds(self):
+        mh = _make_music_handler()
+        _runtime.set_music_handler(mh)
+        state = _make_state(mode="owner", permissions={"mode": "owner"})
+        with patch("orchestrator.nodes.route_music.store_conversation_context",
+                   new_callable=AsyncMock):
+            result = _run(route_music_node(state))
+        mh.parse_music_play_intent.assert_awaited_once()
+        mh.handle_play.assert_awaited_once()
+        assert result.error is None
+        assert result.answer == "Now playing Miles Davis in living room."
 
 
 class TestMusicPlaySingleRoom:

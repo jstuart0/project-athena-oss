@@ -1,6 +1,8 @@
 """Prometheus metrics for the Athena orchestrator.
 
 These 7 metric objects were previously declared in main.py (lines 840–879).
+An 8th, ``ha_write_denied_total``, was added directly here for ATHENA-69 --
+it has no main.py predecessor.
 They are moved here so that sibling modules (e.g. nodes/validate.py) can
 import them without crossing the orchestrator.main boundary.
 
@@ -64,4 +66,14 @@ validation_layer_duration = Histogram(
     'Validation node duration in seconds',
     ['layer'],  # layer: basic, pattern, llm_fact_check
     buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+)
+
+# ---------------------------------------------------------------------------
+# HA write authorization (ATHENA-69)
+# ---------------------------------------------------------------------------
+
+ha_write_denied_total = Counter(
+    'athena_ha_write_denied_total',
+    'Home Assistant writes denied by the permission-enforcing guard',
+    ['domain', 'scope_mode']  # domain: HA service domain; scope_mode: owner/guest/degraded/system
 )

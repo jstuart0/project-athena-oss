@@ -2,9 +2,15 @@
 
 Routes home-automation control commands through Home Assistant: sensor fast-paths,
 status-query bulk optimisation, dynamic-agent / sequence / context-continuation
-routing, and simple pattern-match fallback when the smart controller is absent.
+routing, and smart-controller intent execution.
 
-Byte-identical move. See thoughts/shared/plans/2026-05-06-deliver-orchestrator-refactor.md.
+Originally a byte-identical move; ATHENA-69 (D9, D12, D14) wraps the smart-
+controller dispatch in a per-request ha_permission_scope, adds a CONTROL
+intent gate and a coarse per-device-type domain pre-check before
+execute_intent, surfaces any denial recorded on the scope as the answer
+(D2), and deletes the dead/broken "no smart controller" fallback branch
+(D12) in favor of a "not configured" answer. See
+.mozart/plans/active/2026-09-28-deliver-athena-ha-permission-gap.md.
 """
 from __future__ import annotations
 
@@ -20,13 +26,21 @@ from orchestrator.nodes._runtime import (
     get_sequence_executor,
     get_smart_controller,
 )
-from orchestrator.state import OrchestratorState
+from orchestrator.state import IntentCategory, OrchestratorState
 from orchestrator.helpers import (
     get_automation_system_mode,
     get_feature_config,
     store_conversation_context,
 )
-from orchestrator.mode_permission import check_entity_permission
+from orchestrator.mode_permission import (
+    DEGRADED_INTENT_REFUSAL,
+    GUEST_INTENT_REFUSAL,
+    authorize_ha_write,
+    check_intent_permission,
+    ha_permission_scope,
+    intent_write_domains,
+    permission_refusal_message,
+)
 from orchestrator.ha_status_optimizer import (
     detect_status_query_type,
     optimize_status_query,
@@ -222,241 +236,292 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
 
         # Use smart controller for LLM-based intent extraction and execution
         if smart_controller:
-            # AUTOMATION SYSTEM MODE: Check if we should use dynamic agent vs pattern matching
-            automation_mode = await get_automation_system_mode()
-
-            # DYNAMIC AGENT: Route sequences/automations to LLM-based agent
-            if automation_mode == "dynamic_agent" and automation_agent and should_use_automation_agent(state.query):
-                logger.info(f"Dynamic agent mode - routing to automation agent: {state.query[:50]}...")
-
-                # Build context for automation agent
-                context = {
-                    "room": state.room,
-                    "mode": state.mode,
-                    "session_id": state.session_id,
-                    "guest_name": getattr(state, 'guest_name', None),
-                    "guest_session_id": getattr(state, 'guest_session_id', None),
-                }
-
-                # Execute via automation agent
-                result = await automation_agent.execute(
-                    query=state.query,
-                    context=context,
-                    model="llama3.1:8b"  # Use capable model for automation
-                )
-                state.answer = result
-                state.node_timings["route_control"] = time.time() - start
-                return state
-
-            # PATTERN MATCHING: Check if this is a multi-step command with delays/loops/scheduling
-            if smart_controller.detect_sequence_intent(state.query):
-                logger.info(f"Sequence intent detected (pattern matching mode): {state.query[:50]}...")
-
-                # Extract sequence from the complex command
-                sequence_data = await smart_controller.extract_sequence_intent(
-                    state.query,
-                    device_room=state.room
-                )
-
-                if sequence_data and sequence_data.get("steps"):
-                    steps = sequence_data["steps"]
-                    acknowledge = sequence_data.get("acknowledge", "Starting sequence...")
-
-                    logger.info(f"Executing sequence with {len(steps)} steps")
-
-                    # Execute sequence in background - return acknowledgment immediately
-                    if sequence_executor:
-                        result = await sequence_executor.execute_sequence(
-                            steps,
-                            session_id=state.session_id,
-                            background=True
-                        )
-                        state.answer = acknowledge
-                    else:
-                        state.answer = "Sequence executor not available."
-
+            with ha_permission_scope(
+                state.permissions,
+                mode=state.mode,
+                request_id=state.request_id,
+                session_id=state.session_id,
+            ) as scope:
+                # Intent gate (D9): refuse CONTROL before any dispatch --
+                # the automation agent, sequence detection, or intent
+                # extraction never run for a denied intent.
+                if not check_intent_permission(IntentCategory.CONTROL, scope.permissions):
+                    state.answer = (
+                        DEGRADED_INTENT_REFUSAL if scope.permissions.get("mode") == "degraded"
+                        else GUEST_INTENT_REFUSAL
+                    )
+                    state.error = "permission_denied"
+                    logger.warning(
+                        "control_request_denied",
+                        intent="control",
+                        mode=scope.permissions.get("mode"),
+                        request_id=state.request_id,
+                        session_id=state.session_id,
+                    )
                     state.node_timings["route_control"] = time.time() - start
                     return state
 
-            # Check if we have previous context from classify_node
-            has_context = state.prev_context is not None
-            ref_info = state.context_ref_info or {}
+                # AUTOMATION SYSTEM MODE: Check if we should use dynamic agent vs pattern matching
+                automation_mode = await get_automation_system_mode()
 
-            # Handle inquiry follow-ups - return info about previous action instead of executing
-            if has_context and ref_info.get("is_inquiry"):
-                prev = state.prev_context
-                prev_response = prev.get("response", "")
-                prev_entities = prev.get("entities", {})
-                prev_room = prev_entities.get("room", "unknown")
-                prev_action = prev.get("parameters", {}).get("action", "")
+                # DYNAMIC AGENT: Route sequences/automations to LLM-based agent
+                if automation_mode == "dynamic_agent" and automation_agent and should_use_automation_agent(state.query):
+                    logger.info(f"Dynamic agent mode - routing to automation agent: {state.query[:50]}...")
 
-                # Generate conversational response about what was done
-                if prev_room and prev_response:
-                    state.answer = f"I {prev_action.replace('_', 'ed ').replace('turn_', 'turned ')} the {prev_room} lights. {prev_response}"
-                else:
-                    state.answer = prev_response or "I performed the action you requested."
+                    # Build context for automation agent
+                    context = {
+                        "room": state.room,
+                        "mode": state.mode,
+                        "session_id": state.session_id,
+                        "guest_name": getattr(state, 'guest_name', None),
+                        "guest_session_id": getattr(state, 'guest_session_id', None),
+                    }
 
-                logger.info(f"Inquiry follow-up answered from context: room={prev_room}, action={prev_action}")
-                state.node_timings["route_control"] = time.time() - start
-                return state
-
-            if has_context and ref_info.get("has_context_ref"):
-                # Use previous context to resolve the command
-                prev = state.prev_context
-                prev_params = prev.get("parameters", {})
-                prev_query = prev.get("query", "")
-                prev_response = prev.get("response", "")
-                prev_entities = prev.get("entities", {})
-
-                # Merge entities and parameters for full context
-                # prev_params is the full intent, prev_entities has room/device_type
-                prev_intent_for_llm = prev_params.copy() if prev_params else {}
-                if prev_entities:
-                    prev_intent_for_llm.update(prev_entities)
-
-                # Extract intent with conversation context for corrections/follow-ups
-                # e.g., "no, just my side" after "Warming bed on both sides at level 3"
-                new_intent = await smart_controller.extract_intent(
-                    state.query,
-                    device_room=state.room,
-                    prev_query=prev_query,
-                    prev_response=prev_response,
-                    prev_intent_entities=prev_intent_for_llm
-                )
-                new_room = new_intent.get('room')
-
-                # Merge previous context with new info
-                # Start with previous parameters as base
-                intent = prev_params.copy() if prev_params else {}
-
-                # If new intent has meaningful data, merge it (preserving previous params not overwritten)
-                if new_intent.get('device_type') and new_intent.get('action'):
-                    # Merge parameters: start with previous, update with new
-                    prev_params_dict = intent.get('parameters', {}) if isinstance(intent.get('parameters'), dict) else {}
-                    new_params_dict = new_intent.get('parameters', {}) if isinstance(new_intent.get('parameters'), dict) else {}
-                    merged_params = {**prev_params_dict, **new_params_dict}
-
-                    # Now merge the intent itself
-                    intent.update(new_intent)
-                    intent['parameters'] = merged_params
-                    logger.info(f"LLM interpreted follow-up with context: {intent}")
-
-                # If new room specified, use it; otherwise keep previous room
-                if new_room:
-                    intent['room'] = new_room
-                    logger.info(f"Context continuation - applying previous command to new room: {new_room}")
-                elif prev.get("entities", {}).get("room"):
-                    intent['room'] = prev["entities"]["room"]
-
-                # Handle reversal patterns - "turn them back on", "turn it back off"
-                query_lower = state.query.lower()
-                if "back on" in query_lower or "on again" in query_lower:
-                    intent["action"] = "turn_on"
-                    logger.info("Context reversal: detected 'back on' - setting action to turn_on")
-                elif "back off" in query_lower or "off again" in query_lower:
-                    intent["action"] = "turn_off"
-                    logger.info("Context reversal: detected 'back off' - setting action to turn_off")
-
-                # Handle modifier-based adjustments
-                if "modifier" in ref_info.get("ref_types", []):
-                    if "brighter" in query_lower:
-                        # Increase brightness
-                        current_brightness = intent.get("parameters", {}).get("brightness", 200)
-                        intent.setdefault("parameters", {})["brightness"] = min(255, current_brightness + 50)
-                        intent["action"] = "set_brightness"
-                    elif "dimmer" in query_lower:
-                        # Decrease brightness
-                        current_brightness = intent.get("parameters", {}).get("brightness", 200)
-                        intent.setdefault("parameters", {})["brightness"] = max(50, current_brightness - 50)
-                        intent["action"] = "set_brightness"
-                    elif "different color" in query_lower or "another color" in query_lower:
-                        # Re-extract to get new colors with context
-                        intent = await smart_controller.extract_intent(
-                            state.query + " different colors",
-                            device_room=state.room,
-                            prev_query=prev_query,
-                            prev_response=prev_response,
-                            prev_intent_entities=prev_intent_for_llm
-                        )
-                        if prev.get("entities", {}).get("room"):
-                            intent['room'] = prev["entities"]["room"]
-                    logger.info(f"Modifier adjustment applied: {ref_info.get('ref_types')}")
-
-                # Ensure we have required fields
-                if not intent.get('device_type'):
-                    intent['device_type'] = prev_params.get('device_type', 'light')
-                if not intent.get('action'):
-                    intent['action'] = prev_params.get('action', 'set_color')
-            else:
-                # Normal extraction - no context continuation
-                # Pass device room for context when query doesn't specify room
-                intent = await smart_controller.extract_intent(state.query, device_room=state.room)
-
-            logger.info(f"Extracted intent: {intent}")
-
-            # Execute the intent with permission checking
-            device_type = intent.get('device_type', 'light')
-            room = intent.get('room')
-
-            # Execute the command (pass original query for fallback room extraction, and device_room for context)
-            result = await smart_controller.execute_intent(intent, ha_client, original_query=state.query, device_room=state.room)
-            state.answer = result
-            state.retrieved_data = {"intent": intent}
-
-            logger.info(f"Smart control executed: {intent.get('action')} on {device_type} in {room}")
-
-            # Store context for future reference using new context system
-            if state.session_id and "couldn't" not in result.lower():
-                await store_conversation_context(
-                    session_id=state.session_id,
-                    intent="control",
-                    query=state.query,
-                    entities={"room": room, "device_type": device_type},
-                    parameters=intent,
-                    response=result,
-                    ttl=300  # 5 minutes
-                )
-
-        else:
-            # Fallback to simple pattern matching if smart controller not available
-            device = state.entities.get("device")
-            query_lower = state.query.lower()
-
-            # Simple pattern matching for common commands
-            if "turn on" in query_lower:
-                action = "turn_on"
-            elif "turn off" in query_lower:
-                action = "turn_off"
-            else:
-                action = None
-
-            if device and action:
-                # Phase 2: Check entity permission before executing command
-                if not check_entity_permission(device, state.permissions):
-                    logger.warning(
-                        "entity_blocked_by_guest_mode",
-                        entity_id=device,
-                        mode=state.mode
+                    # Execute via automation agent (D2: surface any denial
+                    # recorded on the scope during the call as the answer,
+                    # instead of whatever automation_agent.execute returned)
+                    denials_before = len(scope.denials)
+                    writes_before = scope.allowed_writes
+                    result = await automation_agent.execute(
+                        query=state.query,
+                        context=context,
+                        model="llama3.1:8b"  # Use capable model for automation
                     )
-                    state.answer = f"I'm sorry, you don't have permission to control {device.replace('_', ' ').replace('.', ' ')} in {state.mode} mode."
-                    state.error = "permission_denied"
+                    if len(scope.denials) > denials_before:
+                        denied_domains = tuple(
+                            d.domain for d in scope.denials[denials_before:]
+                            if d.reason != "halted_after_denial"
+                        )
+                        state.answer = permission_refusal_message(
+                            denied_domains, scope, partial=scope.allowed_writes > writes_before
+                        )
+                        state.error = "permission_denied"
+                    else:
+                        state.answer = result
+                    state.node_timings["route_control"] = time.time() - start
                     return state
 
-                # Call Home Assistant service
-                domain = device.split(".")[0]
-                result = await ha_client.call_service(
-                    domain=domain,
-                    service=action,
-                    service_data={"entity_id": device}
-                )
+                # PATTERN MATCHING: Check if this is a multi-step command with delays/loops/scheduling
+                if smart_controller.detect_sequence_intent(state.query):
+                    logger.info(f"Sequence intent detected (pattern matching mode): {state.query[:50]}...")
 
-                state.answer = f"Done! I've turned {'on' if action == 'turn_on' else 'off'} the {device.replace('_', ' ').replace('.', ' ')}."
-                state.retrieved_data = {"ha_response": result}
+                    # Extract sequence from the complex command
+                    sequence_data = await smart_controller.extract_sequence_intent(
+                        state.query,
+                        device_room=state.room
+                    )
 
-            else:
-                state.answer = "I understand you want to control something, but I need more details."
+                    if sequence_data and sequence_data.get("steps"):
+                        steps = sequence_data["steps"]
+                        acknowledge = sequence_data.get("acknowledge", "Starting sequence...")
 
-            logger.info(f"Fallback control executed: {device} - {action}")
+                        logger.info(f"Executing sequence with {len(steps)} steps")
+
+                        # Execute sequence in background - return acknowledgment immediately
+                        if sequence_executor:
+                            denials_before = len(scope.denials)
+                            writes_before = scope.allowed_writes
+                            result = await sequence_executor.execute_sequence(
+                                steps,
+                                session_id=state.session_id,
+                                background=True
+                            )
+                            if len(scope.denials) > denials_before:
+                                denied_domains = tuple(
+                                    d.domain for d in scope.denials[denials_before:]
+                                    if d.reason != "halted_after_denial"
+                                )
+                                state.answer = permission_refusal_message(
+                                    denied_domains, scope, partial=scope.allowed_writes > writes_before
+                                )
+                                state.error = "permission_denied"
+                            else:
+                                state.answer = acknowledge
+                        else:
+                            state.answer = "Sequence executor not available."
+
+                        state.node_timings["route_control"] = time.time() - start
+                        return state
+
+                # Check if we have previous context from classify_node
+                has_context = state.prev_context is not None
+                ref_info = state.context_ref_info or {}
+
+                # Handle inquiry follow-ups - return info about previous action instead of executing
+                if has_context and ref_info.get("is_inquiry"):
+                    prev = state.prev_context
+                    prev_response = prev.get("response", "")
+                    prev_entities = prev.get("entities", {})
+                    prev_room = prev_entities.get("room", "unknown")
+                    prev_action = prev.get("parameters", {}).get("action", "")
+
+                    # Generate conversational response about what was done
+                    if prev_room and prev_response:
+                        state.answer = f"I {prev_action.replace('_', 'ed ').replace('turn_', 'turned ')} the {prev_room} lights. {prev_response}"
+                    else:
+                        state.answer = prev_response or "I performed the action you requested."
+
+                    logger.info(f"Inquiry follow-up answered from context: room={prev_room}, action={prev_action}")
+                    state.node_timings["route_control"] = time.time() - start
+                    return state
+
+                if has_context and ref_info.get("has_context_ref"):
+                    # Use previous context to resolve the command
+                    prev = state.prev_context
+                    prev_params = prev.get("parameters", {})
+                    prev_query = prev.get("query", "")
+                    prev_response = prev.get("response", "")
+                    prev_entities = prev.get("entities", {})
+
+                    # Merge entities and parameters for full context
+                    # prev_params is the full intent, prev_entities has room/device_type
+                    prev_intent_for_llm = prev_params.copy() if prev_params else {}
+                    if prev_entities:
+                        prev_intent_for_llm.update(prev_entities)
+
+                    # Extract intent with conversation context for corrections/follow-ups
+                    # e.g., "no, just my side" after "Warming bed on both sides at level 3"
+                    new_intent = await smart_controller.extract_intent(
+                        state.query,
+                        device_room=state.room,
+                        prev_query=prev_query,
+                        prev_response=prev_response,
+                        prev_intent_entities=prev_intent_for_llm
+                    )
+                    new_room = new_intent.get('room')
+
+                    # Merge previous context with new info
+                    # Start with previous parameters as base
+                    intent = prev_params.copy() if prev_params else {}
+
+                    # If new intent has meaningful data, merge it (preserving previous params not overwritten)
+                    if new_intent.get('device_type') and new_intent.get('action'):
+                        # Merge parameters: start with previous, update with new
+                        prev_params_dict = intent.get('parameters', {}) if isinstance(intent.get('parameters'), dict) else {}
+                        new_params_dict = new_intent.get('parameters', {}) if isinstance(new_intent.get('parameters'), dict) else {}
+                        merged_params = {**prev_params_dict, **new_params_dict}
+
+                        # Now merge the intent itself
+                        intent.update(new_intent)
+                        intent['parameters'] = merged_params
+                        logger.info(f"LLM interpreted follow-up with context: {intent}")
+
+                    # If new room specified, use it; otherwise keep previous room
+                    if new_room:
+                        intent['room'] = new_room
+                        logger.info(f"Context continuation - applying previous command to new room: {new_room}")
+                    elif prev.get("entities", {}).get("room"):
+                        intent['room'] = prev["entities"]["room"]
+
+                    # Handle reversal patterns - "turn them back on", "turn it back off"
+                    query_lower = state.query.lower()
+                    if "back on" in query_lower or "on again" in query_lower:
+                        intent["action"] = "turn_on"
+                        logger.info("Context reversal: detected 'back on' - setting action to turn_on")
+                    elif "back off" in query_lower or "off again" in query_lower:
+                        intent["action"] = "turn_off"
+                        logger.info("Context reversal: detected 'back off' - setting action to turn_off")
+
+                    # Handle modifier-based adjustments
+                    if "modifier" in ref_info.get("ref_types", []):
+                        if "brighter" in query_lower:
+                            # Increase brightness
+                            current_brightness = intent.get("parameters", {}).get("brightness", 200)
+                            intent.setdefault("parameters", {})["brightness"] = min(255, current_brightness + 50)
+                            intent["action"] = "set_brightness"
+                        elif "dimmer" in query_lower:
+                            # Decrease brightness
+                            current_brightness = intent.get("parameters", {}).get("brightness", 200)
+                            intent.setdefault("parameters", {})["brightness"] = max(50, current_brightness - 50)
+                            intent["action"] = "set_brightness"
+                        elif "different color" in query_lower or "another color" in query_lower:
+                            # Re-extract to get new colors with context
+                            intent = await smart_controller.extract_intent(
+                                state.query + " different colors",
+                                device_room=state.room,
+                                prev_query=prev_query,
+                                prev_response=prev_response,
+                                prev_intent_entities=prev_intent_for_llm
+                            )
+                            if prev.get("entities", {}).get("room"):
+                                intent['room'] = prev["entities"]["room"]
+                        logger.info(f"Modifier adjustment applied: {ref_info.get('ref_types')}")
+
+                    # Ensure we have required fields
+                    if not intent.get('device_type'):
+                        intent['device_type'] = prev_params.get('device_type', 'light')
+                    if not intent.get('action'):
+                        intent['action'] = prev_params.get('action', 'set_color')
+                else:
+                    # Normal extraction - no context continuation
+                    # Pass device room for context when query doesn't specify room
+                    intent = await smart_controller.extract_intent(state.query, device_room=state.room)
+
+                logger.info(f"Extracted intent: {intent}")
+
+                # Execute the intent with permission checking
+                device_type = intent.get('device_type', 'light')
+                room = intent.get('room')
+
+                # Coarse domain pre-check (D14): refuse before execute_intent
+                # when the intent's device_type would write a domain this
+                # scope isn't authorized for. This is defense-in-depth --
+                # per-entity patterns still pass this coarse check and are
+                # enforced by the guard's authorize_ha_write once it's wired
+                # into lifespan (Pass B).
+                expected_domains = intent_write_domains(intent)
+                precheck_denied_domains = [
+                    d for d in expected_domains
+                    if not authorize_ha_write(d, "_precheck", None, scope.permissions).allowed
+                ]
+                if precheck_denied_domains:
+                    state.answer = permission_refusal_message(precheck_denied_domains, scope)
+                    state.error = "permission_denied"
+                    state.node_timings["route_control"] = time.time() - start
+                    return state
+
+                # Execute the command (pass original query for fallback room extraction, and device_room for context)
+                denials_before = len(scope.denials)
+                writes_before = scope.allowed_writes
+                result = await smart_controller.execute_intent(intent, ha_client, original_query=state.query, device_room=state.room)
+
+                if len(scope.denials) > denials_before:
+                    denied_domains = tuple(
+                        d.domain for d in scope.denials[denials_before:]
+                        if d.reason != "halted_after_denial"
+                    )
+                    state.answer = permission_refusal_message(
+                        denied_domains, scope, partial=scope.allowed_writes > writes_before
+                    )
+                    state.error = "permission_denied"
+                else:
+                    state.answer = result
+                    state.retrieved_data = {"intent": intent}
+
+                    logger.info(f"Smart control executed: {intent.get('action')} on {device_type} in {room}")
+
+                    # Store context for future reference using new context system
+                    if state.session_id and "couldn't" not in result.lower():
+                        await store_conversation_context(
+                            session_id=state.session_id,
+                            intent="control",
+                            query=state.query,
+                            entities={"room": room, "device_type": device_type},
+                            parameters=intent,
+                            response=result,
+                            ttl=300  # 5 minutes
+                        )
+
+        else:
+            # D12: the old "no smart controller" fallback pattern-matched
+            # turn_on/turn_off and called ha_client directly, but it was
+            # both unreachable in production and broken -- ha_client is
+            # only constructed when smart_controller is (main.py's
+            # lifespan), so this branch's ha_client.call_service would
+            # always dereference None. No HA call is possible without the
+            # smart controller; say so rather than execute a dead path.
+            state.answer = "Home automation isn't configured."
+            state.error = "ha_not_configured"
 
     except Exception as e:
         logger.error(f"Control execution error: {e}", exc_info=True)

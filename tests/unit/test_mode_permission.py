@@ -35,6 +35,15 @@ Covers all 6 extracted helpers:
 31.  check_entity_permission — entity allowed (no restrictions matched)
 32.  check_entity_permission — invalid regex falls back to exact match
 
+ATHENA-69 (D4): the 3 outage tests above (4xx / ConnectError / generic
+exception) were updated in-place to assert degraded permissions rather than
+the old unrestricted-owner fallback. The ATHENA-69 guard module itself
+(authorize_ha_write, normalize_permissions, degraded_permissions,
+PermissionScope/ha_permission_scope, PermissionEnforcingHAClient,
+ensure_permission_enforcing, CONTROL_DEVICE_DOMAINS/intent_write_domains,
+permission_refusal_message) is covered by tests/unit/test_ha_permission_guard.py
+and tests/unit/test_guest_policy.py, not here.
+
 Patching strategy:
 - mode_client: install via ``orchestrator.nodes._runtime.set_mode_client``.
 - Pure functions (detect_owner_mode_command, extract_pin_from_query,
@@ -107,7 +116,10 @@ class TestGetCurrentMode:
         assert result["reason"] == "Scheduled"
         assert result["permissions"]["allowed_intents"] == ["weather"]
 
-    def test_4xx_response_raises_falls_back_to_owner(self):
+    def test_4xx_response_raises_falls_back_to_degraded(self):
+        """D4: an unreachable/rejecting mode service reports mode="owner"
+        (prompts/UI unchanged) but permissions degraded -- never the old
+        unrestricted-owner permissions dict."""
         error_resp = _make_response(503, {})
         _install_mode_client(get_side_effects=[error_resp])
 
@@ -116,23 +128,32 @@ class TestGetCurrentMode:
         assert result["mode"] == "owner"
         assert result["reason"] == "Mode service unavailable"
         assert result["override_active"] is False
+        assert result["degraded"] is True
+        assert result["permissions"]["mode"] == "degraded"
+        assert result["permissions"] == mode_permission.degraded_permissions()
 
-    def test_connect_error_falls_back_to_owner(self):
+    def test_connect_error_falls_back_to_degraded(self):
         import httpx
         _install_mode_client(get_side_effects=httpx.ConnectError("refused"))
 
         result = _run(mode_permission.get_current_mode())
 
         assert result["mode"] == "owner"
-        assert result["permissions"]["mode"] == "owner"
+        assert result["degraded"] is True
+        assert result["permissions"]["mode"] == "degraded"
 
-    def test_generic_exception_falls_back_to_owner(self):
+    def test_generic_exception_falls_back_to_degraded(self):
         _install_mode_client(get_side_effects=RuntimeError("boom"))
 
         result = _run(mode_permission.get_current_mode())
 
         assert result["mode"] == "owner"
         assert result["override_active"] is False
+        assert result["degraded"] is True
+        assert result["permissions"]["mode"] == "degraded"
+        # D4: locks/covers/etc. stay denied even though mode reports "owner".
+        assert mode_permission.check_entity_permission("lock.front_door", result["permissions"]) is False
+        assert mode_permission.check_entity_permission("light.kitchen", result["permissions"]) is True
 
 
 # ---------------------------------------------------------------------------
