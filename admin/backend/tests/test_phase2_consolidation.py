@@ -257,6 +257,34 @@ class TestServiceRegistryWriteAuth:
         data = resp.json()
         assert data["enabled"] != original_state
 
+    def test_toggle_matches_by_host_label_when_service_name_mismatches(self, client, db, rag_service):
+        """ATHENA-108 follow-up: shared.service_registry.unregister_service()
+        now posts the "-rag"-derived name to the toggle route, which
+        doesn't match the seeded "weather" row's actual name -- host_label
+        is the fallback that finds it, and the response reports the row's
+        real name."""
+        original_state = rag_service.enabled
+        resp = client.post(
+            "/api/service-registry/services/weather-rag/toggle",
+            params={"host_label": "athena-rag-weather"},
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["service"] == "weather"
+        assert data["enabled"] != original_state
+
+        db.refresh(rag_service)
+        assert rag_service.enabled != original_state
+
+    def test_toggle_404s_when_name_and_host_label_both_miss(self, client, db, rag_service):
+        resp = client.post(
+            "/api/service-registry/services/nonexistent-rag/toggle",
+            params={"host_label": "athena-rag-nonexistent"},
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert resp.status_code == 404
+
     def test_delete_with_service_key(self, client, db, rag_service):
         resp = client.delete(
             "/api/service-registry/services/weather",
@@ -665,6 +693,140 @@ class TestRegisterServicePreservesSeededRow:
         assert before.keys() == after.keys()
         for name in before:
             assert before[name] == after[name], f"{name!r} changed: {before[name]} -> {after[name]}"
+
+    def test_ping_matches_seeded_row_by_host_label_when_name_mismatches(self, client, db):
+        """ATHENA-108 follow-up: shared.service_registry.register_service()
+        now posts name="weather-rag" (the "-rag"-suffix registry-name
+        convention), which doesn't match a row seeded/named "weather" --
+        host_label="athena-rag-weather" is the fallback key that finds it.
+        The matched row is byte-for-byte untouched in host/port/type, and
+        the response reports the row's own name, not the caller's derived
+        one."""
+        db.add(RagService(
+            name="weather-rag", display_name="Weather Service",
+            host="athena-rag-weather", port=8010, protocol="http",
+            endpoint_url="http://athena-rag-weather:8010",
+            service_type="rag", cache_ttl=600, enabled=True,
+        ))
+        db.commit()
+
+        resp = client.post(
+            "/api/service-registry/services",
+            params={
+                "name": "weather-rag",
+                "host_label": "athena-rag-weather",
+                "display_name": "Weather Service",
+                "service_type": "rag",
+            },
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["action"] == "updated"
+        assert resp.json()["service"] == "weather-rag"
+
+        row = db.query(RagService).filter(RagService.name == "weather-rag").first()
+        assert row is not None
+        assert row.host == "athena-rag-weather"
+        assert row.port == 8010
+        assert row.endpoint_url == "http://athena-rag-weather:8010"
+        assert row.service_type == "rag"
+
+    def test_ping_matches_a_differently_named_row_by_host_label(self, client, db):
+        """The realistic mismatch: the seeded row is still named "weather"
+        (OSS_SERVICE_REGISTRY's short-name convention) but the client now
+        posts name="weather-rag". No row named "weather-rag" exists, so the
+        upsert must fall back to host_label="athena-rag-weather" and match
+        the existing "weather" row -- never create a duplicate, never
+        rename it, and report the row's real name in the response."""
+        db.add(RagService(
+            name="weather", display_name="Weather Service",
+            host="athena-rag-weather", port=8010, protocol="http",
+            endpoint_url="http://athena-rag-weather:8010",
+            service_type="rag", cache_ttl=600, enabled=True,
+        ))
+        db.commit()
+
+        resp = client.post(
+            "/api/service-registry/services",
+            params={
+                "name": "weather-rag",
+                "host_label": "athena-rag-weather",
+                "display_name": "Weather Service",
+                "service_type": "rag",
+            },
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["action"] == "updated"
+        assert body["service"] == "weather", "must report the matched row's real name"
+
+        rows = db.query(RagService).all()
+        assert len(rows) == 1, "must update the matched row, never create a duplicate"
+        assert rows[0].name == "weather"
+        assert rows[0].host == "athena-rag-weather"
+        assert rows[0].port == 8010
+        assert rows[0].service_type == "rag"
+
+    def test_host_label_ambiguous_when_two_rows_share_a_host_refuses_to_guess(self, client, db):
+        """`host` is not a unique column. Two rows legitimately (or by
+        misconfiguration) sharing one host must never be resolved by
+        picking whichever the DB returns first -- the upsert must refuse
+        with 409 host_label_ambiguous and leave both rows untouched."""
+        db.add(RagService(
+            name="weather", display_name="Weather Service",
+            host="athena-rag-weather", port=8010, protocol="http",
+            endpoint_url="http://athena-rag-weather:8010",
+            service_type="rag", cache_ttl=600, enabled=True,
+        ))
+        db.add(RagService(
+            name="weather-old", display_name="Weather Service (old)",
+            host="athena-rag-weather", port=9999, protocol="http",
+            endpoint_url="http://athena-rag-weather:9999",
+            service_type="rag", cache_ttl=600, enabled=False,
+        ))
+        db.commit()
+        before = {
+            row.name: (row.host, row.port, row.enabled)
+            for row in db.query(RagService).all()
+        }
+
+        resp = client.post(
+            "/api/service-registry/services",
+            params={
+                "name": "weather-rag",
+                "host_label": "athena-rag-weather",
+                "service_type": "rag",
+            },
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["error"] == "host_label_ambiguous"
+
+        db.expire_all()
+        after = {
+            row.name: (row.host, row.port, row.enabled)
+            for row in db.query(RagService).all()
+        }
+        assert after == before, "neither ambiguous row may be touched"
+        assert db.query(RagService).filter(RagService.name == "weather-rag").first() is None
+
+    def test_host_label_never_matches_when_no_row_shares_that_host(self, client, db):
+        """A brand-new, never-seeded service pinging with host_label set
+        but no existing row anywhere sharing that host must still 422 --
+        host_label is a fallback match key, not a way to bypass the
+        endpoint_url-required-for-create rule."""
+        resp = client.post(
+            "/api/service-registry/services",
+            params={
+                "name": "brand-new-rag",
+                "host_label": "athena-rag-brand-new",
+                "service_type": "rag",
+            },
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 422
+        assert db.query(RagService).filter(RagService.name == "brand-new-rag").first() is None
 
 
 # ---------------------------------------------------------------------------

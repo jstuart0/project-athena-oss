@@ -109,8 +109,50 @@ async def test_unregister_service_sends_service_key_header(monkeypatch):
 
     assert ok is True
     assert len(transport.requests) == 1
-    assert transport.requests[0].url.path == "/api/service-registry/services/weather/toggle"
+    # ATHENA-108 follow-up: the toggle target is the "-rag"-suffixed
+    # registry name (register_service()'s own convention), not the bare
+    # connector name -- a bare-named path never matches a "<name>-rag" row,
+    # so shutdown silently toggled nothing.
+    assert transport.requests[0].url.path == "/api/service-registry/services/weather-rag/toggle"
+    assert dict(transport.requests[0].url.params)["host_label"] == "athena-rag-weather"
     assert transport.requests[0].headers.get("X-Service-Key") == "test-service-key-athena-108"
+
+
+@pytest.mark.asyncio
+async def test_unregister_service_already_rag_suffixed_name_is_idempotent(monkeypatch):
+    """to_rag_registry_name() is idempotent -- a caller that already passes
+    the "-rag"-suffixed name must not get "-rag-rag" appended."""
+    monkeypatch.setenv("SERVICE_API_KEY", "test-service-key-athena-108")
+    _clear_cache_for_tests()
+    transport = _RecordingTransport(status_code=200)
+    _patch_async_client(monkeypatch, transport)
+
+    ok = await service_registry_module.unregister_service("weather-rag")
+
+    assert ok is True
+    assert transport.requests[0].url.path == "/api/service-registry/services/weather-rag/toggle"
+    assert dict(transport.requests[0].url.params)["host_label"] == "athena-rag-weather"
+
+
+@pytest.mark.asyncio
+async def test_unregister_service_clears_cache_keyed_by_bare_name(monkeypatch):
+    """_url_cache/_cache_time are keyed by the bare name get_service_url()
+    callers use -- unregister_service() must clear that key, not the
+    "-rag"-derived name it now posts to the toggle route (regression pin:
+    the rebind that derives the registry name must not also break cache
+    invalidation)."""
+    monkeypatch.setenv("SERVICE_API_KEY", "test-service-key-athena-108")
+    _clear_cache_for_tests()
+    service_registry_module._url_cache["weather"] = "http://athena-rag-weather:8010"
+    service_registry_module._cache_time["weather"] = 0.0
+    transport = _RecordingTransport(status_code=200)
+    _patch_async_client(monkeypatch, transport)
+
+    ok = await service_registry_module.unregister_service("weather")
+
+    assert ok is True
+    assert "weather" not in service_registry_module._url_cache
+    assert "weather" not in service_registry_module._cache_time
 
 
 @pytest.mark.asyncio
@@ -149,7 +191,11 @@ async def test_register_service_payload_omits_endpoint_url_by_default(monkeypatc
     query = dict(transport.requests[0].url.params)
     assert "endpoint_url" not in query
     assert query["service_type"] == "rag"
-    assert query["name"] == "weather"
+    # ATHENA-108 follow-up: the registry row is named "<name>-rag", not the
+    # bare connector name -- posting "weather" against a "weather-rag" row
+    # found no match and 422'd (registration silently never landed).
+    assert query["name"] == "weather-rag"
+    assert query["host_label"] == "athena-rag-weather"
 
 
 @pytest.mark.asyncio
@@ -182,3 +228,46 @@ async def test_register_service_never_sends_service_type_api(monkeypatch):
         query = dict(transport.requests[0].url.params)
         assert query["service_type"] == "rag", f"{name!r}: {query}"
         assert query["service_type"] != "api"
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-108 follow-up: registry rows are named "<name>-rag" (the same
+# "-rag" suffix convention admin/backend/app/database.py::
+# _infer_oss_service_type and the Control Agent's registry-sync apply), not
+# the bare connector name register_service() used to post -- that mismatch
+# 422'd the admin upsert and registration never landed for any RAG.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bare,expected", [
+    ("weather", "weather-rag"),
+    ("weather-rag", "weather-rag"),
+    ("site-scraper", "site-scraper-rag"),
+])
+def test_to_rag_registry_name_derivation(bare, expected):
+    assert service_registry_module.to_rag_registry_name(bare) == expected
+
+
+@pytest.mark.parametrize("bare,expected", [
+    ("weather", "athena-rag-weather"),
+    ("weather-rag", "athena-rag-weather"),
+])
+def test_to_rag_host_label_derivation(bare, expected):
+    assert service_registry_module.to_rag_host_label(bare) == expected
+
+
+@pytest.mark.asyncio
+async def test_register_service_payload_sends_derived_name_and_host_label(monkeypatch):
+    monkeypatch.setenv("SERVICE_API_KEY", "test-service-key-athena-108")
+    _clear_cache_for_tests()
+    transport = _RecordingTransport(status_code=200)
+    _patch_async_client(monkeypatch, transport)
+
+    ok = await service_registry_module.register_service("weather", 8010, "Weather Service")
+
+    assert ok is True
+    assert len(transport.requests) == 1
+    query = dict(transport.requests[0].url.params)
+    assert query["name"] == "weather-rag"
+    assert query["host_label"] == "athena-rag-weather"
+    assert query["display_name"] == "Weather Service"
+    assert query["service_type"] == "rag"

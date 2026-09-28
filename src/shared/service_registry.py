@@ -25,6 +25,33 @@ _cache_time: Dict[str, float] = {}
 _CACHE_TTL = 30.0
 
 
+def to_rag_registry_name(service_name: str) -> str:
+    """Registry ``name`` for a RAG connector's self-registration.
+
+    Every RAG registry row (seeded via OSS_SERVICE_REGISTRY or created by an
+    operator) is matched by admin/backend/app/database.py::_infer_oss_service_type
+    and the Control Agent's registry-sync using the same "-rag" suffix
+    convention on the identifying string. Bare connector names like
+    "weather" (what every ``src/rag/*/main.py`` passes today) become
+    "weather-rag"; a name that already carries the suffix is left alone so
+    this is idempotent.
+    """
+    return service_name if service_name.endswith("-rag") else f"{service_name}-rag"
+
+
+def to_rag_host_label(service_name: str) -> str:
+    """K8s DNS service host hint for a RAG connector's self-registration.
+
+    Mirrors OSS_SERVICE_REGISTRY's host column convention
+    (``athena-rag-<name>``), e.g. "weather" -> "athena-rag-weather". Sent
+    alongside ``name`` so the admin upsert can still locate an existing
+    seeded row by host when the derived registry name doesn't match it
+    (ATHENA-108 follow-up).
+    """
+    base = service_name[:-len("-rag")] if service_name.endswith("-rag") else service_name
+    return f"athena-rag-{base}"
+
+
 def _get_service_api_key() -> str:
     """SERVICE_API_KEY for the X-Service-Key header POST /api/service-registry/services
     requires (ATHENA-108). Prefer get_config() -- the centralized,
@@ -152,8 +179,19 @@ async def register_service(
         # protocol untouched. A brand-new, never-seeded service name still
         # needs SOME endpoint_url to be created at all; set the env var for
         # that deployment shape.
+        #
+        # ATHENA-108 follow-up: registry rows are named "<name>-rag" (the
+        # same "-rag" suffix convention _infer_oss_service_type()/the
+        # Control Agent apply), not the bare connector name this function
+        # receives -- posting "weather" against a "weather-rag" row found
+        # no match and 422'd, so registration silently never landed.
+        # host_label is sent alongside so the upsert can still find a
+        # seeded row (e.g. OSS_SERVICE_REGISTRY's "weather"/"athena-rag-
+        # weather") by its K8s host when the derived name doesn't match.
+        registry_name = to_rag_registry_name(service_name)
         params = {
-            "name": service_name,
+            "name": registry_name,
+            "host_label": to_rag_host_label(service_name),
             "display_name": description or service_name.replace('-', ' ').title(),
             "service_type": "rag",
         }
@@ -185,11 +223,30 @@ async def unregister_service(service_name: str) -> bool:
     Unregister a service from the registry via Admin API.
 
     Args:
-        service_name: Name of the service
+        service_name: Name of the service (the connector's bare/short name,
+            e.g. "weather")
 
     Returns:
         True if unregistration succeeded
+
+    ATHENA-108 follow-up: this used to POST .../{service_name}/toggle with
+    the bare connector name, which never matches a row named
+    "<connector>-rag" (register_service()'s naming convention) -- shutdown
+    silently toggled nothing, leaving the row enabled=True. `service_name`
+    is shadowed below with the same "-rag"-derived name register_service()
+    posts, plus a host_label fallback for a row that wasn't renamed to that
+    convention, so the toggle disables the row a RAG connector actually
+    registered under. (The rebind, rather than a new local variable, keeps
+    this call's own f-string text as "{service_name}" -- what
+    tests/unit/test_orchestrator_callers_send_service_key.py's AST scan
+    matches the /toggle route pattern against.)
     """
+    # _url_cache/_cache_time are keyed by the bare name get_service_url()
+    # callers use -- captured before service_name is shadowed below, so
+    # cache invalidation still hits the right key.
+    bare_service_name = service_name
+    host_label = to_rag_host_label(service_name)
+    service_name = to_rag_registry_name(service_name)
     try:
         service_key = _get_service_api_key()
         if not service_key:
@@ -203,17 +260,18 @@ async def unregister_service(service_name: str) -> bool:
             # Use toggle to disable rather than delete
             response = await client.post(
                 f"{ADMIN_API_URL}/api/service-registry/services/{service_name}/toggle",
+                params={"host_label": host_label},
                 headers={"X-Service-Key": service_key},
             )
 
             if response.status_code == 200:
                 logger.info(f"Service unregistered: {service_name}")
 
-                # Clear cache
-                if service_name in _url_cache:
-                    del _url_cache[service_name]
-                if service_name in _cache_time:
-                    del _cache_time[service_name]
+                # Clear cache (keyed by the bare name, not the registry name)
+                if bare_service_name in _url_cache:
+                    del _url_cache[bare_service_name]
+                if bare_service_name in _cache_time:
+                    del _cache_time[bare_service_name]
 
                 return True
             else:
