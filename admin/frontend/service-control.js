@@ -1,16 +1,20 @@
 /**
  * Service Control - Frontend JavaScript
- * Handles start/stop/restart of services and Ollama models
+ *
+ * Reads the unified GET /api/service-control envelope (ATHENA-118): every
+ * row carries a server-resolved manager (Control Agent / Kubernetes / none),
+ * a per-user-gated action list, and D17's server-computed group -- this file
+ * never re-derives running/stopped or group membership from the row name.
  */
 
 // State
-let services = [];
-let ragServices = [];
-let ollamaModels = [];
-let ollamaHealth = null;
+let serviceControl = null; // full GET /api/service-control envelope
+let ollamaHealth = null;   // null while loading
+let ollamaModels = null;   // null while loading / on error
+let ollamaModelsError = null;
 let restartHistory = [];
 
-// Service dependency graph
+// Service dependency graph -- warning copy shown in the confirm modal.
 const SERVICE_DEPENDENCIES = {
     'gateway': {
         dependents: ['orchestrator', 'voice-pipelines'],
@@ -34,30 +38,12 @@ const SERVICE_DEPENDENCIES = {
     }
 };
 
-// Service restart macros
-const SERVICE_MACROS = [
-    {
-        id: 'voice-pipeline-restart',
-        name: 'Restart Voice Pipeline',
-        description: 'Gateway + Orchestrator (recommended order)',
-        services: ['gateway', 'orchestrator'],
-        icon: 'audio-waveform'
-    },
-    {
-        id: 'full-stack-restart',
-        name: 'Restart Full Stack',
-        description: 'All core services in dependency order',
-        services: ['redis', 'qdrant', 'ollama', 'orchestrator', 'gateway'],
-        icon: 'refresh-cw'
-    },
-    {
-        id: 'llm-refresh',
-        name: 'Refresh LLM Layer',
-        description: 'Ollama + Orchestrator to reload models',
-        services: ['ollama', 'orchestrator'],
-        icon: 'brain'
-    }
-];
+const ACTION_LABELS = { start: 'Start', stop: 'Stop', restart: 'Restart' };
+const ACTION_CLASSES = {
+    start: 'bg-green-600 hover:bg-green-700',
+    stop: 'bg-red-600 hover:bg-red-700',
+    restart: 'bg-yellow-600 hover:bg-yellow-700',
+};
 
 // ============================================================================
 // Initialization
@@ -66,12 +52,9 @@ const SERVICE_MACROS = [
 async function loadServiceControl() {
     await Promise.all([
         loadServices(),
-        loadRagServicesFromRegistry(),
-        loadOllamaHealth(),
-        loadOllamaModels(),
-        loadRestartHistory()
+        refreshOllamaPanel(),
+        loadRestartHistory(),
     ]);
-    renderMacros();
     renderRestartTimeline();
 }
 
@@ -81,85 +64,21 @@ async function loadServiceControl() {
 
 async function loadServices() {
     try {
-        const response = await apiRequest('/api/services');
-        // API returns {services: [...]} not plain array
-        services = response.services || response || [];
-        renderServiceTables();
-        updateServiceCounts();
+        serviceControl = await apiRequest('/api/service-control');
+        renderServiceControlBanners();
+        renderServiceControlTables();
+        updateServiceControlCounts();
     } catch (error) {
-        console.error('Failed to load services:', error);
+        console.error('Failed to load service control data:', error);
         showServiceError('Failed to load services');
     }
 }
 
-// Module-level flag: populated on first loadRagServicesFromRegistry() call.
-let controlAgentEnabled = false;
-
-// Status-change tracking for ATHENA-48 toast announcements.
-const _lastStatusByService = new Map();
-
+// loadRagServicesFromRegistry is now a thin alias -- RAG rows live in the
+// same unified envelope as every other row (D3/D17). Kept under its
+// original name because it's still called from a few reload sites below.
 async function loadRagServicesFromRegistry() {
-    try {
-        const response = await apiRequest('/api/service-registry/services');
-        // Service registry returns {services: [...], total_services, healthy_services,
-        // overall_health, control_agent_enabled}
-        ragServices = response.services || [];
-        controlAgentEnabled = response.control_agent_enabled === true;
-        renderRagServicesTable();
-        updateRagServiceCounts(response);
-        _renderControlAgentBanner();
-    } catch (error) {
-        console.error('Failed to load RAG services from registry:', error);
-        const container = document.getElementById('rag-services-table');
-        if (container) {
-            container.innerHTML = '<div class="text-center text-red-400 py-8">Failed to load RAG services from registry</div>';
-        }
-    }
-}
-
-function _renderControlAgentBanner() {
-    // Render a banner when Control Agent is disabled so operators understand
-    // why start/stop/restart buttons are greyed out.  (ruby B2, plan Phase 4 E)
-    const banner = document.getElementById('control-agent-disabled-banner');
-    if (!banner) return;
-    if (controlAgentEnabled) {
-        banner.classList.add('hidden');
-    } else {
-        banner.classList.remove('hidden');
-    }
-}
-
-async function loadOllamaHealth() {
-    try {
-        ollamaHealth = await apiRequest('/api/service-control/ollama/health');
-        renderOllamaStatus();
-    } catch (error) {
-        console.error('Failed to load Ollama health:', error);
-        ollamaHealth = {
-            healthy: false,
-            status: 'error',
-            api_reachable: false,
-            models_loaded: 0,
-            version: null
-        };
-        renderOllamaStatus();
-    }
-}
-
-async function loadOllamaModels() {
-    try {
-        ollamaModels = await apiRequest('/api/service-control/ollama/models');
-        renderOllamaModelsTable();
-        updateModelCounts();
-    } catch (error) {
-        console.error('Failed to load Ollama models:', error);
-        const container = document.getElementById('ollama-models-table');
-        if (container) {
-            container.innerHTML = `
-                <div class="text-center text-red-400 py-8">Failed to load Ollama models - Ollama may be offline</div>
-            `;
-        }
-    }
+    return loadServices();
 }
 
 async function refreshServiceStatus(btn) {
@@ -179,7 +98,7 @@ async function refreshServiceStatus(btn) {
             `Health check complete: ${summary.healthy || 0} healthy, ${summary.unhealthy || 0} unhealthy`,
             'success',
         );
-        await loadRagServicesFromRegistry();
+        await loadServices();
     } catch (error) {
         showToast(`Refresh failed: ${error.message}`, 'error');
     } finally {
@@ -192,67 +111,131 @@ async function refreshServiceStatus(btn) {
 }
 
 // ============================================================================
-// Rendering
+// D18 -- manager degraded-mode banners / neutral note
 // ============================================================================
 
-function renderServiceTables() {
-    const types = {
-        'core': 'core-services-table',
-        'llm': 'core-services-table', // Group with core
-        'infrastructure': 'infrastructure-services-table'
-        // Note: RAG services are now loaded from service registry separately
-    };
+function renderServiceControlBanners() {
+    const container = document.getElementById('service-control-banners');
+    if (!container || !serviceControl) return;
 
-    // Group services by type (use service_type or infer from service_name)
-    // SKIP RAG services - those come from the service registry now
-    const grouped = {};
-    for (const service of services) {
-        let serviceType = service.service_type;
-        // Infer type from service name if not provided
-        if (!serviceType) {
-            const name = (service.service_name || '').toLowerCase();
-            // Skip RAG services - they're loaded from registry
-            if (name.includes('rag') || name.includes('weather') || name.includes('sports') ||
-                name.includes('news') || name.includes('stocks') || name.includes('dining') ||
-                name.includes('flight') || name.includes('airport') || name.includes('recipe') ||
-                name.includes('streaming') || name.includes('event') || name.includes('websearch')) {
-                continue; // Skip - handled by loadRagServicesFromRegistry()
-            } else if (name.includes('ollama') || name.includes('llm')) {
-                serviceType = 'llm';
-            } else if (name.includes('redis') || name.includes('postgres') || name.includes('qdrant')) {
-                serviceType = 'infrastructure';
-            } else {
-                serviceType = 'core';
-            }
-        } else if (serviceType === 'rag') {
-            continue; // Skip - handled by loadRagServicesFromRegistry()
-        }
-        const tableId = types[serviceType] || 'core-services-table';
-        if (!grouped[tableId]) grouped[tableId] = [];
-        grouped[tableId].push(service);
+    const banners = [];
+    const k8s = serviceControl.kubernetes;
+    const ca = serviceControl.control_agent;
+
+    if (k8s && k8s.enabled && !k8s.available) {
+        banners.push(`
+            <div class="bg-amber-500/10 border border-amber-500/40 rounded-lg px-4 py-3 text-sm text-amber-300">
+                Kubernetes control is enabled but unavailable${k8s.reason ? `: ${escapeHtml(k8s.reason)}` : '.'}
+            </div>
+        `);
+    }
+    if (ca && ca.enabled && !ca.reachable) {
+        banners.push(`
+            <div class="bg-amber-500/10 border border-amber-500/40 rounded-lg px-4 py-3 text-sm text-amber-300">
+                Control Agent is enabled but unreachable${ca.note ? `: ${escapeHtml(ca.note)}` : '.'}
+            </div>
+        `);
+    }
+    if (banners.length === 0 && !(ca && ca.enabled) && !(k8s && k8s.enabled)) {
+        banners.push(`
+            <div class="bg-gray-700/40 border border-dark-border rounded-lg px-4 py-3 text-sm text-gray-400">
+                Neither the Control Agent nor Kubernetes control is enabled -- services are read-only here.
+            </div>
+        `);
     }
 
-    // Render each table (core, llm, infrastructure)
-    for (const [tableId, serviceList] of Object.entries(grouped)) {
-        renderServiceTable(tableId, serviceList);
-    }
-
-    // Handle empty tables
-    for (const tableId of Object.values(types)) {
-        if (!grouped[tableId]) {
-            const container = document.getElementById(tableId);
-            if (container) {
-                container.innerHTML = '<div class="text-center text-gray-400 py-8">No services</div>';
-            }
-        }
-    }
+    container.innerHTML = banners.join('');
 }
 
-function renderServiceTable(containerId, serviceList) {
+// ============================================================================
+// Rendering -- grouping and per-row cells
+// ============================================================================
+
+/**
+ * Bucket rows by the server-computed `row.group` (D17) -- 'core', 'rag', or
+ * 'infrastructure'. This is a THIN reader: it must never re-derive group
+ * membership from the row's name/host, which would silently reopen the
+ * "RAG row rendered in Core" bug D17 exists to close.
+ */
+function groupServiceControlRows(rows) {
+    const groups = { core: [], rag: [], infrastructure: [] };
+    for (const row of rows || []) {
+        const key = Object.prototype.hasOwnProperty.call(groups, row.group) ? row.group : 'core';
+        groups[key].push(row);
+    }
+    return groups;
+}
+
+const RUN_STATE_BADGES = {
+    running: { label: 'Running', cls: 'bg-green-900 text-green-300', dot: '●' },
+    stopped: { label: 'Stopped', cls: 'bg-red-900 text-red-300', dot: '●' },
+    disabled: { label: 'Disabled', cls: 'bg-gray-700 text-gray-400', dot: '○' },
+};
+
+/**
+ * Pure: run-state badge + health detail + native_state (D16). native_state
+ * is orthogonal to run_state (a disabled row can still show "0/0 pods") so
+ * it's always rendered when present, regardless of run_state.
+ */
+function renderStatusCell(row) {
+    const info = RUN_STATE_BADGES[row.run_state] || RUN_STATE_BADGES.stopped;
+    const badge = `<span class="px-2 py-1 text-xs rounded ${escapeHtml(info.cls)}">${info.dot} ${escapeHtml(info.label)}</span>`;
+    const nativeState = row.native_state
+        ? `<div class="text-xs text-gray-500 mt-1">${escapeHtml(row.native_state)}</div>`
+        : '';
+    const errorDetail = row.last_error
+        ? `<div class="text-xs text-red-400 mt-1">${escapeHtml(String(row.last_error).substring(0, 100))}</div>`
+        : '';
+    return `<div>${badge}${nativeState}${errorDetail}</div>`;
+}
+
+function _managerLabel(manager, note) {
+    if (manager === 'control_agent') return 'Control Agent';
+    if (manager === 'kubernetes') return 'Kubernetes';
+    if (note === 'protected') return 'Protected';
+    return 'Managed externally';
+}
+
+function _managerBadge(row) {
+    const label = _managerLabel(row.manager, row.manager_note);
+    const cls = row.manager === 'control_agent'
+        ? 'bg-blue-900 text-blue-300'
+        : row.manager === 'kubernetes'
+            ? 'bg-purple-900 text-purple-300'
+            : 'bg-gray-700 text-gray-400';
+    const title = row.manager_note ? ` title="${escapeHtml(row.manager_note)}"` : '';
+    return `<span class="px-2 py-0.5 text-xs rounded ${escapeHtml(cls)}"${title}>${escapeHtml(label)}</span>`;
+}
+
+/**
+ * Pure: manager badge + one button per row.actions (server-gated per D20 --
+ * an operator never sees a dead button for a critical target). Action
+ * literals come straight from the fixed 'start'/'stop'/'restart' server
+ * vocabulary.
+ */
+function renderServiceActions(row) {
+    const badge = _managerBadge(row);
+    const buttons = (row.actions || []).map((action) => {
+        const label = ACTION_LABELS[action] || action;
+        const cls = ACTION_CLASSES[action] || 'bg-gray-600 hover:bg-gray-700';
+        return `<button onclick="requestServiceAction('${escapeJsAttr(row.name)}', '${escapeJsAttr(action)}')"
+                        class="px-2 py-1 text-xs ${escapeHtml(cls)} text-white rounded">${escapeHtml(label)}</button>`;
+    }).join('');
+    return `<div class="flex flex-wrap items-center gap-2">${badge}${buttons}</div>`;
+}
+
+function renderServiceControlTables() {
+    const groups = groupServiceControlRows(serviceControl ? serviceControl.services : []);
+    _renderManagedServiceTable('core-services-table', groups.core);
+    _renderManagedServiceTable('infrastructure-services-table', groups.infrastructure);
+    renderRagServicesTable(groups.rag);
+}
+
+function _renderManagedServiceTable(containerId, rows) {
     const container = document.getElementById(containerId);
     if (!container) return;
 
-    if (serviceList.length === 0) {
+    if (!rows || rows.length === 0) {
         container.innerHTML = '<div class="text-center text-gray-400 py-8">No services</div>';
         return;
     }
@@ -261,225 +244,57 @@ function renderServiceTable(containerId, serviceList) {
         <table class="w-full">
             <thead class="bg-gray-800">
                 <tr>
-                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase"><span class="inline-flex items-center gap-1">Service${typeof infoIcon === 'function' ? infoIcon('service-name') : ''}</span></th>
-                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase"><span class="inline-flex items-center gap-1">Endpoint${typeof infoIcon === 'function' ? infoIcon('service-endpoint') : ''}</span></th>
-                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase"><span class="inline-flex items-center gap-1">Status${typeof infoIcon === 'function' ? infoIcon('service-status') : ''}</span></th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Service</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Endpoint</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
                     <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Actions</th>
                 </tr>
             </thead>
             <tbody class="divide-y divide-gray-700">
-                ${serviceList.map(s => renderServiceRow(s)).join('')}
+                ${rows.map((row) => `
+                    <tr class="hover:bg-gray-800/50">
+                        <td class="px-4 py-3">
+                            <div class="text-white font-medium">${escapeHtml(row.display_name || row.name)}</div>
+                            <div class="text-xs text-gray-500">${escapeHtml(row.description || '')}</div>
+                        </td>
+                        <td class="px-4 py-3">
+                            <div class="text-sm text-gray-300">${escapeHtml(String(row.host || 'unknown'))}:${row.port || ''}</div>
+                        </td>
+                        <td class="px-4 py-3">${renderStatusCell(row)}</td>
+                        <td class="px-4 py-3">${renderServiceActions(row)}</td>
+                    </tr>
+                `).join('')}
             </tbody>
         </table>
     `;
 }
 
-function renderServiceRow(service) {
-    // Normalize field names - API uses different names than expected
-    const displayName = service.display_name || service.service_name || 'Unknown';
-    const host = service.host || service.ip_address || 'unknown';
-    const isRunning = service.is_running ?? (service.status === 'running' || service.status === 'healthy' || service.status === 'online');
-    // Raw value for the handler attrs -- escapeJsAttr escapes it at the call
-    // site; escapeHtml here would be double-escaped by escapeJsAttr and
-    // deliver the wrong identifier to stopService/restartService/startService
-    // (codex r2 F1).
-    const serviceName = service.service_name || service.name || '';
-
-    const statusBadge = isRunning
-        ? '<span class="px-2 py-1 text-xs rounded bg-green-900 text-green-300">● Running</span>'
-        : '<span class="px-2 py-1 text-xs rounded bg-red-900 text-red-300">● Stopped</span>';
-
-    const errorText = service.last_error
-        ? `<div class="text-xs text-red-400 mt-1">${escapeHtml(service.last_error.substring(0, 100))}</div>`
-        : '';
-
-    return `
-        <tr class="hover:bg-gray-800/50">
-            <td class="px-4 py-3">
-                <div class="text-white font-medium">${escapeHtml(displayName)}</div>
-                <div class="text-xs text-gray-500">${escapeHtml(service.description || '')}</div>
-            </td>
-            <td class="px-4 py-3">
-                <div class="text-sm text-gray-300">${escapeHtml(String(host))}:${service.port}</div>
-                ${errorText}
-            </td>
-            <td class="px-4 py-3">${statusBadge}</td>
-            <td class="px-4 py-3">
-                <div class="flex gap-2">
-                    ${isRunning ? `
-                        <button onclick="stopService('${escapeJsAttr(serviceName)}')"
-                                class="px-2 py-1 text-xs bg-red-600 hover:bg-red-700 text-white rounded">
-                            Stop
-                        </button>
-                        <button onclick="restartService('${escapeJsAttr(serviceName)}')"
-                                class="px-2 py-1 text-xs bg-yellow-600 hover:bg-yellow-700 text-white rounded">
-                            Restart
-                        </button>
-                    ` : `
-                        <button onclick="startService('${escapeJsAttr(serviceName)}')"
-                                class="px-2 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded">
-                            Start
-                        </button>
-                    `}
-                </div>
-            </td>
-        </tr>
-    `;
-}
-
-function renderOllamaStatus() {
-    const container = document.getElementById('ollama-status-panel');
-    if (!container) return;
-
-    if (!ollamaHealth) {
-        container.innerHTML = '<div class="text-center text-gray-400 py-4">Loading Ollama status...</div>';
-        return;
-    }
-
-    let statusBadge, statusColor;
-    switch (ollamaHealth.status) {
-        case 'healthy':
-            statusBadge = '<span class="px-3 py-1 text-sm rounded-full bg-green-900 text-green-300">Healthy</span>';
-            statusColor = 'green';
-            break;
-        case 'idle':
-            statusBadge = '<span class="px-3 py-1 text-sm rounded-full bg-blue-900 text-blue-300">Idle (No Models Loaded)</span>';
-            statusColor = 'blue';
-            break;
-        case 'offline':
-            statusBadge = '<span class="px-3 py-1 text-sm rounded-full bg-red-900 text-red-300">Offline</span>';
-            statusColor = 'red';
-            break;
-        case 'control_agent_offline':
-            statusBadge = '<span class="px-3 py-1 text-sm rounded-full bg-yellow-900 text-yellow-300">Control Agent Offline</span>';
-            statusColor = 'yellow';
-            break;
-        default:
-            statusBadge = '<span class="px-3 py-1 text-sm rounded-full bg-gray-700 text-gray-300">Unknown</span>';
-            statusColor = 'gray';
-    }
-
-    const isOnline = ollamaHealth.healthy || ollamaHealth.api_reachable;
-
-    container.innerHTML = `
-        <div class="flex items-center justify-between p-4 bg-gray-800 rounded-lg">
-            <div class="flex items-center gap-4">
-                <div class="w-3 h-3 rounded-full ${isOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}"></div>
-                <div>
-                    <div class="flex items-center gap-3">
-                        <span class="text-lg font-semibold text-white">Ollama LLM Server</span>
-                        ${statusBadge}
-                    </div>
-                    <div class="text-sm text-gray-400 mt-1">
-                        ${ollamaHealth.version ? `Version: ${escapeHtml(ollamaHealth.version)}` : 'Version: Unknown'}
-                        | Models Loaded: ${ollamaHealth.models_loaded || 0}
-                        | Host: ${ollamaHealth.host || 'localhost:11434'}
-                    </div>
-                </div>
-            </div>
-            <div class="flex gap-2">
-                ${isOnline ? `
-                    <button onclick="stopOllama()"
-                            class="px-3 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded transition">
-                        Stop
-                    </button>
-                    <button onclick="restartOllama()"
-                            class="px-3 py-2 text-sm bg-yellow-600 hover:bg-yellow-700 text-white rounded transition">
-                        Restart
-                    </button>
-                ` : `
-                    <button onclick="startOllama()"
-                            class="px-3 py-2 text-sm bg-green-600 hover:bg-green-700 text-white rounded transition">
-                        Start Ollama
-                    </button>
-                `}
-                <button onclick="refreshOllamaHealth()"
-                        class="px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded transition">
-                    Refresh
-                </button>
-            </div>
-        </div>
-    `;
-}
-
-function renderOllamaModelsTable() {
-    const container = document.getElementById('ollama-models-table');
-    if (!container) return;
-
-    if (!ollamaHealth || !ollamaHealth.healthy) {
-        container.innerHTML = '<div class="text-center text-gray-400 py-8">Ollama is offline - start it to manage models</div>';
-        return;
-    }
-
-    if (ollamaModels.length === 0) {
-        container.innerHTML = '<div class="text-center text-gray-400 py-8">No models available</div>';
-        return;
-    }
-
-    container.innerHTML = `
-        <table class="w-full">
-            <thead class="bg-gray-800">
-                <tr>
-                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase"><span class="inline-flex items-center gap-1">Model${typeof infoIcon === 'function' ? infoIcon('ollama-model-name') : ''}</span></th>
-                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase"><span class="inline-flex items-center gap-1">Size${typeof infoIcon === 'function' ? infoIcon('ollama-model-size') : ''}</span></th>
-                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase"><span class="inline-flex items-center gap-1">Status${typeof infoIcon === 'function' ? infoIcon('ollama-model-status') : ''}</span></th>
-                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Actions</th>
-                </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-700">
-                ${ollamaModels.map(m => renderModelRow(m)).join('')}
-            </tbody>
-        </table>
-    `;
-}
-
-function renderModelRow(model) {
-    const statusBadge = model.loaded
-        ? '<span class="px-2 py-1 text-xs rounded bg-green-900 text-green-300">● Loaded</span>'
-        : '<span class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-400">○ Not Loaded</span>';
-
-    return `
-        <tr class="hover:bg-gray-800/50">
-            <td class="px-4 py-3">
-                <div class="text-white font-medium">${escapeHtml(model.name)}</div>
-            </td>
-            <td class="px-4 py-3 text-sm text-gray-300">${formatBytes(model.size)}</td>
-            <td class="px-4 py-3">${statusBadge}</td>
-            <td class="px-4 py-3">
-                ${model.loaded ? `
-                    <button onclick="unloadModel('${escapeJsAttr(model.name)}')"
-                            class="px-2 py-1 text-xs bg-yellow-600 hover:bg-yellow-700 text-white rounded">
-                        Unload
-                    </button>
-                ` : `
-                    <button onclick="loadModel('${escapeJsAttr(model.name)}')"
-                            class="px-2 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded">
-                        Load
-                    </button>
-                `}
-            </td>
-        </tr>
-    `;
-}
-
-function updateServiceCounts() {
-    const isServiceRunning = (s) => s.is_running ?? (s.status === 'running' || s.status === 'healthy' || s.status === 'online');
-    const running = services.filter(isServiceRunning).length;
-    const stopped = services.filter(s => !isServiceRunning(s)).length;
-
-    document.getElementById('services-running-count').textContent = running;
-    document.getElementById('services-stopped-count').textContent = stopped;
+function updateServiceControlCounts() {
+    const counts = (serviceControl && serviceControl.counts) || { running: 0, stopped: 0, disabled: 0 };
+    const runningEl = document.getElementById('services-running-count');
+    const stoppedEl = document.getElementById('services-stopped-count');
+    const disabledEl = document.getElementById('services-disabled-count');
+    if (runningEl) runningEl.textContent = counts.running;
+    if (stoppedEl) stoppedEl.textContent = counts.stopped;
+    if (disabledEl) disabledEl.textContent = counts.disabled;
 }
 
 // ============================================================================
-// RAG Services from Registry (Source of Truth)
+// RAG Services (a group within the unified envelope, D17) -- keeps its own
+// richer status cell (freshness chip, aria-live status flips) and its own
+// Disable/Refresh/Edit action set, per plan step (e).
 // ============================================================================
 
-function renderRagServicesTable() {
+// Status-change tracking for ATHENA-48 toast announcements.
+const _lastStatusByService = new Map();
+
+function renderRagServicesTable(ragRows) {
     const container = document.getElementById('rag-services-table');
     if (!container) return;
 
-    if (ragServices.length === 0) {
+    const rows = ragRows || [];
+
+    if (rows.length === 0) {
         // Actionable empty-state copy (ruby r1 / plan Phase 4 E).
         container.innerHTML = `
             <div class="text-center text-gray-400 py-8">
@@ -492,10 +307,10 @@ function renderRagServicesTable() {
 
     // Status-change announcements (ATHENA-48): one toast per flip, batched if >3 flips in a tick.
     const flips = [];
-    for (const s of ragServices) {
+    for (const s of rows) {
         const name = s.name;
         if (!name) continue;
-        const current = String(s.status ?? (s.is_running ? 'healthy' : 'unhealthy'));
+        const current = String(s.health_status ?? (s.run_state === 'running' ? 'healthy' : 'unhealthy'));
         const prev = _lastStatusByService.get(name);
         if (prev !== undefined && prev !== current) {
             flips.push({ name, from: prev, to: current });
@@ -527,7 +342,7 @@ function renderRagServicesTable() {
                 </tr>
             </thead>
             <tbody class="divide-y divide-gray-700">
-                ${ragServices.map(s => renderRagServiceRow(s)).join('')}
+                ${rows.map((s) => renderRagServiceRow(s)).join('')}
             </tbody>
         </table>
     `;
@@ -584,9 +399,6 @@ function renderRagServiceRow(service) {
     const host = service.host || 'unknown';
     const port = service.port || 0;
 
-    // Status badge — reads health_status (cached, written by Phase 4 poller).
-    // Phase 1 inline-pinged `status`; Phase 2+ uses `health_status` (NULL→'pending'
-    // normalised by the backend).
     let statusBadge;
     let statusLabel;
     const rt = service.last_response_time_ms != null
@@ -621,7 +433,7 @@ function renderRagServiceRow(service) {
             statusBadge = '<span class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-400">○ Disabled</span>';
             break;
         case 'pending':
-            // Neutral — no poller result yet (Phase 2→4 transient; never alarming).
+            // Neutral — no poller result yet (transient; never alarming).
             statusBadge = '<span class="px-2 py-1 text-xs rounded bg-gray-600 text-gray-300" title="Health check pending — checks run every 30 seconds.">○ Pending</span>';
             break;
         default:
@@ -632,6 +444,12 @@ function renderRagServiceRow(service) {
     const chip = _freshnessChip(service.last_health_check);
     const freshnessPill = chip
         ? `<div class="text-xs ${chip.colorClass} mt-1">${escapeHtml(chip.text)}</div>`
+        : '';
+
+    // native_state (D16) — orthogonal to health_status, shown whenever a
+    // manager has one (Control Agent / Kubernetes managed RAG rows).
+    const nativeStatePill = service.native_state
+        ? `<div class="text-xs text-gray-500 mt-1">${escapeHtml(service.native_state)}</div>`
         : '';
 
     // last_error display (category only — URL/IP scrubbed by backend MED-1).
@@ -659,10 +477,7 @@ function renderRagServiceRow(service) {
         ? 'TCP'
         : escapeHtml(service.health_endpoint || '/health');
 
-    // Control Agent gate: disable start/stop/restart when CA is unavailable.
-    const caDisabled = !controlAgentEnabled;
-    const caTitle = caDisabled ? ' title="Service control requires the Control Agent."' : '';
-    const caClass = caDisabled ? ' opacity-50 cursor-not-allowed' : '';
+    const managerBadge = _managerBadge(service);
 
     return `
         <tr class="hover:bg-gray-800/50" id="rag-row-${safeName}">
@@ -681,9 +496,11 @@ function renderRagServiceRow(service) {
                 data-status-item="${safeName}">
                 ${statusBadge}
                 ${freshnessPill}
+                ${nativeStatePill}
             </td>
             <td class="px-4 py-3">
-                <div class="flex gap-2">
+                <div class="flex flex-wrap items-center gap-2">
+                    ${managerBadge}
                     <button onclick="toggleRagService('${escapeJsAttr(rawName)}')"
                             class="px-2 py-1 text-xs ${isEnabled ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'} text-white rounded">
                         ${isEnabled ? 'Disable' : 'Enable'}
@@ -706,13 +523,11 @@ function renderRagServiceRow(service) {
 // ============================================================================
 // Registry row editor (ATHENA-109) -- lets an operator switch a row's check
 // type between http/https (endpoint URL) and tcp (host:port connect only).
-// Reuses the existing POST /api/service-registry/services upsert route --
-// there was no create/edit form for registry rows before this; the table only
-// offered enable/disable + on-demand refresh.
+// Reuses the existing POST /api/service-registry/services upsert route.
 // ============================================================================
 
 function showEditRagServiceModal(serviceName) {
-    const service = ragServices.find(s => s.name === serviceName);
+    const service = (serviceControl?.services || []).find(s => s.name === serviceName);
     if (!service) return;
 
     const isTcp = service.protocol === 'tcp';
@@ -817,23 +632,10 @@ async function saveRagServiceEdit(event, serviceName) {
         await apiRequest(`/api/service-registry/services?${params.toString()}`, { method: 'POST' });
         closeModal('rag-edit-modal');
         showNotification(`Service ${serviceName} updated`, 'success');
-        await loadRagServicesFromRegistry();
+        await loadServices();
     } catch (error) {
         showServiceError(`Failed to update service: ${error.message}`);
     }
-}
-
-function updateRagServiceCounts(registryResponse) {
-    const total = registryResponse.total_services || ragServices.length;
-    const healthy = registryResponse.healthy_services || ragServices.filter(s => s.health_status === 'healthy').length;
-    const offline = total - healthy;
-
-    // Update RAG-specific counters if they exist
-    const ragRunningEl = document.getElementById('rag-services-running-count');
-    const ragStoppedEl = document.getElementById('rag-services-stopped-count');
-
-    if (ragRunningEl) ragRunningEl.textContent = healthy;
-    if (ragStoppedEl) ragStoppedEl.textContent = offline;
 }
 
 async function toggleRagService(serviceName) {
@@ -842,7 +644,7 @@ async function toggleRagService(serviceName) {
             method: 'POST'
         });
         showToast(result.message, 'success');
-        await loadRagServicesFromRegistry();
+        await loadServices();
     } catch (error) {
         showToast(`Failed to toggle ${serviceName}: ${error.message}`, 'error');
     }
@@ -859,9 +661,7 @@ async function toggleRagService(serviceName) {
 async function checkRagServiceHealth(serviceName, btn) {
     // Disable button + show checking state in the status cell.
     const statusCell = document.querySelector(`[data-status-item="${CSS.escape(serviceName)}"]`);
-    let originalBtnContent = '';
     if (btn) {
-        originalBtnContent = btn.innerHTML;
         btn.disabled = true;
         btn.textContent = 'Checking…';
     }
@@ -881,7 +681,7 @@ async function checkRagServiceHealth(serviceName, btn) {
     }
 
     // Always reload the full table to pick up the updated row.
-    await loadRagServicesFromRegistry();
+    await loadServices();
 }
 
 async function refreshRagService(serviceName) {
@@ -890,54 +690,111 @@ async function refreshRagService(serviceName) {
             method: 'POST'
         });
         showToast(result.message, 'success');
-        await loadRagServicesFromRegistry();
+        await loadServices();
     } catch (error) {
         showToast(`Failed to refresh ${serviceName}: ${error.message}`, 'error');
     }
 }
 
 function updateModelCounts() {
-    const loaded = ollamaModels.filter(m => m.loaded).length;
-    const total = ollamaModels.length;
+    const models = ollamaModels || [];
+    const loaded = models.filter(m => m.loaded).length;
+    const total = models.length;
 
-    document.getElementById('ollama-models-loaded').textContent = loaded;
-    document.getElementById('ollama-models-total').textContent = total;
+    const loadedEl = document.getElementById('ollama-models-loaded');
+    const totalEl = document.getElementById('ollama-models-total');
+    if (loadedEl) loadedEl.textContent = loaded;
+    if (totalEl) totalEl.textContent = total;
 }
 
 // ============================================================================
 // Service Actions
 // ============================================================================
 
-async function startService(serviceName) {
-    await serviceAction(serviceName, 'start');
-}
+/**
+ * POST helper for lifecycle-action routes that returns the PARSED error
+ * detail on failure (never the generic apiRequest()'s stringified message)
+ * -- 409 responses carry a structured {error, manager_note} body this
+ * caller needs to read directly (e.g. detail.error).
+ */
+async function _postServiceControlAction(url, body) {
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'same-origin',
+        body: JSON.stringify(body || {}),
+    });
 
-async function stopService(serviceName) {
-    if (!confirm(`Are you sure you want to stop ${serviceName}?`)) return;
-    await serviceAction(serviceName, 'stop');
-}
-
-async function restartService(serviceName) {
-    await serviceAction(serviceName, 'restart');
-}
-
-async function serviceAction(serviceName, action) {
+    let payload = null;
     try {
-        const result = await apiRequest(`/api/service-control/${serviceName}/${action}`, {
-            method: 'POST'
-        });
-
-        if (result.success) {
-            showToast(result.message, 'success');
-        } else {
-            showToast(result.message, 'warning');
-        }
-
-        await loadServices();
-
-    } catch (error) {
-        showToast(`Failed to ${action} ${serviceName}: ${error.message}`, 'error');
+        payload = await response.json();
+    } catch (_e) {
+        payload = null;
     }
+
+    if (!response.ok) {
+        const detail = payload && typeof payload === 'object' ? payload.detail : null;
+        const message = (detail && typeof detail === 'object' && detail.error)
+            || (typeof detail === 'string' ? detail : null)
+            || `HTTP ${response.status}`;
+        const err = new Error(message);
+        err.status = response.status;
+        err.detail = detail;
+        throw err;
+    }
+
+    return payload;
+}
+
+async function requestServiceAction(name, action) {
+    const row = (serviceControl?.services || []).find(r => r.name === name);
+    if (!row) {
+        showToast(`Unknown service '${name}'`, 'error');
+        return;
+    }
+
+    // D9/D20: a critical target requires typing the RESOLVED target's name
+    // (manager_target — always equal to the server's confirm_name), never
+    // the row's own display name when the row is an alias.
+    const requireTyped = row.confirm_required ? (row.manager_target || row.name) : null;
+
+    let message;
+    if (row.manager === 'kubernetes' && action === 'restart') {
+        message = `This restarts '${row.manager_target}' by scaling it to 0 replicas and back. The service will be UNAVAILABLE for the duration of the restart.`;
+    } else if (action === 'start' && row.run_state === 'disabled') {
+        message = `'${row.display_name || row.name}' is disabled in the registry. Starting it brings the underlying process/container up, but it stays unpolled and unrouted until re-enabled.`;
+    } else if (requireTyped) {
+        message = `This is a critical, infrastructure-managed target. Type its name to confirm.`;
+    } else {
+        message = `Are you sure you want to ${action} '${row.display_name || row.name}'?`;
+    }
+
+    const confirmed = await showServiceConfirmModal({
+        title: `${action.charAt(0).toUpperCase()}${action.slice(1)} ${row.display_name || row.name}`,
+        message,
+        serviceName: row.name,
+        action,
+        requireTyped,
+    });
+    if (confirmed === false) return;
+
+    const body = requireTyped ? { confirm_name: confirmed } : {};
+
+    try {
+        const result = await _postServiceControlAction(
+            `/api/service-control/${encodeURIComponent(name)}/${encodeURIComponent(action)}`,
+            body,
+        );
+        showToast(result.message, result.success ? 'success' : 'warning');
+    } catch (error) {
+        if (error.status === 409 && error.detail) {
+            showToast(error.detail.error || `Failed to ${action} ${name}`, 'warning');
+        } else {
+            showToast(`Failed to ${action} ${name}: ${error.message}`, 'error');
+        }
+    }
+
+    await loadServices();
 }
 
 // ============================================================================
@@ -952,17 +809,12 @@ async function loadModel(modelName) {
             method: 'POST'
         });
 
-        if (result.success) {
-            showToast(result.message, 'success');
-        } else {
-            showToast(result.message, 'error');
-        }
-
-        await loadOllamaModels();
-
+        showToast(result.message, result.success ? 'success' : 'error');
     } catch (error) {
         showToast(`Failed to load model: ${error.message}`, 'error');
     }
+
+    await refreshOllamaPanel();
 }
 
 async function unloadModel(modelName) {
@@ -971,98 +823,237 @@ async function unloadModel(modelName) {
             method: 'POST'
         });
 
-        if (result.success) {
-            showToast(result.message, 'success');
-        } else {
-            showToast(result.message, 'error');
-        }
-
-        await loadOllamaModels();
-
+        showToast(result.message, result.success ? 'success' : 'error');
     } catch (error) {
         showToast(`Failed to unload model: ${error.message}`, 'error');
     }
+
+    await refreshOllamaPanel();
 }
 
 // ============================================================================
 // Ollama Service Control
 // ============================================================================
 
-async function startOllama() {
+async function loadOllamaHealth() {
     try {
-        showToast('Starting Ollama... This may take a moment.', 'info');
-
-        const result = await apiRequest('/api/service-control/ollama/start', {
-            method: 'POST'
-        });
-
-        if (result.success) {
-            showToast(result.message, 'success');
-        } else {
-            showToast(result.message, 'error');
-        }
-
-        // Refresh both health and models
-        await loadOllamaHealth();
-        await loadOllamaModels();
-
+        ollamaHealth = await apiRequest('/api/service-control/ollama/health');
     } catch (error) {
-        showToast(`Failed to start Ollama: ${error.message}`, 'error');
+        console.error('Failed to load Ollama health:', error);
+        ollamaHealth = {
+            healthy: false,
+            status: 'error',
+            api_reachable: false,
+            models_loaded: 0,
+            version: null,
+            host: null,
+            manager: 'none',
+            manager_target: null,
+            manager_note: 'health_check_failed',
+            native_actions: [],
+            allowed_actions: [],
+            confirm_required: false,
+            confirm_name: null,
+            row_name: null,
+        };
     }
 }
 
-async function stopOllama() {
-    if (!confirm('Are you sure you want to stop Ollama? This will unload all models.')) return;
-
+async function loadOllamaModels() {
     try {
-        const result = await apiRequest('/api/service-control/ollama/stop', {
-            method: 'POST'
-        });
-
-        if (result.success) {
-            showToast(result.message, 'success');
-        } else {
-            showToast(result.message, 'error');
-        }
-
-        // Refresh health and models
-        await loadOllamaHealth();
-        await loadOllamaModels();
-
+        ollamaModels = await apiRequest('/api/service-control/ollama/models');
+        ollamaModelsError = null;
     } catch (error) {
-        showToast(`Failed to stop Ollama: ${error.message}`, 'error');
+        console.error('Failed to load Ollama models:', error);
+        ollamaModels = null;
+        ollamaModelsError = error.message || 'Failed to load Ollama models';
     }
 }
 
-async function restartOllama() {
-    try {
-        showToast('Restarting Ollama... This may take a moment.', 'info');
-
-        const result = await apiRequest('/api/service-control/ollama/restart', {
-            method: 'POST'
-        });
-
-        if (result.success) {
-            showToast(result.message, 'success');
-        } else {
-            showToast(result.message, 'error');
-        }
-
-        // Wait a bit then refresh
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        await loadOllamaHealth();
-        await loadOllamaModels();
-
-    } catch (error) {
-        showToast(`Failed to restart Ollama: ${error.message}`, 'error');
-    }
+/**
+ * The one Ollama refresh entry point (plan step (i)) -- every reload site
+ * calls this instead of awaiting loadOllamaHealth()/loadOllamaModels()
+ * directly, so the health card and the models table never drift out of
+ * sync with each other.
+ */
+async function refreshOllamaPanel() {
+    await Promise.allSettled([loadOllamaHealth(), loadOllamaModels()]);
+    renderOllamaStatus();
+    renderOllamaModelsTable();
+    updateModelCounts();
 }
 
-async function refreshOllamaHealth() {
-    showToast('Refreshing Ollama status...', 'info');
-    await loadOllamaHealth();
-    await loadOllamaModels();
-    showToast('Ollama status refreshed', 'success');
+const OLLAMA_STATUS_BADGES = {
+    healthy: { label: 'Healthy', cls: 'bg-green-900 text-green-300' },
+    idle: { label: 'Idle (No Models Loaded)', cls: 'bg-blue-900 text-blue-300' },
+    offline: { label: 'Offline', cls: 'bg-red-900 text-red-300' },
+    error: { label: 'Error', cls: 'bg-red-900 text-red-300' },
+    ssrf_blocked: { label: 'Blocked (network guard)', cls: 'bg-yellow-900 text-yellow-300' },
+};
+
+function renderOllamaStatus() {
+    const container = document.getElementById('ollama-status-panel');
+    if (!container) return;
+
+    if (!ollamaHealth) {
+        container.innerHTML = '<div class="text-center text-gray-400 py-4">Loading Ollama status…</div>';
+        return;
+    }
+
+    const badgeInfo = OLLAMA_STATUS_BADGES[ollamaHealth.status] || { label: 'Unknown', cls: 'bg-gray-700 text-gray-300' };
+    const statusBadge = `<span class="px-3 py-1 text-sm rounded-full ${escapeHtml(badgeInfo.cls)}">${escapeHtml(badgeInfo.label)}</span>`;
+    const isOnline = !!ollamaHealth.healthy;
+    const managerBadge = _managerBadge({ manager: ollamaHealth.manager, manager_note: ollamaHealth.manager_note });
+
+    const actionButtons = ollamaHealth.manager === 'none'
+        ? '<span class="px-3 py-2 text-sm text-gray-400">Managed on its host</span>'
+        : (ollamaHealth.allowed_actions || []).map((action) => {
+            const label = ACTION_LABELS[action] || action;
+            const cls = ACTION_CLASSES[action] || 'bg-gray-600 hover:bg-gray-700';
+            return `<button onclick="requestOllamaAction('${escapeJsAttr(action)}')"
+                            class="px-3 py-2 text-sm ${escapeHtml(cls)} text-white rounded transition">${escapeHtml(label)}</button>`;
+        }).join('');
+
+    container.innerHTML = `
+        <div class="flex items-center justify-between p-4 bg-gray-800 rounded-lg">
+            <div class="flex items-center gap-4">
+                <div class="w-3 h-3 rounded-full ${isOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}"></div>
+                <div>
+                    <div class="flex items-center gap-3">
+                        <span class="text-lg font-semibold text-white">Ollama LLM Server</span>
+                        ${statusBadge}
+                        ${managerBadge}
+                    </div>
+                    <div class="text-sm text-gray-400 mt-1">
+                        ${ollamaHealth.version ? `Version: ${escapeHtml(ollamaHealth.version)}` : 'Version: Unknown'}
+                        | Models Loaded: ${ollamaHealth.models_loaded || 0}
+                        | Host: ${escapeHtml(ollamaHealth.host || 'localhost:11434')}
+                    </div>
+                </div>
+            </div>
+            <div class="flex gap-2">
+                ${actionButtons}
+                <button onclick="refreshOllamaPanel()"
+                        class="px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded transition">
+                    Refresh
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+/**
+ * Pure: what to show in the Ollama models panel before we have a real
+ * table to render. Returns null when the caller should render the models
+ * table instead of a message.
+ */
+function ollamaModelsMessage(health, modelsError) {
+    if (!health) return 'Loading Ollama status…';
+    if (health.manager === 'none') {
+        return 'Ollama is managed on its host — start it there, then refresh.';
+    }
+    if (!health.healthy) {
+        return 'Ollama appears unreachable. Start it, then refresh to manage models.';
+    }
+    if (modelsError) {
+        return `The models endpoint is unavailable: ${modelsError}`;
+    }
+    return null;
+}
+
+function renderOllamaModelsTable() {
+    const container = document.getElementById('ollama-models-table');
+    if (!container) return;
+
+    const message = ollamaModelsMessage(ollamaHealth, ollamaModelsError);
+    if (message !== null) {
+        container.innerHTML = `<div class="text-center text-gray-400 py-8">${escapeHtml(message)}</div>`;
+        return;
+    }
+
+    const models = ollamaModels || [];
+    if (models.length === 0) {
+        container.innerHTML = '<div class="text-center text-gray-400 py-8">No models available</div>';
+        return;
+    }
+
+    container.innerHTML = `
+        <table class="w-full">
+            <thead class="bg-gray-800">
+                <tr>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Model</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Size</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Actions</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-700">
+                ${models.map(m => renderModelRow(m)).join('')}
+            </tbody>
+        </table>
+    `;
+}
+
+function renderModelRow(model) {
+    const statusBadge = model.loaded
+        ? '<span class="px-2 py-1 text-xs rounded bg-green-900 text-green-300">● Loaded</span>'
+        : '<span class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-400">○ Not Loaded</span>';
+
+    return `
+        <tr class="hover:bg-gray-800/50">
+            <td class="px-4 py-3">
+                <div class="text-white font-medium">${escapeHtml(model.name)}</div>
+            </td>
+            <td class="px-4 py-3 text-sm text-gray-300">${formatBytes(model.size)}</td>
+            <td class="px-4 py-3">${statusBadge}</td>
+            <td class="px-4 py-3">
+                ${model.loaded ? `
+                    <button onclick="unloadModel('${escapeJsAttr(model.name)}')"
+                            class="px-2 py-1 text-xs bg-yellow-600 hover:bg-yellow-700 text-white rounded">
+                        Unload
+                    </button>
+                ` : `
+                    <button onclick="loadModel('${escapeJsAttr(model.name)}')"
+                            class="px-2 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded">
+                        Load
+                    </button>
+                `}
+            </td>
+        </tr>
+    `;
+}
+
+async function requestOllamaAction(action) {
+    if (!ollamaHealth) return;
+
+    const requireTyped = ollamaHealth.confirm_required ? (ollamaHealth.confirm_name || 'ollama') : null;
+    const message = requireTyped
+        ? `This is a critical, infrastructure-managed target. Type its name to confirm.`
+        : `Are you sure you want to ${action} Ollama?`;
+
+    const confirmed = await showServiceConfirmModal({
+        title: `${action.charAt(0).toUpperCase()}${action.slice(1)} Ollama`,
+        message,
+        serviceName: 'ollama',
+        action,
+        requireTyped,
+    });
+    if (confirmed === false) return;
+
+    const body = requireTyped ? { confirm_name: confirmed } : {};
+
+    try {
+        const result = await _postServiceControlAction(`/api/service-control/ollama/${encodeURIComponent(action)}`, body);
+        showToast(result.message, result.success ? 'success' : 'warning');
+    } catch (error) {
+        if (error.status === 409 && error.detail) {
+            showToast(error.detail.error || `Failed to ${action} Ollama`, 'warning');
+        } else {
+            showToast(`Failed to ${action} Ollama: ${error.message}`, 'error');
+        }
+    }
+
+    await refreshOllamaPanel();
 }
 
 // ============================================================================
@@ -1079,63 +1070,44 @@ function showServiceError(message) {
 }
 
 // formatBytes, escapeHtml, and showNotification are now provided by utils.js
+// / escape-html.js.
 
 // ============================================================================
-// Runbook: Timeline, Macros, and Dependency Warnings
+// Runbook: Restart Timeline (D15)
 // ============================================================================
 
 /**
- * Load restart history from audit log
+ * Load restart history from the audit log. audit.py's `action` filter
+ * accepts exactly one value (no OR), so the three lifecycle actions are
+ * fetched separately and merged client-side, newest first.
  */
 async function loadRestartHistory() {
+    const actions = ['service_start', 'service_stop', 'service_restart'];
     try {
-        const response = await apiRequest('/api/audit?action_type=service_restart&limit=20');
-        restartHistory = response.items || response || [];
+        const results = await Promise.all(
+            actions.map(action =>
+                apiRequest(`/api/audit?action=${encodeURIComponent(action)}&limit=20`).catch(() => [])
+            )
+        );
+        restartHistory = results
+            .flat()
+            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+            .slice(0, 20);
     } catch (error) {
         console.warn('Failed to load restart history:', error);
         restartHistory = [];
     }
 }
 
-/**
- * Render the service macros section
- */
-function renderMacros() {
-    const container = document.getElementById('service-macros');
-    if (!container) return;
-
-    container.innerHTML = `
-        <div class="mb-4">
-            <h3 class="text-lg font-semibold text-white mb-2">Quick Actions</h3>
-            <p class="text-sm text-gray-400">Common service restart combinations</p>
-        </div>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-            ${SERVICE_MACROS.map(macro => `
-                <button onclick="executeMacro('${escapeJsAttr(macro.id)}')"
-                        class="p-4 bg-dark-elevated hover:bg-gray-700 rounded-lg border border-dark-border transition-all text-left group">
-                    <div class="flex items-center gap-3 mb-2">
-                        <div class="p-2 bg-blue-500/20 rounded-lg">
-                            <i data-lucide="${macro.icon}" class="w-5 h-5 text-blue-400"></i>
-                        </div>
-                        <span class="font-medium text-white">${escapeHtml(macro.name)}</span>
-                    </div>
-                    <p class="text-sm text-gray-400">${escapeHtml(macro.description)}</p>
-                    <div class="mt-3 flex flex-wrap gap-1">
-                        ${macro.services.map(s => `
-                            <span class="px-2 py-0.5 text-xs bg-gray-700 text-gray-300 rounded">${escapeHtml(s)}</span>
-                        `).join('')}
-                    </div>
-                </button>
-            `).join('')}
-        </div>
-    `;
-
-    if (typeof lucide !== 'undefined') lucide.createIcons();
+function _serviceNameForAuditLog(log) {
+    if (log.resource_id != null && serviceControl?.services) {
+        const row = serviceControl.services.find(r => r.id === log.resource_id);
+        if (row) return row.display_name || row.name;
+    }
+    if (log.new_value && log.new_value.target) return log.new_value.target;
+    return 'Service';
 }
 
-/**
- * Render the restart timeline
- */
 function renderRestartTimeline() {
     const container = document.getElementById('restart-timeline');
     if (!container) return;
@@ -1154,7 +1126,7 @@ function renderRestartTimeline() {
     container.innerHTML = `
         <div class="mb-4">
             <h3 class="text-lg font-semibold text-white mb-2">Restart History</h3>
-            <p class="text-sm text-gray-400">Recent service restart events</p>
+            <p class="text-sm text-gray-400">Recent service start/stop/restart events</p>
         </div>
         <div class="relative">
             <div class="absolute left-4 top-0 bottom-0 w-0.5 bg-dark-border"></div>
@@ -1167,15 +1139,12 @@ function renderRestartTimeline() {
     if (typeof lucide !== 'undefined') lucide.createIcons();
 }
 
-/**
- * Render a single timeline event
- */
 function renderTimelineEvent(event) {
-    const timestamp = new Date(event.created_at || event.timestamp);
+    const timestamp = new Date(event.timestamp);
     const timeAgo = formatTimeAgo(timestamp);
-    const serviceName = event.entity_name || event.service_name || 'Unknown';
-    const action = event.action_type || event.action || 'restart';
-    const user = event.user_email || event.user || 'System';
+    const serviceName = _serviceNameForAuditLog(event);
+    const action = event.action || 'service_restart';
+    const user = event.username || event.user || 'System';
 
     let iconColor = 'text-blue-400';
     let bgColor = 'bg-blue-500/20';
@@ -1191,6 +1160,10 @@ function renderTimelineEvent(event) {
         icon = 'play';
     }
 
+    const outcome = event.success === false
+        ? `<span class="text-red-400"> (failed${event.error_message ? `: ${escapeHtml(event.error_message)}` : ''})</span>`
+        : '';
+
     return `
         <div class="relative pl-10">
             <div class="absolute left-2 w-4 h-4 rounded-full ${bgColor} flex items-center justify-center">
@@ -1201,15 +1174,12 @@ function renderTimelineEvent(event) {
                     <span class="font-medium text-white">${escapeHtml(serviceName)}</span>
                     <span class="text-xs text-gray-500">${escapeHtml(timeAgo)}</span>
                 </div>
-                <p class="text-sm text-gray-400 mt-1">${escapeHtml(action)} by ${escapeHtml(user)}</p>
+                <p class="text-sm text-gray-400 mt-1">${escapeHtml(action)} by ${escapeHtml(user)}${outcome}</p>
             </div>
         </div>
     `;
 }
 
-/**
- * Format time ago string
- */
 function formatTimeAgo(date) {
     const seconds = Math.floor((new Date() - date) / 1000);
 
@@ -1219,50 +1189,24 @@ function formatTimeAgo(date) {
     return `${Math.floor(seconds / 86400)}d ago`;
 }
 
-/**
- * Execute a service macro
- */
-async function executeMacro(macroId) {
-    const macro = SERVICE_MACROS.find(m => m.id === macroId);
-    if (!macro) return;
-
-    // Show confirmation modal with dependency info
-    const confirmed = await showServiceConfirmModal({
-        title: macro.name,
-        message: `This will restart the following services in order:`,
-        services: macro.services,
-        action: 'restart'
-    });
-
-    if (!confirmed) return;
-
-    // Execute restarts in sequence
-    showToast(`Executing ${macro.name}...`, 'info');
-
-    for (const serviceName of macro.services) {
-        try {
-            showToast(`Restarting ${serviceName}...`, 'info');
-            await apiRequest(`/api/service-control/${serviceName}/restart`, { method: 'POST' });
-            // Wait between restarts
-            await new Promise(resolve => setTimeout(resolve, 2000));
-        } catch (error) {
-            showToast(`Failed to restart ${serviceName}: ${error.message}`, 'error');
-            return;
-        }
-    }
-
-    showToast(`${macro.name} completed successfully`, 'success');
-    await loadServiceControl();
-}
+// ============================================================================
+// Confirmation modal (extended with typed confirmation, D9/D20)
+// ============================================================================
 
 /**
- * Show service action confirmation modal with dependency warnings
+ * Show a service action confirmation modal with dependency warnings, and
+ * (when requireTyped is set) a typed-confirmation input the operator must
+ * fill in with the EXACT resolved target name before Proceed is enabled.
+ *
+ * Resolves:
+ *   - `false` on cancel / Escape / backdrop click
+ *   - `true` when requireTyped is falsy and the operator clicks Proceed
+ *   - the typed string when requireTyped is set and it matches exactly
  */
-function showServiceConfirmModal({ title, message, services, action, serviceName }) {
+function showServiceConfirmModal({ title, message, services, action, serviceName, requireTyped = null }) {
     return new Promise((resolve) => {
-        // Check for dependency warnings
         let warnings = [];
-        const targetServices = serviceName ? [serviceName] : services;
+        const targetServices = serviceName ? [serviceName] : (services || []);
 
         for (const svc of targetServices) {
             const dep = SERVICE_DEPENDENCIES[svc.toLowerCase()];
@@ -1275,7 +1219,6 @@ function showServiceConfirmModal({ title, message, services, action, serviceName
             }
         }
 
-        // Create modal
         const modal = document.createElement('div');
         modal.className = 'fixed inset-0 bg-black/60 flex items-center justify-center z-50';
         modal.id = 'service-confirm-modal';
@@ -1313,6 +1256,8 @@ function showServiceConfirmModal({ title, message, services, action, serviceName
                             `).join('')}
                         </div>
                     ` : ''}
+
+                    <div id="service-confirm-typed-container"></div>
                 </div>
 
                 <div class="px-6 py-4 bg-gray-800/50 border-t border-dark-border flex justify-end gap-3 rounded-b-lg">
@@ -1327,64 +1272,88 @@ function showServiceConfirmModal({ title, message, services, action, serviceName
         `;
 
         document.body.appendChild(modal);
+
+        const proceedBtn = modal.querySelector('#confirm-proceed');
+        let typedInput = null;
+
+        if (requireTyped) {
+            const container = modal.querySelector('#service-confirm-typed-container');
+
+            const label = document.createElement('label');
+            label.className = 'block text-sm font-medium text-gray-300 mb-1';
+            label.setAttribute('for', 'service-confirm-typed-input');
+            // requireTyped is the server-resolved target name -- textContent
+            // renders it as plain text, never as HTML (D9/plan step f).
+            label.textContent = `Type "${requireTyped}" to confirm:`;
+
+            typedInput = document.createElement('input');
+            typedInput.type = 'text';
+            typedInput.id = 'service-confirm-typed-input';
+            typedInput.autocomplete = 'off';
+            typedInput.spellcheck = false;
+            typedInput.className = 'w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-white focus:outline-none focus:border-yellow-500';
+
+            container.appendChild(label);
+            container.appendChild(typedInput);
+
+            proceedBtn.disabled = true;
+            proceedBtn.classList.add('opacity-50', 'cursor-not-allowed');
+
+            typedInput.addEventListener('input', () => {
+                const matches = typedInput.value === requireTyped;
+                proceedBtn.disabled = !matches;
+                proceedBtn.classList.toggle('opacity-50', !matches);
+                proceedBtn.classList.toggle('cursor-not-allowed', !matches);
+            });
+        }
+
         if (typeof lucide !== 'undefined') lucide.createIcons();
 
-        // Event handlers
+        const escHandler = (e) => {
+            if (e.key === 'Escape') {
+                modal.remove();
+                document.removeEventListener('keydown', escHandler);
+                resolve(false);
+            }
+        };
+        document.addEventListener('keydown', escHandler);
+
         modal.querySelector('#confirm-cancel').onclick = () => {
             modal.remove();
+            document.removeEventListener('keydown', escHandler);
             resolve(false);
         };
 
-        modal.querySelector('#confirm-proceed').onclick = () => {
+        proceedBtn.onclick = () => {
+            if (requireTyped && (!typedInput || typedInput.value !== requireTyped)) return;
+            const result = requireTyped ? typedInput.value : true;
             modal.remove();
-            resolve(true);
+            document.removeEventListener('keydown', escHandler);
+            resolve(result);
         };
 
         modal.onclick = (e) => {
             if (e.target === modal) {
                 modal.remove();
-                resolve(false);
-            }
-        };
-
-        // Escape key closes
-        const escHandler = (e) => {
-            if (e.key === 'Escape') {
-                modal.remove();
-                resolve(false);
                 document.removeEventListener('keydown', escHandler);
+                resolve(false);
             }
         };
-        document.addEventListener('keydown', escHandler);
+
+        if (typedInput) {
+            typedInput.focus();
+        }
     });
 }
 
-/**
- * Enhanced stop service with dependency warning
- */
-async function stopServiceWithWarning(serviceName) {
-    const confirmed = await showServiceConfirmModal({
-        title: `Stop ${serviceName}`,
-        message: `Are you sure you want to stop ${serviceName}?`,
-        serviceName: serviceName,
-        action: 'stop'
-    });
-
-    if (!confirmed) return;
-    await serviceAction(serviceName, 'stop');
-}
-
-/**
- * Enhanced restart service with dependency warning
- */
-async function restartServiceWithWarning(serviceName) {
-    const confirmed = await showServiceConfirmModal({
-        title: `Restart ${serviceName}`,
-        message: `Are you sure you want to restart ${serviceName}?`,
-        serviceName: serviceName,
-        action: 'restart'
-    });
-
-    if (!confirmed) return;
-    await serviceAction(serviceName, 'restart');
+// Node-testability (mirrors utils.js's window.formatBytes = formatBytes
+// pattern): in a real browser these top-level function declarations are
+// already window properties (classic-script semantics); under Node's
+// CommonJS require() they are not, so the pure functions T12–T14 exercise
+// are attached explicitly.
+if (typeof window !== 'undefined') {
+    window.groupServiceControlRows = groupServiceControlRows;
+    window.renderStatusCell = renderStatusCell;
+    window.renderServiceActions = renderServiceActions;
+    window.ollamaModelsMessage = ollamaModelsMessage;
 }

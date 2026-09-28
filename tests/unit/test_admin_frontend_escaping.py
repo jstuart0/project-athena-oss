@@ -556,3 +556,240 @@ def test_integrations_js_reads_services_array_from_envelope():
     assert "const service = ragStatus?.find(" not in source, (
         "regression: ragStatus?.find() treats the envelope object as an array"
     )
+
+
+# ---------------------------------------------------------------------------
+# ATHENA-118 Phase 4 -- T12/T13/T14 (test contract). Pure functions only
+# (groupServiceControlRows, renderServiceActions, renderStatusCell,
+# ollamaModelsMessage) -- no DOM, no fetch mock, per the contract's own
+# "Mocking strategy" note. The escaping round-trip (T13 #5) uses the real
+# escape-html.js, not a stand-in, per the contract and CLAUDE.md.
+# ---------------------------------------------------------------------------
+
+SERVICE_CONTROL_JS = FRONTEND_DIR / "service-control.js"
+
+
+def _extract_block(file_path: Path, marker: str) -> str:
+    """Generalizes _extract_function_source to any top-level brace-delimited
+    declaration (`function NAME(`, `const NAME = {`, ...) reachable by a
+    unique marker string, by brace-matching from the first `{` after the
+    marker to its balanced close (plus a trailing `;` if present)."""
+    source = file_path.read_text()
+    start = source.index(marker)
+    brace_start = source.index("{", start)
+    depth = 0
+    for i in range(brace_start, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                if end < len(source) and source[end] == ";":
+                    end += 1
+                return source[start:end]
+    raise AssertionError(f"unbalanced braces extracting {marker!r} from {file_path}")
+
+
+def _run_node_with_sources(sources: list[str], js_expr: str):
+    """Like _run_node_with_source, but concatenates several extracted
+    blocks (in dependency order) before evaluating js_expr. `global.window
+    = global` is set first so escape-html.js's IIFE (which assigns onto
+    its `global` parameter) attaches escapeHtml/escapeJsAttr the same way
+    it does in a real page load."""
+    script = f"""
+    'use strict';
+    global.window = global;
+    {chr(10).join(sources)}
+    const result = (function() {{ return {js_expr}; }})();
+    process.stdout.write(JSON.stringify(result === undefined ? "__undefined__" : result));
+    """
+    proc = subprocess.run(
+        [NODE_BIN, "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert proc.returncode == 0, f"node failed: {proc.stderr}\n---script---\n{script}"
+    return json.loads(proc.stdout)
+
+
+def _group_rows(rows):
+    fn_source = _extract_block(SERVICE_CONTROL_JS, "function groupServiceControlRows(")
+    return _run_node_with_source(fn_source, f"groupServiceControlRows({json.dumps(rows)})")
+
+
+def _render_status_cell(row):
+    sources = [
+        ESCAPE_HTML_JS.read_text(),
+        _extract_block(SERVICE_CONTROL_JS, "const RUN_STATE_BADGES"),
+        _extract_block(SERVICE_CONTROL_JS, "function renderStatusCell("),
+    ]
+    return _run_node_with_sources(sources, f"renderStatusCell({json.dumps(row)})")
+
+
+def _render_service_actions(row):
+    sources = [
+        ESCAPE_HTML_JS.read_text(),
+        _extract_block(SERVICE_CONTROL_JS, "const ACTION_LABELS"),
+        _extract_block(SERVICE_CONTROL_JS, "const ACTION_CLASSES"),
+        _extract_block(SERVICE_CONTROL_JS, "function _managerLabel("),
+        _extract_block(SERVICE_CONTROL_JS, "function _managerBadge("),
+        _extract_block(SERVICE_CONTROL_JS, "function renderServiceActions("),
+    ]
+    return _run_node_with_sources(sources, f"renderServiceActions({json.dumps(row)})")
+
+
+def _ollama_models_message(health, models_error):
+    fn_source = _extract_block(SERVICE_CONTROL_JS, "function ollamaModelsMessage(")
+    return _run_node_with_source(
+        fn_source,
+        f"ollamaModelsMessage({json.dumps(health)}, {json.dumps(models_error)})",
+    )
+
+
+# --- T12: groupServiceControlRows -------------------------------------------
+
+def test_t12_group_service_control_rows_trusts_server_group_not_name():
+    """A floor of 6 rows across the three groups, and a row whose `group`
+    is 'rag' but whose `name` is the deliberately misleading 'orchestrator'
+    still lands in the rag bucket -- catches the client re-deriving group
+    from the row name instead of trusting row.group (D17 regression)."""
+    rows = [
+        {"name": "athena-gateway", "group": "core"},
+        {"name": "athena-orchestrator", "group": "core"},
+        {"name": "redis", "group": "infrastructure"},
+        {"name": "qdrant", "group": "infrastructure"},
+        {"name": "athena-rag-weather", "group": "rag"},
+        # Deliberately misleading: name says "orchestrator" (a core service
+        # name), but the server says this row is RAG.
+        {"name": "orchestrator", "group": "rag"},
+    ]
+    assert len(rows) >= 6
+    grouped = _group_rows(rows)
+    rag_names = [r["name"] for r in grouped["rag"]]
+    core_names = [r["name"] for r in grouped["core"]]
+    assert "orchestrator" in rag_names, (
+        "row.group='rag' must win over the misleading name -- client-side "
+        "re-derivation from the name would silently reopen the RAG-row-"
+        "rendered-in-Core bug D17 exists to close"
+    )
+    assert "orchestrator" not in core_names
+
+
+# --- T13: renderServiceActions / renderStatusCell ---------------------------
+
+def test_t13_manager_none_shows_managed_externally_and_zero_buttons():
+    row = {"name": "some-external-thing", "manager": "none", "manager_note": "managed_externally", "actions": []}
+    html = _render_service_actions(row)
+    assert "Managed externally" in html
+    assert "<button" not in html
+
+
+def test_t13_kubernetes_stop_restart_exactly_two_buttons_no_start():
+    row = {"name": "athena-gateway", "manager": "kubernetes", "manager_note": None, "actions": ["stop", "restart"]}
+    html = _render_service_actions(row)
+    assert html.count("<button") == 2
+    assert not re.search(r"requestServiceAction\([^)]*'start'\)", html), (
+        "no button may dispatch the 'start' action when actions=['stop','restart'] "
+        "(a naive substring check on 'start' would false-positive on 'restart')"
+    )
+
+
+def test_t13_disabled_and_native_state_both_present():
+    row = {"run_state": "disabled", "native_state": "0/0 pods", "last_error": None}
+    html = _render_status_cell(row)
+    assert "Disabled" in html
+    assert "0/0 pods" in html
+
+
+def test_t13_escaping_round_trip_action_name_and_note_escaping():
+    hostile_name = "svc'&\"<x>"
+    row = {
+        "name": hostile_name,
+        "manager": "control_agent",
+        "manager_note": "note<script>",
+        "actions": ["stop"],
+    }
+    html = _render_service_actions(row)
+
+    # Assertion 1: the action name round-trips through the onclick handler.
+    m = re.search(r"requestServiceAction\('(.*?)', 'stop'\)", html)
+    assert m, f"expected a requestServiceAction(...) onclick handler, got: {html}"
+    js_literal_body = _html_attr_decode(m.group(1))
+    recovered = _js_single_quoted_string_parse(js_literal_body)
+    assert recovered == hostile_name
+
+    # Assertion 2: the manager badge's title (built from manager_note,
+    # escaped) contains no raw '<' -- a distinct bug class from assertion 1
+    # (a fix that escapes one and not the other is a real regression).
+    title_match = re.search(r'title="([^"]*)"', html)
+    assert title_match, f"expected a title= attribute on the manager badge, got: {html}"
+    assert "<" not in title_match.group(1)
+
+
+# --- T14: ollamaModelsMessage -------------------------------------------
+
+def test_t14_offline_message_contains_unreachable_not_dead_literal():
+    health = {"manager": "control_agent", "healthy": False, "status": "offline"}
+    message = _ollama_models_message(health, None)
+    assert "unreachable" in message
+    assert "offline - start it" not in message
+
+
+def test_t14_models_endpoint_error_when_reachable_but_models_call_failed():
+    health = {"manager": "control_agent", "healthy": True, "status": "healthy"}
+    message = _ollama_models_message(health, "connection reset")
+    assert "models endpoint" in message
+
+
+def test_t14_returns_null_not_empty_string_when_reachable_and_no_error():
+    health = {"manager": "control_agent", "healthy": True, "status": "healthy"}
+    message = _ollama_models_message(health, None)
+    assert message is None
+
+
+def test_t14_loading_message_when_health_is_null():
+    message = _ollama_models_message(None, None)
+    assert "Loading" in message
+
+
+def test_t14_render_ollama_models_table_renders_loading_when_health_null():
+    """renderOllamaModelsTable() needs `document`, so it isn't cleanly
+    extractable as pure JS for this Node harness (contract's own escape
+    hatch) -- static source assertion instead: it must delegate to
+    ollamaModelsMessage(ollamaHealth, ollamaModelsError) rather than
+    re-deriving a "Loading" check inline, so the pure-function assertions
+    above actually describe its rendered behavior."""
+    source = SERVICE_CONTROL_JS.read_text()
+    assert "ollamaModelsMessage(ollamaHealth, ollamaModelsError)" in source
+
+
+# --- Static gates (grep-equivalent, not Node) -------------------------------
+
+def test_static_no_dead_pre_phase4_call_sites_remain():
+    source = SERVICE_CONTROL_JS.read_text()
+    forbidden_patterns = [
+        r"apiRequest\('/api/services'\)",
+        r"/api/service-registry/services'\)",
+        r"action_type=",
+        r"SERVICE_MACROS",
+        r"function executeMacro",
+    ]
+    for pattern in forbidden_patterns:
+        assert not re.search(pattern, source), f"expected {pattern!r} to be gone from service-control.js"
+
+
+def test_static_ollama_host_is_escaped():
+    source = SERVICE_CONTROL_JS.read_text()
+    assert "Host: ${ollamaHealth.host" not in source
+
+
+def test_static_ollama_loaders_only_awaited_inside_refresh_panel():
+    source = SERVICE_CONTROL_JS.read_text()
+    assert len(re.findall(r"await loadOllamaHealth\(\)|await loadOllamaModels\(\)", source)) == 0
+
+
+def test_static_restart_timeline_element_present_exactly_once():
+    source = (FRONTEND_DIR / "index.html").read_text()
+    assert source.count('id="restart-timeline"') == 1

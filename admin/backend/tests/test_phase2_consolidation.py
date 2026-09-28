@@ -786,9 +786,13 @@ class TestPhase2ReconcileRegressions:
         assert 'service.health_status' in source, (
             "service-control.js must switch on service.health_status (Phase 2 field name)"
         )
-        # The fallback filter must also reference health_status
-        assert "s.health_status === 'healthy'" in source, (
-            "updateRagServiceCounts fallback must filter on s.health_status"
+        # ATHENA-118 Phase 4: updateRagServiceCounts (the client-side RAG
+        # count fallback this assertion originally pinned) was removed --
+        # counts are now server-computed in the unified envelope
+        # (serviceControl.counts). The health_status invariant now lives in
+        # the status-flip detector inside renderRagServicesTable.
+        assert "s.health_status ?? (s.run_state === 'running' ? 'healthy' : 'unhealthy')" in source, (
+            "renderRagServicesTable's status-flip detector must read s.health_status"
         )
         # No bare switch on service.status inside renderRagServiceRow
         # (we allow service.status in renderServiceRow which is a different function)
