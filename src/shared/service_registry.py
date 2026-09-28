@@ -150,10 +150,19 @@ async def unregister_service(service_name: str) -> bool:
         True if unregistration succeeded
     """
     try:
+        service_key = _get_service_api_key()
+        if not service_key:
+            logger.warning(
+                f"SERVICE_API_KEY is unset; unregistration of {service_name} will be "
+                "rejected with 401 by the admin API's X-Service-Key write gate, leaving "
+                "the row enabled=True after this shutdown."
+            )
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             # Use toggle to disable rather than delete
             response = await client.post(
-                f"{ADMIN_API_URL}/api/service-registry/services/{service_name}/toggle"
+                f"{ADMIN_API_URL}/api/service-registry/services/{service_name}/toggle",
+                headers={"X-Service-Key": service_key},
             )
 
             if response.status_code == 200:

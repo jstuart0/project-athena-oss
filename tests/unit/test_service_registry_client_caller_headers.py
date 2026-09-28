@@ -89,3 +89,39 @@ async def test_register_service_warns_and_sends_empty_header_when_key_unset(monk
     # in logs/monitoring for whoever is watching that RAG's startup), but
     # it must not silently claim success or fabricate a key.
     assert transport.requests[0].headers.get("X-Service-Key", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# xander diff-review Medium (2026-09-28, batch review): unregister_service's
+# POST .../toggle was missed by the ATHENA-108 fix above -- also gated by
+# verify_service_or_oidc, also 401s with no X-Service-Key, leaving the row
+# enabled=True after shutdown.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_unregister_service_sends_service_key_header(monkeypatch):
+    monkeypatch.setenv("SERVICE_API_KEY", "test-service-key-athena-108")
+    _clear_cache_for_tests()
+    transport = _RecordingTransport(status_code=200)
+    _patch_async_client(monkeypatch, transport)
+
+    ok = await service_registry_module.unregister_service("weather")
+
+    assert ok is True
+    assert len(transport.requests) == 1
+    assert transport.requests[0].url.path == "/api/service-registry/services/weather/toggle"
+    assert transport.requests[0].headers.get("X-Service-Key") == "test-service-key-athena-108"
+
+
+@pytest.mark.asyncio
+async def test_unregister_service_warns_and_sends_empty_header_when_key_unset(monkeypatch):
+    monkeypatch.delenv("SERVICE_API_KEY", raising=False)
+    _clear_cache_for_tests()
+    transport = _RecordingTransport(status_code=401, response_json={"detail": "unauthorized"})
+    _patch_async_client(monkeypatch, transport)
+
+    ok = await service_registry_module.unregister_service("weather")
+
+    assert ok is False
+    assert len(transport.requests) == 1
+    assert transport.requests[0].headers.get("X-Service-Key", "") == ""

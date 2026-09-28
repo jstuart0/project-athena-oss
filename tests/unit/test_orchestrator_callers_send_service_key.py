@@ -133,10 +133,16 @@ _ROUTE_PATTERN = re.compile(
     # ATHENA-108: shared.service_registry.register_service() POSTs here to
     # self-register every RAG/service process. Scoped to the bare
     # "/services" literal (trailing quote/`?`) so it matches only this call
-    # site, not the sibling GET .../url or POST .../toggle routes on the
-    # same router -- those are pre-existing, out-of-scope gaps this ticket
-    # does not touch.
+    # site, not the sibling GET .../url (intentionally unauthenticated,
+    # see service_registry.py's routes docstring) or POST .../toggle route
+    # on the same router.
     r"""|/api/service-registry/services["'?]"""
+    # xander diff-review Medium (2026-09-28): shared.service_registry.
+    # unregister_service() POSTs .../toggle to disable a service at
+    # shutdown -- also gated by verify_service_or_oidc, also needs the
+    # header. GET .../url (service_registry.py line ~60) stays deliberately
+    # unmatched -- it is documented as intentionally unauthenticated.
+    r"""|/api/service-registry/services/\{service_name\}/toggle"""
 )
 
 _HTTP_METHODS = {"get", "post", "put", "delete", "stream", "request"}

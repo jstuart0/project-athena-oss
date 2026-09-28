@@ -152,9 +152,11 @@ async def verify_service_or_oidc(
       - Control Agent sends ``X-Service-Key``.
       - Admin UI sends ``Authorization: Bearer <jwt>`` (per app.js:2497).
       - ``src/shared/service_registry.py::register_service`` and
-        ``unregister_service`` POST to write endpoints with no ``X-Service-Key``
-        and no Bearer token; they fall through to the OIDC path and 401 in
-        production (unaffected by ATHENA-21).
+        ``unregister_service`` both send ``X-Service-Key`` (from
+        ``get_config().service_api_key`` / env fallback; ATHENA-108 /
+        xander diff-review Medium 2026-09-28). A caller with the key unset
+        still POSTs with an empty header and 401s in production, same as
+        any other misconfigured service caller.
 
     (xander CRIT-1 / D9 — ATHENA-1 Phase 2 wires this onto the POST/toggle/
     refresh/delete endpoints in service_registry.py.)
