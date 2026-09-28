@@ -65,13 +65,19 @@ def _validate_intent_names(value: Optional[List[str]]) -> Optional[List[str]]:
 # precedents). Checked explicitly in both route handlers instead, so the
 # response shape is actually {"error": "owner_pin_format"} as the rest of
 # the API already does.
-_OWNER_PIN_FORMAT_RE = re.compile(r"^[0-9]{6}$")
+# mozart review (nit before merging ee7e02a/4168a60): `^...$` with .match()
+# lets Python's $ match immediately before a trailing "\n" -- "123456\n"
+# would pass here and then be permanently unverifiable, since
+# verify_owner_pin (app/routes/internal.py) uses re.fullmatch(), which "\n"
+# does not satisfy. fullmatch() with no anchors closes that gap the same
+# way re.fullmatch() already does over there.
+_OWNER_PIN_FORMAT_RE = re.compile(r"[0-9]{6}")
 
 
 def _validate_owner_pin_format(pin: Optional[str]) -> None:
     if pin is None:
         return
-    if not _OWNER_PIN_FORMAT_RE.match(pin):
+    if not _OWNER_PIN_FORMAT_RE.fullmatch(pin):
         raise HTTPException(status_code=422, detail={"error": "owner_pin_format"})
 
 

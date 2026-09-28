@@ -88,8 +88,11 @@ def test_patch_config_owner_pin_only_body_is_valid_request_shape(client, db, tes
 
 MALFORMED_PINS = pytest.mark.parametrize(
     "bad_pin",
-    ["abc", "12345", "1234567", "１２３４５６", "²³⁴⁵⁶⁷", "", "123 456"],
-    ids=["nondigit", "too-short", "too-long", "fullwidth-digits", "superscript-digits", "empty", "embedded-space"],
+    ["abc", "12345", "1234567", "１２３４５６", "²³⁴⁵⁶⁷", "", "123 456", "123456\n"],
+    ids=[
+        "nondigit", "too-short", "too-long", "fullwidth-digits", "superscript-digits",
+        "empty", "embedded-space", "trailing-newline",
+    ],
 )
 
 
