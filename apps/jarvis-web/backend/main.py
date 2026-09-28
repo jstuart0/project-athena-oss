@@ -15,10 +15,11 @@ import os
 import uuid
 import json
 import time
+import functools
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -28,14 +29,25 @@ import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from sqlalchemy import text
 from admin_url import get_admin_url
+from caller_auth import require_owner_caller, resolve_caller, resolve_caller_ws, is_owner_permitted, _posture_reminder_loop, _POSTURE_REMINDER_INTERVAL_SECONDS
 
-# Configure logging
-structlog.configure(
-    processors=[
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.JSONRenderer()
-    ]
-)
+# Configure logging. Guarded: structlog.configure() is process-global, and
+# this module gets exec'd more than once in the same pytest process under
+# different private module names (jarvis-web shares the filename main.py
+# with several other services -- see test_jarvis_web_appliances_ha_entities.py:20-25).
+# An unconditional call here would stomp on the config another already-loaded
+# service (orchestrator, a RAG service, etc.) established first, breaking
+# structlog.testing.capture_logs() for every test that runs afterward in the
+# same process. In production this container only ever loads this one
+# service, so is_configured() is always False there and behavior is
+# unchanged.
+if not structlog.is_configured():
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.JSONRenderer()
+        ]
+    )
 logger = structlog.get_logger()
 
 # Configuration from environment
@@ -89,6 +101,13 @@ async def get_current_mode() -> str:
     else:
         logger.debug("mode_auto_owner", reason="no_guest_booked")
         return "owner"
+
+
+# ATHENA-69 (D18/D19): binds get_current_mode as require_owner_caller's
+# household_mode_resolver, so its returned Caller.mode reflects real
+# household state for a signed-in owner/operator instead of the
+# no-resolver "guest" fallback (caller_auth.py never imports main.py).
+_require_owner_caller = functools.partial(require_owner_caller, household_mode_resolver=get_current_mode)
 
 
 class ModeState(BaseModel):
@@ -152,6 +171,12 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     global _engine, _db_available
+
+    # ATHENA-69 (D28): runs independently of DB availability -- warns at
+    # startup and hourly while JARVIS_PUBLIC_MODE=="household" bypasses
+    # every owner_only route's gate.
+    asyncio.create_task(_posture_reminder_loop(_POSTURE_REMINDER_INTERVAL_SECONDS))
+
     if not _SA_URL:
         logger.info("persistent_sessions_db_skipped", reason="DATABASE_URL_not_set")
         return
@@ -472,7 +497,7 @@ async def get_current_guest() -> Optional[Dict[str, Any]]:
             # Use internal endpoint that doesn't require authentication
             response = await client.get(
                 f"{internal_url}/api/guest-mode/internal/current-guest",
-                headers={"Accept": "application/json"}
+                headers={"Accept": "application/json", "X-Service-Key": SERVICE_API_KEY}
             )
             if response.status_code == 200:
                 data = response.json()
@@ -571,7 +596,7 @@ async def get_welcome():
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(message: ChatMessage):
+async def chat(message: ChatMessage, request: Request):
     """Send a message to Athena and get a response"""
     start_time = datetime.now()
 
@@ -600,8 +625,12 @@ async def chat(message: ChatMessage):
         )
 
     try:
-        # Auto-detect from admin: "owner" normally, "guest" when a guest booking is active
-        current_mode = await get_current_mode()
+        # ATHENA-69 (D18/D24): mode and caller_trust are server-derived from
+        # the request's own Bearer token, never from anything the browser
+        # sends. Unauthenticated callers are guest (or JARVIS_PUBLIC_MODE's
+        # household legacy bypass); message.source stays analytics-only.
+        caller = await resolve_caller(request, get_current_mode)
+        current_mode = caller.mode
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             request_body = {
@@ -611,6 +640,7 @@ async def chat(message: ChatMessage):
                 "session_id": session_id,
                 "interface_type": message.interface_type or "chat",  # chat/text prevents TTS normalization
                 "source": message.source or "jarvis",  # forward caller's source or default to "jarvis"
+                "caller_trust": caller.trust,
             }
 
             # Build context with guest info and location override
@@ -807,7 +837,10 @@ async def chat_stream(message: ChatMessage, request: Request):
         context["guest_id"] = guest.get("id")
         context["guest_name"] = guest.get("guest_name")
 
-    current_mode = await get_current_mode()
+    # ATHENA-69 (D18/D24): mode and caller_trust are server-derived from the
+    # request's own Bearer token, never from anything the browser sends.
+    caller = await resolve_caller(request, get_current_mode)
+    current_mode = caller.mode
 
     # --- Persistent session setup ---
     config = await get_persistent_sessions_config()
@@ -852,6 +885,7 @@ async def chat_stream(message: ChatMessage, request: Request):
                 "interface_type": message.interface_type or "chat",
                 "source": message.source or "jarvis",
                 "chat_history": chat_history_msgs if inject_history else None,
+                "caller_trust": caller.trust,
             }
 
             if context:
@@ -1096,12 +1130,14 @@ async def get_session(session_id: str):
 # Mode Management API
 # =============================================================================
 
-@app.get("/api/mode", response_model=ModeState)
-async def get_mode():
-    """
-    Get current mode status.
+async def _get_mode_state(request: Optional[Request]) -> ModeState:
+    """Shared body for GET /api/mode and the internal set_mode/
+    clear_mode_override refresh calls (both already owner_only-gated, so
+    they pass request=None and skip the suppression check below).
 
-    Returns the active mode, whether it's overridden, and guest status.
+    ATHENA-69 (D31): a web_public caller (no signed-in owner/operator, and
+    not under JARVIS_PUBLIC_MODE=household) gets guest_name suppressed --
+    has_guest and the rest of the mode state are unaffected.
     """
     global mode_override
 
@@ -1114,16 +1150,32 @@ async def get_mode():
     # Determine active mode
     active_mode = mode_override if mode_override is not None else auto_mode
 
+    guest_name = guest.get("guest_name") if guest else None
+    if request is not None:
+        caller = await resolve_caller(request, get_current_mode)
+        if not is_owner_permitted(caller):
+            guest_name = None
+
     return ModeState(
         mode=active_mode,
         is_override=mode_override is not None,
         auto_mode=auto_mode,
         has_guest=has_guest,
-        guest_name=guest.get("guest_name") if guest else None
+        guest_name=guest_name
     )
 
 
-@app.post("/api/mode", response_model=ModeState)
+@app.get("/api/mode", response_model=ModeState)
+async def get_mode(request: Request):
+    """
+    Get current mode status.
+
+    Returns the active mode, whether it's overridden, and guest status.
+    """
+    return await _get_mode_state(request)
+
+
+@app.post("/api/mode", response_model=ModeState, dependencies=[Depends(_require_owner_caller)])
 async def set_mode(request: SetModeRequest):
     """
     Set or clear the mode override.
@@ -1185,11 +1237,12 @@ async def set_mode(request: SetModeRequest):
         is_override=mode_override is not None
     )
 
-    # Return updated state
-    return await get_mode()
+    # Return updated state (request=None: this caller already passed
+    # require_owner_caller, so guest_name is never suppressed here)
+    return await _get_mode_state(None)
 
 
-@app.delete("/api/mode")
+@app.delete("/api/mode", dependencies=[Depends(_require_owner_caller)])
 async def clear_mode_override():
     """Clear the mode override and return to auto-detection."""
     global mode_override
@@ -1199,7 +1252,7 @@ async def clear_mode_override():
 
     logger.info("mode_override_cleared", old_mode=old_mode)
 
-    return await get_mode()
+    return await _get_mode_state(None)
 
 
 # =============================================================================
@@ -1262,7 +1315,7 @@ async def get_climate():
         )
 
 
-@app.post("/api/climate/temperature")
+@app.post("/api/climate/temperature", dependencies=[Depends(_require_owner_caller)])
 async def set_temperature(request: SetTemperatureRequest):
     """Set thermostat target temperature (with guest-safe limits)"""
     if not HA_TOKEN:
@@ -1313,7 +1366,7 @@ async def set_temperature(request: SetTemperatureRequest):
         )
 
 
-@app.post("/api/climate/mode/{mode}")
+@app.post("/api/climate/mode/{mode}", dependencies=[Depends(_require_owner_caller)])
 async def set_hvac_mode(mode: str):
     """Set HVAC mode (heat, cool, off, heat_cool)"""
     if not HA_TOKEN:
@@ -1689,31 +1742,31 @@ async def get_media_players():
     }
 
 
-@app.post("/api/media/{entity_id}/play")
+@app.post("/api/media/{entity_id}/play", dependencies=[Depends(_require_owner_caller)])
 async def media_play(entity_id: str):
     """Start or resume playback"""
     return await _media_command(entity_id, "media_play")
 
 
-@app.post("/api/media/{entity_id}/pause")
+@app.post("/api/media/{entity_id}/pause", dependencies=[Depends(_require_owner_caller)])
 async def media_pause(entity_id: str):
     """Pause playback"""
     return await _media_command(entity_id, "media_pause")
 
 
-@app.post("/api/media/{entity_id}/stop")
+@app.post("/api/media/{entity_id}/stop", dependencies=[Depends(_require_owner_caller)])
 async def media_stop(entity_id: str):
     """Stop playback"""
     return await _media_command(entity_id, "media_stop")
 
 
-@app.post("/api/media/{entity_id}/next")
+@app.post("/api/media/{entity_id}/next", dependencies=[Depends(_require_owner_caller)])
 async def media_next(entity_id: str):
     """Skip to next track"""
     return await _media_command(entity_id, "media_next_track")
 
 
-@app.post("/api/media/{entity_id}/previous")
+@app.post("/api/media/{entity_id}/previous", dependencies=[Depends(_require_owner_caller)])
 async def media_previous(entity_id: str):
     """Go to previous track"""
     return await _media_command(entity_id, "media_previous_track")
@@ -1723,20 +1776,20 @@ class VolumeRequest(BaseModel):
     volume: float  # 0.0 to 1.0
 
 
-@app.post("/api/media/{entity_id}/volume")
+@app.post("/api/media/{entity_id}/volume", dependencies=[Depends(_require_owner_caller)])
 async def media_volume(entity_id: str, request: VolumeRequest):
     """Set volume level (0.0 to 1.0)"""
     volume = max(0.0, min(1.0, request.volume))
     return await _media_command(entity_id, "volume_set", {"volume_level": volume})
 
 
-@app.post("/api/media/{entity_id}/mute")
+@app.post("/api/media/{entity_id}/mute", dependencies=[Depends(_require_owner_caller)])
 async def media_mute(entity_id: str):
     """Toggle mute"""
     return await _media_command(entity_id, "volume_mute", {"is_volume_muted": True})
 
 
-@app.post("/api/media/{entity_id}/unmute")
+@app.post("/api/media/{entity_id}/unmute", dependencies=[Depends(_require_owner_caller)])
 async def media_unmute(entity_id: str):
     """Unmute"""
     return await _media_command(entity_id, "volume_mute", {"is_volume_muted": False})
@@ -1746,19 +1799,19 @@ class SourceRequest(BaseModel):
     source: str
 
 
-@app.post("/api/media/{entity_id}/source")
+@app.post("/api/media/{entity_id}/source", dependencies=[Depends(_require_owner_caller)])
 async def media_select_source(entity_id: str, request: SourceRequest):
     """Select input source or app"""
     return await _media_command(entity_id, "select_source", {"source": request.source})
 
 
-@app.post("/api/media/{entity_id}/turn_on")
+@app.post("/api/media/{entity_id}/turn_on", dependencies=[Depends(_require_owner_caller)])
 async def media_turn_on(entity_id: str):
     """Turn on media player"""
     return await _media_command(entity_id, "turn_on")
 
 
-@app.post("/api/media/{entity_id}/turn_off")
+@app.post("/api/media/{entity_id}/turn_off", dependencies=[Depends(_require_owner_caller)])
 async def media_turn_off(entity_id: str):
     """Turn off media player"""
     return await _media_command(entity_id, "turn_off")
@@ -1952,7 +2005,7 @@ async def get_oven_state():
         raise HTTPException(status_code=503, detail="Unable to connect to Home Assistant")
 
 
-@app.post("/api/appliances/oven/temperature")
+@app.post("/api/appliances/oven/temperature", dependencies=[Depends(_require_owner_caller)])
 async def set_oven_temperature(request: SetOvenTempRequest):
     """Set oven target temperature"""
     if not HA_TOKEN:
@@ -1994,7 +2047,7 @@ async def set_oven_temperature(request: SetOvenTempRequest):
         raise HTTPException(status_code=503, detail="Unable to connect to Home Assistant")
 
 
-@app.post("/api/appliances/oven/mode")
+@app.post("/api/appliances/oven/mode", dependencies=[Depends(_require_owner_caller)])
 async def set_oven_mode(request: SetOvenModeRequest):
     """Set oven cooking mode (Bake, Convection, etc.)"""
     if not HA_TOKEN:
@@ -2029,7 +2082,7 @@ async def set_oven_mode(request: SetOvenModeRequest):
         raise HTTPException(status_code=503, detail="Unable to connect to Home Assistant")
 
 
-@app.post("/api/appliances/oven/off")
+@app.post("/api/appliances/oven/off", dependencies=[Depends(_require_owner_caller)])
 async def turn_oven_off():
     """Turn off the oven"""
     if not HA_TOKEN:
@@ -2124,7 +2177,7 @@ async def get_fridge_state():
         raise HTTPException(status_code=503, detail="Unable to connect to Home Assistant")
 
 
-@app.post("/api/appliances/fridge/temperature")
+@app.post("/api/appliances/fridge/temperature", dependencies=[Depends(_require_owner_caller)])
 async def set_fridge_temperature(request: SetApplianceTempRequest):
     """Set fridge target temperature"""
     if not HA_TOKEN:
@@ -2166,7 +2219,7 @@ async def set_fridge_temperature(request: SetApplianceTempRequest):
         raise HTTPException(status_code=503, detail="Unable to connect to Home Assistant")
 
 
-@app.post("/api/appliances/freezer/temperature")
+@app.post("/api/appliances/freezer/temperature", dependencies=[Depends(_require_owner_caller)])
 async def set_freezer_temperature(request: SetApplianceTempRequest):
     """Set freezer target temperature"""
     if not HA_TOKEN:
@@ -2320,7 +2373,7 @@ async def get_streaming_apps():
     return STREAMING_APPS
 
 
-@app.post("/api/appletv/{entity_id}/launch/{app_name}")
+@app.post("/api/appletv/{entity_id}/launch/{app_name}", dependencies=[Depends(_require_owner_caller)])
 async def launch_app(entity_id: str, app_name: str):
     """Launch an app on the Apple TV"""
     if not HA_TOKEN:
@@ -2363,7 +2416,7 @@ async def launch_app(entity_id: str, app_name: str):
         raise HTTPException(status_code=503, detail="Unable to connect to Home Assistant")
 
 
-@app.post("/api/appletv/{entity_id}/remote")
+@app.post("/api/appletv/{entity_id}/remote", dependencies=[Depends(_require_owner_caller)])
 async def send_remote_command(entity_id: str, request: RemoteCommandRequest):
     """Send a remote control command to the Apple TV"""
     if not HA_TOKEN:
@@ -2411,7 +2464,7 @@ async def send_remote_command(entity_id: str, request: RemoteCommandRequest):
         raise HTTPException(status_code=503, detail="Unable to connect to Home Assistant")
 
 
-@app.post("/api/appletv/{entity_id}/power/{action}")
+@app.post("/api/appletv/{entity_id}/power/{action}", dependencies=[Depends(_require_owner_caller)])
 async def power_control(entity_id: str, action: str):
     """Turn Apple TV on or off"""
     if not HA_TOKEN:
@@ -2713,7 +2766,7 @@ async def livekit_config():
         return {"enabled": False, "error": str(e)}
 
 
-@app.post("/livekit/rooms")
+@app.post("/livekit/rooms", dependencies=[Depends(_require_owner_caller)])
 async def livekit_create_room(request: Request):
     """Proxy room creation to Gateway."""
     try:
@@ -2731,7 +2784,7 @@ async def livekit_create_room(request: Request):
         raise HTTPException(status_code=503, detail=f"Gateway unavailable: {e}")
 
 
-@app.post("/livekit/rooms/{room_name}/athena-join")
+@app.post("/livekit/rooms/{room_name}/athena-join", dependencies=[Depends(_require_owner_caller)])
 async def livekit_athena_join(room_name: str):
     """Proxy Athena join request to Gateway."""
     try:
@@ -2745,7 +2798,7 @@ async def livekit_athena_join(room_name: str):
         raise HTTPException(status_code=503, detail=f"Gateway unavailable: {e}")
 
 
-@app.delete("/livekit/rooms/{room_name}")
+@app.delete("/livekit/rooms/{room_name}", dependencies=[Depends(_require_owner_caller)])
 async def livekit_delete_room(room_name: str):
     """Proxy room deletion to Gateway."""
     try:
@@ -2851,7 +2904,7 @@ class MusicPlayRequest(BaseModel):
     radio_mode: bool = True
 
 
-@app.post("/api/music/play")
+@app.post("/api/music/play", dependencies=[Depends(_require_owner_caller)])
 async def music_play(request: MusicPlayRequest):
     """
     Play media to a specific Music Assistant player.
@@ -2946,6 +2999,14 @@ if MUSIC_WS_AVAILABLE:
         Proxies WebSocket connections from browser through Jarvis Web
         to the Gateway, which in turn connects to Music Assistant.
         """
+        # ATHENA-69 (D19): owner_only -- close before accept() when the
+        # caller isn't a signed-in owner/operator (or JARVIS_PUBLIC_MODE
+        # isn't the household legacy bypass).
+        caller = await resolve_caller_ws(websocket, get_current_mode)
+        if not is_owner_permitted(caller):
+            await websocket.close(code=1008)
+            return
+
         await websocket.accept()
         logger.info("MA WebSocket proxy: Client connected via Jarvis Web")
 
@@ -3004,6 +3065,14 @@ if MUSIC_WS_AVAILABLE:
         to the Gateway, which connects to Music Assistant's Sendspin endpoint.
         Handles both text (JSON control) and binary (audio) messages.
         """
+        # ATHENA-69 (D19): owner_only -- close before accept() when the
+        # caller isn't a signed-in owner/operator (or JARVIS_PUBLIC_MODE
+        # isn't the household legacy bypass).
+        caller = await resolve_caller_ws(websocket, get_current_mode)
+        if not is_owner_permitted(caller):
+            await websocket.close(code=1008)
+            return
+
         await websocket.accept()
         logger.info("Sendspin proxy: Client connected via Jarvis Web")
 
@@ -3075,6 +3144,61 @@ if MUSIC_WS_AVAILABLE:
             if gateway_ws:
                 await gateway_ws.close()
             logger.info("Sendspin proxy: Connection closed")
+
+
+# =============================================================================
+# ATHENA-69 (D19): route classification census
+# =============================================================================
+# Every mutating (non-GET) route in this file, classified owner_only
+# (carries Depends(_require_owner_caller), or a WS close(1008) before
+# accept()) or no_side_effect (chat/voice/search -- guest-safe writes).
+# tests/unit/test_ha_permission_wiring.py's TestJarvisWebMutatingRoutesClassified
+# asserts this dict's population equals every mutating route FastAPI actually
+# registered, and that every owner_only HTTP entry carries the dependency --
+# a route added here without the dependency, or a route added to the app
+# without an entry here, fails that test.
+
+_CONDITIONAL_ROUTES = {"WS /ma/ws", "WS /ma/sendspin"}
+
+ROUTE_CLASSIFICATION: Dict[str, str] = {
+    "POST /api/mode": "owner_only",
+    "DELETE /api/mode": "owner_only",
+    "POST /api/climate/temperature": "owner_only",
+    "POST /api/climate/mode/{mode}": "owner_only",
+    "POST /api/media/{entity_id}/play": "owner_only",
+    "POST /api/media/{entity_id}/pause": "owner_only",
+    "POST /api/media/{entity_id}/stop": "owner_only",
+    "POST /api/media/{entity_id}/next": "owner_only",
+    "POST /api/media/{entity_id}/previous": "owner_only",
+    "POST /api/media/{entity_id}/volume": "owner_only",
+    "POST /api/media/{entity_id}/mute": "owner_only",
+    "POST /api/media/{entity_id}/unmute": "owner_only",
+    "POST /api/media/{entity_id}/source": "owner_only",
+    "POST /api/media/{entity_id}/turn_on": "owner_only",
+    "POST /api/media/{entity_id}/turn_off": "owner_only",
+    "POST /api/appliances/oven/temperature": "owner_only",
+    "POST /api/appliances/oven/mode": "owner_only",
+    "POST /api/appliances/oven/off": "owner_only",
+    "POST /api/appliances/fridge/temperature": "owner_only",
+    "POST /api/appliances/freezer/temperature": "owner_only",
+    "POST /api/appletv/{entity_id}/launch/{app_name}": "owner_only",
+    "POST /api/appletv/{entity_id}/remote": "owner_only",
+    "POST /api/appletv/{entity_id}/power/{action}": "owner_only",
+    "POST /livekit/rooms": "owner_only",
+    "POST /livekit/rooms/{room_name}/athena-join": "owner_only",
+    "DELETE /livekit/rooms/{room_name}": "owner_only",
+    "POST /api/music/play": "owner_only",
+    "POST /api/chat": "no_side_effect",
+    "POST /api/chat/stream": "no_side_effect",
+    "DELETE /api/session/current": "no_side_effect",
+    "POST /api/voice/transcribe": "no_side_effect",
+    "POST /api/voice/synthesize": "no_side_effect",
+    "POST /api/music/search": "no_side_effect",
+}
+
+if MUSIC_WS_AVAILABLE:
+    ROUTE_CLASSIFICATION["WS /ma/ws"] = "owner_only"
+    ROUTE_CLASSIFICATION["WS /ma/sendspin"] = "owner_only"
 
 
 # Serve static files in production

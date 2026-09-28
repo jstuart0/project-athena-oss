@@ -131,6 +131,11 @@ class LiveKitClient {
             });
 
             if (!roomResponse.ok) {
+                // ATHENA-69 (D19): unauthenticated callers get 403
+                // sign_in_required from this owner-only route.
+                if (roomResponse.status === 403) {
+                    throw new Error('sign_in_required');
+                }
                 throw new Error(`Room creation failed: ${roomResponse.status}`);
             }
 
@@ -143,9 +148,12 @@ class LiveKitClient {
             await this._connectToRoom();
 
             // Have Athena join the room for server-side processing
-            await fetch(`${this.config.gatewayUrl}/livekit/rooms/${this.roomName}/athena-join`, {
+            const joinResponse = await fetch(`${this.config.gatewayUrl}/livekit/rooms/${this.roomName}/athena-join`, {
                 method: 'POST'
             });
+            if (!joinResponse.ok) {
+                console.warn('[LiveKit] athena-join failed:', joinResponse.status);
+            }
 
             this.isConnected = true;
             this._updateState('connected');
@@ -492,9 +500,12 @@ class LiveKitClient {
         // Close room on server
         if (this.roomName) {
             try {
-                await fetch(`${this.config.gatewayUrl}/livekit/rooms/${this.roomName}`, {
+                const deleteResponse = await fetch(`${this.config.gatewayUrl}/livekit/rooms/${this.roomName}`, {
                     method: 'DELETE'
                 });
+                if (!deleteResponse.ok) {
+                    console.warn('[LiveKit] Failed to close room:', deleteResponse.status);
+                }
             } catch (e) {
                 console.warn('[LiveKit] Failed to close room:', e);
             }

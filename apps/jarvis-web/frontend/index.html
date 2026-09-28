@@ -2043,6 +2043,11 @@
                     };
 
                     maClient.onError = (error) => {
+                        if (error && error.message === 'sign_in_required') {
+                            console.warn('[Music] Browser music playback requires sign-in');
+                            showError('Sign-in required for browser music playback');
+                            return;
+                        }
                         console.error('[Music] MA Client error:', error);
                     };
 
@@ -2553,6 +2558,11 @@
                 };
 
                 livekitClient.onError = (error) => {
+                    if (error && error.message === 'sign_in_required') {
+                        console.warn('[LiveKit] Always-on voice requires sign-in');
+                        showError('Sign-in required for always-on voice mode');
+                        return;
+                    }
                     console.error('[LiveKit] Error:', error);
                     showError('Voice streaming error: ' + error.message);
                 };
@@ -2783,9 +2793,14 @@
                     const suffix = currentModeState.is_override ? ' (override)' : ' (auto)';
                     showNotification(`Mode: ${modeText}${suffix}`);
                 } else if (response.status === 403) {
-                    // Guest trying to switch to owner mode
                     modeMenu.classList.remove('visible');
-                    showError('Cannot switch to owner mode while in guest mode');
+                    const body = await response.json().catch(() => ({}));
+                    if (body.detail === 'sign_in_required') {
+                        showError('Sign-in required to change mode');
+                    } else {
+                        // Guest trying to switch to owner mode
+                        showError('Cannot switch to owner mode while in guest mode');
+                    }
                 } else {
                     showError('Failed to change mode');
                 }
@@ -3257,6 +3272,20 @@
             setTimeout(() => toast.remove(), 4000);
         }
 
+        // ATHENA-69 (D19): every direct device/mode-write route now requires
+        // a signed-in owner/operator and answers 403 {"detail":"sign_in_required"}
+        // for anyone else. Show that distinctly from a generic failure.
+        async function showErrorForResponse(response, fallbackMessage) {
+            if (response.status === 403) {
+                const body = await response.json().catch(() => ({}));
+                if (body.detail === 'sign_in_required') {
+                    showError('Sign-in required');
+                    return;
+                }
+            }
+            showError(fallbackMessage);
+        }
+
         function scrollToBottom() {
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
@@ -3537,7 +3566,7 @@
                     // Refresh climate state after a short delay
                     setTimeout(loadClimate, 1000);
                 } else {
-                    showError('Failed to set temperature');
+                    await showErrorForResponse(response, 'Failed to set temperature');
                     loadClimate(); // Reload to get actual state
                 }
             } catch (error) {
@@ -3596,7 +3625,7 @@
                 if (response.ok) {
                     setTimeout(loadAppleTVs, 1000);
                 } else {
-                    showError(`Failed to turn ${action} Apple TV`);
+                    await showErrorForResponse(response, `Failed to turn ${action} Apple TV`);
                 }
             } catch (error) {
                 console.error('Power control error:', error);
@@ -3616,7 +3645,7 @@
                         body: JSON.stringify({ command: cmd })
                     });
                     if (!response.ok) {
-                        showError('Remote command failed');
+                        await showErrorForResponse(response, 'Remote command failed');
                     }
                 } catch (error) {
                     console.error('Remote command error:', error);
@@ -3725,7 +3754,7 @@
                     tvStatus.textContent = `Launching ${appName}...`;
                     setTimeout(loadAppleTVs, 2000);
                 } else {
-                    showError(`Failed to launch ${appName}`);
+                    await showErrorForResponse(response, `Failed to launch ${appName}`);
                 }
             } catch (error) {
                 console.error('App launch error:', error);

@@ -33,12 +33,18 @@ Pass C members:
  - test_no_client_mode_trust
  - test_pin_branch_only_via_trust_helper
 
-Later passes (F) append their own members to this file; do not remove
-Pass A/B/C/E cases when doing so.
+Pass F members (jarvis-web -- P6, D19):
+ - test_jarvis_web_mutating_routes_classified
+ - test_websockets_importable_in_ci
+
+Later passes append their own members to this file; do not remove
+Pass A/B/C/E/F cases when doing so.
 """
 from __future__ import annotations
 
 import ast
+import importlib.util
+import os
 import re
 import sys
 import unittest.mock as mock
@@ -840,3 +846,90 @@ class TestPinBranchOnlyViaTrustHelper:
                 if any(inner is handle_calls[0] for inner in ast.walk(node)):
                     enclosing = node
         assert enclosing is not None, "handle_owner_mode_utterance must be called inside process_query"
+
+
+# ---------------------------------------------------------------------------
+# Pass F (jarvis-web -- P6, D19)
+# ---------------------------------------------------------------------------
+
+_JARVIS_BACKEND = REPO_ROOT / "apps" / "jarvis-web" / "backend"
+
+
+def _load_jarvis_web_main():
+    """Load apps/jarvis-web/backend/main.py under a private synthetic
+    module name -- main.py is a name several services in this repo share
+    (see tests/unit/test_jarvis_web_appliances_ha_entities.py:20-25)."""
+    if str(_JARVIS_BACKEND) not in sys.path:
+        sys.path.insert(0, str(_JARVIS_BACKEND))
+    os.environ.setdefault("SERVICE_API_KEY", "test-key-wiring")
+    spec = importlib.util.spec_from_file_location("_wiring_test_jarvis_web_main", _JARVIS_BACKEND / "main.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["_wiring_test_jarvis_web_main"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestJarvisWebMutatingRoutesClassified:
+    """D19: every mutating (non-GET) HTTP route and both WS handlers in
+    jarvis-web's main.py are classified owner_only or no_side_effect in
+    ROUTE_CLASSIFICATION; the population is set-equal against what FastAPI
+    actually registered (a route added to the app without an entry here,
+    or vice versa, fails); every owner_only HTTP route carries
+    require_owner_caller (bound as _require_owner_caller, D18's
+    household_mode_resolver partial) as a route dependency."""
+
+    NAMED_OWNER_ONLY = {"POST /livekit/rooms", "DELETE /livekit/rooms/{room_name}"}
+
+    def test_jarvis_web_mutating_routes_classified(self):
+        module = _load_jarvis_web_main()
+        classification = module.ROUTE_CLASSIFICATION
+
+        try:
+            import websockets  # noqa: F401
+            websockets_available = True
+        except ImportError:
+            websockets_available = False
+
+        expected_total = 35 if websockets_available else 33
+        expected_owner_only = 29 if websockets_available else 27
+
+        assert len(classification) == expected_total
+        owner_only = {k for k, v in classification.items() if v == "owner_only"}
+        assert len(owner_only) == expected_owner_only
+
+        for member in self.NAMED_OWNER_ONLY:
+            assert classification.get(member) == "owner_only", member
+
+        route_by_key = {}
+        for route in module.app.routes:
+            methods = getattr(route, "methods", None)
+            if methods:
+                for m in methods:
+                    if m == "HEAD":
+                        continue
+                    route_by_key[f"{m} {route.path}"] = route
+            elif route.path in ("/ma/ws", "/ma/sendspin"):
+                route_by_key[f"WS {route.path}"] = route
+
+        mutating_keys = {k for k in route_by_key if not k.startswith("GET ")}
+        assert mutating_keys == set(classification.keys())
+
+        for key, kind in classification.items():
+            if kind != "owner_only" or key.startswith("WS "):
+                continue
+            route = route_by_key[key]
+            dep_names = {
+                getattr(d.dependency, "__name__", None) or getattr(getattr(d.dependency, "func", None), "__name__", None)
+                for d in getattr(route, "dependencies", [])
+            }
+            assert "require_owner_caller" in dep_names, f"{key} missing require_owner_caller: {dep_names}"
+
+
+class TestWebsocketsImportableInCI:
+    def test_websockets_importable_in_ci(self):
+        """MUSIC_WS_AVAILABLE (and therefore the WS entries in
+        ROUTE_CLASSIFICATION, and CI's coverage of the two owner_only WS
+        gates) depends on the `websockets` package being importable. This
+        is a tripwire: if it silently stops being a dependency, the 35/33
+        population-size branch in the test above goes untested in CI."""
+        import websockets  # noqa: F401

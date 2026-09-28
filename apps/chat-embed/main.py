@@ -197,7 +197,11 @@ async def chat_stream(req: ChatRequest, request: Request):
                     STREAM_URL,
                     json={
                         "query": req.message,
-                        "mode": "owner",
+                        # ATHENA-69 (D19/P6.3): this relay has no caller
+                        # identity of its own and never forwards the
+                        # browser's Authorization header, so every request
+                        # it proxies is guest, never owner.
+                        "mode": "guest",
                         "session_id": session_id,
                         "interface_type": "chat",
                         "source": SOURCE_TAG,
