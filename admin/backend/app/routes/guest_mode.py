@@ -885,24 +885,29 @@ async def delete_guest_entry(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Soft delete a manual guest entry (only manual entries can be deleted)."""
+    """Soft delete a guest entry, manual or synced (ATHENA-127 codex r2
+    High / step 6b). Previously manual-only -- an owner had no remedy for a
+    phantom/cancelled synced (iCal/Lodgify) row, which D12/D13's suppression
+    depends on being deletable. The upserts never touch `deleted_at` (D13),
+    so a re-sync of the same external_id can't resurrect a deleted row.
+    """
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     db_entry = db.query(CalendarEvent).filter(
         CalendarEvent.id == event_id,
-        CalendarEvent.created_by == "manual",
         CalendarEvent.deleted_at.is_(None)
     ).first()
 
     if not db_entry:
         raise HTTPException(
             status_code=404,
-            detail="Manual guest entry not found or already deleted"
+            detail="Guest entry not found or already deleted"
         )
 
     # Store old values for audit
     old_value = db_entry.to_dict()
+    created_by = db_entry.created_by
 
     # Soft delete
     db_entry.deleted_at = datetime.utcnow()
@@ -919,7 +924,7 @@ async def delete_guest_entry(
         request=request
     )
 
-    logger.info("guest_entry_deleted", entry_id=event_id)
+    logger.info("guest_entry_deleted", entry_id=event_id, created_by=created_by)
 
     return {"message": "Guest entry deleted", "id": event_id}
 

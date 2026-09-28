@@ -23,20 +23,22 @@ Endpoints:
 """
 from typing import Dict, Any, List, Literal, Optional
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 import asyncpg
 import hmac
 import os
 import re
 import structlog
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.utils.service_auth import verify_service_api_key
 from app.utils.passwords import verify_password
 from app.database import get_db
-from app.models import GuestModeConfig, OwnerPinAttempt, RagService
+from app.models import GuestModeConfig, OwnerPinAttempt, RagService, CalendarEvent
 from shared.config import get_config
+from shared.booking_window import db_value_to_utc, resolve_property_tz
 
 logger = structlog.get_logger()
 
@@ -201,6 +203,126 @@ async def verify_owner_pin(payload: VerifyPinRequest, db: Session = Depends(get_
     db.commit()
     logger.info("owner_pin_verify", tier=tier, status="verified")
     return VerifyPinResponse(status="verified", locked_until=None)
+
+
+# ATHENA-127 D2/D3: this router now hosts more than PIN verification -- the
+# mode service's booking source read (guest_mode_pin_router's name predates
+# this addition; kept as-is rather than renamed, to avoid an unrelated diff
+# across every other route already mounted on it).
+
+_MAX_BOOKINGS_WINDOW = timedelta(days=62)
+
+
+class BookingRow(BaseModel):
+    id: int
+    key: str
+    source: str
+    checkin: str
+    checkout: str
+    is_test: bool
+
+
+class SuppressedRow(BaseModel):
+    checkin: str
+    checkout: str
+
+
+class BookingsResponse(BaseModel):
+    generated_at: str
+    property_timezone: str
+    property_timezone_valid: bool
+    bookings: List[BookingRow]
+    suppressed: List[SuppressedRow]
+
+
+def _booking_key(source: str, external_id: str) -> str:
+    """D3: opaque, non-reversible identifier -- never the raw external_id
+    (which may embed a guest email/token for some providers)."""
+    import hashlib
+
+    return hashlib.sha256(f"{source}|{external_id}".encode()).hexdigest()[:16]
+
+
+@guest_mode_pin_router.get("/bookings", response_model=BookingsResponse)
+async def get_internal_bookings(
+    start: datetime = Query(...),
+    end: datetime = Query(...),
+    db: Session = Depends(get_db),
+):
+    """D2/D3: the mode service's booking source. Returns confirmed,
+    non-deleted rows overlapping [start, end), plus a `suppressed` list of
+    soft-deleted/cancelled day pairs (D13) the mode service uses to drop a
+    matching legacy-iCal duplicate. Payload is minimised: no title, name,
+    email, phone, or raw external_id -- only an opaque hashed `key` (D3).
+    """
+    if start.tzinfo is None or end.tzinfo is None:
+        raise HTTPException(
+            status_code=422, detail="start and end must be ISO-8601 with a UTC offset or 'Z'"
+        )
+    if end <= start:
+        raise HTTPException(status_code=422, detail="end must be after start")
+    if end - start > _MAX_BOOKINGS_WINDOW:
+        raise HTTPException(status_code=422, detail="window must be at most 62 days")
+
+    # CalendarEvent.checkin/checkout are stored as naive UTC in this
+    # codebase's existing comparison pattern (see guest_mode.py's
+    # datetime.utcnow() filters) -- compare on that same naive-UTC basis.
+    start_naive = start.astimezone(timezone.utc).replace(tzinfo=None)
+    end_naive = end.astimezone(timezone.utc).replace(tzinfo=None)
+
+    rows = (
+        db.query(CalendarEvent)
+        .filter(
+            CalendarEvent.deleted_at.is_(None),
+            CalendarEvent.status == "confirmed",
+            CalendarEvent.checkout > start_naive,
+            CalendarEvent.checkin < end_naive,
+        )
+        .order_by(CalendarEvent.checkin)
+        .all()
+    )
+
+    suppressed_rows = (
+        db.query(CalendarEvent)
+        .filter(
+            or_(CalendarEvent.deleted_at.isnot(None), CalendarEvent.status == "cancelled"),
+            CalendarEvent.checkout > start_naive,
+            CalendarEvent.checkin < end_naive,
+        )
+        .all()
+    )
+
+    property_tz_name = get_config().default_timezone
+    _, tz_valid = resolve_property_tz(property_tz_name)
+
+    bookings = [
+        BookingRow(
+            id=r.id,
+            key=_booking_key(r.source, r.external_id),
+            source=r.source,
+            checkin=db_value_to_utc(r.checkin).isoformat(),
+            checkout=db_value_to_utc(r.checkout).isoformat(),
+            is_test=r.is_test,
+        )
+        for r in rows
+    ]
+    suppressed = [
+        SuppressedRow(
+            checkin=db_value_to_utc(r.checkin).isoformat(),
+            checkout=db_value_to_utc(r.checkout).isoformat(),
+        )
+        for r in suppressed_rows
+    ]
+
+    logger.info("internal_bookings_served", bookings=len(bookings), suppressed=len(suppressed))
+
+    return BookingsResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        property_timezone=property_tz_name or "UTC",
+        property_timezone_valid=tz_valid,
+        bookings=bookings,
+        suppressed=suppressed,
+    )
 
 
 async def get_athena_db_connection():
