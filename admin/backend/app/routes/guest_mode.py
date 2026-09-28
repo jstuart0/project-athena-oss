@@ -4,7 +4,7 @@ Guest Mode API routes.
 Provides configuration management for guest mode (Airbnb/vacation rental integration).
 Includes CRUD operations for manual guest entries and guest history tracking.
 """
-from typing import List, Optional
+from typing import Any, List, Literal, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr, field_validator
@@ -244,7 +244,7 @@ class GuestEntryUpdate(BaseModel):
     guest_email: Optional[str] = None
     guest_phone: Optional[str] = None
     notes: Optional[str] = None
-    status: Optional[str] = None
+    status: Optional[Literal["confirmed", "pending", "cancelled", "blocked"]] = None
 
 
 class GuestEntryResponse(BaseModel):
@@ -731,6 +731,8 @@ async def get_mode_status(
     if not allowed:
         return {"reachable": False, "error": "ssrf_blocked", "detail": reason}
 
+    # Only the exception class and HTTP status reach the response: exception
+    # text can carry URLs and query strings.
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             response = await client.get(
@@ -738,23 +740,33 @@ async def get_mode_status(
             )
             response.raise_for_status()
             body = response.json()
+        if not isinstance(body, dict):
+            return {"reachable": False, "error": "malformed_response"}
+        return {
+            "reachable": True,
+            "mode": body.get("mode"),
+            "reason": body.get("reason"),
+            "override_active": body.get("override_active"),
+            "events_count": _int_or_none(body.get("events_count")),
+            "bookings_source": body.get("bookings_source"),
+            "bookings_status": body.get("bookings_status"),
+            "bookings_age_seconds": body.get("bookings_age_seconds"),
+            "property_timezone": body.get("property_timezone"),
+            "property_timezone_valid": body.get("property_timezone_valid"),
+        }
     except httpx.HTTPStatusError as e:
         return {"reachable": False, "error": "http_error", "detail": str(e.response.status_code)}
     except Exception as e:
-        return {"reachable": False, "error": type(e).__name__, "detail": str(e)}
+        return {"reachable": False, "error": type(e).__name__}
 
-    return {
-        "reachable": True,
-        "mode": body.get("mode"),
-        "reason": body.get("reason"),
-        "override_active": body.get("override_active"),
-        "events_count": body.get("events_count"),
-        "bookings_source": body.get("bookings_source"),
-        "bookings_status": body.get("bookings_status"),
-        "bookings_age_seconds": body.get("bookings_age_seconds"),
-        "property_timezone": body.get("property_timezone"),
-        "property_timezone_valid": body.get("property_timezone_valid"),
-    }
+
+def _int_or_none(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @router.get("/events/{event_id}", response_model=CalendarEventResponse)

@@ -243,6 +243,18 @@ def _booking_key(source: str, external_id: str) -> str:
     return hashlib.sha256(f"{source}|{external_id}".encode()).hexdigest()[:16]
 
 
+def _utc_query_bound(value: datetime, dialect_name: str) -> datetime:
+    """An aware bound -> the UTC instant to compare stored checkin/checkout
+    against. The columns are `DateTime(timezone=True)`: timestamptz on
+    Postgres, where the bound must stay aware (a naive one is read in the
+    session TimeZone). SQLite stores naive UTC, so only there is tzinfo
+    stripped."""
+    bound = value.astimezone(timezone.utc)
+    if dialect_name == "sqlite":
+        return bound.replace(tzinfo=None)
+    return bound
+
+
 @guest_mode_pin_router.get("/bookings", response_model=BookingsResponse)
 async def get_internal_bookings(
     start: datetime = Query(...),
@@ -264,19 +276,17 @@ async def get_internal_bookings(
     if end - start > _MAX_BOOKINGS_WINDOW:
         raise HTTPException(status_code=422, detail="window must be at most 62 days")
 
-    # CalendarEvent.checkin/checkout are stored as naive UTC in this
-    # codebase's existing comparison pattern (see guest_mode.py's
-    # datetime.utcnow() filters) -- compare on that same naive-UTC basis.
-    start_naive = start.astimezone(timezone.utc).replace(tzinfo=None)
-    end_naive = end.astimezone(timezone.utc).replace(tzinfo=None)
+    dialect_name = db.get_bind().dialect.name
+    start_bound = _utc_query_bound(start, dialect_name)
+    end_bound = _utc_query_bound(end, dialect_name)
 
     rows = (
         db.query(CalendarEvent)
         .filter(
             CalendarEvent.deleted_at.is_(None),
             CalendarEvent.status == "confirmed",
-            CalendarEvent.checkout > start_naive,
-            CalendarEvent.checkin < end_naive,
+            CalendarEvent.checkout > start_bound,
+            CalendarEvent.checkin < end_bound,
         )
         .order_by(CalendarEvent.checkin)
         .all()
@@ -286,8 +296,8 @@ async def get_internal_bookings(
         db.query(CalendarEvent)
         .filter(
             or_(CalendarEvent.deleted_at.isnot(None), CalendarEvent.status == "cancelled"),
-            CalendarEvent.checkout > start_naive,
-            CalendarEvent.checkin < end_naive,
+            CalendarEvent.checkout > start_bound,
+            CalendarEvent.checkin < end_bound,
         )
         .all()
     )

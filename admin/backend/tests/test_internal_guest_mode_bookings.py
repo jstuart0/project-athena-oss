@@ -298,3 +298,69 @@ class TestCancelViaPatch:
         booking_ids = {b["id"] for b in bookings_resp.json()["bookings"]}
         assert event.id not in booking_ids
         assert len(bookings_resp.json()["suppressed"]) == 1
+
+
+class TestQueryBounds:
+    """The stored columns are timestamptz on Postgres: a naive bound there
+    is read in the session TimeZone, so only SQLite (naive storage) may get
+    the tz stripped."""
+
+    def test_postgres_bound_stays_aware_utc(self):
+        from zoneinfo import ZoneInfo
+        from app.routes.internal import _utc_query_bound
+
+        local = datetime(2026, 7, 1, 16, 0, tzinfo=ZoneInfo("America/New_York"))
+        bound = _utc_query_bound(local, "postgresql")
+        assert bound.tzinfo is not None
+        assert bound.utcoffset() == timedelta(0)
+        assert bound == datetime(2026, 7, 1, 20, 0, tzinfo=timezone.utc)
+
+    def test_sqlite_bound_is_naive_utc(self):
+        from zoneinfo import ZoneInfo
+        from app.routes.internal import _utc_query_bound
+
+        local = datetime(2026, 7, 1, 16, 0, tzinfo=ZoneInfo("America/New_York"))
+        assert _utc_query_bound(local, "sqlite") == datetime(2026, 7, 1, 20, 0)
+
+
+class TestOverlapStraddlingStart:
+    def test_row_starting_before_window_and_ending_inside_is_returned(self, client, db):
+        start = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+        end = start + timedelta(days=5)
+        straddler = _make_event(
+            db,
+            external_id="straddles-start",
+            checkin=start - timedelta(days=3),
+            checkout=start + timedelta(days=1),
+        )
+        resp = client.get(BOOKINGS_URL, params={"start": _iso(start), "end": _iso(end)}, headers=_headers())
+        assert resp.status_code == 200
+        assert [b["id"] for b in resp.json()["bookings"]] == [straddler.id]
+
+
+class TestEditStatusValidation:
+    def _synced_row(self, db, status="confirmed"):
+        now = datetime.now(timezone.utc)
+        return _make_event(
+            db, external_id=f"lodgify_status_{status}", checkin=now, checkout=now + timedelta(days=1),
+            status=status,
+        )
+
+    @pytest.mark.parametrize("bad", ["", "bogus", "Confirmed"])
+    def test_invalid_status_is_422_and_row_unchanged(self, owner_client, db, bad):
+        event = self._synced_row(db)
+        resp = owner_client.patch(f"/api/guest-mode/events/{event.id}", json={"status": bad})
+        assert resp.status_code == 422
+        db.refresh(event)
+        assert event.status == "confirmed"
+
+    def test_blocked_row_round_trips(self, owner_client, db):
+        event = self._synced_row(db, status="blocked")
+        resp = owner_client.patch(
+            f"/api/guest-mode/events/{event.id}", json={"status": "blocked", "notes": "owner note"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "blocked"
+        db.refresh(event)
+        assert event.status == "blocked"
+        assert event.notes == "owner note"

@@ -141,3 +141,44 @@ class TestTimeout:
         assert resp.status_code == 200
         data = resp.json()
         assert data["reachable"] is False
+
+
+def _proxy_with_handler(owner_client, monkeypatch, handler):
+    monkeypatch.setenv("MODE_SERVICE_URL", "http://mode-service.test")
+    _clear_cache_for_tests()
+
+    async def fake_check_ssrf_safe(url):
+        return True, ""
+
+    def fake_async_client(*args, **kwargs):
+        return _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler))
+
+    with patch("app.routes.guest_mode.check_ssrf_safe", new=fake_check_ssrf_safe), \
+         patch("app.routes.guest_mode.httpx.AsyncClient", new=fake_async_client):
+        return owner_client.get(MODE_STATUS_URL)
+
+
+class TestProxyHardening:
+    def test_non_object_json_is_unreachable_not_500(self, owner_client, monkeypatch):
+        resp = _proxy_with_handler(owner_client, monkeypatch, lambda r: httpx.Response(200, json=[1, 2]))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["reachable"] is False
+        assert data["error"] == "malformed_response"
+
+    def test_error_detail_never_echoes_exception_text(self, owner_client, monkeypatch):
+        def handler(request):
+            raise httpx.ConnectError("connect failed to http://mode-service.test/?token=SECRET123")
+
+        resp = _proxy_with_handler(owner_client, monkeypatch, handler)
+        data = resp.json()
+        assert data == {"reachable": False, "error": "ConnectError"}
+        assert "SECRET123" not in resp.text
+
+    @pytest.mark.parametrize("raw,expected", [(3, 3), ("7", 7), ("<img src=x onerror=alert(1)>", None), (None, None), (2.9, 2)])
+    def test_events_count_is_coerced_to_int(self, owner_client, monkeypatch, raw, expected):
+        body = {"mode": "owner", "reason": "No active bookings", "events_count": raw}
+        resp = _proxy_with_handler(owner_client, monkeypatch, lambda r: httpx.Response(200, json=body))
+        data = resp.json()
+        assert data["reachable"] is True
+        assert data["events_count"] == expected
