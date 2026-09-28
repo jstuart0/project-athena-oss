@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Guest mode now reads bookings from the admin-managed calendar sources (Lodgify and iCal, whatever the Calendar Sources page has configured) instead of only an in-process poll of a single legacy iCal URL. The legacy URL still works as an optional, additive supplement. Booking data freshness (fresh/stale/expired) is now visible on `/health`, `/mode`, and the admin Guest Mode page, which now shows the mode service's actual mode/reason instead of just a database-derived guess.
+- The Guest Mode page's Delete button now works on calendar-synced bookings too, not just manually-entered ones — useful for hiding a phantom or cancelled booking without waiting for the next sync.
+- "Sync all" on the Calendar Sources page now actually triggers a sync for every enabled source (it previously reported a count but did nothing).
+
+### Fixed
+
+- Date-only and floating (no explicit timezone) booking times from a calendar feed are now localised to the configured property timezone instead of being silently treated as UTC — a real check-in/check-out time could previously be off by several hours depending on the deployment's timezone.
+- A feed entry marked as a block (`Blocked`, `Closed Period`, `Not available`, etc. — an owner blocking dates for personal use) is no longer counted as a guest stay.
+
 ### Security
 
 - The admin-backend session ID now rotates on every login path (local, demo-mode, OIDC callback), closing a session-fixation gap where a cookie value set before authentication remained valid afterward. Logout already invalidated the session correctly and is unchanged.
