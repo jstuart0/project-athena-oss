@@ -5,21 +5,55 @@ Provides configuration management for guest mode (Airbnb/vacation rental integra
 Includes CRUD operations for manual guest entries and guest history tracking.
 """
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
+import hmac
 import structlog
-import hashlib
 import uuid
 
 from app.database import get_db
-from app.auth.oidc import get_current_user
-from app.models import User, GuestModeConfig, CalendarEvent, ModeOverride, AuditLog
+from app.auth.oidc import get_current_user, optional_security
+from app.models import User, GuestModeConfig, CalendarEvent, ModeOverride, AuditLog, OwnerPinAttempt
+from app.routes.internal import require_service_key_401
+from app.utils.passwords import hash_password
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/guest-mode", tags=["guest_mode"])
+
+
+async def _guest_mode_config_auth(
+    request: Request,
+    db: Session = Depends(get_db),
+    x_service_key: Optional[str] = Header(default=None, alias="X-Service-Key"),
+) -> Optional[User]:
+    """Dual-auth for GET /config (D25): a valid X-Service-Key returns None
+    (service-trusted, no user, no read-permission check); anything else
+    authenticates exactly as `Depends(get_current_user)` always has.
+
+    Deliberately does NOT reuse `verify_service_or_oidc` here:  that
+    dependency resolves its OIDC fallback via `get_optional_user`, which
+    catches *any* `HTTPException` from `get_current_user` (including the
+    403 `oidc.py::_enforce_scoped_role_route_access` raises for a scoped
+    role on this path) and converts it to a generic 401 -- changing this
+    route's pre-existing Bearer-path status codes, which D25 requires stay
+    unchanged. Calling `get_current_user` directly here keeps its exact
+    exception behavior intact.
+    """
+    if x_service_key:
+        configured_key = get_config().service_api_key
+        if not configured_key:
+            raise HTTPException(status_code=503, detail="Service authentication not configured")
+        if not hmac.compare_digest(x_service_key, configured_key):
+            raise HTTPException(status_code=401, detail="Invalid service key")
+        return None
+
+    credentials = await optional_security(request)
+    x_api_key = request.headers.get("X-API-Key")
+    return await get_current_user(credentials=credentials, x_api_key=x_api_key, db=db, request=request)
 
 
 class GuestModeConfigCreate(BaseModel):
@@ -64,7 +98,7 @@ class GuestModeConfigUpdate(BaseModel):
 
 class GuestModeConfigResponse(BaseModel):
     """Response model for guest mode configuration."""
-    id: int
+    id: Optional[int] = None
     enabled: bool
     calendar_source: str
     calendar_url: Optional[str] = None
@@ -75,6 +109,7 @@ class GuestModeConfigResponse(BaseModel):
     guest_allowed_intents: List[str]
     guest_restricted_entities: List[str]
     guest_allowed_domains: List[str]
+    guest_restricted_intents: List[str] = []
     max_queries_per_minute_guest: int
     max_queries_per_minute_owner: int
     guest_data_retention_hours: int
@@ -83,6 +118,8 @@ class GuestModeConfigResponse(BaseModel):
     created_by: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    owner_pin_configured: bool = False
+    config_source: str = "admin"
 
     class Config:
         from_attributes = True
@@ -227,23 +264,88 @@ def create_audit_log(
     logger.info("audit_log_created", action=action, resource_type=resource_type, resource_id=resource_id)
 
 
-def hash_pin(pin: str) -> str:
-    """Hash a PIN for secure storage."""
-    return hashlib.sha256(pin.encode()).hexdigest()
+def _config_response(config: GuestModeConfig, config_source: str = "admin") -> GuestModeConfigResponse:
+    """Build the API response for a real, DB-backed GuestModeConfig row.
+
+    Constructed explicitly (not `return config` + FastAPI's ORM
+    auto-conversion) because `owner_pin_configured` and `config_source` are
+    computed, not columns.
+    """
+    return GuestModeConfigResponse(
+        id=config.id,
+        enabled=config.enabled,
+        calendar_source=config.calendar_source,
+        calendar_url=config.calendar_url,
+        calendar_poll_interval_minutes=config.calendar_poll_interval_minutes,
+        buffer_before_checkin_hours=config.buffer_before_checkin_hours,
+        buffer_after_checkout_hours=config.buffer_after_checkout_hours,
+        override_timeout_minutes=config.override_timeout_minutes,
+        guest_allowed_intents=config.guest_allowed_intents or [],
+        guest_restricted_entities=config.guest_restricted_entities or [],
+        guest_allowed_domains=config.guest_allowed_domains or [],
+        guest_restricted_intents=config.guest_restricted_intents or [],
+        max_queries_per_minute_guest=config.max_queries_per_minute_guest,
+        max_queries_per_minute_owner=config.max_queries_per_minute_owner,
+        guest_data_retention_hours=config.guest_data_retention_hours,
+        auto_purge_enabled=config.auto_purge_enabled,
+        config=config.config or {},
+        created_by=config.creator.username if config.creator else None,
+        created_at=config.created_at,
+        updated_at=config.updated_at,
+        owner_pin_configured=config.owner_pin is not None,
+        config_source=config_source,
+    )
+
+
+_DEFAULT_CONFIG_RESPONSE_KWARGS = dict(
+    id=None,
+    enabled=False,
+    calendar_source="ical",
+    calendar_url=None,
+    calendar_poll_interval_minutes=10,
+    buffer_before_checkin_hours=2,
+    buffer_after_checkout_hours=1,
+    override_timeout_minutes=60,
+    guest_allowed_intents=[],
+    guest_restricted_entities=[],
+    guest_allowed_domains=[],
+    guest_restricted_intents=[],
+    max_queries_per_minute_guest=10,
+    max_queries_per_minute_owner=100,
+    guest_data_retention_hours=24,
+    auto_purge_enabled=True,
+    config={},
+    created_by=None,
+    created_at=None,
+    updated_at=None,
+    owner_pin_configured=False,
+)
 
 
 @router.get("/config", response_model=GuestModeConfigResponse)
 async def get_guest_mode_config(
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    auth_user: Optional[User] = Depends(_guest_mode_config_auth),
 ):
-    """Get guest mode configuration (returns first/only config, creates default if none exists)."""
-    if not current_user.has_permission('read'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    """Get guest mode configuration (returns first/only config, creates default if none exists).
 
+    Dual-auth (ATHENA-69 D25): a service-key caller (the mode service) skips
+    the read-permission check entirely -- the key is already the trust
+    boundary -- and, per D39, never auto-creates a row: `created_by_id` is
+    NOT NULL, so a service-key caller has no user to attribute a new row to.
+    It gets the built-in defaults instead, with `config_source="defaults"`.
+    An OIDC/API-key admin caller keeps the pre-existing behavior: a
+    `has_permission('read')` gate, and auto-create on first read.
+    `auth_user` is None exactly when `_guest_mode_config_auth` authenticated
+    via a valid X-Service-Key.
+    """
+    is_service_call = auth_user is None
     config = db.query(GuestModeConfig).first()
-    if not config:
-        # Auto-create default configuration
+
+    if config is None and not is_service_call:
+        if not auth_user.has_permission('read'):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
         config = GuestModeConfig(
             enabled=False,
             calendar_source="ical",
@@ -259,14 +361,21 @@ async def get_guest_mode_config(
             guest_data_retention_hours=24,
             auto_purge_enabled=True,
             config={},
-            created_by_id=current_user.id
+            created_by_id=auth_user.id
         )
         db.add(config)
         db.commit()
         db.refresh(config)
-        logger.info("guest_mode_config_auto_created", config_id=config.id, user=current_user.username)
+        logger.info("guest_mode_config_auto_created", config_id=config.id, user=auth_user.username)
 
-    return config
+    if config is None:
+        # Service-key caller, no row yet (D39): synthesized defaults, no write.
+        return GuestModeConfigResponse(**_DEFAULT_CONFIG_RESPONSE_KWARGS, config_source="defaults")
+
+    if not is_service_call and not auth_user.has_permission('read'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    return _config_response(config, config_source="admin")
 
 
 @router.post("/config", response_model=GuestModeConfigResponse)
@@ -285,8 +394,8 @@ async def create_guest_mode_config(
     if existing:
         raise HTTPException(status_code=400, detail="Guest mode configuration already exists. Use PATCH to update.")
 
-    # Hash PIN if provided
-    owner_pin_hash = hash_pin(config_data.owner_pin) if config_data.owner_pin else None
+    # Hash PIN if provided (PBKDF2-HMAC-SHA256, salted -- D30)
+    owner_pin_hash = hash_password(config_data.owner_pin) if config_data.owner_pin else None
 
     # Create configuration
     config = GuestModeConfig(
@@ -326,7 +435,7 @@ async def create_guest_mode_config(
 
     logger.info("guest_mode_config_created", config_id=config.id, user=current_user.username)
 
-    return config
+    return _config_response(config, config_source="admin")
 
 
 @router.patch("/config", response_model=GuestModeConfigResponse)
@@ -361,7 +470,10 @@ async def update_guest_mode_config(
     if config_data.buffer_after_checkout_hours is not None:
         config.buffer_after_checkout_hours = config_data.buffer_after_checkout_hours
     if config_data.owner_pin is not None:
-        config.owner_pin = hash_pin(config_data.owner_pin)
+        config.owner_pin = hash_password(config_data.owner_pin)
+        # A new PIN invalidates every tier's lockout state -- this is the
+        # owner's recovery path when locked out (D25).
+        db.query(OwnerPinAttempt).delete()
     if config_data.override_timeout_minutes is not None:
         config.override_timeout_minutes = config_data.override_timeout_minutes
     if config_data.guest_allowed_intents is not None:
@@ -398,7 +510,7 @@ async def update_guest_mode_config(
 
     logger.info("guest_mode_config_updated", config_id=config.id, user=current_user.username)
 
-    return config
+    return _config_response(config, config_source="admin")
 
 
 @router.get("/events", response_model=List[CalendarEventResponse])
@@ -448,16 +560,17 @@ async def get_current_guests(
     return {"entries": [GuestEntryResponse.from_orm_event(e) for e in entries]}
 
 
-@router.get("/internal/current-guest")
+@router.get("/internal/current-guest", dependencies=[Depends(require_service_key_401)])
 async def get_current_guest_internal(
     db: Session = Depends(get_db)
 ):
     """
     Internal endpoint for service-to-service calls to get current guest.
 
-    This endpoint does NOT require authentication and should only be
-    accessible from within the cluster network. Returns the first current
-    guest if any, or null if no current guest.
+    Requires X-Service-Key (ATHENA-69 D31) -- previously open to any caller
+    on the cluster network; now gated the same way as the guest-mode PIN
+    verification endpoint. Returns the first current guest if any, or null
+    if no current guest.
 
     Used by: Jarvis Web backend for guest context injection
     """
