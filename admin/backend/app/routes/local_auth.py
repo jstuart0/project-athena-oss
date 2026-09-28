@@ -10,13 +10,14 @@ from pydantic import BaseModel
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 import structlog
-from starsessions import load_session, regenerate_session_id
+from starsessions import load_session
 
 from app.auth.oidc import create_access_token
 from app.database import get_db
 from app.models import User
 from app.utils.passwords import hash_password, verify_password
 from app.utils.rate_limit import login_rate_limit_dep
+from app.utils.sessions import rotate_session_id
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -167,10 +168,12 @@ async def local_login(payload: LocalLoginRequest, request: Request, db: Session 
     request.session["access_token"] = token
     request.session["user_id"] = int(user.id)
     request.session["auth_method"] = "local"
-    # Rotate the session ID post-auth (session fixation, ATHENA-80/xander): a
-    # cookie value fixed by an attacker before login must not become valid for
-    # the now-authenticated session.
-    regenerate_session_id(request)
+    # Rotate the session ID post-auth and purge the pre-rotation entry from
+    # the store (session fixation, ATHENA-80/xander; store purge added per
+    # codex diff review 2026-09-28): a cookie value fixed by an attacker
+    # before login must not become valid for the now-authenticated session,
+    # and the old id can't be replayed even if it already held data.
+    await rotate_session_id(request)
     logger.info("local_user_authenticated", user_id=user.id, username=user.username)
 
     return {

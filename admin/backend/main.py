@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from starsessions import SessionMiddleware, load_session, regenerate_session_id
+from starsessions import SessionMiddleware, load_session
 from starsessions.stores.redis import RedisStore
 from redis.asyncio import Redis
 from sqlalchemy.orm import Session
@@ -36,6 +36,7 @@ from app.auth.oidc import (
     decode_ws_ticket,
 )
 from app.utils.rate_limit import login_rate_limit_dep
+from app.utils.sessions import rotate_session_id
 from app.auth import oidc as oidc_auth
 from app.models import User, RagService
 
@@ -780,10 +781,13 @@ async def auth_login(request: Request, db: Session = Depends(get_db)):
         # xander:5 — explicit int() cast for JSON serialization safety on session store.
         request.session['access_token'] = demo_token
         request.session['user_id'] = int(demo_user.id)
-        # Rotate the session ID post-auth (session fixation, ATHENA-80/xander): a
-        # cookie value fixed by an attacker before login must not become valid for
-        # the now-authenticated session.
-        regenerate_session_id(request)
+        # Rotate the session ID post-auth and purge the pre-rotation entry
+        # from the store (session fixation, ATHENA-80/xander; store purge
+        # added per codex diff review 2026-09-28): a cookie value fixed by an
+        # attacker before login must not become valid for the
+        # now-authenticated session, and the old id can't be replayed even
+        # if it already held data.
+        await rotate_session_id(request)
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:8080")
         # ?logged_in=1 is a client-side hint to clear stale localStorage before the
         # frontend fetches the session token (codex-H1 mitigation for shared devices).
@@ -856,10 +860,13 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
         request.session['access_token'] = jwt_token
         request.session['user_id'] = user.id
 
-        # Rotate the session ID post-auth (session fixation, ATHENA-80/xander): a
-        # cookie value fixed by an attacker before login must not become valid for
-        # the now-authenticated session.
-        regenerate_session_id(request)
+        # Rotate the session ID post-auth and purge the pre-rotation entry
+        # from the store (session fixation, ATHENA-80/xander; store purge
+        # added per codex diff review 2026-09-28): a cookie value fixed by an
+        # attacker before login must not become valid for the
+        # now-authenticated session, and the old id can't be replayed even
+        # if it already held data.
+        await rotate_session_id(request)
 
         logger.info("user_authenticated", user_id=user.id, username=user.username)
 
