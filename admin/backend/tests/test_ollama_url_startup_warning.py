@@ -144,3 +144,22 @@ async def test_never_raises_on_internal_error(monkeypatch):
     await main_module._warn_if_ollama_url_ssrf_blocked()  # must not raise
 
     assert any(event == "ollama_url_ssrf_check_failed" for event, _ in calls), calls
+
+
+@pytest.mark.asyncio
+async def test_warning_never_logs_raw_url_userinfo(monkeypatch):
+    """codex r2 diff-review High (2026-09-28): a URL shaped
+    http://user:pass@host:port must never reach the log line verbatim --
+    neither the structured `url` field nor the human-readable `message`."""
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    _patch_db_and_ollama_url(monkeypatch, "http://admin:s3cr3t@ollama:11434")
+    calls = _capture_warnings(monkeypatch)
+
+    await main_module._warn_if_ollama_url_ssrf_blocked()
+
+    matches = [kw for event, kw in calls if event == "ollama_url_blocked_by_ssrf_guard"]
+    assert len(matches) == 1, calls
+    assert matches[0]["url"] == "http://ollama:11434"
+    serialized = repr(matches[0])
+    assert "admin:s3cr3t" not in serialized, serialized
+    assert "s3cr3t" not in serialized, serialized

@@ -158,6 +158,16 @@ async def check_ssrf_safe(url: str) -> tuple[bool, str]:
     return await _validate_service_url(host, port, path_and_query)
 
 
+# codex r2 diff-review Medium (2026-09-28): the ONLY check_ssrf_safe denial
+# reason the not-in-cluster loopback carve-out below may override. Matches
+# the exact prefix src/shared/url_safety.py::validate_url_not_private()
+# uses for its "resolves to a private IP" branch -- every other denial
+# (path CRLF/NUL/traversal, k8s control-plane hostname, malformed URL, DNS
+# failure) is host-classification-independent and must stay blocked
+# regardless of is_local_host().
+_PRIVATE_IP_DENIAL_PREFIX = "Hostname resolves to private IP:"
+
+
 async def check_ollama_ssrf_safe(url: str) -> tuple[bool, str]:
     """check_ssrf_safe(), plus the not-in-cluster loopback carve-out this
     repo already applies at the Ollama write-boundary (POST
@@ -181,22 +191,38 @@ async def check_ollama_ssrf_safe(url: str) -> tuple[bool, str]:
     - A private host that ISN'T loopback/RFC1918/ULA reachable outside a
       pod (there is no such thing -- is_local_host() covers exactly
       loopback/RFC1918/ULA) gets no carve-out either.
+    - Any OTHER denial reason (codex r2 diff-review Medium, 2026-09-28):
+      the carve-out matches ONLY the private-host-IP denial
+      (_PRIVATE_IP_DENIAL_PREFIX below), never a blanket "was it blocked at
+      all". check_ssrf_safe's path-sanitization checks (CRLF/NUL/traversal)
+      and the k8s-control-plane-hostname block return their OWN distinct
+      reason strings for a REASON, not just for humans reading logs -- a
+      loopback URL with a CRLF- or traversal-carrying path must stay
+      blocked even outside a cluster; is_local_host() only ever classifies
+      the HOST, it says nothing about whether the PATH is safe.
 
     Returns (allowed, reason); reason is non-empty only when blocked (by
     check_ssrf_safe AND not covered by the carve-out).
     """
     from urllib.parse import urlparse
-    from app.utils.url_validators import is_local_host
+    from app.utils.url_validators import is_local_host, redact_url_userinfo
 
     allowed, reason = await check_ssrf_safe(url)
     if allowed:
         return allowed, reason
 
+    if not reason.startswith(_PRIVATE_IP_DENIAL_PREFIX):
+        # Not a "this host is private/unallowlisted" denial -- a malformed
+        # URL, CRLF/NUL/traversal in the path, a k8s-control-plane hostname
+        # block, or a DNS failure. The local-dev carve-out never applies.
+        return allowed, reason
+
     hostname = urlparse(url).hostname or ""
     if is_local_host(hostname):
+        safe_url = redact_url_userinfo(url)
         logger.warning(
             "ollama_ssrf_local_dev_carveout",
-            url=url,
+            url=safe_url,
             original_reason=reason,
             message=(
                 "Ollama probe host is loopback/RFC1918/ULA and this process is not "

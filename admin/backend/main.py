@@ -36,6 +36,7 @@ from app.auth.oidc import (
     decode_ws_ticket,
 )
 from app.utils.rate_limit import login_rate_limit_dep
+from app.utils.url_validators import redact_url_userinfo
 from app.auth import oidc as oidc_auth
 from app.models import User, RagService
 
@@ -372,12 +373,17 @@ async def _warn_if_ollama_url_ssrf_blocked() -> None:
 
         allowed, reason = await check_ollama_ssrf_safe(f"{ollama_url.rstrip('/')}/api/tags")
         if not allowed:
+            # codex r2 diff-review High (2026-09-28): never log the raw
+            # configured URL -- a userinfo-bearing form
+            # (http://user:pass@host:port) would put the credential
+            # straight into structured log output. scheme://host:port only.
+            safe_url = redact_url_userinfo(ollama_url)
             logger.warning(
                 "ollama_url_blocked_by_ssrf_guard",
-                url=ollama_url,
+                url=safe_url,
                 reason=reason,
                 message=(
-                    f"Configured Ollama URL {ollama_url!r} will be refused (ssrf_blocked) "
+                    f"Configured Ollama URL {safe_url!r} will be refused (ssrf_blocked) "
                     "by every model-discovery/voice-test probe. If this is an in-cluster "
                     "Service (e.g. http://ollama:11434), add its hostname or ClusterIP CIDR "
                     "to HEALTH_POLL_ALLOWED_PRIVATE_HOSTS."
@@ -732,10 +738,13 @@ async def ensure_default_model():
             try:
                 response = await client.get(f"{OSS_OLLAMA_URL}/api/tags")
                 if response.status_code != 200:
-                    logger.warning("ollama_not_reachable", url=OSS_OLLAMA_URL)
+                    logger.warning("ollama_not_reachable", url=redact_url_userinfo(OSS_OLLAMA_URL))
                     return
             except Exception as e:
-                logger.warning("ollama_connection_failed", url=OSS_OLLAMA_URL, error=str(e))
+                logger.warning(
+                    "ollama_connection_failed",
+                    url=redact_url_userinfo(OSS_OLLAMA_URL), error=str(e),
+                )
                 return
 
             # Check if model exists

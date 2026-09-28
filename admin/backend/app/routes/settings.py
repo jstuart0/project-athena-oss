@@ -16,7 +16,7 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, Secret, SystemSetting
 from app.utils.encryption import encrypt_value, decrypt_value
-from app.utils.url_validators import validate_host, is_local_host
+from app.utils.url_validators import validate_host, is_local_host, redact_url_userinfo
 from app.utils.rag_urls import check_ssrf_safe
 from shared.config import get_config
 
@@ -940,7 +940,10 @@ async def save_ollama_url(
         version_url = f"{url}/api/version"
         allowed, reason = await check_ssrf_safe(version_url)
         if not allowed:
-            logger.warning("ollama_url_reachability_test_ssrf_blocked", url=url, reason=reason)
+            logger.warning(
+                "ollama_url_reachability_test_ssrf_blocked",
+                url=redact_url_userinfo(url), reason=reason,
+            )
         else:
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
@@ -950,7 +953,10 @@ async def save_ollama_url(
                         data = response.json()
                         version = data.get("version")
             except Exception as e:
-                logger.warning("ollama_url_not_reachable", url=url, error=str(e))
+                logger.warning(
+                    "ollama_url_not_reachable",
+                    url=redact_url_userinfo(url), error=str(e),
+                )
 
         # Save to system_settings
         setting = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
@@ -977,7 +983,7 @@ async def save_ollama_url(
         logger.info(
             "ollama_url_saved",
             user=current_user.username,
-            url=url,
+            url=redact_url_userinfo(url),
             is_reachable=is_reachable
         )
 

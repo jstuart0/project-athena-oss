@@ -33,7 +33,7 @@ os.environ.setdefault("DEV_MODE", "true")
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("SERVICE_API_KEY", "test-svc-key-athena-118")
 
-from app.utils.rag_urls import check_ollama_ssrf_safe
+from app.utils.rag_urls import check_ollama_ssrf_safe, check_ssrf_safe
 from shared.config import _clear_cache_for_tests
 
 
@@ -155,3 +155,113 @@ async def test_carveout_does_not_fire_and_no_warning_when_allowed_normally(monke
     assert allowed is True
     assert reason == ""
     assert not any(event == "ollama_ssrf_local_dev_carveout" for event, _ in calls), calls
+
+
+# ---------------------------------------------------------------------------
+# codex r2 diff-review (2026-09-28)
+# High: never log URL userinfo.
+# Medium: the carve-out must match on the SPECIFIC private-host denial
+# reason, not "blocked for any reason" -- a loopback URL with a CRLF/NUL/
+# traversal path must stay blocked outside a cluster too.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_carveout_warning_never_logs_url_userinfo(monkeypatch):
+    from app.utils import rag_urls as rag_urls_module
+
+    calls = []
+    monkeypatch.setattr(
+        rag_urls_module.logger, "warning",
+        lambda event, **kw: calls.append((event, kw)),
+    )
+
+    allowed, _ = await check_ollama_ssrf_safe("http://u:p@localhost:11434/api/tags")
+
+    assert allowed is True
+    matches = [kw for event, kw in calls if event == "ollama_ssrf_local_dev_carveout"]
+    assert len(matches) == 1, calls
+    assert matches[0]["url"] == "http://localhost:11434"
+    serialized = repr(matches[0])
+    assert "u:p" not in serialized, serialized
+    assert "u:p@" not in serialized, serialized
+
+
+@pytest.mark.asyncio
+async def test_loopback_with_traversal_path_stays_blocked_outside_cluster():
+    """The carve-out must NOT override a path-sanitization denial. A ".."
+    traversal segment is a request-smuggling-adjacent vector regardless of
+    how the host classifies -- is_local_host() says nothing about path
+    safety. (urllib.parse.urlparse strips literal \\r\\n from a URL string
+    before check_ssrf_safe ever sees it, so CRLF can't be exercised via a
+    plain URL string here; the path-check's CRLF branch is defensive for a
+    caller that builds `path` some other way. NUL and ".." both survive
+    urlparse intact and exercise the same "denial reason isn't the
+    private-IP one" property this fix protects.)"""
+    allowed, reason = await check_ollama_ssrf_safe("http://localhost:11434/../../etc/passwd")
+    assert allowed is False
+    assert reason != ""
+    assert "traversal" in reason
+
+
+@pytest.mark.asyncio
+async def test_loopback_with_null_byte_path_stays_blocked_outside_cluster():
+    allowed, reason = await check_ollama_ssrf_safe("http://localhost:11434/api/tags\x00.txt")
+    assert allowed is False
+    assert reason != ""
+    assert "NUL" in reason
+
+
+@pytest.mark.asyncio
+async def test_k8s_control_plane_hostname_stays_blocked_even_outside_cluster():
+    """k8s control-plane hostnames are blocked unconditionally by
+    check_ssrf_safe itself (not a private-IP-resolution denial) -- the
+    carve-out's reason-prefix match must not accidentally cover this
+    denial class either."""
+    allowed, reason = await check_ollama_ssrf_safe("http://kubernetes.default.svc:11434/api/tags")
+    assert allowed is False
+    assert reason == "k8s control-plane hostname blocked"
+
+
+@pytest.mark.asyncio
+async def test_private_ip_denial_prefix_matches_the_real_validator_reason():
+    """Pin the exact reason text the carve-out matches against, so a
+    future wording change in shared.url_safety.validate_url_not_private()
+    that silently drifts from this prefix is caught here, not by the
+    carve-out quietly going dead."""
+    from app.utils.rag_urls import _PRIVATE_IP_DENIAL_PREFIX
+
+    allowed, reason = await check_ssrf_safe("http://10.55.55.55:11434/api/tags")
+    assert allowed is False
+    assert reason.startswith(_PRIVATE_IP_DENIAL_PREFIX), reason
+
+
+# ---------------------------------------------------------------------------
+# codex r2 diff-review High: redact_url_userinfo() itself.
+# ---------------------------------------------------------------------------
+
+def test_redact_url_userinfo_strips_credentials():
+    from app.utils.url_validators import redact_url_userinfo
+
+    assert redact_url_userinfo("http://u:p@ollama:11434") == "http://ollama:11434"
+    assert redact_url_userinfo("http://u:p@ollama:11434/api/tags?x=1") == "http://ollama:11434"
+    assert redact_url_userinfo("https://token@ollama.example.com/v1") == "https://ollama.example.com"
+
+
+def test_redact_url_userinfo_preserves_scheme_host_port_no_userinfo():
+    from app.utils.url_validators import redact_url_userinfo
+
+    assert redact_url_userinfo("http://localhost:11434") == "http://localhost:11434"
+    assert redact_url_userinfo("http://ollama:11434/api/tags") == "http://ollama:11434"
+
+
+def test_redact_url_userinfo_brackets_ipv6():
+    from app.utils.url_validators import redact_url_userinfo
+
+    assert redact_url_userinfo("http://u:p@[::1]:11434/api/tags") == "http://[::1]:11434"
+
+
+def test_redact_url_userinfo_never_raises_on_garbage_input():
+    from app.utils.url_validators import redact_url_userinfo
+
+    assert redact_url_userinfo("not a url at all ][") == "<unparseable-url>"
+    assert redact_url_userinfo("") == "<unparseable-url>"
