@@ -32,6 +32,7 @@ from app.routes.services import create_audit_log
 from app.services.service_managers import (
     CONTROL_AGENT_URL,
     ManagerResolution,
+    _clear_inventory_cache,
     _get_ollama_port,
     gather_inventory,
     group_for,
@@ -303,6 +304,28 @@ async def _run_ollama_action(
     )
 
 
+async def _fresh_k8s_replica_count(deployment_name: str) -> Optional[int]:
+    """A live (never cached) read of one Deployment's spec replica count,
+    used ONLY to decide whether to clear a stale restart_interrupted
+    marker (codex diff review r3 Medium). The envelope's own
+    resolution.k8s_replicas can be up to 10s stale (the shared inventory
+    cache) -- trusting it here could delete a still-valid marker within
+    that window. Returns None (never clears) on any error: a client
+    construction failure, an unreachable API, or the Deployment not
+    existing are all reasons to leave the marker alone, not delete it on
+    unproven grounds."""
+    client, reason = get_k8s_client()
+    if client is None:
+        return None
+    try:
+        scale = await client.get_scale(deployment_name)
+    except K8sControlError:
+        return None
+    except Exception:  # noqa: BLE001 -- never let this check crash the envelope
+        return None
+    return scale.spec_replicas
+
+
 def _kubernetes_target_counts(db: Session, inv, permissions: set) -> dict:
     """D4.4: how many registry rows (enabled OR disabled) resolve to each
     Kubernetes target. Shared by the envelope (list_services) and the
@@ -548,6 +571,16 @@ async def _dispatch_kubernetes_action(
         return False, f"Kubernetes API error ({exc.kind}): {exc.message}", None, None
     finally:
         release_lease(LEASE_SESSION_FACTORY, lease)
+        # codex diff review r3 Medium: invalidate the shared 10s inventory
+        # cache after EVERY k8s mutation attempt (success or failure) --
+        # _run_action's own gather_inventory(fresh=True) snapshot, taken
+        # before/during this dispatch, is written into this SAME cache
+        # gather_inventory(fresh=False) later reads (list_services always
+        # calls fresh=False). Without this, a scale-back failure that sets
+        # the interrupted marker could be immediately followed by an
+        # envelope read that sees stale cached non-zero replicas and
+        # lazily deletes the marker it just set.
+        _clear_inventory_cache()
 
 
 # Service Routes
@@ -604,12 +637,21 @@ async def list_services(
             if resolution.k8s_replicas == 0 and (lease_expired_mid_restart or marker_set):
                 resolution.note = 'restart_interrupted'
             elif marker_set and resolution.k8s_replicas != 0:
-                # codex diff review r2 Medium #3: an out-of-band `kubectl
-                # scale` recovery means the marker is stale -- the observed
-                # replica count already proves the row isn't wedged, so
-                # drop the badge and clear the marker lazily rather than
-                # letting it resurface on the next restart.
-                clear_interrupted(LEASE_SESSION_FACTORY, resolution.target)
+                # codex diff review r2 Medium #3 / r3 Medium: an out-of-band
+                # `kubectl scale` recovery means the marker MAY be stale --
+                # but resolution.k8s_replicas can itself be up to 10s stale
+                # (the shared inventory cache _run_action's own mutation
+                # wrote into), so it is not proof enough on its own to
+                # delete the marker. Require a live, uncached read of this
+                # Deployment's actual scale before clearing; on any doubt
+                # (fresh read fails) the marker is left alone -- badge stays
+                # visible over deletion) rather than letting it resurface
+                # on the next restart.
+                fresh_replicas = await _fresh_k8s_replica_count(resolution.target)
+                if fresh_replicas is not None and fresh_replicas != 0:
+                    clear_interrupted(LEASE_SESSION_FACTORY, resolution.target)
+                else:
+                    resolution.note = 'restart_interrupted'
 
         run_state = derive_run_state(svc.enabled, svc.health_status, resolution.k8s_replicas)
         if run_state == 'disabled':

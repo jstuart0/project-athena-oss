@@ -447,3 +447,20 @@ def test_L12_show_matches_reveals_text_only_for_builtin_default_format(tmp_path)
 
     github_show_proc = _run(repo, "--format", "github", "--show-matches")
     assert _PROBE_LAN_IP not in github_show_proc.stdout
+
+
+def test_changelog_xmojo_net_still_warns_and_stays_non_blocking(tmp_path):
+    """OSS sanitization pass (2026-09-27): CHANGELOG.md's own xmojo.net
+    references were all stripped/reworded, but the gate itself was never
+    broken -- CHANGELOG.md is a .md file, so classify_path's blanket
+    WARN-class-for-.md rule already covers it (confirmed by direct
+    inspection before the cleanup: every plane.xmojo.net ticket-link line
+    produced a WARN, it just never failed the gate by design). Locks that
+    in as a regression test so a future xmojo.net reference here is never
+    silently invisible."""
+    repo = _init_repo(tmp_path)
+    _write(repo, "CHANGELOG.md", "> **Ticket:** [ATHENA-999](https://plane.xmojo.net)\n")
+    _add(repo)
+    proc = _run(repo)
+    assert proc.returncode == 0
+    assert "WARN CHANGELOG.md:1 [maintainer-domain]" in proc.stdout

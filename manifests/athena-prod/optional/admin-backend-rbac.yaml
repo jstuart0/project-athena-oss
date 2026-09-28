@@ -36,7 +36,7 @@
 # Adding a Deployment later: re-run the resourceNames generator (parses
 # every `manifests/athena-prod/*.yaml`, kind==Deployment,
 # namespace==athena-prod, minus the two protected names) and update the
-# list below. tests/unit/test_admin_backend_rbac_manifest.py (T10) computes
+# list below. admin/backend/tests/test_admin_backend_rbac_manifest.py (T10) computes
 # this set at TEST TIME and fails if this file drifts from the manifests.
 # NOTE: this file grants a Role to the EXISTING `athena-admin-backend`
 # ServiceAccount (defined in manifests/athena-prod/serviceaccounts.yaml) --

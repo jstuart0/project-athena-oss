@@ -122,11 +122,11 @@ def _reset_state(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_healthy_with_two_loaded_models_zero_ca_calls(owner_client, db, monkeypatch):
-    _allow_host(monkeypatch, "10.0.0.108")
-    _set_ollama_url(db, "http://10.0.0.108:11434")
+    _allow_host(monkeypatch, "10.0.0.10")
+    _set_ollama_url(db, "http://10.0.0.10:11434")
     transport = _MultiHostTransport({
-        ("10.0.0.108", "/api/version"): (200, {"version": "0.5.1"}),
-        ("10.0.0.108", "/api/ps"): (200, {"models": [{"name": "a"}, {"name": "b"}]}),
+        ("10.0.0.10", "/api/version"): (200, {"version": "0.5.1"}),
+        ("10.0.0.10", "/api/ps"): (200, {"models": [{"name": "a"}, {"name": "b"}]}),
     })
     _patch_async_client(monkeypatch, transport)
 
@@ -141,8 +141,8 @@ def test_healthy_with_two_loaded_models_zero_ca_calls(owner_client, db, monkeypa
 
 
 def test_version_refused_is_offline(owner_client, db, monkeypatch):
-    _allow_host(monkeypatch, "10.0.0.108")
-    _set_ollama_url(db, "http://10.0.0.108:11434")
+    _allow_host(monkeypatch, "10.0.0.10")
+    _set_ollama_url(db, "http://10.0.0.10:11434")
 
     def _raise_connect(request):
         raise httpx.ConnectError("nope", request=request)
@@ -158,10 +158,10 @@ def test_version_refused_is_offline(owner_client, db, monkeypatch):
 
 
 def test_tags_failure_is_502(owner_client, db, monkeypatch):
-    _allow_host(monkeypatch, "10.0.0.108")
-    _set_ollama_url(db, "http://10.0.0.108:11434")
+    _allow_host(monkeypatch, "10.0.0.10")
+    _set_ollama_url(db, "http://10.0.0.10:11434")
     transport = _MultiHostTransport({
-        ("10.0.0.108", "/api/tags"): (500, {}),
+        ("10.0.0.10", "/api/tags"): (500, {}),
     })
     _patch_async_client(monkeypatch, transport)
 
@@ -201,12 +201,50 @@ def test_ca_host_match_dispatches_through_control_agent(owner_client, db, monkey
     assert rows[0].success is True
 
 
+# ---------------------------------------------------------------------------
+# valerie r2 #4 (envelope-level): confirm_name == 'ollama' on the CA Ollama
+# row, ollama_row present, kubernetes.namespace present.
+# ---------------------------------------------------------------------------
+
+def test_envelope_ollama_row_confirm_name_and_kubernetes_namespace(owner_client, db, monkeypatch):
+    monkeypatch.setenv("CONTROL_AGENT_ENABLED", "true")
+    _clear_all_config_caches()
+    _set_ollama_url(db, "http://localhost:11434")
+
+    ollama_row = RagService(
+        name="ollama", display_name="Ollama", host="localhost", port=11434,
+        service_type="infrastructure", enabled=True, health_status="healthy",
+    )
+    db.add(ollama_row)
+    db.commit()
+
+    transport = _MultiHostTransport({
+        ("localhost", "/process/list"): (200, []),
+        ("localhost", "/docker/list"): (200, []),
+    })
+    _patch_async_client(monkeypatch, transport)
+
+    response = owner_client.get("/api/service-control")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["ollama_row"] == "ollama"
+    row = next(r for r in data["services"] if r["name"] == "ollama")
+    assert row["confirm_required"] is True
+    assert row["confirm_name"] == "ollama"
+
+    # Kubernetes is disabled in this test's environment (no
+    # SERVICE_CONTROL_K8S_ENABLED), but the namespace key must still be
+    # present on the response shape (D3 / plan step 13).
+    assert "namespace" in data["kubernetes"]
+
+
 def test_host_mismatch_resolves_none_and_refuses(owner_client, db, monkeypatch):
     monkeypatch.setenv("CONTROL_AGENT_ENABLED", "true")
     _clear_all_config_caches()
-    _allow_host(monkeypatch, "10.0.0.108")
+    _allow_host(monkeypatch, "10.0.0.10")
     # CONTROL_AGENT_URL default host is 'localhost'; put Ollama somewhere else.
-    _set_ollama_url(db, "http://10.0.0.108:11434")
+    _set_ollama_url(db, "http://10.0.0.10:11434")
 
     transport = _MultiHostTransport({
         ("localhost", "/process/list"): (200, []),
@@ -345,13 +383,13 @@ def test_in_cluster_ollama_resolves_kubernetes_synthetic_row(owner_client, db, m
 # ---------------------------------------------------------------------------
 
 def test_list_ollama_models_ps_failure_degrades_with_header_models_still_listed(owner_client, db, monkeypatch):
-    _allow_host(monkeypatch, "10.0.0.108")
-    _set_ollama_url(db, "http://10.0.0.108:11434")
+    _allow_host(monkeypatch, "10.0.0.10")
+    _set_ollama_url(db, "http://10.0.0.10:11434")
     transport = _MultiHostTransport({
-        ("10.0.0.108", "/api/tags"): (200, {"models": [
+        ("10.0.0.10", "/api/tags"): (200, {"models": [
             {"name": "llama3", "size": 123, "modified_at": "2026-01-01"},
         ]}),
-        ("10.0.0.108", "/api/ps"): (500, {}),
+        ("10.0.0.10", "/api/ps"): (500, {}),
     })
     _patch_async_client(monkeypatch, transport)
 
@@ -366,13 +404,13 @@ def test_list_ollama_models_ps_failure_degrades_with_header_models_still_listed(
 
 
 def test_list_ollama_models_both_healthy_header_absent(owner_client, db, monkeypatch):
-    _allow_host(monkeypatch, "10.0.0.108")
-    _set_ollama_url(db, "http://10.0.0.108:11434")
+    _allow_host(monkeypatch, "10.0.0.10")
+    _set_ollama_url(db, "http://10.0.0.10:11434")
     transport = _MultiHostTransport({
-        ("10.0.0.108", "/api/tags"): (200, {"models": [
+        ("10.0.0.10", "/api/tags"): (200, {"models": [
             {"name": "llama3", "size": 123, "modified_at": "2026-01-01"},
         ]}),
-        ("10.0.0.108", "/api/ps"): (200, {"models": [{"name": "llama3"}]}),
+        ("10.0.0.10", "/api/ps"): (200, {"models": [{"name": "llama3"}]}),
     })
     _patch_async_client(monkeypatch, transport)
 

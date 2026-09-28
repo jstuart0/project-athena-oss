@@ -152,8 +152,18 @@ _inventory_cache: Dict[str, Tuple[float, Inventory]] = {}
 
 
 def _clear_inventory_cache() -> None:
-    """Test-only helper — the module cache is process/global, so tests that
-    inject a fresh transport must clear it first."""
+    """Invalidate the module-global inventory cache.
+
+    Test callers use this after injecting a fresh transport. Production
+    also calls it after every Kubernetes mutation (codex diff review r3
+    Medium): `_run_action` gathers a `fresh=True` snapshot and that
+    snapshot is written into this SAME 10s cache -- if a mutation then
+    fails its scale-back and sets the interrupted marker, an immediate
+    envelope read (`list_services`, `fresh=False`) would otherwise see the
+    stale (pre-failure, or otherwise outdated) cached replica count and
+    the marker's own lazy-clear logic could delete a still-valid marker
+    within that 10s window. Invalidating here forces the next read to
+    re-fetch."""
     _inventory_cache.clear()
 
 

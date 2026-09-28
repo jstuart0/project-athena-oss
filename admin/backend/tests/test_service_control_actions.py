@@ -848,10 +848,13 @@ async def test_restart_superseded_audits_exactly_once_through_the_route(
     patch_calls = [r for r in transport.requests if r.method == "PATCH"]
     assert len(patch_calls) == 1  # only the initial scale-to-0 -- no scale-back raced
 
-    rows = db.query(AuditLog).filter(
-        AuditLog.resource_id == tesla_row.id, AuditLog.error_message == "restart_superseded"
-    ).all()
+    # valerie r2 #5: count ALL audit rows for the service first (not
+    # pre-filtered by error_message) -- proves there is exactly one row
+    # total for this action, not merely one row that happens to match the
+    # filter while a second, differently-labelled row also exists.
+    rows = db.query(AuditLog).filter(AuditLog.resource_id == tesla_row.id).all()
     assert len(rows) == 1, f"expected exactly one audit row, found {len(rows)}"
+    assert rows[0].error_message == "restart_superseded"
 
 
 # ---------------------------------------------------------------------------
@@ -889,7 +892,10 @@ async def test_restart_scaleback_patch_failure_marks_interrupted_and_start_clear
 
     assert read_interrupted(db, "athena-rag-tesla") is True
 
-    sm._clear_inventory_cache()
+    # codex diff review r3 Medium: no manual sm._clear_inventory_cache()
+    # here -- _dispatch_kubernetes_action's own finally must invalidate the
+    # cache itself (this test exercises that real path, not a test-side
+    # workaround for a gap in it).
     envelope = await service_control.list_services(None, db, test_user)
     row = next(r for r in envelope.services if r.name == "tesla-rag")
     assert row.manager_note == "restart_interrupted"
@@ -903,10 +909,87 @@ async def test_restart_scaleback_patch_failure_marks_interrupted_and_start_clear
 
     assert read_interrupted(db, "athena-rag-tesla") is False
 
-    sm._clear_inventory_cache()
     envelope2 = await service_control.list_services(None, db, test_user)
     row2 = next(r for r in envelope2.services if r.name == "tesla-rag")
     assert row2.manager_note != "restart_interrupted"
+
+
+# ---------------------------------------------------------------------------
+# codex diff review r3 Medium: the interrupted marker's lazy-clear must not
+# trust a possibly-stale cached replica count. _run_action's own
+# fresh=True gather is written into the SAME 10s cache list_services'
+# fresh=False reads -- a scale-back failure that sets the marker, followed
+# immediately by an envelope read, must not see a stale non-zero replica
+# count and delete the marker it just set.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_restart_interrupted_marker_survives_stale_cache_until_fresh_scale_confirms_recovery(
+    db, test_user, tesla_row, k8s_env, monkeypatch
+):
+    transport = k8s_env({"athena-rag-tesla": {"replicas": 1, "ready": 1}})
+    real_handler = transport.handler
+    patch_count = {"n": 0}
+
+    def _fail_second_patch(request):
+        if request.method == "PATCH":
+            patch_count["n"] += 1
+            if patch_count["n"] == 2:
+                return httpx.Response(500, json={})
+        return real_handler(request)
+
+    # Warm the SHARED 10s inventory cache with the pre-restart state
+    # (replicas=1) -- the same cache _run_action's own fresh=True gather,
+    # and list_services' fresh=False reads, both share.
+    monkeypatch.setattr(kc, "_test_transport", httpx.MockTransport(real_handler))
+    kc._clear_client_cache()
+    await sm.gather_inventory(fresh=False)
+
+    monkeypatch.setattr(kc, "_test_transport", httpx.MockTransport(_fail_second_patch))
+    kc._clear_client_cache()
+
+    success, message, replicas_after, error_code = await service_control._dispatch_kubernetes_action(
+        "athena-rag-tesla", "restart", db, test_user, None, tesla_row, {},
+    )
+    assert success is False
+
+    from app.services.service_control_settings import read_interrupted
+
+    assert read_interrupted(db, "athena-rag-tesla") is True
+
+    # Immediately after the failure: the Deployment is REALLY at 0
+    # replicas now (the first scale-to-0 PATCH landed; only the scale-back
+    # PATCH failed), but the cache warmed above still claims 1 -- proving
+    # list_services must not trust an uninvalidated cache. No manual
+    # sm._clear_inventory_cache() here: _dispatch_kubernetes_action's own
+    # finally must invalidate it (codex diff review r3 Medium).
+    monkeypatch.setattr(kc, "_test_transport", httpx.MockTransport(real_handler))
+    kc._clear_client_cache()
+
+    envelope = await service_control.list_services(None, db, test_user)
+    row = next(r for r in envelope.services if r.name == "tesla-rag")
+    assert row.manager_note == "restart_interrupted"
+    assert read_interrupted(db, "athena-rag-tesla") is True  # not deleted
+    # Without the invalidation fix, this would read the stale cached
+    # replicas=1 rather than the real (0) count.
+    assert row.k8s_replicas == 0
+
+    # Now the Deployment genuinely IS back at 1 replica (an operator ran
+    # `kubectl scale` out of band). The above list_services() call already
+    # repopulated the cache (correctly, with the fresh 0) -- simulate that
+    # cache entry aging out (the natural 10s-TTL path in production) so
+    # this read reaches a live gather rather than reusing the now-stale
+    # "0" snapshot; the lazy-clear branch's OWN fresh scale check (fix #2)
+    # is what actually confirms recovery, independent of this cache-expiry
+    # simulation.
+    transport.deployments["athena-rag-tesla"]["replicas"] = 1
+    transport.deployments["athena-rag-tesla"]["ready"] = 1
+    sm._clear_inventory_cache()
+
+    envelope2 = await service_control.list_services(None, db, test_user)
+    row2 = next(r for r in envelope2.services if r.name == "tesla-rag")
+    assert row2.manager_note != "restart_interrupted"
+    assert read_interrupted(db, "athena-rag-tesla") is False
 
 
 # ---------------------------------------------------------------------------
@@ -927,6 +1010,7 @@ async def test_envelope_carries_confirm_name_for_critical_ca_process_row(db, tes
     transport = _RecordingTransport({
         "/process/list": (200, [{"port": 8010, "name": "weather-proc", "running": True}]),
         "/docker/list": (200, []),
+        "/process/stop/8010": (200, {"success": True, "message": "stopped"}),
     })
     _patch_async_client(monkeypatch, transport)
 
@@ -936,3 +1020,11 @@ async def test_envelope_carries_confirm_name_for_critical_ca_process_row(db, tes
     assert out.confirm_required is True
     assert out.confirm_name == "process:8010"
     assert out.native_actions == out.actions == out.allowed_actions
+
+    # valerie r2 #3: the round-trip -- send the envelope's OWN confirm_name
+    # back through _run_action (never a hand-typed literal) and expect it
+    # to actually succeed, proving row.confirm_name is genuinely what the
+    # server checks against, not merely a display value.
+    body = service_control.ServiceActionRequest(confirm_name=out.confirm_name)
+    result = await service_control._run_action("weather-proc", "stop", body, None, db, test_user)
+    assert result.success is True
