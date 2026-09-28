@@ -146,14 +146,12 @@ from orchestrator.nodes import finalize_node, notification_pref_node, retrieve_n
 
 # Helpers extracted to helpers.py (Phase 2.1, ATHENA-10)
 from orchestrator.mode_permission import (
-    activate_owner_override,
-    check_entity_permission,
     check_intent_permission,
     degraded_permissions,
-    detect_owner_mode_command,
     ensure_permission_enforcing,
     extract_pin_from_query,
-    get_current_mode,
+    handle_owner_mode_utterance,
+    resolve_request_authorization,
 )
 from orchestrator.helpers import (
     get_feature_config,
@@ -1257,8 +1255,15 @@ async def lifespan(app: FastAPI):
     _runtime.set_result_fusion(result_fusion)
     logger.info("Result fusion initialized")
 
-    # Phase 2: Initialize mode service client for guest mode
-    mode_client = httpx.AsyncClient(base_url=MODE_SERVICE_URL, timeout=10.0)
+    # Phase 2: Initialize mode service client for guest mode.
+    # ATHENA-69 D15/D23: X-Service-Key so the mode service's ingress-auth
+    # dependency (Pass D) doesn't fail-open on every request; 2.5 s timeout
+    # (D4) so an unreachable mode service degrades quickly rather than
+    # holding every request open for 10 s. activate_owner_override's
+    # override POST uses its own 5 s timeout (D34) via a per-call override.
+    mode_client = httpx.AsyncClient(
+        base_url=MODE_SERVICE_URL, timeout=2.5, headers={"X-Service-Key": _SERVICE_API_KEY}
+    )
     _runtime.set_mode_client(mode_client)
     logger.info(f"Mode service client initialized: {MODE_SERVICE_URL}")
 
@@ -1287,15 +1292,22 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"RAG service {service_name} not available: {e}")
 
-    # Check mode service health
+    # Check mode service health. D23: MODE_SERVICE_URL wiring is a
+    # pre-image precondition -- an unreachable mode service here means
+    # every request will degrade (D4), which is a startup-visible
+    # misconfiguration, not a routine transient warning.
     try:
         response = await mode_client.get("/health")
         if response.status_code == 200:
             logger.info("Mode service is healthy")
         else:
-            logger.warning(f"Mode service unhealthy: {response.status_code}")
+            logger.error(
+                "mode_service_unreachable_at_startup",
+                status_code=response.status_code,
+                url=MODE_SERVICE_URL,
+            )
     except Exception as e:
-        logger.warning(f"Mode service not available: {e}")
+        logger.error("mode_service_unreachable_at_startup", error=str(e), url=MODE_SERVICE_URL)
 
     # Post-init readiness assertion (R2-M2) — logged only; does not raise to avoid
     # pod restart loops on transient init failures. /health/ready reflects the state.
@@ -6142,7 +6154,24 @@ orchestrator_graph = None
 class QueryRequest(BaseModel):
     """Request model for query endpoint."""
     query: str = Field(..., description="User's query")
-    mode: Literal["owner", "guest"] = Field("owner", description="User mode")
+    mode: Literal["owner", "guest"] = Field(
+        "owner",
+        description=(
+            "Narrowing hint only -- 'guest' restricts the request, 'owner' "
+            "is ignored. Effective mode is always derived from the mode "
+            "service and device fingerprint (ATHENA-69 D7); a client can "
+            "never claim owner."
+        ),
+    )
+    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_public"]] = Field(
+        None,
+        description=(
+            "Set by the calling service in server code, never by an end "
+            "user (ATHENA-69 D24). Gates only the owner-PIN override "
+            "utterance -- absent or 'web_public' means untrusted and the "
+            "PIN path is refused before any throttle or mode-service call."
+        ),
+    )
     room: str = Field("unknown", description="Room identifier")
     temperature: float = Field(0.7, ge=0, le=2, description="LLM temperature")
     model: Optional[str] = Field(None, description="Preferred model")
@@ -6227,48 +6256,36 @@ async def process_query(request: QueryRequest) -> QueryResponse:
 
         logger.info(f"Processing query in session {session.session_id}")
 
-        # Phase 2: Get current mode and permissions (Guest Mode)
+        # Phase 2 (ATHENA-69 D6/D7): server-derived mode and permissions --
+        # the single resolution path for every entry point. request.mode is
+        # a narrowing hint only; it can never escalate above the server's
+        # own mode.
         with timing_tracker.track("pre_graph", "mode_determination"):
-            # If we identified a guest via device fingerprint, use guest mode
-            # Otherwise check mode service or use request mode
-            mode_info = await get_current_mode()
-            if guest_info:
-                # Device-identified guest: always use guest mode
-                current_mode = "guest"
-            else:
-                current_mode = request.mode if request.mode else mode_info.get("mode", "owner")
-            permissions = mode_info.get("permissions", {})
+            authz = await resolve_request_authorization(request.mode, guest_info)
+            current_mode = authz.mode
+            permissions = authz.permissions
 
             logger.info(
                 "request_mode_determined",
                 mode=current_mode,
-                override_active=mode_info.get("override_active", False),
-                reason=mode_info.get("reason", "Unknown")
+                override_active=authz.mode_info.get("override_active", False),
+                reason=authz.mode_info.get("reason", "Unknown"),
+                degraded=authz.degraded,
+                escalation_ignored=authz.escalation_ignored,
             )
 
-        # Phase 4: Voice PIN Override - Detect and handle owner mode commands
+        # Phase 4 (ATHENA-69 D16/D24): the owner-PIN voice/utterance path.
+        # caller_trust is set by the calling SERVICE, in server code, never
+        # by the end user -- handle_owner_mode_utterance refuses any
+        # caller_trust outside PIN_TRUSTED_TIERS before any throttle
+        # consumption or mode-service call.
         with timing_tracker.track("pre_graph", "pin_override_check"):
-            if detect_owner_mode_command(request.query):
-                logger.info(
-                    "owner_mode_command_detected",
-                    query=request.query[:50],
-                    current_mode=current_mode
-                )
-
-                # Extract PIN if provided
-                pin = extract_pin_from_query(request.query)
-
-                # Attempt to activate owner override
-                success, message, override_data = await activate_owner_override(
-                    pin=pin,
-                    voice_device_id=request.room,  # Use room as device identifier
-                    timeout_minutes=None  # Use default from config
-                )
-
+            outcome = await handle_owner_mode_utterance(request.query, request.caller_trust, request.room)
+            if outcome is not None:
                 # Return early with owner mode response
                 request_id = hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8]
                 return QueryResponse(
-                    answer=message,
+                    answer=outcome.message,
                     intent="mode_override",
                     confidence=1.0,
                     citations=[],
@@ -6276,10 +6293,11 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     session_id=session.session_id,
                     processing_time=time.time() - timing_tracker.start_time if hasattr(timing_tracker, 'start_time') else 0.1,
                     metadata={
-                        "success": success,
-                        "mode": "owner" if success else current_mode,
-                        "pin_provided": pin is not None,
-                        "override_data": override_data
+                        "success": outcome.success,
+                        "mode": "owner" if outcome.success else current_mode,
+                        "pin_provided": extract_pin_from_query(request.query) is not None,
+                        "override_data": outcome.override_data,
+                        "refused_reason": outcome.refused_reason,
                     }
                 )
 
@@ -6686,10 +6704,17 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         log_continuation_decision(final_state, session.session_id)
         tool_exec_time = time.time() - tool_exec_start
 
-        # Phase 2: Check intent permission AFTER classification
+        # Phase 2: Check intent permission AFTER classification. Skipped
+        # when a node already refused (bob M8) -- a route_control_node/
+        # route_music_node/route_tv_node denial already set state.error ==
+        # "permission_denied" and a specific refusal answer; running this
+        # generic check on top would either double-refuse with a less
+        # specific message or (for a non-CONTROL intent a node doesn't
+        # gate) redundantly re-check what authz.permissions already covers.
         permission_check_start = time.time()
         intent = final_state.get("intent")
-        if intent and not check_intent_permission(intent, permissions):
+        node_already_refused = final_state.get("error") == "permission_denied"
+        if not node_already_refused and intent and not check_intent_permission(intent, permissions):
             logger.warning(
                 "intent_blocked_by_guest_mode",
                 intent=intent.value if hasattr(intent, "value") else intent,
@@ -7067,12 +7092,10 @@ async def process_query_stream(request: QueryRequest):
                 zone=request.room
             )
 
-            # Get mode and permissions
-            mode_info = await get_current_mode()
-            if guest_info:
-                current_mode = "guest"  # Device-identified guest
-            else:
-                current_mode = mode_info.get("mode", "owner")
+            # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
+            # via the single resolution path every entry point shares.
+            authz = await resolve_request_authorization(request.mode, guest_info)
+            current_mode = authz.mode
 
             # Get conversation history
             config = await get_config()
@@ -7147,7 +7170,7 @@ async def process_query_stream(request: QueryRequest):
                 query=request.query,
                 mode=current_mode,
                 room=request.room,
-                permissions=mode_info.get("permissions", {}),
+                permissions=authz.permissions,
                 conversation_history=conversation_history,
                 history_summary=history_summary,
                 session_id=session.session_id,
@@ -7338,16 +7361,35 @@ async def process_query_stream_v2(request: QueryRequest):
             if orchestrator_graph is None:
                 orchestrator_graph = create_orchestrator_graph()
 
+            # Multi-guest identification: Look up user by device fingerprint
+            # (ATHENA-69 D6/D7: added here to match /query -- this endpoint
+            # previously had no fingerprint lookup at all, so a device-
+            # identified guest calling stream/v2 was never recognized as one).
+            guest_info = None
+            user_id = request.mode  # Default: use mode as user_id
+
+            if request.device_id:
+                admin_client = get_admin_client()
+                guest_info = await admin_client.get_user_session_by_device(request.device_id)
+                if guest_info:
+                    user_id = f"guest:{guest_info.get('guest_id')}"
+                    logger.info(
+                        "multi_guest_identified_stream_v2",
+                        guest_id=guest_info.get("guest_id"),
+                        guest_name=guest_info.get("guest_name")
+                    )
+
             # Session management
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
-                user_id=request.mode,
+                user_id=user_id,
                 zone=request.room
             )
 
-            # Get mode
-            mode_info = await get_current_mode()
-            current_mode = request.mode if request.mode else mode_info.get("mode", "owner")
+            # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
+            # via the single resolution path every entry point shares.
+            authz = await resolve_request_authorization(request.mode, guest_info)
+            current_mode = authz.mode
 
             # Run orchestrator up to LLM synthesis point
             # We need intent classification and RAG data, but will stream the LLM response
@@ -7361,7 +7403,7 @@ async def process_query_stream_v2(request: QueryRequest):
                 session_id=session.session_id,
                 conversation_history=[],
                 history_summary="",
-                permissions=mode_info.get("permissions", {}),
+                permissions=authz.permissions,
                 interface_type=request.interface_type,
                 context=dict(request.context) if request.context else {},
                 memory_context="",
@@ -8037,7 +8079,10 @@ async def chat_completions(request: OpenAIChatRequest):
                     zone="web"
                 )
 
-                mode_info = await get_current_mode()
+                # ATHENA-69 D6/D7: server-derived mode via the single
+                # resolution path every entry point shares. OpenAIChatRequest
+                # has no mode/device_id fields at all, so both args are None.
+                authz = await resolve_request_authorization(None, None)
                 config = await get_config()
                 conv_settings = await config.get_conversation_settings()
                 conversation_history = []
@@ -8092,9 +8137,9 @@ async def chat_completions(request: OpenAIChatRequest):
 
                 initial_state = OrchestratorState(
                     query=user_message,
-                    mode=mode_info.get("mode", "owner"),
+                    mode=authz.mode,
                     room=room,
-                    permissions=mode_info.get("permissions", {}),
+                    permissions=authz.permissions,
                     conversation_history=conversation_history,
                     history_summary=history_summary,
                     session_id=session.session_id,

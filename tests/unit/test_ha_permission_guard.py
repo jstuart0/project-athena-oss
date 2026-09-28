@@ -248,19 +248,35 @@ class TestDegradedPermissionsWhenModeServiceDown:
 
 class TestScopePropagation:
     def test_scope_propagates_into_create_task_and_gather(self):
+        """Mutation-resistance (tessa, Pass B review): the original version
+        of this test used `lock.unlock` for every gathered write, which
+        passes even with the D20 latch disabled entirely (every write is
+        independently denied by the guest floor regardless of latch
+        state). The second write here is an otherwise-ALLOWED
+        `light.turn_on` -- it can only be denied because the scope already
+        latched after the first (lock) denial, which the reason field
+        proves directly."""
         inner = _make_inner()
         guard = mp.PermissionEnforcingHAClient(inner)
 
-        async def _write():
+        async def _write_lock():
             with pytest.raises(mp.HAWritePermissionDenied):
                 await guard.call_service("lock", "unlock", {"entity_id": "lock.front_door"})
 
+        async def _write_light():
+            with pytest.raises(mp.HAWritePermissionDenied):
+                await guard.call_service("light", "turn_on", {"entity_id": "light.kitchen"})
+
         async def _main():
             with mp.ha_permission_scope(_guest_perms(), mode="guest") as scope:
-                await asyncio.gather(_write(), _write())
-                task = asyncio.create_task(_write())
+                await asyncio.gather(_write_lock(), _write_light())
+                task = asyncio.create_task(_write_light())
                 await task
                 assert len(scope.denials) == 3
+                reasons = [d.reason for d in scope.denials]
+                assert reasons[0] == "entity_or_domain_denied"
+                assert reasons[1] == "halted_after_denial"
+                assert reasons[2] == "halted_after_denial"
 
         _run(_main())
 
@@ -420,11 +436,47 @@ class TestAuthorizeAutomationConfig:
         decision = mp.authorize_automation_config("morning_lights", config, perms)
         assert decision.allowed is True
 
+    def test_automation_walker_nested_choose_allowed_actions(self):
+        """Mutation-resistance (tessa, Pass B review): a positive case is
+        required alongside the denial case below, because deleting the
+        choose[].sequence recursion entirely makes EVERY choose step "an
+        unknown step, denied unless owner" -- which would make the denial
+        case below pass for the wrong reason (the choose wrapper itself
+        being denied, not the nested lock action). This case has NO denied
+        action anywhere inside the choose block, so it can only pass if the
+        walker actually recurses into choose[].sequence and authorizes each
+        nested step on its own merits."""
+        perms = _isolated_perms(allowed_domains=["automation", "light"])
+        config = {
+            "action": [
+                {
+                    "choose": [
+                        {
+                            "conditions": [],
+                            "sequence": [
+                                {"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}},
+                                {"service": "light.turn_off", "target": {"entity_id": "light.office"}},
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+        decision = mp.authorize_automation_config("nested_allowed", config, perms)
+        assert decision.allowed is True
+
     def test_automation_walker_nested_choose_and_data_entity_id(self):
         """Covers the recursive walk through choose[].sequence and the
         data.entity_id target-normalization path (a lock action nested two
         levels deep, expressed with the data-wrapped shape) -- denied even
-        though the top-level automation domain is allowed."""
+        though the top-level automation domain is allowed. Asserts the
+        SPECIFIC reason/target (mutation-resistance, tessa Pass B review):
+        a mutant that stops recursing into choose[].sequence entirely would
+        still deny this config (the un-recursed choose step falls to
+        "unknown step"), but with reason == "unknown_automation_step" and
+        no denied_targets naming the lock entity -- this assertion
+        distinguishes "denied because the nested lock action was correctly
+        found and checked" from "denied because the walker gave up."""
         perms = _isolated_perms(allowed_domains=["automation", "light"], restricted_entities=[r"^lock\."])
         config = {
             "action": [
@@ -443,6 +495,8 @@ class TestAuthorizeAutomationConfig:
         }
         decision = mp.authorize_automation_config("nested", config, perms)
         assert decision.allowed is False
+        assert decision.reason == "entity_or_domain_denied"
+        assert "lock.front_door" in decision.denied_targets
 
     def test_automation_unknown_step_denied_for_guest(self):
         guest = mp.apply_guest_baseline({"mode": "guest"})

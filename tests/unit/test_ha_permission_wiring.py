@@ -28,8 +28,13 @@ Pass E members (gateway -- P5, D17/D24/D27):
  - test_livekit_browser_token_sites_use_default_ttl
 
 
-Later passes (C/F) append their own members to this file; do not remove
-Pass A/B/E cases when doing so.
+Pass C members:
+ - test_entry_points_use_resolve_request_authorization
+ - test_no_client_mode_trust
+ - test_pin_branch_only_via_trust_helper
+
+Later passes (F) append their own members to this file; do not remove
+Pass A/B/C/E cases when doing so.
 """
 from __future__ import annotations
 
@@ -232,9 +237,12 @@ class TestCallServiceMethodsSubsetOfHAClientMethods:
     def test_call_service_methods_subset_of_ha_client_methods(self):
         """Every `.call_service(` receiver across the guarded modules is a
         known ha_client-like reference -- never a bare/raw variable that
-        bypassed ensure_permission_enforcing."""
+        bypassed ensure_permission_enforcing. `self._ha_raw` (music_handler's
+        unwrapped reference, kept only for the one read-only bulk-states
+        call) is deliberately NOT in this allowlist -- see the two
+        dedicated `_ha_raw` tests below, which scope it to reads only."""
         allowed_receivers = {
-            "ha_client", "self.ha_client", "self.ha", "self._inner", "inner", "self._ha_raw",
+            "ha_client", "self.ha_client", "self.ha", "self._inner", "inner",
             "self.music.ha",  # FollowMeAudioService reaches MusicHandler's already-wrapped self.ha
         }
         offenders = []
@@ -256,6 +264,35 @@ class TestCallServiceMethodsSubsetOfHAClientMethods:
                 if receiver not in allowed_receivers:
                     offenders.append(f"{path.name}:{receiver}")
         assert offenders == []
+
+    def test_ha_raw_never_calls_call_service(self):
+        """Mutation-resistance (tessa, Pass B review): self._ha_raw
+        (music_handler's deliberately-unwrapped reference for one
+        read-only bulk-states call) must NEVER be used for a write -- a
+        synthetic `self._ha_raw.call_service(...)` anywhere in src/ must
+        fail this test, independent of the general allowlist above."""
+        offenders = []
+        for path in SRC.rglob("*.py"):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if "self._ha_raw.call_service(" in text:
+                offenders.append(str(path.relative_to(REPO_ROOT)))
+        assert offenders == []
+
+    def test_ha_raw_attribute_access_scoped_to_one_read_site(self):
+        """The only `self._ha_raw.<attr>` accesses anywhere in src/ are
+        `.url` and `.headers`, both at music_handler.py's one bulk-states
+        read site (get_playing_rooms_from_ha) -- never a write method, and
+        never from any other file."""
+        pattern = re.compile(r"self\._ha_raw\.([A-Za-z_][A-Za-z0-9_]*)")
+        found = []
+        for path in SRC.rglob("*.py"):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for m in pattern.finditer(text):
+                found.append((str(path.relative_to(REPO_ROOT)), m.group(1)))
+        assert found, "expected at least one self._ha_raw usage (music_handler.py)"
+        for file_path, attr in found:
+            assert file_path.endswith("music_handler.py"), (file_path, attr)
+            assert attr in ("url", "headers"), (file_path, attr)
 
 
 class TestControllerCallServiceReceiversAreHAClient:
@@ -737,3 +774,69 @@ class TestLiveKitBrowserTokenSitesUseDefaultTTL:
         assert other_sites == []
         assert browser_sites == self.EXPECTED_BROWSER_SITES
         assert athena_sites == self.EXPECTED_ATHENA_SITES
+
+
+# ---------------------------------------------------------------------------
+# Pass C
+# ---------------------------------------------------------------------------
+
+_MAIN_PY = SRC / "orchestrator" / "main.py"
+
+
+class TestEntryPointsUseResolveRequestAuthorization:
+    EXPECTED_FUNCTIONS = {"process_query", "process_query_stream", "process_query_stream_v2", "chat_completions"}
+
+    def test_entry_points_use_resolve_request_authorization(self):
+        tree = ast.parse(_MAIN_PY.read_text(encoding="utf-8"), filename=str(_MAIN_PY))
+        found = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name in self.EXPECTED_FUNCTIONS:
+                for inner in ast.walk(node):
+                    if (
+                        isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Name)
+                        and inner.func.id == "resolve_request_authorization"
+                    ):
+                        found.add(node.name)
+                        break
+        assert found == self.EXPECTED_FUNCTIONS
+
+
+class TestNoClientModeTrust:
+    def test_no_client_mode_trust(self):
+        """Tripwire only (M1): no 'request.mode if request.mode' pattern
+        anywhere in main.py -- the load-bearing guard is
+        test_entry_points_use_resolve_request_authorization above."""
+        text = _MAIN_PY.read_text(encoding="utf-8")
+        assert "request.mode if request.mode" not in text
+
+
+class TestPinBranchOnlyViaTrustHelper:
+    def test_pin_branch_only_via_trust_helper(self):
+        tree = ast.parse(_MAIN_PY.read_text(encoding="utf-8"), filename=str(_MAIN_PY))
+        activate_calls = 0
+        handle_calls = []
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "activate_owner_override"
+            ):
+                activate_calls += 1
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "handle_owner_mode_utterance"
+            ):
+                handle_calls.append(node)
+        assert activate_calls == 0
+
+        # handle_owner_mode_utterance is called exactly once, inside
+        # process_query.
+        assert len(handle_calls) == 1
+        enclosing = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "process_query":
+                if any(inner is handle_calls[0] for inner in ast.walk(node)):
+                    enclosing = node
+        assert enclosing is not None, "handle_owner_mode_utterance must be called inside process_query"

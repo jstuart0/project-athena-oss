@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -39,7 +40,7 @@ import structlog
 from orchestrator.metrics import ha_write_denied_total
 from orchestrator.state import IntentCategory
 from shared.config import get_config
-from shared.guest_policy import apply_guest_baseline, parse_json_array_env
+from shared.guest_policy import apply_guest_baseline, guest_baseline, parse_json_array_env
 
 logger = structlog.get_logger(__name__)
 
@@ -229,38 +230,96 @@ def extract_pin_from_query(query: str) -> Optional[str]:
     return None
 
 
+# ============================================================================
+# ATHENA-69 D33: mixed-version override safety
+# ============================================================================
+#
+# An orchestrator built against Pass D's admin-verified PIN contract must
+# never send a PIN to an OLDER mode service that still hashes and compares
+# it locally (pre-D25) -- that would silently downgrade to the weaker,
+# unsalted-SHA-256 verification path. The mode service's own /health
+# (Pass D) reports pin_authority: "admin" once it's running the new
+# contract; this is cached in-process for up to 30 s so the capability
+# check doesn't add a network round-trip to every override attempt.
+
+_PIN_AUTHORITY_CACHE_SECONDS = 30.0
+_pin_authority_cache: Dict[str, Any] = {"checked_at": float("-inf"), "ok": False}
+
+
+async def _mode_service_supports_admin_pin_authority() -> bool:
+    """True iff the mode service's cached /health reports pin_authority ==
+    "admin". Raises (does not swallow) on a transport failure -- callers
+    that want outage-vs-mixed-version to produce different refusal text
+    must catch around this themselves; a mixed-version response (a
+    successful /health missing or misreporting pin_authority) returns
+    False normally, without raising."""
+    now = time.monotonic()
+    if now - _pin_authority_cache["checked_at"] < _PIN_AUTHORITY_CACHE_SECONDS:
+        return _pin_authority_cache["ok"]
+    response = await mode_client.get("/health")
+    response.raise_for_status()
+    data = response.json()
+    ok = data.get("pin_authority") == "admin"
+    _pin_authority_cache["checked_at"] = now
+    _pin_authority_cache["ok"] = ok
+    return ok
+
+
+def _reset_pin_authority_cache_for_tests() -> None:
+    """PRIVATE — test isolation only. Production code never calls this."""
+    _pin_authority_cache["checked_at"] = float("-inf")
+    _pin_authority_cache["ok"] = False
+
+
 async def activate_owner_override(
     pin: Optional[str],
+    *,
+    caller_tier: str,
     voice_device_id: Optional[str] = None,
     timeout_minutes: Optional[int] = None
 ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """
-    Activate owner mode override via mode service (Phase 4: Voice PIN Override).
+    Activate owner mode override via mode service (Phase 4: Voice PIN Override;
+    ATHENA-69 D16/D33/D34).
 
     Args:
         pin: 6-digit PIN or None
-        voice_device_id: Optional device identifier
+        caller_tier: the caller's trust tier (D16/D24) -- sent to the mode
+            service in the request body; also the D25 lockout key.
+        voice_device_id: Optional device identifier (log-only)
         timeout_minutes: Override duration
 
     Returns:
         Tuple of (success, message, response_data)
     """
     try:
+        if not await _mode_service_supports_admin_pin_authority():
+            logger.warning("override_unavailable_mode_service_version", caller_tier=caller_tier)
+            return (
+                False,
+                "Owner mode isn't available right now -- the system is finishing an update. Please try again in a minute.",
+                None,
+            )
+
         request_data = {
             "mode": "owner",
             "voice_pin": pin,
             "timeout_minutes": timeout_minutes,
-            "voice_device_id": voice_device_id
+            "voice_device_id": voice_device_id,
+            "caller_tier": caller_tier,
         }
 
-        response = await mode_client.post("/mode/override", json=request_data)
+        # D34: the override POST gets its own 5 s timeout, distinct from
+        # mode_client's 2.5 s default (used for permission/health fetches).
+        response = await mode_client.post("/mode/override", json=request_data, timeout=5.0)
 
         if response.status_code == 200:
             data = response.json()
             logger.info(
                 "owner_override_activated",
                 expires_at=data.get("expires_at"),
-                device=voice_device_id
+                device=voice_device_id,
+                caller_tier=caller_tier,
             )
             return True, data.get("message", "Owner mode activated."), data
 
@@ -270,6 +329,14 @@ async def activate_owner_override(
             return False, "Please provide your 6-digit owner PIN. Say 'owner mode' followed by your PIN.", None
 
         elif response.status_code == 403:
+            detail = ""
+            try:
+                detail = response.json().get("detail", "") or ""
+            except Exception:
+                detail = ""
+            if "owner_pin_not_configured" in detail:
+                logger.warning("owner_override_pin_not_configured", caller_tier=caller_tier)
+                return False, "Owner mode needs a PIN set in the admin panel.", None
             # Invalid PIN
             logger.warning("owner_override_pin_invalid", device=voice_device_id)
             return False, "Invalid PIN. Access denied.", None
@@ -279,6 +346,14 @@ async def activate_owner_override(
             detail = response.json().get("detail", "Invalid PIN format")
             logger.warning("owner_override_invalid_format", detail=detail, device=voice_device_id)
             return False, f"{detail}. Please provide a 6-digit PIN.", None
+
+        elif response.status_code == 429:
+            logger.warning("owner_override_locked", caller_tier=caller_tier)
+            return False, "Owner mode is temporarily locked after too many attempts. Try again later.", None
+
+        elif response.status_code == 503:
+            logger.warning("owner_pin_verification_unavailable", caller_tier=caller_tier)
+            return False, "I can't verify the PIN right now. Please try again in a minute.", None
 
         else:
             logger.error(
@@ -291,6 +366,102 @@ async def activate_owner_override(
     except Exception as e:
         logger.error(f"owner_override_failed: {e}")
         return False, "Mode service unavailable. Owner mode request could not be processed.", None
+
+
+# ============================================================================
+# ATHENA-69 D16/D24: owner-override surface gating and per-tier throttle
+# ============================================================================
+
+PIN_TRUSTED_TIERS = frozenset({"household", "sms", "web_authenticated"})
+
+
+class OwnerOverrideThrottle:
+    """In-process per-tier rate limit on owner-override attempts (D16).
+
+    Keyed ONLY on ``tier`` -- never ``session_id``, ``room``, ``device_id``,
+    or ``source``, all of which are caller-controlled and would let an
+    anonymous caller reset or evade the limit by rotating them. 10 attempts
+    per tier per 10-minute sliding window.
+    """
+
+    _MAX_ATTEMPTS = 10
+    _WINDOW_SECONDS = 600.0
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._attempts: Dict[str, List[float]] = {}
+
+    def check(self, tier: str) -> bool:
+        """Record an attempt for `tier` and return whether it's allowed."""
+        now = self._clock()
+        window_start = now - self._WINDOW_SECONDS
+        history = self._attempts.setdefault(tier, [])
+        history[:] = [t for t in history if t > window_start]
+        if len(history) >= self._MAX_ATTEMPTS:
+            return False
+        history.append(now)
+        return True
+
+
+_owner_override_throttle = OwnerOverrideThrottle()
+
+
+def _reset_owner_override_throttle_for_tests() -> None:
+    """PRIVATE — test isolation only. Production code never calls this."""
+    global _owner_override_throttle
+    _owner_override_throttle = OwnerOverrideThrottle()
+
+
+@dataclass(frozen=True)
+class OwnerOverrideOutcome:
+    """The result of `handle_owner_mode_utterance` when the query WAS an
+    owner-mode command (None means it wasn't one at all)."""
+    success: bool
+    message: str
+    override_data: Optional[Dict[str, Any]]
+    refused_reason: Optional[str] = None
+
+
+async def handle_owner_mode_utterance(
+    query: str, caller_trust: Optional[str], room: Optional[str]
+) -> Optional["OwnerOverrideOutcome"]:
+    """The single orchestrator entry point for the owner-PIN voice/utterance
+    path (D16, D24). Returns None when `query` isn't an owner-mode command
+    at all. Otherwise, in order:
+
+    1. `caller_trust not in PIN_TRUSTED_TIERS` -> refused "untrusted_surface",
+       before any throttle consumption or mode-service call (bob r2 H2 --
+       an anonymous internet caller must never be able to touch the
+       per-tier throttle or lock out a real tier).
+    2. Throttle check for `caller_trust` -> refused "throttled" on failure.
+    3. `extract_pin_from_query` -> `activate_owner_override`.
+    """
+    if not detect_owner_mode_command(query):
+        return None
+
+    if caller_trust not in PIN_TRUSTED_TIERS:
+        logger.warning("owner_override_refused_untrusted_surface", caller_trust=caller_trust)
+        return OwnerOverrideOutcome(
+            success=False,
+            message="Owner mode isn't available from here.",
+            override_data=None,
+            refused_reason="untrusted_surface",
+        )
+
+    if not _owner_override_throttle.check(caller_trust):
+        logger.warning("owner_override_throttled", caller_trust=caller_trust)
+        return OwnerOverrideOutcome(
+            success=False,
+            message="Owner mode is temporarily locked after too many attempts. Try again later.",
+            override_data=None,
+            refused_reason="throttled",
+        )
+
+    pin = extract_pin_from_query(query)
+    success, message, override_data = await activate_owner_override(
+        pin, caller_tier=caller_trust, voice_device_id=room
+    )
+    return OwnerOverrideOutcome(success=success, message=message, override_data=override_data, refused_reason=None)
 
 
 def check_intent_permission(intent: IntentCategory, permissions: Dict[str, Any]) -> bool:
@@ -1109,3 +1280,98 @@ def ensure_permission_enforcing(client: Any) -> Any:
     if getattr(client, "_athena_ha_guard", None) is _GUARD_SENTINEL:
         return client
     return PermissionEnforcingHAClient(client)
+
+
+# ============================================================================
+# ATHENA-69 Pass C (D6, D7): server-derived mode at every entry point
+# ============================================================================
+
+async def get_guest_permissions() -> Dict[str, Any]:
+    """D6: fetch guest permissions explicitly from the mode service,
+    regardless of the household's current (possibly owner) mode. On any
+    mismatch, error, or timeout, falls back to the floored baseline --
+    never returns owner. No owner variant exists; only "guest" can be
+    requested.
+    """
+    try:
+        response = await mode_client.get("/mode/permissions", params={"mode": "guest"})
+        response.raise_for_status()
+        data = response.json()
+        if data.get("mode") != "guest":
+            raise ValueError("mode service returned non-guest permissions for a guest request")
+        return normalize_permissions(data)
+    except Exception as e:
+        logger.warning(f"get_guest_permissions falling back to floored baseline: {e}")
+        baseline = guest_baseline()
+        fallback_floor = degraded_permissions()["restricted_entities"]
+        merged_entities = list(baseline["restricted_entities"])
+        for pattern in fallback_floor:
+            if pattern not in merged_entities:
+                merged_entities.append(pattern)
+        return normalize_permissions({**baseline, "restricted_entities": merged_entities})
+
+
+@dataclass(frozen=True)
+class RequestAuthorization:
+    """The resolved mode/permissions for one request, from
+    resolve_request_authorization."""
+    mode: str
+    permissions: Dict[str, Any]
+    server_mode: str
+    degraded: bool
+    escalation_ignored: bool
+    mode_info: Dict[str, Any]
+
+
+async def resolve_request_authorization(
+    request_mode: Optional[str], guest_info: Optional[Dict[str, Any]]
+) -> RequestAuthorization:
+    """The single mode/permissions resolution path for every orchestrator
+    entry point (D7, D6, D5).
+
+    Effective mode is "guest" if `guest_info` is present (device-
+    fingerprinted guest), `request_mode == "guest"`, or the server's own
+    mode is "guest"; otherwise it's the server's mode. `request_mode ==
+    "owner"` never changes anything -- narrowing only, never escalation.
+
+    Guest permissions: the server's own permissions when the server is
+    already in guest mode (no extra fetch needed); the D4 degraded
+    baseline (no network call) when the mode service is degraded;
+    otherwise an explicit `get_guest_permissions()` fetch (a narrowing
+    guest -- fingerprinted or request-asserted -- while the house is
+    nominally owner needs the REAL guest allowlist, not the owner
+    permissions the server returned for its own mode).
+    """
+    mode_info = await get_current_mode()
+    server_mode = mode_info.get("mode", "owner")
+    degraded = bool(mode_info.get("degraded", False))
+
+    effective_mode = "guest" if (guest_info or request_mode == "guest" or server_mode == "guest") else server_mode
+
+    escalation_ignored = request_mode == "owner" and effective_mode != "owner"
+    if escalation_ignored:
+        logger.info(
+            "request_mode_escalation_ignored",
+            request_mode=request_mode,
+            effective_mode=effective_mode,
+            server_mode=server_mode,
+        )
+
+    if effective_mode == "guest":
+        if degraded:
+            permissions = normalize_permissions({**degraded_permissions(), "mode": "guest"})
+        elif server_mode == "guest":
+            permissions = normalize_permissions(mode_info.get("permissions", {}))
+        else:
+            permissions = await get_guest_permissions()
+    else:
+        permissions = normalize_permissions(mode_info.get("permissions", {}))
+
+    return RequestAuthorization(
+        mode=effective_mode,
+        permissions=permissions,
+        server_mode=server_mode,
+        degraded=degraded,
+        escalation_ignored=escalation_ignored,
+        mode_info=mode_info,
+    )
