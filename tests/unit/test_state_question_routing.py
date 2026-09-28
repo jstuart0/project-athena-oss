@@ -617,6 +617,34 @@ class TestProbePhraseDispatchedIntent:
         assert result.retrieved_data["intent"]["action"] == "get_status"
 
 
+def test_probe_phrase_never_writes():
+    """Verification (3): the incident phrase, as owner, through an LLM that
+    answers every prompt with a turn_off write -> zero call_service calls,
+    and a state answer rather than a refusal or a fan-out prompt."""
+    result, controller, llm, client = _drive_route_control(PROBE_PHRASE)
+    assert client.call_service.await_count == 0, client.call_service.await_args_list
+    assert result.answer and result.answer != READ_ONLY_REFUSAL
+    assert "should i go ahead" not in result.answer.lower()
+    assert "to do it, say" not in result.answer.lower()
+
+
+def test_probe_phrase_harness_records_writes_when_routing_and_gate_bypassed():
+    """Positive control for the test above: with the question routing
+    bypassed (classifier forced to UNKNOWN) and the fan-out limits off, the
+    same harness records the incident's office-light turn_off writes -- so
+    zero writes above is the fix, not a harness that can't see writes."""
+    from orchestrator import write_fanout
+    from orchestrator.utterance_kind import UNKNOWN_CLASSIFICATION
+
+    cfg = mock.MagicMock(ha_write_fanout_confirm_threshold=0, ha_write_fanout_hard_limit=0)
+    with mock.patch("orchestrator.nodes.route_control.classify_utterance", return_value=UNKNOWN_CLASSIFICATION), \
+            mock.patch.object(write_fanout, "get_config", lambda: cfg):
+        result, controller, llm, client = _drive_route_control(PROBE_PHRASE)
+    services = [c.args[1] for c in client.call_service.await_args_list]
+    assert len(services) >= 11, services
+    assert set(services) == {"turn_off"}
+
+
 class TestJsonFallbackImperativeCase:
     """3.6(j): the JSON-fallback imperative case (bob L2) -- "turn the
     office lights on" through an LLM returning invalid JSON yields exactly
