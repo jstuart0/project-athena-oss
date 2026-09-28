@@ -239,6 +239,16 @@ class AthenaConfig(BaseSettings):
     # (e.g. a bare-metal dev RAG service that was never seeded).
     service_registry_endpoint_url: str = Field(default="")
 
+    # service_registry_name: overrides the connector-name normalisation
+    # shared.service_registry.to_rag_registry_name()/to_rag_host_label()
+    # apply by default (lower-case, strip "-"/"_", then the "-rag"/
+    # "athena-rag-" convention) for a deployer whose seeded row doesn't
+    # follow that convention. When set, it IS the base used to build both
+    # the registry `name` and the `host_label` -- no further normalisation
+    # is applied to it. Empty (default): derive the base from the
+    # connector's own service_name as before.
+    service_registry_name: str = Field(default="")
+
     # ------------------------------------------------------------------
     # Health poller (ATHENA-1 Phase 4)
     # ------------------------------------------------------------------
