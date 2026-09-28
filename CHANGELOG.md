@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- The admin-backend session ID now rotates on every login path (local, demo-mode, OIDC callback), closing a session-fixation gap where a cookie value set before authentication remained valid afterward. Logout already invalidated the session correctly and is unchanged.
+
 ---
 
 ## [0.4.0] - 2026-09-28 — OSS readiness, service control, security hardening

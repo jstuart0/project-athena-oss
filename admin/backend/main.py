@@ -36,6 +36,7 @@ from app.auth.oidc import (
     decode_ws_ticket,
 )
 from app.utils.rate_limit import login_rate_limit_dep
+from app.utils.sessions import rotate_session_id
 from app.auth import oidc as oidc_auth
 from app.models import User, RagService
 
@@ -780,6 +781,13 @@ async def auth_login(request: Request, db: Session = Depends(get_db)):
         # xander:5 — explicit int() cast for JSON serialization safety on session store.
         request.session['access_token'] = demo_token
         request.session['user_id'] = int(demo_user.id)
+        # Rotate the session ID post-auth and purge the pre-rotation entry
+        # from the store (session fixation, ATHENA-80/xander; store purge
+        # added per codex diff review 2026-09-28): a cookie value fixed by an
+        # attacker before login must not become valid for the
+        # now-authenticated session, and the old id can't be replayed even
+        # if it already held data.
+        await rotate_session_id(request)
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:8080")
         # ?logged_in=1 is a client-side hint to clear stale localStorage before the
         # frontend fetches the session token (codex-H1 mitigation for shared devices).
@@ -852,6 +860,14 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
         request.session['access_token'] = jwt_token
         request.session['user_id'] = user.id
 
+        # Rotate the session ID post-auth and purge the pre-rotation entry
+        # from the store (session fixation, ATHENA-80/xander; store purge
+        # added per codex diff review 2026-09-28): a cookie value fixed by an
+        # attacker before login must not become valid for the
+        # now-authenticated session, and the old id can't be replayed even
+        # if it already held data.
+        await rotate_session_id(request)
+
         logger.info("user_authenticated", user_id=user.id, username=user.username)
 
         # xander:4 — session already populated at the 'request.session' lines above;
@@ -871,6 +887,19 @@ async def auth_logout(request: Request):
     # Explicitly load session for starsessions compatibility
     await load_session(request)
     request.session.clear()
+    # ATHENA-80/xander: deliberately NOT calling regenerate_session_id() here.
+    # starsessions' SessionMiddleware treats an is_empty-after-request session
+    # as a destroy case: it removes THIS request's handler.session_id from the
+    # store and expires the cookie in the same response (see
+    # starsessions.middleware.SessionMiddleware.__call__). regenerate_session_id()
+    # rewrites handler.session_id to a fresh, never-written value *before* that
+    # cleanup runs, so the middleware's destroy() call would target the new
+    # (empty) id instead of the old one -- leaving the just-cleared session's
+    # data (including the JWT) sitting in the store until it expires on its own,
+    # while still expiring the cookie in the browser regardless. Verified
+    # empirically against starsessions 2.2.1: clear() alone already removes the
+    # store entry and expires the cookie; adding regenerate_session_id() here
+    # only defeats that cleanup.
     logger.info("user_logged_out")
 
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:8080")
