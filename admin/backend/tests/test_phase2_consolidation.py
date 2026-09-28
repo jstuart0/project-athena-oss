@@ -812,21 +812,30 @@ class TestPhase2ReconcileRegressions:
         )
 
     def test_service_control_js_has_unconfigured_case(self):
-        """DC10 (ATHENA-89 Phase 4): service-control.js must have an explicit
-        'unconfigured' case with its own amber badge, distinct from both the
-        green 'healthy' case and the yellow 'unhealthy'/'degraded' case."""
+        """DC10 (ATHENA-89 Phase 4): service-control.js must render an
+        'unconfigured' health state with its own amber "Needs setup" label,
+        distinct from both the green 'healthy' state and the red/amber
+        'unhealthy'/'degraded' state.
+
+        ATHENA-118 Phase 4b (ruby H2): the per-row switch statement this
+        assertion originally pinned was replaced by _healthLine's shared
+        health vocabulary (one status language for core/infra/RAG rows) --
+        updated to check the new mechanism rather than the deleted one."""
         path = os.path.normpath(
             os.path.join(os.path.dirname(__file__), '..', '..', '..', 'admin', 'frontend', 'service-control.js')
         )
         with open(path) as f:
             source = f.read()
-        assert "case 'unconfigured':" in source, (
-            "service-control.js must have an 'unconfigured' case (DC10: 200 body with configured: false)"
+        assert "function _healthLine(" in source
+        idx = source.index("function _healthLine(")
+        snippet = source[idx: idx + 800]
+        assert "case 'unconfigured':" in snippet, (
+            "_healthLine must have an 'unconfigured' case (DC10: 200 body with configured: false)"
         )
-        idx = source.index("case 'unconfigured':")
-        snippet = source[idx: idx + 400]
-        assert "amber" in snippet, "the unconfigured badge must use the amber palette, not green/red/gray"
-        assert "Needs Setup" in snippet
+        unconfigured_idx = snippet.index("case 'unconfigured':")
+        unconfigured_snippet = snippet[unconfigured_idx: unconfigured_idx + 200]
+        assert "amber" in unconfigured_snippet, "the unconfigured state must use the amber palette, not green/red/gray"
+        assert "Needs setup" in unconfigured_snippet
 
     # -----------------------------------------------------------------------
     # xander H-1 — integrations.py healthy path has no MAC_STUDIO_IP reference

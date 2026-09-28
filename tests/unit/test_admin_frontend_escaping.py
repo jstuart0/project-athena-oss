@@ -573,10 +573,27 @@ def _extract_block(file_path: Path, marker: str) -> str:
     """Generalizes _extract_function_source to any top-level brace-delimited
     declaration (`function NAME(`, `const NAME = {`, ...) reachable by a
     unique marker string, by brace-matching from the first `{` after the
-    marker to its balanced close (plus a trailing `;` if present)."""
+    marker to its balanced close (plus a trailing `;` if present).
+
+    For a `function NAME(` marker, the search for the body's opening brace
+    skips past the parameter list first -- a destructured parameter (e.g.
+    `function f({ a, b }) {`) puts a `{` inside the parens, which a naive
+    "first `{` after the marker" search would grab instead of the actual
+    function body."""
     source = file_path.read_text()
     start = source.index(marker)
-    brace_start = source.index("{", start)
+    search_from = start + len(marker)
+    if marker.startswith("function") and marker.rstrip().endswith("("):
+        paren_depth = 1  # the marker's own trailing '(' already opened one
+        i = search_from
+        while paren_depth > 0:
+            if source[i] == "(":
+                paren_depth += 1
+            elif source[i] == ")":
+                paren_depth -= 1
+            i += 1
+        search_from = i
+    brace_start = source.index("{", search_from)
     depth = 0
     for i in range(brace_start, len(source)):
         if source[i] == "{":
@@ -623,18 +640,29 @@ def _render_status_cell(row):
     sources = [
         ESCAPE_HTML_JS.read_text(),
         _extract_block(SERVICE_CONTROL_JS, "const RUN_STATE_BADGES"),
+        _extract_block(SERVICE_CONTROL_JS, "function _isNativelyRunning("),
+        _extract_block(SERVICE_CONTROL_JS, "function _healthLine("),
         _extract_block(SERVICE_CONTROL_JS, "function renderStatusCell("),
     ]
     return _run_node_with_sources(sources, f"renderStatusCell({json.dumps(row)})")
 
 
-def _render_service_actions(row):
-    sources = [
+def _manager_sources():
+    return [
         ESCAPE_HTML_JS.read_text(),
+        _extract_block(SERVICE_CONTROL_JS, "const K8S_REASON_TEXT"),
+        _extract_block(SERVICE_CONTROL_JS, "function k8sReasonText("),
+        _extract_block(SERVICE_CONTROL_JS, "function _managerNoteInfo("),
+        _extract_block(SERVICE_CONTROL_JS, "function _managerBadgeLabel("),
+        _extract_block(SERVICE_CONTROL_JS, "function _managerBadge("),
+        _extract_block(SERVICE_CONTROL_JS, "function _managerNoteSentenceHtml("),
+    ]
+
+
+def _render_service_actions(row):
+    sources = _manager_sources() + [
         _extract_block(SERVICE_CONTROL_JS, "const ACTION_LABELS"),
         _extract_block(SERVICE_CONTROL_JS, "const ACTION_CLASSES"),
-        _extract_block(SERVICE_CONTROL_JS, "function _managerLabel("),
-        _extract_block(SERVICE_CONTROL_JS, "function _managerBadge("),
         _extract_block(SERVICE_CONTROL_JS, "function renderServiceActions("),
     ]
     return _run_node_with_sources(sources, f"renderServiceActions({json.dumps(row)})")
@@ -703,6 +731,31 @@ def test_t13_disabled_and_native_state_both_present():
     assert "0/0 pods" in html
 
 
+def test_t13_render_status_cell_escapes_native_state_and_last_error():
+    """tessa P4 mid-build High: renderStatusCell escapes native_state and
+    last_error, but stripping either escapeHtml call left all 51 pre-P4b
+    tests green -- no test actually round-tripped a hostile payload through
+    THIS function. Written against the H2 rewrite's new shape (health line
+    included), so it can't silently pass against stale code either."""
+    hostile = '<img src=x onerror=alert(1)> \\ " \''
+    row = {
+        "run_state": "stopped",
+        "native_state": hostile,
+        "last_error": hostile,
+        "health_status": "unhealthy",
+    }
+    html = _render_status_cell(row)
+
+    # No live tag boundary survives -- '<' and '>' are the characters that
+    # matter for breaking out of a text node; the inert word "onerror="
+    # appearing as escaped text content is not itself a vulnerability.
+    assert "<img" not in html
+    assert "&lt;img" in html
+    assert "&gt;" in html
+    # The raw payload must appear nowhere unescaped in the output.
+    assert hostile not in html
+
+
 def test_t13_escaping_round_trip_action_name_and_note_escaping():
     hostile_name = "svc'&\"<x>"
     row = {
@@ -754,6 +807,30 @@ def test_t14_loading_message_when_health_is_null():
     assert "Loading" in message
 
 
+def test_t14_manager_none_but_healthy_still_shows_models_table():
+    """ruby H8: the manager only governs start/stop/restart -- load/unload
+    hit the Ollama URL directly regardless of manager. manager==='none'
+    must NOT hide the table, or model management breaks for the default
+    OSS deployment (Control Agent and Kubernetes both off)."""
+    health = {"manager": "none", "manager_note": "managed_externally", "healthy": True, "status": "healthy"}
+    message = _ollama_models_message(health, None)
+    assert message is None
+
+
+def test_t14_fetch_failure_is_distinct_from_a_real_offline_status():
+    """ruby H8: /ollama/health itself failing (network down between the
+    browser and admin-backend) must read differently than Ollama itself
+    reporting offline/error -- fetchFailed distinguishes the two."""
+    health = {"manager": "none", "manager_note": "health_check_failed", "healthy": False, "status": "error", "fetchFailed": True}
+    offline_health = {"manager": "control_agent", "healthy": False, "status": "offline"}
+
+    message = _ollama_models_message(health, None)
+    offline_message = _ollama_models_message(offline_health, None)
+
+    assert "admin-backend" in message
+    assert message != offline_message
+
+
 def test_t14_render_ollama_models_table_renders_loading_when_health_null():
     """renderOllamaModelsTable() needs `document`, so it isn't cleanly
     extractable as pure JS for this Node harness (contract's own escape
@@ -793,3 +870,43 @@ def test_static_ollama_loaders_only_awaited_inside_refresh_panel():
 def test_static_restart_timeline_element_present_exactly_once():
     source = (FRONTEND_DIR / "index.html").read_text()
     assert source.count('id="restart-timeline"') == 1
+
+
+# ---------------------------------------------------------------------------
+# ruby M1 / tessa P4 mid-build Medium: the typed-confirm exact-match gating
+# had no test at all. typedConfirmMatches is a pure function extracted from
+# showServiceConfirmModal specifically so this is testable without jsdom;
+# the modal's own DOM wiring (createElement + textContent, never innerHTML
+# interpolation of the target name) is covered by a static source check.
+# ---------------------------------------------------------------------------
+
+def _typed_confirm_matches(expected, value):
+    fn_source = _extract_block(SERVICE_CONTROL_JS, "function typedConfirmMatches(")
+    return _run_node_with_source(fn_source, f"typedConfirmMatches({json.dumps(expected)}, {json.dumps(value)})")
+
+
+def test_typed_confirm_matches_exact_case_sensitive_match():
+    assert _typed_confirm_matches("athena-orchestrator", "athena-orchestrator") is True
+
+
+@pytest.mark.parametrize("value", ["Athena-Orchestrator", "athena-orchestrato", "athena-orchestrator ", ""])
+def test_typed_confirm_matches_rejects_anything_else(value):
+    assert _typed_confirm_matches("athena-orchestrator", value) is False
+
+
+def test_typed_confirm_matches_null_expected_never_matches():
+    assert _typed_confirm_matches(None, "") is False
+    assert _typed_confirm_matches(None, None) is False
+
+
+def test_static_typed_confirm_input_built_via_create_element_and_text_content():
+    """The typed-confirm label uses textContent (never innerHTML string
+    interpolation of the server-resolved target name) and the input is
+    built with document.createElement -- both inside the requireTyped
+    branch of showServiceConfirmModal."""
+    source = SERVICE_CONTROL_JS.read_text()
+    modal_fn = _extract_block(SERVICE_CONTROL_JS, "function showServiceConfirmModal(")
+    assert "document.createElement('label')" in modal_fn
+    assert "document.createElement('input')" in modal_fn
+    assert "label.textContent = `Type \"${requireTyped}\" to confirm:`;" in modal_fn
+    assert "typedConfirmMatches(requireTyped" in modal_fn
