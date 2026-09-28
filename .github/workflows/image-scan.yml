@@ -1,0 +1,55 @@
+name: Container Image Vulnerability Scan
+
+# ATHENA-126: builds athena-mode-service (the smallest Python image, sharing
+# the same python:3.11-slim base and Dockerfile skeleton as every other
+# service image) and runs Trivy against it on every PR touching a
+# Dockerfile or a requirements file. A CRITICAL/HIGH finding with a
+# published fix fails the build; --ignore-unfixed skips advisories with no
+# upstream fix, and .trivyignore (repo root) documents the one exception
+# that IS fixed upstream but can't be cleared from this repo (see that
+# file's header for GHSA-6v7p-g79w-8964).
+
+on:
+  pull_request:
+    paths:
+      - "**/Dockerfile"
+      - "**/requirements*.txt"
+      - "**/requirements*.in"
+      - "scripts/generate-rag-dockerfiles.py"
+      - ".trivyignore"
+      - ".github/workflows/image-scan.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  trivy-scan:
+    name: Trivy scan (athena-mode-service)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build athena-mode-service
+        run: |
+          docker buildx build --load --pull \
+            -t athena-mode-service:scan \
+            -f src/mode_service/Dockerfile \
+            src
+
+      - name: Run Trivy (CRITICAL/HIGH, fixed only)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}/.trivyignore:/.trivyignore:ro" \
+            aquasec/trivy:latest image \
+            --exit-code 1 \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --ignorefile /.trivyignore \
+            athena-mode-service:scan

@@ -76,6 +76,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Apply Debian security updates before anything else installs on top of the
+# base layer (Trivy: perl-base, gzip, libpcre2-8-0 CVEs ship stale in
+# python:3.11-slim until this runs). ATHENA-126.
+RUN apt-get update && apt-get -y --no-install-recommends upgrade && rm -rf /var/lib/apt/lists/*
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     curl \\
