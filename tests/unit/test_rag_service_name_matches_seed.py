@@ -9,13 +9,23 @@ name/host never had ("pricecompare"/"sitescraper") -- neither `name` nor
 the `host_label` fallback matched an existing row, so the admin upsert
 treated it as a brand-new row with no endpoint_url and rejected it.
 
-Static AST scan, no imports of either module under test: resolves the
-first positional argument of every register_service()/startup_service()
-call site (a literal string or a module-level SERVICE_NAME assignment) and
-statically parses OSS_SERVICE_REGISTRY out of admin/backend/app/database.py
-(never imports/executes it -- that module creates a SQLAlchemy engine at
-import time), so a future RAG connector with the same hyphen/underscore
-mismatch fails CI instead of 422ing in production.
+Static AST scan, no imports of admin/backend: resolves the first positional
+argument of every register_service()/startup_service() call site (a literal
+string or a module-level SERVICE_NAME assignment) and statically parses
+OSS_SERVICE_REGISTRY out of admin/backend/app/database.py (never imports/
+executes it -- that module creates a SQLAlchemy engine at import time), so a
+future RAG connector with the same hyphen/underscore mismatch fails CI
+instead of 422ing in production.
+
+codex follow-up (2026-09-28) on 4db4236 tightened two things:
+  - the "is every call site's argument statically resolvable" guard now
+    tracks (path, lineno) per call site rather than diffing at file
+    granularity -- a computed argument sitting next to a resolvable literal
+    in the same file no longer slips through unflagged.
+  - normalisation can alias two distinct connectors onto one registry row
+    (e.g. a hypothetical "site-scraper" and "sitescraper" both -> the same
+    "sitescraper" base). Two new tests assert no collision exists, both
+    across real call sites and across the seed list itself.
 """
 from __future__ import annotations
 
@@ -30,9 +40,24 @@ _SRC = REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from shared.service_registry import to_rag_host_label  # noqa: E402
+from shared.service_registry import _normalize_rag_base, to_rag_host_label  # noqa: E402
 
 _REGISTER_CALL_NAMES = {"register_service", "startup_service"}
+
+
+class CallSite:
+    """One register_service()/startup_service() call site. `name` is the
+    statically-resolved first positional argument, or None when it couldn't
+    be resolved (a computed expression)."""
+
+    __slots__ = ("lineno", "name")
+
+    def __init__(self, lineno: int, name: str | None):
+        self.lineno = lineno
+        self.name = name
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return f"CallSite(lineno={self.lineno}, name={self.name!r})"
 
 
 def _call_name(node: ast.AST) -> str | None:
@@ -61,48 +86,48 @@ def _module_level_string_constants(tree: ast.Module) -> dict[str, str]:
     return out
 
 
-def _resolve_registration_service_names(source: str) -> list[str]:
-    """Returns the resolved service_name argument for every
-    register_service()/startup_service() call in `source` whose first
-    positional argument is a literal string or a module-level string
-    constant (e.g. SERVICE_NAME). A call whose argument isn't statically
-    resolvable (a computed expression) is skipped, not silently ignored --
-    see test_every_registration_arg_is_statically_resolvable below."""
+def _registration_call_sites(source: str) -> list[CallSite]:
+    """Every register_service()/startup_service() call in `source`, one
+    CallSite per call with its line number and resolved argument (or None
+    when the first positional argument is neither a literal string nor a
+    module-level string constant like SERVICE_NAME)."""
     tree = ast.parse(source)
     constants = _module_level_string_constants(tree)
-    names: list[str] = []
+    sites: list[CallSite] = []
     for node in ast.walk(tree):
-        if _call_name(node) is None or not node.args:  # type: ignore[union-attr]
+        if _call_name(node) is None:
             continue
-        arg = node.args[0]  # type: ignore[union-attr]
+        assert isinstance(node, ast.Call)
+        if not node.args:
+            sites.append(CallSite(node.lineno, None))
+            continue
+        arg = node.args[0]
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            names.append(arg.value)
+            sites.append(CallSite(node.lineno, arg.value))
         elif isinstance(arg, ast.Name) and arg.id in constants:
-            names.append(constants[arg.id])
-    return names
+            sites.append(CallSite(node.lineno, constants[arg.id]))
+        else:
+            sites.append(CallSite(node.lineno, None))
+    return sites
 
 
-def _rag_files_with_registration_calls() -> dict[Path, list[str]]:
-    out: dict[Path, list[str]] = {}
+def _all_rag_call_sites() -> dict[Path, list[CallSite]]:
+    out: dict[Path, list[CallSite]] = {}
     for path in sorted(_RAG_ROOT.glob("*/main.py")):
-        names = _resolve_registration_service_names(path.read_text())
-        if names:
-            out[path] = names
+        sites = _registration_call_sites(path.read_text())
+        if sites:
+            out[path] = sites
     return out
 
 
-def _rag_files_with_any_registration_call_text() -> list[Path]:
-    """Every file mentioning register_service/startup_service at all
-    (including a statically-unresolvable call, or a bare import). Used only
-    to detect a call whose argument this scanner failed to resolve."""
-    out = []
-    for path in sorted(_RAG_ROOT.glob("*/main.py")):
-        source = path.read_text()
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if _call_name(node) is not None:
-                out.append(path)
-                break
+def _rag_files_with_registration_calls() -> dict[Path, list[str]]:
+    """Path -> resolved service_name args only (unresolved call sites
+    dropped) -- what the seed-match and collision checks below iterate."""
+    out: dict[Path, list[str]] = {}
+    for path, sites in _all_rag_call_sites().items():
+        names = [s.name for s in sites if s.name is not None]
+        if names:
+            out[path] = names
     return out
 
 
@@ -157,20 +182,43 @@ def test_registration_call_named_members_present():
 
 
 def test_every_registration_arg_is_statically_resolvable():
-    """Every file that calls register_service()/startup_service() at all
-    must have had its argument resolved by _resolve_registration_service_names()
-    -- otherwise test_every_rag_service_name_normalises_to_a_seeded_row()
-    would silently skip a real call site instead of checking it."""
-    resolved = set(_rag_files_with_registration_calls())
-    mentioned = set(_rag_files_with_any_registration_call_text())
-    unresolved = mentioned - resolved
-    assert unresolved == set(), (
-        f"{sorted(str(p.relative_to(REPO_ROOT)) for p in unresolved)} call "
-        "register_service()/startup_service() with an argument this scanner "
-        "could not statically resolve to a string (not a literal or a "
-        "module-level SERVICE_NAME constant) -- extend "
-        "_resolve_registration_service_names() rather than silently skipping it"
+    """Every register_service()/startup_service() call site must have had
+    its argument resolved -- tracked per (path, lineno), not per file, so a
+    computed argument next to a resolvable literal in the SAME file still
+    fails instead of being masked by the file's other, resolvable call
+    site. Otherwise test_every_rag_service_name_normalises_to_a_seeded_row()
+    would silently skip that specific call instead of checking it."""
+    unresolved: list[str] = []
+    for path, sites in _all_rag_call_sites().items():
+        rel = path.relative_to(REPO_ROOT)
+        for site in sites:
+            if site.name is None:
+                unresolved.append(f"{rel}:{site.lineno}")
+    assert unresolved == [], (
+        f"{unresolved} call register_service()/startup_service() with an "
+        "argument this scanner could not statically resolve to a string "
+        "(not a literal or a module-level SERVICE_NAME constant) -- extend "
+        "_registration_call_sites() rather than silently skipping it"
     )
+
+
+def test_scanner_flags_a_computed_argument_next_to_a_resolvable_literal():
+    """Positive control for the per-(path, lineno) tracking above: a file
+    with one resolvable call site and one computed-argument call site must
+    flag the second, not be masked by the first resolving fine."""
+    mixed_source = '''
+SERVICE_NAME = "weather"
+
+async def lifespan(app):
+    await startup_service(SERVICE_NAME, SERVICE_PORT, "x")
+    await startup_service(f"{SERVICE_NAME}-extra", SERVICE_PORT, "y")
+'''
+    sites = _registration_call_sites(mixed_source)
+    assert len(sites) == 2
+    resolved = [s for s in sites if s.name is not None]
+    unresolved = [s for s in sites if s.name is None]
+    assert len(resolved) == 1 and resolved[0].name == "weather"
+    assert len(unresolved) == 1, "the f-string argument must be flagged unresolved, not silently dropped"
 
 
 def test_every_rag_service_name_normalises_to_a_seeded_row():
@@ -191,18 +239,83 @@ def test_every_rag_service_name_normalises_to_a_seeded_row():
     assert failures == [], "\n".join(failures)
 
 
+# ---------------------------------------------------------------------------
+# codex follow-up (2026-09-28, Medium): normalisation can alias two distinct
+# connectors onto the same registry row (e.g. "site-scraper" and
+# "sitescraper" both -> base "sitescraper"). A collision here means one of
+# the two connectors silently never gets its own row -- worse than the
+# original 422, because it succeeds while clobbering the other's row.
+# ---------------------------------------------------------------------------
+
+def test_no_seed_name_base_collisions():
+    """No two OSS_SERVICE_REGISTRY seed names may normalise to the same
+    base -- that would mean two seeded rows are indistinguishable to every
+    RAG connector's self-registration, and only one could ever be reached."""
+    by_base: dict[str, list[str]] = {}
+    for name in _seed_names():
+        by_base.setdefault(_normalize_rag_base(name), []).append(name)
+    failures = [
+        f"base {base!r} is produced by multiple seed names: {sorted(names)}"
+        for base, names in by_base.items()
+        if len(names) > 1
+    ]
+    assert failures == [], "\n".join(failures)
+
+
+def test_no_registration_call_site_base_collisions():
+    """No two distinct service_name strings actually posted by RAG
+    connectors' register_service()/startup_service() calls may normalise to
+    the same base -- that would mean the two connectors' self-registration
+    upserts race for a single registry row."""
+    by_base: dict[str, dict[str, list[Path]]] = {}
+    for path, names in _rag_files_with_registration_calls().items():
+        for name in names:
+            base = _normalize_rag_base(name)
+            by_base.setdefault(base, {}).setdefault(name, []).append(path)
+
+    failures: list[str] = []
+    for base, names_to_paths in by_base.items():
+        if len(names_to_paths) <= 1:
+            continue
+        detail = ", ".join(
+            f"{name!r} ({sorted(str(p.relative_to(REPO_ROOT)) for p in paths)})"
+            for name, paths in sorted(names_to_paths.items())
+        )
+        failures.append(f"base {base!r} is produced by multiple distinct service names: {detail}")
+    assert failures == [], "\n".join(failures)
+
+
+def test_scanner_catches_a_synthetic_base_collision():
+    """Positive control: proves the collision detector has teeth against
+    the exact shape the codex follow-up named -- "site-scraper" and
+    "sitescraper" as two distinct connector names that alias to one base."""
+    by_base: dict[str, dict[str, list[Path]]] = {}
+    synthetic = {
+        Path("src/rag/site_scraper/main.py"): ["site-scraper"],
+        Path("src/rag/synthetic_sitescraper/main.py"): ["sitescraper"],
+    }
+    for path, names in synthetic.items():
+        for name in names:
+            base = _normalize_rag_base(name)
+            by_base.setdefault(base, {}).setdefault(name, []).append(path)
+
+    collisions = {base: names for base, names in by_base.items() if len(names) > 1}
+    assert collisions == {"sitescraper": {"site-scraper": [Path("src/rag/site_scraper/main.py")],
+                                           "sitescraper": [Path("src/rag/synthetic_sitescraper/main.py")]}}
+
+
 def test_scanner_catches_a_synthetic_hyphen_mismatch():
-    """Positive control: proves the scanner has teeth against the exact
-    shape price_compare/site_scraper shipped with, not just that the
-    (now-fixed) real files happen to pass."""
+    """Positive control: proves the seed-match scanner has teeth against
+    the exact shape price_compare/site_scraper shipped with, not just that
+    the (now-fixed) real files happen to pass."""
     bad_source = '''
 SERVICE_NAME = "totally-unseeded-connector"
 
 async def lifespan(app):
     await startup_service(SERVICE_NAME, SERVICE_PORT, "x")
 '''
-    names = _resolve_registration_service_names(bad_source)
-    assert names == ["totally-unseeded-connector"]
+    sites = _registration_call_sites(bad_source)
+    assert [s.name for s in sites] == ["totally-unseeded-connector"]
     seeds = _seed_names()
-    host_label = to_rag_host_label(names[0])
+    host_label = to_rag_host_label(sites[0].name)
     assert not any(host_label == f"athena-rag-{seed}" for seed in seeds)

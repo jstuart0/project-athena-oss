@@ -8,6 +8,7 @@ Architecture:
     Service -> Admin API (HTTP) -> PostgreSQL (athena database)
 """
 import os
+import re
 import time
 import httpx
 from typing import Optional, Dict
@@ -23,6 +24,18 @@ ADMIN_API_URL = get_admin_url()
 _url_cache: Dict[str, str] = {}
 _cache_time: Dict[str, float] = {}
 _CACHE_TTL = 30.0
+
+# Mirrors admin/backend/app/routes/service_registry.py's `_SERVICE_NAME_RE`/
+# `_HOST_LABEL_RE` exactly (duplicated, not imported -- this module ships
+# inside every RAG connector's own process, which has no dependency on the
+# admin-backend package). Bounds the `name`/`host_label` to_rag_registry_name()/
+# to_rag_host_label() derive -- including from an operator-supplied
+# SERVICE_REGISTRY_NAME override -- BEFORE it's ever sent, so a malformed
+# value fails loudly here with a clear error instead of a confusing 422 from
+# the admin route's own (identical) validation. Keep in sync if either
+# upstream pattern changes.
+_SERVICE_NAME_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
+_HOST_LABEL_RE = re.compile(r'^[a-zA-Z0-9_.-]{1,255}$')
 
 
 def _normalize_rag_base(service_name: str) -> str:
@@ -70,7 +83,16 @@ def to_rag_registry_name(service_name: str) -> str:
     the same base twice is a no-op, so this is idempotent.
     """
     base = _get_service_registry_name_override() or _normalize_rag_base(service_name)
-    return f"{base}-rag"
+    name = f"{base}-rag"
+    if not _SERVICE_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"Derived registry name {name!r} (base {base!r}, from "
+            f"{'SERVICE_REGISTRY_NAME' if _get_service_registry_name_override() else 'service_name'}"
+            f") does not match {_SERVICE_NAME_RE.pattern!r} -- the admin "
+            "route's own name validation would reject it too. If "
+            "SERVICE_REGISTRY_NAME is set, check its value."
+        )
+    return name
 
 
 def to_rag_host_label(service_name: str) -> str:
@@ -85,7 +107,16 @@ def to_rag_host_label(service_name: str) -> str:
     _normalize_rag_base()), so the two stay consistent.
     """
     base = _get_service_registry_name_override() or _normalize_rag_base(service_name)
-    return f"athena-rag-{base}"
+    host_label = f"athena-rag-{base}"
+    if not _HOST_LABEL_RE.fullmatch(host_label):
+        raise ValueError(
+            f"Derived host_label {host_label!r} (base {base!r}, from "
+            f"{'SERVICE_REGISTRY_NAME' if _get_service_registry_name_override() else 'service_name'}"
+            f") does not match {_HOST_LABEL_RE.pattern!r} -- the admin "
+            "route's own host_label validation would reject it too. If "
+            "SERVICE_REGISTRY_NAME is set, check its value."
+        )
+    return host_label
 
 
 def _get_service_api_key() -> str:
