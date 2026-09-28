@@ -41,7 +41,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.database import Base, get_db, OSS_SERVICE_REGISTRY, seed_oss_service_registry
+from app.database import Base, get_db, OSS_SERVICE_REGISTRY, seed_oss_service_registry, _infer_oss_service_type
 from app.models import RagService, RAGConnector, User
 from main import app
 
@@ -256,6 +256,34 @@ class TestServiceRegistryWriteAuth:
         assert resp.status_code == 200
         data = resp.json()
         assert data["enabled"] != original_state
+
+    def test_toggle_matches_by_host_label_when_service_name_mismatches(self, client, db, rag_service):
+        """ATHENA-108 follow-up: shared.service_registry.unregister_service()
+        now posts the "-rag"-derived name to the toggle route, which
+        doesn't match the seeded "weather" row's actual name -- host_label
+        is the fallback that finds it, and the response reports the row's
+        real name."""
+        original_state = rag_service.enabled
+        resp = client.post(
+            "/api/service-registry/services/weather-rag/toggle",
+            params={"host_label": "athena-rag-weather"},
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["service"] == "weather"
+        assert data["enabled"] != original_state
+
+        db.refresh(rag_service)
+        assert rag_service.enabled != original_state
+
+    def test_toggle_404s_when_name_and_host_label_both_miss(self, client, db, rag_service):
+        resp = client.post(
+            "/api/service-registry/services/nonexistent-rag/toggle",
+            params={"host_label": "athena-rag-nonexistent"},
+            headers={"X-Service-Key": "test-service-key-for-hardening-tests"},
+        )
+        assert resp.status_code == 404
 
     def test_delete_with_service_key(self, client, db, rag_service):
         resp = client.delete(
@@ -539,6 +567,266 @@ class TestSeedOssServiceRegistry:
 
         count = db.query(RagService).count()
         assert count == len(OSS_SERVICE_REGISTRY)
+
+    def test_infer_oss_service_type_matches_control_agent_rule(self):
+        """_infer_oss_service_type must use the exact same rule as
+        src/control_agent/main.py's registry-sync heuristic: "-rag" in the
+        identifying name -> 'rag', else 'core'."""
+        assert _infer_oss_service_type("athena-rag-weather") == "rag"
+        assert _infer_oss_service_type("athena-mode-service") == "core"
+        assert _infer_oss_service_type("athena-admin-backend") == "core"
+
+    def test_seed_rows_are_typed_rag_or_core_not_hardcoded_api(self, db):
+        """ATHENA-119: every OSS_SERVICE_REGISTRY row seeded (ORM-simulated,
+        SQLite-compatible, same as test_seed_idempotency_via_orm above) must
+        get service_type derived from its host -- 'rag' for every
+        "-rag"-named service, 'core' for everything else -- never the old
+        hardcoded 'api'."""
+        for name, display_name, host, port, protocol, cache_ttl, enabled in OSS_SERVICE_REGISTRY:
+            endpoint_url = f"{protocol}://{host}:{port}"
+            db.add(RagService(
+                name=name, display_name=display_name, host=host, port=port,
+                protocol=protocol, endpoint_url=endpoint_url,
+                service_type=_infer_oss_service_type(host),
+                cache_ttl=cache_ttl, enabled=enabled,
+            ))
+        db.commit()
+
+        rows = db.query(RagService).filter(
+            RagService.name.in_({e[0] for e in OSS_SERVICE_REGISTRY})
+        ).all()
+        assert len(rows) == len(OSS_SERVICE_REGISTRY)
+        for row in rows:
+            assert row.service_type != "api", f"{row.name!r} still typed 'api'"
+            if "-rag" in row.host:
+                assert row.service_type == "rag", f"{row.name!r} (host={row.host!r}) should be 'rag'"
+            else:
+                assert row.service_type == "core", f"{row.name!r} (host={row.host!r}) should be 'core'"
+
+
+# ---------------------------------------------------------------------------
+# xander diff-review Critical (2026-09-28): shared.service_registry.
+# register_service()'s self-registration payload must never overwrite a
+# seeded row's host/port/type with its own "http://localhost:<port>"/
+# hardcoded-'api' view of itself. Integration-style: hits the REAL POST
+# /api/service-registry/services upsert route (not a mock) with exactly the
+# payload shape register_service() now sends -- no endpoint_url, service_
+# type='rag' -- against a DB seeded the way ATHENA-119's real startup does.
+# ---------------------------------------------------------------------------
+
+class TestRegisterServicePreservesSeededRow:
+    def test_startup_registration_of_seeded_rag_row_keeps_host_and_type(self, client, db):
+        db.add(RagService(
+            name="weather", display_name="Weather Service",
+            host="athena-rag-weather", port=8010, protocol="http",
+            endpoint_url="http://athena-rag-weather:8010",
+            service_type="rag", cache_ttl=600, enabled=True,
+        ))
+        db.commit()
+
+        # Exactly register_service()'s payload shape post-fix: name,
+        # display_name, service_type -- no endpoint_url.
+        resp = client.post(
+            "/api/service-registry/services",
+            params={"name": "weather", "display_name": "Weather Service", "service_type": "rag"},
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["action"] == "updated"
+
+        row = db.query(RagService).filter(RagService.name == "weather").first()
+        assert row.host == "athena-rag-weather", "seeded K8s host must survive a self-registration ping"
+        assert row.port == 8010
+        assert row.endpoint_url == "http://athena-rag-weather:8010"
+        assert row.service_type == "rag"
+
+    def test_registration_without_endpoint_url_on_new_row_still_422s(self, client, db):
+        """No prior row to fall back to -- endpoint_url stays required to
+        CREATE a row, matching the route's own docstring."""
+        resp = client.post(
+            "/api/service-registry/services",
+            params={"name": "brand-new-unseeded-svc", "service_type": "rag"},
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 422
+        assert db.query(RagService).filter(RagService.name == "brand-new-unseeded-svc").first() is None
+
+    def test_house_shaped_rows_all_untouched_by_a_bare_rag_ping(self, client, db):
+        """All 23 OSS_SERVICE_REGISTRY athena-rag-* rows, seeded the way
+        seed_oss_service_registry() really does (host/type included), must
+        be byte-for-byte unchanged after every one of them receives the
+        exact ping register_service() sends. Only the actual RAG-typed
+        entries are pinged here -- "mode" (service_type='core') is not a
+        shared.service_registry.register_service() caller (confirmed by
+        repo grep: src/mode_service/main.py never imports it), so pinging
+        it with service_type='rag' would test a call that never happens in
+        production, not this fix."""
+        for name, display_name, host, port, protocol, cache_ttl, enabled in OSS_SERVICE_REGISTRY:
+            db.add(RagService(
+                name=name, display_name=display_name, host=host, port=port,
+                protocol=protocol, endpoint_url=f"{protocol}://{host}:{port}",
+                service_type=_infer_oss_service_type(host),
+                cache_ttl=cache_ttl, enabled=enabled,
+            ))
+        db.commit()
+
+        before = {
+            row.name: (row.host, row.port, row.endpoint_url, row.service_type)
+            for row in db.query(RagService).all()
+        }
+
+        rag_entries = [e for e in OSS_SERVICE_REGISTRY if _infer_oss_service_type(e[2]) == "rag"]
+        assert len(rag_entries) >= 20, "sanity: most OSS_SERVICE_REGISTRY entries are RAG services"
+        for name, display_name, host, port, protocol, cache_ttl, enabled in rag_entries:
+            resp = client.post(
+                "/api/service-registry/services",
+                params={"name": name, "display_name": display_name, "service_type": "rag"},
+                headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+            )
+            assert resp.status_code == 200, resp.text
+
+        db.expire_all()
+        after = {
+            row.name: (row.host, row.port, row.endpoint_url, row.service_type)
+            for row in db.query(RagService).all()
+        }
+        assert before.keys() == after.keys()
+        for name in before:
+            assert before[name] == after[name], f"{name!r} changed: {before[name]} -> {after[name]}"
+
+    def test_ping_matches_seeded_row_by_host_label_when_name_mismatches(self, client, db):
+        """ATHENA-108 follow-up: shared.service_registry.register_service()
+        now posts name="weather-rag" (the "-rag"-suffix registry-name
+        convention), which doesn't match a row seeded/named "weather" --
+        host_label="athena-rag-weather" is the fallback key that finds it.
+        The matched row is byte-for-byte untouched in host/port/type, and
+        the response reports the row's own name, not the caller's derived
+        one."""
+        db.add(RagService(
+            name="weather-rag", display_name="Weather Service",
+            host="athena-rag-weather", port=8010, protocol="http",
+            endpoint_url="http://athena-rag-weather:8010",
+            service_type="rag", cache_ttl=600, enabled=True,
+        ))
+        db.commit()
+
+        resp = client.post(
+            "/api/service-registry/services",
+            params={
+                "name": "weather-rag",
+                "host_label": "athena-rag-weather",
+                "display_name": "Weather Service",
+                "service_type": "rag",
+            },
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["action"] == "updated"
+        assert resp.json()["service"] == "weather-rag"
+
+        row = db.query(RagService).filter(RagService.name == "weather-rag").first()
+        assert row is not None
+        assert row.host == "athena-rag-weather"
+        assert row.port == 8010
+        assert row.endpoint_url == "http://athena-rag-weather:8010"
+        assert row.service_type == "rag"
+
+    def test_ping_matches_a_differently_named_row_by_host_label(self, client, db):
+        """The realistic mismatch: the seeded row is still named "weather"
+        (OSS_SERVICE_REGISTRY's short-name convention) but the client now
+        posts name="weather-rag". No row named "weather-rag" exists, so the
+        upsert must fall back to host_label="athena-rag-weather" and match
+        the existing "weather" row -- never create a duplicate, never
+        rename it, and report the row's real name in the response."""
+        db.add(RagService(
+            name="weather", display_name="Weather Service",
+            host="athena-rag-weather", port=8010, protocol="http",
+            endpoint_url="http://athena-rag-weather:8010",
+            service_type="rag", cache_ttl=600, enabled=True,
+        ))
+        db.commit()
+
+        resp = client.post(
+            "/api/service-registry/services",
+            params={
+                "name": "weather-rag",
+                "host_label": "athena-rag-weather",
+                "display_name": "Weather Service",
+                "service_type": "rag",
+            },
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["action"] == "updated"
+        assert body["service"] == "weather", "must report the matched row's real name"
+
+        rows = db.query(RagService).all()
+        assert len(rows) == 1, "must update the matched row, never create a duplicate"
+        assert rows[0].name == "weather"
+        assert rows[0].host == "athena-rag-weather"
+        assert rows[0].port == 8010
+        assert rows[0].service_type == "rag"
+
+    def test_host_label_ambiguous_when_two_rows_share_a_host_refuses_to_guess(self, client, db):
+        """`host` is not a unique column. Two rows legitimately (or by
+        misconfiguration) sharing one host must never be resolved by
+        picking whichever the DB returns first -- the upsert must refuse
+        with 409 host_label_ambiguous and leave both rows untouched."""
+        db.add(RagService(
+            name="weather", display_name="Weather Service",
+            host="athena-rag-weather", port=8010, protocol="http",
+            endpoint_url="http://athena-rag-weather:8010",
+            service_type="rag", cache_ttl=600, enabled=True,
+        ))
+        db.add(RagService(
+            name="weather-old", display_name="Weather Service (old)",
+            host="athena-rag-weather", port=9999, protocol="http",
+            endpoint_url="http://athena-rag-weather:9999",
+            service_type="rag", cache_ttl=600, enabled=False,
+        ))
+        db.commit()
+        before = {
+            row.name: (row.host, row.port, row.enabled)
+            for row in db.query(RagService).all()
+        }
+
+        resp = client.post(
+            "/api/service-registry/services",
+            params={
+                "name": "weather-rag",
+                "host_label": "athena-rag-weather",
+                "service_type": "rag",
+            },
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["error"] == "host_label_ambiguous"
+
+        db.expire_all()
+        after = {
+            row.name: (row.host, row.port, row.enabled)
+            for row in db.query(RagService).all()
+        }
+        assert after == before, "neither ambiguous row may be touched"
+        assert db.query(RagService).filter(RagService.name == "weather-rag").first() is None
+
+    def test_host_label_never_matches_when_no_row_shares_that_host(self, client, db):
+        """A brand-new, never-seeded service pinging with host_label set
+        but no existing row anywhere sharing that host must still 422 --
+        host_label is a fallback match key, not a way to bypass the
+        endpoint_url-required-for-create rule."""
+        resp = client.post(
+            "/api/service-registry/services",
+            params={
+                "name": "brand-new-rag",
+                "host_label": "athena-rag-brand-new",
+                "service_type": "rag",
+            },
+            headers={"X-Service-Key": _PHASE2_SERVICE_KEY},
+        )
+        assert resp.status_code == 422
+        assert db.query(RagService).filter(RagService.name == "brand-new-rag").first() is None
 
 
 # ---------------------------------------------------------------------------

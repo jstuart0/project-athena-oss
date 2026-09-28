@@ -207,3 +207,45 @@ def test_write_validation_precedes_reachability_probe_isolated_from_redundant_ga
         "own host blocklist can be responsible for the zero-request outcome -- "
         "proving it runs before (and independently of) the reachability probe"
     )
+
+
+# ---------------------------------------------------------------------------
+# codex r2 diff-review High (2026-09-28): the Ollama URL logging sites in
+# this route must never log raw userinfo -- POST /ollama-url's save-path
+# logging (ollama_url_saved / ollama_url_reachability_test_ssrf_blocked /
+# ollama_url_not_reachable) all now redact via redact_url_userinfo().
+# ---------------------------------------------------------------------------
+
+def test_save_ollama_url_never_logs_userinfo(owner_client, db, monkeypatch, capsys):
+    """Asserts against the REAL rendered log output (capsys), not a
+    monkeypatched `logger.info` -- under a full-suite run, some other test
+    module's mid-suite eviction/re-import of app.* modules can leave an
+    already-registered FastAPI route bound to a DIFFERENT `app.routes.
+    settings` module object than whatever `import app.routes.settings`
+    freshly resolves inside this test, so patching the freshly-imported
+    module's `logger` attribute can silently miss the actual call the live
+    route makes. capsys captures structlog's real stdout writer
+    regardless of which module object emitted the call."""
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "ollama-creds")
+    _clear_all_config_caches()
+
+    mock_response = httpx.Response(200, json={"version": "0.1.0"})
+
+    async def _fake_get(self, url, *a, **kw):
+        return mock_response
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", _fake_get)
+
+    capsys.readouterr()  # drain anything buffered before this test's call
+    response = owner_client.post(
+        "/api/settings/ollama-url",
+        json={"ollama_url": "http://admin:s3cr3t@ollama-creds:11434"},
+    )
+    out = capsys.readouterr().out
+
+    assert response.status_code == 200, response.text
+    assert "ollama_url_saved" in out, out
+    assert "http://ollama-creds:11434" in out, out
+    assert "admin:s3cr3t" not in out, out
+    assert "s3cr3t" not in out, out

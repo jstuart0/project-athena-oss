@@ -242,6 +242,8 @@ A Kubernetes in-cluster `Service` DNS name (e.g. a bare `redis` resolving to a `
 
 Registering a `tcp` row via the admin UI's row editor (or directly via `POST /api/service-registry/services?protocol=tcp&host=...&port=...`) takes `host`/`port` directly instead of `endpoint_url` -- a TCP check has no scheme or path to parse a URL out of, and `endpoint_url` is left `null` for these rows.
 
+**RAG self-registration payload (`shared/service_registry.py::register_service`, ATHENA-108)**: every RAG process pings this same upsert route at startup to confirm it's registered. By default the ping omits `endpoint_url` entirely -- `POST /services` is partial-update-safe for an *existing* row (same semantics `service_type`/`cache_ttl`/`enabled` already have), so a seeded row's `host`/`port`/`protocol`/`endpoint_url` (the correct in-cluster K8s Service DNS name, e.g. `athena-rag-weather`) survive the ping untouched. `endpoint_url` remains required to *create* a brand-new, never-seeded row. Set `SERVICE_REGISTRY_ENDPOINT_URL` only for a deployment shape where the self-reported `http://localhost:<port>` view genuinely is the correct address (e.g. an ad-hoc bare-metal dev RAG service that isn't in `OSS_SERVICE_REGISTRY`) -- setting it against a seeded service overwrites that row's real host on every restart.
+
 **Dashboard aggregation (ATHENA-112)**: `GET /api/service-registry/services` computes `healthy_services` and `overall_health` over **enabled** rows only. A disabled row is reported with `health_status: "disabled"` regardless of its last cached poller value (which goes stale the moment it's disabled) and is excluded from both the counts and the health rollup. `enabled_services` / `disabled_services` are new response fields; `total_services` still counts every row for backward compatibility.
 
 **Mission Control voice-health card and RAG test probes (ATHENA-113b)**: the admin-backend's dashboard (`admin/backend/app/routes/dashboard.py`) and voice-test routes (`admin/backend/app/routes/voice_tests.py`) resolve each RAG service's URL independently via `app.utils.rag_urls.resolve_rag_url`, instead of assuming every RAG shares one host behind `RAG_HOST`/`RAG_SERVICE_HOST` -- in Kubernetes each RAG is its own Service, so a single shared host is an OSS-First violation and (when unset) reported every RAG as "unreachable" rather than "not configured". Resolution order per service:
@@ -478,6 +480,15 @@ refused and the UI reports `ssrf_blocked`). **An in-cluster Ollama needs its
 Service's CIDR or hostname added to `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`**,
 the same as any other in-cluster Service (see "Service Registry Health
 Checks" above) — there is no separate allowlist for Ollama specifically.
+
+**Local-dev carve-out for model discovery and voice tests (ATHENA-122 / xander diff-review Medium, 2026-09-28)**: `GET /api/component-models/available-models`, `validate_model_exists` (model-assignment validation), and `voice_tests.py`'s `/llm/test` and `/pipeline/test` probes call `app.utils.rag_urls.check_ollama_ssrf_safe()` instead of the bare `check_ssrf_safe()` — it applies the SAME not-in-cluster loopback/RFC1918/ULA carve-out the write-boundary check above already has (`app.utils.url_validators.is_local_host()`), so the OSS default `http://localhost:11434` works for these four probes out of the box on a bare-metal dev machine with **no** `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` entry needed. This carve-out does **not** apply inside a Kubernetes pod (`is_local_host()` always returns `False` there) or to link-local/IMDS-class addresses — an in-cluster `http://ollama:11434` still needs the allowlist entry exactly as described above. `service_control.py`'s Ollama probes and this route's own reachability check are unchanged by this carve-out (pre-existing behavior, out of this fix's scope) — a bare-metal `localhost` Ollama still needs the allowlist for the Service Control panel and the settings reachability check specifically.
+
+**Startup discoverability**: admin-backend logs one WARNING at boot,
+`ollama_url_blocked_by_ssrf_guard`, naming the exact env var to set,
+whenever the currently configured Ollama URL would genuinely be blocked
+(i.e. not covered by the carve-out above) — most commonly an in-cluster
+Service DNS name with no matching `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`
+entry yet. This is a diagnostic log line only; it never blocks startup.
 
 ### Redis
 

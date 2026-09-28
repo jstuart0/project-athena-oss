@@ -731,6 +731,16 @@ def seed_oss_base_knowledge():
             logger.debug("oss_base_knowledge_already_configured")
 
 
+def _infer_oss_service_type(host: str) -> str:
+    """Same rule src/control_agent/main.py's registry-sync uses when a
+    service entry has no explicit `service_type`: "-rag" in the identifying
+    name means a RAG service, everything else is 'core'. Here the
+    identifying string is `host` (the in-cluster K8s service DNS name,
+    e.g. "athena-rag-weather") since OSS_SERVICE_REGISTRY's short `name`
+    field (e.g. "weather") never contains "-rag"."""
+    return "rag" if "-rag" in host else "core"
+
+
 def seed_oss_service_registry():
     """Seed OSS default service registry entries for cluster-local RAG services.
 
@@ -739,13 +749,18 @@ def seed_oss_service_registry():
     asserts the required columns exist before this function is called.
 
     The 7-tuple shape is (name, display_name, host, port, protocol, cache_ttl, enabled).
-    endpoint_url is derived as f"{protocol}://{host}:{port}".
+    endpoint_url is derived as f"{protocol}://{host}:{port}"; service_type
+    (ATHENA-119) is derived from host via _infer_oss_service_type() rather
+    than hardcoded — every row was previously seeded as service_type='api',
+    which broke the RAG/core split the Control Agent's own registry-sync
+    already relies on.
     """
     with get_db_context() as db:
         created_count = 0
         updated_count = 0
         for name, display_name, host, port, protocol, cache_ttl, enabled in OSS_SERVICE_REGISTRY:
             endpoint_url = f"{protocol}://{host}:{port}"
+            service_type = _infer_oss_service_type(host)
             result = db.execute(text("""
                 INSERT INTO athena_service_registry (
                     name, display_name, service_type,
@@ -753,7 +768,7 @@ def seed_oss_service_registry():
                     headers, cache_ttl, timeout, rate_limit,
                     enabled, updated_at
                 ) VALUES (
-                    :name, :display_name, 'api',
+                    :name, :display_name, :service_type,
                     :host, :port, :protocol, :endpoint_url,
                     CAST(:headers AS jsonb), :cache_ttl, 5000, 100,
                     :enabled, NOW()
@@ -775,6 +790,7 @@ def seed_oss_service_registry():
             """), {
                 "name": name,
                 "display_name": display_name,
+                "service_type": service_type,
                 "host": host,
                 "port": port,
                 "protocol": protocol,

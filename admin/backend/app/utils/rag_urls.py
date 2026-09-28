@@ -156,3 +156,80 @@ async def check_ssrf_safe(url: str) -> tuple[bool, str]:
     if parsed.query:
         path_and_query = f"{path_and_query}?{parsed.query}"
     return await _validate_service_url(host, port, path_and_query)
+
+
+# codex r2 diff-review Medium (2026-09-28): the ONLY check_ssrf_safe denial
+# reason the not-in-cluster loopback carve-out below may override. Matches
+# the exact prefix src/shared/url_safety.py::validate_url_not_private()
+# uses for its "resolves to a private IP" branch -- every other denial
+# (path CRLF/NUL/traversal, k8s control-plane hostname, malformed URL, DNS
+# failure) is host-classification-independent and must stay blocked
+# regardless of is_local_host().
+_PRIVATE_IP_DENIAL_PREFIX = "Hostname resolves to private IP:"
+
+
+async def check_ollama_ssrf_safe(url: str) -> tuple[bool, str]:
+    """check_ssrf_safe(), plus the not-in-cluster loopback carve-out this
+    repo already applies at the Ollama write-boundary (POST
+    /api/settings/ollama-url -- see docs/CONFIGURATION.md "Ollama URL write
+    validation") but never extended to the runtime probes themselves
+    (codex diff-review Medium, 2026-09-28: component_models.py's model
+    discovery and voice_tests.py's Ollama probes inherit the health
+    poller's default-deny allowlist with no carve-out, so the OSS default
+    http://localhost:11434 stops working for bare-metal dev unless the
+    operator sets HEALTH_POLL_ALLOWED_PRIVATE_HOSTS -- a genuine
+    works-out-of-the-box regression this wrapper closes for Ollama
+    specifically, without touching the shared allowlist's posture for
+    anything else (RAG probes, the health poller, service-registry writes
+    all keep calling check_ssrf_safe() directly, unchanged).
+
+    Posture, unchanged for everything this carve-out does NOT cover:
+    - Inside a Kubernetes pod (KUBERNETES_SERVICE_HOST set): no carve-out,
+      ever -- an in-cluster Ollama Service still needs its CIDR/hostname in
+      HEALTH_POLL_ALLOWED_PRIVATE_HOSTS, same as any other in-cluster
+      Service (is_local_host() returns False unconditionally in a pod).
+    - A private host that ISN'T loopback/RFC1918/ULA reachable outside a
+      pod (there is no such thing -- is_local_host() covers exactly
+      loopback/RFC1918/ULA) gets no carve-out either.
+    - Any OTHER denial reason (codex r2 diff-review Medium, 2026-09-28):
+      the carve-out matches ONLY the private-host-IP denial
+      (_PRIVATE_IP_DENIAL_PREFIX below), never a blanket "was it blocked at
+      all". check_ssrf_safe's path-sanitization checks (CRLF/NUL/traversal)
+      and the k8s-control-plane-hostname block return their OWN distinct
+      reason strings for a REASON, not just for humans reading logs -- a
+      loopback URL with a CRLF- or traversal-carrying path must stay
+      blocked even outside a cluster; is_local_host() only ever classifies
+      the HOST, it says nothing about whether the PATH is safe.
+
+    Returns (allowed, reason); reason is non-empty only when blocked (by
+    check_ssrf_safe AND not covered by the carve-out).
+    """
+    from urllib.parse import urlparse
+    from app.utils.url_validators import is_local_host, redact_url_userinfo
+
+    allowed, reason = await check_ssrf_safe(url)
+    if allowed:
+        return allowed, reason
+
+    if not reason.startswith(_PRIVATE_IP_DENIAL_PREFIX):
+        # Not a "this host is private/unallowlisted" denial -- a malformed
+        # URL, CRLF/NUL/traversal in the path, a k8s-control-plane hostname
+        # block, or a DNS failure. The local-dev carve-out never applies.
+        return allowed, reason
+
+    hostname = urlparse(url).hostname or ""
+    if is_local_host(hostname):
+        safe_url = redact_url_userinfo(url)
+        logger.warning(
+            "ollama_ssrf_local_dev_carveout",
+            url=safe_url,
+            original_reason=reason,
+            message=(
+                "Ollama probe host is loopback/RFC1918/ULA and this process is not "
+                "running inside a Kubernetes pod -- allowing as local dev, bypassing "
+                "the HEALTH_POLL_ALLOWED_PRIVATE_HOSTS allowlist for this probe only."
+            ),
+        )
+        return True, ""
+
+    return allowed, reason

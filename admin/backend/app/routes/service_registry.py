@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -44,10 +45,55 @@ router = APIRouter(prefix="/api/service-registry", tags=["service-registry"])
 # (codex r2 M-5 / xander L-2)
 _SERVICE_NAME_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
+# Loose sanity check on host_label (ATHENA-108 follow-up): it is a match
+# key only -- never persisted -- but is still worth bounding so a caller
+# can't probe with pathological input. Hostnames may contain dots
+# (K8s DNS names never do, but this stays permissive rather than coupling
+# to that convention).
+_HOST_LABEL_RE = re.compile(r'^[a-zA-Z0-9_.-]{1,255}$')
+
 _WRITE_DEPS = [
     Depends(verify_service_or_oidc),
     Depends(service_registry_rate_limit_dep),
 ]
+
+
+def _resolve_by_name_or_host_label(
+    db: Session, name: str, host_label: Optional[str]
+) -> Optional[RagService]:
+    """Match an existing row by `name`; if none found and `host_label` is
+    given, fall back to a case-insensitive match on the row's `host`
+    column. `host` is NOT a unique column (two rows can legitimately share
+    one, e.g. a decommissioned duplicate never cleaned up) -- if host_label
+    matches more than one row, refuses to guess which one the caller meant
+    and raises 409 `host_label_ambiguous` instead of silently updating an
+    arbitrary match. (codex diff-review Medium, ATHENA-108 follow-up)
+    """
+    existing = db.query(RagService).filter(RagService.name == name).first()
+    if existing is not None or not host_label:
+        return existing
+
+    host_matches = db.query(RagService).filter(
+        func.lower(RagService.host) == host_label.lower()
+    ).limit(2).all()
+    if len(host_matches) > 1:
+        logger.warning(
+            "service_registry_host_label_ambiguous",
+            host_label=host_label,
+            requested_name=name,
+            matched_names=[row.name for row in host_matches],
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "host_label_ambiguous",
+                "message": (
+                    f"host_label {host_label!r} matches more than one "
+                    "registry row; refusing to update an arbitrary one"
+                ),
+            },
+        )
+    return host_matches[0] if host_matches else None
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +216,7 @@ async def register_service(
     response: Response,
     db: Session = Depends(get_db),
     name: str = "",
+    host_label: Optional[str] = None,
     endpoint_url: str = "",
     display_name: Optional[str] = None,
     service_type: Optional[str] = None,
@@ -213,6 +260,28 @@ async def register_service(
     Partial-update semantics mean an omitted `enabled` now keeps the row's
     current value, so an operator-disabled row stays disabled across CA
     restarts.
+
+    endpoint_url is ALSO now partial-update-safe on an existing row (xander
+    diff-review Critical, 2026-09-28): shared.service_registry.
+    register_service() self-registers with no location info of its own by
+    design (see that function's comment) -- an existing, seeded row (e.g.
+    ATHENA-119's OSS_SERVICE_REGISTRY "athena-rag-weather") must keep its
+    correct K8s host/port/protocol when a RAG process pings this route with
+    endpoint_url omitted. endpoint_url stays REQUIRED when creating a
+    brand-new row (there is no prior host to fall back to), and unchanged
+    for protocol='tcp', whose host/port validation is independent.
+
+    host_label (ATHENA-108 follow-up): shared.service_registry.
+    register_service() now derives `name` as "<connector>-rag" -- a value
+    that doesn't match a row seeded/renamed under a different convention
+    (e.g. a plain connector name whose host is "athena-rag-<connector>").
+    When no row matches `name`, host_label is used as a fallback lookup key
+    against the row's `host` column (case-insensitive). It is a match key
+    only -- never stored -- so a match-by-host still returns the row's own
+    `name`, not the caller's derived one. `host` is not a unique column: if
+    host_label matches more than one row, the upsert refuses to guess and
+    returns 409 `host_label_ambiguous` rather than updating an arbitrary
+    match (codex diff-review Medium, follow-up).
     """
     if not name:
         raise HTTPException(status_code=422, detail="'name' query parameter is required")
@@ -224,6 +293,16 @@ async def register_service(
             status_code=422,
             detail="'name' must match ^[a-zA-Z0-9_-]{1,64}$",
         )
+    if host_label is not None and not _HOST_LABEL_RE.fullmatch(host_label):
+        raise HTTPException(
+            status_code=422,
+            detail="'host_label' must match ^[a-zA-Z0-9_.-]{1,255}$",
+        )
+
+    existing = _resolve_by_name_or_host_label(db, name, host_label)
+
+    resolved_endpoint_url: Optional[str] = None
+    parsed: Optional[Dict[str, Any]] = None
 
     if protocol == 'tcp':
         if not host:
@@ -234,12 +313,8 @@ async def register_service(
             host = validate_host(host)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
-        resolved_endpoint_url: Optional[str] = None
         parsed = {'host': host, 'port': port, 'protocol': 'tcp', 'health_endpoint': None}
-    else:
-        if not endpoint_url:
-            raise HTTPException(status_code=422, detail="'endpoint_url' query parameter is required")
-
+    elif endpoint_url:
         # SSRF protection: validate scheme + host before persisting.
         # The Phase 4 health poller will make HTTP requests to stored endpoint_url
         # values; a stored IMDS or cluster-internal URL would be polled silently.
@@ -257,16 +332,24 @@ async def register_service(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         resolved_endpoint_url = endpoint_url
+    elif existing is None:
+        raise HTTPException(status_code=422, detail="'endpoint_url' query parameter is required")
+    # else: protocol != 'tcp', endpoint_url omitted, existing row found --
+    # partial update (xander diff-review Critical): location fields below
+    # are left untouched.
 
-    display_url = resolved_endpoint_url or f"tcp://{parsed['host']}:{parsed['port']}"
+    if parsed is not None:
+        display_url = resolved_endpoint_url or f"tcp://{parsed['host']}:{parsed['port']}"
+    else:
+        display_url = existing.endpoint_url or f"tcp://{existing.host}:{existing.port}"
 
-    existing = db.query(RagService).filter(RagService.name == name).first()
     if existing:
-        existing.endpoint_url = resolved_endpoint_url
-        existing.host = parsed['host']
-        existing.port = parsed['port']
-        existing.protocol = parsed['protocol']
-        existing.health_endpoint = parsed['health_endpoint']
+        if parsed is not None:
+            existing.endpoint_url = resolved_endpoint_url
+            existing.host = parsed['host']
+            existing.port = parsed['port']
+            existing.protocol = parsed['protocol']
+            existing.health_endpoint = parsed['health_endpoint']
         if display_name is not None:
             existing.display_name = display_name
         # Partial update (codex diff review): each of these is applied only
@@ -285,12 +368,21 @@ async def register_service(
         # Do NOT touch updated_at explicitly — let onupdate handle it so it only
         # advances on this config-change write.
         db.commit()
-        logger.info("service_registry_updated", service=name)
+        # Matched-by-host_label rows keep their own `name` (never renamed by
+        # this upsert) -- report the row that was actually touched, not the
+        # caller's derived name, so a mismatched match is never masked.
+        matched_name = existing.name
+        logger.info(
+            "service_registry_updated",
+            service=matched_name,
+            requested_name=name,
+            matched_by="host_label" if matched_name != name else "name",
+        )
         return {
-            'service': name,
+            'service': matched_name,
             'action': 'updated',
             'url': display_url,
-            'message': f"Service {name} has been updated",
+            'message': f"Service {matched_name} has been updated",
         }
     else:
         svc = RagService(
@@ -328,20 +420,39 @@ async def toggle_service(
     request: Request,
     response: Response,
     service_name: str,
+    host_label: Optional[str] = None,
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Toggle the enabled state of a service."""
-    svc = db.query(RagService).filter(RagService.name == service_name).first()
+    """Toggle the enabled state of a service.
+
+    host_label (ATHENA-108 follow-up): same fallback as POST /services --
+    shared.service_registry.unregister_service() posts the "-rag"-derived
+    name, which may not match an existing row's actual `name`; host_label
+    locates it by host instead (ambiguity-safe, see
+    _resolve_by_name_or_host_label). The response always reports the
+    matched row's own name.
+    """
+    if host_label is not None and not _HOST_LABEL_RE.fullmatch(host_label):
+        raise HTTPException(
+            status_code=422,
+            detail="'host_label' must match ^[a-zA-Z0-9_.-]{1,255}$",
+        )
+    svc = _resolve_by_name_or_host_label(db, service_name, host_label)
     if not svc:
         raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
 
     svc.enabled = not svc.enabled
     db.commit()
-    logger.info("service_registry_toggled", service=service_name, enabled=svc.enabled)
+    logger.info(
+        "service_registry_toggled",
+        service=svc.name,
+        requested_name=service_name,
+        enabled=svc.enabled,
+    )
     return {
-        'service': service_name,
+        'service': svc.name,
         'enabled': svc.enabled,
-        'message': f"Service {service_name} has been {'enabled' if svc.enabled else 'disabled'}",
+        'message': f"Service {svc.name} has been {'enabled' if svc.enabled else 'disabled'}",
     }
 
 

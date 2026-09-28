@@ -570,17 +570,24 @@ async def _dispatch_kubernetes_action(
             ), None, None
         return False, f"Kubernetes API error ({exc.kind}): {exc.message}", None, None
     finally:
-        release_lease(LEASE_SESSION_FACTORY, lease)
-        # codex diff review r3 Medium: invalidate the shared 10s inventory
-        # cache after EVERY k8s mutation attempt (success or failure) --
-        # _run_action's own gather_inventory(fresh=True) snapshot, taken
-        # before/during this dispatch, is written into this SAME cache
-        # gather_inventory(fresh=False) later reads (list_services always
-        # calls fresh=False). Without this, a scale-back failure that sets
-        # the interrupted marker could be immediately followed by an
-        # envelope read that sees stale cached non-zero replicas and
-        # lazily deletes the marker it just set.
-        _clear_inventory_cache()
+        # F54 (ATHENA-118 codex r4, Low): nested so the cache invalidation
+        # below always runs even if release_lease itself raises -- a bare
+        # sibling statement after a raising release_lease would never run,
+        # leaving _run_action's fresh=True snapshot wedged in the cache
+        # fresh=False reads next (see the invalidation's own comment).
+        try:
+            release_lease(LEASE_SESSION_FACTORY, lease)
+        finally:
+            # codex diff review r3 Medium: invalidate the shared 10s inventory
+            # cache after EVERY k8s mutation attempt (success or failure) --
+            # _run_action's own gather_inventory(fresh=True) snapshot, taken
+            # before/during this dispatch, is written into this SAME cache
+            # gather_inventory(fresh=False) later reads (list_services always
+            # calls fresh=False). Without this, a scale-back failure that sets
+            # the interrupted marker could be immediately followed by an
+            # envelope read that sees stale cached non-zero replicas and
+            # lazily deletes the marker it just set.
+            _clear_inventory_cache()
 
 
 # Service Routes

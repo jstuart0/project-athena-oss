@@ -9,6 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- The admin-backend session ID now rotates on every login path (local, demo-mode, OIDC callback), closing a session-fixation gap where a cookie value set before authentication remained valid afterward. Logout already invalidated the session correctly and is unchanged.
+- The Ollama SSRF gate now also covers the remaining operator-configured Ollama probes — model discovery and the admin panel's Ollama test actions — not just the RAG probes and reachability checks it already covered. A not-in-cluster carve-out keeps `localhost`/private-host Ollama working for bare-metal development; an in-cluster Ollama still needs its host allowlisted via `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`. Startup logs a non-fatal `ollama_url_blocked_by_ssrf_guard` warning when the configured Ollama URL would be blocked.
+- Configured URLs (Ollama, Redis, Qdrant, and registry endpoints) are redacted to `scheme://host:port` before being written to admin-backend logs, so credentials embedded in a URL are never logged.
+- RAG services now send `X-Service-Key` when self-registering and unregistering with the service registry; both calls previously had no header and were silently rejected with 401.
+
+### Fixed
+
+- `scripts/deploy.sh` refuses to apply manifests that still carry an unconfigured placeholder (any `YOUR_*` or `CONFIGURE_ME*` token) before running any `kubectl` command, so a placeholder manifest can no longer overwrite a live, already-configured deployment. Pass `--allow-placeholders` to apply against a fresh, unconfigured namespace.
+- RAG self-registration no longer overwrites a service registry row's host or type with `localhost`/`api` on startup — it now sends only the fields it owns, with an optional `SERVICE_REGISTRY_ENDPOINT_URL` env var available for an explicit endpoint. The registry upsert route treats endpoint-location fields as partial updates instead of requiring the full set on every call.
+- DEV_MODE's service registry seed types RAG rows as `rag`; previously every seeded row, including the RAG services, was typed `api`.
+- Service-control inventory cache is now invalidated even when releasing the action lease raises, instead of leaving a stale cache entry behind.
+- RAG self-registration now posts the `<name>-rag` registry name and a `host_label` hint, matching the convention seeded/renamed registry rows actually use — connectors registering with their bare short name (e.g. `weather`) were silently rejected with 422 and never landed in the registry. The upsert route now also matches an existing row by host when the posted name doesn't, so a registry row is never duplicated or renamed by a self-registration ping. A RAG connector's registration log now reports failure honestly instead of always claiming success.
+
 ---
 
 ## [0.4.0] - 2026-09-28 — OSS readiness, service control, security hardening

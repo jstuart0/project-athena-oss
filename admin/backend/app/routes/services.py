@@ -18,7 +18,9 @@ import ssl
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, RagService, AuditLog
-from app.utils.url_validators import validate_protocol, validate_host, validate_health_endpoint
+from app.utils.url_validators import (
+    validate_protocol, validate_host, validate_health_endpoint, redact_url_userinfo,
+)
 from app.services.health_poller import _validate_service_url
 from shared.config import get_config
 
@@ -247,7 +249,11 @@ async def _ssrf_check_url(url: str, health_path: str = "/health") -> Optional[di
 
     allowed, reason = await _validate_service_url(host, port, health_path)
     if not allowed:
-        logger.warning("quick_check_ssrf_blocked", url=url, reason=reason)
+        # codex r3 diff-review Low (2026-09-28): url can originate from
+        # ENV_FALLBACKS (operator-set env vars, e.g. a redis:// URL with
+        # embedded credentials) as well as a database row -- redact either
+        # way before it reaches structured log output.
+        logger.warning("quick_check_ssrf_blocked", url=redact_url_userinfo(url), reason=reason)
         return {"status": "ssrf_blocked", "error": f"SSRF guard: {reason}"}
     return None
 

@@ -226,6 +226,19 @@ class AthenaConfig(BaseSettings):
     # (xander HIGH-4 / ATHENA-1 Phase 2)
     service_registry_write_per_minute: int = Field(default=60)
 
+    # service_registry_endpoint_url: explicit endpoint_url override for
+    # shared.service_registry.register_service()'s self-registration POST
+    # (xander diff-review Critical, 2026-09-28). Empty (default): the
+    # client omits endpoint_url entirely -- the upsert route then leaves
+    # an existing row's host/port/protocol untouched (ATHENA-109 partial-
+    # update semantics), which is what every real deployment wants, since
+    # the correct in-cluster host is the seeded K8s Service DNS name
+    # (ATHENA-119's OSS_SERVICE_REGISTRY), never this process's own
+    # "http://localhost:<port>" view of itself. Set only for a deployment
+    # topology where the self-reported endpoint genuinely IS authoritative
+    # (e.g. a bare-metal dev RAG service that was never seeded).
+    service_registry_endpoint_url: str = Field(default="")
+
     # ------------------------------------------------------------------
     # Health poller (ATHENA-1 Phase 4)
     # ------------------------------------------------------------------
