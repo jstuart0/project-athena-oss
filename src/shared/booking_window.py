@@ -33,6 +33,22 @@ BLOCK_SUMMARY_MARKERS = ("blocked", "closed period", "not available", "unavailab
 MIN_BUFFER_HOURS = 0
 MAX_BUFFER_HOURS = 168
 
+# These helpers run on every /mode read, so their warnings fire once per
+# process per distinct (event, value) rather than on every call (D5).
+_logged_once: set[tuple] = set()
+
+
+def _log_once(level: str, event: str, value, **fields) -> None:
+    marker = (event, value)
+    if marker in _logged_once:
+        return
+    _logged_once.add(marker)
+    getattr(logger, level)(event, **fields)
+
+
+def _reset_log_latches_for_tests() -> None:
+    _logged_once.clear()
+
 
 def resolve_property_tz(name: Optional[str]) -> tuple[TZInfo, bool]:
     """Resolve an IANA zone name to a tzinfo. Empty/unknown -> UTC, plus one
@@ -40,12 +56,12 @@ def resolve_property_tz(name: Optional[str]) -> tuple[TZInfo, bool]:
     ``property_timezone_valid``.
     """
     if not name:
-        logger.error("booking_timezone_invalid", name=name)
+        _log_once("error", "booking_timezone_invalid", name, name=name)
         return timezone.utc, False
     try:
         return ZoneInfo(name), True
     except (ZoneInfoNotFoundError, ValueError, KeyError):
-        logger.error("booking_timezone_invalid", name=name)
+        _log_once("error", "booking_timezone_invalid", name, name=name)
         return timezone.utc, False
 
 
@@ -112,7 +128,7 @@ def classify_summary(summary: str) -> Literal["blocked", "confirmed"]:
 
 def clamp_buffer_hours(hours) -> float:
     """Clamp an operator-configured buffer to [0, 168] hours (D5), logging
-    once per call if the raw value needed clamping. Used at read time for
+    once per distinct raw value that needed clamping. Used at read time for
     both is_active/active_booking and the D6 fetch-window formula, so a
     raw out-of-range buffer can't widen the fetch beyond what is_active
     itself will honour."""
@@ -122,7 +138,7 @@ def clamp_buffer_hours(hours) -> float:
         raw = 0.0
     clamped = min(max(raw, MIN_BUFFER_HOURS), MAX_BUFFER_HOURS)
     if clamped != raw:
-        logger.warning("mode_booking_buffer_clamped", requested=raw, clamped=clamped)
+        _log_once("warning", "mode_booking_buffer_clamped", raw, requested=raw, clamped=clamped)
     return clamped
 
 
@@ -140,9 +156,9 @@ class Booking:
 def is_active(b: Booking, now: datetime, before: timedelta, after: timedelta) -> bool:
     """Half-open: ``checkin - before <= now < checkout + after``. A booking
     whose raw window is inverted (``end <= start``) is invalid, never
-    active, and logged once per check (D5)."""
+    active, and logged once per booking (D5)."""
     if b.end <= b.start:
-        logger.warning("mode_booking_invalid_window", key=b.key, source=b.source)
+        _log_once("warning", "mode_booking_invalid_window", (b.source, b.key), key=b.key, source=b.source)
         return False
     return (b.start - before) <= now < (b.end + after)
 

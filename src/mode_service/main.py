@@ -703,7 +703,7 @@ async def bookings_refresh_loop():
                 admin_client=_get_admin_http_client(),
             )
         except Exception as e:
-            logger.error("mode_bookings_refresh_loop_error", error=str(e), exc_info=True)
+            logger.error("mode_bookings_refresh_loop_error", error=type(e).__name__)
 
 
 def _clamped_buffers() -> tuple[timedelta, timedelta]:

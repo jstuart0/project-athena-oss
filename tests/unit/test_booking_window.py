@@ -12,12 +12,23 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, "src")
 
+import pytest
 import structlog
 
 from shared import booking_window as bw
 
 
 NY = ZoneInfo("America/New_York")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_log_latches():
+    reset = getattr(bw, "_reset_log_latches_for_tests", None)
+    if reset:
+        reset()
+    yield
+    if reset:
+        reset()
 
 
 class TestResolvePropertyTz:
@@ -278,3 +289,40 @@ class TestMerge:
         pair = bw.stay_day_pair(admin_row, NY)
         merged = bw.merge([admin_row], [], suppressed_pairs={pair}, tz=NY)
         assert len(merged) == 1
+
+
+class TestLogOncePerValue:
+    """D5: the timezone, clamp and invalid-window logs fire once per process
+    per distinct value, not on every call (these run on every /mode read)."""
+
+    @staticmethod
+    def _count(logs, event):
+        return sum(1 for e in logs if e["event"] == event)
+
+    def test_invalid_timezone_logged_once_per_name(self):
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(3):
+                bw.resolve_property_tz("Mars/Olympus")
+            bw.resolve_property_tz("Venus/Ishtar")
+            bw.resolve_property_tz("")
+            bw.resolve_property_tz("")
+        assert self._count(logs, "booking_timezone_invalid") == 3
+
+    def test_buffer_clamp_logged_once_per_value(self):
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(3):
+                assert bw.clamp_buffer_hours(500) == 168.0
+            assert bw.clamp_buffer_hours(-1) == 0.0
+        assert self._count(logs, "mode_booking_buffer_clamped") == 2
+
+    def test_invalid_window_logged_once_per_booking(self):
+        inverted = _booking(
+            datetime(2026, 7, 5, 11, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 1, 16, 0, tzinfo=timezone.utc),
+        )
+        other = _booking(inverted.start, inverted.end, key="k2")
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(3):
+                assert bw.is_active(inverted, inverted.start, timedelta(0), timedelta(0)) is False
+            assert bw.is_active(other, other.start, timedelta(0), timedelta(0)) is False
+        assert self._count(logs, "mode_booking_invalid_window") == 2
