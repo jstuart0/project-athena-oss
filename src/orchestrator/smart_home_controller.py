@@ -4328,7 +4328,7 @@ Do NOT mention rooms that have no current or recent motion."""
         includes living room, dining room, and kitchen.
         All HA API calls are parallelized for faster response.
         """
-        from orchestrator.mode_permission import ensure_permission_enforcing
+        from orchestrator.mode_permission import HAWritePermissionDenied, ensure_permission_enforcing
         ha_client = ensure_permission_enforcing(ha_client)
         import structlog
         logger = structlog.get_logger(__name__)
@@ -4430,9 +4430,29 @@ Do NOT mention rooms that have no current or recent motion."""
         # must not crash the fan-out and skip every sibling call -- the guard
         # already recorded the denial on the scope before raising, so
         # execute_intent's _finish() wrapper surfaces the partial refusal
-        # from scope.denials once this returns normally.
+        # from scope.denials once this returns normally. ATHENA-69 Pass H2
+        # follow-up (xander re-check): return_exceptions alone also
+        # swallows a GENUINE failure (e.g. httpx.ConnectError) into this
+        # function's "Done!" reply below -- HAWritePermissionDenied is safe
+        # to absorb (already recorded on scope.denials, surfaced by
+        # _finish()); anything else means some of these HA calls silently
+        # never happened, and the caller must be told that instead of
+        # congratulated.
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            unexpected_errors = [
+                r for r in results
+                if isinstance(r, BaseException) and not isinstance(r, HAWritePermissionDenied)
+            ]
+            if unexpected_errors:
+                logger.error(
+                    "room_group_command_partial_failure",
+                    action=action,
+                    group_name=group_name,
+                    error_count=len(unexpected_errors),
+                    sample_error=str(unexpected_errors[0]),
+                )
+                return "I ran into a problem controlling the lights. Please try again."
 
         # Return contextual response for voice output
         room_count = len(members)

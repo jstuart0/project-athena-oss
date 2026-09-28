@@ -512,3 +512,24 @@ class TestFanOutGenuineErrorNotSwallowed:
 
         assert "done" not in result.lower()
         assert "problem" in result.lower()
+
+    def test_room_group_connect_error_surfaces_as_error_not_done(self):
+        """Same guarantee for _execute_room_group_command's own gather
+        (smart_home_controller.py:4435) -- a genuine transport failure
+        must not be reported as success."""
+        controller = _controller()
+        ha_client = _raw_ha_client()
+        ha_client.call_service = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+        room_group = {"display_name": "First Floor", "members": [{"room_name": "kitchen"}]}
+
+        async def _drive():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner"):
+                return await controller._execute_room_group_command(
+                    room_group, "turn_on", "group", {}, {"device_type": "light", "action": "turn_on"},
+                    ha_client, "turn on the first floor lights",
+                )
+
+        result = _run(_drive())
+
+        assert "done" not in result.lower()
+        assert "problem" in result.lower()
