@@ -25,6 +25,7 @@ os.environ.setdefault("SERVICE_API_KEY", "test-key-gateway-nonstream-continuity"
 os.environ.setdefault("ADMIN_API_URL", "http://localhost:8080")
 
 import gateway.main as gw  # noqa: E402
+import gateway.simple_commands as sc  # noqa: E402
 from gateway.conversation_limiter import NewConversationLimiter  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -750,7 +751,13 @@ def test_ATHENA_121_fastpath_ha_timeout_falls_through_to_orchestrator(monkeypatc
 def test_ATHENA_121_fastpath_ha_2xx_still_returns_real_success(monkeypatch, _fixed_room):
     """Regression guard: a genuine 2xx HA response must still take the fast
     path and speak the canned success line -- the fix must not turn every
-    fast-path command into a fallback."""
+    fast-path command into a fallback.
+
+    ATHENA-69 D17 gated execute_simple_command on fast_path_allowed() (a
+    mode-service call, out of scope for this HA-outcome-propagation test --
+    covered separately by test_gateway_fast_path_guard.py). Keep the gate
+    open here so the assertion below still exercises the real HA call path."""
+    monkeypatch.setattr(sc, "fast_path_allowed", mock.AsyncMock(return_value=True))
     monkeypatch.setattr(gw, "get_feature_flag", _fastpath_flags())
     monkeypatch.setattr(gw, "device_session_mgr", _fake_session_mgr())
     ha_client = _StatusHAClient(200)

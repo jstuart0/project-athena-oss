@@ -278,6 +278,22 @@ async function updateGuestModeStatus() {
         const hasCurrentGuests = currentData.entries.length > 0;
         const isEnabled = config.enabled;
 
+        // ATHENA-69 Pass H (valerie r1, Medium): a pre-D30 legacy PIN hash
+        // can never be verified -- POST verify-pin always answers
+        // "not_configured" for it. Fixed string, no interpolation, so no
+        // escaping is needed here.
+        const pinResetNotice = config.owner_pin_needs_reset ? `
+            <div class="p-4 bg-yellow-900/20 border border-yellow-700/50 rounded-lg flex items-center gap-3 mt-3">
+                <span class="text-2xl">🔑</span>
+                <div>
+                    <div class="text-yellow-200 font-medium">Owner PIN must be set again</div>
+                    <div class="text-yellow-300/70 text-sm">
+                        This PIN was set before a security upgrade and can no longer be verified. Set a new PIN below to restore the voice owner-mode override.
+                    </div>
+                </div>
+            </div>
+        ` : '';
+
         if (hasCurrentGuests) {
             banner.innerHTML = `
                 <div class="p-4 bg-green-900/20 border border-green-700/50 rounded-lg flex items-center gap-3">
@@ -289,6 +305,7 @@ async function updateGuestModeStatus() {
                         </div>
                     </div>
                 </div>
+                ${pinResetNotice}
             `;
         } else if (isEnabled) {
             banner.innerHTML = `
@@ -301,6 +318,7 @@ async function updateGuestModeStatus() {
                         </div>
                     </div>
                 </div>
+                ${pinResetNotice}
             `;
         } else {
             banner.innerHTML = `
@@ -313,6 +331,7 @@ async function updateGuestModeStatus() {
                         </div>
                     </div>
                 </div>
+                ${pinResetNotice}
             `;
         }
     } catch (error) {

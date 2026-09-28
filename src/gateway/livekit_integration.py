@@ -120,7 +120,12 @@ class LiveKitIntegration:
                 "mode": "owner",
                 "room": room,
                 "session_id": session_id,
-                "interface_type": "voice"
+                "interface_type": "voice",
+                # ATHENA-69 D24: set server-side only -- LiveKit rooms can
+                # only be minted by a signed-in owner/operator (D19), so
+                # this is trusted for the orchestrator's owner-mode PIN
+                # override path.
+                "caller_trust": "household",
             }
 
             # Include interruption context if user interrupted previous response

@@ -1669,6 +1669,26 @@ class ModeAuditLog(Base):
         }
 
 
+class OwnerPinAttempt(Base):
+    """
+    Per-tier owner-PIN verification lockout counter (ATHENA-69 D25/D35).
+
+    One row per caller-trust tier (household/sms/web_authenticated/unknown),
+    keyed by tier so a lockout in one tier never blocks another. The
+    verify-pin handler locks this row with SELECT ... FOR UPDATE before
+    checking + incrementing, so concurrent requests (including across
+    admin-backend replicas) serialize on the row instead of racing the
+    increment. Changing the owner PIN in the admin UI deletes every row
+    (the owner's recovery path).
+    """
+    __tablename__ = 'owner_pin_attempts'
+
+    tier = Column(String(32), primary_key=True)
+    failed_count = Column(Integer, nullable=False, default=0)
+    locked_until = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class GuestModeConfigHistory(Base):
     """
     History of guest mode configuration changes for rollback support.

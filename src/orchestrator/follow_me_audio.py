@@ -13,6 +13,7 @@ Features:
 """
 
 import asyncio
+import contextlib
 import time
 from typing import Optional, Dict, Any, List, Set
 from dataclasses import dataclass, field
@@ -22,6 +23,12 @@ from enum import Enum
 import structlog
 
 logger = structlog.get_logger()
+
+# ATHENA-69: orchestrator.mode_permission is imported lazily inside
+# FollowMeAudioService (not at module scope) -- this module is imported by
+# music_handler.py at module level (get_most_recent_room), so a top-level
+# import here would force orchestrator.metrics -> prometheus_client as a
+# hard import-time dependency on every caller of music_handler.py too.
 
 
 class FollowMeMode(Enum):
@@ -77,7 +84,9 @@ class FollowMeAudioService:
             music_handler: Music handler for playback control
             config: Follow-me configuration
         """
-        self.ha = ha_client
+        from orchestrator.mode_permission import ensure_permission_enforcing
+
+        self.ha = ensure_permission_enforcing(ha_client)
         self.music = music_handler
         self.config = config or FollowMeConfig()
 
@@ -130,6 +139,13 @@ class FollowMeAudioService:
             room_name: Room where motion was detected
             motion_detected: True if motion started, False if cleared
             timestamp: Event timestamp (defaults to now)
+
+        ATHENA-69 (D3): this is the follow-me entry point -- HA-triggered,
+        not routed through any orchestrator node's request scope. Opens its
+        own system-mode scope for the duration of the call (and any
+        background task it spawns while the scope is open keeps it, per
+        contextvars' copy-on-task-creation semantics) when none is already
+        open.
         """
         if not self.config.enabled:
             return
@@ -148,10 +164,14 @@ class FollowMeAudioService:
         now = timestamp or time.time()
         presence = self._room_presence[room_name]
 
-        if motion_detected:
-            await self._handle_motion_start(presence, now)
-        else:
-            await self._handle_motion_end(presence, now)
+        from orchestrator.mode_permission import current_ha_scope, ha_permission_scope
+
+        scope_cm = ha_permission_scope(None, mode="system") if current_ha_scope() is None else contextlib.nullcontext()
+        with scope_cm:
+            if motion_detected:
+                await self._handle_motion_start(presence, now)
+            else:
+                await self._handle_motion_end(presence, now)
 
     async def _handle_motion_start(self, presence: RoomPresence, now: float):
         """Handle motion detected in a room."""

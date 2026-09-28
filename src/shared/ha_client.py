@@ -3,7 +3,7 @@
 import os
 import httpx
 import logging
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,16 @@ class HomeAssistantClient:
         """Get the state of an entity."""
         self._check_configured()
         response = await self.client.get(f"/api/states/{entity_id}")
+        response.raise_for_status()
+        return response.json()
+
+    async def get_states(self) -> List[Dict[str, Any]]:
+        """Get every entity's state in one bulk call (ATHENA-69, D10:
+        a read, exposed through PermissionEnforcingHAClient's read
+        allowlist so bulk-state callers never need the raw, unwrapped
+        client)."""
+        self._check_configured()
+        response = await self.client.get("/api/states")
         response.raise_for_status()
         return response.json()
     

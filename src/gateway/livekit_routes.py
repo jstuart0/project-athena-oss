@@ -182,11 +182,13 @@ async def athena_join_room(
     audio processing (wake word detection, STT, etc.).
     """
     try:
-        # Generate Athena's token
+        # Generate Athena's token -- not browser-facing, keeps the prior
+        # 24h TTL explicitly (ATHENA-69 D27).
         athena_token = service.generate_room_token(
             room_name=room_name,
             participant_name="Athena",
-            participant_identity=f"athena_{room_name}"
+            participant_identity=f"athena_{room_name}",
+            ttl_minutes=24 * 60
         )
 
         # Join as Athena

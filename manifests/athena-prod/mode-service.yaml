@@ -30,6 +30,15 @@ spec:
         env:
         - name: PORT
           value: "8022"
+        # ATHENA-69 (D23/D25): validates inbound X-Service-Key from the
+        # orchestrator/gateway (MODE_SERVICE_INGRESS_AUTH), and is sent as
+        # X-Service-Key on this service's own calls to the admin backend
+        # (config fetch, PIN verify). Same secret/key as orchestrator.yaml.
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: athena-encryption
+              key: SERVICE_API_KEY
         resources:
           requests:
             memory: "64Mi"

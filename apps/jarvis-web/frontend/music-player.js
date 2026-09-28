@@ -644,6 +644,13 @@ class MusicPlayer {
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
                 console.warn('[MusicPlayer] MA play request failed:', error);
+                // ATHENA-69 (D19): unauthenticated callers get 403
+                // sign_in_required -- show that instead of a generic failure.
+                if (response.status === 403 && error.detail === 'sign_in_required') {
+                    window.dispatchEvent(new CustomEvent('musicPlaybackError', {
+                        detail: { error: 'Sign-in required for music playback', track: this.currentTrack?.name }
+                    }));
+                }
                 return false;
             }
 

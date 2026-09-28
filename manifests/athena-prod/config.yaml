@@ -30,20 +30,28 @@ data:
   # DEFAULT_TIMEZONE: ""
   # DEMO_MODE: ""
   # DEV_MODE: ""
+  # GUEST_BASELINE_ALLOWED_DOMAINS: ""
+  # GUEST_BASELINE_ALLOWED_INTENTS: ""
+  # GUEST_BASELINE_RESTRICTED_ENTITIES: ""
   # HA_BED_WARMER_ENTITIES: ""
   # HA_LIGHT_GROUPS: ""
   # HA_MUSIC_PLAYERS: ""
+  # HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES: ""
   # HA_SATELLITE_ROOM_MAP: ""
   # HA_TV_ENTITIES: ""
   # HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: ""
   # HEALTH_POLL_CONCURRENCY: ""
   # HEALTH_POLL_INTERVAL_SECONDS: ""
   # HEALTH_POLL_TIMEOUT_SECONDS: ""
+  # LIVEKIT_USER_TOKEN_TTL_MINUTES: ""
   # LLM_SERVICE_URL: ""
   # LOGIN_LOCKOUT_MINUTES: ""
   # LOGIN_LOCKOUT_THRESHOLD: ""
   # LOGIN_MINIMUM_DELAY_MS: ""
   # LOGIN_RATE_LIMIT_PER_MINUTE: ""
+  # MODE_OVERRIDE_LOCKOUT_MINUTES: ""
+  # MODE_OVERRIDE_LOCKOUT_THRESHOLD: ""
+  # MODE_SERVICE_INGRESS_AUTH: ""
   # MUSIC_ASSISTANT_URL: ""
   # NEW_CONVERSATION_PER_MINUTE_PER_IP: ""
   # NEW_CONVERSATION_RESET_GRACE_SECONDS: ""
@@ -315,6 +323,80 @@ data:
   # this many seconds (covers HA's truncated-ASR-retry resend of the same
   # opener). Default 120.
   # NEW_CONVERSATION_RESET_GRACE_SECONDS: "120"
+
+  # ==========================================================================
+  # Mode and permissions (ATHENA-69) — see docs/CONFIGURATION.md
+  # "Mode and permissions" for the full model.
+  # ==========================================================================
+
+  # MODE_SERVICE_INGRESS_AUTH (D15/D23): same three-value contract as
+  # ORCHESTRATOR_INGRESS_AUTH above, applied to the mode service's /mode*
+  # routes via shared.service_ingress_auth. Code default is "enforce" --
+  # left commented here so a fresh OSS install runs it from the start, not
+  # "warn" forever. Uncomment temporarily to "warn" ONLY during a staged
+  # rollout onto an already-running deployment (e.g. an upgrade where the
+  # orchestrator/gateway haven't picked up SERVICE_API_KEY yet) -- the mode
+  # service logs mode_service_ingress_auth_warn_active at startup and
+  # hourly while "warn" is active, so it's easy to notice the override is
+  # still in effect. Remove this line (back to commented) once every
+  # caller is confirmed sending X-Service-Key.
+  # MODE_SERVICE_INGRESS_AUTH: "warn"
+
+  # LIVEKIT_USER_TOKEN_TTL_MINUTES (D27): TTL for browser-facing LiveKit
+  # room tokens minted for jarvis-web voice sessions (clamped 1-1440).
+  # Server-side Athena participant tokens are unaffected (explicit 24h TTL).
+  # A shorter TTL only bounds *joining* a room; it doesn't disconnect an
+  # already-connected participant. Default 30.
+  # LIVEKIT_USER_TOKEN_TTL_MINUTES: "30"
+
+  # Guest permission baselines and the mode-service-outage fallback
+  # (D4/D8/D22) — comma-separated-array or JSON-array env vars, parsed by
+  # shared.guest_policy.parse_json_array_env. Unset or malformed falls back
+  # to the built-in default list (never an empty list, which would silently
+  # disable a floor); an explicit "[]" is honoured as an intentional
+  # deployer opt-out and is logged once at startup
+  # (ha_permission_fallback_disabled).
+  #
+  # HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES: entity-id regex patterns
+  # applied when the mode service is unreachable or rejecting -- the
+  # "degraded" permission set. Default restricts locks, covers, alarm
+  # panels, cameras, automations, scripts, and scenes; lights/climate/media
+  # stay usable.
+  # HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES: '[]'
+  #
+  # GUEST_BASELINE_RESTRICTED_ENTITIES: the floor unioned into every guest's
+  # restricted_entities regardless of admin config -- same domain set as
+  # the fallback list above, always unioned in, never replaced by an
+  # admin-configured list.
+  # GUEST_BASELINE_RESTRICTED_ENTITIES: '[]'
+  #
+  # GUEST_BASELINE_ALLOWED_INTENTS / GUEST_BASELINE_ALLOWED_DOMAINS: used
+  # only when the admin-configured guest allowlist is empty -- an empty
+  # admin list means "use this baseline", never "allow everything".
+  # GUEST_BASELINE_ALLOWED_INTENTS: '["weather","time","general_info","news","recipes","streaming"]'
+  # GUEST_BASELINE_ALLOWED_DOMAINS: '["light","media_player","switch","climate"]'
+  #
+  # MODE_OVERRIDE_LOCKOUT_THRESHOLD / MODE_OVERRIDE_LOCKOUT_MINUTES (D16/
+  # D25): read by the admin backend's per-tier owner-PIN lockout counter
+  # (POST /api/internal/guest-mode/verify-pin) -- after this many failed
+  # verifications in a trust tier within the lockout window, that tier is
+  # locked out for this many minutes. Not read by the mode service, which
+  # holds no PIN state after D25. Defaults 5 and 30.
+  # MODE_OVERRIDE_LOCKOUT_THRESHOLD: "5"
+  # MODE_OVERRIDE_LOCKOUT_MINUTES: "30"
+
+  # OVERRIDE_MAX_TIMEOUT_MINUTES (ATHENA-69 Pass H2, xander delta review,
+  # High): server-side ceiling on POST /mode/override's timeout_minutes,
+  # applied regardless of PIN outcome -- a caller-supplied value above this
+  # is clamped, never rejected. Default 240 (4 hours).
+  # OVERRIDE_MAX_TIMEOUT_MINUTES: "240"
+
+  # JARVIS_PUBLIC_MODE (D18/D19): jarvis-web (not this ConfigMap -- set on
+  # the athena-jarvis-web Deployment, see jarvis-web.yaml). "guest"
+  # (default) treats every unauthenticated caller as a guest; "household"
+  # is the legacy pre-ATHENA-69 behavior (every caller gets the household's
+  # actual mode) for LAN-only deployments not reachable from the internet.
+  # Logs jarvis_public_mode_household_active hourly while active.
 
   # Logging
   LOG_LEVEL: "INFO"

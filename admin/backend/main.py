@@ -132,6 +132,7 @@ app.include_router(guest_mode.router)
 app.include_router(component_models.router)
 app.include_router(service_control.router)
 app.include_router(internal.router)
+app.include_router(internal.guest_mode_pin_router)
 app.include_router(gateway_config.router)
 app.include_router(sms.router)
 app.include_router(sms.tips_router)  # Tips endpoints at /api/tips

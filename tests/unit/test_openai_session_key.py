@@ -589,7 +589,12 @@ def test_streaming_endpoint_persists_session_history(monkeypatch):
         _main_module, "run_orchestrator_for_streaming", mock.AsyncMock(return_value=fake_state)
     )
     monkeypatch.setattr(
-        _main_module, "get_current_mode", mock.AsyncMock(return_value={"mode": "owner", "permissions": {}})
+        _main_module,
+        "resolve_request_authorization",
+        mock.AsyncMock(return_value=SimpleNamespace(
+            mode="owner", permissions={}, server_mode="owner", degraded=False,
+            escalation_ignored=False, mode_info={"mode": "owner", "permissions": {}},
+        )),
     )
     fake_conv_config = SimpleNamespace(
         get_conversation_settings=mock.AsyncMock(return_value={"enabled": False})
@@ -667,7 +672,12 @@ def test_true_streaming_endpoint_persists_session_history(monkeypatch):
         _main_module, "run_orchestrator_for_streaming", mock.AsyncMock(return_value=fake_state)
     )
     monkeypatch.setattr(
-        _main_module, "get_current_mode", mock.AsyncMock(return_value={"mode": "owner", "permissions": {}})
+        _main_module,
+        "resolve_request_authorization",
+        mock.AsyncMock(return_value=SimpleNamespace(
+            mode="owner", permissions={}, server_mode="owner", degraded=False,
+            escalation_ignored=False, mode_info={"mode": "owner", "permissions": {}},
+        )),
     )
     monkeypatch.setattr(
         _main_module,

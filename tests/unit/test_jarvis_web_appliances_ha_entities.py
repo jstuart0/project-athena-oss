@@ -46,7 +46,30 @@ def client(monkeypatch):
     monkeypatch.setattr(jarvis_main, "OVEN_ENTITY", "")
     monkeypatch.setattr(jarvis_main, "FRIDGE_ENTITY", "")
     monkeypatch.setattr(jarvis_main, "FREEZER_ENTITY", "")
-    return TestClient(jarvis_main.app)
+
+    # ATHENA-69 (D19): the oven/fridge/freezer POST routes are now
+    # owner_only. Authenticate every request in this file as a signed-in
+    # owner so the "entity not configured" 503 assertions below still
+    # exercise the handler body rather than being pre-empted by a 403
+    # sign_in_required from require_owner_caller.
+    import caller_auth
+
+    async def _fake_auth_me(token):
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"role": "owner"}
+
+        return _Resp()
+
+    monkeypatch.setattr(caller_auth, "get_admin_url", lambda: "http://admin.local:8080")
+    caller_auth._set_auth_me_callable_for_tests(_fake_auth_me)
+    caller_auth._auth_cache.clear()
+    test_client = TestClient(jarvis_main.app, headers={"Authorization": "Bearer test-owner-token"})
+    yield test_client
+    caller_auth._set_auth_me_callable_for_tests(None)
+    caller_auth._auth_cache.clear()
 
 
 def test_get_oven_state_503_when_unconfigured(client):

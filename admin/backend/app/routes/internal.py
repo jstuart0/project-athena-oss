@@ -21,16 +21,22 @@ Endpoints:
 - /api/internal/config/validation-models - Cross-validation models (athena)
 - /api/internal/config/validation-scenarios - Validation test scenarios (athena)
 """
-from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Dict, Any, List, Literal, Optional
+from datetime import datetime, timedelta, timezone
+from fastapi import APIRouter, Depends, Header, HTTPException
 import asyncpg
+import hmac
 import os
+import re
 import structlog
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.utils.service_auth import verify_service_api_key
+from app.utils.passwords import verify_password
 from app.database import get_db
-from app.models import RagService
+from app.models import GuestModeConfig, OwnerPinAttempt, RagService
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -40,6 +46,161 @@ router = APIRouter(
     include_in_schema=False,
     dependencies=[Depends(verify_service_api_key)],
 )
+
+
+async def require_service_key_401(
+    x_service_key: Optional[str] = Header(default=None, alias="X-Service-Key"),
+) -> bool:
+    """Service-key-only auth that returns 401 (not 422) for a missing/wrong
+    key, and 503 when SERVICE_API_KEY itself is unset (ATHENA-69 D40).
+
+    `verify_service_api_key` declares its header parameter as required
+    (`Header(...)`), so FastAPI raises a 422 validation error before that
+    dependency's body ever runs when the header is absent -- fine for the
+    existing `/api/internal/*` routes (their tests expect 422-on-missing),
+    wrong for a route whose contract is "401 when the caller sends nothing".
+    This dependency declares the header optional at the FastAPI layer and
+    does the presence/match check itself, so a missing key gets 401 instead
+    of 422. Used by the guest-mode PIN-verification and current-guest
+    routes, which are registered on a *separate* router/route (not the
+    `/api/internal` router above) so its router-level `verify_service_api_key`
+    dependency never intercepts them first.
+    """
+    key = get_config().service_api_key
+    if not key:
+        raise HTTPException(status_code=503, detail="Service authentication not configured")
+    if not x_service_key or not hmac.compare_digest(x_service_key, key):
+        raise HTTPException(status_code=401, detail="Invalid or missing service key")
+    return True
+
+
+# Separate router (ATHENA-69 D40): same URL prefix as `router` above, but
+# deliberately without its `Depends(verify_service_api_key)` router-level
+# dependency, so a missing X-Service-Key on this route surfaces this
+# dependency's 401 instead of a 422 from the other router's required-header
+# parameter.
+guest_mode_pin_router = APIRouter(
+    prefix="/api/internal/guest-mode",
+    tags=["internal"],
+    include_in_schema=False,
+    dependencies=[Depends(require_service_key_401)],
+)
+
+
+class VerifyPinRequest(BaseModel):
+    pin: str = Field(max_length=16)
+    tier: Literal["household", "sms", "web_authenticated", "unknown"]
+
+
+class VerifyPinResponse(BaseModel):
+    status: Literal["verified", "invalid", "malformed", "not_configured", "locked"]
+    locked_until: Optional[str] = None
+
+
+def _record_pin_failure(db: Session, attempt: OwnerPinAttempt, tier: str, now: datetime) -> None:
+    """Increment the tier's failure counter; lock it once the threshold is
+    reached, resetting the counter so the next window starts fresh (D25)."""
+    cfg = get_config()
+    attempt.failed_count += 1
+    if attempt.failed_count >= cfg.mode_override_lockout_threshold:
+        attempt.locked_until = now + timedelta(minutes=cfg.mode_override_lockout_minutes)
+        attempt.failed_count = 0
+        logger.warning(
+            "owner_pin_lockout_started",
+            tier=tier,
+            locked_until=attempt.locked_until.isoformat(),
+        )
+    attempt.updated_at = now
+    db.commit()
+
+
+@guest_mode_pin_router.post("/verify-pin", response_model=VerifyPinResponse)
+async def verify_owner_pin(payload: VerifyPinRequest, db: Session = Depends(get_db)):
+    """Verify an owner-override PIN on behalf of the mode service (D16/D25).
+
+    This service is the sole holder of PIN state: the hash, the per-tier
+    lockout counter, and the verdict. The mode service forwards whatever PIN
+    and caller_tier it received and never evaluates either itself.
+
+    Order (D25): (1) no config row or no PIN configured, or a legacy
+    unsalted-SHA256 hash that predates ATHENA-69 D30 -> not_configured, never
+    counted; (2) tier locked -> locked, the hash is NOT evaluated; (3) PIN
+    not exactly 6 ASCII digits -> counted, malformed; (4) hash mismatch ->
+    counted, invalid; (5) match -> tier row reset, verified.
+    """
+    now = datetime.now(timezone.utc)
+    tier = payload.tier
+
+    config = db.query(GuestModeConfig).first()
+    if not config or not config.owner_pin:
+        return VerifyPinResponse(status="not_configured", locked_until=None)
+
+    if not config.owner_pin.startswith("pbkdf2_sha256$"):
+        # Legacy unsalted-SHA256 PIN (pre-ATHENA-69 D30) -- can't be verified
+        # against the new hash scheme; the admin UI prompts to re-set it.
+        logger.info("owner_pin_verify", tier=tier, status="not_configured")
+        return VerifyPinResponse(status="not_configured", locked_until=None)
+
+    # D35: lock the tier row before check+increment. SQLite serializes on a
+    # single writer connection, so with_for_update() is a documented no-op
+    # there rather than an error; PostgreSQL takes a real row lock, which is
+    # what makes concurrent wrong PINs across replicas produce exactly one
+    # lockout instead of a lost-update race.
+    attempt = (
+        db.query(OwnerPinAttempt)
+        .filter(OwnerPinAttempt.tier == tier)
+        .with_for_update()
+        .first()
+    )
+    if attempt is None:
+        # Known race (valerie r1, Low -- accepted, not fixed here): two
+        # concurrent first-ever attempts for the same tier can both reach
+        # this branch and both try to INSERT a new row. Whichever loses
+        # raises an IntegrityError on the tier's unique constraint and the
+        # request 500s rather than silently double-inserting or granting
+        # an unlocked verification -- the failure mode is closed, not
+        # open. Not an upsert because SQLAlchemy's ORM-level upsert isn't
+        # portable across SQLite (tests) and PostgreSQL (production)
+        # without dialect-specific statements; the race window is a single
+        # tier's very first verify-pin call ever, not a steady-state path.
+        attempt = OwnerPinAttempt(tier=tier, failed_count=0, locked_until=None)
+        db.add(attempt)
+        db.flush()
+
+    # SQLite stores DateTime(timezone=True) as a naive ISO string and reloads
+    # it without tzinfo; PostgreSQL returns tz-aware values. Normalise to UTC
+    # before comparing (copied from local_auth.py:92-128).
+    locked_until_utc = attempt.locked_until
+    if locked_until_utc is not None and locked_until_utc.tzinfo is None:
+        locked_until_utc = locked_until_utc.replace(tzinfo=timezone.utc)
+
+    if locked_until_utc and locked_until_utc > now:
+        db.commit()
+        logger.info("owner_pin_verify", tier=tier, status="locked")
+        return VerifyPinResponse(status="locked", locked_until=locked_until_utc.isoformat())
+
+    # ATHENA-69 Pass H (valerie r1, Low): str.isdigit() accepts many
+    # non-ASCII Unicode digit characters (superscripts, Devanagari, etc.)
+    # -- a "PIN" built from those would pass this check but never match
+    # what verify_password compares against (the hash was derived from an
+    # actual 6-ASCII-digit PIN when it was set). An explicit ASCII-digit
+    # regex is the only string this can ever legitimately match.
+    if not re.fullmatch(r"[0-9]{6}", payload.pin):
+        _record_pin_failure(db, attempt, tier, now)
+        logger.info("owner_pin_verify", tier=tier, status="malformed")
+        return VerifyPinResponse(status="malformed", locked_until=None)
+
+    if not verify_password(payload.pin, config.owner_pin):
+        _record_pin_failure(db, attempt, tier, now)
+        logger.info("owner_pin_verify", tier=tier, status="invalid")
+        return VerifyPinResponse(status="invalid", locked_until=None)
+
+    attempt.failed_count = 0
+    attempt.locked_until = None
+    attempt.updated_at = now
+    db.commit()
+    logger.info("owner_pin_verify", tier=tier, status="verified")
+    return VerifyPinResponse(status="verified", locked_until=None)
 
 
 async def get_athena_db_connection():

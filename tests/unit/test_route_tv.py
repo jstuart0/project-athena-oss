@@ -40,7 +40,8 @@ sys.path.insert(0, "src")
 
 from orchestrator.nodes import route_tv_node  # noqa: E402
 from orchestrator.nodes import _runtime  # noqa: E402
-from orchestrator.state import OrchestratorState  # noqa: E402
+from orchestrator.state import IntentCategory, OrchestratorState  # noqa: E402
+from orchestrator import mode_permission as mp  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -57,12 +58,16 @@ def _make_state(
     session_id: str | None = "sess-tv-1",
     room: str | None = "living room",
     mode: str = "default",
+    intent: IntentCategory | None = IntentCategory.TV_CONTROL,
+    permissions: dict | None = None,
     timing_tracker=None,
 ) -> OrchestratorState:
     state = OrchestratorState(query=query)
     state.session_id = session_id
     state.room = room
     state.mode = mode
+    state.intent = intent
+    state.permissions = permissions if permissions is not None else {"mode": "owner"}
     state.timing_tracker = timing_tracker
     state.node_timings = {}
     state.retrieved_data = {}
@@ -138,6 +143,39 @@ class TestTVHandlerNotInitialised:
         state = _make_state()
         result = _run(route_tv_node(state))
         assert isinstance(result.node_timings.get("route_tv"), float)
+
+
+class TestIntentPermissionGate:
+    """ATHENA-69 (D9): the intent gate refuses TV_CONTROL before any Apple
+    TV call when the current scope denies it."""
+
+    def setup_method(self):
+        _runtime.reset_for_test()
+
+    def test_guest_intent_denied_no_ha_call(self):
+        th = _make_tv_handler()
+        _runtime.set_tv_handler(th)
+        state = _make_state(
+            mode="guest",
+            permissions={"mode": "guest", "allowed_intents": ["weather"]},
+        )
+        result = _run(route_tv_node(state))
+        th.parse_tv_intent.assert_not_awaited()
+        th.handle_launch.assert_not_awaited()
+        assert result.error == "permission_denied"
+        assert "guest mode" in result.answer.lower()
+
+    def test_owner_proceeds(self):
+        th = _make_tv_handler()
+        _runtime.set_tv_handler(th)
+        state = _make_state(mode="owner", permissions={"mode": "owner"})
+        with patch("orchestrator.nodes.route_tv.store_conversation_context",
+                   new_callable=AsyncMock):
+            result = _run(route_tv_node(state))
+        th.parse_tv_intent.assert_awaited_once()
+        th.handle_launch.assert_awaited_once()
+        assert result.error is None
+        assert result.answer == "Opened Netflix."
 
 
 class TestLaunchIntent:
@@ -334,6 +372,40 @@ class TestContextStorage:
         with patch("orchestrator.nodes.route_tv.store_conversation_context", mock_store):
             _run(route_tv_node(state))
         mock_store.assert_not_awaited()
+
+
+class TestDenialSurfacing:
+    """ATHENA-69 Pass H (codex full-diff, Medium): route_tv_node opens a
+    scope but previously never inspected scope.denials after dispatch -- a
+    HAWritePermissionDenied raised by the guard mid-handler (e.g. a
+    restricted media_player.* entity behind an Apple TV's media_player
+    domain) fell into the generic `except Exception` branch and produced
+    "I encountered an error controlling the TV", not the specific
+    refusal."""
+
+    def setup_method(self):
+        _runtime.reset_for_test()
+
+    def test_restricted_media_player_entity_denial_replaces_answer(self):
+        th = _make_tv_handler()
+
+        async def _deny_side_effect(*a, **kw):
+            scope = mp.current_ha_scope()
+            scope.denials.append(mp.HADenial(
+                domain="media_player", service="turn_on",
+                targets=("media_player.owner_bedroom_appletv",), reason="entity_or_domain_denied",
+            ))
+            raise mp.HAWritePermissionDenied("media_player.turn_on denied (entity_or_domain_denied)")
+
+        th.handle_launch = AsyncMock(side_effect=_deny_side_effect)
+        _runtime.set_tv_handler(th)
+        state = _make_state(mode="guest", permissions={"mode": "guest", "allowed_intents": ["tv_control"]})
+
+        result = _run(route_tv_node(state))
+
+        assert result.error == "permission_denied"
+        assert "guest mode" in result.answer.lower()
+        assert "encountered an error" not in result.answer.lower()
 
 
 class TestErrorHandlingAndMetrics:

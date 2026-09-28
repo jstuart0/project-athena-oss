@@ -13,6 +13,14 @@ from unittest import mock
 
 import pytest
 
+# ATHENA-69: smart_home_controller.py's ha_client-accepting methods now
+# lazily import orchestrator.mode_permission (-> orchestrator.metrics ->
+# prometheus_client) at call time. Stub before import, matching the
+# convention used across tests/unit/test_route_control.py and friends.
+for _mod in ("prometheus_client", "langgraph", "langgraph.graph"):
+    if _mod not in sys.modules:
+        sys.modules[_mod] = mock.MagicMock()
+
 sys.path.insert(0, "src")
 
 import orchestrator.smart_home_controller as shc  # noqa: E402

@@ -94,6 +94,17 @@ class MusicAssistantClient {
                     this.onDisconnect(event);
                 }
 
+                // ATHENA-69 (D19): the server closes with 1008 before accept()
+                // when the caller isn't a signed-in owner/operator. Retrying
+                // won't help without auth, so surface it distinctly and skip
+                // the reconnect loop.
+                if (event.code === 1008) {
+                    if (this.onError) {
+                        this.onError(new Error('sign_in_required'));
+                    }
+                    return;
+                }
+
                 // Auto-reconnect if not explicitly closed
                 if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
                     this._scheduleReconnect();

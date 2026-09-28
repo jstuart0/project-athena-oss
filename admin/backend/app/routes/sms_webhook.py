@@ -397,6 +397,7 @@ async def route_to_orchestrator(
             json={
                 "query": query,
                 "mode": "guest",
+                "caller_trust": "sms",
                 "interface_type": "text",  # Full details for SMS
                 "session_id": f"sms_{phone_number}",
                 "room": "sms",

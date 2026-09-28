@@ -5,23 +5,36 @@ Polls Airbnb iCal calendar, detects active stays, and determines current mode (g
 Provides API for orchestrator to query current mode and permissions.
 
 API Endpoints:
-- GET /health - Health check
-- GET /mode - Get current mode (guest/owner)
-- GET /mode/permissions - Get current permissions for mode
-- POST /mode/override - Manually override mode (voice PIN)
+- GET /health - Health check (no auth)
+- GET /mode - Get current mode (guest/owner/degraded)
+- GET /mode/permissions - Get current permissions for mode (?mode=guest to force guest)
+- POST /mode/override - Manually override mode (voice PIN, verified by the admin backend)
 - GET /mode/events - Get current calendar events
+
+Authentication (ATHENA-69 D15): every route below except /health requires
+X-Service-Key, gated by `mode_service_ingress_auth`
+(MODE_SERVICE_INGRESS_AUTH, default "enforce"; "warn" for rollout).
+
+Owner PIN authority (ATHENA-69 D16/D25): this service holds no PIN state.
+`POST /mode/override` for mode="owner" forwards the caller's PIN and trust
+tier to the admin backend's `POST /api/internal/guest-mode/verify-pin`,
+which owns the hash, the per-tier lockout counter, and the verdict. This
+service never hashes or compares a PIN itself.
+
+Cold start (ATHENA-69 D38): until the first successful admin-config load,
+`/mode` reports mode="degraded" (never "owner") and `/health` reports
+config_source="none", ready=false.
 """
 import os
+import time
 import asyncio
-import hashlib
-import secrets
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
 import httpx
 from icalendar import Calendar
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -33,6 +46,13 @@ from shared.logging_config import configure_logging
 from shared.cache import CacheClient
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from shared.guest_policy import (
+    GUEST_BASELINE_RESTRICTED_ENTITIES_DEFAULT,
+    apply_guest_baseline,
+    guest_baseline,
+    parse_json_array_env,
+)
+from shared.service_ingress_auth import make_require_service_caller
 
 # Configure logging
 logger = configure_logging("mode-service")
@@ -43,18 +63,65 @@ REDIS_URL = get_config().redis_url
 SERVICE_PORT = int(os.getenv("MODE_SERVICE_PORT", "8021"))
 POLL_INTERVAL_SECONDS = int(os.getenv("CALENDAR_POLL_INTERVAL_SECONDS", "600"))  # 10 minutes
 
+_POSTURE_REMINDER_INTERVAL_SECONDS = 3600
+_CONFIG_STALE_AFTER_SECONDS = 15 * 60
+_CONFIG_STALE_LOG_INTERVAL_SECONDS = 10 * 60
+
+# Ingress auth dependency (D15).
+_require_caller = make_require_service_caller("mode_service_ingress_auth", "mode_service")
+
 # Global state
 cache: Optional[CacheClient] = None
 current_config: Dict[str, Any] = {}
 current_events: List[Dict[str, Any]] = []
-current_mode = "owner"  # Safe default - owner mode
+current_mode = "degraded"  # Safe default until the first config load succeeds (D38)
 active_override: Optional[Dict[str, Any]] = None
+
+# Last-good config tracking (D26/D37/D38).
+_config_loaded = False  # sticky True once any load has ever succeeded
+_last_load_ok = False  # whether the MOST RECENT load attempt succeeded
+_config_loaded_at: Optional[float] = None  # time.monotonic() of the last successful load
+_service_key_warned = False  # log the unauthenticated-config-fetch warning once
+_last_stale_log_at: Optional[float] = None
+
+# Lazily-created admin HTTP client for PIN verification (module-level so tests
+# can inject an httpx.MockTransport before calling override_mode).
+_admin_http_client: Optional[httpx.AsyncClient] = None
+
+
+def _default_config() -> Dict[str, Any]:
+    """The built-in-defaults config used before any admin load has ever
+    succeeded (D26 "using=defaults"). Guest lists come from the same
+    shared floor/baseline the orchestrator uses (D8/D22), so a
+    never-configured deployment and a mode-service-can't-reach-admin
+    deployment converge on identical guest restrictions.
+    """
+    baseline = guest_baseline()
+    return {
+        "enabled": False,
+        "buffer_before_checkin_hours": 2,
+        "buffer_after_checkout_hours": 1,
+        "guest_allowed_intents": baseline["allowed_intents"],
+        "guest_restricted_entities": baseline["restricted_entities"],
+        "guest_allowed_domains": baseline["allowed_domains"],
+        "guest_restricted_intents": list(baseline.get("restricted_intents") or []),
+        "max_queries_per_minute_guest": 10,
+        "max_queries_per_minute_owner": 100,
+        "owner_pin_configured": False,
+    }
+
+
+def _get_admin_http_client() -> httpx.AsyncClient:
+    global _admin_http_client
+    if _admin_http_client is None:
+        _admin_http_client = httpx.AsyncClient(timeout=3.0)
+    return _admin_http_client
 
 
 # Pydantic models
 class ModeResponse(BaseModel):
     """Response for current mode query."""
-    mode: str  # 'guest' or 'owner'
+    mode: str  # 'guest', 'owner', or 'degraded'
     reason: str
     override_active: bool
     events_count: int
@@ -67,15 +134,23 @@ class PermissionsResponse(BaseModel):
     allowed_intents: List[str]
     restricted_entities: List[str]
     allowed_domains: List[str]
+    restricted_intents: List[str] = []
     max_queries_per_minute: int
 
 
 class ModeOverrideRequest(BaseModel):
     """Request to override mode."""
-    mode: str  # 'owner' or 'guest'
+    # ATHENA-69 Pass H2 (xander delta review, High): was a bare `str` --
+    # any non-"owner" value (a typo, "Owner", "admin") silently skipped
+    # the entire PIN-required branch below and got stored verbatim, and
+    # get_permissions()'s fallthrough "else: unrestricted" branch then
+    # granted owner permissions to it with zero PIN attempts. A Literal
+    # rejects anything else with 422 before this body ever runs.
+    mode: Literal["owner", "guest"]
     voice_pin: Optional[str] = None
     timeout_minutes: Optional[int] = None
     voice_device_id: Optional[str] = None
+    caller_tier: Optional[Literal["household", "sms", "web_authenticated"]] = None
 
 
 @asynccontextmanager
@@ -88,12 +163,16 @@ async def lifespan(app: FastAPI):
     cache = CacheClient(url=REDIS_URL)
     await cache.connect()
 
+    if not get_config().service_api_key and not get_config().dev_mode:
+        logger.error("mode_service_service_api_key_unset")
+
     # Load initial config
     await load_config()
 
     # Start background tasks
     asyncio.create_task(calendar_polling_loop())
     asyncio.create_task(config_refresh_loop())
+    asyncio.create_task(_posture_reminder_loop(_POSTURE_REMINDER_INTERVAL_SECONDS))
 
     logger.info("mode_service.startup.complete", msg="Mode Service ready")
 
@@ -103,6 +182,8 @@ async def lifespan(app: FastAPI):
     logger.info("mode_service.shutdown", msg="Shutting down Mode Service")
     if cache:
         await cache.disconnect()
+    if _admin_http_client is not None:
+        await _admin_http_client.aclose()
 
 
 app = FastAPI(
@@ -113,9 +194,22 @@ app = FastAPI(
 )
 
 
+def _config_source() -> str:
+    if not _config_loaded:
+        return "none"
+    return "admin" if _last_load_ok else "last_good"
+
+
+def _config_age_seconds() -> Optional[float]:
+    if _config_loaded_at is None:
+        return None
+    return time.monotonic() - _config_loaded_at
+
+
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint. Never behind ingress auth (D15)."""
+    _refresh_mode()
     return JSONResponse(
         status_code=200,
         content={
@@ -124,19 +218,36 @@ async def health_check():
             "version": "1.0.0",
             "current_mode": current_mode,
             "events_loaded": len(current_events),
-            "config_enabled": current_config.get('enabled', False)
+            "config_enabled": current_config.get('enabled', False),
+            "config_source": _config_source(),
+            "config_age_seconds": _config_age_seconds(),
+            "pin_authority": "admin",
+            "ready": _config_loaded,
         }
     )
 
 
-@app.get("/mode", response_model=ModeResponse)
+def _refresh_mode() -> None:
+    """Recompute `current_mode` from live state (D26: cheap, in-memory, run
+    on every read). Cold start (D38): never owner/guest until the first
+    admin-config load has succeeded at least once.
+    """
+    global current_mode
+    if not _config_loaded:
+        current_mode = "degraded"
+        return
+    current_mode = determine_mode()
+
+
+@app.get("/mode", response_model=ModeResponse, dependencies=[Depends(_require_caller)])
 async def get_current_mode():
     """
-    Get the current operating mode (guest or owner).
+    Get the current operating mode (guest, owner, or degraded).
 
     Returns:
         ModeResponse with mode, reason, and current event details
     """
+    _refresh_mode()
     current_event = get_current_event()
 
     return ModeResponse(
@@ -148,67 +259,112 @@ async def get_current_mode():
     )
 
 
-@app.get("/mode/permissions", response_model=PermissionsResponse)
-async def get_permissions():
+def _degraded_permissions_response() -> PermissionsResponse:
+    """Physical-security domains denied, everything else unrestricted
+    (D4/D38). ATHENA-69 Pass H2 (xander delta review, Info->fix): must
+    match orchestrator.mode_permission.degraded_permissions() exactly --
+    the entity floor alone (HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES),
+    no intent narrowing, no domain restriction. This previously reused the
+    full guest baseline (GUEST_BASELINE_ALLOWED_INTENTS/_DOMAINS, a
+    DIFFERENT, deliberately narrower allowlist), so an owner hitting a
+    cold mode service (this endpoint reachable, config not yet loaded) was
+    denied lights/media/climate that the orchestrator's own outage
+    fallback (an unreachable mode service) would have kept -- the same
+    failure class produced two different outcomes depending on which
+    layer detected it.
     """
-    Get permissions for the current mode.
+    fallback_entities = parse_json_array_env(
+        get_config().ha_permission_fallback_restricted_entities,
+        GUEST_BASELINE_RESTRICTED_ENTITIES_DEFAULT,
+    )
+    return PermissionsResponse(
+        mode="degraded",
+        allowed_intents=[],
+        restricted_entities=fallback_entities,
+        allowed_domains=[],
+        restricted_intents=[],
+        max_queries_per_minute=current_config.get('max_queries_per_minute_guest', 10),
+    )
+
+
+@app.get("/mode/permissions", response_model=PermissionsResponse, dependencies=[Depends(_require_caller)])
+async def get_permissions(mode: Optional[Literal["guest"]] = Query(None)):
+    """
+    Get permissions for the current mode, or force the guest set via
+    ?mode=guest regardless of the server's current mode (D6). Any other
+    explicit value (e.g. ?mode=owner) is rejected by FastAPI/pydantic as a
+    422 before this body runs.
 
     Returns:
         PermissionsResponse with allowed intents, entities, and rate limits
     """
-    if current_mode == "guest":
+    _refresh_mode()
+    effective_mode = "guest" if mode == "guest" else current_mode
+
+    if effective_mode == "degraded":
+        return _degraded_permissions_response()
+
+    if effective_mode == "guest":
+        guest_dict = apply_guest_baseline({
+            "mode": "guest",
+            "allowed_intents": current_config.get('guest_allowed_intents', []),
+            "restricted_entities": current_config.get('guest_restricted_entities', []),
+            "allowed_domains": current_config.get('guest_allowed_domains', []),
+            "restricted_intents": current_config.get('guest_restricted_intents', ['tesla']),
+        })
         return PermissionsResponse(
             mode="guest",
-            allowed_intents=current_config.get('guest_allowed_intents', [
-                'weather', 'time', 'general_info', 'news', 'recipes', 'streaming'
-            ]),
-            restricted_entities=current_config.get('guest_restricted_entities', [
-                'lock.*', 'garage.*', 'alarm.*', 'camera.*'
-            ]),
-            allowed_domains=current_config.get('guest_allowed_domains', [
-                'light', 'media_player', 'switch', 'scene', 'climate'
-            ]),
-            max_queries_per_minute=current_config.get('max_queries_per_minute_guest', 10)
+            allowed_intents=guest_dict["allowed_intents"],
+            restricted_entities=guest_dict["restricted_entities"],
+            allowed_domains=guest_dict["allowed_domains"],
+            restricted_intents=guest_dict["restricted_intents"],
+            max_queries_per_minute=current_config.get('max_queries_per_minute_guest', 10),
         )
-    else:
+
+    if effective_mode == "owner":
         # Owner mode - unrestricted
         return PermissionsResponse(
             mode="owner",
             allowed_intents=[],  # Empty = all allowed
             restricted_entities=[],  # Empty = none restricted
             allowed_domains=[],  # Empty = all allowed
+            restricted_intents=[],
             max_queries_per_minute=current_config.get('max_queries_per_minute_owner', 100)
         )
 
+    # ATHENA-69 Pass H2 (xander delta review, High): the unrestricted
+    # branch above used to be an unconditional else -- any effective_mode
+    # value that wasn't literally "degraded" or "guest" fell through to it
+    # and got owner permissions. Explicit "owner" check above; anything
+    # else (should be unreachable now that determine_mode()/_refresh_mode()
+    # validate the stored value, and ModeOverrideRequest.mode is a Literal)
+    # fails closed to degraded rather than defaulting open.
+    logger.error("get_permissions_unknown_effective_mode", effective_mode=effective_mode)
+    return _degraded_permissions_response()
 
-def verify_pin(input_pin: str) -> bool:
+
+async def _verify_owner_pin(pin: str, tier: str) -> Dict[str, Any]:
+    """POST the PIN + caller tier to the admin backend's verify-pin endpoint
+    and return its verdict body. Raises on any transport/parsing failure;
+    the caller maps that to 503 owner_pin_verification_unavailable.
     """
-    Verify a PIN against the stored hash from admin backend config.
-
-    Args:
-        input_pin: The 6-digit PIN provided by the user
-
-    Returns:
-        True if PIN matches, False otherwise
-    """
-    stored_hash = current_config.get('owner_pin')
-    if not stored_hash:
-        logger.warning("mode_service.pin.not_configured", msg="No owner PIN configured")
-        return False
-
-    # Hash the input PIN with SHA256 (same as admin backend)
-    input_hash = hashlib.sha256(input_pin.encode()).hexdigest()
-
-    # Use timing-safe comparison to prevent timing attacks
-    return secrets.compare_digest(input_hash, stored_hash)
+    client = _get_admin_http_client()
+    response = await client.post(
+        f"{ADMIN_API_URL}/api/internal/guest-mode/verify-pin",
+        json={"pin": pin, "tier": tier},
+        headers={"X-Service-Key": get_config().service_api_key},
+    )
+    response.raise_for_status()
+    return response.json()
 
 
-@app.post("/mode/override")
+@app.post("/mode/override", dependencies=[Depends(_require_caller)])
 async def override_mode(request: ModeOverrideRequest):
     """
     Manually override the current mode (e.g., owner returning home during guest stay).
 
-    Requires voice PIN verification for switching to owner mode.
+    Switching to owner mode requires a PIN, verified by the admin backend
+    (D16/D25) -- this service holds no PIN state.
 
     Args:
         request: ModeOverrideRequest with mode and optional PIN
@@ -217,57 +373,74 @@ async def override_mode(request: ModeOverrideRequest):
         Success message with new mode
 
     Raises:
-        HTTPException 401: If PIN is required but not provided
-        HTTPException 403: If PIN verification fails
+        HTTPException 401: PIN required but not provided
+        HTTPException 400: PIN not exactly 6 digits
+        HTTPException 403: Invalid PIN, or no PIN configured at all
+        HTTPException 429: Tier locked after too many failed attempts
+        HTTPException 503: The admin backend couldn't verify the PIN
     """
     global current_mode, active_override
 
-    # Verify PIN if switching to owner mode
     if request.mode == "owner":
-        # Check if PIN is configured
-        pin_configured = bool(current_config.get('owner_pin'))
+        pin_configured = bool(current_config.get('owner_pin_configured'))
 
-        if pin_configured:
-            # PIN is required
-            if not request.voice_pin:
+        if not request.voice_pin:
+            if not pin_configured:
                 logger.warning(
-                    "mode_service.override.pin_required",
-                    device=request.voice_device_id
+                    "owner_override_refused_no_pin",
+                    device=request.voice_device_id,
                 )
-                raise HTTPException(
-                    status_code=401,
-                    detail="PIN required for owner mode override"
-                )
-
-            # Validate PIN format (6 digits)
-            if not request.voice_pin.isdigit() or len(request.voice_pin) != 6:
-                logger.warning(
-                    "mode_service.override.invalid_pin_format",
-                    device=request.voice_device_id
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail="PIN must be exactly 6 digits"
-                )
-
-            # Verify PIN against stored hash
-            if not verify_pin(request.voice_pin):
-                logger.warning(
-                    "mode_service.override.pin_verification_failed",
-                    device=request.voice_device_id
-                )
-                raise HTTPException(
-                    status_code=403,
-                    detail="Invalid PIN"
-                )
-
-            logger.info(
-                "mode_service.override.pin_verified",
+                raise HTTPException(status_code=403, detail="owner_pin_not_configured")
+            logger.warning(
+                "mode_service.override.pin_required",
                 device=request.voice_device_id
             )
+            raise HTTPException(
+                status_code=401,
+                detail="PIN required for owner mode override"
+            )
 
-    # Set override
-    timeout_minutes = request.timeout_minutes or current_config.get('override_timeout_minutes', 60)
+        tier = request.caller_tier or "unknown"
+        try:
+            verdict = await _verify_owner_pin(request.voice_pin, tier)
+            verdict_status = verdict.get("status")
+        except Exception as e:
+            logger.error("owner_pin_verification_unavailable", error=str(e))
+            raise HTTPException(status_code=503, detail="owner_pin_verification_unavailable")
+
+        if verdict_status == "invalid":
+            logger.warning("mode_service.override.pin_verification_failed", device=request.voice_device_id)
+            raise HTTPException(status_code=403, detail="Invalid PIN")
+        if verdict_status == "malformed":
+            raise HTTPException(status_code=400, detail="PIN must be exactly 6 digits")
+        if verdict_status == "not_configured":
+            raise HTTPException(status_code=403, detail="owner_pin_not_configured")
+        if verdict_status == "locked":
+            raise HTTPException(status_code=429, detail="owner_override_locked")
+        if verdict_status != "verified":
+            logger.error("owner_pin_verification_unavailable", status=verdict_status)
+            raise HTTPException(status_code=503, detail="owner_pin_verification_unavailable")
+
+        logger.info(
+            "mode_service.override.pin_verified",
+            device=request.voice_device_id
+        )
+
+    # Set override. ATHENA-69 Pass H2 (xander delta review, High): the
+    # requested/configured duration is capped server-side regardless of
+    # how the PIN check went above -- a caller-supplied timeout_minutes
+    # was previously unbounded (e.g. 999999), letting a single successful
+    # override (or, before the Literal fix above, none at all) grant
+    # effectively-permanent owner mode.
+    requested_timeout_minutes = request.timeout_minutes or current_config.get('override_timeout_minutes', 60)
+    max_timeout_minutes = get_config().override_max_timeout_minutes
+    timeout_minutes = min(requested_timeout_minutes, max_timeout_minutes)
+    if timeout_minutes != requested_timeout_minutes:
+        logger.warning(
+            "mode_service.override.timeout_clamped",
+            requested=requested_timeout_minutes,
+            clamped_to=timeout_minutes,
+        )
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=timeout_minutes)
 
     active_override = {
@@ -294,7 +467,7 @@ async def override_mode(request: ModeOverrideRequest):
     }
 
 
-@app.get("/mode/events")
+@app.get("/mode/events", dependencies=[Depends(_require_caller)])
 async def get_events():
     """
     Get current calendar events.
@@ -310,39 +483,82 @@ async def get_events():
 
 
 async def load_config():
-    """Load guest mode configuration from admin API."""
-    global current_config
+    """Load guest mode configuration from admin API (D26).
+
+    Sends X-Service-Key. On success, replaces current_config and marks the
+    load loaded/ok. On failure: keeps the last-good config if one has ever
+    loaded (an admin blip during an active booking must not flip the house
+    guest -> owner); falls back to the built-in defaults only if nothing has
+    ever loaded.
+    """
+    global current_config, _config_loaded, _last_load_ok, _config_loaded_at
+    global _service_key_warned
+
+    headers = {}
+    key = get_config().service_api_key
+    if key:
+        headers["X-Service-Key"] = key
+    elif not _service_key_warned:
+        logger.warning("mode_service_admin_config_unauthenticated")
+        _service_key_warned = True
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{ADMIN_API_URL}/api/guest-mode/config")
+            response = await client.get(f"{ADMIN_API_URL}/api/guest-mode/config", headers=headers)
             response.raise_for_status()
             current_config = response.json()
+            _config_loaded = True
+            _last_load_ok = True
+            _config_loaded_at = time.monotonic()
             logger.info("mode_service.config.loaded", enabled=current_config.get('enabled'))
     except Exception as e:
-        logger.warning(
-            "mode_service.config.load_failed",
-            error=str(e),
-            msg="Using safe defaults"
+        _last_load_ok = False
+        if _config_loaded:
+            logger.error("mode_service.config.load_failed", error=str(e), using="last_good")
+        else:
+            current_config = _default_config()
+            logger.warning("mode_service.config.load_failed", error=str(e), using="defaults")
+
+
+def _check_config_staleness() -> None:
+    """After a load attempt, log a throttled ERROR if the config hasn't
+    refreshed successfully in over `_CONFIG_STALE_AFTER_SECONDS` (D37).
+
+    Split out of config_refresh_loop so the throttling logic is directly
+    testable without waiting on the loop's real 60 s outer sleep.
+    """
+    global _last_stale_log_at
+
+    age = _config_age_seconds()
+    if (
+        _config_loaded
+        and age is not None
+        and age > _CONFIG_STALE_AFTER_SECONDS
+        and (
+            _last_stale_log_at is None
+            or (time.monotonic() - _last_stale_log_at) >= _CONFIG_STALE_LOG_INTERVAL_SECONDS
         )
-        # Use safe defaults
-        current_config = {
-            'enabled': False,
-            'buffer_before_checkin_hours': 2,
-            'buffer_after_checkout_hours': 1,
-            'guest_allowed_intents': ['weather', 'time', 'general_info', 'news', 'recipes'],
-            'guest_restricted_entities': ['lock.*', 'garage.*', 'alarm.*', 'camera.*'],
-            'guest_allowed_domains': ['light', 'media_player', 'switch', 'scene', 'climate'],
-            'max_queries_per_minute_guest': 10,
-            'max_queries_per_minute_owner': 100,
-        }
+    ):
+        logger.error("mode_service_config_stale", config_age_seconds=age)
+        _last_stale_log_at = time.monotonic()
 
 
 async def config_refresh_loop():
-    """Periodically refresh configuration from admin API."""
+    """Periodically refresh configuration from admin API, and log a stale
+    warning if a successful load hasn't happened in a while (D37)."""
     while True:
         await asyncio.sleep(60)  # Check every 60 seconds
         await load_config()
+        _check_config_staleness()
+
+
+async def _posture_reminder_loop(interval: float) -> None:
+    """Log a WARNING immediately (startup) and every `interval` seconds
+    thereafter while MODE_SERVICE_INGRESS_AUTH=warn (D28/xander r2 New-M1)."""
+    while True:
+        if get_config().mode_service_ingress_auth == "warn":
+            logger.warning("mode_service_ingress_auth_warn_active")
+        await asyncio.sleep(interval)
 
 
 async def calendar_polling_loop():
@@ -386,7 +602,7 @@ async def calendar_polling_loop():
                     logger.info("mode_service.calendar.loaded", count=len(events))
 
                     # Update current mode
-                    current_mode = determine_mode()
+                    _refresh_mode()
 
         except Exception as e:
             logger.error("mode_service.calendar.fetch_failed", error=str(e), exc_info=True)
@@ -408,7 +624,19 @@ def determine_mode() -> str:
     # Check for active override
     if active_override:
         if datetime.now(timezone.utc) < active_override['expires_at']:
-            return active_override['mode']
+            stored_mode = active_override['mode']
+            if stored_mode not in ("owner", "guest"):
+                # ATHENA-69 Pass H2 (xander delta review, High): belt and
+                # suspenders alongside ModeOverrideRequest.mode's Literal --
+                # a stored value that predates this fix, or that somehow
+                # reached this dict outside override_mode(), must not be
+                # returned verbatim. Treat as if there were no override at
+                # all (fall through to calendar-based determination) rather
+                # than propagating an unvalidated mode string.
+                logger.error("active_override_invalid_mode_discarded", stored_mode=stored_mode)
+                active_override = None
+            else:
+                return stored_mode
         else:
             # Override expired
             active_override = None
@@ -435,6 +663,9 @@ def determine_mode() -> str:
 def determine_mode_reason() -> str:
     """Get human-readable reason for current mode."""
     global active_override
+
+    if not _config_loaded:
+        return "Mode service starting up (config not yet loaded)"
 
     if active_override:
         return "Manual override via voice PIN"

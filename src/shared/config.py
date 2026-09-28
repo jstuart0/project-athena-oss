@@ -449,6 +449,71 @@ class AthenaConfig(BaseSettings):
     ha_music_players: str = Field(default="")
 
     # ------------------------------------------------------------------
+    # HA write authorization (ATHENA-69 / D4, D8, D22)
+    # ------------------------------------------------------------------
+    # Four JSON-array-of-strings fields, parsed via
+    # shared.guest_policy.parse_json_array_env: unset (empty string) means
+    # "use the built-in default list"; a malformed value also falls back to
+    # the default (never an empty list, which would silently disable a
+    # floor); an explicit "[]" is honoured as an intentional deployer
+    # opt-out. Same pattern as ha_light_groups above.
+    #
+    # ha_permission_fallback_restricted_entities: entity-id regex patterns
+    #   applied when the mode service is unreachable or rejecting (D4) --
+    #   the "degraded" permission set. Default restricts the
+    #   physical-security domains (locks, covers, alarm panels, cameras,
+    #   automations, scripts, scenes) while leaving lights/climate/media
+    #   usable. An explicit "[]" here means an outage grants unrestricted
+    #   HA writes -- a deliberate, logged deployer choice
+    #   (ha_permission_fallback_disabled), not a silent default.
+    ha_permission_fallback_restricted_entities: str = Field(default="")
+    # guest_baseline_restricted_entities: the floor unioned into every
+    #   guest's restricted_entities regardless of admin config (D8) --
+    #   same domain set as the fallback list above, plus this is *always*
+    #   unioned in, never replaced by an admin-configured list.
+    guest_baseline_restricted_entities: str = Field(default="")
+    # guest_baseline_allowed_intents / guest_baseline_allowed_domains: used
+    #   only when the admin-configured guest allowlist is empty (D22) -- an
+    #   empty admin list means "use this baseline", never "allow
+    #   everything".
+    guest_baseline_allowed_intents: str = Field(default="")
+    guest_baseline_allowed_domains: str = Field(default="")
+
+    # mode_service_ingress_auth: D15. Same three-value contract as
+    # orchestrator_ingress_auth above, applied to the mode service's
+    # /mode* routes via shared.service_ingress_auth. "enforce" (default)
+    # requires X-Service-Key; "warn" logs and allows through for staged
+    # rollout; any other value behaves as "enforce" and logs an ERROR once.
+    mode_service_ingress_auth: str = Field(default="enforce")
+
+    # mode_override_lockout_threshold / mode_override_lockout_minutes: D16/
+    #   D25. Read by the admin backend's per-tier owner-PIN lockout counter
+    #   (POST /api/internal/guest-mode/verify-pin) -- after this many failed
+    #   verifications in a trust tier within the lockout window, that tier
+    #   is locked out for this many minutes. Not read by the mode service,
+    #   which holds no PIN state after D25.
+    mode_override_lockout_threshold: int = Field(default=5)
+    mode_override_lockout_minutes: int = Field(default=30)
+
+    # override_max_timeout_minutes: ATHENA-69 Pass H2 (xander delta review,
+    #   High). Server-side ceiling on POST /mode/override's timeout_minutes,
+    #   applied regardless of PIN outcome -- a caller (or a caller-supplied
+    #   value alone, previously unbounded) could otherwise request an
+    #   owner-mode override lasting effectively forever
+    #   (timeout_minutes=999999). Requested values above this are clamped,
+    #   never rejected outright (a too-long request still gets the
+    #   maximum, not a hard failure).
+    override_max_timeout_minutes: int = Field(default=240)
+
+    # livekit_user_token_ttl_minutes: D27. TTL for browser-facing LiveKit
+    #   room tokens minted for jarvis-web voice sessions (clamped 1-1440 by
+    #   the gateway's generate_room_token). Server-side Athena tokens are
+    #   unaffected -- they pass an explicit 24h TTL. A shorter TTL only
+    #   bounds *joining* a room; it doesn't disconnect an already-connected
+    #   participant.
+    livekit_user_token_ttl_minutes: int = Field(default=30)
+
+    # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern
     # ------------------------------------------------------------------
     # Fields below are NOT yet migrated to AthenaConfig.  They are listed

@@ -24,6 +24,9 @@ from shared.ha_client import HomeAssistantClient
 from shared.admin_config import AdminConfigClient
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+# ATHENA-69: orchestrator.mode_permission is imported lazily inside
+# TVHandler.__init__ (not at module scope) -- see the identical note in
+# sequence_executor.py.
 
 logger = structlog.get_logger()
 
@@ -227,7 +230,9 @@ class AppleTVHandler:
     """
 
     def __init__(self, ha_client: HomeAssistantClient, admin_client: AdminConfigClient):
-        self.ha = ha_client
+        from orchestrator.mode_permission import ensure_permission_enforcing
+
+        self.ha = ensure_permission_enforcing(ha_client)
         self.admin = admin_client
 
     async def parse_tv_intent(self, query: str, room: Optional[str] = None, mode: str = "owner") -> TVIntent:

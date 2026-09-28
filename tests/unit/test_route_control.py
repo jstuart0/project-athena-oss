@@ -51,6 +51,7 @@ for _mod in ("prometheus_client", "langgraph", "langgraph.graph"):
 
 sys.path.insert(0, "src")
 
+from orchestrator import mode_permission
 from orchestrator.nodes import route_control_node
 from orchestrator.nodes import _runtime
 from orchestrator.state import OrchestratorState, IntentCategory
@@ -280,7 +281,7 @@ class TestSequenceRouting:
         _runtime.set_sequence_executor(se)
         _runtime.set_automation_agent(None)
         _runtime.set_entity_manager(None)
-        state = _make_state(query="turn on kitchen then dim to 50% after 1 minute")
+        state = _make_state(query="turn on kitchen then dim to 50% after 1 minute", permissions={"mode": "owner"})
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
                   return_value={"enabled": False}),
@@ -327,7 +328,7 @@ class TestSequenceRouting:
         _runtime.set_sequence_executor(None)
         _runtime.set_automation_agent(None)
         _runtime.set_entity_manager(None)
-        state = _make_state(query="run the morning routine")
+        state = _make_state(query="run the morning routine", permissions={"mode": "owner"})
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
                   return_value={"enabled": False}),
@@ -338,6 +339,44 @@ class TestSequenceRouting:
         ):
             result = _run(route_control_node(state))
         assert result.answer == "Sequence executor not available."
+
+    def test_guest_sequence_with_lock_step_refused_before_scheduling(self):
+        """D21: a sequence containing a denied step is refused synchronously,
+        before execute_sequence is ever called -- a background sequence
+        can't be scheduled with authorization it doesn't have."""
+        sc = _make_smart_controller()
+        sc.detect_sequence_intent.return_value = True
+        sc.extract_sequence_intent = AsyncMock(return_value={
+            "steps": [
+                {"target": {"entity_id": "light.kitchen"}, "action": "turn_on"},
+                {"target": {"entity_id": "lock.front_door"}, "action": "unlock"},
+            ],
+            "acknowledge": "On it!",
+        })
+        se = MagicMock()
+        se.execute_sequence = AsyncMock(return_value="done")
+        _runtime.set_smart_controller(sc)
+        _runtime.set_sequence_executor(se)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
+        state = _make_state(
+            query="turn on the kitchen lights then unlock the front door",
+            mode="guest",
+            permissions={"mode": "guest", "allowed_intents": ["control"]},
+        )
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value=False),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+        ):
+            result = _run(route_control_node(state))
+        se.execute_sequence.assert_not_awaited()
+        assert result.error == "permission_denied"
+        assert "schedule" in result.answer.lower()
+        assert "guest mode" in result.answer.lower()
 
 
 class TestContextContinuation:
@@ -507,75 +546,261 @@ class TestNormalExtraction:
         assert call_kwargs["intent"] == "control"
 
 
-class TestFallbackBranch:
+class TestNoSmartController:
+    """D12: the dead/broken 'no smart controller' fallback branch was
+    deleted (route_control.py:420-459 at base) -- there is no HA call
+    possible without the smart controller, so this now just says so."""
+
     def setup_method(self):
         _runtime.reset_for_test()
 
-    def test_fallback_turn_on_via_ha_client(self):
+    def test_no_smart_controller_returns_not_configured(self):
         _runtime.set_smart_controller(None)
-        ha = MagicMock()
-        ha.call_service = AsyncMock(return_value={"result": "ok"})
-        _runtime.set_ha_client(ha)
-        state = _make_state(
-            query="turn on the office light",
-            entities={"device": "light.office"},
-        )
+        state = _make_state(query="turn on the office light")
         with patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
                    return_value={"enabled": False}):
             result = _run(route_control_node(state))
-        ha.call_service.assert_awaited_once()
-        assert "turned on" in result.answer.lower() or "done" in result.answer.lower()
+        assert result.answer == "Home automation isn't configured."
+        assert result.error == "ha_not_configured"
 
-    def test_fallback_entity_permission_denied(self):
-        _runtime.set_smart_controller(None)
-        ha = MagicMock()
-        ha.call_service = AsyncMock(return_value={"result": "ok"})
-        _runtime.set_ha_client(ha)
+
+class TestHAPermissionGating:
+    """ATHENA-69 (D9/D14): the intent gate, coarse domain pre-check, and
+    post-call denial surfacing wired into route_control_node's smart-
+    controller dispatch."""
+
+    def setup_method(self):
+        _runtime.reset_for_test()
+
+    def _guest_permissions(self, **overrides):
+        perms = mode_permission.apply_guest_baseline({"mode": "guest"})
+        perms.update(overrides)
+        return perms
+
+    def test_smart_controller_guest_lock_denied_before_execute(self):
+        sc = _make_smart_controller()
+        sc.extract_intent = AsyncMock(return_value={"device_type": "lock", "action": "unlock", "room": "front"})
+        _runtime.set_smart_controller(sc)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
         state = _make_state(
-            query="turn on the office light",
-            entities={"device": "light.office"},
+            query="unlock the front door",
             mode="guest",
-            permissions={"restricted_entities": ["light.office"]},
+            # allowed_intents includes "control" so this exercises the
+            # entity/domain-level coarse pre-check, not the intent gate.
+            permissions=self._guest_permissions(allowed_intents=["control"]),
         )
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
                   return_value={"enabled": False}),
-            patch("orchestrator.nodes.route_control.check_entity_permission", return_value=False),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
         ):
             result = _run(route_control_node(state))
-        ha.call_service.assert_not_awaited()
+        sc.execute_intent.assert_not_awaited()
         assert result.error == "permission_denied"
-        assert "permission" in result.answer.lower()
+        assert "guest mode" in result.answer.lower()
+        assert "lock" in result.answer.lower()
 
-    def test_fallback_no_device_extracted_asks_for_details_never_defaults_to_a_house_entity(self):
-        """DC14 item 1: the fallback branch used to silently default an
-        unspecified device to the hardcoded 'light.office' -- a real
-        house-specific entity ID that would be wrong for any other
-        deployment (and arguably wrong UX even for this one, since it
-        acted on a device the user never named). No device extracted must
-        now fall through to the existing 'need more details' clarification
-        instead of guessing any entity."""
-        _runtime.set_smart_controller(None)
-        ha = MagicMock()
-        ha.call_service = AsyncMock(return_value={"result": "ok"})
-        _runtime.set_ha_client(ha)
+    def test_smart_controller_owner_lock_proceeds(self):
+        sc = _make_smart_controller()
+        sc.extract_intent = AsyncMock(return_value={"device_type": "lock", "action": "unlock", "room": "front"})
+        sc.execute_intent = AsyncMock(return_value="Done! Front door unlocked.")
+        _runtime.set_smart_controller(sc)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
+        state = _make_state(query="unlock the front door", mode="owner", permissions={"mode": "owner"})
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+            patch("orchestrator.nodes.route_control.store_conversation_context", new_callable=AsyncMock),
+        ):
+            result = _run(route_control_node(state))
+        sc.execute_intent.assert_awaited_once()
+        assert result.answer == "Done! Front door unlocked."
+        assert result.error is None
+
+    def test_guest_control_intent_denied_skips_extraction(self):
+        sc = _make_smart_controller()
+        _runtime.set_smart_controller(sc)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
+        # A guest allowlist that doesn't include "control" at all (not an
+        # empty list -- an empty list means baseline, not "nothing
+        # allowed"; a populated allow-list without "control" is what
+        # actually denies the CONTROL intent).
         state = _make_state(
-            query="turn on the lights",
-            entities={},
+            query="turn off the lights",
+            mode="guest",
+            permissions=self._guest_permissions(allowed_intents=["weather"]),
         )
         with patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
                    return_value={"enabled": False}):
             result = _run(route_control_node(state))
-        ha.call_service.assert_not_awaited()
-        assert "light.office" not in (result.answer or "")
-        assert "more details" in result.answer.lower()
+        sc.extract_intent.assert_not_awaited()
+        assert result.error == "permission_denied"
+        assert result.answer == mode_permission.GUEST_INTENT_REFUSAL
+
+    def test_denial_inside_execute_intent_surfaces_refusal_and_skips_context_store(self):
+        sc = _make_smart_controller()
+        sc.extract_intent = AsyncMock(return_value={"device_type": "light", "action": "turn_on", "room": "kitchen"})
+
+        async def _execute_intent_with_manual_denial(intent, ha_client_arg, **kwargs):
+            scope = mode_permission.current_ha_scope()
+            scope.denials.append(mode_permission.HADenial(
+                domain="light", service="turn_on", targets=("light.kitchen",), reason="entity_or_domain_denied",
+            ))
+            scope.halted = True
+            return "I turned on the kitchen light."
+
+        sc.execute_intent = AsyncMock(side_effect=_execute_intent_with_manual_denial)
+        _runtime.set_smart_controller(sc)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
+        mock_store = AsyncMock()
+        state = _make_state(
+            query="turn on the kitchen light",
+            mode="guest",
+            permissions=self._guest_permissions(allowed_intents=["control"]),
+            session_id="sess-denial",
+        )
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+            patch("orchestrator.nodes.route_control.store_conversation_context", mock_store),
+        ):
+            result = _run(route_control_node(state))
+        sc.execute_intent.assert_awaited_once()
+        assert result.error == "permission_denied"
+        assert result.answer != "I turned on the kitchen light."
+        assert "guest mode" in result.answer.lower()
+        mock_store.assert_not_awaited()
+
+    def test_bed_warmer_guest_refused_by_multi_domain_precheck(self):
+        sc = _make_smart_controller()
+        sc.extract_intent = AsyncMock(return_value={"device_type": "bed_warmer", "action": "warm", "room": "master"})
+        _runtime.set_smart_controller(sc)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
+        state = _make_state(
+            query="warm my side of the bed",
+            mode="guest",
+            permissions=self._guest_permissions(allowed_intents=["control"]),
+        )
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+        ):
+            result = _run(route_control_node(state))
+        sc.execute_intent.assert_not_awaited()
+        assert result.error == "permission_denied"
+
+    def test_degraded_owner_whole_house_lights_allowed(self):
+        """D4/D14 (bob r2 M2): a degraded scope still lets an owner turn
+        off all the lights -- the whole-house write is light-only, and
+        light isn't in the D4 fallback's restricted floor."""
+        sc = _make_smart_controller()
+        sc.extract_intent = AsyncMock(return_value={
+            "device_type": "light", "action": "turn_off", "room": "whole_house",
+        })
+
+        recording = MagicMock()
+        recording.call_service = AsyncMock(return_value={"ok": True})
+        guard = mode_permission.PermissionEnforcingHAClient(recording)
+
+        async def _execute_intent_writes_via_guard(intent, ha_client_arg, **kwargs):
+            await guard.call_service("light", "turn_off", {"entity_id": "all"})
+            return "Good night! I've turned off the lights."
+
+        sc.execute_intent = AsyncMock(side_effect=_execute_intent_writes_via_guard)
+        _runtime.set_smart_controller(sc)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
+        state = _make_state(
+            query="turn off all the lights",
+            mode="owner",
+            permissions=mode_permission.degraded_permissions(),
+        )
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+            patch("orchestrator.nodes.route_control.store_conversation_context", new_callable=AsyncMock),
+        ):
+            result = _run(route_control_node(state))
+        recording.call_service.assert_awaited_once_with("light", "turn_off", {"entity_id": "all"})
+        assert result.answer == "Good night! I've turned off the lights."
+        assert result.error is None
+
+    def test_empty_permissions_are_degraded_not_owner(self):
+        sc = _make_smart_controller()
+        sc.extract_intent = AsyncMock(return_value={"device_type": "lock", "action": "lock", "room": "front"})
+        _runtime.set_smart_controller(sc)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
+        state = _make_state(query="lock the front door", mode="owner", permissions={})
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+        ):
+            result = _run(route_control_node(state))
+        # An empty permissions dict must NOT behave like unrestricted
+        # owner -- the lock write is still denied (degraded floor).
+        sc.execute_intent.assert_not_awaited()
+        assert result.error == "permission_denied"
+
+    def test_old_mode_service_guest_without_floor_is_floored(self):
+        """A pre-ATHENA-69 mode service response with no floor patterns at
+        all still gets the D8 floor applied by normalize_permissions."""
+        sc = _make_smart_controller()
+        sc.extract_intent = AsyncMock(return_value={"device_type": "lock", "action": "unlock", "room": "front"})
+        _runtime.set_smart_controller(sc)
+        _runtime.set_automation_agent(None)
+        _runtime.set_entity_manager(None)
+        state = _make_state(
+            query="unlock the front door",
+            mode="guest",
+            # allowed_intents explicitly includes "control" so this
+            # exercises normalize_permissions' floor application, not the
+            # separate (and also-denying) intent gate.
+            permissions={"mode": "guest", "restricted_entities": [], "allowed_domains": [], "allowed_intents": ["control"]},
+        )
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  return_value={"enabled": False}),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
+        ):
+            result = _run(route_control_node(state))
+        sc.execute_intent.assert_not_awaited()
+        assert result.error == "permission_denied"
 
 
 class TestErrorHandlingAndMetrics:
     def setup_method(self):
         _runtime.reset_for_test()
 
-    def test_outer_exception_sets_error_and_fallback_answer(self):
+    def test_outer_exception_sets_error_and_generic_answer(self):
+        """Renamed off the removed '-k fallback' test-name pattern (ATHENA-69
+        Pass A deleted the unrelated dead fallback branch and its 3 tests;
+        this test covers the outer try/except, a distinct concern, and is
+        kept under a name outside that pattern)."""
         sc = MagicMock()
         sc.detect_sequence_intent.return_value = False
         sc.extract_intent = AsyncMock(side_effect=RuntimeError("LLM down"))

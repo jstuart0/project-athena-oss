@@ -30,6 +30,10 @@ spec:
         env:
         - name: PORT
           value: "8001"
+        # ATHENA-69 (D23): required. Without it, mode/permission resolution
+        # degrades every request (get_current_mode's outage fallback).
+        - name: MODE_SERVICE_URL
+          value: "http://athena-mode-service:8022"
         # Override Kubernetes auto-injected REDIS_* vars
         - name: REDIS_HOST
           value: "redis"

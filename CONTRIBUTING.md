@@ -152,7 +152,7 @@ Then add a unit test in `tests/unit/test_config.py` mirroring the existing field
 
 ### Current `AthenaConfig` fields
 
-41 fields, plus one computed property (`llm_endpoint`). This table is meant
+51 fields, plus one computed property (`llm_endpoint`). This table is meant
 to stay complete — when you add a field, add its row here too.
 
 | Field | Env var | Default | Notes |
@@ -177,6 +177,7 @@ to stay complete — when you add a field, add its row here too.
 | `login_lockout_minutes` | `LOGIN_LOCKOUT_MINUTES` | `30` | Lockout duration once the threshold is reached |
 | `login_minimum_delay_ms` | `LOGIN_MINIMUM_DELAY_MS` | `400` | Wall-time floor on every login-failure branch, to equalize timing |
 | `service_registry_write_per_minute` | `SERVICE_REGISTRY_WRITE_PER_MINUTE` | `60` | Rate limit for service-registry POST/toggle/refresh/DELETE |
+| `service_registry_endpoint_url` | `SERVICE_REGISTRY_ENDPOINT_URL` | `""` | Explicit `endpoint_url` override for `register_service()`'s self-registration POST; empty (default) omits it so the upsert leaves an existing row's host/port untouched. Set only when this process's own view of itself is genuinely authoritative (e.g. an unseeded bare-metal dev RAG service) |
 | `health_poll_interval_seconds` | `HEALTH_POLL_INTERVAL_SECONDS` | `30` | Background health-poller cycle interval |
 | `health_poll_timeout_seconds` | `HEALTH_POLL_TIMEOUT_SECONDS` | `5` | Per-service `/health` request timeout |
 | `health_poll_concurrency` | `HEALTH_POLL_CONCURRENCY` | `8` | Max simultaneous outbound health pings per cycle |
@@ -200,6 +201,15 @@ to stay complete — when you add a field, add its row here too.
 | `ha_bed_warmer_entities` | `HA_BED_WARMER_ENTITIES` | `""` | Entity ids for a Sunbeam-via-Tuya bed-warmer integration |
 | `ha_light_groups` | `HA_LIGHT_GROUPS` | `""` | Room → light-group entity map, read only by the scene-activation-failed fallback (per room; empty means no fallback for that room, never house-wide) |
 | `ha_music_players` | `HA_MUSIC_PLAYERS` | `""` | Fallback room → Music Assistant entity map, used only when the admin API is unreachable |
+| `ha_permission_fallback_restricted_entities` | `HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES` | `""` | Entity-id regex patterns applied as the "degraded" permission set when the mode service is unreachable or rejecting (ATHENA-69 D4); empty string means "use the built-in default list", explicit `[]` means an outage grants unrestricted HA writes |
+| `guest_baseline_restricted_entities` | `GUEST_BASELINE_RESTRICTED_ENTITIES` | `""` | Floor unioned into every guest's `restricted_entities` regardless of admin config (D8); always unioned in, never replaced |
+| `guest_baseline_allowed_intents` | `GUEST_BASELINE_ALLOWED_INTENTS` | `""` | Baseline used only when the admin-configured guest `allowed_intents` is empty (D22); empty admin list means "use this baseline", never "allow everything" |
+| `guest_baseline_allowed_domains` | `GUEST_BASELINE_ALLOWED_DOMAINS` | `""` | Baseline used only when the admin-configured guest `allowed_domains` is empty (D22) |
+| `mode_service_ingress_auth` | `MODE_SERVICE_INGRESS_AUTH` | `enforce` | `enforce`\|`warn`; gates the mode service's `/mode*` routes behind `X-Service-Key` (D15) |
+| `mode_override_lockout_threshold` | `MODE_OVERRIDE_LOCKOUT_THRESHOLD` | `5` | Failed owner-PIN verifications (per trust tier) before that tier locks out (D16/D25) |
+| `mode_override_lockout_minutes` | `MODE_OVERRIDE_LOCKOUT_MINUTES` | `30` | Owner-PIN lockout duration once the threshold is reached |
+| `livekit_user_token_ttl_minutes` | `LIVEKIT_USER_TOKEN_TTL_MINUTES` | `30` | TTL (clamped 1-1440) for browser-facing LiveKit room tokens (jarvis-web voice sessions); server-side Athena participant tokens are unaffected (D27) |
+| `override_max_timeout_minutes` | `OVERRIDE_MAX_TIMEOUT_MINUTES` | `240` | Server-side ceiling on `POST /mode/override`'s `timeout_minutes`, applied regardless of PIN outcome; a requested value above this is clamped, never rejected (ATHENA-69 Pass H2) |
 
 ## Fetching user-supplied or admin-supplied URLs (SSRF guard)
 

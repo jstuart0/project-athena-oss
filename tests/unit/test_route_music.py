@@ -38,6 +38,7 @@ sys.path.insert(0, "src")
 from orchestrator.nodes import route_music_node  # noqa: E402
 from orchestrator.nodes import _runtime  # noqa: E402
 from orchestrator.state import OrchestratorState, IntentCategory  # noqa: E402
+from orchestrator import mode_permission as mp  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,8 @@ def _make_state(
     room: str | None = "living room",
     intent: IntentCategory | None = IntentCategory.MUSIC_PLAY,
     interface_type: str | None = None,
+    mode: str = "owner",
+    permissions: dict | None = None,
     timing_tracker=None,
 ) -> OrchestratorState:
     state = OrchestratorState(query=query)
@@ -62,6 +65,8 @@ def _make_state(
     state.room = room
     state.intent = intent
     state.interface_type = interface_type
+    state.mode = mode
+    state.permissions = permissions if permissions is not None else {"mode": "owner"}
     state.timing_tracker = timing_tracker
     state.node_timings = {}
     state.retrieved_data = {}
@@ -118,6 +123,39 @@ class TestMusicHandlerNotInitialised:
         state = _make_state()
         result = _run(route_music_node(state))
         assert isinstance(result.node_timings.get("route_music"), float)
+
+
+class TestIntentPermissionGate:
+    """ATHENA-69 (D9): the intent gate refuses MUSIC_PLAY/MUSIC_CONTROL
+    before any Music Assistant call when the current scope denies it."""
+
+    def setup_method(self):
+        _runtime.reset_for_test()
+
+    def test_guest_intent_denied_no_ha_call(self):
+        mh = _make_music_handler()
+        _runtime.set_music_handler(mh)
+        state = _make_state(
+            mode="guest",
+            permissions={"mode": "guest", "allowed_intents": ["weather"]},
+        )
+        result = _run(route_music_node(state))
+        mh.parse_music_play_intent.assert_not_awaited()
+        mh.handle_play.assert_not_awaited()
+        assert result.error == "permission_denied"
+        assert "guest mode" in result.answer.lower()
+
+    def test_owner_proceeds(self):
+        mh = _make_music_handler()
+        _runtime.set_music_handler(mh)
+        state = _make_state(mode="owner", permissions={"mode": "owner"})
+        with patch("orchestrator.nodes.route_music.store_conversation_context",
+                   new_callable=AsyncMock):
+            result = _run(route_music_node(state))
+        mh.parse_music_play_intent.assert_awaited_once()
+        mh.handle_play.assert_awaited_once()
+        assert result.error is None
+        assert result.answer == "Now playing Miles Davis in living room."
 
 
 class TestMusicPlaySingleRoom:
@@ -295,6 +333,39 @@ class TestContextStorage:
         with patch("orchestrator.nodes.route_music.store_conversation_context", mock_store):
             _run(route_music_node(state))
         mock_store.assert_not_awaited()
+
+
+class TestDenialSurfacing:
+    """ATHENA-69 Pass H (codex full-diff, Medium): route_music_node opens a
+    scope but previously never inspected scope.denials after dispatch -- a
+    HAWritePermissionDenied raised by the guard mid-handler (e.g. a
+    restricted media_player.* entity inside an otherwise-allowed intent)
+    fell into the generic `except Exception` branch and produced "I
+    encountered an error with music playback", not the specific refusal."""
+
+    def setup_method(self):
+        _runtime.reset_for_test()
+
+    def test_restricted_media_player_entity_denial_replaces_answer(self):
+        mh = _make_music_handler()
+
+        async def _deny_side_effect(*a, **kw):
+            scope = mp.current_ha_scope()
+            scope.denials.append(mp.HADenial(
+                domain="media_player", service="media_play",
+                targets=("media_player.owner_bedroom",), reason="entity_or_domain_denied",
+            ))
+            raise mp.HAWritePermissionDenied("media_player.media_play denied (entity_or_domain_denied)")
+
+        mh.handle_play = AsyncMock(side_effect=_deny_side_effect)
+        _runtime.set_music_handler(mh)
+        state = _make_state(mode="guest", permissions={"mode": "guest", "allowed_intents": ["music_play"]})
+
+        result = _run(route_music_node(state))
+
+        assert result.error == "permission_denied"
+        assert "guest mode" in result.answer.lower()
+        assert "encountered an error" not in result.answer.lower()
 
 
 class TestErrorHandlingAndMetrics:
