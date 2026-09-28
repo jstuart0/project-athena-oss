@@ -240,7 +240,7 @@ def test_llm_test_endpoint_blocks_private_ollama_host_with_no_network_call(owner
 def test_llm_test_endpoint_allows_allowed_ollama_host_and_probes_it(owner_client, db, monkeypatch):
     _seed_ollama_url(db, "http://192.0.2.10:11434")
     ssrf_spy = AsyncMock(return_value=(True, ""))
-    monkeypatch.setattr(voice_tests_module, "check_ssrf_safe", ssrf_spy)
+    monkeypatch.setattr(voice_tests_module, "check_ollama_ssrf_safe", ssrf_spy)
 
     mock_response = MagicMock()
     mock_response.status = 200

@@ -82,7 +82,7 @@ def test_available_models_probes_when_host_is_allowed(owner_client, db, monkeypa
         ssrf_spy_calls.append(url)
         return True, ""
 
-    monkeypatch.setattr(component_models_module, "check_ssrf_safe", _fake_check_ssrf_safe)
+    monkeypatch.setattr(component_models_module, "check_ollama_ssrf_safe", _fake_check_ssrf_safe)
 
     response = owner_client.get("/api/component-models/available-models")
 
@@ -116,7 +116,7 @@ async def test_validate_model_exists_probes_when_host_is_allowed(db, monkeypatch
     async def _fake_check_ssrf_safe(url):
         return True, ""
 
-    monkeypatch.setattr(component_models_module, "check_ssrf_safe", _fake_check_ssrf_safe)
+    monkeypatch.setattr(component_models_module, "check_ollama_ssrf_safe", _fake_check_ssrf_safe)
 
     result = await component_models_module.validate_model_exists("phi3:mini", db)
 

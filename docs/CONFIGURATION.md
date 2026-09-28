@@ -481,6 +481,15 @@ Service's CIDR or hostname added to `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`**,
 the same as any other in-cluster Service (see "Service Registry Health
 Checks" above) — there is no separate allowlist for Ollama specifically.
 
+**Local-dev carve-out for model discovery and voice tests (ATHENA-122 / xander diff-review Medium, 2026-09-28)**: `GET /api/component-models/available-models`, `validate_model_exists` (model-assignment validation), and `voice_tests.py`'s `/llm/test` and `/pipeline/test` probes call `app.utils.rag_urls.check_ollama_ssrf_safe()` instead of the bare `check_ssrf_safe()` — it applies the SAME not-in-cluster loopback/RFC1918/ULA carve-out the write-boundary check above already has (`app.utils.url_validators.is_local_host()`), so the OSS default `http://localhost:11434` works for these four probes out of the box on a bare-metal dev machine with **no** `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` entry needed. This carve-out does **not** apply inside a Kubernetes pod (`is_local_host()` always returns `False` there) or to link-local/IMDS-class addresses — an in-cluster `http://ollama:11434` still needs the allowlist entry exactly as described above. `service_control.py`'s Ollama probes and this route's own reachability check are unchanged by this carve-out (pre-existing behavior, out of this fix's scope) — a bare-metal `localhost` Ollama still needs the allowlist for the Service Control panel and the settings reachability check specifically.
+
+**Startup discoverability**: admin-backend logs one WARNING at boot,
+`ollama_url_blocked_by_ssrf_guard`, naming the exact env var to set,
+whenever the currently configured Ollama URL would genuinely be blocked
+(i.e. not covered by the carve-out above) — most commonly an in-cluster
+Service DNS name with no matching `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`
+entry yet. This is a diagnostic log line only; it never blocks startup.
+
 ### Redis
 
 | Variable | Default | Description |

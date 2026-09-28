@@ -82,6 +82,17 @@ data:
   #   (Also set OPENAI_API_KEY in secrets)
   #
   # Both Ollama and MLX-LM provide OpenAI-compatible APIs.
+  #
+  # IMPORTANT: an in-cluster Ollama (Option 1, the default below) needs its
+  # Service hostname or ClusterIP CIDR added to HEALTH_POLL_ALLOWED_PRIVATE_HOSTS
+  # above (currently commented out) -- otherwise model discovery, voice
+  # tests, and the Service Control Ollama panel all refuse with
+  # ssrf_blocked. Bare-metal/external Ollama (Options 2-4) resolved outside
+  # a K8s pod does NOT need this entry for model discovery/voice tests
+  # (automatic local-dev carve-out), but the Service Control panel and the
+  # settings reachability check still require it. Uncomment and set, e.g.:
+  #   HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: "ollama"
+  # See docs/CONFIGURATION.md "Ollama (LLM)" for the full rule.
   # ==========================================================================
   OLLAMA_URL: "http://ollama:11434"
 
@@ -239,6 +250,9 @@ data:
   #   HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: "10.96.0.0/12,10.244.0.0/16"
   # Example with a host subnet (pod CIDR + service CIDR + host subnet):
   #   HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: "10.96.0.0/12,10.244.0.0/16,192.0.2.0/24"
+  #
+  # This same allowlist gates the in-cluster Ollama probes too -- see the
+  # "LLM Backend Configuration" IMPORTANT note above.
   #
   # HEALTH_POLL_ALLOWED_PRIVATE_HOSTS: ""
 

@@ -156,3 +156,54 @@ async def check_ssrf_safe(url: str) -> tuple[bool, str]:
     if parsed.query:
         path_and_query = f"{path_and_query}?{parsed.query}"
     return await _validate_service_url(host, port, path_and_query)
+
+
+async def check_ollama_ssrf_safe(url: str) -> tuple[bool, str]:
+    """check_ssrf_safe(), plus the not-in-cluster loopback carve-out this
+    repo already applies at the Ollama write-boundary (POST
+    /api/settings/ollama-url -- see docs/CONFIGURATION.md "Ollama URL write
+    validation") but never extended to the runtime probes themselves
+    (codex diff-review Medium, 2026-09-28: component_models.py's model
+    discovery and voice_tests.py's Ollama probes inherit the health
+    poller's default-deny allowlist with no carve-out, so the OSS default
+    http://localhost:11434 stops working for bare-metal dev unless the
+    operator sets HEALTH_POLL_ALLOWED_PRIVATE_HOSTS -- a genuine
+    works-out-of-the-box regression this wrapper closes for Ollama
+    specifically, without touching the shared allowlist's posture for
+    anything else (RAG probes, the health poller, service-registry writes
+    all keep calling check_ssrf_safe() directly, unchanged).
+
+    Posture, unchanged for everything this carve-out does NOT cover:
+    - Inside a Kubernetes pod (KUBERNETES_SERVICE_HOST set): no carve-out,
+      ever -- an in-cluster Ollama Service still needs its CIDR/hostname in
+      HEALTH_POLL_ALLOWED_PRIVATE_HOSTS, same as any other in-cluster
+      Service (is_local_host() returns False unconditionally in a pod).
+    - A private host that ISN'T loopback/RFC1918/ULA reachable outside a
+      pod (there is no such thing -- is_local_host() covers exactly
+      loopback/RFC1918/ULA) gets no carve-out either.
+
+    Returns (allowed, reason); reason is non-empty only when blocked (by
+    check_ssrf_safe AND not covered by the carve-out).
+    """
+    from urllib.parse import urlparse
+    from app.utils.url_validators import is_local_host
+
+    allowed, reason = await check_ssrf_safe(url)
+    if allowed:
+        return allowed, reason
+
+    hostname = urlparse(url).hostname or ""
+    if is_local_host(hostname):
+        logger.warning(
+            "ollama_ssrf_local_dev_carveout",
+            url=url,
+            original_reason=reason,
+            message=(
+                "Ollama probe host is loopback/RFC1918/ULA and this process is not "
+                "running inside a Kubernetes pod -- allowing as local dev, bypassing "
+                "the HEALTH_POLL_ALLOWED_PRIVATE_HOSTS allowlist for this probe only."
+            ),
+        )
+        return True, ""
+
+    return allowed, reason
