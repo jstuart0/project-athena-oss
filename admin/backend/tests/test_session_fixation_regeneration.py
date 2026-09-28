@@ -17,13 +17,46 @@ and additionally purges the pre-rotation id from the backing store.
 codex diff review (2026-09-28) on the first cut of this fix (bare
 regenerate_session_id(), no store purge): regenerate_session_id() only
 repoints handler.session_id to a freshly generated id -- it never removes
-the OLD entry from the store. A planted-but-empty attacker cookie is
-harmless either way (nothing was ever written under it), but if the old id
-already held data before this request -- e.g. an attacker-seeded session
-that was itself live, or any other stale pre-existing entry -- that data
-remained valid under its own TTL even after rotation. rotate_session_id()
-captures the old id before calling regenerate_session_id(), then explicitly
-removes it from the store.
+the OLD entry from the store. Confirmed by reading the INSTALLED
+starsessions 2.2.1 source directly (site-packages/starsessions/session.py:
+regenerate_id() at lines 153-155 is exactly `self.session_id =
+generate_session_id(); return self.session_id` -- no store write, no
+removal; save() at 133-142 only ever writes under the NEW self.session_id;
+there is no `_remove_data_for_session` or equivalent anywhere in the
+installed package). This is a source-code fact, not something the tests
+below can distinguish on their own -- a test can observe "the old id is
+gone from the store" but can't tell whether the library did that on its
+own or app.utils.sessions.rotate_session_id()'s manual store.remove() did
+it; the file-level docstring in app/utils/sessions.py carries the citation
+so a future reader checks the source rather than re-litigating this from
+test behavior. A planted-but-empty attacker cookie is harmless either way
+(nothing was ever written under it), but if the old id already held data
+before this request -- e.g. an attacker-seeded session that was itself
+live, or any other stale pre-existing entry -- that data remained valid
+under its own TTL even after rotation. rotate_session_id() captures the
+old id before calling regenerate_session_id(), then explicitly removes it
+from the store.
+
+xander (residual Medium, 2026-09-28): rotating a caller-supplied cookie
+purges whatever session that id held, even if it belonged to a different,
+already-authenticated identity (an attacker plants a victim's live cookie,
+then logs in as themselves under it -- the victim gets force-logged-out as
+a side effect). The purge must still happen (the fixation defense has to
+win), but it should be visible: rotate_session_id() now reads the old
+entry's user_id before removing it and, if it differs from the identity
+that just authenticated, logs a structlog WARNING
+(session_rotation_purged_foreign_identity) with both user ids and the
+client IP -- never tokens. admin/backend's structlog is unconfigured
+(structlog.is_configured() is False; no service calls
+shared.logging_config.configure_logging() here), so it falls back to
+structlog's default PrintLogger writing straight to stdout -- caplog
+(which hooks stdlib logging) won't see it, so the tests below use
+capsys.readouterr() instead. test_local_login_warns_on_cross_identity_purge
+drives this through the real local_login endpoint (attacker authenticates
+under a cookie seeded with a different, victim, user_id) and confirms the
+token value itself never appears in the captured output;
+test_local_login_same_identity_purge_does_not_warn is the negative control
+-- a user re-authenticating under their OWN old id must not warn.
 
 auth_logout is deliberately NOT touched (does not use rotate_session_id
 either). Empirical check against starsessions 2.2.1 (see the file-level
@@ -471,7 +504,135 @@ def test_oidc_auth_callback_purges_preexisting_old_id_entry(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 4. Positive control: logout's existing clear()-only cleanup is sufficient
+# 4. Cross-identity purge warning (xander, residual Medium): purging the old
+# id must still happen even when it belonged to a different, already-
+# authenticated user, but it must be logged. admin/backend's structlog is
+# unconfigured here (falls back to PrintLogger -> stdout), so these use
+# capsys rather than caplog -- see the module docstring.
+# ---------------------------------------------------------------------------
+
+def test_local_login_warns_on_cross_identity_purge(monkeypatch, capsys):
+    import json
+
+    from app.utils.passwords import hash_password
+
+    _main, client, SessionLocal = _fresh_app_client(monkeypatch)
+    db = SessionLocal()
+    try:
+        from app.models import User
+
+        victim = User(
+            username="victim",
+            email="victim@test.example",
+            auth_provider="local",
+            password_hash=hash_password("victim-password", iterations=1000),
+            active=True,
+            role="viewer",
+        )
+        attacker = User(
+            username="attacker",
+            email="attacker@test.example",
+            auth_provider="local",
+            password_hash=hash_password("attacker-password", iterations=1000),
+            active=True,
+            role="viewer",
+        )
+        db.add_all([victim, attacker])
+        db.commit()
+        db.refresh(victim)
+        db.refresh(attacker)
+        victim_id = victim.id
+        attacker_id = attacker.id
+    finally:
+        db.close()
+
+    assert victim_id != attacker_id
+
+    # Simulates the victim's own live, authenticated session under a cookie
+    # the attacker has planted in their own browser.
+    shared_cookie = "victim-live-session-id"
+    _main.session_store.data[shared_cookie] = json.dumps(
+        {"user_id": victim_id, "access_token": "victim-real-jwt-do-not-leak"}
+    ).encode("utf-8")
+
+    capsys.readouterr()  # drain any import/startup noise before the request
+
+    r = client.post(
+        "/api/auth/local-login",
+        json={"username": "attacker", "password": "attacker-password"},
+        cookies={"athena_session": shared_cookie},
+    )
+    assert r.status_code == 200, r.text
+
+    # The fixation defense still wins -- the victim's old id is gone either way.
+    assert shared_cookie not in _main.session_store.data
+
+    captured = capsys.readouterr()
+    assert "session_rotation_purged_foreign_identity" in captured.out, (
+        "cross-identity purge must log a warning"
+    )
+    assert str(victim_id) in captured.out
+    assert str(attacker_id) in captured.out
+    assert "victim-real-jwt-do-not-leak" not in captured.out, (
+        "the warning must never log token values"
+    )
+
+    _main.app.dependency_overrides.clear()
+
+
+def test_local_login_same_identity_purge_does_not_warn(monkeypatch, capsys):
+    """Negative control: a user re-authenticating under their OWN old id
+    (e.g. re-login after a session refresh) must not trigger the
+    cross-identity warning -- only a genuine identity mismatch should."""
+    import json
+
+    from app.utils.passwords import hash_password
+
+    _main, client, SessionLocal = _fresh_app_client(monkeypatch)
+    db = SessionLocal()
+    try:
+        from app.models import User
+
+        user = User(
+            username="alice",
+            email="alice@test.example",
+            auth_provider="local",
+            password_hash=hash_password("password1234", iterations=1000),
+            active=True,
+            role="viewer",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        user_id = user.id
+    finally:
+        db.close()
+
+    own_old_cookie = "alices-own-previous-session-id"
+    _main.session_store.data[own_old_cookie] = json.dumps(
+        {"user_id": user_id, "access_token": "alices-own-earlier-jwt"}
+    ).encode("utf-8")
+
+    capsys.readouterr()
+
+    r = client.post(
+        "/api/auth/local-login",
+        json={"username": "alice", "password": "password1234"},
+        cookies={"athena_session": own_old_cookie},
+    )
+    assert r.status_code == 200, r.text
+    assert own_old_cookie not in _main.session_store.data
+
+    captured = capsys.readouterr()
+    assert "session_rotation_purged_foreign_identity" not in captured.out, (
+        "re-authenticating under one's own old id must not warn"
+    )
+
+    _main.app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# 5. Positive control: logout's existing clear()-only cleanup is sufficient
 # ---------------------------------------------------------------------------
 
 def test_logout_clear_alone_removes_store_entry_and_expires_cookie(monkeypatch):
