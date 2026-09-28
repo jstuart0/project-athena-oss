@@ -186,7 +186,14 @@ def redact_url_userinfo(url: str) -> str:
 
     Never raises: an unparseable URL is returned as the fixed literal
     `"<unparseable-url>"` rather than risk logging the raw (possibly
-    credential-bearing) input in an exception message.
+    credential-bearing) input in an exception message. A malformed port
+    (out of range, e.g. `:99999`, or non-numeric, e.g. `:abc`) makes
+    `parsed.port` itself raise `ValueError` -- caught separately (codex r3
+    diff-review Low, 2026-09-28) and handled by stripping userinfo from
+    the raw `netloc` by hand instead of reconstructing from
+    `hostname`/`port`, since `.hostname` and the raising `.port` share the
+    same malformed authority and a hand split is the only piece of that
+    authority guaranteed not to raise.
     """
     try:
         parsed = urlparse(url)
@@ -198,6 +205,12 @@ def redact_url_userinfo(url: str) -> str:
     if not hostname:
         return "<unparseable-url>"
 
+    try:
+        port = parsed.port
+    except ValueError:
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        return f"{scheme}://{netloc}" if scheme else netloc
+
     # urlparse().hostname strips IPv6 brackets; re-bracket so the redacted
     # form round-trips as a valid authority (unbracketed "::1:8080" is
     # ambiguous / invalid).
@@ -205,8 +218,8 @@ def redact_url_userinfo(url: str) -> str:
         hostname = f"[{hostname}]"
 
     netloc = hostname
-    if parsed.port:
-        netloc = f"{hostname}:{parsed.port}"
+    if port:
+        netloc = f"{hostname}:{port}"
 
     return f"{scheme}://{netloc}" if scheme else netloc
 

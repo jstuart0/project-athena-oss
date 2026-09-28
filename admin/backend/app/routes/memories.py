@@ -26,6 +26,7 @@ import structlog
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, Memory, GuestSession, MemoryConfig, Feature
+from app.utils.url_validators import redact_url_userinfo
 
 logger = structlog.get_logger()
 
@@ -49,7 +50,7 @@ def get_qdrant():
         try:
             from qdrant_client import QdrantClient
             _qdrant_client = QdrantClient(url=QDRANT_URL, timeout=10)
-            logger.info("qdrant_client_initialized", url=QDRANT_URL)
+            logger.info("qdrant_client_initialized", url=redact_url_userinfo(QDRANT_URL))
         except Exception as e:
             logger.error("qdrant_client_init_failed", error=str(e))
             return None

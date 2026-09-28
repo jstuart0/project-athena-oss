@@ -265,3 +265,31 @@ def test_redact_url_userinfo_never_raises_on_garbage_input():
 
     assert redact_url_userinfo("not a url at all ][") == "<unparseable-url>"
     assert redact_url_userinfo("") == "<unparseable-url>"
+
+
+# ---------------------------------------------------------------------------
+# codex r3 diff-review Low (2026-09-28): parsed.port raises ValueError for
+# a malformed port (out of range or non-numeric) -- must not crash the
+# "never raises" contract; falls back to the raw netloc with userinfo
+# stripped by hand.
+# ---------------------------------------------------------------------------
+
+def test_redact_url_userinfo_handles_out_of_range_port_never_raises():
+    from app.utils.url_validators import redact_url_userinfo
+
+    assert redact_url_userinfo("http://u:p@host:99999/path") == "http://host:99999"
+    assert redact_url_userinfo("http://host:99999") == "http://host:99999"
+
+
+def test_redact_url_userinfo_handles_non_numeric_port_never_raises():
+    from app.utils.url_validators import redact_url_userinfo
+
+    assert redact_url_userinfo("http://u:p@host:abc/path") == "http://host:abc"
+
+
+def test_redact_url_userinfo_strips_fragment():
+    from app.utils.url_validators import redact_url_userinfo
+
+    assert redact_url_userinfo("http://u:p@ollama:11434/api#frag") == "http://ollama:11434"
+    assert redact_url_userinfo("http://ollama:11434#frag") == "http://ollama:11434"
+    assert redact_url_userinfo("http://u:p@host:99999/path#frag") == "http://host:99999"
