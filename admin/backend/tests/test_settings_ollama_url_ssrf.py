@@ -24,8 +24,22 @@ import httpx
 import pytest
 
 from app.models import SystemSetting
+from shared.config import _clear_cache_for_tests
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+def _clear_all_config_caches() -> None:
+    """Belt-and-suspenders cache clear (ATHENA-118 test-isolation note, same
+    fix as test_service_control_ollama.py): test_rate_limit_active.py
+    evicts and re-imports every app./shared.* module mid-suite, which can
+    leave this file's captured `_clear_cache_for_tests` reference pointing
+    at a stale, already-replaced shared.config module. Look up whichever
+    module object is CURRENTLY live in sys.modules and clear that one too."""
+    _clear_cache_for_tests()
+    live = sys.modules.get('shared.config')
+    if live is not None and hasattr(live, '_clear_cache_for_tests'):
+        live._clear_cache_for_tests()
 
 
 class _RecordingTransport:
@@ -106,3 +120,90 @@ def test_non_http_scheme_rejected(owner_client, db, monkeypatch):
     assert response.status_code == 422
     assert _stored_ollama_url(db) == before
     assert transport.requests == []
+
+
+# ---------------------------------------------------------------------------
+# tessa P3 mid-build fold-in item 1 (HIGH): GET /api/settings/ollama-url's
+# own reachability probe (settings.py:867-877) has the D21 SSRF gate too --
+# a stored value can be a pre-existing bad one, or the OLLAMA_URL env
+# fallback, neither of which the write-time gate above ever saw. A blocked
+# host must report unreachable with ZERO transport calls (never merely a
+#200 with is_reachable=False from a real connection attempt that happened
+# to fail); an allowed host must actually probe.
+# ---------------------------------------------------------------------------
+
+def _seed_ollama_url(db, url: str) -> None:
+    row = db.query(SystemSetting).filter(SystemSetting.key == "ollama_url").first()
+    if row:
+        row.value = url
+    else:
+        db.add(SystemSetting(key="ollama_url", value=url, category="llm"))
+    db.commit()
+
+
+def test_get_ollama_url_reports_ssrf_blocked_for_stored_private_host_zero_requests(client, db, monkeypatch):
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    _seed_ollama_url(db, "http://192.168.10.108:11434")
+    transport = _RecordingTransport()
+    _patch_async_client(monkeypatch, transport)
+
+    response = client.get("/api/settings/ollama-url")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_reachable"] is False
+    assert data["error"] is not None
+    assert "ssrf_blocked" in data["error"]
+    assert transport.requests == []
+
+
+def test_get_ollama_url_probes_when_host_is_allowed(client, db, monkeypatch):
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "192.168.10.108")
+    _clear_all_config_caches()
+    _seed_ollama_url(db, "http://192.168.10.108:11434")
+    transport = _RecordingTransport()
+    _patch_async_client(monkeypatch, transport)
+
+    response = client.get("/api/settings/ollama-url")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_reachable"] is True
+    assert data["version"] == "0.1.0"
+    assert len(transport.requests) == 1
+
+
+# ---------------------------------------------------------------------------
+# tessa P3 mid-build fold-in item 3 (LOW): the ordering claim "write-boundary
+# validation runs before the reachability probe" is not falsifiable by the
+# existing IMMUTABLE_BAD_URLS test above, because save_ollama_url's own
+# reachability block ALSO calls check_ssrf_safe (settings.py) -- so even a
+# save_ollama_url that (incorrectly) ran _validate_ollama_url_write() AFTER
+# the reachability probe would still show zero transport calls on a blocked
+# host, since the redundant in-block gate masks the reordering. Isolate the
+# claim by neutralizing check_ssrf_safe entirely (pass-through) and proving
+# the 422 with zero HTTP calls survives on _validate_ollama_url_write alone.
+# ---------------------------------------------------------------------------
+
+def test_write_validation_precedes_reachability_probe_isolated_from_redundant_gate(owner_client, db, monkeypatch):
+    import app.routes.settings as settings_module
+
+    async def _pass_through(_url):
+        return True, None
+
+    monkeypatch.setattr(settings_module, "check_ssrf_safe", _pass_through)
+
+    transport = _RecordingTransport()
+    _patch_async_client(monkeypatch, transport)
+
+    before = _stored_ollama_url(db)
+    response = owner_client.post("/api/settings/ollama-url", json={"ollama_url": "http://169.254.169.254:80"})
+
+    assert response.status_code == 422
+    assert _stored_ollama_url(db) == before
+    assert transport.requests == [], (
+        "with check_ssrf_safe neutralized, only _validate_ollama_url_write's "
+        "own host blocklist can be responsible for the zero-request outcome -- "
+        "proving it runs before (and independently of) the reachability probe"
+    )

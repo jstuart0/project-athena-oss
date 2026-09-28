@@ -334,3 +334,52 @@ def test_in_cluster_ollama_resolves_kubernetes_synthetic_row(owner_client, db, m
     assert with_confirm.json()["success"] is True
     patches = [r for r in k8s_transport.requests if r.method == "PATCH"]
     assert len(patches) == 1
+
+
+# ---------------------------------------------------------------------------
+# tessa P3 mid-build fold-in item 2 (MEDIUM): list_ollama_models' /api/ps
+# degrade path (service_control.py:841-846) had zero coverage. A /api/tags
+# 200 + /api/ps failure must still return 200 with the model list (every
+# model loaded=False) and the X-Athena-Ollama-Ps: unavailable header; when
+# both endpoints are healthy the header must be ABSENT.
+# ---------------------------------------------------------------------------
+
+def test_list_ollama_models_ps_failure_degrades_with_header_models_still_listed(owner_client, db, monkeypatch):
+    _allow_host(monkeypatch, "10.0.0.108")
+    _set_ollama_url(db, "http://10.0.0.108:11434")
+    transport = _MultiHostTransport({
+        ("10.0.0.108", "/api/tags"): (200, {"models": [
+            {"name": "llama3", "size": 123, "modified_at": "2026-01-01"},
+        ]}),
+        ("10.0.0.108", "/api/ps"): (500, {}),
+    })
+    _patch_async_client(monkeypatch, transport)
+
+    response = owner_client.get("/api/service-control/ollama/models")
+
+    assert response.status_code == 200
+    assert response.headers.get("X-Athena-Ollama-Ps") == "unavailable"
+    models = response.json()
+    assert len(models) == 1
+    assert models[0]["name"] == "llama3"
+    assert models[0]["loaded"] is False
+
+
+def test_list_ollama_models_both_healthy_header_absent(owner_client, db, monkeypatch):
+    _allow_host(monkeypatch, "10.0.0.108")
+    _set_ollama_url(db, "http://10.0.0.108:11434")
+    transport = _MultiHostTransport({
+        ("10.0.0.108", "/api/tags"): (200, {"models": [
+            {"name": "llama3", "size": 123, "modified_at": "2026-01-01"},
+        ]}),
+        ("10.0.0.108", "/api/ps"): (200, {"models": [{"name": "llama3"}]}),
+    })
+    _patch_async_client(monkeypatch, transport)
+
+    response = owner_client.get("/api/service-control/ollama/models")
+
+    assert response.status_code == 200
+    assert "X-Athena-Ollama-Ps" not in response.headers
+    models = response.json()
+    assert len(models) == 1
+    assert models[0]["loaded"] is True
