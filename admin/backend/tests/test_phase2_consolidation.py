@@ -41,7 +41,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.database import Base, get_db, OSS_SERVICE_REGISTRY, seed_oss_service_registry
+from app.database import Base, get_db, OSS_SERVICE_REGISTRY, seed_oss_service_registry, _infer_oss_service_type
 from app.models import RagService, RAGConnector, User
 from main import app
 
@@ -539,6 +539,41 @@ class TestSeedOssServiceRegistry:
 
         count = db.query(RagService).count()
         assert count == len(OSS_SERVICE_REGISTRY)
+
+    def test_infer_oss_service_type_matches_control_agent_rule(self):
+        """_infer_oss_service_type must use the exact same rule as
+        src/control_agent/main.py's registry-sync heuristic: "-rag" in the
+        identifying name -> 'rag', else 'core'."""
+        assert _infer_oss_service_type("athena-rag-weather") == "rag"
+        assert _infer_oss_service_type("athena-mode-service") == "core"
+        assert _infer_oss_service_type("athena-admin-backend") == "core"
+
+    def test_seed_rows_are_typed_rag_or_core_not_hardcoded_api(self, db):
+        """ATHENA-119: every OSS_SERVICE_REGISTRY row seeded (ORM-simulated,
+        SQLite-compatible, same as test_seed_idempotency_via_orm above) must
+        get service_type derived from its host -- 'rag' for every
+        "-rag"-named service, 'core' for everything else -- never the old
+        hardcoded 'api'."""
+        for name, display_name, host, port, protocol, cache_ttl, enabled in OSS_SERVICE_REGISTRY:
+            endpoint_url = f"{protocol}://{host}:{port}"
+            db.add(RagService(
+                name=name, display_name=display_name, host=host, port=port,
+                protocol=protocol, endpoint_url=endpoint_url,
+                service_type=_infer_oss_service_type(host),
+                cache_ttl=cache_ttl, enabled=enabled,
+            ))
+        db.commit()
+
+        rows = db.query(RagService).filter(
+            RagService.name.in_({e[0] for e in OSS_SERVICE_REGISTRY})
+        ).all()
+        assert len(rows) == len(OSS_SERVICE_REGISTRY)
+        for row in rows:
+            assert row.service_type != "api", f"{row.name!r} still typed 'api'"
+            if "-rag" in row.host:
+                assert row.service_type == "rag", f"{row.name!r} (host={row.host!r}) should be 'rag'"
+            else:
+                assert row.service_type == "core", f"{row.name!r} (host={row.host!r}) should be 'core'"
 
 
 # ---------------------------------------------------------------------------
