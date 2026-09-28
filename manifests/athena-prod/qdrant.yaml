@@ -49,26 +49,36 @@ spec:
       automountServiceAccountToken: false
       containers:
       - name: qdrant
-        # Pinned 2026-06-12: v1.18.2 is the current stable release (Docker Hub, June 3 2026).
+        # Pinned 2026-09-28 (ATHENA-126): v1.19.1 is the current stable release
+        # (Docker Hub, published 2026-09-03; GitHub releases/latest confirms no gap).
+        #
+        # FRESH INSTALL (no existing collections): deploy this version directly.
+        # There is no on-disk state to migrate, so v1.19.1 starts clean.
         #
         # *** UPGRADE WARNING — IRREVERSIBLE ON-DISK MIGRATIONS ***
-        # The 1.12→1.18 jump triggers two one-way storage format migrations:
+        # A deployment with EXISTING collections must not jump straight to this
+        # tag from an older pin. Per Qdrant's storage-compatibility policy, upgrade
+        # one minor version at a time (e.g. 1.12→1.13→1.14→...→1.19) — skipping
+        # minors is unsupported and can corrupt or strand on-disk data. Two of the
+        # steps in that walk are themselves one-way:
         #   • v1.15.4: shard-key format change (qdrant PR #7110)
         #   • v1.16.1: RocksDB backend replaced by Gridstore (qdrant PR #7551)
-        # Both migrations run automatically on first successful start at the new version
-        # and cannot be undone by reverting the image tag alone. Reverting the tag after
-        # a successful v1.18.2 start will crash-loop the container (incompatible on-disk
-        # format). ROLLBACK REQUIRES RESTORING THE PVC FROM A PRE-UPGRADE SNAPSHOT.
+        # Each one-way migration runs automatically on first successful start at
+        # the new version and cannot be undone by reverting the image tag alone;
+        # reverting after a successful start at a post-migration version will
+        # crash-loop the container (incompatible on-disk format).
         #
-        # Before applying this manifest to an existing cluster:
+        # Before upgrading a populated instance:
         #   1. Snapshot the qdrant-storage PVC (e.g. via VolumeSnapshot or storage-class backup)
         #   2. Verify the snapshot is restorable
-        #   3. Only then apply; the migration runs during pod startup (startupProbe provides grace)
-        # Review release notes: https://github.com/qdrant/qdrant/releases/tag/v1.18.2
+        #   3. Walk the image tag one minor version at a time, letting each one fully
+        #      start and pass /readyz before moving to the next
+        #   4. Only once at the latest prior minor, move to this tag
+        # Review release notes: https://github.com/qdrant/qdrant/releases/tag/v1.19.1
         #
         # NOTE: This is a single-replica Deployment. "Upgrade" means stop-then-start — there
         # is no rolling upgrade; the pod is replaced in full.
-        image: qdrant/qdrant:v1.18.2
+        image: qdrant/qdrant:v1.19.1
         ports:
         - name: http
           containerPort: 6333

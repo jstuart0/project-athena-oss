@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build and push all Project Athena container images
-# Usage: ./scripts/build-and-push.sh [service_name]
+# Usage: ./scripts/build-and-push.sh [--tag TAG] [--force-tag] [service_name]
 #   If service_name is provided, only that service is built
 #   Otherwise, all services are built
 #
@@ -8,20 +8,35 @@
 #   REGISTRY - Container registry URL (default: localhost:5000)
 #   TAG      - Image tag (default: latest)
 #
+# Flags:
+#   --tag TAG    - Image tag; wins over both an exported TAG and config.env's
+#   --force-tag  - Skip the tag-collision guard and push even if REGISTRY
+#                  already has this image:tag (default: refuse)
+#
+# Precedence for the effective tag (highest wins): --tag flag > exported
+# TAG env var > config.env's TAG > "latest". config.env is a deployment
+# default for unattended runs — it never overrides an explicit invocation.
+#
+# Every build passes --pull, so it always starts from the current upstream
+# base image rather than a stale local layer cache.
+#
 # Examples:
 #   REGISTRY=myregistry.io:5000 ./scripts/build-and-push.sh
 #   REGISTRY=ghcr.io/myorg TAG=v1.0.0 ./scripts/build-and-push.sh gateway
+#   ./scripts/build-and-push.sh --tag v2.0.0 --force-tag gateway
 
 set -e
 
-# Load config if exists
-if [ -f "$(dirname "$0")/../config.env" ]; then
-    source "$(dirname "$0")/../config.env"
-fi
-
-REGISTRY="${REGISTRY:-localhost:5000}"
-TAG="${TAG:-latest}"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# --pull refreshes the base image tag, but Docker's build-cache for the
+# apt-get-upgrade RUN layer is keyed on (parent layer + instruction text) —
+# if the base image digest hasn't moved since the last build, that RUN
+# layer cache-hits even though Debian's package repos have kept publishing
+# security fixes independently of the base image. APT_CACHE_BUST (consumed
+# by every Dockerfile's upgrade RUN line) forces a fresh apt-get run once
+# per day regardless of layer-cache state.
+APT_CACHE_BUST="$(date -u +%Y%m%d)"
 
 # Colors for output
 RED='\033[0;31m'
@@ -32,6 +47,143 @@ NC='\033[0m' # No Color
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Capture any TAG the caller exported *before* config.env gets a chance to
+# clobber it — config.env supplies deployment defaults for unattended runs,
+# it must never silently override an explicit `TAG=v2.0.0 ./build-and-push.sh`
+# or `--tag v2.0.0` invocation (ATHENA-126: a stale config.env TAG overwrote
+# an intentional push to a fresh tag).
+CALLER_TAG="${TAG-}"
+
+# --- CLI flag parsing (before config.env, so --tag/--force-tag participate
+# in the same precedence resolution as an exported TAG) ---
+FORCE_TAG=0
+CLI_TAG=""
+SERVICE_ARG=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --tag)
+            if [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+                log_error "--tag requires a value"
+                exit 1
+            fi
+            CLI_TAG="$2"
+            shift 2
+            ;;
+        --tag=*)
+            CLI_TAG="${1#--tag=}"
+            shift
+            ;;
+        --force-tag)
+            FORCE_TAG=1
+            shift
+            ;;
+        --)
+            shift
+            if [ $# -gt 0 ]; then
+                SERVICE_ARG="$1"
+            fi
+            break
+            ;;
+        -*)
+            log_error "Unknown flag: $1"
+            exit 1
+            ;;
+        *)
+            SERVICE_ARG="$1"
+            shift
+            ;;
+    esac
+done
+
+# Load config if exists
+if [ -f "$PROJECT_ROOT/config.env" ]; then
+    source "$PROJECT_ROOT/config.env"
+fi
+
+REGISTRY="${REGISTRY:-localhost:5000}"
+
+# Precedence (highest wins): --tag flag > caller-exported TAG > config.env's
+# TAG > "latest" default.
+if [ -n "$CLI_TAG" ]; then
+    TAG="$CLI_TAG"
+elif [ -n "$CALLER_TAG" ]; then
+    TAG="$CALLER_TAG"
+else
+    TAG="${TAG:-latest}"
+fi
+
+log_info "Effective registry: $REGISTRY"
+log_info "Effective tag: $TAG"
+
+# Returns 0 if $REGISTRY/$1:$2 already exists (docker manifest inspect
+# succeeded — via Docker's own credential store and registry endpoint
+# resolution, not a hand-rolled /v2/ URL, which breaks for path-style
+# registries like ghcr.io/org: REGISTRY="ghcr.io/org" would need
+# https://ghcr.io/v2/org/name/tags/list, not
+# https://ghcr.io/org/v2/name/tags/list). Returns 1 ONLY if it confirmed
+# the tag is genuinely absent — matched against the specific manifest/name
+# "unknown" markers the Docker distribution spec uses for true absence
+# (MANIFEST_UNKNOWN, NAME_UNKNOWN, "manifest unknown", "no such manifest"),
+# case-insensitively, fixed-string only, never a regex. A bare "not found"
+# substring is deliberately NOT treated as absence (codex r2): an auth,
+# credential-helper, TLS, or registry-routing failure can also contain
+# that phrase (e.g. "repository not found or you do not have access" from
+# an UNAUTHORIZED response), and treating it as "tag absent" would
+# fail-open the guard for exactly those failures. Returns 2 for any OTHER
+# failure — callers must fail closed on 2, never treat it as "safe to
+# push". REGISTRY_INSECURE=1 appends --insecure to the inspect call only
+# (see config.env.example), for a private plain-HTTP registry Docker
+# hasn't been separately configured to trust.
+tag_exists_in_registry() {
+    local name="$1" tag="$2" output
+    # Deliberately a separate statement from the `local` above: a single
+    # `local a=X b=$a` evaluates every right-hand side against the
+    # PRE-existing (enclosing-scope) value of each name before any of the
+    # assignments in that statement land — `${name}`/`${tag}` here would
+    # silently resolve empty if folded into the line above.
+    local image="${REGISTRY}/${name}:${tag}"
+    local insecure_flag=()
+    if [ "${REGISTRY_INSECURE:-0}" = "1" ]; then
+        insecure_flag=(--insecure)
+    fi
+    if output=$(docker manifest inspect "${insecure_flag[@]}" "${image}" 2>&1); then
+        return 0
+    fi
+    local output_lower
+    output_lower="$(printf '%s' "${output}" | tr '[:upper:]' '[:lower:]')"
+    case "${output_lower}" in
+        *"manifest_unknown"*|*"name_unknown"*|*"manifest unknown"*|*"no such manifest"*)
+            return 1
+            ;;
+    esac
+    log_warn "docker manifest inspect for ${image} failed for a reason other than confirmed tag absence: ${output}"
+    return 2
+}
+
+# Refuses (returns 1) a push to $REGISTRY/$name:$TAG that would silently
+# overwrite an existing tag, OR whose existence could not be determined
+# (auth failure, network error, etc.) — unless --force-tag was passed.
+# Fails closed: an unverifiable registry state is treated the same as a
+# confirmed collision, not as "safe to proceed".
+guard_tag_collision() {
+    local name="$1"
+    if [ "$FORCE_TAG" = "1" ]; then
+        return 0
+    fi
+    tag_exists_in_registry "$name" "$TAG"
+    case $? in
+        0)
+            log_error "$REGISTRY/$name:$TAG already exists — refusing to overwrite. Re-run with --force-tag to push anyway."
+            return 1
+            ;;
+        2)
+            log_error "Could not verify whether $REGISTRY/$name:$TAG already exists (registry check failed — see warning above). Refusing to push without confirmation. Re-run with --force-tag to override."
+            return 1
+            ;;
+    esac
+    return 0
+}
 
 # Function to build and push - standard context (admin, jarvis-web)
 build_push() {
@@ -44,6 +196,8 @@ build_push() {
         return 1
     fi
 
+    guard_tag_collision "$name" || return 1
+
     # Copy shared module if needed (for admin-backend)
     if [[ "$name" == "athena-admin-backend" ]]; then
         log_info "Copying shared module to $context..."
@@ -52,7 +206,7 @@ build_push() {
     fi
 
     log_info "Building $name from $context..."
-    if docker build --platform linux/amd64 -t "$REGISTRY/$name:$TAG" -f "$dockerfile" "$context"; then
+    if docker build --pull --build-arg APT_CACHE_BUST="$APT_CACHE_BUST" --platform linux/amd64 -t "$REGISTRY/$name:$TAG" -f "$dockerfile" "$context"; then
         log_info "Pushing $name..."
         docker push "$REGISTRY/$name:$TAG"
         log_info "$name built and pushed successfully"
@@ -88,8 +242,10 @@ build_push_with_dockerfile() {
         return 1
     fi
 
+    guard_tag_collision "$name" || return 1
+
     log_info "Building $name from $context (Dockerfile: $dockerfile_relpath)..."
-    if docker build --platform linux/amd64 \
+    if docker build --pull --build-arg APT_CACHE_BUST="$APT_CACHE_BUST" --platform linux/amd64 \
         -t "$REGISTRY/$name:$TAG" \
         -f "$dockerfile_abspath" \
         "$context"; then
@@ -114,8 +270,10 @@ build_push_src() {
         return 1
     fi
 
+    guard_tag_collision "$name" || return 1
+
     log_info "Building $name with src/ context..."
-    if docker build --platform linux/amd64 \
+    if docker build --pull --build-arg APT_CACHE_BUST="$APT_CACHE_BUST" --platform linux/amd64 \
         -t "$REGISTRY/$name:$TAG" \
         -f "$dockerfile" \
         "$PROJECT_ROOT/src"; then
@@ -135,13 +293,13 @@ build_push_src() {
 source "$(dirname "$0")/service-defs.sh"
 
 # Build specific service if provided
-if [ -n "$1" ]; then
+if [ -n "$SERVICE_ARG" ]; then
     found=false
 
     # Check admin services
     for service_def in "${ADMIN_SERVICES[@]}"; do
         IFS=':' read -r name context dockerfile_relpath <<< "$service_def"
-        if [ "$1" == "$name" ] || [ "$1" == "${name#athena-}" ]; then
+        if [ "$SERVICE_ARG" == "$name" ] || [ "$SERVICE_ARG" == "${name#athena-}" ]; then
             if [ -n "$dockerfile_relpath" ]; then
                 build_push_with_dockerfile "$name" "$context" "$dockerfile_relpath"
             else
@@ -156,7 +314,7 @@ if [ -n "$1" ]; then
     if [ "$found" = false ]; then
         for service_def in "${CORE_SRC_SERVICES[@]}"; do
             IFS=':' read -r name dir_name <<< "$service_def"
-            if [ "$1" == "$name" ] || [ "$1" == "${name#athena-}" ]; then
+            if [ "$SERVICE_ARG" == "$name" ] || [ "$SERVICE_ARG" == "${name#athena-}" ]; then
                 build_push_src "$name" "$dir_name"
                 found=true
                 break
@@ -169,7 +327,7 @@ if [ -n "$1" ]; then
         for service_def in "${RAG_SERVICES[@]}"; do
             IFS=':' read -r name dir_name <<< "$service_def"
             short_name="${name#athena-rag-}"
-            if [ "$1" == "$name" ] || [ "$1" == "${name#athena-}" ] || [ "$1" == "$short_name" ]; then
+            if [ "$SERVICE_ARG" == "$name" ] || [ "$SERVICE_ARG" == "${name#athena-}" ] || [ "$SERVICE_ARG" == "$short_name" ]; then
                 build_push_src "$name" "$dir_name"
                 found=true
                 break
@@ -178,7 +336,7 @@ if [ -n "$1" ]; then
     fi
 
     if [ "$found" = false ]; then
-        log_error "Unknown service: $1"
+        log_error "Unknown service: $SERVICE_ARG"
         echo ""
         echo "Available services:"
         echo "  Admin services:"
