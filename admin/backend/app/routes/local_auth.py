@@ -10,7 +10,7 @@ from pydantic import BaseModel
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 import structlog
-from starsessions import load_session
+from starsessions import load_session, regenerate_session_id
 
 from app.auth.oidc import create_access_token
 from app.database import get_db
@@ -167,6 +167,10 @@ async def local_login(payload: LocalLoginRequest, request: Request, db: Session 
     request.session["access_token"] = token
     request.session["user_id"] = int(user.id)
     request.session["auth_method"] = "local"
+    # Rotate the session ID post-auth (session fixation, ATHENA-80/xander): a
+    # cookie value fixed by an attacker before login must not become valid for
+    # the now-authenticated session.
+    regenerate_session_id(request)
     logger.info("local_user_authenticated", user_id=user.id, username=user.username)
 
     return {
