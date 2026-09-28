@@ -247,6 +247,11 @@ kubectl config current-context
 # (`kubectl patch`/`kubectl edit`) or apply a private overlay — never
 # `kubectl apply -f manifests/athena-prod/` (or the directory) against a
 # namespace that already has house-specific values.
+# Prefer `./scripts/deploy.sh deploy` over this raw kubectl command: it
+# refuses (non-zero exit) if any manifest it is about to apply still
+# contains an unconfigured YOUR_REGISTRY/CONFIGURE_ME-class placeholder,
+# unless you pass --allow-placeholders (fresh, unconfigured namespace
+# only). The raw `kubectl apply -f` below has no such guard.
 kubectl apply -f manifests/athena-prod/
 
 # Check deployment status
