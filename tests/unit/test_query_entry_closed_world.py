@@ -95,14 +95,17 @@ def _reset():
 SENTINEL = "GARAGE-RELAY-TURNED-ON-SENTINEL"
 
 
+@pytest.mark.parametrize("error", [None, "No entitled tool calls"], ids=["no_error", "other_error"])
 @pytest.mark.parametrize("path", ["/query", "/query/stream", "/query/stream/v2"])
-def test_public_cannot_control_even_when_guest_profile_allows(monkeypatch, path):
+def test_public_cannot_control_even_when_guest_profile_allows(monkeypatch, path, error):
     """Behavioural matrix: the guest profile allows control and switch, the
     house is in guest mode, and a public caller asks to turn on the garage
     relay. The state handed to the pipeline denies both the intent and the
     write, and even when the pipeline hands back a CONTROL answer, the
     response on every entry point is the public refusal, never that
-    answer (codex M: the post-graph re-check)."""
+    answer (codex M: the post-graph re-check). Named (tessa A3-d,
+    other_error): an error that isn't a permission refusal doesn't
+    exempt the result from the re-check."""
     from orchestrator.mode_permission import PUBLIC_INTENT_REFUSAL, authorize_ha_write, check_intent_permission
 
     h.patch_conversation_config(monkeypatch)
@@ -115,12 +118,13 @@ def test_public_cannot_control_even_when_guest_profile_allows(monkeypatch, path)
         async def ainvoke(self, state):
             captured.append(state)
             return {"intent": h.IntentCategory.CONTROL, "answer": SENTINEL, "confidence": 1.0,
-                    "citations": [], "request_id": "r", "node_timings": {}}
+                    "citations": [], "request_id": "r", "node_timings": {}, "error": error}
 
     async def _stream_run(state):
         captured.append(state)
         state.intent = h.IntentCategory.CONTROL
         state.answer = SENTINEL
+        state.error = error
         return state
 
     monkeypatch.setattr(h.main, "orchestrator_graph", _Graph())

@@ -132,6 +132,21 @@ def test_session_id_of_another_visitor_is_not_forwarded(monkeypatch, jarvis):
     assert events[-1]["type"] == "done" and events[-1]["session_id"] != first
 
 
+def test_session_continues_within_the_visitors_ipv6_64(monkeypatch, jarvis):
+    """tessa A1-c: a visitor whose IPv6 address changes within its /64 keeps
+    its conversation (the binding uses the same /64 rate key both sides
+    use); another /64 gets a fresh one."""
+    embed = _load_chat_embed(monkeypatch, TRUSTED_PROXY_CIDRS="198.51.100.0/24")
+    sent = []
+    _wire(monkeypatch, embed, capture=sent)
+    c = _embed_client(embed)
+    sid = c.post("/api/chat", json={"message": "hi"}, headers={"X-Forwarded-For": "2001:db8:5:6::1"}).json()["session_id"]
+    same = c.post("/api/chat", json={"message": "and?", "session_id": sid}, headers={"X-Forwarded-For": "2001:db8:5:6:ffff::9"})
+    assert json.loads(sent[-1].content)["session_id"] == sid and same.json()["session_id"] == sid
+    other = c.post("/api/chat", json={"message": "and?", "session_id": sid}, headers={"X-Forwarded-For": "2001:db8:5:7::1"})
+    assert "session_id" not in json.loads(sent[-1].content) and other.json()["session_id"] != sid
+
+
 def test_21_relayed_requests_end_in_rate_limited_event(monkeypatch, jarvis):
     """Named: jarvis-web's per-visitor relay limit (20) is reached through
     chat-embed; the stream ends with a terminal rate_limited event."""

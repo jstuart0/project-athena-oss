@@ -259,6 +259,19 @@ def test_bearer_still_applies_in_edge_mode(out):
     assert resp.status_code == 200
 
 
+def test_not_household_edge_identity_plus_owner_bearer_is_authenticated(out, captured_logs):
+    """tessa ED-g (named): the edge signs in someone outside the household
+    groups, and the request also carries a valid owner Bearer; the Bearer
+    decides, so the caller is web_authenticated, not 403 not_household."""
+    h.install_role("owner")
+    headers = _signed_in(groups="music-assistant|authentik Admins", Authorization="Bearer owner-token")
+    resp = _welcome(headers)
+    assert resp.status_code == 200
+    resolved = [e for e in captured_logs if e["event"] == "jarvis_caller_resolved"][-1]
+    assert resolved["caller_class"] == "web_authenticated" and resolved["source"] == "bearer"
+    assert resp.json()["capabilities"]["control"] is True
+
+
 def test_signed_in_owner_has_control_during_stay(monkeypatch):
     h.install_outbound(monkeypatch, guest={"has_guest": True, "guest_name": "G", "id": 1})
     resp = h.client().post("/api/climate/mode/heat", headers={**_signed_in(), **h.CSRF})
