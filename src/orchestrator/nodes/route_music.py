@@ -17,7 +17,12 @@ import structlog
 
 from orchestrator.nodes._runtime import get_music_handler
 from orchestrator.state import IntentCategory, OrchestratorState
-from orchestrator.helpers import get_feature_config, store_conversation_context
+from orchestrator.helpers import (
+    configured_assistant_names,
+    get_feature_config,
+    holds_foreign_pending,
+    store_conversation_context,
+)
 from orchestrator.mode_permission import (
     HAWritePermissionDenied,
     check_intent_permission,
@@ -88,7 +93,7 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
         # ATHENA-128: a state question ("is music playing") runs under a
         # read-only scope here too -- defence in depth, since its parse
         # already yields a read (now_playing). The kill switch reverts it.
-        uk = classify_utterance(state.query)
+        uk = classify_utterance(state.query, assistant_names=await configured_assistant_names())
         kill_switch = (await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)).get("enabled", False)
         with ha_permission_scope(
             state.permissions,
@@ -210,7 +215,9 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
                 )
 
             # Store context for potential follow-up commands
-            if state.session_id and state.answer and "sorry" not in state.answer.lower():
+            # Never over another caller's pending write confirmation.
+            if (state.session_id and state.answer and "sorry" not in state.answer.lower()
+                    and not holds_foreign_pending(state.prev_context, state.caller_fingerprint)):
                 await store_conversation_context(
                     session_id=state.session_id,
                     intent="music",

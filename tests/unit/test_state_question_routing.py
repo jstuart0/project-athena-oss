@@ -1236,8 +1236,8 @@ class TestConfiguredAssistantNameRouting:
 
     @staticmethod
     def _reset_cache():
-        from orchestrator.nodes import route_control as rc
-        rc._assistant_names_cache.update(names=(), expires_at=0.0)
+        from orchestrator import helpers
+        helpers._assistant_names_cache.update(names=(), expires_at=0.0)
 
     def test_configured_name_question_takes_the_read_path(self, monkeypatch):
         from orchestrator.nodes import route_control as rc
@@ -1252,7 +1252,7 @@ class TestConfiguredAssistantNameRouting:
         assert result.retrieved_data["intent"]["room"] == "office"
 
     def test_lookup_reads_the_profile_once_per_ttl(self, monkeypatch):
-        from orchestrator.nodes import route_control as rc
+        from orchestrator import helpers as rc
         self._reset_cache()
         calls = []
 
@@ -1262,14 +1262,14 @@ class TestConfiguredAssistantNameRouting:
 
         monkeypatch.setattr(rc, "get_assistant_profile", _profile)
         try:
-            assert _run(rc._configured_assistant_names()) == ("Friday",)
-            assert _run(rc._configured_assistant_names()) == ("Friday",)
+            assert _run(rc.configured_assistant_names()) == ("Friday",)
+            assert _run(rc.configured_assistant_names()) == ("Friday",)
             assert len(calls) == 1
         finally:
             self._reset_cache()
 
     def test_slow_profile_lookup_is_bounded(self, monkeypatch):
-        from orchestrator.nodes import route_control as rc
+        from orchestrator import helpers as rc
         self._reset_cache()
 
         async def _slow_profile():
@@ -1280,7 +1280,7 @@ class TestConfiguredAssistantNameRouting:
         monkeypatch.setattr(rc, "ASSISTANT_NAME_LOOKUP_TIMEOUT_SECONDS", 0.01)
         try:
             t0 = _time.perf_counter()
-            assert _run(rc._configured_assistant_names()) == ()
+            assert _run(rc.configured_assistant_names()) == ()
             assert _time.perf_counter() - t0 < 1.0
         finally:
             self._reset_cache()
@@ -1309,28 +1309,75 @@ def _node_state(query, intent):
     return state
 
 
-def _drive_tv(query, *, kill_switch=False):
+def _drive_tv(query, *, kill_switch=False, names=(), prev_context=None, fingerprint=None, store=None):
     _runtime.reset_for_test()
     raw = _raw_ha_client_3_6()
+    raw.get_state = mock.AsyncMock(return_value={"state": "off"})
     _runtime.set_tv_handler(_tv_handler_module.AppleTVHandler(raw, mock.MagicMock()))
+    state = _node_state(query, IntentCategory.TV_CONTROL)
+    state.prev_context = prev_context
+    state.caller_fingerprint = fingerprint
     with (
+        mock.patch("orchestrator.nodes.route_tv.configured_assistant_names", new_callable=mock.AsyncMock,
+                   return_value=tuple(names)),
         mock.patch.object(_tv_handler_module, "get_tv_configs", new_callable=mock.AsyncMock, return_value=_TV_CONFIGS),
         mock.patch("orchestrator.nodes.route_tv.get_feature_config", new_callable=mock.AsyncMock,
                    return_value={"enabled": kill_switch}),
-        mock.patch("orchestrator.nodes.route_tv.store_conversation_context", new_callable=mock.AsyncMock),
+        mock.patch("orchestrator.nodes.route_tv.store_conversation_context", store or mock.AsyncMock()),
     ):
-        out = _run(route_tv_node(_node_state(query, IntentCategory.TV_CONTROL)))
+        out = _run(route_tv_node(state))
     return out, raw
 
 
 class TestTvNodeQuestionsAreReadOnly:
     def test_past_tense_question_never_powers_the_tv(self):
-        """"did you turn off the tv" parses to a power-off; the read-only
-        scope denies it before the HA client."""
+        """"did you turn off the tv" parses to a power-off. Round 1 pinned
+        the read-only refusal here; the question is now answered from the
+        TV's Home Assistant state instead (still no write)."""
         assert classify_utterance("did you turn off the tv").kind == UtteranceKind.STATE_QUESTION
         out, raw = _drive_tv("did you turn off the tv")
         assert raw.call_service.await_count == 0, raw.call_service.await_args_list
+        raw.get_state.assert_awaited_once_with("media_player.living_room")
+        assert out.answer == "The living room TV is off."
+        assert out.error is None
+
+    def test_is_the_tv_on_is_answered_from_state(self):
+        out, raw = _drive_tv("is the tv on")
+        assert raw.call_service.await_count == 0
+        assert out.answer == "The living room TV is off."
+
+    def test_question_under_read_only_even_if_the_handler_wrote(self):
+        """The read path is not the only defence: a handler that did write
+        for a question would still be refused by the read-only scope."""
+        async def _writing_status(self, room=None, all_tvs=False):
+            await self.ha.call_service("media_player", "turn_off", {"entity_id": "media_player.living_room"})
+            return {"success": True, "message": "wrote"}
+
+        with mock.patch.object(_tv_handler_module.AppleTVHandler, "handle_status", _writing_status):
+            out, raw = _drive_tv("is the tv on")
+        assert raw.call_service.await_count == 0
         assert out.answer == READ_ONLY_REFUSAL
+
+    def test_configured_assistant_name_is_stripped(self):
+        """R6: the node classifies with the configured assistant name, so
+        "Friday, did you turn off the tv" is a question, not a power-off."""
+        out, raw = _drive_tv("Friday, did you turn off the tv", names=("Friday",))
+        assert raw.call_service.await_count == 0
+        assert out.answer == "The living room TV is off."
+
+    def test_unconfigured_name_positive_control(self):
+        out, raw = _drive_tv("Friday, did you turn off the tv")
+        assert raw.call_service.await_count == 1
+
+    def test_success_store_skips_a_foreign_pending(self):
+        """R8: a turn from a different caller doesn't store context over
+        another caller's pending write confirmation."""
+        store = mock.AsyncMock()
+        _drive_tv("turn off the tv", prev_context=_foreign_pending_context(), fingerprint="fp-b", store=store)
+        store.assert_not_awaited()
+        store_ok = mock.AsyncMock()
+        _drive_tv("turn off the tv", prev_context=None, fingerprint="fp-b", store=store_ok)
+        store_ok.assert_awaited()
 
     def test_command_still_powers_the_tv(self):
         """Positive control: the same harness records the write for a
@@ -1355,16 +1402,28 @@ class _ScopeRecordingMusicHandler:
         return "Nothing is playing in the living room right now."
 
 
-def _drive_music(query, *, kill_switch=False):
+def _foreign_pending_context():
+    return {
+        "intent": "control", "query": "office lights off please", "entities": {}, "response": "?",
+        "parameters": {"action": "get_status", "pending_write_confirmation": {"fingerprint": "fp-a", "nonce": "n"}},
+    }
+
+
+def _drive_music(query, *, kill_switch=False, names=(), prev_context=None, fingerprint=None, store=None):
     _runtime.reset_for_test()
     handler = _ScopeRecordingMusicHandler()
     _runtime.set_music_handler(handler)
+    state = _node_state(query, IntentCategory.MUSIC_CONTROL)
+    state.prev_context = prev_context
+    state.caller_fingerprint = fingerprint
     with (
+        mock.patch("orchestrator.nodes.route_music.configured_assistant_names", new_callable=mock.AsyncMock,
+                   return_value=tuple(names)),
         mock.patch("orchestrator.nodes.route_music.get_feature_config", new_callable=mock.AsyncMock,
                    return_value={"enabled": kill_switch}),
-        mock.patch("orchestrator.nodes.route_music.store_conversation_context", new_callable=mock.AsyncMock),
+        mock.patch("orchestrator.nodes.route_music.store_conversation_context", store or mock.AsyncMock()),
     ):
-        _run(route_music_node(_node_state(query, IntentCategory.MUSIC_CONTROL)))
+        _run(route_music_node(state))
     return handler
 
 
@@ -1377,6 +1436,18 @@ class TestMusicNodeQuestionsAreReadOnly:
 
     def test_kill_switch_reverts_the_read_only_scope(self):
         assert _drive_music("is music playing", kill_switch=True).read_only_seen == [False]
+
+    def test_configured_assistant_name_is_stripped(self):
+        assert _drive_music("Friday, is music playing", names=("Friday",)).read_only_seen == [True]
+        assert _drive_music("Friday, is music playing").read_only_seen == [False]
+
+    def test_success_store_skips_a_foreign_pending(self):
+        store = mock.AsyncMock()
+        _drive_music("pause the music", prev_context=_foreign_pending_context(), fingerprint="fp-b", store=store)
+        store.assert_not_awaited()
+        store_ok = mock.AsyncMock()
+        _drive_music("pause the music", prev_context=_foreign_pending_context(), fingerprint="fp-a", store=store_ok)
+        store_ok.assert_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1466,3 +1537,14 @@ class TestExtractorShortcutOnAQuestionIsARead:
         assert client.call_service.await_count == 0
         assert result.error is None, result.error
         assert result.answer and result.answer != READ_ONLY_REFUSAL
+
+
+class TestHoldsForeignPending:
+    def test_cases(self):
+        from orchestrator.helpers import holds_foreign_pending
+        ctx = _foreign_pending_context()
+        assert holds_foreign_pending(ctx, "fp-b") is True
+        assert holds_foreign_pending(ctx, None) is True
+        assert holds_foreign_pending(ctx, "fp-a") is False
+        assert holds_foreign_pending(None, "fp-b") is False
+        assert holds_foreign_pending({"parameters": {"action": "turn_off"}}, "fp-b") is False

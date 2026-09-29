@@ -16,7 +16,12 @@ import structlog
 
 from orchestrator.nodes._runtime import get_tv_handler
 from orchestrator.state import OrchestratorState
-from orchestrator.helpers import get_feature_config, store_conversation_context
+from orchestrator.helpers import (
+    configured_assistant_names,
+    get_feature_config,
+    holds_foreign_pending,
+    store_conversation_context,
+)
 from orchestrator.mode_permission import (
     HAWritePermissionDenied,
     check_intent_permission,
@@ -87,7 +92,7 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
         # ATHENA-128: a state question ("is the TV on") runs under a
         # read-only scope -- defence in depth for a parse that would turn
         # it into a power/launch write. The kill switch reverts it.
-        uk = classify_utterance(state.query)
+        uk = classify_utterance(state.query, assistant_names=await configured_assistant_names())
         kill_switch = (await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)).get("enabled", False)
         with ha_permission_scope(
             state.permissions,
@@ -128,7 +133,16 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
 
             result = None
 
-            if intent.action == "launch":
+            if uk.kind == UtteranceKind.STATE_QUESTION and not kill_switch:
+                # A question ("is the TV on", "did you turn off the TV") is
+                # answered from the resolved TV's Home Assistant state -- a
+                # read -- instead of dispatching whatever action the parse
+                # found (the read-only scope would refuse it).
+                result = await tv_handler.handle_status(
+                    room=intent.room or state.room, all_tvs=intent.all_tvs
+                )
+
+            elif intent.action == "launch":
                 if intent.all_tvs:
                     result = await tv_handler.handle_launch_everywhere(
                         app_name=intent.app_name,
@@ -184,7 +198,8 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
             )
 
             # Store context for potential follow-up commands
-            if state.session_id and result.get("success"):
+            # Never over another caller's pending write confirmation.
+            if state.session_id and result.get("success") and not holds_foreign_pending(state.prev_context, state.caller_fingerprint):
                 await store_conversation_context(
                     session_id=state.session_id,
                     intent="tv_control",

@@ -31,6 +31,8 @@ from orchestrator.nodes._runtime import (
 )
 from orchestrator.state import IntentCategory, OrchestratorState
 from orchestrator.helpers import (
+    configured_assistant_names as _configured_assistant_names,
+    holds_foreign_pending,
     get_automation_system_mode,
     get_feature_config,
     store_conversation_context,
@@ -63,34 +65,9 @@ from orchestrator.utterance_kind import UNKNOWN_CLASSIFICATION as _KILL_SWITCH_C
 from orchestrator.context.detector import context_ref_view
 from orchestrator.metrics import ha_write_fanout_confirm_total
 from orchestrator import write_fanout
-from shared.assistant_profile import get_assistant_profile
 
 logger = structlog.get_logger(__name__)
 
-# The configured assistant name is a classifier vocative filler ("Friday,
-# are the lights on"). Looked up best-effort from the assistant profile
-# with a bounded wait, and the result (or the lookup failure) is kept for
-# a TTL so a slow admin API costs at most one bounded wait per TTL.
-ASSISTANT_NAME_LOOKUP_TIMEOUT_SECONDS = 0.5
-ASSISTANT_NAME_CACHE_TTL_SECONDS = 300.0
-_assistant_names_cache: Dict[str, Any] = {"names": (), "expires_at": 0.0}
-
-
-async def _configured_assistant_names() -> tuple:
-    now = time.monotonic()
-    if now < _assistant_names_cache["expires_at"]:
-        return _assistant_names_cache["names"]
-    names: tuple = ()
-    try:
-        profile = await asyncio.wait_for(
-            get_assistant_profile(), timeout=ASSISTANT_NAME_LOOKUP_TIMEOUT_SECONDS
-        )
-        name = str((profile or {}).get("assistant_name") or "").strip()
-        names = (name,) if name else ()
-    except Exception as e:
-        logger.warning("assistant_name_lookup_failed", error=str(e))
-    _assistant_names_cache.update(names=names, expires_at=now + ASSISTANT_NAME_CACHE_TTL_SECONDS)
-    return names
 
 PENDING_CONFIRMATION_TTL_SECONDS = 60
 CONTROL_CONTEXT_TTL_SECONDS = 300
@@ -191,11 +168,7 @@ def _holds_foreign_pending(state: OrchestratorState) -> bool:
     """The session's stored context holds a pending confirmation created
     by a different caller. This turn must not overwrite it (no context
     store, no new pending of its own)."""
-    pending = _pending_confirmation(state)
-    if not pending:
-        return False
-    fingerprint = pending.get("fingerprint")
-    return not (bool(fingerprint) and fingerprint == state.caller_fingerprint)
+    return holds_foreign_pending(state.prev_context, state.caller_fingerprint)
 
 
 def _pending_domain(pending: Dict[str, Any]) -> str:

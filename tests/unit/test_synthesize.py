@@ -597,6 +597,38 @@ def test_store_context_called_for_weather_intent():
     assert call_kwargs["intent"] == IntentCategory.WEATHER.value
 
 
+def test_store_context_skipped_over_a_foreign_pending_confirmation():
+    """ATHENA-128: a turn from a different caller on the session must not
+    overwrite another caller's pending write confirmation (the positive
+    control is the test above, with no pending)."""
+    router = _make_llm_router("Sunny, 75F.")
+    _runtime.set_llm_router(router)
+
+    store_mock = AsyncMock()
+    state = _make_state(
+        intent=IntentCategory.WEATHER,
+        retrieved_data={"temp": "75F"},
+        session_id="sess-weather",
+    )
+    state.prev_context = {
+        "intent": "control", "query": "office lights off please", "entities": {}, "response": "?",
+        "parameters": {"action": "get_status", "pending_write_confirmation": {"fingerprint": "fp-a", "nonce": "n"}},
+    }
+    state.caller_fingerprint = "fp-b"
+    with (
+        _patch_component_config(),
+        _patch_build_prompt(),
+        _patch_knowledge_context(),
+        _patch_admin_client(),
+        patch("orchestrator.nodes.synthesize.store_conversation_context", store_mock),
+        _patch_sms_detection(),
+    ):
+        asyncio.run(synthesize_node(state))
+
+    assert state.answer
+    store_mock.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # Test 17: Outer exception handler — synthesis error caught
 # ---------------------------------------------------------------------------

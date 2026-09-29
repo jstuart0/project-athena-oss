@@ -468,6 +468,61 @@ class AppleTVHandler:
             "results": results
         }
 
+    @staticmethod
+    def _resolve_tv(tv_configs: Dict[str, Dict[str, Any]], room: Optional[str]):
+        """(room, config, None) for the TV a room names -- the first
+        configured TV when no room is given -- or (room, None, failure)."""
+        if not room:
+            if not tv_configs:
+                return room, None, {
+                    "success": False,
+                    "message": "No Apple TVs configured.",
+                    "error": "no_tv_configured"
+                }
+            room = list(tv_configs.keys())[0]
+        config = tv_configs.get(room.lower())
+        if not config:
+            return room, None, {
+                "success": False,
+                "message": f"No Apple TV in {room.replace('_', ' ')}.",
+                "error": "room_not_found"
+            }
+        return room, config, None
+
+    _TV_STATE_PHRASES = {
+        "on": "on", "playing": "playing", "paused": "paused", "idle": "on and idle",
+        "standby": "off", "off": "off", "unavailable": "unavailable",
+    }
+
+    async def handle_status(self, room: Optional[str] = None, all_tvs: bool = False) -> Dict[str, Any]:
+        """Answer a TV state question from the resolved TV's Home Assistant
+        state (a read: get_state passes the permission guard untouched)."""
+        tv_configs = await get_tv_configs()
+        if all_tvs:
+            targets = [(r, c) for r, c in tv_configs.items()]
+            if not targets:
+                return {"success": False, "message": "No Apple TVs configured.", "error": "no_tv_configured"}
+        else:
+            room, config, failure = self._resolve_tv(tv_configs, room)
+            if failure:
+                return failure
+            targets = [(room, config)]
+
+        lines = []
+        for target_room, config in targets:
+            display = config.get("display_name", target_room.replace("_", " "))
+            try:
+                state = await self.ha.get_state(config["media_player_entity_id"])
+                value = (state or {}).get("state")
+            except Exception as e:
+                logger.error("tv_status_failed", room=target_room, error=str(e))
+                value = None
+            if not value:
+                lines.append(f"I couldn't check the {display} TV right now.")
+            else:
+                lines.append(f"The {display} TV is {self._TV_STATE_PHRASES.get(value, value)}.")
+        return {"success": True, "message": " ".join(lines), "room": room}
+
     async def handle_power(
         self,
         action: str,
@@ -476,24 +531,9 @@ class AppleTVHandler:
         """Turn TV on or off."""
 
         tv_configs = await get_tv_configs()
-
-        if not room:
-            if tv_configs:
-                room = list(tv_configs.keys())[0]
-            else:
-                return {
-                    "success": False,
-                    "message": "No Apple TVs configured.",
-                    "error": "no_tv_configured"
-                }
-
-        config = tv_configs.get(room.lower())
-        if not config:
-            return {
-                "success": False,
-                "message": f"No Apple TV in {room.replace('_', ' ')}.",
-                "error": "room_not_found"
-            }
+        room, config, failure = self._resolve_tv(tv_configs, room)
+        if failure:
+            return failure
 
         entity_id = config["media_player_entity_id"]
         service = "turn_on" if action == "on" else "turn_off"
