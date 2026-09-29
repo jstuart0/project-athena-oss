@@ -38,6 +38,26 @@ from orchestrator.utterance_kind import (
 logger = structlog.get_logger(__name__)
 
 
+_MUSIC_COMMANDS = {
+    "pause": "pause the music",
+    "play": "resume the music",
+    "next": "skip this song",
+    "previous": "play the previous song",
+    "shuffle": "turn on shuffle",
+    "repeat": "turn on repeat",
+    "volume_up": "turn the music up",
+    "volume_down": "turn the music down",
+}
+
+
+def _music_command_hint(action) -> "str | None":
+    """The command form of a music question's parsed action, for when the
+    kill switch has routing reverted and the question may be a misread
+    command."""
+    command = _MUSIC_COMMANDS.get(action or "")
+    return f"To do that, say: {command}." if command else None
+
+
 # ---------------------------------------------------------------------------
 # Proxy shim — forward bare-global attribute access to _runtime singleton
 # ---------------------------------------------------------------------------
@@ -120,7 +140,20 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
                 state.node_timings["route_music"] = time.time() - start
                 return state
 
-            if state.intent == IntentCategory.MUSIC_PLAY:
+            if uk.kind == UtteranceKind.STATE_QUESTION:
+                # A question ("is the music paused", "is shuffle on") is
+                # answered with what's playing -- a read -- whatever control
+                # action its words parse to. Also with the kill switch on,
+                # where it gets the command to say instead of a write.
+                intent_data = await music_handler.parse_music_control_intent(state.query, room=state.room)
+                result = await music_handler.handle_control(
+                    action="now_playing", room=intent_data.get("room"), volume_level=None
+                )
+                hint = _music_command_hint(intent_data.get("action")) if kill_switch else None
+                state.answer = f"{result} {hint}" if hint else result
+                state.retrieved_data = {"music_intent": {**intent_data, "action": "now_playing"}}
+
+            elif state.intent == IntentCategory.MUSIC_PLAY:
                 # Parse the play intent, passing interface_type for browser detection
                 intent_data = await music_handler.parse_music_play_intent(
                     state.query,

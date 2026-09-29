@@ -66,14 +66,17 @@ GATED = {
     "_execute_multi_room_command",
     "_execute_room_group_command",
     "_run_scene_fallback",
+    # Single-target writes, gated with one entity so commands pass
+    # unchanged and a real state question is never written silently
+    # (with routing reverted by the kill switch).
+    "_handle_climate_intent",
+    "_handle_bed_warmer_intent",
+    "_handle_motion_control_intent",
+    "_handle_scene_intent",
 }
 
-ALLOWLIST = {
-    "_handle_climate_intent": "single resolved thermostat entity",
-    "_handle_bed_warmer_intent": "fixed configured bed-warmer entities (<=5, set by config)",
-    "_handle_motion_control_intent": "per-room automation-override helpers, not device fan-out",
-    "_handle_scene_intent": "one named scene/script entity; the fallback is delegated (_run_scene_fallback) and gated there",
-}
+# Every write-bearing method is gated; an entry here needs a stated reason.
+ALLOWLIST: dict = {}
 
 
 def _iter_call_service_calls(node):
@@ -178,7 +181,7 @@ class TestClosedWorldDriftGuard:
         not_dominated = [name for name in GATED if not method_is_gated(methods[name])]
         assert not_dominated == [], not_dominated
 
-        assert len(GATED) >= 9
+        assert len(GATED) >= 13
         for named in ("_dispatch_light_or_room_command", "_execute_room_group_command", "_run_scene_fallback"):
             assert named in GATED
 
@@ -1723,3 +1726,112 @@ class TestNormalExtractionUnidentifiedDevice:
         assert _written(h.client) == []
         assert h.stores and h.stores[-1]["parameters"]["awaiting_state_question"] is True
         assert h.stores[-1]["ttl"] == 60
+
+
+# ---------------------------------------------------------------------------
+# Round 3 / K1: with the kill switch on, a real question never writes
+# silently -- the single-target handlers included
+# ---------------------------------------------------------------------------
+
+CLIMATE_SET_JSON = (
+    '{"device_type": "climate", "room": null, "action": "set_temperature", "target_scope": "group", '
+    '"parameters": {"temperature": 72}}'
+)
+GOOD_NIGHT_SCENE_JSON = (
+    '{"device_type": "scene", "room": null, "action": "turn_on", "target_scope": "group", '
+    '"parameters": {"entity_id": "scene.good_night"}}'
+)
+
+
+def _kill_switch_harness(llm_text):
+    h = _Harness(llm_text=llm_text, flags=KILL_SWITCH_ON)
+    h.em = _TwoRoomEntityManager()
+    h.controller.entity_manager = h.em
+    return h
+
+
+class TestKillSwitchSingleTargetHandlers:
+    def test_furnace_question_never_sets_the_temperature(self):
+        h = _kill_switch_harness(CLIMATE_SET_JSON)
+        out = h.run(_state54("is the furnace on", room=None))
+        assert h.client.call_service.await_count == 0, h.client.call_service.await_args_list
+        assert out.answer == "That would change 1 thermostat. Should I go ahead?", out.answer
+
+    def test_furnace_question_without_follow_up_gets_the_rewording(self):
+        h = _kill_switch_harness(CLIMATE_SET_JSON)
+        out = h.run(_state54("is the furnace on", room=None, supports_followup=False))
+        assert h.client.call_service.await_count == 0
+        assert out.answer == "That would change 1 thermostat. To do it, say: change the thermostat.", out.answer
+
+    def test_thermostat_command_still_executes(self):
+        h = _kill_switch_harness(CLIMATE_SET_JSON)
+        h.run(_state54("set the thermostat to 72", room=None))
+        assert [c.args[:2] for c in h.client.call_service.await_args_list] == [("climate", "set_temperature")]
+
+    def test_good_night_question_never_activates_the_scene(self):
+        h = _kill_switch_harness(GOOD_NIGHT_SCENE_JSON)
+        out = h.run(_state54("is good night mode on?", room=None))
+        assert h.client.call_service.await_count == 0, h.client.call_service.await_args_list
+        # "good night" resolves to a scene or a script ("routine").
+        assert out.answer in (
+            "That would activate 1 scene. Should I go ahead?",
+            "That would activate 1 routine. Should I go ahead?",
+        ), out.answer
+
+    def test_good_night_command_still_activates_the_scene(self):
+        h = _kill_switch_harness(GOOD_NIGHT_SCENE_JSON)
+        h.run(_state54("activate good night mode", room=None))
+        calls = [c.args[:2] for c in h.client.call_service.await_args_list]
+        assert calls in ([("scene", "turn_on")], [("script", "turn_on")]), calls
+
+    def test_questions_classify_as_questions(self):
+        for q in ("is the furnace on", "is good night mode on?"):
+            assert classify_utterance(q).kind == UtteranceKind.STATE_QUESTION, q
+
+
+def _bed_warmer_config():
+    import json as _json
+    cfg = MagicMock()
+    cfg.ha_bed_warmer_entities = _json.dumps({
+        "level_left": "select.bed_left", "level_right": "select.bed_right", "power_main": "switch.bed_main",
+        "power_side_a": "switch.bed_a", "power_side_b": "switch.bed_b",
+    })
+    return cfg
+
+
+class TestSingleTargetGatesDirect:
+    """Each formerly allowlisted handler, called directly under a scope: a
+    real question is blocked at one target; the same call from a command
+    proceeds (positive control)."""
+
+    def _call(self, name, query):
+        controller = shc.SmartHomeController(entity_manager=_TwoRoomEntityManager(), llm_router=MagicMock())
+        raw = _raw_client_54()
+        calls = {
+            "climate": lambda: controller._handle_climate_intent("set_temperature", {"temperature": 72}, query, raw),
+            "bed_warmer": lambda: controller._handle_bed_warmer_intent("turn_off", {}, raw, query),
+            "motion": lambda: controller._handle_motion_control_intent("leave_lights_on", {}, raw, "office", query),
+            "scene": lambda: controller._handle_scene_intent("turn_on", {"entity_id": "scene.good_night"}, raw, query),
+        }
+
+        async def _drive():
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance(query)):
+                with mock.patch.object(write_fanout, "get_config", lambda: _fake_config(6, 18)), \
+                        mock.patch.object(shc, "get_config", _bed_warmer_config):
+                    answer = await calls[name]()
+                return answer, write_fanout.take_block()
+
+        answer, block = _run(_drive())
+        return answer, block, raw
+
+    @pytest.mark.parametrize("name", ["climate", "bed_warmer", "motion", "scene"])
+    def test_question_is_blocked_at_one_target(self, name):
+        answer, block, raw = self._call(name, "is it on in the office?")
+        assert raw.call_service.await_count == 0, (name, raw.call_service.await_args_list)
+        assert block is not None and sum(len(w.entity_ids) for w in block.writes) == 1, (name, block)
+
+    @pytest.mark.parametrize("name", ["climate", "bed_warmer", "motion", "scene"])
+    def test_command_proceeds(self, name):
+        answer, block, raw = self._call(name, "please do it now")
+        assert block is None, name
+        assert raw.call_service.await_count >= 1, (name, answer)

@@ -81,6 +81,8 @@ _VERB_FOR_SERVICE = {
     "open_cover": "open",
     "close_cover": "close",
 }
+# Domains whose "turn_on" is an activation, not a power change.
+_ACTIVATED_DOMAINS = frozenset({"scene", "script"})
 
 
 # Singular/plural for a counted, single-domain target ("1 light", "7
@@ -92,6 +94,11 @@ _COUNTED_NOUNS = {
     "fan": ("fan", "fans"),
     "switch": ("switch", "switches"),
     "media_player": ("media player", "media players"),
+    "climate": ("thermostat", "thermostats"),
+    "select": ("bed warmer", "bed warmers"),
+    "input_boolean": ("motion setting", "motion settings"),
+    "scene": ("scene", "scenes"),
+    "script": ("routine", "routines"),
 }
 
 
@@ -103,8 +110,12 @@ def _counted_noun(n: int, domains: Iterable[str]) -> str:
     return noun_for_domains(unique)
 
 
-def _verb_for(service: str) -> str:
-    return _VERB_FOR_SERVICE.get(service, service.replace("_", " "))
+def _verb_for(service: str, domain: Optional[str] = None) -> str:
+    if domain in _ACTIVATED_DOMAINS:
+        return "activate"
+    # Anything else (set_temperature, a bed-warmer level, a motion
+    # override) reads as a change to the device.
+    return _VERB_FOR_SERVICE.get(service, "change")
 
 
 def caller_fingerprint(
@@ -193,9 +204,11 @@ def _room_text(room: Optional[str], scope_hint: Any) -> str:
 
 
 def _command_text(write: PlannedWrite, room: Optional[str] = None) -> str:
-    verb = _verb_for(write.service)
-    noun = noun_for_domains([write.domain])
+    verb = _verb_for(write.service, write.domain)
     where = f"{room.replace('_', ' ')} " if room else ""
+    if len(write.entity_ids) == 1 and "all" not in write.entity_ids:
+        return f"{verb} the {where}{_counted_noun(1, [write.domain])}"
+    noun = noun_for_domains([write.domain])
     return f"{verb} all the {where}{noun}"
 
 
@@ -210,7 +223,7 @@ def rewording(block: FanoutBlock) -> str:
         lead = f"That would affect all the {noun}."
     else:
         n = sum(len(w.entity_ids) for w in block.writes)
-        verb = _verb_for(block.writes[0].service) if block.writes else "control"
+        verb = _verb_for(block.writes[0].service, block.writes[0].domain) if block.writes else "control"
         lead = f"That would {verb} {n} {_counted_noun(n, [w.domain for w in block.writes])}{f' in the {block.room}' if block.room else ''}."
     return f"{lead} {say}"
 
@@ -301,7 +314,7 @@ def _block(scope, writes, room, scope_hint, domain_for_metric: str, prompt_outco
     if scope is not None and scope.can_carry_pending:
         ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome=prompt_outcome).inc()
         n = len({e for w in writes for e in w.entity_ids})
-        verb = _verb_for(writes[0].service)
+        verb = _verb_for(writes[0].service, writes[0].domain)
         return f"That would {verb} {n} {_counted_noun(n, [w.domain for w in writes])}{_room_text(room, scope_hint)}. Should I go ahead?"
     ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome=reword_outcome).inc()
     return rewording(block)

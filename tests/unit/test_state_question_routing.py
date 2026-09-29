@@ -1391,20 +1391,30 @@ class TestTvNodeQuestionsAreReadOnly:
         out, raw = _drive_tv("turn off the tv")
         assert [c.args[:2] for c in raw.call_service.await_args_list] == [("media_player", "turn_off")]
 
-    def test_kill_switch_reverts_the_read_only_scope(self):
+    def test_kill_switch_question_still_reads_and_hints_the_command(self):
+        """Round 3 (replaces "the kill switch reverts to a write"): with
+        routing reverted, a real question is still answered from state and
+        gets the command form instead of powering the TV."""
         out, raw = _drive_tv("did you turn off the tv", kill_switch=True)
-        assert raw.call_service.await_count == 1
+        assert raw.call_service.await_count == 0, raw.call_service.await_args_list
+        assert out.answer == "The living room TV is off. To turn it off, say: turn off the living room TV."
+
+    def test_kill_switch_command_still_powers_the_tv(self):
+        out, raw = _drive_tv("turn off the tv", kill_switch=True)
+        assert [c.args[:2] for c in raw.call_service.await_args_list] == [("media_player", "turn_off")]
 
 
 class _ScopeRecordingMusicHandler:
     def __init__(self):
         self.read_only_seen = []
+        self.actions = []
 
     async def parse_music_control_intent(self, query, room=None):
         return {"action": "now_playing" if "playing" in query else "pause", "room": room}
 
     async def handle_control(self, action, room=None, volume_level=None):
         self.read_only_seen.append(current_ha_scope().read_only)
+        self.actions.append(action)
         return "Nothing is playing in the living room right now."
 
 
@@ -1429,7 +1439,7 @@ def _drive_music(query, *, kill_switch=False, names=(), prev_context=None, finge
                    return_value={"enabled": kill_switch}),
         mock.patch("orchestrator.nodes.route_music.store_conversation_context", store or mock.AsyncMock()),
     ):
-        _run(route_music_node(state))
+        handler.answer = _run(route_music_node(state)).answer
     return handler
 
 
@@ -1442,6 +1452,24 @@ class TestMusicNodeQuestionsAreReadOnly:
 
     def test_kill_switch_reverts_the_read_only_scope(self):
         assert _drive_music("is music playing", kill_switch=True).read_only_seen == [False]
+
+    def test_question_parsed_as_a_control_is_answered_with_a_read(self):
+        """"is the music paused" parses to pause; a question only ever
+        reads what's playing."""
+        handler = _drive_music("is the music paused")
+        assert handler.actions == ["now_playing"], handler.actions
+        assert handler.answer == "Nothing is playing in the living room right now."
+
+
+    def test_kill_switch_question_reads_and_hints_the_command(self):
+        handler = _drive_music("is the music paused", kill_switch=True)
+        assert handler.actions == ["now_playing"], handler.actions
+        assert handler.answer == (
+            "Nothing is playing in the living room right now. To do that, say: pause the music."
+        ), handler.answer
+
+    def test_kill_switch_command_still_controls(self):
+        assert _drive_music("pause the music", kill_switch=True).actions == ["pause"]
 
     def test_configured_assistant_name_is_stripped(self):
         assert _drive_music("Friday, is music playing", names=("Friday",)).read_only_seen == [True]

@@ -37,6 +37,17 @@ from orchestrator.utterance_kind import (
 logger = structlog.get_logger(__name__)
 
 
+def _tv_command_hint(intent, room) -> "str | None":
+    """The command form of a TV question's parsed action, for when the kill
+    switch has routing reverted and the question may be a misread command."""
+    where = f"the {str(room).replace('_', ' ')} TV" if room else "the TV"
+    if intent.action == "power" and intent.power_action in ("on", "off"):
+        return f"To turn it {intent.power_action}, say: turn {intent.power_action} {where}."
+    if intent.action == "launch" and intent.app_name:
+        return f"To open {intent.app_name}, say: open {intent.app_name} on {where}."
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Proxy shim — forward bare-global attribute access to _runtime singleton
 # ---------------------------------------------------------------------------
@@ -133,14 +144,18 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
 
             result = None
 
-            if uk.kind == UtteranceKind.STATE_QUESTION and not kill_switch:
+            if uk.kind == UtteranceKind.STATE_QUESTION:
                 # A question ("is the TV on", "did you turn off the TV") is
                 # answered from the resolved TV's Home Assistant state -- a
                 # read -- instead of dispatching whatever action the parse
-                # found (the read-only scope would refuse it).
+                # found. Also with the kill switch on: a real question never
+                # powers or launches anything; it gets the command to say.
                 result = await tv_handler.handle_status(
                     room=intent.room or state.room, all_tvs=intent.all_tvs
                 )
+                hint = _tv_command_hint(intent, intent.room or state.room) if kill_switch else None
+                if hint and result.get("success"):
+                    result = {**result, "message": f"{result['message']} {hint}"}
 
             elif intent.action == "launch":
                 if intent.all_tvs:

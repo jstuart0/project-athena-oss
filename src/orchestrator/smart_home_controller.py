@@ -2400,6 +2400,16 @@ Return ONLY valid JSON."""
             logger.info(f"Climate status query: {response}")
             return response
 
+        # ATHENA-128 (K1): one target, so commands pass unchanged; a real
+        # state question (routing reverted by the kill switch) is confirmed
+        # or reworded instead of writing silently.
+        from . import write_fanout
+        _climate_prompt = write_fanout.gate(
+            "climate", "set_temperature", (climate_state.get('entity_id', 'climate.thermostat'),), original_query,
+        )
+        if _climate_prompt:
+            return _climate_prompt
+
         # Handle temperature adjustment actions
         current_target = climate_state.get('target_temp')
         # Check if dual-setpoint mode (heat_cool)
@@ -3655,6 +3665,15 @@ Do NOT mention rooms that have no current or recent motion."""
         left_level = parameters.get('left_level')
         right_level = parameters.get('right_level')
 
+        # ATHENA-128 (K1): gated as one target (the pad), so commands pass
+        # unchanged and only a real state question is confirmed/reworded.
+        from . import write_fanout
+        _bed_prompt = write_fanout.gate(
+            POWER_MAIN.split(".", 1)[0], action or "set_level", (POWER_MAIN,), original_query,
+        )
+        if _bed_prompt:
+            return _bed_prompt
+
         try:
             if action == "turn_off":
                 # Turn off the mattress pad
@@ -4169,6 +4188,14 @@ Do NOT mention rooms that have no current or recent motion."""
             # so a failed activation raised UnboundLocalError here instead
             # of ever reaching the intended "not configured yet" message.
             scene_name = entity_id.split('.')[-1].replace('_', ' ').title()
+
+            # ATHENA-128 (K1): one scene/script, so commands pass unchanged;
+            # a real state question ("is good night mode on?") never
+            # activates it silently.
+            from . import write_fanout
+            _scene_prompt = write_fanout.gate(domain, service, (entity_id,), original_query)
+            if _scene_prompt:
+                return _scene_prompt
 
             # Try to activate the scene/script
             try:
@@ -4912,6 +4939,16 @@ Return ONLY the JSON, no other text."""
 
         duration = parameters.get("duration_minutes", 60)
         brightness = parameters.get("brightness_percent")
+
+        # ATHENA-128 (K1): gated as one target (the room's motion override),
+        # so commands pass unchanged and only a real state question is
+        # confirmed/reworded.
+        from . import write_fanout
+        _motion_prompt = write_fanout.gate(
+            "input_boolean", action or "change", (motion_disable_bool,), original_query, room=room,
+        )
+        if _motion_prompt:
+            return _motion_prompt
 
         try:
             if action == "leave_lights_on":
