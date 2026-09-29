@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 
@@ -54,9 +53,11 @@ def _call(client, method, path, params_or_body, headers=None):
 
 
 @pytest.fixture
-def no_qdrant(monkeypatch):
-    monkeypatch.setattr(memories_module, "check_qdrant_available", mock.AsyncMock(return_value=False))
-    monkeypatch.setattr(memories_module, "get_qdrant", lambda: None)
+def no_qdrant():
+    from app.services import memory_vectors
+    from tests.conftest import failing_client
+
+    memory_vectors.set_client_for_tests(failing_client())
 
 
 def _session(db, guest_id=5):
@@ -198,6 +199,25 @@ class _FakeQdrant:
         self.filters = []
         self.deleted = []
 
+    def collection_exists(self, collection_name=None):
+        return True
+
+    def get_collection(self, collection_name=None):
+        from app.services import memory_vectors
+        from qdrant_client.models import Distance, VectorParams
+
+        params = SimpleNamespace(vectors=VectorParams(size=memory_vectors.EMBEDDING_DIM, distance=Distance.COSINE))
+        return SimpleNamespace(
+            config=SimpleNamespace(params=params, metadata=memory_vectors.collection_metadata()),
+            points_count=len(self.hits), vectors_count=len(self.hits), indexed_vectors_count=0,
+        )
+
+    def count(self, collection_name=None, count_filter=None, exact=True):
+        return SimpleNamespace(count=0)
+
+    def update_collection(self, collection_name=None, **kwargs):
+        return True
+
     def query_points(self, collection_name=None, query=None, query_filter=None, **kwargs):
         self.filters.append(query_filter)
         return SimpleNamespace(points=[
@@ -210,12 +230,13 @@ class _FakeQdrant:
 
 
 @pytest.fixture
-def qdrant_with(monkeypatch):
+def qdrant_with():
+    from app.services import memory_vectors
+
     def _install(hits):
         fake = _FakeQdrant(hits)
-        monkeypatch.setattr(memories_module, "check_qdrant_available", mock.AsyncMock(return_value=True))
-        monkeypatch.setattr(memories_module, "get_qdrant", lambda: fake)
-        monkeypatch.setattr(memories_module, "embed_text", lambda text: [0.1, 0.2])
+        memory_vectors.set_client_for_tests(fake)
+        assert memory_vectors.refresh_state().status == "ready"
         return fake
     return _install
 

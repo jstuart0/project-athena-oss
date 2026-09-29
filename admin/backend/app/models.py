@@ -3308,6 +3308,9 @@ class Memory(Base):
     # Qdrant vector reference
     vector_id = Column(String(36), nullable=False, unique=True, index=True)  # UUID as string
     collection = Column(String(100), nullable=False, default='athena_memories')
+    # 'pending' until app.services.memory_vectors.store_vector confirms the
+    # point; only 'stored' rows are served by semantic search.
+    vector_status = Column(String(16), nullable=False, default='pending', server_default='pending')
 
     # Metadata
     category = Column(String(100), index=True)  # preference, fact, context, conversation
@@ -3351,6 +3354,7 @@ class Memory(Base):
             'guest_session_id': self.guest_session_id,
             'vector_id': self.vector_id,
             'collection': self.collection,
+            'vector_status': self.vector_status,
             'category': self.category,
             'importance': self.importance,
             'access_count': self.access_count,

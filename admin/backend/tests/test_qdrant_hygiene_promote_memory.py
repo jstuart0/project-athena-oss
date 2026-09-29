@@ -30,6 +30,7 @@ import pytest
 # needing to stand up a full FastAPI app.
 # ---------------------------------------------------------------------------
 import app.routes.memories as memories_module
+from app.services import memory_vectors
 
 
 def _make_mock_point(vector=None, payload=None):
@@ -50,8 +51,8 @@ class TestPromoteMemoryRetrieveCallsWithVectors:
     def _run_promote(self, mock_qdrant, mock_memory, mock_db, mock_user):
         """Drive the core Qdrant branch of promote_memory in isolation."""
         # Patch collaborators used inside the function
-        with mock.patch.object(memories_module, "get_qdrant", return_value=mock_qdrant), \
-             mock.patch.object(memories_module, "COLLECTION_NAME", "test-collection"):
+        with mock.patch.object(memory_vectors, "_client_or_none", return_value=mock_qdrant), \
+             mock.patch.object(memory_vectors, "COLLECTION_NAME", "test-collection"):
 
             # Simulate the DB query returning our mock memory
             mock_db.query.return_value.filter.return_value.first.return_value = mock_memory
@@ -142,8 +143,8 @@ class TestPromoteMemoryAbortOnNullVector:
 
     def _run_promote_expect_error(self, qdrant, memory, db, user):
         """Run promote_memory and expect the Qdrant block to raise inside the try/except."""
-        with mock.patch.object(memories_module, "get_qdrant", return_value=qdrant), \
-             mock.patch.object(memories_module, "COLLECTION_NAME", "test-collection"):
+        with mock.patch.object(memory_vectors, "_client_or_none", return_value=qdrant), \
+             mock.patch.object(memory_vectors, "COLLECTION_NAME", "test-collection"):
 
             db.query.return_value.filter.return_value.first.return_value = memory
             db.add = mock.MagicMock()
