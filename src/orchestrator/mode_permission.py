@@ -748,6 +748,65 @@ def degraded_permissions() -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# The public audience (anonymous embed visitors)
+# ---------------------------------------------------------------------------
+
+PUBLIC_CALLER_TRUST = "web_public"
+
+PUBLIC_ALLOWED_INTENTS = frozenset({
+    IntentCategory.WEATHER.value,
+    IntentCategory.GENERAL_INFO.value,
+    IntentCategory.NEWS.value,
+    IntentCategory.RECIPES.value,
+    IntentCategory.STREAMING.value,
+})
+
+PUBLIC_ALLOWED_TOOLS = frozenset({"get_weather", "get_news", "search_recipes", "search_streaming"})
+
+PUBLIC_INTENT_REFUSAL = (
+    "Sorry, I can't help with that here. I can answer general questions, "
+    "or help with the weather, news, recipes, and what's streaming."
+)
+
+
+def public_permissions() -> Dict[str, Any]:
+    """The permission set for an anonymous public caller (an embedded
+    website chatbot, relayed by jarvis-web).
+
+    Hard-coded and never fetched: not the mode service's guest profile,
+    not the degraded baseline, not GUEST_BASELINE_* env. Widening what a
+    rental guest may do must never widen what the internet may do.
+
+    It's a guest dict, so every existing guest branch still fires, and the
+    ``audience`` marker only narrows further. ``restricted_entities [".*"]``
+    denies every HA target before domains are consulted; the ``__none__``
+    domain sentinel stops apply_guest_baseline refilling the baseline
+    domains. Returns a fresh dict each call.
+    """
+    return {
+        "mode": "guest",
+        "audience": "public",
+        "allowed_intents": sorted(PUBLIC_ALLOWED_INTENTS),
+        "restricted_intents": [],
+        "restricted_entities": [".*"],
+        "allowed_domains": ["__none__"],
+    }
+
+
+def is_public_audience(permissions: Optional[Dict[str, Any]]) -> bool:
+    """True when ``permissions`` belong to the public audience. The single
+    way code asks this question after authorization."""
+    return isinstance(permissions, dict) and permissions.get("audience") == "public"
+
+
+def is_public_caller(caller_trust: Optional[str]) -> bool:
+    """True when the calling service classified this request as public.
+    Used before authorization (device lookup, context, session); after
+    authorization ask ``is_public_audience``."""
+    return caller_trust == PUBLIC_CALLER_TRUST
+
+
 def normalize_permissions(permissions: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Normalize a raw permissions dict for use by the guard (D5).
 
@@ -1397,7 +1456,9 @@ class RequestAuthorization:
 
 
 async def resolve_request_authorization(
-    request_mode: Optional[str], guest_info: Optional[Dict[str, Any]]
+    request_mode: Optional[str],
+    guest_info: Optional[Dict[str, Any]],
+    caller_trust: Optional[str] = None,
 ) -> RequestAuthorization:
     """The single mode/permissions resolution path for every orchestrator
     entry point (D7, D6, D5).
@@ -1414,10 +1475,34 @@ async def resolve_request_authorization(
     guest -- fingerprinted or request-asserted -- while the house is
     nominally owner needs the REAL guest allowlist, not the owner
     permissions the server returned for its own mode).
+
+    A public caller (``is_public_caller(caller_trust)``) always gets
+    ``mode="guest"`` with ``public_permissions()``, whatever the server's
+    mode, the guest profile or a degraded mode service say. The mode
+    service is still read, for ``mode_info`` only.
     """
     mode_info = await get_current_mode()
     server_mode = mode_info.get("mode", "owner")
     degraded = bool(mode_info.get("degraded", False))
+
+    if is_public_caller(caller_trust):
+        escalation_ignored = request_mode == "owner"
+        if escalation_ignored:
+            logger.info(
+                "request_mode_escalation_ignored",
+                request_mode=request_mode,
+                effective_mode="guest",
+                server_mode=server_mode,
+            )
+        logger.info("public_audience_resolved", server_mode=server_mode, degraded=degraded)
+        return RequestAuthorization(
+            mode="guest",
+            permissions=normalize_permissions(public_permissions()),
+            server_mode=server_mode,
+            degraded=degraded,
+            escalation_ignored=escalation_ignored,
+            mode_info=mode_info,
+        )
 
     effective_mode = "guest" if (guest_info or request_mode == "guest" or server_mode == "guest") else server_mode
 

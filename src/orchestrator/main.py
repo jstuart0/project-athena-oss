@@ -58,6 +58,8 @@ from orchestrator.search_providers.result_fusion import ResultFusion
 
 # Session manager imports
 from orchestrator.session_manager import (
+    CALLER_CLASS_OTHER,
+    CALLER_CLASS_PUBLIC,
     get_session_manager,
     get_session_summary, update_session_summary
 )
@@ -151,6 +153,9 @@ from orchestrator.mode_permission import (
     ensure_permission_enforcing,
     extract_pin_from_query,
     handle_owner_mode_utterance,
+    is_public_audience,
+    is_public_caller,
+    PUBLIC_ALLOWED_TOOLS,
     resolve_request_authorization,
 )
 from orchestrator.write_fanout import caller_fingerprint as compute_caller_fingerprint
@@ -179,6 +184,8 @@ from orchestrator.helpers import (
     query_mentions_location,
     city_phrases,
     is_transit_query,
+    build_query_context,
+    web_search_allowed,
 )
 
 # Event system imports for real-time pipeline monitoring
@@ -4575,6 +4582,14 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
         timing_breakdown["tool_loading"] = time.time() - tool_load_start
 
+        # The public audience is offered only its hard-coded allowlist. A new
+        # list, so the cached schemas are never narrowed for later callers.
+        if tools and is_public_audience(state.permissions):
+            tools = [t for t in tools if t["function"]["name"] in PUBLIC_ALLOWED_TOOLS]
+        # What this caller may execute: after the mode and public filters,
+        # before the per-intent narrowing below (which only shapes the offer).
+        entitled_tool_names = frozenset(t["function"]["name"] for t in (tools or []))
+
         if not tools:
             logger.warning("No tools available for tool calling")
             state.error = "No tools available"
@@ -4756,20 +4771,23 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
         home_address = DEFAULT_LOCATION  # Permanent home address (for "directions from home")
         search_location = DEFAULT_LOCATION  # Current location for searches (may differ from home)
 
-        # Inject base knowledge context from Admin API
+        # Inject base knowledge context from Admin API. The public audience
+        # gets neither base knowledge nor the home address: its searches use
+        # the city-level default location.
         try:
-            admin_client = get_admin_client()
-            user_mode = _tool_user_mode
-            knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
-            if knowledge_context:
-                system_content += f"\n{knowledge_context}"
-                state.base_knowledge_populated = True
-                logger.info(f"Base knowledge context injected for mode={user_mode} in tool_call")
+            if not is_public_audience(state.permissions):
+                admin_client = get_admin_client()
+                user_mode = _tool_user_mode
+                knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
+                if knowledge_context:
+                    system_content += f"\n{knowledge_context}"
+                    state.base_knowledge_populated = True
+                    logger.info(f"Base knowledge context injected for mode={user_mode} in tool_call")
 
-            # Get permanent home address (for "directions from home" type queries)
-            home_address = await get_home_address_for_user(admin_client, user_mode)
-            search_location = home_address  # Default search location to home
-            logger.info(f"Home address: {home_address}")
+                # Get permanent home address (for "directions from home" type queries)
+                home_address = await get_home_address_for_user(admin_client, user_mode)
+                search_location = home_address  # Default search location to home
+                logger.info(f"Home address: {home_address}")
 
             # Check for location from request entities (browser geolocation)
             # This is set when location is passed in the QueryRequest
@@ -5276,6 +5294,8 @@ If the user is asking to repeat, search again, or modify the previous request, u
                     )
                 except Exception as ctx_err:
                     logger.warning(f"Failed to store direct answer context: {ctx_err}")
+            elif not web_search_allowed(state):
+                state.error = "Unable to process request - no tools selected"
             else:
                 # LLM provided nothing - fallback to web search
                 logger.warning("LLM provided neither tools nor content - attempting web search fallback")
@@ -5360,6 +5380,21 @@ Provide a helpful answer:"""
         max_parallel = settings.get("max_parallel_tools", 3)
         timeout_seconds = settings.get("tool_call_timeout_seconds", 30)
 
+        # Execution-time entitlement: never run a tool this caller wasn't
+        # entitled to be offered, whatever the model emitted.
+        entitled_calls = []
+        for tc in tool_calls:
+            name = tc.get("function", {}).get("name", "")
+            if name in entitled_tool_names:
+                entitled_calls.append(tc)
+            else:
+                logger.warning("tool_call_not_entitled_dropped", tool=name, mode=state.mode)
+        tool_calls = entitled_calls
+        if not tool_calls:
+            state.error = "No entitled tool calls"
+            state.node_timings["tool_call"] = time.time() - start
+            return state
+
         # Limit parallelism
         tool_calls_limited = tool_calls[:max_parallel]
 
@@ -5439,6 +5474,7 @@ Provide a helpful answer:"""
         # Track web fallback timing
         web_fallback_start = time.time()
         web_fallback_occurred = False
+        web_fallback_allowed = web_search_allowed(state)
 
         failed_tools = []
         for tool_call in tool_calls_limited:
@@ -5452,7 +5488,7 @@ Provide a helpful answer:"""
                 logger.warning(f"Tool '{function_name}' failed: {result.get('error')}")
 
         # If any tools failed, try web search fallback (if enabled for that tool)
-        if failed_tools:
+        if failed_tools and web_fallback_allowed:
             logger.info(f"Checking web search fallback for {len(failed_tools)} failed tool(s)")
 
             for tool_call_id, function_name, error_msg in failed_tools:
@@ -5579,7 +5615,7 @@ Provide a helpful answer:"""
             elif result is None or result == {}:
                 is_empty = True
 
-            if is_empty:
+            if is_empty and web_fallback_allowed:
                 logger.warning(f"Tool '{function_name}' returned empty/irrelevant results - triggering web search fallback")
 
                 # Check if web search fallback is enabled for this tool
@@ -6164,13 +6200,16 @@ class QueryRequest(BaseModel):
             "never claim owner."
         ),
     )
-    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_public"]] = Field(
+    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_local", "web_public"]] = Field(
         None,
         description=(
             "Set by the calling service in server code, never by an end "
-            "user (ATHENA-69 D24). Gates only the owner-PIN override "
-            "utterance -- absent or 'web_public' means untrusted and the "
-            "PIN path is refused before any throttle or mode-service call."
+            "user (ATHENA-69 D24). Gates the owner-PIN override utterance "
+            "(only PIN_TRUSTED_TIERS may use it; absent, 'web_local' and "
+            "'web_public' are refused before any throttle or mode-service "
+            "call). 'web_public' also selects the public audience: a "
+            "hard-coded narrow allowlist, no guest identity, no base "
+            "knowledge, memories, cache or web search."
         ),
     )
     room: str = Field("unknown", description="Room identifier")
@@ -6204,6 +6243,14 @@ class QueryRequest(BaseModel):
             "never for the device_id guest-session lookup."
         ),
     )
+
+
+def _session_caller_class(request: "QueryRequest") -> str:
+    return CALLER_CLASS_PUBLIC if is_public_caller(request.caller_trust) else CALLER_CLASS_OTHER
+
+
+def _cache_guest_id(guest_info: Optional[Dict[str, Any]]) -> Optional[Any]:
+    return guest_info.get("guest_id") if guest_info else None
 
 
 def _request_caller_fingerprint(request: "QueryRequest", permissions_mode: Optional[str]) -> Optional[str]:
@@ -6257,7 +6304,10 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             guest_info = None
             user_id = request.mode  # Default: use mode as user_id
 
-            if request.device_id:
+            # A public caller never gets a device-identified guest's identity.
+            if is_public_caller(request.caller_trust):
+                user_id = "public"
+            elif request.device_id:
                 admin_client = get_admin_client()
                 guest_info = await admin_client.get_user_session_by_device(request.device_id)
                 if guest_info:
@@ -6281,7 +6331,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
-                zone=request.room
+                zone=request.room,
+                caller_class=_session_caller_class(request),
             )
 
         logger.info(f"Processing query in session {session.session_id}")
@@ -6291,7 +6342,9 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # a narrowing hint only; it can never escalate above the server's
         # own mode.
         with timing_tracker.track("pre_graph", "mode_determination"):
-            authz = await resolve_request_authorization(request.mode, guest_info)
+            authz = await resolve_request_authorization(
+                request.mode, guest_info, caller_trust=request.caller_trust
+            )
             current_mode = authz.mode
             permissions = authz.permissions
 
@@ -6408,7 +6461,9 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # Retrieve relevant memories from Qdrant for context augmentation
         memory_context = ""
         async with timing_tracker.track_async("pre_graph", "memory_retrieval"):
-            if _direct_general_info_response(request.query):
+            if is_public_audience(permissions):
+                logger.info("memory_retrieval_skipped", reason="public_audience")
+            elif _direct_general_info_response(request.query):
                 logger.info("memory_retrieval_skipped", reason="direct_general_info_fast_path", query_preview=request.query[:50])
             else:
                 try:
@@ -6443,12 +6498,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     logger.warning("memory_retrieval_skipped", error=str(e), error_type=type(e).__name__)
 
         # Build context with guest info (if identified via device fingerprint)
-        query_context = dict(request.context) if request.context else {}
-        if guest_info:
-            query_context["guest_id"] = guest_info.get("guest_id")
-            query_context["guest_name"] = guest_info.get("guest_name")
-            query_context["device_type"] = guest_info.get("device_type", "web")
-            query_context["guest_preferences"] = guest_info.get("preferences", {})
+        query_context = build_query_context(request, guest_info)
 
         # Create initial state with conversation history, mode, and permissions
         # Initialize entities with location if provided in request
@@ -6501,15 +6551,17 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             strong_intent_result = detect_strong_intent(request.query)
             detected_strong_intent = strong_intent_result.get("detected_intent") if strong_intent_result.get("has_strong_intent") else None
 
-            # Benchmark flag: skip semantic cache entirely (prevents poisoning N≥20 repeats)
-            if request.skip_semantic_cache:
+            # Benchmark flag: skip semantic cache entirely (prevents poisoning N≥20 repeats).
+            # The public audience never reads the cache.
+            if request.skip_semantic_cache or is_public_caller(request.caller_trust):
                 cached_response = None
             else:
                 cached_response = await get_cached_response(
                     query=request.query,
                     room=request.room,
                     mode=current_mode,
-                    location_override=location_override
+                    location_override=location_override,
+                    guest_id=_cache_guest_id(guest_info),
                 )
 
             # Skip cache if strong intent doesn't match cached intent
@@ -6683,8 +6735,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
 
         # Check for memory forget intent BEFORE running the state machine
         try:
-            memory_manager = await get_memory_manager()
-            if memory_manager.should_forget_memory(request.query):
+            memory_manager = None if is_public_audience(permissions) else await get_memory_manager()
+            if memory_manager is not None and memory_manager.should_forget_memory(request.query):
                 logger.info("memory_forget_intent_detected", query=request.query[:50])
 
                 # Extract what to forget
@@ -6877,8 +6929,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # Memory creation: Check if this conversation should create a memory
         memory_creation_start = time.time()
         try:
-            memory_manager = await get_memory_manager()
-            if memory_manager.should_create_memory(request.query, answer, intent_str):
+            memory_manager = None if is_public_audience(permissions) else await get_memory_manager()
+            if memory_manager is not None and memory_manager.should_create_memory(request.query, answer, intent_str):
                 # Extract memorable content and calculate importance
                 memorable_content = memory_manager.extract_memorable_fact(request.query, answer, intent_str)
                 importance = memory_manager.calculate_importance(request.query, answer, intent_str)
@@ -6997,6 +7049,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # don't poison the cache for concurrent real traffic.
         should_cache = (
             not request.skip_semantic_cache
+            and not is_public_caller(request.caller_trust)
             and response.answer
             and not final_state.get("is_fallback", False)
             and not _looks_like_fallback(response.answer)
@@ -7014,7 +7067,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                         response=response_dict,
                         room=request.room,
                         mode=current_mode,
-                        location_override=cache_location_override
+                        location_override=cache_location_override,
+                        guest_id=_cache_guest_id(guest_info),
                     )
                 )
             except Exception as cache_err:
@@ -7110,7 +7164,9 @@ async def process_query_stream(request: QueryRequest):
             guest_info = None
             user_id = request.mode  # Default: use mode as user_id
 
-            if request.device_id:
+            if is_public_caller(request.caller_trust):
+                user_id = "public"
+            elif request.device_id:
                 admin_client = get_admin_client()
                 guest_info = await admin_client.get_user_session_by_device(request.device_id)
                 if guest_info:
@@ -7125,12 +7181,15 @@ async def process_query_stream(request: QueryRequest):
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
-                zone=request.room
+                zone=request.room,
+                caller_class=_session_caller_class(request),
             )
 
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares.
-            authz = await resolve_request_authorization(request.mode, guest_info)
+            authz = await resolve_request_authorization(
+                request.mode, guest_info, caller_trust=request.caller_trust
+            )
             current_mode = authz.mode
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
@@ -7205,12 +7264,7 @@ async def process_query_stream(request: QueryRequest):
                 logger.info(f"chat_history_injected", turns=len(conversation_history), source="persistent_sessions")
 
             # Build context with guest info (if identified via device fingerprint)
-            query_context = dict(request.context) if request.context else {}
-            if guest_info:
-                query_context["guest_id"] = guest_info.get("guest_id")
-                query_context["guest_name"] = guest_info.get("guest_name")
-                query_context["device_type"] = guest_info.get("device_type", "web")
-                query_context["guest_preferences"] = guest_info.get("preferences", {})
+            query_context = build_query_context(request, guest_info)
 
             # Initialize state with skip_synthesis flag to get RAG data without LLM call
             request_id = hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8]
@@ -7420,7 +7474,9 @@ async def process_query_stream_v2(request: QueryRequest):
             guest_info = None
             user_id = request.mode  # Default: use mode as user_id
 
-            if request.device_id:
+            if is_public_caller(request.caller_trust):
+                user_id = "public"
+            elif request.device_id:
                 admin_client = get_admin_client()
                 guest_info = await admin_client.get_user_session_by_device(request.device_id)
                 if guest_info:
@@ -7435,12 +7491,15 @@ async def process_query_stream_v2(request: QueryRequest):
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
-                zone=request.room
+                zone=request.room,
+                caller_class=_session_caller_class(request),
             )
 
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares.
-            authz = await resolve_request_authorization(request.mode, guest_info)
+            authz = await resolve_request_authorization(
+                request.mode, guest_info, caller_trust=request.caller_trust
+            )
             current_mode = authz.mode
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
@@ -7469,7 +7528,7 @@ async def process_query_stream_v2(request: QueryRequest):
                 history_summary="",
                 permissions=authz.permissions,
                 interface_type=request.interface_type,
-                context=dict(request.context) if request.context else {},
+                context=build_query_context(request, guest_info),
                 memory_context="",
                 timing_tracker=timing_tracker,
                 supports_followup=request.supports_followup,
@@ -7957,14 +8016,15 @@ Response:"""
         interface_type=state.interface_type,
     ) + "\n"
 
-    # Inject base knowledge context from Admin API
+    # Inject base knowledge context from Admin API (never for the public audience)
     try:
-        admin_client = get_admin_client()
-        user_mode = state.mode if state.mode else "guest"
-        knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
-        if knowledge_context:
-            system_context += knowledge_context
-            state.base_knowledge_populated = True
+        if not is_public_audience(state.permissions):
+            admin_client = get_admin_client()
+            user_mode = state.mode if state.mode else "guest"
+            knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
+            if knowledge_context:
+                system_context += knowledge_context
+                state.base_knowledge_populated = True
     except Exception as e:
         logger.warning(f"Failed to fetch base knowledge context for streaming: {e}")
 

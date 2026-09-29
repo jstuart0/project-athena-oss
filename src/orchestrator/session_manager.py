@@ -60,6 +60,9 @@ return evicted
 # In-memory fallback storage
 _memory_sessions: Dict[str, Dict[str, Any]] = {}
 
+CALLER_CLASS_PUBLIC = "public"
+CALLER_CLASS_OTHER = "other"
+
 
 class ConversationSession:
     """Represents a conversation session with history and metadata."""
@@ -87,6 +90,8 @@ class ConversationSession:
         self.last_activity = datetime.utcnow()
         self.messages: List[Dict[str, Any]] = []
         self.metadata: Dict[str, Any] = {}
+        # "public" for an anonymous embed caller's session, else "other".
+        self.caller_class: str = CALLER_CLASS_OTHER
 
     def add_message(self, role: str, content: str, metadata: Optional[Dict] = None):
         """
@@ -201,7 +206,8 @@ class ConversationSession:
             "created_at": self.created_at.isoformat(),
             "last_activity": self.last_activity.isoformat(),
             "messages": self.messages,
-            "metadata": self.metadata
+            "metadata": self.metadata,
+            "caller_class": self.caller_class,
         }
 
     @classmethod
@@ -216,6 +222,9 @@ class ConversationSession:
         session.last_activity = datetime.fromisoformat(data["last_activity"])
         session.messages = data.get("messages", [])
         session.metadata = data.get("metadata", {})
+        session.caller_class = (
+            CALLER_CLASS_PUBLIC if data.get("caller_class") == CALLER_CLASS_PUBLIC else CALLER_CLASS_OTHER
+        )
         return session
 
 
@@ -279,7 +288,8 @@ class SessionManager:
         self,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
-        zone: Optional[str] = None
+        zone: Optional[str] = None,
+        caller_class: str = CALLER_CLASS_OTHER,
     ) -> ConversationSession:
         """
         Create a new conversation session.
@@ -299,6 +309,7 @@ class SessionManager:
             user_id=user_id,
             zone=zone
         )
+        session.caller_class = caller_class
 
         # Save to storage
         await self._save_session(session)
@@ -362,7 +373,8 @@ class SessionManager:
         self,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
-        zone: Optional[str] = None
+        zone: Optional[str] = None,
+        caller_class: str = CALLER_CLASS_OTHER,
     ) -> ConversationSession:
         """
         Get existing session or create new one.
@@ -371,12 +383,21 @@ class SessionManager:
             session_id: Optional existing session ID
             user_id: Optional user identifier
             zone: Optional zone identifier
+            caller_class: "public" for an anonymous embed caller, else "other"
 
         Returns:
             ConversationSession instance
+
+        A public caller presenting the id of a session that isn't public
+        (live or expired) gets a brand-new session under a new id: it never
+        reads that session's history and never overwrites it. Any caller
+        may resume a public session; that only loads public history.
         """
         if session_id:
             session = await self.get_session(session_id)
+            if session and caller_class == CALLER_CLASS_PUBLIC and session.caller_class != CALLER_CLASS_PUBLIC:
+                logger.warning("session_public_caller_refused_foreign_session", session_id=session_id)
+                return await self.create_session(user_id=user_id, zone=zone, caller_class=caller_class)
             if session:
                 # Check if session is expired
                 config = await get_config()
@@ -392,7 +413,9 @@ class SessionManager:
                     # Session expired, create new one with same ID for continuity
 
         # Create new session with provided session_id if given
-        return await self.create_session(session_id=session_id, user_id=user_id, zone=zone)
+        return await self.create_session(
+            session_id=session_id, user_id=user_id, zone=zone, caller_class=caller_class
+        )
 
     async def add_message(
         self,

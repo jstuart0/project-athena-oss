@@ -577,8 +577,15 @@ def get_cache_key(
     room: str = None,
     mode: str = None,
     location_override: dict = None,
+    guest_id: Optional[Any] = None,
 ) -> str:
-    """Generate cache key with optional room/mode/location context.
+    """Generate cache key with optional mode/guest/location context.
+
+    Audience partition: the key carries the effective mode and, for a
+    device-identified guest, ``guest:<id>``, so an owner's answer is never
+    replayed to a guest and one guest's answer never to another. ``room``
+    is accepted for signature compatibility and deliberately not keyed:
+    answers don't vary by room.
 
     Cross-talk guard (ATHENA-46): includes a short hash of raw_query so two
     structurally-different queries cannot collide on the same Redis slot even
@@ -594,6 +601,10 @@ def get_cache_key(
     # different hashes and therefore different cache slots.
     query_hash = hashlib.md5(raw_query.lower().strip().encode()).hexdigest()[:8]
     key_parts.append(query_hash)
+
+    key_parts.append(f"mode_{mode or 'unknown'}")
+    if guest_id is not None and str(guest_id) != "":
+        key_parts.append(f"guest:{guest_id}")
 
     # Include location_override in cache key for location-sensitive queries (directions, dining, etc.)
     # This ensures different origins get different cache entries
@@ -611,15 +622,22 @@ def get_cache_key(
     return ":".join(key_parts)
 
 
-async def get_cached_response(query: str, room: str = None, mode: str = None, location_override: dict = None) -> Optional[Dict[str, Any]]:
+async def get_cached_response(
+    query: str,
+    room: str = None,
+    mode: str = None,
+    location_override: dict = None,
+    guest_id: Optional[Any] = None,
+) -> Optional[Dict[str, Any]]:
     """
     Check cache for a semantically similar query.
 
     Args:
         query: User query
         room: Optional room context
-        mode: Optional user mode
+        mode: The effective mode (part of the key)
         location_override: Optional location override dict with address, latitude, longitude
+        guest_id: The device-identified guest's id, if any (part of the key)
 
     Returns:
         Cached response dict if found and valid, None otherwise
@@ -631,7 +649,7 @@ async def get_cached_response(query: str, room: str = None, mode: str = None, lo
         logger.debug("semantic_cache_skip", category=category, reason="not_cacheable")
         return None
 
-    cache_key = get_cache_key(normalized_query, query, room, mode, location_override)
+    cache_key = get_cache_key(normalized_query, query, room, mode, location_override, guest_id)
     cache = get_cache_client()
 
     try:
@@ -659,7 +677,8 @@ async def cache_response(
     response: Dict[str, Any],
     room: str = None,
     mode: str = None,
-    location_override: dict = None
+    location_override: dict = None,
+    guest_id: Optional[Any] = None,
 ) -> bool:
     """
     Cache a query response with appropriate TTL based on intent category.
@@ -668,8 +687,9 @@ async def cache_response(
         query: Original user query
         response: Response dict to cache (must be JSON-serializable)
         room: Optional room context
-        mode: Optional user mode
+        mode: The effective mode (part of the key)
         location_override: Optional location override dict with address, latitude, longitude
+        guest_id: The device-identified guest's id, if any (part of the key)
 
     Returns:
         True if cached successfully, False otherwise
@@ -682,7 +702,7 @@ async def cache_response(
 
     # Get TTL for this category
     ttl = CACHE_TTL_CONFIG.get(category, CACHE_TTL_CONFIG["general"])
-    cache_key = get_cache_key(normalized_query, query, room, mode, location_override)
+    cache_key = get_cache_key(normalized_query, query, room, mode, location_override, guest_id)
     cache = get_cache_client()
 
     try:

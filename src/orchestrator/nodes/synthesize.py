@@ -23,6 +23,7 @@ from orchestrator.utils.constants import DEFAULT_CITY
 from shared.admin_config import get_admin_client
 from shared.assistant_profile import build_core_assistant_prompt
 from shared.base_knowledge_utils import get_knowledge_context_for_user
+from orchestrator.mode_permission import is_public_audience
 from sms.content_detector import detect_textable_content, extract_sms_content
 
 # Event system — optional dependency; guarded with EVENTS_AVAILABLE flag below.
@@ -202,15 +203,17 @@ Response:"""
             interface_type=state.interface_type,
         ) + "\n"
 
-        # Inject base knowledge context from Admin API
+        # Inject base knowledge context from Admin API (never for the public
+        # audience: guest-scoped base knowledge includes house facts).
         try:
-            admin_client = get_admin_client()
-            user_mode = state.mode if state.mode else "guest"
-            knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
-            if knowledge_context:
-                system_context += knowledge_context
-                state.base_knowledge_populated = True
-                logger.info(f"Base knowledge context injected for mode={user_mode}")
+            if not is_public_audience(state.permissions):
+                admin_client = get_admin_client()
+                user_mode = state.mode if state.mode else "guest"
+                knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
+                if knowledge_context:
+                    system_context += knowledge_context
+                    state.base_knowledge_populated = True
+                    logger.info(f"Base knowledge context injected for mode={user_mode}")
         except Exception as e:
             logger.warning(f"Failed to fetch base knowledge context: {e}")
             # Continue without base knowledge - not critical
