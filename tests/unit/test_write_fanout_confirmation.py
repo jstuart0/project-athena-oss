@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import sys
 import unittest.mock as mock
 from pathlib import Path
@@ -618,7 +619,8 @@ class _Harness:
     log that records context stores and execute_intent in order."""
 
     def __init__(self, *, llm_text=LIGHT_OFF_JSON, n_lights=OFFICE_N, n_locks=0,
-                 cache=None, fail_domains=(), threshold=6, hard_limit=18):
+                 cache=None, fail_domains=(), threshold=6, hard_limit=18, flags=None):
+        self.flags = dict(flags or {})
         self.em = _FakeEntityManager54(n_lights=n_lights, n_locks=n_locks)
         self.llm = _LLM54(llm_text)
         self.controller = shc.SmartHomeController(entity_manager=self.em, llm_router=self.llm)
@@ -656,10 +658,15 @@ class _Harness:
         _runtime.set_automation_agent(None)
         _runtime.set_cache_client(self.cache)
 
-    async def arun(self, state, now=None):
-        self._install()
-
+    @contextlib.contextmanager
+    def patched(self, now=None):
+        """The module patches for route_control_node calls. Concurrent runs
+        (asyncio.gather) must share ONE of these around the gather: nested
+        per-run patches stopping in a different order would unpatch a run
+        that's still in flight."""
         async def _feature_config(name):
+            if name in self.flags:
+                return {"enabled": bool(self.flags[name]), "config": {}}
             return {"enabled": name in ("status_bulk_query", "status_skip_synthesis")}
 
         patches = [
@@ -674,10 +681,17 @@ class _Harness:
         for p in patches:
             p.start()
         try:
-            return await route_control_node(state)
+            yield
         finally:
             for p in reversed(patches):
                 p.stop()
+
+    async def arun(self, state, now=None, patch=True):
+        self._install()
+        if not patch:
+            return await route_control_node(state)
+        with self.patched(now=now):
+            return await route_control_node(state)
 
     def run(self, state, now=None):
         return _run(self.arun(state, now=now))
@@ -914,10 +928,11 @@ class TestReplaySafety:
         _, prev = _first_turn(h)
 
         async def _both():
-            return await asyncio.gather(
-                h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO)),
-                h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO)),
-            )
+            with h.patched():
+                return await asyncio.gather(
+                    h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO), patch=False),
+                    h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO), patch=False),
+                )
 
         outs = _run(_both())
         assert len(_written(h.client, "light")) == OFFICE_N
@@ -929,10 +944,11 @@ class TestReplaySafety:
         _, prev = _first_turn(h)
 
         async def _both():
-            return await asyncio.gather(
-                h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO)),
-                h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO)),
-            )
+            with h.patched():
+                return await asyncio.gather(
+                    h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO), patch=False),
+                    h.arun(_state54("yes", prev_context=prev, context_ref_info=YES_NO), patch=False),
+                )
 
         _run(_both())
         assert len(_written(h.client, "light")) == OFFICE_N
@@ -1305,3 +1321,167 @@ class TestSequenceExecutorKeepsNoPerSessionState:
             _run(_drive(f"seq-{i}"))
         assert set(vars(executor)) == {"smart_controller", "ha_client", "_running_sequences"}
         assert executor._running_sequences == {}
+
+
+# ---------------------------------------------------------------------------
+# 3.6(f): the kill switch at runtime (routing reverts; the gate still reads
+# the real classification)
+# ---------------------------------------------------------------------------
+
+PROBE_PHRASE = "are the office lights currently on or off right now"
+KILL_SWITCH_ON = {"state_question_routing_kill_switch": True}
+PROMPT_12 = "That would turn off 12 lights in the office. Should I go ahead?"
+
+
+class TestKillSwitchRuntime:
+    def _drive(self, query, *, threshold=6, hard_limit=18):
+        h = _Harness(n_lights=12, flags=KILL_SWITCH_ON, threshold=threshold, hard_limit=hard_limit)
+        seen = []
+        wrapped = h.controller.execute_intent
+
+        async def _spy(intent, *a, **kw):
+            scope = mp.current_ha_scope()
+            seen.append((intent.get("action"), scope.read_only, scope.utterance.kind))
+            return await wrapped(intent, *a, **kw)
+
+        h.controller.execute_intent = _spy
+        metric = MagicMock()
+        with mock.patch.object(write_fanout, "ha_write_fanout_confirm_total", metric):
+            out = h.run(_state54(query))
+        outcomes = [c.kwargs.get("outcome") for c in metric.labels.call_args_list]
+        return h, out, seen, outcomes
+
+    def test_probe_reaches_extraction_writable_and_the_gate_prompts(self):
+        h, out, seen, outcomes = self._drive(PROBE_PHRASE)
+        assert h.extract_calls, "the probe must reach extract_intent with routing reverted"
+        assert seen and all(read_only is False for _, read_only, _ in seen), seen
+        assert all(kind == UtteranceKind.STATE_QUESTION for _, _, kind in seen), seen
+        assert _written(h.client) == []
+        assert out.answer == PROMPT_12
+        assert h.stores and "pending_write_confirmation" in h.stores[-1]["parameters"]
+        assert outcomes == ["requested"]
+
+    def test_both_limits_zero_the_probe_writes_twelve(self):
+        """Proves the switch really bypasses routing: with the gate off too,
+        the probe phrase is the incident again."""
+        h, out, seen, outcomes = self._drive(PROBE_PHRASE, threshold=0, hard_limit=0)
+        writes = [c.args[:2] for c in h.client.call_service.await_args_list]
+        assert len(writes) == 12, writes
+        assert set(writes) == {("light", "turn_off")}
+
+    def test_explicit_all_command_is_exempt_scope(self):
+        h, out, seen, outcomes = self._drive("turn off all the office lights")
+        assert len(set(_written(h.client, "light"))) == 12
+        assert "exempt_scope" in outcomes, outcomes
+
+    def test_imperative_command_is_exempt_imperative(self):
+        h, out, seen, outcomes = self._drive("turn off the office lights")
+        assert len(set(_written(h.client, "light"))) == 12
+        assert outcomes == ["exempt_imperative"], outcomes
+
+
+# ---------------------------------------------------------------------------
+# Handler-level gates: each handler feeds the gate its real target set
+# ---------------------------------------------------------------------------
+
+B4_N = 8
+
+
+class _B4EntityManager:
+    def __init__(self, n=B4_N):
+        self._entities = {}
+        for i in range(n):
+            self._entities[f"fan.office_{i}"] = {"state": "on", "attributes": {"friendly_name": f"Office Fan {i}"}}
+            self._entities[f"cover.office_{i}"] = {"state": "open", "attributes": {"friendly_name": f"Office Blind {i}"}}
+            self._entities[f"media_player.office_tv_{i}"] = {"state": "on", "attributes": {"friendly_name": f"Office TV {i}"}}
+
+    async def get_entities(self):
+        return dict(self._entities)
+
+    async def find_lights_by_room(self, room):
+        return [{
+            "entity_id": f"light.{room}_group", "friendly_name": f"{room} lights", "state": "on", "type": "group",
+            "members": [f"light.{room}_{i}" for i in range(B4_N // 2)],
+        }]
+
+    async def get_all_light_groups(self):
+        return [
+            {"entity_id": f"light.{r}_group", "friendly_name": f"{r} lights",
+             "members": [f"light.{r}_{i}" for i in range(B4_N // 2)]}
+            for r in ("office", "kitchen")
+        ]
+
+
+_B4_INTENT = {"device_type": "light"}
+_B4_ROOM_GROUP = {"display_name": "First Floor", "members": [{"room_name": "office"}, {"room_name": "kitchen"}]}
+_B4_HANDLERS = {
+    "fan": lambda c, raw, q: c._handle_fan_intent("turn_off", "office", raw, q),
+    "cover": lambda c, raw, q: c._handle_cover_intent("close", "office", raw, q),
+    "media": lambda c, raw, q: c._handle_media_intent("turn_off", {}, q, None, raw),
+    "whole_house": lambda c, raw, q: c._execute_whole_house_command("turn_off", "group", {}, _B4_INTENT, raw, q),
+    "multi_room": lambda c, raw, q: c._execute_multi_room_command(
+        ["office", "kitchen"], "turn_off", "group", {}, _B4_INTENT, raw, q),
+    "room_group": lambda c, raw, q: c._execute_room_group_command(
+        _B4_ROOM_GROUP, "turn_off", "group", {}, _B4_INTENT, raw, q),
+}
+_B4_QUERY = "please"  # UNKNOWN, no scope cue, no room names
+
+
+def _run_b4_handler(name, *, threshold):
+    controller = shc.SmartHomeController(entity_manager=_B4EntityManager(), llm_router=MagicMock())
+    raw = _raw_client_54()
+
+    async def _drive():
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance(_B4_QUERY)):
+            with mock.patch.object(write_fanout, "get_config", lambda: _fake_config(threshold=threshold, hard_limit=18)):
+                answer = await _B4_HANDLERS[name](controller, raw, _B4_QUERY)
+            return answer, write_fanout.take_block()
+
+    answer, block = _run(_drive())
+    return answer, block, raw
+
+
+class TestHandlerLevelGates:
+    def test_query_is_an_uncued_non_imperative(self):
+        assert classify_utterance(_B4_QUERY).kind == UtteranceKind.UNKNOWN
+
+    @pytest.mark.parametrize("name", sorted(_B4_HANDLERS))
+    def test_over_threshold_targets_block_with_the_real_target_set(self, name):
+        answer, block, raw = _run_b4_handler(name, threshold=6)
+        assert raw.call_service.await_count == 0, (name, raw.call_service.await_args_list)
+        assert block is not None, name
+        assert sum(len(w.entity_ids) for w in block.writes) == B4_N, (name, block)
+        assert "say:" in answer, (name, answer)
+
+    @pytest.mark.parametrize("name", sorted(_B4_HANDLERS))
+    def test_positive_control_threshold_off_writes_every_target(self, name):
+        answer, block, raw = _run_b4_handler(name, threshold=0)
+        assert block is None, name
+        assert len(set(_written(raw))) == B4_N, (name, _written(raw), answer)
+
+
+# ---------------------------------------------------------------------------
+# Sequence step between the threshold and the hard limit
+# ---------------------------------------------------------------------------
+
+class TestSequenceImperativeStepUnderHardLimit:
+    def test_imperative_step_between_limits_executes(self, monkeypatch):
+        """t < n <= h: an IMPERATIVE's step proceeds -- which needs the gate
+        to read the request's classification from the scope, since a
+        sequence step's execute_intent call carries no utterance."""
+        monkeypatch.setattr(write_fanout, "get_config", lambda: _fake_config(threshold=6, hard_limit=10))
+        em = _FakeEntityManagerSeq(n=8)
+        controller = shc.SmartHomeController(entity_manager=em, llm_router=MagicMock())
+        client = _raw_ha_client_seq()
+        executor = SequenceExecutor(controller, client)
+        steps = [{"action": "turn_off", "target": {"device_type": "light", "room": "office"}}]
+
+        async def _drive():
+            with mp.ha_permission_scope(
+                {"mode": "owner"}, mode="owner", utterance=classify_utterance("turn off the office lights"),
+            ):
+                return await executor.execute_sequence(steps, session_id="seq-8", background=False)
+
+        result = _run(_drive())
+        assert result == "Sequence complete."
+        assert client.call_service.await_count == 8

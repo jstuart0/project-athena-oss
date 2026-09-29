@@ -511,6 +511,7 @@ class TestJarvisWebUrlNoHardcode:
 # ---------------------------------------------------------------------------
 
 import ast as _ast
+from contextlib import nullcontext as _nullcontext
 
 from orchestrator.nodes import route_control_node
 from orchestrator.nodes import _runtime
@@ -548,6 +549,10 @@ class _FakeEntityManager3_6:
     async def get_all_light_groups(self):
         return []
 
+    async def get_climate_state(self):
+        return {"entity_id": "climate.thermostat", "state": "heat", "current_temp": 68,
+                "target_temp": 70, "hvac_action": "heating"}
+
 
 class _HostileLLMRouter:
     """Returns a light turn_off write for EVERY prompt, regardless of what
@@ -575,7 +580,7 @@ def _raw_ha_client_3_6():
 def _drive_route_control(
     query, *, prev_context=None, context_ref_info=None, mode="owner",
     permissions=None, room="office", llm_router=None, entity_manager=None,
-    ha_client=None, feature_flags=None, session_id="sess-1",
+    ha_client=None, feature_flags=None, session_id="sess-1", fanout_limits=None,
 ):
     _runtime.reset_for_test()
     em = entity_manager or _FakeEntityManager3_6()
@@ -602,87 +607,264 @@ def _drive_route_control(
     async def _feature_config(name):
         return flags.get(name, {"enabled": name == "status_bulk_query" or name == "status_skip_synthesis"})
 
+    from orchestrator import write_fanout as _wf
+    limits_cfg = None
+    if fanout_limits is not None:
+        limits_cfg = mock.MagicMock(
+            ha_write_fanout_confirm_threshold=fanout_limits[0], ha_write_fanout_hard_limit=fanout_limits[1],
+        )
     with (
         mock.patch("orchestrator.nodes.route_control.get_feature_config", new_callable=mock.AsyncMock, side_effect=_feature_config),
         mock.patch("orchestrator.nodes.route_control.get_automation_system_mode", new_callable=mock.AsyncMock, return_value="pattern"),
         mock.patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=False),
         mock.patch("orchestrator.nodes.route_control.store_conversation_context", new_callable=mock.AsyncMock),
+        (mock.patch.object(_wf, "get_config", lambda: limits_cfg) if limits_cfg is not None else _nullcontext()),
     ):
         result = _run(route_control_node(state))
     return result, controller, llm, client
 
 
-class TestQuestionCorpusNeverWrites:
-    """3.6(a): every QUESTION_CORPUS entry, as owner -> 0 call_service,
-    a non-empty answer that isn't the read-only refusal, and the correct
-    path (bulk_optimizer for room-less bulk-eligible entries, otherwise
-    get_status_dispatch)."""
+_ANSWER_TERMS = {
+    "light": ("light",),
+    "switch": ("switch",),
+    "lock": ("lock",),
+    "cover": ("garage", "cover", "blind"),
+    "climate": ("thermostat",),
+    "media_player": ("tv", "media"),
+    "fan": ("fan",),
+}
 
-    def test_every_question_corpus_entry_never_writes(self):
+
+def _question_path_run(q, room):
+    """One question through route_control with spies on the three layers a
+    zero-write result could come from: the bulk optimizer, the get_status
+    dispatch (execute_intent's action and the scope's read_only at call
+    time), and the fan-out gate."""
+    from orchestrator import write_fanout as _wf
+
+    seen = []
+    real_execute = shc.SmartHomeController.execute_intent
+
+    async def _execute_spy(self, intent, *a, **kw):
+        scope = current_ha_scope()
+        seen.append((intent.get("action"), scope.read_only if scope else None))
+        return await real_execute(self, intent, *a, **kw)
+
+    optimize = mock.AsyncMock(return_value=mock.MagicMock(
+        query_type="lights_on", entities=[{"entity_id": "light.office_0", "state": "on"}], raw_states={},
+    ))
+    gate_spy = mock.MagicMock(side_effect=_wf.gate)
+    gate_many_spy = mock.MagicMock(side_effect=_wf.gate_many)
+    with (
+        mock.patch("orchestrator.nodes.route_control.optimize_status_query", optimize),
+        mock.patch("orchestrator.nodes.route_control.should_skip_synthesis", return_value=(True, "Some lights are on.")),
+        mock.patch.object(shc.SmartHomeController, "execute_intent", _execute_spy),
+        mock.patch.object(_wf, "gate", gate_spy),
+        mock.patch.object(_wf, "gate_many", gate_many_spy),
+    ):
+        result, controller, llm, client = _drive_route_control(q, room=room)
+    return result, client, optimize, seen, gate_spy.call_count + gate_many_spy.call_count
+
+
+class TestQuestionCorpusNeverWrites:
+    """3.6(a): every QUESTION_CORPUS entry, as owner, is answered by the
+    read path -- not merely with zero writes, which the fan-out gate could
+    also produce. Per entry: the bulk optimizer exactly when bulk-eligible
+    (room-less, non-referent, a status-pattern match), otherwise one
+    get_status dispatch under a read-only scope; the gate is never
+    reached; and the answer names the asked device's domain."""
+
+    def test_every_question_corpus_entry_takes_the_read_path(self):
         failures = []
         for q in QUESTION_CORPUS:
             uk = classify_utterance(q)
             room = "office" if uk.room else None
-            bulk_expected = (not uk.room and not uk.needs_referent and _real_detect_status_query_type(q))
-            with mock.patch(
-                "orchestrator.nodes.route_control.optimize_status_query",
-                new_callable=mock.AsyncMock,
-                return_value=mock.MagicMock(query_type="lights_on", entities=[{"entity_id": "light.office_0", "state": "on"}], raw_states={}),
-            ), mock.patch(
-                "orchestrator.nodes.route_control.should_skip_synthesis",
-                return_value=(True, "Some lights are on."),
-            ):
-                result, controller, llm, client = _drive_route_control(q, room=room)
+            bulk_expected = bool(not uk.room and not uk.needs_referent and _real_detect_status_query_type(q))
+            result, client, optimize, seen, gate_calls = _question_path_run(q, room)
+            answer = (result.answer or "").lower()
             if client.call_service.await_count != 0:
                 failures.append((q, "wrote", client.call_service.await_args_list))
-                continue
-            if not result.answer or result.answer == READ_ONLY_REFUSAL:
-                failures.append((q, "bad_answer", result.answer))
-                continue
-            if "should i go ahead" in result.answer.lower() or "to do it, say" in result.answer.lower():
+            if gate_calls:
+                failures.append((q, "gate_reached", gate_calls))
+            if not answer or result.answer == READ_ONLY_REFUSAL or result.error:
+                failures.append((q, "bad_answer", result.answer, result.error))
+            if "should i go ahead" in answer or "to do it, say" in answer:
                 failures.append((q, "fanout_text_leaked", result.answer))
+            if bulk_expected:
+                if optimize.await_count != 1 or seen:
+                    failures.append((q, "expected_bulk", optimize.await_count, seen))
+            else:
+                if optimize.await_count != 0 or seen != [("get_status", True)]:
+                    failures.append((q, "expected_read_only_get_status", optimize.await_count, seen))
+                if not any(term in answer for term in _ANSWER_TERMS[uk.device_type or "light"]):
+                    failures.append((q, "answer_not_about_device", uk.device_type, result.answer))
+        assert not failures, failures
+
+    def test_referent_questions_without_context_read_under_read_only(self):
+        """No context to resolve against: the referent question reaches
+        extraction (never the bulk optimizer or the dispatch) and still
+        executes only a get_status, read-only."""
+        failures = []
+        for q in REFERENT_QUESTIONS:
+            result, client, optimize, seen, gate_calls = _question_path_run(q, "office")
+            if client.call_service.await_count or gate_calls or optimize.await_count:
+                failures.append((q, client.call_service.await_count, gate_calls, optimize.await_count))
+            if seen != [("get_status", True)]:
+                failures.append((q, "seen", seen))
         assert not failures, failures
 
 
-class TestReferentPathCoercion:
-    """3.6(b): a referent question through a hostile LLM must have its
-    write coerced to get_status by 3.3(b) -- proving the LLM really was
-    invoked (not just skipped) and still produced zero writes."""
+_PREV_OFFICE_OFF = {
+    "query": "turn off the office lights",
+    "response": "Done! Lights off.",
+    "entities": {"room": "office", "device_type": "light"},
+    "parameters": {"device_type": "light", "action": "turn_off", "room": "office"},
+}
+_CONTINUED_PRONOUN = {"has_context_ref": True, "anaphora_types": ["pronoun"], "ref_types": ["pronoun"]}
+_NO_DEVICE_TYPE_TURN_OFF = '{"room": "office", "action": "turn_off", "target_scope": "group", "parameters": {}}'
 
-    def test_referent_question_coerced_not_written(self):
-        prev_context = {
-            "query": "turn off the office lights",
-            "response": "Done! Lights off.",
-            "entities": {"room": "office", "device_type": "light"},
-            "parameters": {"device_type": "light", "action": "turn_off", "room": "office"},
-        }
-        context_ref_info = {"has_context_ref": True, "anaphora_types": ["yes_no"], "ref_types": []}
-        llm = _HostileLLMRouter()
+
+def _drive_referent(llm_text=None):
+    """"did those come back on?" after an office turn_off, with the fan-out
+    limits off (t = h = 0) so the gate can't be what stops a write."""
+    metric = mock.MagicMock()
+    llm = _HostileLLMRouter(response_text=llm_text)
+    with (
+        mock.patch("orchestrator.metrics.state_question_routed_total", metric),
+        mock.patch("orchestrator.nodes.route_control.state_question_routed_total", metric),
+    ):
         result, controller, llm_used, client = _drive_route_control(
-            "did those come back on?", prev_context=prev_context, context_ref_info=context_ref_info, llm_router=llm,
+            "did those come back on?", prev_context=dict(_PREV_OFFICE_OFF),
+            context_ref_info=dict(_CONTINUED_PRONOUN), llm_router=llm, fanout_limits=(0, 0),
         )
-        assert client.call_service.await_count == 0
+    paths = [c.kwargs.get("path") for c in metric.labels.call_args_list]
+    return result, llm, client, paths
+
+
+def _assert_answered_by_a_read(result, client):
+    assert client.call_service.await_count == 0, client.call_service.await_args_list
+    assert result.error is None, result.error
+    assert result.answer and result.answer != READ_ONLY_REFUSAL
+    assert "to do it, say" not in result.answer.lower()
+    assert "should i go ahead" not in result.answer.lower()
+
+
+class TestReferentPathCoercion:
+    """3.6(b): a referent question through a hostile LLM is coerced to
+    get_status by 3.3(b) and answered -- with the gate disabled, so zero
+    writes can only come from the question layer."""
+
+    def test_referent_question_coerced_and_answered(self):
+        result, llm, client, paths = _drive_referent()
+        _assert_answered_by_a_read(result, client)
+        assert llm.generate.await_count >= 1
+        assert paths.count("llm_coerced") == 1, paths
+
+    def test_referent_llm_intent_without_device_type_is_still_a_read(self):
+        """The LLM intent lacks device_type, so the continuation merge is
+        skipped and the previous write action survives into the intent --
+        only the post-merge get_status force keeps it a read."""
+        result, llm, client, paths = _drive_referent(_NO_DEVICE_TYPE_TURN_OFF)
+        _assert_answered_by_a_read(result, client)
         assert llm.generate.await_count >= 1
 
 
 class TestJsonFallbackReachable:
-    """3.6(c): a referent question whose LLM returns invalid JSON ->
-    0 writes, the 3.3(c) fallback fires (not the coercion path)."""
+    """3.6(c): a referent question whose LLM returns invalid JSON takes the
+    3.3(c) fallback (not the coercion path) and is answered."""
 
-    def test_referent_question_json_fallback_no_write(self):
-        prev_context = {
-            "query": "turn off the office lights",
-            "response": "Done! Lights off.",
-            "entities": {"room": "office", "device_type": "light"},
-            "parameters": {"device_type": "light", "action": "turn_off", "room": "office"},
-        }
-        context_ref_info = {"has_context_ref": True, "anaphora_types": ["yes_no"], "ref_types": []}
-        llm = _HostileLLMRouter(response_text="not json")
-        result, controller, llm_used, client = _drive_route_control(
-            "did those come back on?", prev_context=prev_context, context_ref_info=context_ref_info, llm_router=llm,
-        )
-        assert client.call_service.await_count == 0
+    def test_referent_question_json_fallback_answered(self):
+        result, llm, client, paths = _drive_referent("not json")
+        _assert_answered_by_a_read(result, client)
         assert llm.generate.await_count >= 1
+        assert paths.count("json_fallback") == 1, paths
+        assert "llm_coerced" not in paths
+
+
+def _extract(query, utterance, llm_text):
+    llm = _HostileLLMRouter(response_text=llm_text)
+    controller = shc.SmartHomeController(entity_manager=_FakeEntityManager3_6(), llm_router=llm)
+    with mock.patch.object(shc, "get_admin_client") as admin:
+        admin.return_value.get_component_model = mock.AsyncMock(return_value=None)
+        intent = _run(controller.extract_intent(query, utterance=utterance))
+    assert llm.generate.await_count == 1, "the LLM path must actually be exercised"
+    return intent
+
+
+class TestExtractIntentQuestionGuards:
+    """3.3(b)/(c) directly on extract_intent, independent of route_control's
+    post-merge force and the read-only scope."""
+
+    Q = "did those come back on?"
+
+    def test_hostile_json_is_coerced_to_get_status(self):
+        assert _extract(self.Q, classify_utterance(self.Q), None)["action"] == "get_status"
+
+    def test_hostile_json_without_device_type_is_coerced(self):
+        assert _extract(self.Q, classify_utterance(self.Q), _NO_DEVICE_TYPE_TURN_OFF)["action"] == "get_status"
+
+    def test_invalid_json_falls_back_to_get_status(self):
+        intent = _extract(self.Q, classify_utterance(self.Q), "not json")
+        assert intent["action"] == "get_status"
+
+    def test_invalid_json_for_an_imperative_uses_its_target_state(self):
+        """3.6(j)'s route-level case never reaches the fallback ("turn the
+        office lights on" is resolved before the LLM), so the IMPERATIVE
+        fallback is pinned here."""
+        from orchestrator.utterance_kind import UtteranceClassification
+        for target, expected in (("on", "turn_on"), ("off", "turn_off")):
+            uk = UtteranceClassification(kind=UtteranceKind.IMPERATIVE, device_type="light", target_state=target)
+            assert _extract("do the thing in the den", uk, "not json")["action"] == expected, target
+
+
+class _EntityStateManager:
+    def __init__(self, entities):
+        self._entities = entities
+
+    async def get_entities(self):
+        return dict(self._entities)
+
+
+def _entity_state_answer(entities, domain, room):
+    controller = shc.SmartHomeController(entity_manager=_EntityStateManager(entities), llm_router=mock.MagicMock())
+    return _run(controller._handle_entity_state_query(domain, room, "is it on"))
+
+
+def _switch(name, state):
+    return {"state": state, "attributes": {"friendly_name": name}}
+
+
+class TestEntityStateQuery:
+    """3.4: the generic read handler for switch / media_player state."""
+
+    MIXED = {
+        "switch.office_desk": _switch("Office Desk Switch", "on"),
+        "switch.office_fan_plug": _switch("Office Fan Plug", "on"),
+        "switch.office_heater": _switch("Office Heater", "off"),
+        "switch.kitchen_kettle": _switch("Kitchen Kettle", "on"),
+    }
+
+    def test_single_entity_in_the_room(self):
+        entities = {"switch.office_desk": _switch("Office Desk Switch", "on"),
+                    "switch.kitchen_kettle": _switch("Kitchen Kettle", "off")}
+        assert _entity_state_answer(entities, "switch", "office") == "The Office Desk Switch is on."
+
+    def test_n_of_m_on_in_the_room(self):
+        answer = _entity_state_answer(self.MIXED, "switch", "office")
+        assert answer == "2 of 3 switches are on: Office Desk Switch and Office Fan Plug."
+
+    def test_none_on_in_the_room(self):
+        entities = {"switch.office_a": _switch("Office A", "off"), "switch.office_b": _switch("Office B", "off"),
+                    "switch.kitchen_kettle": _switch("Kitchen Kettle", "on")}
+        assert _entity_state_answer(entities, "switch", "office") == "No switches are currently on in the office."
+
+    def test_room_not_found(self):
+        assert _entity_state_answer(self.MIXED, "switch", "garage") == "I couldn't find a switch in the garage."
+
+    def test_media_player_noun(self):
+        entities = {"media_player.office_tv": _switch("Office TV", "playing"),
+                    "media_player.office_speaker": _switch("Office Speaker", "idle")}
+        assert _entity_state_answer(entities, "media_player", "office") == "1 of 2 media players are on: Office TV."
 
 
 class TestImperativeAndUnknownCorpusReadOnlyFalse:
