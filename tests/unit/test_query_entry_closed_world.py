@@ -8,6 +8,7 @@ point that skips any of these fails here.
 from __future__ import annotations
 
 import ast
+import json
 import types
 import typing
 
@@ -91,13 +92,18 @@ def _reset():
     h.reset_runtime()
 
 
+SENTINEL = "GARAGE-RELAY-TURNED-ON-SENTINEL"
+
+
 @pytest.mark.parametrize("path", ["/query", "/query/stream", "/query/stream/v2"])
 def test_public_cannot_control_even_when_guest_profile_allows(monkeypatch, path):
     """Behavioural matrix: the guest profile allows control and switch, the
     house is in guest mode, and a public caller asks to turn on the garage
     relay. The state handed to the pipeline denies both the intent and the
-    write."""
-    from orchestrator.mode_permission import authorize_ha_write, check_intent_permission
+    write, and even when the pipeline hands back a CONTROL answer, the
+    response on every entry point is the public refusal, never that
+    answer (codex M: the post-graph re-check)."""
+    from orchestrator.mode_permission import PUBLIC_INTENT_REFUSAL, authorize_ha_write, check_intent_permission
 
     h.patch_conversation_config(monkeypatch)
     monkeypatch.setattr(h.main, "_direct_general_info_response", lambda q: True)
@@ -108,12 +114,13 @@ def test_public_cannot_control_even_when_guest_profile_allows(monkeypatch, path)
     class _Graph:
         async def ainvoke(self, state):
             captured.append(state)
-            return {"intent": h.IntentCategory.CONTROL, "answer": "ok", "confidence": 1.0,
+            return {"intent": h.IntentCategory.CONTROL, "answer": SENTINEL, "confidence": 1.0,
                     "citations": [], "request_id": "r", "node_timings": {}}
 
     async def _stream_run(state):
         captured.append(state)
-        state.answer = "ok"
+        state.intent = h.IntentCategory.CONTROL
+        state.answer = SENTINEL
         return state
 
     monkeypatch.setattr(h.main, "orchestrator_graph", _Graph())
@@ -125,8 +132,21 @@ def test_public_cannot_control_even_when_guest_profile_allows(monkeypatch, path)
         headers=h.service_headers(),
     ) as resp:
         assert resp.status_code == 200
-        list(resp.iter_text())
+        text = "".join(resp.iter_text())
     assert len(captured) == 1
     permissions = captured[0].permissions
     assert check_intent_permission(h.IntentCategory.CONTROL, permissions) is False
     assert authorize_ha_write("switch", "turn_on", {"entity_id": "switch.garage_relay"}, permissions).allowed is False
+    assert SENTINEL not in text
+    assert PUBLIC_INTENT_REFUSAL in _answer_text(path, text)
+
+
+def _answer_text(path, text):
+    """The answer a client would show: /query's answer field, v1's
+    answer_chunk contents joined, v2's full_response."""
+    if path == "/query":
+        return json.loads(text)["answer"]
+    events = [json.loads(chunk[6:]) for chunk in text.split("\n\n") if chunk.startswith("data: ")]
+    if path == "/query/stream":
+        return "".join(e["content"] for e in events if e.get("stage") == "answer_chunk")
+    return next(e["full_response"] for e in events if e.get("stage") == "complete")

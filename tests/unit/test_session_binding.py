@@ -101,7 +101,10 @@ def test_household_resumes_own_session(client, monkeypatch):
     assert graph.states[0].conversation_history
 
 
-def test_public_resumes_public_session_and_others_may_too(monkeypatch):
+def test_public_sessions_are_public_only_both_ways(monkeypatch):
+    """A public caller resumes its own public session; a caller that isn't
+    public presenting that id (live, or not yet created) gets a fresh
+    non-public session and never sees the public history."""
     from orchestrator.session_manager import CALLER_CLASS_PUBLIC
 
     h.patch_conversation_config(monkeypatch)
@@ -114,12 +117,15 @@ def test_public_resumes_public_session_and_others_may_too(monkeypatch):
         await sm._save_session(created)
         again = await sm.get_or_create_session(session_id="pub-1", caller_class=CALLER_CLASS_PUBLIC)
         other = await sm.get_or_create_session(session_id="pub-1")
-        return created, again, other
+        unseen = await sm.get_or_create_session(session_id="pub-never-created")
+        return created, again, other, unseen
 
-    created, again, other = asyncio.run(_run())
+    created, again, other, unseen = asyncio.run(_run())
     assert created.caller_class == "public"
     assert again.session_id == "pub-1" and len(again.messages) == 1
-    assert other.session_id == "pub-1"
+    assert other.session_id != "pub-1" and not other.session_id.startswith("pub-")
+    assert other.messages == [] and other.caller_class == "other"
+    assert not unseen.session_id.startswith("pub-")
 
 
 def test_session_caller_class_roundtrip():
@@ -172,8 +178,12 @@ def test_public_sessions_are_prefixed(monkeypatch):
     chosen = _run(sm.get_or_create_session(session_id="abc123", caller_class=CALLER_CLASS_PUBLIC))
     assert chosen.session_id.startswith(PUBLIC_SESSION_PREFIX) and chosen.session_id != "abc123"
     assert _run(sm.get_session("abc123")) is None
-    # a prefixed id that belongs to a non-public session is not resumed
-    other = _run(sm.create_session(session_id="pub-household"))
+    # a prefixed id that belongs to a non-public session (stored before
+    # non-public callers stopped taking pub- ids) is not resumed
+    from orchestrator.session_manager import ConversationSession
+
+    assert not _run(sm.create_session(session_id="pub-household")).session_id.startswith(PUBLIC_SESSION_PREFIX)
+    other = ConversationSession(session_id="pub-household")
     other.add_message("user", "private")
     _run(sm._save_session(other))
     taken = _run(sm.get_or_create_session(session_id="pub-household", caller_class=CALLER_CLASS_PUBLIC))

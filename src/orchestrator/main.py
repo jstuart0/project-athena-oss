@@ -157,6 +157,7 @@ from orchestrator.mode_permission import (
     is_public_audience,
     is_public_caller,
     PUBLIC_ALLOWED_TOOLS,
+    PUBLIC_INTENT_REFUSAL,
     record_intent_gate_refusal,
     resolve_request_authorization,
 )
@@ -376,12 +377,14 @@ def detect_tool_creation_intent(query: str) -> bool:
 async def handle_tool_creation_request(
     query: str,
     session_id: str,
-    user_mode: str
+    user_mode: str,
+    public: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Handle a request to create a new tool.
 
     Returns a response dict if handled, None if tool creation is disabled.
+    The public audience gets its own refusal, never the owner-mode copy.
     """
     # Get the self-building tools manager
     manager = SelfBuildingToolsFactory.get()
@@ -390,6 +393,9 @@ async def handle_tool_creation_request(
     if not await manager.check_enabled():
         logger.info("tool_creation_disabled", query=query[:50])
         return None
+
+    if public:
+        return {"answer": PUBLIC_INTENT_REFUSAL, "intent": "tool_creation", "success": False}
 
     # Only allow owner mode to create tools
     if user_mode != "owner":
@@ -5947,6 +5953,20 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
     return state
 
 
+def post_graph_intent_refusal(intent: Any, error: Optional[str], permissions: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The intent gate again after the pipeline ran, on every entry point
+    (/query, both streams, /v1 streaming): defence in depth, since routing
+    already applies it. None when a node already refused (bob M8): that
+    node's domain-specific answer stands."""
+    if error == "permission_denied":
+        return None
+    refusal = intent_gate_refusal(intent, permissions)
+    if refusal:
+        record_intent_gate_refusal(intent, permissions)
+        logger.warning("intent_blocked_post_graph", intent=getattr(intent, "value", intent))
+    return refusal
+
+
 # ============================================================================
 # LangGraph State Machine
 # ============================================================================
@@ -6714,7 +6734,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             tool_result = await handle_tool_creation_request(
                 query=request.query,
                 session_id=session.session_id,
-                user_mode=current_mode
+                user_mode=current_mode,
+                public=is_public_audience(permissions),
             )
 
             if tool_result is not None:
@@ -6813,16 +6834,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # (bob M8): that node's domain-specific answer stands.
         permission_check_start = time.time()
         intent = final_state.get("intent")
-        node_already_refused = final_state.get("error") == "permission_denied"
-        refusal = None if node_already_refused else intent_gate_refusal(intent, permissions)
+        refusal = post_graph_intent_refusal(intent, final_state.get("error"), permissions)
         if refusal:
-            record_intent_gate_refusal(intent, permissions)
-            logger.warning(
-                "intent_blocked_post_graph",
-                intent=intent.value if hasattr(intent, "value") else intent,
-                mode=current_mode
-            )
-            # Return permission denied response
             return QueryResponse(
                 answer=refusal,
                 intent=intent.value if hasattr(intent, "value") else str(intent),
@@ -7309,6 +7322,9 @@ async def process_query_stream(request: QueryRequest):
             tool_start_time = time.time()
             state = await run_orchestrator_for_streaming(initial_state)
             log_continuation_decision(state, session.session_id)
+            refusal = post_graph_intent_refusal(state.intent, state.error, authz.permissions)
+            if refusal:
+                state.answer, state.retrieved_data = refusal, {}
             tool_exec_time = time.time() - tool_start_time
 
             if state.retrieved_data:
@@ -7556,6 +7572,9 @@ async def process_query_stream_v2(request: QueryRequest):
             # Run through classification and RAG nodes only (stop before synthesis)
             final_state = await orchestrator_graph.ainvoke(initial_state)
             log_continuation_decision(final_state, session.session_id)
+            refusal = post_graph_intent_refusal(final_state.get("intent"), final_state.get("error"), authz.permissions)
+            if refusal:
+                final_state["answer"] = refusal
 
             intent_value = final_state.get("intent")
             intent_str = intent_value.value if hasattr(intent_value, "value") else str(intent_value)
@@ -8333,6 +8352,9 @@ async def chat_completions(request: OpenAIChatRequest):
                 # Run orchestrator through RAG collection (no synthesis)
                 state = await run_orchestrator_for_streaming(initial_state)
                 log_continuation_decision(state, resolved_session.session_id)
+                refusal = post_graph_intent_refusal(state.intent, state.error, authz.permissions)
+                if refusal:
+                    state.answer, state.retrieved_data = refusal, {}
 
                 # Check if already answered by a handler (control, music, TV, SMS)
                 if state.answer:

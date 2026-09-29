@@ -583,7 +583,7 @@ def test_streaming_endpoint_persists_session_history(monkeypatch):
     _runtime.set_cache_client(_FakeSessionCacheClient())
 
     fake_state = SimpleNamespace(
-        answer="Hello there!", intent=SimpleNamespace(value="general_info"), request_id="req-1",
+        answer="Hello there!", intent=SimpleNamespace(value="general_info"), request_id="req-1", error=None,
     )
     monkeypatch.setattr(
         _main_module, "run_orchestrator_for_streaming", mock.AsyncMock(return_value=fake_state)
@@ -667,6 +667,7 @@ def test_true_streaming_endpoint_persists_session_history(monkeypatch):
         request_id="req-2",
         retrieved_data=None,
         temperature=0.5,
+        error=None,
     )
     monkeypatch.setattr(
         _main_module, "run_orchestrator_for_streaming", mock.AsyncMock(return_value=fake_state)

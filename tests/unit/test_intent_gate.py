@@ -182,9 +182,14 @@ def _call_lines(fn, name):
 
 
 def test_query_post_graph_uses_gate():
-    fn = _function("process_query")
-    assert _call_lines(fn, "intent_gate_refusal")
-    assert not _call_lines(fn, "check_intent_permission")
+    """codex M: every entry point that runs the pipeline re-checks the gate
+    on its result, through the one helper (which is the gate)."""
+    helper = _function("post_graph_intent_refusal")
+    assert _call_lines(helper, "intent_gate_refusal")
+    for name in ("process_query", "process_query_stream", "process_query_stream_v2", "chat_completions"):
+        fn = _function(name)
+        assert _call_lines(fn, "post_graph_intent_refusal"), name
+        assert not _call_lines(fn, "check_intent_permission"), name
 
 
 def test_router_and_stream_runner_gate_first():

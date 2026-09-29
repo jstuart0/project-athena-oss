@@ -306,7 +306,7 @@ class SessionManager:
             New ConversationSession instance
         """
         # Use provided session_id or generate new one
-        if caller_class == CALLER_CLASS_PUBLIC and not (session_id or "").startswith(PUBLIC_SESSION_PREFIX):
+        if (caller_class == CALLER_CLASS_PUBLIC) != (session_id or PUBLIC_SESSION_PREFIX).startswith(PUBLIC_SESSION_PREFIX):
             session_id = None
         session_id = session_id or (
             f"{PUBLIC_SESSION_PREFIX}{uuid.uuid4()}" if caller_class == CALLER_CLASS_PUBLIC else str(uuid.uuid4())
@@ -399,13 +399,19 @@ class SessionManager:
         (live or expired) gets a brand-new session under a new id: it never
         reads that session's history and never overwrites it. Public ids
         always start with PUBLIC_SESSION_PREFIX; an id without it is never
-        adopted for a public caller. Any caller may resume a public
-        session; that only loads public history.
+        adopted for a public caller. The reverse holds too: a caller that
+        isn't public never resumes (or claims the id of) a public session,
+        so public and household conversations never mix in either
+        direction.
         """
         if session_id:
             session = await self.get_session(session_id)
-            if session and caller_class == CALLER_CLASS_PUBLIC and session.caller_class != CALLER_CLASS_PUBLIC:
-                logger.warning("session_public_caller_refused_foreign_session", session_id=session_id)
+            if session and (caller_class == CALLER_CLASS_PUBLIC) != (session.caller_class == CALLER_CLASS_PUBLIC):
+                logger.warning(
+                    "session_audience_mismatch_refused",
+                    session_id=session_id,
+                    caller_public=caller_class == CALLER_CLASS_PUBLIC,
+                )
                 return await self.create_session(user_id=user_id, zone=zone, caller_class=caller_class)
             if session:
                 # Check if session is expired

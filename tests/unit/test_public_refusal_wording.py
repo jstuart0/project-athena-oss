@@ -120,3 +120,31 @@ def test_guest_wording_unchanged():
     guest = h.mode_permission.normalize_permissions({"mode": "guest"})
     scope = PermissionScope(permissions=guest, mode="guest")
     assert permission_refusal_message(["lock"], scope) == "Sorry, I can't control the locks in guest mode."
+
+
+def test_public_tool_creation_gets_the_public_refusal(monkeypatch):
+    """codex L (named): with self-building tools enabled, a public "create a
+    tool" request gets the public refusal before any owner-mode copy, and
+    nothing is generated."""
+    from fastapi.testclient import TestClient
+    from orchestrator.mode_permission import PUBLIC_INTENT_REFUSAL
+
+    h.patch_conversation_config(monkeypatch)
+    h.install_mode_client(server_mode="owner")
+    monkeypatch.setattr(h.main, "get_admin_client", lambda: h.fake_admin_client())
+    manager = mock.MagicMock()
+    manager.check_enabled = mock.AsyncMock(return_value=True)
+    monkeypatch.setattr(h.main.SelfBuildingToolsFactory, "get", staticmethod(lambda: manager))
+    generate = mock.AsyncMock(side_effect=AssertionError("no tool generated for the public"))
+    monkeypatch.setattr(h.main, "generate_tool_from_request", generate)
+
+    resp = TestClient(h.main.app).post(
+        "/query",
+        json={"query": "create a tool that opens the garage", "caller_trust": "web_public"},
+        headers=h.service_headers(),
+    )
+    assert resp.status_code == 200
+    answer = resp.json()["answer"]
+    assert answer == PUBLIC_INTENT_REFUSAL
+    assert not MODE_WORDS.search(answer)
+    generate.assert_not_called()
