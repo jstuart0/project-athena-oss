@@ -62,6 +62,9 @@ from shared.admin_url import get_admin_url
 
 logger = logging.getLogger(__name__)
 
+_FANOUT_CONFIRM_THRESHOLD_DEFAULT = 6
+_FANOUT_HARD_LIMIT_DEFAULT = 18
+
 
 class AthenaConfig(BaseSettings):
     """Centralized Athena configuration backed by pydantic-settings.
@@ -536,16 +539,26 @@ class AthenaConfig(BaseSettings):
     #   0 disables the corresponding bound entirely (never confirm /
     #   never hard-block on count alone). A non-zero hard_limit must be
     #   >= threshold -- see the model_validator below.
-    ha_write_fanout_confirm_threshold: int = Field(default=6, ge=0)
-    ha_write_fanout_hard_limit: int = Field(default=18, ge=0)
+    ha_write_fanout_confirm_threshold: int = Field(default=_FANOUT_CONFIRM_THRESHOLD_DEFAULT, ge=0)
+    ha_write_fanout_hard_limit: int = Field(default=_FANOUT_HARD_LIMIT_DEFAULT, ge=0)
 
     @model_validator(mode="after")
     def _validate_fanout_limits(self) -> "AthenaConfig":
+        # Every service loading the shared config reads these, so an
+        # inverted pair must not fail startup stack-wide: log one ERROR and
+        # fall back to the defaults for the pair (the gate stays on).
         if 0 < self.ha_write_fanout_hard_limit < self.ha_write_fanout_confirm_threshold:
-            raise ValueError(
-                "ha_write_fanout_hard_limit must be >= ha_write_fanout_confirm_threshold "
-                "when non-zero (0 disables the hard limit)"
+            logger.error(
+                "ha_write_fanout_limits_invalid: HA_WRITE_FANOUT_HARD_LIMIT=%d is below "
+                "HA_WRITE_FANOUT_CONFIRM_THRESHOLD=%d (a non-zero hard limit must be >= the "
+                "threshold; 0 disables it); using the defaults %d/%d",
+                self.ha_write_fanout_hard_limit,
+                self.ha_write_fanout_confirm_threshold,
+                _FANOUT_HARD_LIMIT_DEFAULT,
+                _FANOUT_CONFIRM_THRESHOLD_DEFAULT,
             )
+            self.ha_write_fanout_confirm_threshold = _FANOUT_CONFIRM_THRESHOLD_DEFAULT
+            self.ha_write_fanout_hard_limit = _FANOUT_HARD_LIMIT_DEFAULT
         return self
 
     # ------------------------------------------------------------------

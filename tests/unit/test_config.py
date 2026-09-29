@@ -602,12 +602,29 @@ class TestHaWriteFanoutLimits:
         with pytest.raises(pydantic.ValidationError):
             _TestConfig()
 
-    def test_hard_limit_below_threshold_rejected(self, monkeypatch):
-        import pydantic
+    def test_hard_limit_below_threshold_falls_back_to_defaults(self, monkeypatch, caplog):
+        """Non-fatal: every service loading the shared config reads these,
+        so an inverted pair logs one ERROR and uses the defaults (the gate
+        stays on) instead of failing startup stack-wide."""
+        import logging
         monkeypatch.setenv("HA_WRITE_FANOUT_HARD_LIMIT", "3")
-        monkeypatch.setenv("HA_WRITE_FANOUT_CONFIRM_THRESHOLD", "6")
-        with pytest.raises(pydantic.ValidationError):
-            _TestConfig()
+        monkeypatch.setenv("HA_WRITE_FANOUT_CONFIRM_THRESHOLD", "5")
+        with caplog.at_level(logging.ERROR, logger="shared.config"):
+            cfg = _TestConfig()
+        assert cfg.ha_write_fanout_confirm_threshold == 6
+        assert cfg.ha_write_fanout_hard_limit == 18
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR and "ha_write_fanout_limits_invalid" in r.getMessage()]
+        assert len(errors) == 1
+        assert "HA_WRITE_FANOUT_HARD_LIMIT=3" in errors[0].getMessage()
+
+    def test_valid_pair_is_kept_without_an_error(self, monkeypatch, caplog):
+        import logging
+        monkeypatch.setenv("HA_WRITE_FANOUT_HARD_LIMIT", "12")
+        monkeypatch.setenv("HA_WRITE_FANOUT_CONFIRM_THRESHOLD", "4")
+        with caplog.at_level(logging.ERROR, logger="shared.config"):
+            cfg = _TestConfig()
+        assert (cfg.ha_write_fanout_confirm_threshold, cfg.ha_write_fanout_hard_limit) == (4, 12)
+        assert not [r for r in caplog.records if "ha_write_fanout_limits_invalid" in r.getMessage()]
 
     def test_hard_limit_zero_bypasses_cross_field_check(self, monkeypatch):
         monkeypatch.setenv("HA_WRITE_FANOUT_HARD_LIMIT", "0")
