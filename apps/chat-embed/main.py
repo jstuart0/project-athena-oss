@@ -9,23 +9,37 @@ Soul and persona are NOT hardcoded here. They are fetched from the Athena
 Admin backend's assistant-profile endpoint at startup and kept in memory.
 Change them in the admin UI; restart this service to pick up the update.
 
+Every relayed message is an anonymous website visitor: jarvis-web serves
+it as the narrow public audience (no household data, no controls), never as
+the household. chat-embed authenticates itself to jarvis-web with a shared
+relay key and names the visitor it resolved, so jarvis-web can rate-limit
+each visitor; it never forwards the browser's own headers or credentials.
+
 Required environment variables:
   ATHENA_CHAT_URL   - URL of the jarvis-web /api/chat endpoint
+  JARVIS_RELAY_KEY  - the same value as jarvis-web's JARVIS_RELAY_KEY
+                      (without it every relayed message is refused)
   ATHENA_ADMIN_URL  - URL of the Athena admin backend (for assistant profile)
 
 Optional:
-  CORS_ORIGINS        - Comma-separated allowed origins, default "*"
-  RATE_LIMIT_RPM      - Requests per minute per IP, default 30
-  SOURCE_TAG          - Analytics source label, default "chatbot"
-  STREAM_URL          - jarvis-web /api/chat/stream endpoint (enables /api/chat/stream)
+  CORS_ORIGINS          - Comma-separated origins allowed to call this API
+                          from a browser. Default empty: no browser can
+                          call it until you list your site. "*" and "null"
+                          are refused.
+  RATE_LIMIT_RPM        - Requests per minute per visitor, default 20
+  TRUSTED_PROXY_CIDRS   - Proxies in front of chat-embed whose
+                          X-Forwarded-For is trusted to name the visitor
+  TRUST_CF_CONNECTING_IP - "true" behind a Cloudflare tunnel whose whole
+                          chain is trusted
+  SOURCE_TAG            - Analytics source label, default "chatbot"
+  STREAM_URL            - jarvis-web /api/chat/stream endpoint (enables /api/chat/stream)
 """
 
+import hashlib
 import os
-import uuid
 import time
 import json
 import logging
-from collections import defaultdict
 from typing import Optional
 
 import httpx
@@ -33,6 +47,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+import client_throttle as throttle
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("chat-embed")
@@ -45,10 +61,30 @@ ATHENA_CHAT_URL = os.environ["ATHENA_CHAT_URL"]
 ATHENA_ADMIN_URL = os.getenv("ATHENA_ADMIN_URL", "")
 STREAM_URL = os.getenv("STREAM_URL", "")
 SOURCE_TAG = os.getenv("SOURCE_TAG", "chatbot")
-RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "30"))
+RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "20"))
+JARVIS_RELAY_KEY = os.getenv("JARVIS_RELAY_KEY", "")
+TRUSTED_PROXIES = throttle.parse_networks(os.getenv("TRUSTED_PROXY_CIDRS", ""))
+TRUST_CF = os.getenv("TRUST_CF_CONNECTING_IP", "").strip().lower() in {"1", "true", "yes", "on"}
 
-_cors_env = os.getenv("CORS_ORIGINS", "*")
-CORS_ORIGINS = [o.strip() for o in _cors_env.split(",")] if _cors_env != "*" else ["*"]
+if not JARVIS_RELAY_KEY:
+    logger.error("jarvis_relay_key_unset: set JARVIS_RELAY_KEY to jarvis-web's value; every message will be refused")
+
+
+def _cors_origins(raw: str) -> list:
+    origins = []
+    for origin in (o.strip() for o in raw.split(",")):
+        if not origin:
+            continue
+        if origin in {"*", "null"}:
+            logger.error("cors_origin_refused origin=%s (list your site's exact origin instead)", origin)
+            continue
+        origins.append(origin.rstrip("/"))
+    return origins
+
+
+CORS_ORIGINS = _cors_origins(os.getenv("CORS_ORIGINS", ""))
+if not CORS_ORIGINS:
+    logger.warning("embed disabled for browsers until CORS_ORIGINS is set")
 
 # ---------------------------------------------------------------------------
 # App
@@ -56,32 +92,80 @@ CORS_ORIGINS = [o.strip() for o in _cors_env.split(",")] if _cors_env != "*" els
 
 app = FastAPI(title="Athena Chat Embed", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["content-type"],
+    )
 
 # ---------------------------------------------------------------------------
-# Rate limiting (in-memory, per IP, sliding window)
+# The visitor, and its rate limit (in-memory, per replica)
 # ---------------------------------------------------------------------------
 
-_rate_buckets: dict[str, list[float]] = defaultdict(list)
+_limiter = throttle.SlidingWindowLimiter(per_minute=RATE_LIMIT_RPM)
 
 
-def _check_rate_limit(ip: str) -> bool:
-    """Return True if request is allowed, False if rate limit exceeded."""
-    now = time.monotonic()
-    window = 60.0
-    bucket = _rate_buckets[ip]
-    # Prune old entries
-    _rate_buckets[ip] = [t for t in bucket if now - t < window]
-    if len(_rate_buckets[ip]) >= RATE_LIMIT_RPM:
-        return False
-    _rate_buckets[ip].append(now)
-    return True
+def _visitor(request: Request) -> str:
+    """The visitor's address, resolved through trusted proxies only. No
+    usable address -> 503 here, never a shared value upstream."""
+    resolved = throttle.resolve_rate_client(
+        request.client.host if request.client else None,
+        throttle.read_forwarded_for(request.headers),
+        request.headers.get("cf-connecting-ip"),
+        TRUSTED_PROXIES,
+        TRUST_CF,
+    )
+    if throttle.parse_ip(resolved.ip) is None:
+        logger.error("visitor_unresolvable source=%s", resolved.source)
+        raise HTTPException(status_code=503, detail="Chat is unavailable right now.")
+    return resolved.ip
+
+
+async def _admit(request: Request) -> str:
+    visitor = _visitor(request)
+    if not await _limiter.allow(throttle.rate_limit_key(visitor)):
+        raise HTTPException(
+            status_code=429,
+            detail="You're going a bit fast. Please wait a minute, then try again.",
+            headers={"Retry-After": "60"},
+        )
+    return visitor
+
+
+def _relay_headers(visitor: str) -> dict:
+    """What jarvis-web needs to accept the relay. Nothing from the
+    browser's request (cookies, Authorization) is ever forwarded."""
+    return {"X-Jarvis-Relay-Key": JARVIS_RELAY_KEY, "X-Jarvis-Relay-Client": visitor}
+
+
+def _relay_body(req: "ChatRequest") -> dict:
+    body = {"message": req.message, "interface_type": "chat", "source": SOURCE_TAG}
+    if req.session_id:
+        body["session_id"] = req.session_id
+    return body
+
+
+def _http_client(**kwargs) -> httpx.AsyncClient:
+    return httpx.AsyncClient(**kwargs)
+
+
+_upstream_rate_limited_warned = False
+
+
+def _note_upstream_status(status: int) -> None:
+    global _upstream_rate_limited_warned
+    if status == 401:
+        logger.error(
+            "jarvis_relay_rejected status=401: jarvis-web refused the relay key; "
+            "chat-embed's JARVIS_RELAY_KEY must equal jarvis-web's JARVIS_RELAY_KEY (key sha256 prefix %s)",
+            hashlib.sha256(JARVIS_RELAY_KEY.encode()).hexdigest()[:12] if JARVIS_RELAY_KEY else "unset",
+        )
+    elif status == 429 and not _upstream_rate_limited_warned:
+        _upstream_rate_limited_warned = True
+        logger.warning("upstream_rate_limited: jarvis-web's relay limit was reached")
 
 
 # ---------------------------------------------------------------------------
@@ -138,24 +222,19 @@ class ChatResponse(BaseModel):
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, request: Request):
-    ip = request.client.host if request.client else "unknown"
-    if not _check_rate_limit(ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please slow down.")
-
-    session_id = req.session_id or str(uuid.uuid4())
+    visitor = await _admit(request)
 
     start = time.time()
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
-                ATHENA_CHAT_URL,
-                json={
-                    "message": req.message,
-                    "session_id": session_id,
-                    "interface_type": "chat",
-                    "source": SOURCE_TAG,
-                },
-            )
+        async with _http_client(timeout=120.0) as client:
+            resp = await client.post(ATHENA_CHAT_URL, json=_relay_body(req), headers=_relay_headers(visitor))
+            _note_upstream_status(resp.status_code)
+            if resp.status_code == 429:
+                raise HTTPException(
+                    status_code=429,
+                    detail="You're going a bit fast. Please wait a minute, then try again.",
+                    headers={"Retry-After": resp.headers.get("Retry-After", "60")},
+                )
             resp.raise_for_status()
             data = resp.json()
     except httpx.TimeoutException:
@@ -166,7 +245,7 @@ async def chat(req: ChatRequest, request: Request):
 
     elapsed = time.time() - start
     response_text = data.get("response", "")
-    upstream_session_id = data.get("session_id", session_id)
+    upstream_session_id = data.get("session_id") or req.session_id or ""
 
     if not response_text:
         raise HTTPException(status_code=502, detail="Empty response from model")
@@ -183,30 +262,23 @@ async def chat_stream(req: ChatRequest, request: Request):
     if not STREAM_URL:
         raise HTTPException(status_code=501, detail="Streaming not configured (STREAM_URL not set)")
 
-    ip = request.client.host if request.client else "unknown"
-    if not _check_rate_limit(ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded.")
-
-    session_id = req.session_id or str(uuid.uuid4())
+    visitor = await _admit(request)
 
     async def generate():
+        # Every stream ends with exactly one terminal event: done or error.
+        session_id = req.session_id or ""
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with _http_client(timeout=120.0) as client:
                 async with client.stream(
-                    "POST",
-                    STREAM_URL,
-                    json={
-                        "query": req.message,
-                        # ATHENA-69 (D19/P6.3): this relay has no caller
-                        # identity of its own and never forwards the
-                        # browser's Authorization header, so every request
-                        # it proxies is guest, never owner.
-                        "mode": "guest",
-                        "session_id": session_id,
-                        "interface_type": "chat",
-                        "source": SOURCE_TAG,
-                    },
+                    "POST", STREAM_URL, json=_relay_body(req), headers=_relay_headers(visitor),
                 ) as resp:
+                    if resp.status_code != 200:
+                        _note_upstream_status(resp.status_code)
+                        if resp.status_code == 429:
+                            yield f"data: {json.dumps({'type': 'error', 'reason': 'rate_limited'})}\n\n"
+                        else:
+                            yield f"data: {json.dumps({'type': 'error'})}\n\n"
+                        return
                     buffer = ""
                     async for raw in resp.aiter_text():
                         buffer += raw
@@ -222,14 +294,19 @@ async def chat_stream(req: ChatRequest, request: Request):
                             except json.JSONDecodeError:
                                 continue
                             stage = obj.get("stage")
-                            if stage == "answer_chunk":
+                            if stage == "session":
+                                session_id = obj.get("session_id") or session_id
+                            elif stage == "answer_chunk":
                                 token = obj.get("content", "")
                                 if token:
                                     yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
                             elif stage == "complete":
                                 yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
-                            elif stage == "error":
+                                return
+                            elif stage == "error" or "error" in obj:
                                 yield f"data: {json.dumps({'type': 'error'})}\n\n"
+                                return
+            yield f"data: {json.dumps({'type': 'error'})}\n\n"  # ended without completing
         except Exception as e:
             logger.error("stream_error error=%s", e)
             yield f"data: {json.dumps({'type': 'error'})}\n\n"

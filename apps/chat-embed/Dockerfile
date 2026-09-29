@@ -17,10 +17,15 @@ RUN echo "$APT_CACHE_BUST" >/dev/null && apt-get update && apt-get -y --no-insta
 # pip-audit-clean and current PyPI HEAD.
 RUN pip install --no-cache-dir --upgrade pip==26.2.1 setuptools==84.0.0 wheel==0.48.0
 
-COPY requirements.txt .
+# Build context is the repository root (it needs the shared client-address
+# module): docker build -f apps/chat-embed/Dockerfile .
+COPY apps/chat-embed/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+COPY apps/chat-embed/main.py .
+# Shared client-address resolution and limiter (single source of truth:
+# src/shared/client_throttle.py), a sibling of main.py.
+COPY src/shared/client_throttle.py ./client_throttle.py
 
 EXPOSE 8000
 

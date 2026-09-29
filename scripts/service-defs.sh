@@ -15,7 +15,7 @@ ADMIN_SERVICES=(
     "athena-admin-backend:${PROJECT_ROOT}/admin/backend"
     "athena-admin-frontend:${PROJECT_ROOT}/admin/frontend"
     "athena-jarvis-web:${PROJECT_ROOT}:apps/jarvis-web/Dockerfile"
-    "athena-chat-embed:${PROJECT_ROOT}/apps/chat-embed"
+    "athena-chat-embed:${PROJECT_ROOT}:apps/chat-embed/Dockerfile"
 )
 
 # Core services that need src/ context (have shared module dependency)
@@ -75,6 +75,6 @@ NON_PYTHON_DOCKERFILES=(
 #   (see build-and-push.sh's build_push, the athena-admin-backend branch).
 SPECIAL_PYTHON_IMAGES=(
     "athena-admin-backend|admin/backend/Dockerfile|admin/backend|1"
-    "athena-chat-embed|apps/chat-embed/Dockerfile|apps/chat-embed|0"
+    "athena-chat-embed|apps/chat-embed/Dockerfile|.|0"
     "athena-jarvis-web|apps/jarvis-web/Dockerfile|.|0"
 )

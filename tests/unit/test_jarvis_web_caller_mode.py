@@ -414,15 +414,3 @@ class TestTokenHygiene:
         assert forwarded, "floor: the orchestrator was called"
         assert secret_token not in json.dumps(forwarded)
         assert logged_events and not any(secret_token in str(kw) for _, kw in logged_events)
-
-
-# ---------------------------------------------------------------------------
-# chat-embed
-# ---------------------------------------------------------------------------
-
-class TestChatEmbedSendsGuest:
-    def test_chat_embed_sends_guest(self):
-        chat_embed_path = _REPO_ROOT / "apps" / "chat-embed" / "main.py"
-        text = chat_embed_path.read_text(encoding="utf-8")
-        assert '"mode": "guest"' in text
-        assert '"mode": "owner"' not in text
