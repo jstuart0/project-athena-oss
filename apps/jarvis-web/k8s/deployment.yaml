@@ -171,17 +171,20 @@ spec:
 
 ---
 # Edge auth, the same shape as manifests/athena-prod/optional/jarvis-web-edge-auth.yaml
-# (read that file's header for the requirements; they apply here too):
-# home network without sign-in, everyone else through Authentik, and every
-# request attested so jarvis-web knows the class came from this proxy.
+# (the canonical template: read its header for the requirements; they apply
+# here too): home network without sign-in, the guest network always as a
+# guest, everyone else through Authentik, and every request attested so
+# jarvis-web knows the class came from this proxy. Routes O, S, G, H and A
+# carry the same priorities and Middleware order as the template.
 # Order: strip -> (forwardAuth) -> attest. Replace CONFIGURE_ME_EDGE_ATTESTATION
 # at apply time from the jarvis-edge-attestation Secret; never commit it.
 # jarvis-web also needs, in its env above: JARVIS_EDGE_ATTESTATION_SECRET
 # (secretKeyRef jarvis-edge-attestation/current, not optional),
 # JARVIS_EDGE_ATTESTATION_SECRET_PREVIOUS (key previous, optional: true),
 # TRUSTED_PROXY_CIDRS (your Traefik pods), JARVIS_LOCAL_NETWORKS (the same
-# CIDR as below), JARVIS_ALLOWED_HOSTS (YOUR_DOMAIN_HERE) and
-# JARVIS_HOUSEHOLD_GROUPS.
+# CIDR as route H), JARVIS_GUEST_NETWORKS (the same CIDR as route G),
+# JARVIS_ALLOWED_HOSTS (YOUR_DOMAIN_HERE,YOUR_SIGNIN_DOMAIN_HERE),
+# JARVIS_HOUSEHOLD_GROUPS and JARVIS_SIGNIN_URL (https://YOUR_SIGNIN_DOMAIN_HERE/).
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -197,6 +200,13 @@ spec:
       X-authentik-email: ""
       X-authentik-name: ""
       X-authentik-uid: ""
+      X-authentik-entitlements: ""
+      X-authentik-jwt: ""
+      X-authentik-meta-app: ""
+      X-authentik-meta-jwks: ""
+      X-authentik-meta-outpost: ""
+      X-authentik-meta-provider: ""
+      X-authentik-meta-version: ""
       X-Service-Key: ""
       X-Jarvis-Relay-Key: ""
       X-Jarvis-Relay-Client: ""
@@ -226,6 +236,17 @@ spec:
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
+  name: jarvis-edge-attest-guest
+  namespace: jarvis-web
+spec:
+  headers:
+    customRequestHeaders:
+      X-Jarvis-Edge-Class: "guest"
+      X-Jarvis-Edge-Attestation: "CONFIGURE_ME_EDGE_ATTESTATION"
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
   name: jarvis-edge-attest-authenticated
   namespace: jarvis-web
 spec:
@@ -246,12 +267,36 @@ spec:
     - websecure
   routes:
     # O: the outpost's sign-in callback and sign-out, untouched.
-    - match: Host(`YOUR_DOMAIN_HERE`) && PathPrefix(`/outpost.goauthentik.io/`)
+    - match: (Host(`YOUR_DOMAIN_HERE`) || Host(`YOUR_SIGNIN_DOMAIN_HERE`)) && PathPrefix(`/outpost.goauthentik.io/`)
       kind: Rule
       priority: 3000
       services:
         - name: authentik-server
           namespace: authentik
+          port: 80
+    # S: the sign-in host always goes through Authentik, even from home.
+    # Optional: delete (and drop it from route O) if you don't run one.
+    - match: Host(`YOUR_SIGNIN_DOMAIN_HERE`)
+      kind: Rule
+      priority: 2000
+      middlewares:
+        - name: jarvis-edge-strip
+        - name: jarvis-edge-forwardauth
+        - name: jarvis-edge-attest-authenticated
+      services:
+        - name: jarvis-web
+          port: 80
+    # G: the guest network, always a guest. REQUIRED: replace
+    # YOUR_GUEST_CIDR, or delete this route if you have no guest network
+    # (guest devices then sign in through route A).
+    - match: Host(`YOUR_DOMAIN_HERE`) && !HeaderRegexp(`Cf-Connecting-Ip`, `.+`) && !HeaderRegexp(`Cf-Ray`, `.+`) && ClientIP(`YOUR_GUEST_CIDR`)
+      kind: Rule
+      priority: 910
+      middlewares:
+        - name: jarvis-edge-strip
+        - name: jarvis-edge-attest-guest
+      services:
+        - name: jarvis-web
           port: 80
     # H: home network, no Cloudflare headers. REQUIRED: replace YOUR_LOCAL_CIDR.
     - match: Host(`YOUR_DOMAIN_HERE`) && !HeaderRegexp(`Cf-Connecting-Ip`, `.+`) && !HeaderRegexp(`Cf-Ray`, `.+`) && ClientIP(`YOUR_LOCAL_CIDR`)

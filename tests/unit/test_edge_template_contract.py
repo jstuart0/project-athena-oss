@@ -16,6 +16,14 @@ from . import _jarvis_web_harness as h
 TEMPLATE = h.REPO_ROOT / "manifests" / "athena-prod" / "optional" / "jarvis-web-edge-auth.yaml"
 STANDALONE = h.REPO_ROOT / "apps" / "jarvis-web" / "k8s" / "deployment.yaml"
 PRIORITIES = {"O": 3000, "S": 2000, "G": 910, "H": 900, "A": 100}
+# Every header Authentik's proxy outpost sets on an authenticated request:
+# goauthentik/authentik, tag version/2025.8.1,
+# internal/outpost/proxyv2/application/mode_common.go lines 42-48 and 51-55.
+AUTHENTIK_HEADERS = {
+    "X-authentik-username", "X-authentik-groups", "X-authentik-entitlements", "X-authentik-email",
+    "X-authentik-name", "X-authentik-uid", "X-authentik-jwt", "X-authentik-meta-jwks",
+    "X-authentik-meta-outpost", "X-authentik-meta-provider", "X-authentik-meta-app", "X-authentik-meta-version",
+}
 
 
 def _docs(path=TEMPLATE):
@@ -46,14 +54,29 @@ def test_every_route_has_explicit_priority_in_d1_order():
     assert all("priority" in r for r in ingress["spec"]["routes"])
 
 
-def test_strip_list_covers_everything_jarvis_web_reads():
-    """Floor 8 names; named member X-Jarvis-Edge-Attestation."""
-    stripped = _middlewares()["jarvis-edge-strip"]["headers"]["customRequestHeaders"]
+def _effective_strip_set():
+    """What jarvis-web says the edge must strip, as configured by default
+    (xander M1: the list plus the identity and groups header names)."""
+    env = {"SERVICE_API_KEY": h.SERVICE_KEY, "JARVIS_EDGE_ATTESTATION_SECRET": "edge-attestation-current-7f3a9c2e1b8d4f6a",
+           "TRUSTED_PROXY_CIDRS": "10.0.0.0/8", "JARVIS_LOCAL_NETWORKS": "192.0.2.0/24",
+           "JARVIS_ALLOWED_HOSTS": "jarvis.example.com", "JARVIS_HOUSEHOLD_GROUPS": "household"}
+    return {n.lower() for n in h.caller_auth.load_settings(env, own_ips=()).edge_strip_headers}
+
+
+@pytest.mark.parametrize("path", [TEMPLATE, STANDALONE], ids=["template", "standalone"])
+def test_strip_list_covers_everything_jarvis_web_reads(path):
+    """Floor 8 names; named member X-Jarvis-Edge-Attestation. Checked
+    against jarvis-web's effective strip set and every header Authentik's
+    outpost can return (otto: the live set is broader than the names
+    jarvis-web reads)."""
+    stripped = _middlewares(path)["jarvis-edge-strip"]["headers"]["customRequestHeaders"]
     assert all(v == "" for v in stripped.values())
-    required = set(h.caller_auth.EDGE_STRIPPED_HEADERS)
+    required = _effective_strip_set()
     assert len(required) >= 8
-    assert "X-Jarvis-Edge-Attestation" in required
-    assert required <= set(stripped)
+    assert "x-jarvis-edge-attestation" in required
+    names = {n.lower() for n in stripped}
+    assert required <= names
+    assert {n.lower() for n in AUTHENTIK_HEADERS} <= names
 
 
 def test_forward_auth_hardening():
@@ -130,12 +153,40 @@ def test_snippet_home_set_matches_route_h():
 
 
 def test_standalone_example_has_the_same_shape():
+    """codex M (D1): the standalone example carries routes O, S, G, H and A
+    with the template's priorities, Middleware order and attest classes."""
     middlewares = _middlewares(STANDALONE)
-    stripped = middlewares["jarvis-edge-strip"]["headers"]["customRequestHeaders"]
-    assert set(h.caller_auth.EDGE_STRIPPED_HEADERS) <= set(stripped)
     forward = middlewares["jarvis-edge-forwardauth"]["forwardAuth"]
     assert forward["trustForwardHeader"] is False and forward["authResponseHeadersRegex"] == "(?i)^x-authentik-"
     routes = _routes(STANDALONE)
-    assert _names(routes[100]) == ["jarvis-edge-strip", "jarvis-edge-forwardauth", "jarvis-edge-attest-authenticated"]
-    assert _names(routes[900]) == ["jarvis-edge-strip", "jarvis-edge-attest-home"]
-    assert "middlewares" not in routes[3000]
+    assert sorted(routes, reverse=True) == sorted(PRIORITIES.values(), reverse=True)
+    for letter, priority in PRIORITIES.items():
+        assert _names(routes[priority]) == _names(_route(letter)), letter
+    for attest, value in (("jarvis-edge-attest-home", "home"), ("jarvis-edge-attest-guest", "guest"),
+                          ("jarvis-edge-attest-authenticated", "authenticated")):
+        assert middlewares[attest]["headers"]["customRequestHeaders"]["X-Jarvis-Edge-Class"] == value
+    guest = routes[PRIORITIES["G"]]["match"]
+    assert "!HeaderRegexp(`Cf-Connecting-Ip`, `.+`)" in guest and "!HeaderRegexp(`Cf-Ray`, `.+`)" in guest
+    assert "ClientIP(`YOUR_GUEST_CIDR`)" in guest
+
+
+def _relay_exempt_block():
+    """The commented relay-exempt Middleware (xander L1): uncommented and
+    parsed, so it's a real Middleware the day someone enables it."""
+    text = TEMPLATE.read_text(encoding="utf-8")
+    block = text.split("# apiVersion: traefik.io/v1alpha1\n# kind: Middleware\n# metadata:\n#   name: jarvis-edge-strip-except-relay", 1)
+    assert len(block) == 2, "the jarvis-edge-strip-except-relay Middleware is defined (commented)"
+    body = "apiVersion: traefik.io/v1alpha1\nkind: Middleware\nmetadata:\n  name: jarvis-edge-strip-except-relay" + block[1]
+    return yaml.safe_load("\n".join(line[2:] if line.startswith("# ") else line.lstrip("#") for line in body.splitlines()))
+
+
+def test_relay_exempt_middleware_defined_and_keeps_only_the_relay_headers():
+    doc = _relay_exempt_block()
+    assert doc["kind"] == "Middleware" and doc["metadata"]["namespace"] == "athena-prod"
+    stripped = {n.lower() for n, v in doc["spec"]["headers"]["customRequestHeaders"].items() if v == ""}
+    relay = {"x-jarvis-relay-key", "x-jarvis-relay-client"}
+    assert stripped == (_effective_strip_set() | {n.lower() for n in AUTHENTIK_HEADERS}) - relay
+    assert "x-jarvis-edge-attestation" in stripped and "x-service-key" in stripped
+    text = TEMPLATE.read_text(encoding="utf-8")
+    route = text.split("#     - name: jarvis-edge-strip-except-relay", 1)[1].split("\n\n", 1)[0]
+    assert "attest" not in route

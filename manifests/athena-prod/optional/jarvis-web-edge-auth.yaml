@@ -88,7 +88,12 @@
 # =============================================================================
 ---
 # Removes, by exact name, every header jarvis-web reads from the edge
-# (caller_auth.EDGE_STRIPPED_HEADERS), so nothing a client sends survives.
+# (caller_auth.EDGE_STRIPPED_HEADERS) plus every other X-authentik-* header
+# Authentik's outpost can return, so nothing a client sends survives. If you
+# set JARVIS_EDGE_IDENTITY_HEADER or JARVIS_EDGE_GROUPS_HEADER to another
+# name, add that name here too (jarvis-web logs its full strip set at
+# startup as jarvis_edge_strip_headers, and refuses to start with a custom
+# name until JARVIS_EDGE_HEADERS_ACK_STRIPPED=true says you did).
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -104,6 +109,13 @@ spec:
       X-authentik-email: ""
       X-authentik-name: ""
       X-authentik-uid: ""
+      X-authentik-entitlements: ""
+      X-authentik-jwt: ""
+      X-authentik-meta-app: ""
+      X-authentik-meta-jwks: ""
+      X-authentik-meta-outpost: ""
+      X-authentik-meta-provider: ""
+      X-authentik-meta-version: ""
       X-Service-Key: ""
       X-Jarvis-Relay-Key: ""
       X-Jarvis-Relay-Client: ""
@@ -190,7 +202,11 @@ spec:
 
     # Relay-exempt (optional, only for an off-cluster chat-embed): relay
     # requests skip forward-auth and are never attested; jarvis-web checks
-    # the relay key itself. The strip list keeps the relay headers.
+    # the relay key itself (a wrong key is 401, never a fall-through), and a
+    # relayed chat is always the public audience. Uncomment this route and
+    # the jarvis-edge-strip-except-relay Middleware at the end of this file
+    # together. An in-cluster chat-embed calls jarvis-web's Service directly
+    # and needs neither.
     # - match: Host(`chat.example.com`) && (Path(`/api/chat`) || Path(`/api/chat/stream`)) && HeaderRegexp(`X-Jarvis-Relay-Key`, `.+`)
     #   kind: Rule
     #   priority: 950
@@ -237,3 +253,31 @@ spec:
           port: 80
   tls:
     secretName: jarvis-web-tls
+# ---
+# The relay-exempt route's strip (optional; uncomment with that route). The
+# same as jarvis-edge-strip except it keeps X-Jarvis-Relay-Key and
+# X-Jarvis-Relay-Client, and it is never followed by an attest Middleware:
+# a relayed request carries no edge class and no attestation.
+# apiVersion: traefik.io/v1alpha1
+# kind: Middleware
+# metadata:
+#   name: jarvis-edge-strip-except-relay
+#   namespace: athena-prod
+# spec:
+#   headers:
+#     customRequestHeaders:
+#       X-Jarvis-Edge-Class: ""
+#       X-Jarvis-Edge-Attestation: ""
+#       X-authentik-username: ""
+#       X-authentik-groups: ""
+#       X-authentik-email: ""
+#       X-authentik-name: ""
+#       X-authentik-uid: ""
+#       X-authentik-entitlements: ""
+#       X-authentik-jwt: ""
+#       X-authentik-meta-app: ""
+#       X-authentik-meta-jwks: ""
+#       X-authentik-meta-outpost: ""
+#       X-authentik-meta-provider: ""
+#       X-authentik-meta-version: ""
+#       X-Service-Key: ""
