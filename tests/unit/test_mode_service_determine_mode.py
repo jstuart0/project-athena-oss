@@ -213,6 +213,9 @@ class TestStaleLookaheadAndResidual:
 class TestMixedFreshnessAuto:
     def _with_ical(self, ms):
         ms.current_config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        # The seeded iCal state below belongs to this URL (a refresh would
+        # have recorded it); snapshot() ignores state from any other URL.
+        ms.booking_sources._ical_url = "https://example.com/x.ics"
 
     def test_admin_fresh_no_active_ical_stale_active_is_guest(self, ms):
         self._with_ical(ms)
@@ -305,8 +308,10 @@ class TestSuppression:
         _fresh(ms.booking_sources._admin, now_monotonic, bookings=[])
         ms.booking_sources._suppressed_rows = [{"checkin": checkin.isoformat(), "checkout": checkout.isoformat()}]
         _fresh(ms.booking_sources._ical, now_monotonic, bookings=[ical_booking])
+        ms.booking_sources._ical_url = ms.current_config["calendar_url"]
 
         snapshot = ms.booking_sources.snapshot(ms.current_config, now=now, now_monotonic=now_monotonic)
+        assert snapshot.counts["ical"] == 1  # considered, so its absence below is suppression
         assert snapshot.bookings == []
 
     def test_cross_source_duplicate_counts_once(self, ms, monkeypatch):
@@ -323,8 +328,10 @@ class TestSuppression:
         ical_booking = Booking(id=None, key="icalkey", source="ical", label="ical abcdef01", start=checkin, end=checkout, is_test=False)
         _fresh(ms.booking_sources._admin, now_monotonic, bookings=[admin_booking])
         _fresh(ms.booking_sources._ical, now_monotonic, bookings=[ical_booking])
+        ms.booking_sources._ical_url = ms.current_config["calendar_url"]
 
         snapshot = ms.booking_sources.snapshot(ms.current_config, now=now, now_monotonic=now_monotonic)
+        assert snapshot.counts == {"admin": 1, "ical": 1}
         assert len(snapshot.bookings) == 1
 
 
@@ -480,3 +487,16 @@ class TestBufferClampWiring:
         ms.current_config = {"enabled": True, "buffer_before_checkin_hours": 500, "buffer_after_checkout_hours": 1}
         assert ms.determine_mode(now=now, now_monotonic=now_monotonic) == "owner"
         assert ms.determine_mode(now=now + timedelta(hours=33), now_monotonic=now_monotonic) == "guest"
+
+
+class TestModeReportsPerSourceStatus:
+    def test_mode_response_carries_per_source_status_and_required_flag(self, ms, client):
+        ms.current_config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        now_monotonic = time.monotonic()
+        _fresh(ms.booking_sources._admin, now_monotonic)
+        ms.booking_sources._ical_url = "https://example.com/x.ics"
+        body = client.get("/mode", headers=_HEADERS).json()
+        assert body["bookings_sources"] == {
+            "admin": {"status": "fresh", "required": True},
+            "ical": {"status": "never_loaded", "required": False},
+        }

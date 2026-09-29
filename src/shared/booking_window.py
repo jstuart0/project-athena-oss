@@ -36,6 +36,9 @@ MAX_BUFFER_HOURS = 168
 
 # These helpers run on every /mode read, so their warnings fire once per
 # process per distinct (event, value) rather than on every call (D5).
+# Bounded: once full it starts over, so memory stays capped and a value
+# seen again after a reset logs once more.
+_LOG_LATCH_CAP = 1024
 _logged_once: set[tuple] = set()
 
 
@@ -43,6 +46,8 @@ def _log_once(level: str, event: str, value, **fields) -> None:
     marker = (event, value)
     if marker in _logged_once:
         return
+    if len(_logged_once) >= _LOG_LATCH_CAP:
+        _logged_once.clear()
     _logged_once.add(marker)
     getattr(logger, level)(event, **fields)
 

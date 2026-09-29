@@ -160,6 +160,8 @@ class ModeResponse(BaseModel):
     bookings_age_seconds: Optional[float] = None
     property_timezone: Optional[str] = None
     property_timezone_valid: Optional[bool] = None
+    # {source: {"status", "required"}} -- statuses only; counts stay on /health.
+    bookings_sources: Optional[Dict[str, Dict[str, Any]]] = None
 
 
 class PermissionsResponse(BaseModel):
@@ -274,6 +276,13 @@ def _bookings_snapshot(now: datetime, now_monotonic: float) -> Optional[BookingS
     return booking_sources.snapshot(current_config, now=now, now_monotonic=now_monotonic)
 
 
+def _source_statuses(snapshot: BookingSnapshot) -> Dict[str, Dict[str, Any]]:
+    return {
+        name: {"status": status, "required": name == snapshot.required}
+        for name, status in snapshot.statuses.items()
+    }
+
+
 def _bookings_status_for_response(snapshot: Optional[BookingSnapshot]) -> Optional[str]:
     """The required source's freshness status, or "not_required" while
     guest mode is disabled (bookings are still fetched per D9, but not
@@ -298,12 +307,8 @@ async def health_check():
     bookings_window = None
     if snapshot is not None:
         bookings_by_source = {
-            name: {
-                "status": status,
-                "count": snapshot.counts.get(name, 0),
-                "required": name == snapshot.required,
-            }
-            for name, status in snapshot.statuses.items()
+            name: {**info, "count": snapshot.counts.get(name, 0)}
+            for name, info in _source_statuses(snapshot).items()
         }
         if snapshot.window is not None:
             bookings_window = {
@@ -371,6 +376,7 @@ async def get_current_mode():
         bookings_age_seconds=snapshot.age_seconds if snapshot else None,
         property_timezone=snapshot.property_timezone if snapshot else None,
         property_timezone_valid=snapshot.property_timezone_valid if snapshot else None,
+        bookings_sources=_source_statuses(snapshot) if snapshot else None,
     )
 
 

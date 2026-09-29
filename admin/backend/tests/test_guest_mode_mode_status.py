@@ -185,3 +185,34 @@ class TestProxyHardening:
         data = resp.json()
         assert data["reachable"] is True
         assert data["events_count"] == expected
+
+
+class TestRound2Proxy:
+    def test_malformed_mode_service_url_is_unreachable_not_500(self, owner_client, monkeypatch):
+        monkeypatch.setenv("MODE_SERVICE_URL", "http://mode-service.test:99999")
+        _clear_cache_for_tests()
+        resp = owner_client.get(MODE_STATUS_URL)
+        assert resp.status_code == 200
+        assert resp.json() == {"reachable": False, "error": "mode_service_url_invalid"}
+
+    def test_per_source_statuses_pass_through_sanitised(self, owner_client, monkeypatch):
+        body = {
+            "mode": "owner", "reason": "No active bookings", "events_count": 0,
+            "bookings_sources": {
+                "admin": {"status": "fresh", "required": True, "count": 9},
+                "ical": {"status": "never_loaded", "required": False},
+                "evil<script>": {"status": "fresh", "required": False},
+                "weird": {"status": "<img src=x>", "required": "yes"},
+                "notadict": "stale",
+            },
+        }
+        resp = _proxy_with_handler(owner_client, monkeypatch, lambda r: httpx.Response(200, json=body))
+        assert resp.json()["bookings_sources"] == {
+            "admin": {"status": "fresh", "required": True},
+            "ical": {"status": "never_loaded", "required": False},
+            "weird": {"status": "unknown", "required": False},
+        }
+
+    def test_missing_per_source_statuses_is_empty(self, owner_client, monkeypatch):
+        resp = _proxy_with_handler(owner_client, monkeypatch, lambda r: httpx.Response(200, json={"mode": "owner"}))
+        assert resp.json()["bookings_sources"] == {}

@@ -40,6 +40,11 @@ logger = structlog.get_logger()
 ADMIN_API_URL = get_admin_url()
 
 _ICAL_TIMEOUT_SECONDS = 30.0
+# A legacy-iCal event longer than this is not a stay. Without the cap, one
+# poisoned event (now -> far future) followed by a failing feed would hold
+# the house in guest mode until restart, since advisory data counts until
+# never_loaded.
+_MAX_ICAL_STAY = timedelta(days=60)
 
 
 class _MalformedAdminResponse(ValueError):
@@ -300,6 +305,7 @@ class BookingSources:
             cal = Calendar.from_ical(response.content)
 
             bookings: List[Booking] = []
+            dropped = {"invalid_window": 0, "too_long": 0}
             for component in cal.walk():
                 if component.name != "VEVENT":
                     continue
@@ -321,6 +327,15 @@ class BookingSources:
                     checkout = feed_value_to_utc(
                         dtend.dt, default_hhmm=DEFAULT_CHECKOUT_TIME, tz=property_tz
                     )
+                    # Dropped here, counted once per fetch below: the
+                    # per-booking invalid-window log would otherwise latch
+                    # on feed-controlled keys.
+                    if checkout <= checkin:
+                        dropped["invalid_window"] += 1
+                        continue
+                    if checkout - checkin > _MAX_ICAL_STAY:
+                        dropped["too_long"] += 1
+                        continue
                     # D6: filter to the fetch window (no server side to
                     # do this for us, unlike the admin endpoint).
                     if checkout <= start or checkin >= end:
@@ -341,6 +356,8 @@ class BookingSources:
                 except Exception:
                     logger.debug("mode_bookings_ical_event_skipped", reason="parse_error")
                     continue
+            if any(dropped.values()):
+                logger.warning("mode_bookings_ical_events_dropped", **dropped)
         except Exception as e:
             logger.error("mode_bookings_ical_fetch_failed", **_failure_fields(e))
             return
@@ -393,11 +410,21 @@ class BookingSources:
             required_name = "admin"
             advisory_names = ("ical",) if (source_mode == "auto" and calendar_url) else ()
 
-        required_state = self._ical if required_name == "ical" else self._admin
-        required_status = self._classify(required_state, now_monotonic, max_age)
+        # refresh() resets the iCal state when calendar_url changes, but a
+        # read between the config change and the next refresh must not
+        # classify (or use) the previous URL's data either.
+        ical_current = (calendar_url or "") == self._ical_url
+
+        def status_and_data(name: str) -> Tuple[str, List[Booking], _SourceState]:
+            state = self._ical if name == "ical" else self._admin
+            if name == "ical" and not ical_current:
+                return "never_loaded", [], state
+            return self._classify(state, now_monotonic, max_age), list(state.last_good), state
+
+        required_status, required_data, required_state = status_and_data(required_name)
 
         statuses = {required_name: required_status}
-        counts = {required_name: len(required_state.last_good)}
+        counts = {required_name: len(required_data)}
 
         # Rule 1: the required source is considered in every state that has
         # data at all (fresh/stale/expired) -- guest-direction only, since an
@@ -407,20 +434,19 @@ class BookingSources:
         # widen it, so it's still fail-safe to include it here).
         considered_primary: List[Booking] = []
         if required_status != "never_loaded":
-            considered_primary = list(required_state.last_good)
+            considered_primary = required_data
 
         considered_advisory: List[Booking] = []
         for name in advisory_names:
-            state = self._ical if name == "ical" else self._admin
-            status = self._classify(state, now_monotonic, max_age)
+            status, data, _ = status_and_data(name)
             statuses[name] = status
-            counts[name] = len(state.last_good)
+            counts[name] = len(data)
             # D6 rule 1 (amended): advisory data counts in every state that
             # has any. Even expired, it can only ADD guest time; whether the
             # house is owner or degraded is decided by the required source
             # alone, so this never weakens the fail-safe.
             if status != "never_loaded":
-                considered_advisory.extend(state.last_good)
+                considered_advisory.extend(data)
 
         merged = merge(
             considered_primary,
@@ -430,7 +456,7 @@ class BookingSources:
         )
 
         age_seconds = None
-        if required_state.last_success_at is not None:
+        if required_status != "never_loaded" and required_state.last_success_at is not None:
             age_seconds = now_monotonic - required_state.last_success_at
 
         label = "+".join([required_name, *advisory_names])

@@ -645,3 +645,77 @@ class TestFailureLogsCarryNoUrl:
         failures = [e for e in captured_logs if e.get("event") == "mode_bookings_admin_fetch_failed"]
         assert [e.get("error") for e in failures] == ["ConnectError"]
         assert self._TOKEN not in " ".join(repr(e) for e in captured_logs)
+
+
+def _vevent(uid, dtstart, dtend, summary="Reserved"):
+    return (f"BEGIN:VEVENT\r\nUID:{uid}\r\nDTSTART;VALUE=DATE:{dtstart}\r\n"
+            f"DTEND;VALUE=DATE:{dtend}\r\nSUMMARY:{summary}\r\nEND:VEVENT\r\n")
+
+
+def _feed(*events):
+    return ("BEGIN:VCALENDAR\r\n" + "".join(events) + "END:VCALENDAR\r\n").encode()
+
+
+class TestRound2IcalHardening:
+    def _refresh(self, bs, config, feed):
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([]))),
+                               ical_client_factory=_ical_factory(lambda r: httpx.Response(200, content=feed))))
+
+    def test_snapshot_treats_cleared_or_replaced_url_as_never_loaded_before_next_refresh(self, bs, monkeypatch):
+        monkeypatch.setenv("MODE_BOOKINGS_SOURCE", "ical")
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "UTC")
+        config_module._clear_cache_for_tests()
+        old = {"enabled": True, "calendar_url": "https://old.example.com/x.ics"}
+        self._refresh(bs, old, _feed(_vevent("a@x", "20260630", "20260702")))
+        assert bs.snapshot(old, now=_FIXED_NOW, now_monotonic=time.monotonic()).statuses["ical"] == "fresh"
+
+        for changed in ({"enabled": True, "calendar_url": ""},
+                        {"enabled": True, "calendar_url": "https://new.example.com/y.ics"}):
+            snap = bs.snapshot(changed, now=_FIXED_NOW, now_monotonic=time.monotonic())
+            assert snap.statuses["ical"] == "never_loaded", changed
+            assert snap.bookings == []
+            assert snap.counts["ical"] == 0
+
+    def test_replaced_advisory_url_does_not_inherit_old_bookings(self, bs, monkeypatch):
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "UTC")
+        config_module._clear_cache_for_tests()
+        old = {"enabled": True, "calendar_url": "https://old.example.com/x.ics"}
+        self._refresh(bs, old, _feed(_vevent("a@x", "20260630", "20260702")))
+        assert len(bs.snapshot(old, now=_FIXED_NOW, now_monotonic=time.monotonic()).bookings) == 1
+        new = {"enabled": True, "calendar_url": "https://new.example.com/y.ics"}
+        snap = bs.snapshot(new, now=_FIXED_NOW, now_monotonic=time.monotonic())
+        assert snap.bookings == []
+        assert snap.statuses["ical"] == "never_loaded"
+
+    def test_inverted_and_overlong_events_dropped_at_parse_with_one_count_log_per_fetch(self, bs, monkeypatch, captured_logs):
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "UTC")
+        config_module._clear_cache_for_tests()
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        feed = _feed(
+            _vevent("good@x", "20260630", "20260702"),
+            _vevent("inverted-1@x", "20260702", "20260630"),
+            _vevent("inverted-2@x", "20260701", "20260701"),
+            _vevent("forever@x", "20260701", "20270701"),
+        )
+        self._refresh(bs, config, feed)
+        assert [b.start.date().isoformat() for b in bs._ical.last_good] == ["2026-06-30"]
+        drops = [e for e in captured_logs if e.get("event") == "mode_bookings_ical_events_dropped"]
+        assert len(drops) == 1
+        assert drops[0]["invalid_window"] == 2
+        assert drops[0]["too_long"] == 1
+
+        bs._ical.last_attempt_at -= 10_000
+        self._refresh(bs, config, feed)
+        drops = [e for e in captured_logs if e.get("event") == "mode_bookings_ical_events_dropped"]
+        assert len(drops) == 2
+        # The per-booking latch never sees feed-controlled inverted keys.
+        assert not [e for e in captured_logs if e.get("event") == "mode_booking_invalid_window"]
+
+    def test_exactly_60_day_event_is_kept(self, bs, monkeypatch):
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "UTC")
+        config_module._clear_cache_for_tests()
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        # 2026-06-30 16:00 -> 2026-08-29 16:00 is exactly 60 d; checkout at 11:00 is under.
+        self._refresh(bs, config, _feed(_vevent("long-ok@x", "20260630", "20260829")))
+        assert len(bs._ical.last_good) == 1

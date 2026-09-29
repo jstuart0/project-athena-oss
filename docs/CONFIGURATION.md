@@ -723,7 +723,12 @@ directly.
   through the same SSRF guard admin-backend applies to calendar-source
   URLs: `https://` only, private/loopback targets blocked unless listed
   in `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`, every redirect re-validated. A
-  plain `http://` URL is a failed fetch (never loaded).
+  plain `http://` URL is a failed fetch (never loaded). Events whose end
+  isn't after their start, or that last longer than 60 days, are dropped
+  at parse time and counted in one `mode_bookings_ical_events_dropped`
+  warning per fetch. The Guest Mode page warns when a `calendar_url` is
+  set but its source is `never_loaded` or `expired` (the mode-status
+  proxy passes each source's status and required flag through).
 - **Freshness.** Per source: `never_loaded` (no successful fetch ever) →
   age of the last success > `MODE_BOOKINGS_MAX_AGE_SECONDS` (default
   21600s / 6h, clamped to `[max(300, 2 x the iCal poll interval),

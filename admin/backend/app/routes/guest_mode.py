@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr, field_validator
 from datetime import datetime, timedelta
 import hmac
+from urllib.parse import urlparse
 import re
 import structlog
 import uuid
@@ -727,6 +728,8 @@ async def get_mode_status(
         return {"reachable": False, "error": "mode_service_url_unset"}
 
     url = f"{mode_service_url}/mode"
+    if not _is_well_formed_http_url(url):
+        return {"reachable": False, "error": "mode_service_url_invalid"}
     allowed, reason = await check_ssrf_safe(url)
     if not allowed:
         return {"reachable": False, "error": "ssrf_blocked", "detail": reason}
@@ -753,11 +756,47 @@ async def get_mode_status(
             "bookings_age_seconds": body.get("bookings_age_seconds"),
             "property_timezone": body.get("property_timezone"),
             "property_timezone_valid": body.get("property_timezone_valid"),
+            "bookings_sources": _source_statuses(body.get("bookings_sources")),
         }
     except httpx.HTTPStatusError as e:
         return {"reachable": False, "error": "http_error", "detail": str(e.response.status_code)}
     except Exception as e:
         return {"reachable": False, "error": type(e).__name__}
+
+
+def _is_well_formed_http_url(url: str) -> bool:
+    """An http(s) URL with a host and an in-range port. Checked before
+    check_ssrf_safe, which reads parsed.port unguarded (a port like 99999
+    raises there) -- keeps this route's always-200 contract without
+    changing that helper for its other callers."""
+    try:
+        parsed = urlparse(url)
+        parsed.port
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+
+
+_SOURCE_NAME_RE = re.compile(r"[a-z0-9_]{1,32}")
+_SOURCE_STATUSES = frozenset({"fresh", "stale", "expired", "never_loaded"})
+
+
+def _source_statuses(raw: Any) -> dict:
+    """Per-source {status, required} from the mode service, reduced to
+    known shapes: names are short identifiers, statuses a fixed set
+    ("unknown" otherwise), required a strict boolean."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for name, info in raw.items():
+        if not isinstance(name, str) or not _SOURCE_NAME_RE.fullmatch(name) or not isinstance(info, dict):
+            continue
+        status = info.get("status")
+        out[name] = {
+            "status": status if status in _SOURCE_STATUSES else "unknown",
+            "required": info.get("required") is True,
+        }
+    return out
 
 
 def _int_or_none(value: Any) -> Optional[int]:

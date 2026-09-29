@@ -375,3 +375,11 @@ class TestBookingKey:
         internal_src = open("admin/backend/app/routes/internal.py").read()
         assert "hashlib.sha256(f\"{source}|" not in internal_src
         assert "booking_key(" in internal_src
+
+
+class TestLogLatchIsBounded:
+    def test_latch_never_exceeds_its_cap(self):
+        with structlog.testing.capture_logs():
+            for i in range(bw._LOG_LATCH_CAP + 50 if hasattr(bw, "_LOG_LATCH_CAP") else 1100):
+                bw.clamp_buffer_hours(1000 + i)
+        assert len(bw._logged_once) <= getattr(bw, "_LOG_LATCH_CAP", 1024)
