@@ -1225,8 +1225,13 @@ class TestIdentityBeforeExpiry:
             now=self.NOW,
         )
         assert _written(h.client) == []
-        assert out.answer != EXPIRED_TEXT
+        assert out.answer not in (EXPIRED_TEXT, NEUTRAL_TEXT), out.answer
         assert h.stores == [], h.stores
+        # Context-free: the reply went through normal extraction with no
+        # previous turn to merge.
+        assert h.extract_calls, "an expired foreign pending falls through to the normal flow"
+        for _, kw in h.extract_calls:
+            assert kw.get("prev_query") is None
 
     def test_own_expired_pending_still_answers_expired(self):
         """Positive control for the test above."""
@@ -1260,6 +1265,26 @@ class TestForeignPendingIsNotOverwritten:
         assert not out.answer.endswith("?"), out.answer
         assert "say:" in out.answer
         assert h.stores == [], h.stores
+
+    def test_cross_identity_command_success_skips_the_store(self):
+        """A different caller's successful (under-threshold) command runs,
+        but doesn't store its context over the pending."""
+        h = _Harness(n_lights=3)
+        prev = _prev_with_pending(fingerprint=_fp(device="voice-a"), expires_at=_time_mod.time() + 60, n=3)
+        ref = {"anaphora_types": [], "has_context_ref": False}
+        h.run(_state54(
+            "turn off the office lights", prev_context=prev, context_ref_info=ref, fingerprint=_fp(device="voice-b"),
+        ))
+        assert len(set(_written(h.client, "light"))) == 3
+        assert h.stores == [], h.stores
+
+    def test_same_caller_command_success_still_stores(self):
+        """Positive control for the test above."""
+        h = _Harness(n_lights=3)
+        ref = {"anaphora_types": [], "has_context_ref": False}
+        h.run(_state54("turn off the office lights", prev_context=None, context_ref_info=ref))
+        assert len(set(_written(h.client, "light"))) == 3
+        assert h.stores and h.stores[-1]["ttl"] == 300
 
     def test_same_caller_success_still_stores(self):
         """Positive control: with no foreign pending the same turn stores

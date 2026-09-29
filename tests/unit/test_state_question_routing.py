@@ -275,6 +275,36 @@ class TestClassifierBoundedCost:
                 slow.append((s[:30], round(elapsed, 3)))
         assert not slow, slow
 
+    def test_huge_input_classifies_within_budget(self):
+        """The prefix bound: even with every gap bounded, a 100 KB input
+        would cost seconds if classified whole."""
+        huge = "are the lights " + "what is " * 12_500
+        assert len(huge) >= 100_000
+        t0 = _time.perf_counter()
+        classify_utterance(huge)
+        assert _time.perf_counter() - t0 < _CLASSIFY_BUDGET_SECONDS
+
+    def test_every_pattern_is_bounded_without_the_prefix_cap(self):
+        """Each classifier pattern is cheap on its own, so the prefix cap
+        isn't the only defence (a future caller or pattern can't bring the
+        cubic cost back)."""
+        from orchestrator import utterance_kind as ukm
+
+        patterns = [
+            ukm._WH_STATE_RE, ukm._ENSURE_STATE_RE, ukm._NOUN_FIRST_STATUS_RE, ukm._EMBEDDED_READ_RE,
+            ukm._STATE_WORD_RE, ukm._DEVICE_NOUN_RE, ukm._BARE_COMMAND_RE, ukm._PAST_ACTION_CHECK_RE,
+            *ukm._ELLIPTIC_PATTERNS, *ukm._ROOM_FRAME_RES, *(p for p, _ in ukm._NOUN_MAP),
+        ]
+        slow = []
+        for s in _CRAFTED_SLOW_INPUTS:
+            for pattern in patterns:
+                t0 = _time.perf_counter()
+                list(pattern.finditer(s.lower()))
+                elapsed = _time.perf_counter() - t0
+                if elapsed >= _CLASSIFY_BUDGET_SECONDS:
+                    slow.append((pattern.pattern[:40], s[:20], round(elapsed, 3)))
+        assert not slow, slow
+
     def test_long_input_still_classifies_its_prefix(self):
         """The bound keeps a real question at the front of an over-long
         utterance a question -- truncation isn't a blanket UNKNOWN."""
@@ -383,6 +413,8 @@ EXPECTED_ROOMS = {
     "what lights are on": None,
     "are any kitchen lights on": "kitchen",
     "is my office light on": "office",
+    "which office lights are on": "office",
+    "what kitchen lights are on": "kitchen",
     "turn off the lights in the living room": "living room",
 }
 
