@@ -747,7 +747,13 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     return state
 
                 # PATTERN MATCHING: Check if this is a multi-step command with delays/loops/scheduling
-                if smart_controller.detect_sequence_intent(state.query):
+                # A question is never a sequence to schedule: a referent
+                # question ("did they turn off after 5 seconds") reaches this
+                # point and must go on to the read path, not be acknowledged
+                # as a sequence. With the kill switch on, uk is UNKNOWN and
+                # legacy routing applies; the sequence executor's gate then
+                # stops a real question's writes.
+                if uk.kind != UtteranceKind.STATE_QUESTION and smart_controller.detect_sequence_intent(state.query):
                     logger.info(f"Sequence intent detected (pattern matching mode): {state.query[:50]}...")
 
                     # Extract sequence from the complex command

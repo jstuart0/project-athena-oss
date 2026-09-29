@@ -306,9 +306,9 @@ class SequenceExecutor:
         logger.info(f"Executing step {step_num}/{total_steps}: {action} on {device_type} in {room or entity_id}")
 
         if entity_id:
-            # Direct entity control -- single target, never fan-out gated.
-            await self._execute_direct_action(entity_id, action, parameters)
-            return None
+            # Direct entity control: gated on its own target like every
+            # other write (a refusal is returned as the step result).
+            return await self._execute_direct_action(entity_id, action, parameters)
         else:
             # Use smart controller for room-based control. ATHENA-128 4.7:
             # the result (a gate rewording, on a fan-out block) is
@@ -356,7 +356,18 @@ class SequenceExecutor:
         elif 'temperature' in parameters:
             service_data['temperature'] = parameters['temperature']
 
+        # ATHENA-128: the fan-out gate reads the request's classification
+        # from the scope, so a real state question (routing reverted by the
+        # kill switch) never writes through a sequence step. Outside
+        # pending_carrier, a block is always the rewording, recorded by the
+        # step loop as refused_fanout -- never a dangling prompt.
+        from orchestrator import write_fanout
+        refusal = write_fanout.gate(domain, service, (entity_id,), None)
+        if refusal:
+            return refusal
+
         await self.ha_client.call_service(domain, service, service_data)
+        return None
 
     def _calculate_wait_until(self, time_str: str) -> float:
         """

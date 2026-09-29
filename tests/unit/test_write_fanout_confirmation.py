@@ -151,12 +151,12 @@ def method_is_gated(method_node) -> bool:
     return set(all_calls).issubset(dominated)
 
 
-def _methods_with_call_service(tree):
+def _methods_with_call_service(tree, class_name="SmartHomeController"):
     result = {}
 
     class _Visitor(ast.NodeVisitor):
         def visit_ClassDef(self, node):
-            if node.name == "SmartHomeController":
+            if node.name == class_name:
                 for item in node.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         if list(_iter_call_service_calls(item)):
@@ -167,7 +167,40 @@ def _methods_with_call_service(tree):
     return result
 
 
+SEQ_SRC_PATH = Path("src/orchestrator/sequence_executor.py")
+# SequenceExecutor's own writes (steps that name an entity directly skip
+# execute_intent); every one is gated, none allowlisted.
+SEQ_GATED = {"_execute_direct_action"}
+SEQ_ALLOWLIST: dict = {}
+
+
 class TestClosedWorldDriftGuard:
+    def test_every_sequence_executor_write_is_gated(self):
+        methods = _methods_with_call_service(ast.parse(SEQ_SRC_PATH.read_text()), "SequenceExecutor")
+        assert set(methods) == SEQ_GATED | set(SEQ_ALLOWLIST), set(methods) ^ (SEQ_GATED | set(SEQ_ALLOWLIST))
+        assert SEQ_GATED & set(SEQ_ALLOWLIST) == set()
+        not_dominated = [name for name in SEQ_GATED if not method_is_gated(methods[name])]
+        assert not_dominated == [], not_dominated
+        assert "_execute_direct_action" in methods
+
+    def test_negative_new_ungated_sequence_executor_write_is_caught(self):
+        src = """
+class SequenceExecutor:
+    async def _execute_direct_action(self, entity_id, action, parameters):
+        refusal = write_fanout.gate("light", "turn_off", (entity_id,), None)
+        if refusal:
+            return refusal
+        await self.ha_client.call_service("light", "turn_off", {"entity_id": entity_id})
+
+    async def _new_writer(self):
+        await self.ha_client.call_service("lock", "unlock", {"entity_id": "lock.front"})
+"""
+        methods = _methods_with_call_service(ast.parse(src), "SequenceExecutor")
+        assert set(methods) == {"_execute_direct_action", "_new_writer"}
+        assert set(methods) != SEQ_GATED | set(SEQ_ALLOWLIST)
+        assert method_is_gated(methods["_execute_direct_action"])
+        assert not method_is_gated(methods["_new_writer"])
+
     def test_every_write_method_is_gated_or_allowlisted(self):
         tree = ast.parse(SRC_PATH.read_text())
         methods = _methods_with_call_service(tree)
@@ -1837,3 +1870,82 @@ class TestSingleTargetGatesDirect:
         answer, block, raw = self._call(name, "please do it now")
         assert block is None, name
         assert raw.call_service.await_count >= 1, (name, answer)
+
+
+# ---------------------------------------------------------------------------
+# Round 4: a timed question can't write through the sequence executor's
+# direct-entity path
+# ---------------------------------------------------------------------------
+
+DIRECT_ENTITY_SEQUENCE_JSON = (
+    '{"type": "sequence", "acknowledge": "Okay.", "steps": [{"action": "turn_off", '
+    '"target": {"entity_id": "light.office_0"}, "parameters": {}, "delay_after": 0, "at_time": null}]}'
+)
+TIMED_QUESTION = "did the office light turn off after 5 seconds"
+TIMED_COMMAND = "turn off the office light after 5 seconds"
+
+
+class _SequenceHarness(_Harness):
+    """The _Harness runtime plus a real SequenceExecutor over the same raw
+    HA client."""
+
+    def _install(self):
+        super()._install()
+        self.executor = SequenceExecutor(self.controller, self.client)
+        _runtime.set_sequence_executor(self.executor)
+
+    async def arun_sequence(self, state):
+        out = await self.arun(state)
+        tasks = list(self.executor._running_sequences.values())
+        results = [await t for t in tasks]
+        return out, results
+
+
+def _run_timed(query, *, kill_switch):
+    h = _SequenceHarness(llm_text=DIRECT_ENTITY_SEQUENCE_JSON, n_lights=3,
+                         flags=KILL_SWITCH_ON if kill_switch else None)
+    out, results = _run(h.arun_sequence(_state54(query, context_ref_info={})))
+    return h, out, results
+
+
+class TestSequenceDirectEntityWrites:
+    def test_population_timed_question_is_a_state_question_and_a_sequence(self):
+        assert classify_utterance(TIMED_QUESTION).kind == UtteranceKind.STATE_QUESTION
+        assert shc.SmartHomeController(entity_manager=MagicMock(), llm_router=MagicMock()).detect_sequence_intent(TIMED_QUESTION)
+
+    def test_timed_question_under_the_kill_switch_never_writes(self):
+        """codex r4: routing reverted, the question is extracted as a
+        sequence whose step names an entity directly."""
+        h, out, results = _run_timed(TIMED_QUESTION, kill_switch=True)
+        assert h.client.call_service.await_count == 0, h.client.call_service.await_args_list
+        assert results and results[0][0]["status"] == "refused_fanout", results
+        assert results[0][0]["message"].startswith("That would turn off 1 light"), results
+        assert not results[0][0]["message"].endswith("?")
+        assert write_fanout.take_block() is None
+
+    def test_timed_question_without_the_kill_switch_takes_the_read_path(self):
+        h, out, results = _run_timed(TIMED_QUESTION, kill_switch=False)
+        assert h.client.call_service.await_count == 0
+        assert results == [], "a question is not scheduled as a sequence"
+        assert "sequence" not in out.answer.lower() and out.answer != "Okay.", out.answer
+
+    def test_timed_command_executes_with_the_kill_switch(self):
+        h, out, results = _run_timed(TIMED_COMMAND, kill_switch=True)
+        assert [c.args[:2] for c in h.client.call_service.await_args_list] == [("light", "turn_off")]
+        assert results == [[]]
+
+    def test_timed_command_executes_without_the_kill_switch(self):
+        h, out, results = _run_timed(TIMED_COMMAND, kill_switch=False)
+        assert [c.args[:2] for c in h.client.call_service.await_args_list] == [("light", "turn_off")]
+        assert results == [[]]
+
+    def test_referent_timed_question_is_not_scheduled(self):
+        """A referent question skips the question dispatch; it must still
+        not be scheduled as a sequence (answer: the sequence acknowledgment)."""
+        q = "did they turn off after 5 seconds"
+        uk = classify_utterance(q)
+        assert uk.kind == UtteranceKind.STATE_QUESTION and uk.needs_referent
+        h, out, results = _run_timed(q, kill_switch=False)
+        assert h.client.call_service.await_count == 0
+        assert results == [], results
+        assert out.answer != "Okay.", out.answer
