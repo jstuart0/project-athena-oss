@@ -440,6 +440,8 @@ EXPECTED_ROOMS = {
     "is the garage fan on": "garage",
     "are the media room lights on": "media room",
     "are the tvs on": None,
+    "are the office tvs on": "office",
+    "are the bedroom televisions off": "bedroom",
     "is it ok to turn off the lights": None,
     "do you think you could lock the door": None,
     "can i get you to close the blinds": None,
