@@ -270,7 +270,11 @@ _CRAFTED_SLOW_INPUTS = [
     "the doors " * 400 + "opened",
 ]
 
-_CLASSIFY_BUDGET_SECONDS = 0.05
+# Generous budgets (CI noise): the defects they guard cost seconds -- the
+# old backtracking shapes ~19 s on these inputs, the uncapped classifier
+# ~8 s on a 1 MB input -- while the fixed code takes a few milliseconds.
+_CLASSIFY_BUDGET_SECONDS = 0.5
+_PATTERN_BUDGET_SECONDS = 1.0
 
 
 class TestClassifierBoundedCost:
@@ -289,10 +293,10 @@ class TestClassifierBoundedCost:
         assert not slow, slow
 
     def test_huge_input_classifies_within_budget(self):
-        """The prefix bound: even with every gap bounded, a 100 KB input
-        would cost seconds if classified whole."""
-        huge = "are the lights " + "what is " * 12_500
-        assert len(huge) >= 100_000
+        """The prefix bound: even with every gap bounded, a 1 MB input costs
+        seconds if classified whole."""
+        huge = "are the lights " + "what is " * 125_000
+        assert len(huge) >= 1_000_000
         t0 = _time.perf_counter()
         classify_utterance(huge)
         assert _time.perf_counter() - t0 < _CLASSIFY_BUDGET_SECONDS
@@ -314,7 +318,7 @@ class TestClassifierBoundedCost:
                 t0 = _time.perf_counter()
                 list(pattern.finditer(s.lower()))
                 elapsed = _time.perf_counter() - t0
-                if elapsed >= _CLASSIFY_BUDGET_SECONDS:
+                if elapsed >= _PATTERN_BUDGET_SECONDS:
                     slow.append((pattern.pattern[:40], s[:20], round(elapsed, 3)))
         assert not slow, slow
 

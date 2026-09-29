@@ -1176,12 +1176,19 @@ class _RaisingRedis:
         raise ConnectionError("redis down")
 
 
-class _HangingRedis:
+class _SlowRedis:
+    """Answers the claim -- successfully -- only after ~1 s. With the
+    timeout in place the claim is abandoned first; without it the test
+    doesn't hang, it replays and fails."""
+
+    DELAY_SECONDS = 1.0
+
     def __init__(self):
         self.client = self
 
     async def set(self, *a, **kw):
-        await asyncio.sleep(3600)
+        await asyncio.sleep(self.DELAY_SECONDS)
+        return True
 
 
 class TestNonceClaimFailsClosed:
@@ -1199,7 +1206,14 @@ class TestNonceClaimFailsClosed:
 
     def test_redis_timeout_loses_the_claim(self, monkeypatch):
         monkeypatch.setattr(rc_module, "NONCE_CLAIM_TIMEOUT_SECONDS", 0.05)
-        h, out = self._yes_after_pending(_HangingRedis())
+        cache = _SlowRedis()
+        h = _Harness(cache=cache)
+        _, prev = _first_turn(h)
+        h.client.call_service.reset_mock()
+        t0 = _time_mod.perf_counter()
+        out = h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO))
+        elapsed = _time_mod.perf_counter() - t0
+        assert elapsed < 0.5, elapsed
         assert _written(h.client) == []
         assert out.answer == ALREADY_DONE_TEXT
 
