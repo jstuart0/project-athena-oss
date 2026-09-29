@@ -461,7 +461,7 @@ def parse_ical_events(
                 'guest_phone': guest_phone,
                 'notes': description if description else None,
                 'source': source_type,
-                'status': classify_summary(summary),
+                'status': classify_summary(summary, source_type=source_type),
             })
 
     return events
