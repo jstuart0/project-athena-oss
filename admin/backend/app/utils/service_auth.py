@@ -214,3 +214,31 @@ async def verify_service_or_oidc(
         detail="Authentication required",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+def require_user_permission(permission: str):
+    """Dependency factory for routes that only a signed-in user may call.
+
+    The caller must authenticate as a user (Bearer JWT or ``X-API-Key``, via
+    ``get_current_user``) and hold ``permission``. Any ``X-Service-Key``
+    header is refused with 401 -- correct, wrong, or with
+    ``SERVICE_API_KEY`` unset alike -- so a leaked or shared service key can
+    never reach these routes, and a caller can't mix the two credentials.
+    Returns the authenticated ``User``.
+    """
+    from app.auth.oidc import get_current_user
+
+    async def _dependency(
+        user=Depends(get_current_user),
+        x_service_key: Optional[str] = Header(default=None, alias="X-Service-Key"),
+    ):
+        if x_service_key is not None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="service key not accepted on this route",
+            )
+        if not user.has_permission(permission):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+        return user
+
+    return _dependency

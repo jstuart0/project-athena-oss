@@ -12,16 +12,18 @@ Lodgify API Integration:
 """
 from typing import List, Optional
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from urllib.parse import urlsplit
+
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, Request
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field
 import structlog
 import httpx
-import os
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
-from app.models import User, CalendarSource, CalendarEvent, ExternalAPIKey
+from app.models import AuditLog, User, CalendarSource, CalendarEvent, ExternalAPIKey, mask_feed_url
+from app.utils.service_auth import require_user_permission
 from shared.config import get_config
 from shared.booking_window import (
     DEFAULT_CHECKIN_TIME,
@@ -39,6 +41,12 @@ router = APIRouter(prefix="/api/calendar-sources", tags=["calendar-sources"])
 # Lodgify API endpoint
 LODGIFY_API_BASE = "https://api.lodgify.com"
 
+# A sync interval below this can't give the deleted/cancelled-entry match
+# rule a real "previous sync" to compare against (see calendar_sync).
+MIN_SYNC_INTERVAL_MINUTES = 5
+
+VALID_SOURCE_TYPES = ('airbnb', 'vrbo', 'lodgify', 'generic_ical')
+
 
 # ============================================================================
 # Pydantic Schemas
@@ -50,7 +58,7 @@ class CalendarSourceCreate(BaseModel):
     source_type: str  # 'airbnb', 'vrbo', 'lodgify', 'generic_ical'
     ical_url: str
     enabled: bool = True
-    sync_interval_minutes: int = 30
+    sync_interval_minutes: int = Field(default=30, ge=MIN_SYNC_INTERVAL_MINUTES)
     priority: int = 1
     default_checkin_time: str = '16:00'  # 4:00 PM
     default_checkout_time: str = '11:00'  # 11:00 AM
@@ -63,7 +71,7 @@ class CalendarSourceUpdate(BaseModel):
     source_type: Optional[str] = None
     ical_url: Optional[str] = None
     enabled: Optional[bool] = None
-    sync_interval_minutes: Optional[int] = None
+    sync_interval_minutes: Optional[int] = Field(default=None, ge=MIN_SYNC_INTERVAL_MINUTES)
     priority: Optional[int] = None
     default_checkin_time: Optional[str] = None
     default_checkout_time: Optional[str] = None
@@ -75,7 +83,9 @@ class CalendarSourceResponse(BaseModel):
     id: int
     name: str
     source_type: str
-    ical_url: str
+    # Only GET /{id} sets this; list/create/update omit the key entirely
+    # (response_model_exclude_unset), so the feed token never leaves there.
+    ical_url: Optional[str] = None
     ical_url_masked: Optional[str] = None
     enabled: bool
     sync_interval_minutes: int
@@ -115,6 +125,76 @@ class SyncResponse(BaseModel):
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
+def is_lodgify_host(url: Optional[str]) -> bool:
+    """True when the URL's host is lodgify.com or a subdomain of it."""
+    try:
+        host = (urlsplit(url or '').hostname or '').lower()
+    except ValueError:
+        return False
+    return host == 'lodgify.com' or host.endswith('.lodgify.com')
+
+
+def _lodgify_key_enabled(db: Session) -> bool:
+    return db.query(ExternalAPIKey.id).filter(
+        ExternalAPIKey.service_name == 'lodgify',
+        ExternalAPIKey.enabled == True,  # noqa: E712
+    ).first() is not None
+
+
+def _validate_feed_url(url: str, current: Optional[str] = None) -> None:
+    """400 unless ``url`` is a full https feed URL. Rejects the masked value
+    the source card shows (anything containing the mask's ellipsis), so a
+    form that posts the display value back can't overwrite the real URL."""
+    if not url or not url.strip():
+        raise HTTPException(status_code=400, detail="iCal URL is required")
+    if '…' in url or (current and url == mask_feed_url(current)):
+        raise HTTPException(
+            status_code=400,
+            detail="That is the masked URL shown on the card. Paste the full iCal URL instead.",
+        )
+    try:
+        scheme = urlsplit(url).scheme.lower()
+    except ValueError:
+        scheme = ''
+    if scheme != 'https':
+        raise HTTPException(status_code=400, detail="iCal URL must use https://")
+
+
+def _enforce_lodgify_type_lock(db: Session, *, current_type: Optional[str], new_type: str, url: str) -> None:
+    """While a Lodgify API key is enabled, a Lodgify source can't be turned
+    into another type, and a lodgify.com feed can't be filed under one: the
+    sync treats both as API-authoritative, and a type change would silently
+    switch it back to writing from the iCal export."""
+    if not _lodgify_key_enabled(db):
+        return
+    moving_off = current_type == 'lodgify' and new_type != 'lodgify'
+    mispaired = new_type != 'lodgify' and is_lodgify_host(url)
+    if moving_off or mispaired:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "lodgify_source_type_locked: a Lodgify API key is enabled, so a "
+                "Lodgify feed must stay a Lodgify source. Disable the key first."
+            ),
+        )
+
+
+def _audit(db: Session, user: User, request: Optional[Request], action: str,
+           source_id: Optional[int], old_value: Optional[dict], new_value: Optional[dict]) -> None:
+    """Stage an audit row in the caller's transaction (committed with the
+    change it records). Values come from ``to_dict_safe``, so no feed URL."""
+    db.add(AuditLog(
+        user_id=user.id,
+        action=action,
+        resource_type='calendar_source',
+        resource_id=source_id,
+        old_value=old_value,
+        new_value=new_value,
+        ip_address=request.client.host if request and request.client else None,
+        user_agent=request.headers.get('user-agent') if request else None,
+        success=True,
+    ))
 
 def get_lodgify_api_key(db: Session) -> Optional[str]:
     """
@@ -391,16 +471,13 @@ def parse_ical_events(
 # CRUD Endpoints
 # ============================================================================
 
-@router.get("", response_model=List[CalendarSourceResponse])
+@router.get("", response_model=List[CalendarSourceResponse], response_model_exclude_unset=True)
 async def list_calendar_sources(
     enabled: Optional[bool] = Query(None, description="Filter by enabled status"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_user_permission('read')),
 ):
-    """
-    List all calendar sources.
-
-    NOTE: This endpoint is public for internal service access.
-    """
+    """List all calendar sources. The feed URL is masked; GET /{id} has it."""
     try:
         query = db.query(CalendarSource)
 
@@ -412,7 +489,6 @@ async def list_calendar_sources(
 
         logger.info("calendar_sources_listed", count=len(sources), enabled=enabled)
 
-        # Use safe dict that masks URL
         return [source.to_dict_safe() for source in sources]
 
     except Exception as e:
@@ -481,9 +557,10 @@ async def get_calendar_source(
         raise HTTPException(status_code=500, detail="Failed to retrieve calendar source")
 
 
-@router.post("", response_model=CalendarSourceResponse, status_code=201)
+@router.post("", response_model=CalendarSourceResponse, status_code=201, response_model_exclude_unset=True)
 async def create_calendar_source(
     source_data: CalendarSourceCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -492,17 +569,16 @@ async def create_calendar_source(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     try:
-        # Validate source type
-        valid_types = ['airbnb', 'vrbo', 'lodgify', 'generic_ical']
-        if source_data.source_type not in valid_types:
+        if source_data.source_type not in VALID_SOURCE_TYPES:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid source_type. Must be one of: {', '.join(valid_types)}"
+                detail=f"Invalid source_type. Must be one of: {', '.join(VALID_SOURCE_TYPES)}"
             )
 
-        # Validate URL format
-        if not source_data.ical_url.startswith(('http://', 'https://')):
-            raise HTTPException(status_code=400, detail="iCal URL must start with http:// or https://")
+        _validate_feed_url(source_data.ical_url)
+        _enforce_lodgify_type_lock(
+            db, current_type=None, new_type=source_data.source_type, url=source_data.ical_url,
+        )
 
         # Check for duplicate URL
         existing = db.query(CalendarSource).filter(
@@ -526,6 +602,9 @@ async def create_calendar_source(
             last_sync_status='pending'
         )
         db.add(new_source)
+        db.flush()
+        _audit(db, current_user, request, 'calendar_source_created', new_source.id,
+               None, new_source.to_dict_safe())
         db.commit()
         db.refresh(new_source)
 
@@ -535,7 +614,7 @@ async def create_calendar_source(
                    name=new_source.name,
                    source_type=new_source.source_type)
 
-        return new_source.to_dict()
+        return new_source.to_dict_safe()
 
     except HTTPException:
         raise
@@ -545,17 +624,15 @@ async def create_calendar_source(
         raise HTTPException(status_code=500, detail="Failed to create calendar source")
 
 
-@router.put("/{source_id}", response_model=CalendarSourceResponse)
+@router.put("/{source_id}", response_model=CalendarSourceResponse, response_model_exclude_unset=True)
 async def update_calendar_source(
     source_id: int,
     update_data: CalendarSourceUpdate,
-    db: Session = Depends(get_db)
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_user_permission('write')),
 ):
-    """Update a calendar source.
-
-    Note: This endpoint does not require authentication to allow
-    automated management and CLI access.
-    """
+    """Update a calendar source. Only fields present in the body change."""
 
     try:
         source = db.query(CalendarSource).filter(CalendarSource.id == source_id).first()
@@ -563,13 +640,24 @@ async def update_calendar_source(
         if not source:
             raise HTTPException(status_code=404, detail="Calendar source not found")
 
+        old_value = source.to_dict_safe()
+
+        if update_data.source_type is not None and update_data.source_type not in VALID_SOURCE_TYPES:
+            raise HTTPException(status_code=400, detail="Invalid source_type")
+        if update_data.ical_url is not None:
+            _validate_feed_url(update_data.ical_url, current=source.ical_url)
+        if update_data.source_type is not None or update_data.ical_url is not None:
+            _enforce_lodgify_type_lock(
+                db,
+                current_type=source.source_type,
+                new_type=update_data.source_type if update_data.source_type is not None else source.source_type,
+                url=update_data.ical_url if update_data.ical_url is not None else source.ical_url,
+            )
+
         # Update fields
         if update_data.name is not None:
             source.name = update_data.name
         if update_data.source_type is not None:
-            valid_types = ['airbnb', 'vrbo', 'lodgify', 'generic_ical']
-            if update_data.source_type not in valid_types:
-                raise HTTPException(status_code=400, detail=f"Invalid source_type")
             source.source_type = update_data.source_type
         if update_data.ical_url is not None:
             # Check for duplicate
@@ -589,14 +677,17 @@ async def update_calendar_source(
         if update_data.description is not None:
             source.description = update_data.description
 
+        _audit(db, current_user, request, 'calendar_source_updated', source.id,
+               old_value, source.to_dict_safe())
         db.commit()
         db.refresh(source)
 
         logger.info("calendar_source_updated",
+                   user=current_user.username,
                    source_id=source_id,
                    name=source.name)
 
-        return source.to_dict()
+        return source.to_dict_safe()
 
     except HTTPException:
         raise
@@ -609,6 +700,7 @@ async def update_calendar_source(
 @router.delete("/{source_id}", status_code=204)
 async def delete_calendar_source(
     source_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -627,6 +719,8 @@ async def delete_calendar_source(
                    source_id=source_id,
                    name=source.name)
 
+        _audit(db, current_user, request, 'calendar_source_deleted', source.id,
+               source.to_dict_safe(), None)
         db.delete(source)
         db.commit()
 
@@ -786,16 +880,14 @@ async def test_ical_url(
 @router.post("/{source_id}/sync", response_model=SyncResponse)
 async def sync_calendar_source(
     source_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_user_permission('write')),
 ):
     """
     Manually trigger a sync for a calendar source.
 
     Fetches events from the iCal URL and updates the database.
     For Lodgify sources, uses API if key is available for full guest names.
-
-    Note: This endpoint does not require authentication to allow
-    automated syncing and CLI access.
     """
 
     source = db.query(CalendarSource).filter(CalendarSource.id == source_id).first()
@@ -1104,7 +1196,8 @@ async def update_guest_session_statuses(db: Session):
 
 @router.post("/sync-guest-sessions")
 async def sync_guest_sessions_endpoint(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_user_permission('write')),
 ):
     """
     Manually sync Lodgify events to guest sessions.
