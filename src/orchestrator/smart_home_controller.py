@@ -3808,7 +3808,7 @@ Do NOT mention rooms that have no current or recent motion."""
             logger.error(f"Light status query error: {e}")
             return "I couldn't check the light status right now."
 
-    _ENTITY_STATE_QUERY_NOUNS = {"switch": "switch", "media_player": "media player"}
+    _ENTITY_STATE_QUERY_NOUNS = {"switch": ("switch", "switches"), "media_player": ("media player", "media players")}
     _ENTITY_STATE_ON_STATES = frozenset({
         "on", "playing", "running", "open", "unlocked", "heating", "cooling",
     })
@@ -3818,7 +3818,7 @@ Do NOT mention rooms that have no current or recent motion."""
         domains that don't have their own status handler (switch,
         media_player). Never touches ha_client -- entity_manager only.
         """
-        noun = self._ENTITY_STATE_QUERY_NOUNS.get(domain, domain)
+        noun, nouns = self._ENTITY_STATE_QUERY_NOUNS.get(domain, (domain, f"{domain}s"))
         try:
             all_entities = await self.entity_manager.get_entities()
             entities = {k: v for k, v in all_entities.items() if k.startswith(f"{domain}.")}
@@ -3826,7 +3826,7 @@ Do NOT mention rooms that have no current or recent motion."""
             if not entities:
                 if room:
                     return f"I couldn't find a {noun} in the {room}."
-                return f"I couldn't find any {noun}s in the home automation system."
+                return f"I couldn't find any {nouns} in the home automation system."
 
             room_lower = (room or "").lower()
             matched = []
@@ -3844,7 +3844,7 @@ Do NOT mention rooms that have no current or recent motion."""
             if not matched:
                 if room:
                     return f"I couldn't find a {noun} in the {room}."
-                return f"I couldn't find any {noun}s."
+                return f"I couldn't find any {nouns}."
 
             if len(matched) == 1:
                 name, state = matched[0]
@@ -3853,8 +3853,8 @@ Do NOT mention rooms that have no current or recent motion."""
             on_list = [name for name, state in matched if state in self._ENTITY_STATE_ON_STATES]
             if not on_list:
                 if room:
-                    return f"No {noun}s are currently on in the {room}."
-                return f"No {noun}s are currently on."
+                    return f"No {nouns} are currently on in the {room}."
+                return f"No {nouns} are currently on."
 
             if len(on_list) == 1:
                 names = on_list[0]
@@ -3862,7 +3862,7 @@ Do NOT mention rooms that have no current or recent motion."""
                 names = ", ".join(on_list[:-1]) + f" and {on_list[-1]}"
             else:
                 names = ", ".join(on_list[:3]) + f" and {len(on_list) - 3} more"
-            return f"{len(on_list)} of {len(matched)} {noun}s are on: {names}."
+            return f"{len(on_list)} of {len(matched)} {nouns} are on: {names}."
         except Exception as e:
             logger.error(f"Entity state query error ({domain}): {e}")
             return f"I couldn't check the {noun} status right now."
