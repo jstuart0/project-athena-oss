@@ -43,12 +43,16 @@ class ResolvedClient(NamedTuple):
 
 
 def parse_ip(value: object) -> Optional[IPAddress]:
-    """Parse one address, folding IPv4-mapped IPv6 to IPv4. None if it isn't one."""
+    """Parse one address, folding IPv4-mapped IPv6 to IPv4. None if it
+    isn't one, or if it carries a zone id ("fe80::1%eth0"): a zone makes
+    the same address compare unequal and never belongs in a forwarded hop."""
     if not isinstance(value, str):
         return None
     try:
         addr = ipaddress.ip_address(value.strip())
     except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.scope_id:
         return None
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
         return addr.ipv4_mapped

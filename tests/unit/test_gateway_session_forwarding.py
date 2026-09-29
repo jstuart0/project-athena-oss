@@ -542,3 +542,30 @@ def test_redis_backed_limiter_atomic_across_interleaved_requests():
         assert sorted(results) == [False, True]
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Both routes hand the limiter every X-Forwarded-For line, joined in order:
+# a caller's own first line can't stand in for the proxy's appended one.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses"])
+def test_routes_join_every_forwarded_for_line(monkeypatch, path):
+    seen = []
+
+    async def _spy(client_host, messages, session_id, forwarded_for=None):
+        seen.append(forwarded_for)
+        raise HTTPException(status_code=418)
+
+    monkeypatch.setattr(gw, "_check_new_conversation_limit", _spy)
+    monkeypatch.setattr(gw, "validate_api_key", mock.AsyncMock(return_value=True))
+    client = TestClient(gw.app)
+    body = (
+        {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        if path == "/v1/chat/completions"
+        else {"model": "m", "input": [{"role": "user", "content": "hi"}]}
+    )
+    headers = [("x-forwarded-for", "192.0.2.5"), ("x-forwarded-for", "203.0.113.9")]
+    response = client.post(path, json=body, headers=headers)
+    assert response.status_code == 418
+    assert seen == ["192.0.2.5, 203.0.113.9"]

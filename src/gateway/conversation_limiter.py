@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import Callable, Optional
 
-from shared.client_throttle import SlidingWindowLimiter, parse_networks, resolve_rate_client
+from shared.client_throttle import SlidingWindowLimiter, parse_networks, rate_limit_key, resolve_rate_client
 
 
 # The in-memory window is the shared implementation (one limiter contract
@@ -119,12 +119,14 @@ def resolve_client_key(
     header is absent, a hop is unparseable, or every hop in the chain is
     trusted. An unparseable peer is returned verbatim. The walk itself is
     shared.client_throttle.resolve_rate_client (Cloudflare never trusted
-    here).
+    here). An IPv6 client is keyed on its /64, so one caller can't rotate
+    through its own prefix.
     """
-    return resolve_rate_client(
+    resolved = resolve_rate_client(
         client_host,
         forwarded_for,
         None,
         parse_networks(trusted_proxy_cidrs),
         trust_cf=False,
-    ).ip
+    )
+    return rate_limit_key(resolved.ip)

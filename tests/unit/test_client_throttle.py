@@ -410,3 +410,76 @@ def test_jarvis_web_dockerfile_copies_module_after_backend(ct):
     ]
     assert len(shared) == 1
     assert shared[0] > backend, "the shared module must overwrite the local-dev shim"
+
+
+# ---------------------------------------------------------------------------
+# Fix round: zone ids, window boundary, refused hits, mid-address cut,
+# gateway joins header lines and folds IPv6 to /64
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["fe80::1%eth0", "fe80::1%1", "2001:db8::5%en0"])
+def test_parse_ip_rejects_zone_ids(ct, trusted, value):
+    assert ct.parse_ip(value) is None
+    assert ct.local_candidate("10.244.2.240", value, trusted, 1) is None
+    resolved = _rate(ct, trusted, "10.244.2.240", f"203.0.113.9, {value}")
+    assert (resolved.ip, resolved.source) == ("10.244.2.240", "peer")
+
+
+def test_limiter_window_boundary_exactly_sixty(ct):
+    clock = _Clock()
+    limiter = ct.SlidingWindowLimiter(per_minute=1, max_keys=10, clock=clock)
+
+    async def run():
+        assert await limiter.allow("a") is True
+        clock.now += 60.0  # a hit exactly 60 s old is outside the window
+        assert await limiter.allow("a") is True
+
+    asyncio.run(run())
+
+
+def test_limiter_refused_hits_not_recorded(ct):
+    clock = _Clock()
+    limiter = ct.SlidingWindowLimiter(per_minute=20, max_keys=10, clock=clock)
+
+    async def run():
+        for _ in range(20):
+            assert await limiter.allow("a")
+        clock.now += 30
+        for _ in range(5):
+            assert await limiter.allow("a") is False
+        clock.now += 30.5  # the first 20 expired; the 5 refused never counted
+        results = [await limiter.allow("a") for _ in range(20)]
+        assert results == [True] * 20
+
+    asyncio.run(run())
+
+
+def test_overlong_cut_mid_address_drops_the_fragment(ct, trusted):
+    """The 2 KB cut lands inside '198.51.100.77', leaving '8.51.100.77',
+    itself a valid address. It must be discarded, never walked."""
+    prefix = "198.51.100.77"
+    hops = ["10.244.1.1"] * 19
+    base = ", ".join([prefix] + hops)
+    # pad the trusted hops with spaces (stripped when parsed) until the cut
+    # lands two characters into the prefix
+    pad = ct.MAX_FORWARDED_FOR_BYTES + 2 - len(base)
+    assert pad > 0
+    hops[0] = hops[0] + " " * pad
+    xff = ", ".join([prefix] + hops)
+    assert len(xff) - ct.MAX_FORWARDED_FOR_BYTES == 2
+    assert xff[len(xff) - ct.MAX_FORWARDED_FOR_BYTES:].startswith("8.51.100.77")
+    resolved = _rate(ct, trusted, "10.244.2.240", xff)
+    assert resolved.ip != "8.51.100.77"
+    assert (resolved.ip, resolved.source) == ("10.244.2.240", "peer")
+
+
+def test_gateway_key_folds_ipv6_to_64(ct):
+    src = str(REPO_ROOT / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    limiter_module = importlib.import_module("gateway.conversation_limiter")
+    a = limiter_module.resolve_client_key("10.244.3.7", "2001:db8:1:2::1", TRUSTED)
+    b = limiter_module.resolve_client_key("10.244.3.7", "2001:db8:1:2:ffff::9", TRUSTED)
+    assert a == b == "2001:db8:1:2::/64"
+    assert limiter_module.resolve_client_key("10.244.3.7", "192.0.2.55", TRUSTED) == "192.0.2.55"

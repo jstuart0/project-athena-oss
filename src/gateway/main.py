@@ -45,6 +45,7 @@ from gateway.simple_commands import detect_simple_command, execute_simple_comman
 from gateway.intent_prerouter import classify_intent, handle_simple_intent
 from gateway.circuit_breaker import CircuitBreaker, CircuitState
 from gateway.rate_limiter import TokenBucketRateLimiter
+from shared.client_throttle import read_forwarded_for
 from gateway.conversation_limiter import (
     NewConversationLimiter,
     RedisNewConversationLimiter,
@@ -1624,7 +1625,7 @@ async def chat_completions(
     # requests with no explicit session_id only).
     await _check_new_conversation_limit(
         raw_request.client.host, request.messages, request.session_id,
-        forwarded_for=raw_request.headers.get("x-forwarded-for"),
+        forwarded_for=read_forwarded_for(raw_request.headers),
     )
 
     try:
@@ -1776,7 +1777,7 @@ async def responses_api(
         # detection.
         await _check_new_conversation_limit(
             raw_request.client.host, chat_request.messages, chat_request.session_id,
-            forwarded_for=raw_request.headers.get("x-forwarded-for"),
+            forwarded_for=read_forwarded_for(raw_request.headers),
         )
 
         # Detect room
