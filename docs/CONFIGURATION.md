@@ -185,7 +185,7 @@ DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODE_SERVICE_URL` | `http://localhost:8022` | Mode service (ATHENA-69). **Required** on both the orchestrator and the gateway — without it, mode/permission resolution degrades every request (orchestrator: `get_current_mode`'s outage fallback; gateway: `mode_gate.py`'s fast-path check always returns `False`). See "Mode and permissions" under Module Settings below. |
+| `MODE_SERVICE_URL` | `http://localhost:8022` | Mode service (ATHENA-69). **Required** on both the orchestrator and the gateway — without it, mode/permission resolution degrades every request (orchestrator: `get_current_mode`'s outage fallback; gateway: `mode_gate.py`'s fast-path check always returns `False`). Also read by admin-backend for the admin modules page and the Guest Mode page's `GET /api/guest-mode/mode-status` proxy — unset there just means that proxy reports `mode_service_url_unset` rather than a live mode. See "Mode and permissions" under Module Settings below. |
 | `NOTIFICATIONS_SERVICE_URL` | `http://localhost:8050` | Notifications service |
 | `JARVIS_WEB_URL` | *(empty)* | jarvis-web API base for appliance/sensor/media lookups in the orchestrator's smart-home controller; empty skips them. |
 | `CONTROL_AGENT_URL` | `http://localhost:8099` | Service management API |
@@ -806,6 +806,111 @@ is not applied until admin-backend comes back** — the mode service keeps
 the older, possibly more permissive config in the meantime; this is an
 accepted residual risk, surfaced by `config_age_seconds` and the stale-log
 signal above, not silently hidden.
+
+**Guest-mode booking source.** The mode service decides guest
+vs owner from bookings, not from an in-process iCal poll of `calendar_url`
+directly.
+
+- **Sources.** `MODE_BOOKINGS_SOURCE` (default `auto`): `auto` reads the
+  admin backend's `calendar_events` (fed by `calendar_sources`, incl.
+  Lodgify) as the **required** source, plus the legacy `calendar_url`
+  iCal feed (if the Guest Mode page has one set) as **advisory-additive**
+  — its last successful fetch keeps adding guest time in every state
+  (fresh, stale, even expired), but its own freshness never degrades the
+  house. `admin`: admin only, no legacy iCal at all. `ical`: the legacy
+  URL is the only, required, source (for a deployment with no
+  admin-managed bookings) — an empty `calendar_url` in this mode is
+  `never_loaded` (logged once, `mode_bookings_source_misconfigured`), and
+  clearing or replacing the URL discards everything learned from the old
+  one, so the house degrades rather than trusting a feed nobody reads.
+- **Legacy iCal URL rules.** The mode service fetches `calendar_url`
+  through the same SSRF guard admin-backend applies to calendar-source
+  URLs: `https://` only, private/loopback targets blocked unless listed
+  in `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`, every redirect re-validated. A
+  plain `http://` URL is a failed fetch (never loaded). Events whose end
+  isn't after their start, or that last longer than 60 days, are dropped
+  at parse time and counted in one `mode_bookings_ical_events_dropped`
+  warning per fetch. The Guest Mode page warns when a `calendar_url` is
+  set but its source is `never_loaded` or `expired` (the mode-status
+  proxy passes each source's status and required flag through).
+- **Freshness.** Per source: `never_loaded` (no successful fetch ever) →
+  age of the last success > `MODE_BOOKINGS_MAX_AGE_SECONDS` (default
+  21600s / 6h, clamped to `[max(300, 2 x the iCal poll interval),
+  604800]`) → `expired` → else last attempt ok → `fresh` → else `stale`.
+  The fetch window always extends far enough into the future
+  (`now + max_age + buffer_before + 1h`) that a scheduled check-in
+  during an outage flips the house to guest on the mode service's own
+  clock, from the last-good snapshot, with no new fetch needed.
+- **Precedence.** Config never loaded → `degraded`. An active, unexpired
+  override → that mode. `enabled == false` → `owner` (bookings are still
+  fetched in the background, just not consulted). Any active booking from
+  a considered source → `guest`: the required source and an advisory
+  source are both considered in every state except `never_loaded`, since
+  old data can only add guest time. The required source `fresh` or
+  `stale` → `owner`. Otherwise → `degraded`. Only the required source's
+  status can produce `degraded`.
+- **Startup.** The mode service waits at most 5 s for its first booking
+  refresh before it starts serving; a slower fetch (e.g. a slow iCal feed)
+  finishes in the background and the house reports from whatever has
+  loaded so far.
+- **The stale-lookahead residual.** While the required source is merely
+  `stale` (a fetch failure after a prior success, still within
+  `max_age`), a booking created, moved earlier, or **extended** after
+  that last success is invisible until the next success. The house can
+  read `owner` for part of that window while a guest is actually
+  present — narrow (bounded by `max_age`) but real. Cancellations or
+  shortenings made after the last success keep the house `guest`, which
+  is the restrictive (safe) direction.
+- **No PIN escape from `degraded`.** Owner-PIN verification itself
+  requires the admin backend, so during the same outage that drives the
+  house to `degraded`, `POST /mode/override` also can't verify a PIN
+  (`503 owner_pin_verification_unavailable`). The only runtime lever is
+  raising `MODE_BOOKINGS_MAX_AGE_SECONDS` (`kubectl set env
+  deploy/athena-mode-service ...`), which restarts the pod and only helps
+  once the outage is already over.
+- **Stay windows.** Active iff `checkin - buffer_before <= now <
+  checkout + buffer_after` (half-open — a checkout and the next check-in
+  can be flush with no owner gap). Date-only and floating (no `Z`/no
+  `TZID`) booking times are localised in `DEFAULT_TIMEZONE` at write time
+  (admin sync) and read time (the mode service's own legacy-iCal parsing)
+  using PEP 495 `fold=0` semantics — no pytz. Feed blocks (`Blocked`,
+  `Closed Period`, `Not available`, `Airbnb (Not available)`, case-
+  insensitive substring match) are classified `status='blocked'` and
+  never count as a stay; an owner-set `cancelled`/`pending` status is
+  never overwritten by a re-sync. RRULE recurrence is **not** expanded in
+  the mode service's legacy-iCal path.
+- **Dedupe and suppression.** The same `(source, key)` collapses exactly;
+  the same local `(checkin date, checkout date)` pair collapses via a
+  union window (never shrinks guest time), which is how a Lodgify-synced
+  admin row and its legacy-iCal twin merge into one booking. A
+  soft-deleted or cancelled admin row's day pair suppresses a matching
+  legacy-iCal booking; admin rows are never suppressed by their own
+  deletion (the admin endpoint already excludes them). Residual: a
+  rebooking of the same days that exists **only** in the legacy iCal feed
+  (not in any admin source) after a soft-delete/cancel is suppressed too
+  — visible on the Guest Mode page's source list if it matters to you.
+- **Manual entries** are still entered and stored in the browser's local
+  timezone (unchanged) — the Guest Mode page's manual-entry modal shows
+  the property timezone alongside the input for reference.
+- **Visibility.** `/mode` reports `bookings_source`, `bookings_status`
+  (the required source's status, or `not_required` while guest mode is
+  disabled), `bookings_age_seconds`, `property_timezone`,
+  `property_timezone_valid`, and `bookings_sources` — a
+  `{source: {"status", "required"}}` map. `/health` carries the same plus
+  per-source counts (`bookings_by_source`) and the fetch window. A guest
+  `reason` names the booking by label, not by guest name: `<source> #<id>`
+  for an admin row (e.g. `lodgify #42`), `ical <key prefix>` for a
+  legacy-iCal booking. The Guest Mode page shows the
+  mode service's live mode and reason and refreshes every 30 s.
+- **The admin UI's mode-status panel** (`GET /api/guest-mode/mode-status`)
+  needs `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` to cover the mode service's
+  ClusterIP/CIDR, or it reports `{"reachable": false, "error":
+  "ssrf_blocked"}` instead of the live mode.
+- **Changing `DEFAULT_TIMEZONE`** requires restarting both admin-backend
+  and the mode service (both read it via `envFrom` at pod start), then a
+  re-sync — per-source (`POST /api/calendar-sources/{id}/sync`) or the
+  Calendar Sources page's "Sync all" button (now actually enqueues a sync
+  per enabled source, rather than being a no-op).
 
 **`GET /api/guest-mode/config`'s dual auth path.** This route now accepts
 either the existing OIDC/Bearer session (unchanged behavior, full

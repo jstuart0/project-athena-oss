@@ -23,6 +23,20 @@ from fastapi.testclient import TestClient
 
 from shared import config as config_module
 from shared.guest_policy import guest_baseline
+from shared.booking_window import Booking
+
+
+def _seed_admin_booking(ms, start, end, *, key="evt-1"):
+    """ATHENA-127: simulate a fresh, successful admin fetch with one active
+    booking, without going through BookingSources.refresh()'s HTTP path --
+    these tests only care about determine_mode()'s consumption of the
+    snapshot, not the fetch itself (that's test_mode_service_bookings.py)."""
+    state = ms.booking_sources._admin
+    state.last_good = [
+        Booking(id=1, key=key, source="admin", label=f"admin #1", start=start, end=end, is_test=False)
+    ]
+    state.last_success_at = time.monotonic()
+    state.last_attempt_ok = True
 
 _SERVICE_KEY = "test-mode-service-key"
 _HEADERS = {"X-Service-Key": _SERVICE_KEY}
@@ -35,24 +49,9 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _restore_structlog_after_module():
-    """Importing mode_service.main calls shared.logging_config.configure_logging(),
-    which globally replaces structlog's processors list and rebinds the
-    "service" contextvar (shared/logging_config.py:104-117) -- a process-wide
-    side effect. In production each service is its own process, so this never
-    collides; in this shared pytest session it would otherwise leak
-    "mode-service" into every later-running test file's log assertions.
-
-    Module-scoped (not function-scoped): restoring after *every* test would
-    invalidate mode_service.main.logger's cache_logger_on_first_use snapshot
-    mid-file, breaking this file's own structlog.testing.capture_logs()
-    tests. Snapshot once before this file's first test, restore once after
-    its last -- leaves the rest of the session untouched by this file's
-    import of mode_service.main.
-    """
-    snapshot = structlog.get_config()
+def _restore_structlog_after_module(isolated_structlog):
+    """See tests/unit/conftest.py::isolated_structlog."""
     yield
-    structlog.configure(**snapshot)
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +69,6 @@ def ms(_mode_service_env):
 
     ms_main.ADMIN_API_URL = "http://admin.test"
     ms_main.current_config = {}
-    ms_main.current_events = []
     ms_main.current_mode = "owner"
     ms_main.active_override = None
     ms_main._config_loaded = True
@@ -78,6 +76,9 @@ def ms(_mode_service_env):
     ms_main._config_loaded_at = None
     ms_main._service_key_warned = False
     ms_main._admin_http_client = None
+    # ATHENA-127: fresh booking-source state per test (the bookings fetch
+    # shares _admin_http_client, reset above).
+    ms_main.booking_sources = ms_main.BookingSources()
     yield ms_main
     if ms_main._admin_http_client is not None:
         asyncio.run(ms_main._admin_http_client.aclose())
@@ -172,11 +173,7 @@ class TestLastGoodConfig:
 class TestModeRecomputedPerRead:
     def test_disabling_guest_mode_returns_owner_without_restart(self, ms, client, monkeypatch):
         now = ms.datetime.now(ms.timezone.utc)
-        ms.current_events = [{
-            "uid": "evt-1", "summary": "Guest stay",
-            "dtstart": now - ms.timedelta(hours=1),
-            "dtend": now + ms.timedelta(hours=1),
-        }]
+        _seed_admin_booking(ms, now - ms.timedelta(hours=1), now + ms.timedelta(hours=1))
         ms.current_config = {"enabled": True, "buffer_before_checkin_hours": 0, "buffer_after_checkout_hours": 0}
         assert client.get("/mode", headers=_HEADERS).json()["mode"] == "guest"
 
@@ -202,11 +199,7 @@ class TestModeRecomputedPerRead:
 
     def test_admin_blip_during_booking_stays_guest(self, ms, client, monkeypatch):
         now = ms.datetime.now(ms.timezone.utc)
-        ms.current_events = [{
-            "uid": "evt-1", "summary": "Guest stay",
-            "dtstart": now - ms.timedelta(hours=1),
-            "dtend": now + ms.timedelta(hours=1),
-        }]
+        _seed_admin_booking(ms, now - ms.timedelta(hours=1), now + ms.timedelta(hours=1))
         ms.current_config = {"enabled": True, "buffer_before_checkin_hours": 0, "buffer_after_checkout_hours": 0}
         assert client.get("/mode", headers=_HEADERS).json()["mode"] == "guest"
 

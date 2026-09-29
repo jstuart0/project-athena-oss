@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Guest mode now reads bookings from the admin-managed calendar sources (Lodgify and iCal, whatever the Calendar Sources page has configured) instead of only an in-process poll of a single legacy iCal URL, so the house switches to guest during every synced booking. The legacy URL still works as an optional, additive supplement. `MODE_BOOKINGS_SOURCE` (`auto`/`admin`/`ical`) selects the required source and `MODE_BOOKINGS_MAX_AGE_SECONDS` how long its last good fetch is trusted; when the required source has never loaded or has expired, the house goes `degraded` rather than `owner`. Per-source booking freshness is visible on `/health`, `/mode` (`bookings_sources`), and the admin Guest Mode page, which now shows the mode service's actual mode and reason, refreshes every 30 s, and warns when a legacy calendar URL is set but not being read. See `docs/CONFIGURATION.md`, "Guest-mode booking source".
+- The Guest Mode page's Delete button now works on calendar-synced bookings too, not just manually-entered ones — useful for hiding a phantom or cancelled booking without waiting for the next sync.
+- "Sync all" on the Calendar Sources page now actually triggers a sync for every enabled source (it previously reported a count but did nothing).
+
+### Fixed
+
+- Date-only and floating (no explicit timezone) booking times from a calendar feed are now localised to the configured property timezone instead of being silently treated as UTC — a real check-in/check-out time could previously be off by several hours depending on the deployment's timezone.
+- A feed entry marked as a block (`Blocked`, `Closed Period`, `Not available`, etc. — an owner blocking dates for personal use) is no longer counted as a guest stay.
+- Editing a blocked booking on the Guest Mode page no longer clears its status; the Edit dialog offers "Blocked (not a stay)" and the API rejects unknown status values.
+- The mode service's legacy iCal URL is now fetched through the same SSRF guard as calendar sources (`https://` only; private hosts need `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`), and fetch failures no longer log the calendar URL.
+
 ### Security
 
 - The admin-backend session ID now rotates on every login path (local, demo-mode, OIDC callback), closing a session-fixation gap where a cookie value set before authentication remained valid afterward. Logout already invalidated the session correctly and is unchanged.
@@ -40,6 +53,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The mode service now actually loads the admin backend's guest-mode settings on startup — if calendar guest mode is enabled, every satellite is in guest mode during an active booking (the guest allowlist excludes `control`, so even lights need the owner PIN).
 - The owner voice-PIN override now requires a PIN set in the admin UI, is refused outright from public/unauthenticated surfaces, and locks per caller-trust-tier after repeated failed attempts. A PIN set before this release was hashed with unsalted SHA-256 and must be re-set once in the admin UI — the old hash is treated as "not configured", not silently accepted (the admin UI's guest-mode page now flags this).
 - jarvis-web's `JARVIS_PUBLIC_MODE` (default `guest`) determines whether an unauthenticated caller reaches the household's actual mode at all; set to `household` only for a LAN-only deployment not reachable from the internet.
+- With calendar guest mode enabled, the house now goes guest during bookings synced from the Calendar Sources page (Lodgify or iCal), not only during bookings in the legacy calendar URL. If the admin backend's bookings can't be read and the last good copy is older than `MODE_BOOKINGS_MAX_AGE_SECONDS` (default 6 h), the house reports `degraded`.
+- A legacy calendar URL using plain `http://` no longer loads — the mode service fetches it `https://`-only through the SSRF guard (private hosts need `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`). The Guest Mode page warns when that URL isn't being read. Events in that feed longer than 60 days, or whose end isn't after their start, are dropped.
+- Check-in/check-out instants for date-only and floating calendar entries are now computed in `DEFAULT_TIMEZONE` — confirm it's set to the property's zone before upgrading. Rows already in the database keep their old instants until their source re-syncs (the periodic sync, a per-source sync, or "Sync all"); re-syncing also reclassifies owner blocks as `blocked`. Changing `DEFAULT_TIMEZONE` later needs a restart of admin-backend and the mode service, then a re-sync.
 - LiveKit browser-facing room tokens now expire after `LIVEKIT_USER_TOKEN_TTL_MINUTES` (default 30) instead of the previous fixed 24-hour lifetime; server-side Athena participant tokens are unaffected (still 24h).
 - Deployment requirement: `SERVICE_API_KEY` on the mode service and `MODE_SERVICE_URL` on the orchestrator and gateway are now required for mode/permission resolution to work at all — without them every request degrades. Roll out admin-backend → mode service → orchestrator → jarvis-web → gateway, with `MODE_SERVICE_INGRESS_AUTH=warn` during the staged window (the shipped template leaves this commented out — code default is `enforce` — uncomment it only for the staged window, then remove it again). To roll back: set the mode service's `MODE_SERVICE_INGRESS_AUTH` to `warn` FIRST, then roll back the image(s) — an old (pre-upgrade) orchestrator that gets a `401` from an `enforce`-mode mode service fails OPEN to owner mode rather than refusing, so rolling back the orchestrator image before re-enabling `warn` is the actual risk, not merely a caller getting locked out.
 

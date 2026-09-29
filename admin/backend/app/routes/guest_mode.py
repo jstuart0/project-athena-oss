@@ -4,21 +4,25 @@ Guest Mode API routes.
 Provides configuration management for guest mode (Airbnb/vacation rental integration).
 Includes CRUD operations for manual guest entries and guest history tracking.
 """
-from typing import List, Optional
+from typing import Any, List, Literal, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr, field_validator
 from datetime import datetime, timedelta
 import hmac
+from urllib.parse import urlparse
 import re
 import structlog
 import uuid
+
+import httpx
 
 from app.database import get_db
 from app.auth.oidc import get_current_user, optional_security
 from app.models import User, GuestModeConfig, CalendarEvent, ModeOverride, AuditLog, OwnerPinAttempt
 from app.routes.internal import require_service_key_401
 from app.utils.passwords import hash_password
+from app.utils.rag_urls import check_ssrf_safe
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -241,7 +245,7 @@ class GuestEntryUpdate(BaseModel):
     guest_email: Optional[str] = None
     guest_phone: Optional[str] = None
     notes: Optional[str] = None
-    status: Optional[str] = None
+    status: Optional[Literal["confirmed", "pending", "cancelled", "blocked"]] = None
 
 
 class GuestEntryResponse(BaseModel):
@@ -702,6 +706,108 @@ async def get_upcoming_guests(
     return {"entries": [GuestEntryResponse.from_orm_event(e) for e in entries]}
 
 
+@router.get("/mode-status")
+async def get_mode_status(
+    current_user: User = Depends(get_current_user),
+):
+    """ATHENA-127 D7: proxy the mode service's actual decision for the
+    Guest Mode page. Always answers 200 -- reachability/errors are reported
+    in the body (`reachable: false`), not as an HTTP error, since a mode
+    service outage is exactly the state this panel needs to show.
+
+    The mode-service URL is operator-set (`MODE_SERVICE_URL`), so it goes
+    through the same `check_ssrf_safe` live-probe guard every other
+    operator-URL probe in this codebase uses (rag_urls.py) -- DNS can
+    change after the URL was configured.
+    """
+    if not current_user.has_permission('read'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    mode_service_url = get_config().mode_service_url
+    if not mode_service_url:
+        return {"reachable": False, "error": "mode_service_url_unset"}
+
+    url = f"{mode_service_url}/mode"
+    if not _is_well_formed_http_url(url):
+        return {"reachable": False, "error": "mode_service_url_invalid"}
+    allowed, reason = await check_ssrf_safe(url)
+    if not allowed:
+        return {"reachable": False, "error": "ssrf_blocked", "detail": reason}
+
+    # Only the exception class and HTTP status reach the response: exception
+    # text can carry URLs and query strings.
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(
+                url, headers={"X-Service-Key": get_config().service_api_key}
+            )
+            response.raise_for_status()
+            body = response.json()
+        if not isinstance(body, dict):
+            return {"reachable": False, "error": "malformed_response"}
+        return {
+            "reachable": True,
+            "mode": body.get("mode"),
+            "reason": body.get("reason"),
+            "override_active": body.get("override_active"),
+            "events_count": _int_or_none(body.get("events_count")),
+            "bookings_source": body.get("bookings_source"),
+            "bookings_status": body.get("bookings_status"),
+            "bookings_age_seconds": body.get("bookings_age_seconds"),
+            "property_timezone": body.get("property_timezone"),
+            "property_timezone_valid": body.get("property_timezone_valid"),
+            "bookings_sources": _source_statuses(body.get("bookings_sources")),
+        }
+    except httpx.HTTPStatusError as e:
+        return {"reachable": False, "error": "http_error", "detail": str(e.response.status_code)}
+    except Exception as e:
+        return {"reachable": False, "error": type(e).__name__}
+
+
+def _is_well_formed_http_url(url: str) -> bool:
+    """An http(s) URL with a host and an in-range port. Checked before
+    check_ssrf_safe, which reads parsed.port unguarded (a port like 99999
+    raises there) -- keeps this route's always-200 contract without
+    changing that helper for its other callers."""
+    try:
+        parsed = urlparse(url)
+        parsed.port
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+
+
+_SOURCE_NAME_RE = re.compile(r"[a-z0-9_]{1,32}")
+_SOURCE_STATUSES = frozenset({"fresh", "stale", "expired", "never_loaded"})
+
+
+def _source_statuses(raw: Any) -> dict:
+    """Per-source {status, required} from the mode service, reduced to
+    known shapes: names are short identifiers, statuses a fixed set
+    ("unknown" otherwise), required a strict boolean."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for name, info in raw.items():
+        if not isinstance(name, str) or not _SOURCE_NAME_RE.fullmatch(name) or not isinstance(info, dict):
+            continue
+        status = info.get("status")
+        out[name] = {
+            "status": status if status in _SOURCE_STATUSES else "unknown",
+            "required": info.get("required") is True,
+        }
+    return out
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @router.get("/events/{event_id}", response_model=CalendarEventResponse)
 async def get_calendar_event(
     event_id: int,
@@ -885,24 +991,29 @@ async def delete_guest_entry(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Soft delete a manual guest entry (only manual entries can be deleted)."""
+    """Soft delete a guest entry, manual or synced (ATHENA-127 codex r2
+    High / step 6b). Previously manual-only -- an owner had no remedy for a
+    phantom/cancelled synced (iCal/Lodgify) row, which D12/D13's suppression
+    depends on being deletable. The upserts never touch `deleted_at` (D13),
+    so a re-sync of the same external_id can't resurrect a deleted row.
+    """
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     db_entry = db.query(CalendarEvent).filter(
         CalendarEvent.id == event_id,
-        CalendarEvent.created_by == "manual",
         CalendarEvent.deleted_at.is_(None)
     ).first()
 
     if not db_entry:
         raise HTTPException(
             status_code=404,
-            detail="Manual guest entry not found or already deleted"
+            detail="Guest entry not found or already deleted"
         )
 
     # Store old values for audit
     old_value = db_entry.to_dict()
+    created_by = db_entry.created_by
 
     # Soft delete
     db_entry.deleted_at = datetime.utcnow()
@@ -919,7 +1030,7 @@ async def delete_guest_entry(
         request=request
     )
 
-    logger.info("guest_entry_deleted", entry_id=event_id)
+    logger.info("guest_entry_deleted", entry_id=event_id, created_by=created_by)
 
     return {"message": "Guest entry deleted", "id": event_id}
 

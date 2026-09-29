@@ -207,6 +207,9 @@ to stay complete — when you add a field, add its row here too.
 | `guest_baseline_allowed_intents` | `GUEST_BASELINE_ALLOWED_INTENTS` | `""` | Baseline used only when the admin-configured guest `allowed_intents` is empty (D22); empty admin list means "use this baseline", never "allow everything" |
 | `guest_baseline_allowed_domains` | `GUEST_BASELINE_ALLOWED_DOMAINS` | `""` | Baseline used only when the admin-configured guest `allowed_domains` is empty (D22) |
 | `mode_service_ingress_auth` | `MODE_SERVICE_INGRESS_AUTH` | `enforce` | `enforce`\|`warn`; gates the mode service's `/mode*` routes behind `X-Service-Key` (D15) |
+| `mode_bookings_source` | `MODE_BOOKINGS_SOURCE` | `auto` | `auto`\|`admin`\|`ical`; which booking source the mode service requires. `auto`: admin required, the legacy `calendar_url` iCal feed (if set) advisory-additive. Unknown values fall back to `auto` with one ERROR |
+| `mode_bookings_max_age_seconds` | `MODE_BOOKINGS_MAX_AGE_SECONDS` | `21600` | How long a source's last successful fetch is trusted before it's `expired`; clamped to `[max(300, 2 x the iCal poll interval), 604800]` |
+| `mode_service_url` | `MODE_SERVICE_URL` | `""` | Mode service base URL for admin-backend's Guest Mode status proxy; empty reports `mode_service_url_unset` instead of guessing |
 | `mode_override_lockout_threshold` | `MODE_OVERRIDE_LOCKOUT_THRESHOLD` | `5` | Failed owner-PIN verifications (per trust tier) before that tier locks out (D16/D25) |
 | `mode_override_lockout_minutes` | `MODE_OVERRIDE_LOCKOUT_MINUTES` | `30` | Owner-PIN lockout duration once the threshold is reached |
 | `ha_write_fanout_confirm_threshold` | `HA_WRITE_FANOUT_CONFIRM_THRESHOLD` | `6` | Distinct entities a non-command utterance may write before it needs a confirmation or explicit all/group wording; `0` disables |

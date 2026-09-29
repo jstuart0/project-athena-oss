@@ -10,7 +10,7 @@ Lodgify API Integration:
 - When a Lodgify API key is available, we fetch full guest details via API
 - API returns type: "Booking" for real guests, "ClosedPeriod" for manual blocks
 """
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.orm import Session
@@ -22,6 +22,15 @@ import os
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, CalendarSource, CalendarEvent, ExternalAPIKey
+from shared.config import get_config
+from shared.booking_window import (
+    DEFAULT_CHECKIN_TIME,
+    DEFAULT_CHECKOUT_TIME,
+    classify_summary,
+    feed_value_to_utc,
+    localize_stay,
+    resolve_property_tz,
+)
 
 logger = structlog.get_logger()
 
@@ -129,20 +138,11 @@ def get_lodgify_api_key(db: Session) -> Optional[str]:
         return None
 
 
-def parse_time_string(time_str: str) -> Tuple[int, int]:
-    """Parse 'HH:MM' time string to (hour, minute) tuple."""
-    try:
-        parts = time_str.split(':')
-        return int(parts[0]), int(parts[1])
-    except (ValueError, IndexError):
-        return 16, 0  # Default to 4:00 PM
-
-
 async def fetch_lodgify_reservations(
     api_key: str,
     timeout: float = 30.0,
-    checkin_time: str = '16:00',
-    checkout_time: str = '11:00'
+    checkin_time: str = DEFAULT_CHECKIN_TIME,
+    checkout_time: str = DEFAULT_CHECKOUT_TIME
 ) -> List[dict]:
     """
     Fetch reservations from Lodgify API with pagination support.
@@ -165,9 +165,9 @@ async def fetch_lodgify_reservations(
     limit = 50  # Fetch 50 at a time
     max_pages = 10  # Safety limit
 
-    # Parse check-in/check-out times
-    checkin_hour, checkin_min = parse_time_string(checkin_time)
-    checkout_hour, checkout_min = parse_time_string(checkout_time)
+    # ATHENA-127 D4/D5: house-local check-in/out times, localised in the
+    # property timezone rather than stamped as UTC (the pre-fix defect).
+    property_tz, _ = resolve_property_tz(get_config().default_timezone)
 
     async with httpx.AsyncClient() as client:
         for page in range(max_pages):
@@ -208,12 +208,14 @@ async def fetch_lodgify_reservations(
                 if not arrival or not departure:
                     continue
 
-                # Convert to datetime using configurable check-in/out times
+                # Convert to datetime using configurable check-in/out times,
+                # localised in the property timezone (ATHENA-127 D4/D5).
                 try:
-                    checkin = datetime.strptime(arrival, '%Y-%m-%d').replace(
-                        hour=checkin_hour, minute=checkin_min, second=0, tzinfo=timezone.utc)
-                    checkout = datetime.strptime(departure, '%Y-%m-%d').replace(
-                        hour=checkout_hour, minute=checkout_min, second=0, tzinfo=timezone.utc)
+                    arrival_date = datetime.strptime(arrival, '%Y-%m-%d').date()
+                    departure_date = datetime.strptime(departure, '%Y-%m-%d').date()
+                    checkin, checkout = localize_stay(
+                        arrival_date, departure_date, checkin_time, checkout_time, property_tz
+                    )
                 except ValueError:
                     logger.warning("invalid_date_format", arrival=arrival, departure=departure)
                     continue
@@ -286,7 +288,12 @@ async def fetch_ical_data(url: str, timeout: float = 30.0) -> str:
     return response.text
 
 
-def parse_ical_events(ical_data: str, source_type: str) -> List[dict]:
+def parse_ical_events(
+    ical_data: str,
+    source_type: str,
+    checkin_time: str = DEFAULT_CHECKIN_TIME,
+    checkout_time: str = DEFAULT_CHECKOUT_TIME,
+) -> List[dict]:
     """
     Parse iCal data and extract events.
 
@@ -297,6 +304,11 @@ def parse_ical_events(ical_data: str, source_type: str) -> List[dict]:
     - checkout (DTEND)
     - guest_name (extracted from SUMMARY/DESCRIPTION)
     - notes (DESCRIPTION)
+    - status ('confirmed' or 'blocked' -- ATHENA-127 D11)
+
+    Date-only values and floating (no Z/TZID) DATE-TIMEs are localised in
+    DEFAULT_TIMEZONE (ATHENA-127 D4/D5) via shared.booking_window, using
+    checkin_time/checkout_time for date-only values.
     """
     try:
         from icalendar import Calendar
@@ -309,6 +321,7 @@ def parse_ical_events(ical_data: str, source_type: str) -> List[dict]:
 
     events = []
     cal = Calendar.from_ical(ical_data)
+    property_tz, _ = resolve_property_tz(get_config().default_timezone)
 
     for component in cal.walk():
         if component.name == "VEVENT":
@@ -323,26 +336,14 @@ def parse_ical_events(ical_data: str, source_type: str) -> List[dict]:
             if not dtstart or not dtend:
                 continue
 
-            # Handle date vs datetime
-            start_dt = dtstart.dt
-            end_dt = dtend.dt
-
-            # Convert date to datetime if needed
-            if hasattr(start_dt, 'hour'):
-                checkin = start_dt
-            else:
-                checkin = datetime.combine(start_dt, datetime.min.time())
-
-            if hasattr(end_dt, 'hour'):
-                checkout = end_dt
-            else:
-                checkout = datetime.combine(end_dt, datetime.min.time())
-
-            # Make timezone aware if not already
-            if checkin.tzinfo is None:
-                checkin = checkin.replace(tzinfo=timezone.utc)
-            if checkout.tzinfo is None:
-                checkout = checkout.replace(tzinfo=timezone.utc)
+            # ATHENA-127 D4/D5: date-only and floating values are localised
+            # in the property timezone rather than stamped as UTC.
+            checkin = feed_value_to_utc(
+                dtstart.dt, default_hhmm=checkin_time, tz=property_tz
+            )
+            checkout = feed_value_to_utc(
+                dtend.dt, default_hhmm=checkout_time, tz=property_tz
+            )
 
             # Extract guest name based on source type
             guest_name = None
@@ -379,7 +380,8 @@ def parse_ical_events(ical_data: str, source_type: str) -> List[dict]:
                 'guest_name': guest_name,
                 'guest_phone': guest_phone,
                 'notes': description if description else None,
-                'source': source_type
+                'source': source_type,
+                'status': classify_summary(summary),
             })
 
     return events
@@ -666,7 +668,12 @@ async def test_calendar_source(
         ical_data = await fetch_ical_data(source.ical_url)
 
         # Parse events
-        events = parse_ical_events(ical_data, source.source_type)
+        events = parse_ical_events(
+            ical_data,
+            source.source_type,
+            checkin_time=source.default_checkin_time or DEFAULT_CHECKIN_TIME,
+            checkout_time=source.default_checkout_time or DEFAULT_CHECKOUT_TIME,
+        )
 
         # Get sample events (next 3 upcoming)
         now = datetime.now(timezone.utc)
@@ -798,15 +805,14 @@ async def sync_calendar_source(
     try:
         events = []
         sync_method = 'ical'
+        checkin_time = source.default_checkin_time or DEFAULT_CHECKIN_TIME
+        checkout_time = source.default_checkout_time or DEFAULT_CHECKOUT_TIME
 
         # For Lodgify sources, try API first for full guest details
         if source.source_type == 'lodgify':
             lodgify_api_key = get_lodgify_api_key(db)
             if lodgify_api_key:
                 try:
-                    # Use configurable check-in/out times from the source
-                    checkin_time = source.default_checkin_time or '16:00'
-                    checkout_time = source.default_checkout_time or '11:00'
                     events = await fetch_lodgify_reservations(
                         lodgify_api_key,
                         checkin_time=checkin_time,
@@ -824,15 +830,24 @@ async def sync_calendar_source(
                                   error=str(api_error))
                     # Fall back to iCal
                     ical_data = await fetch_ical_data(source.ical_url)
-                    events = parse_ical_events(ical_data, source.source_type)
+                    events = parse_ical_events(
+                        ical_data, source.source_type,
+                        checkin_time=checkin_time, checkout_time=checkout_time
+                    )
             else:
                 # No API key, use iCal
                 ical_data = await fetch_ical_data(source.ical_url)
-                events = parse_ical_events(ical_data, source.source_type)
+                events = parse_ical_events(
+                    ical_data, source.source_type,
+                    checkin_time=checkin_time, checkout_time=checkout_time
+                )
         else:
             # Non-Lodgify sources use iCal
             ical_data = await fetch_ical_data(source.ical_url)
-            events = parse_ical_events(ical_data, source.source_type)
+            events = parse_ical_events(
+                ical_data, source.source_type,
+                checkin_time=checkin_time, checkout_time=checkout_time
+            )
 
         added = 0
         updated = 0
@@ -854,6 +869,10 @@ async def sync_calendar_source(
                 existing.notes = event_data['notes']
                 existing.source = event_data['source']
                 existing.source_id = source.id
+                # ATHENA-127 D11: reclassify confirmed<->blocked on re-sync,
+                # but never overwrite an owner-set cancelled/pending status.
+                if existing.status in ('confirmed', 'blocked'):
+                    existing.status = event_data.get('status', existing.status)
                 existing.synced_at = datetime.now(timezone.utc)
                 updated += 1
             else:
@@ -930,13 +949,20 @@ async def sync_all_calendar_sources(
     """
     Trigger a sync for all enabled calendar sources.
 
-    Runs in the background to avoid timeout on large syncs.
+    Runs in the background to avoid timeout on large syncs. Each source is
+    synced in its own fresh DB session (ATHENA-127 bob H3d): the request
+    session in `db` above is gone by the time these background tasks run.
     """
     if not current_user.has_permission('write'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
+    from app.services.calendar_sync import sync_source_in_new_session
+
     # Get all enabled sources
     sources = db.query(CalendarSource).filter(CalendarSource.enabled == True).all()
+
+    for s in sources:
+        background_tasks.add_task(sync_source_in_new_session, s.id)
 
     logger.info("sync_all_triggered",
                user=current_user.username,
