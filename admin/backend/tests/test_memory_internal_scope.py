@@ -125,12 +125,16 @@ def test_public_memory_routes_require_auth(client, db, test_user, no_qdrant, mon
 
 
 def test_read_route_population():
-    from app.utils.service_auth import verify_service_or_oidc
+    """The read routes carry require_memory_reader, which authenticates
+    through verify_service_or_oidc before its own role check."""
+    import inspect
+    from app.routes.memories import require_memory_reader
 
+    assert "verify_service_or_oidc(" in inspect.getsource(require_memory_reader)
     gated = set()
     for route in memories_module.router.routes:
         deps = [d.call for d in route.dependant.dependencies]
-        if verify_service_or_oidc in deps:
+        if require_memory_reader in deps:
             gated.update((m, route.path) for m in route.methods)
     expected = {(m, p) for m, p, _ in READ_ROUTES}
     assert expected <= gated
@@ -284,3 +288,110 @@ def test_memory_scopes_table():
     assert lone.readable == ("global",) and lone.deletable == () and lone.create_scope is None
     for mode in ("public", "", None, "OWNER"):
         assert _memory_scopes(mode, None) == lone
+
+
+# ---------------------------------------------------------------------------
+# Fix round: no owner default (xander L1), the Bearer branch needs 'read'
+# and owner/operator (xander L2), guest-to-guest isolation (tessa H4)
+# ---------------------------------------------------------------------------
+
+def test_internal_create_without_mode_is_not_owner(client, db, no_qdrant):
+    resp = client.post(
+        "/api/memories/internal/create",
+        params={"content": "the garage code is 4417", "importance": 0.95},
+        headers=_key_headers(),
+    )
+    assert resp.json()["created"] is False
+    assert db.query(Memory).count() == 0
+
+
+def test_internal_forget_without_mode_deletes_nothing(client, db, qdrant_with):
+    owner = _memory(db, "garage owner note", "owner", None, "v-owner")
+    glob = _memory(db, "garage global note", "global", None, "v-global")
+    qdrant_with([owner, glob])
+    assert _forget(client).json()["deleted"] == 0
+    db.refresh(owner)
+    assert owner.is_deleted is False
+
+
+def test_internal_search_without_mode_reads_global_only(client, db, qdrant_with, monkeypatch):
+    fake = qdrant_with([])
+    monkeypatch.setattr(memories_module, "is_hybrid_search_enabled", lambda db: False)
+    resp = client.get("/api/memories/internal/search", params={"query": "garage"}, headers=_key_headers())
+    assert resp.status_code == 200
+    rendered = repr(fake.filters[-1])
+    assert "value='owner'" not in rendered and "value='global'" in rendered
+
+
+def test_keyword_search_default_mode_is_not_owner(db):
+    import asyncio
+
+    _memory(db, "garage owner secret", "owner")
+    _memory(db, "garage global fact", "global")
+    results = asyncio.run(memories_module.keyword_search_memories(db, ["garage"]))
+    assert [r["scope"] for r in results] == ["global"]
+
+
+def _bearer(user):
+    token = create_access_token({"user_id": user.id, "username": user.username, "role": user.role})
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.parametrize("method, path, body", READ_ROUTES, ids=[r[0] + " " + r[1] for r in READ_ROUTES])
+def test_bearer_reader_needs_read_permission(client, db, operator_user, no_qdrant, monkeypatch, method, path, body):
+    from app.models import User
+
+    monkeypatch.setattr("app.auth.oidc.DEV_MODE", False)
+    assert _call(client, method, path, body, _bearer(operator_user)).status_code == 200
+    monkeypatch.setitem(User.ROLE_PERMISSIONS, "operator", {"write", "view_audit"})
+    assert _call(client, method, path, body, _bearer(operator_user)).status_code == 403
+
+
+@pytest.mark.parametrize("method, path, body", READ_ROUTES, ids=[r[0] + " " + r[1] for r in READ_ROUTES])
+def test_viewer_cannot_read_memories(client, db, viewer_user, no_qdrant, monkeypatch, method, path, body):
+    monkeypatch.setattr("app.auth.oidc.DEV_MODE", False)
+    assert _call(client, method, path, body, _bearer(viewer_user)).status_code in (401, 403)
+
+
+def test_guest_keyword_search_isolated_between_guests(db):
+    import asyncio
+
+    _session(db, 5)
+    _session(db, 6)
+    _memory(db, "garage note from guest five", "guest", 5)
+    _memory(db, "garage note from guest six", "guest", 6)
+    _memory(db, "garage owner note", "owner")
+    _memory(db, "garage global note", "global")
+    results = asyncio.run(memories_module.keyword_search_memories(db, ["garage"], mode="guest", guest_session_id=5))
+    assert sorted(r["content"] for r in results) == ["garage global note", "garage note from guest five"]
+
+
+def _conditions(flt):
+    """Flatten a rendered Qdrant filter to (key, value) leaves per branch."""
+    branches = []
+    for cond in flt.should or []:
+        if getattr(cond, "must", None):
+            branches.append(tuple(sorted((c.key, c.match.value) for c in cond.must)))
+        else:
+            branches.append(((cond.key, cond.match.value),))
+    return sorted(branches)
+
+
+@pytest.mark.parametrize("path", ["/api/memories/search", "/api/memories/internal/search"])
+def test_guest_semantic_search_isolated_between_guests(client, db, qdrant_with, monkeypatch, path):
+    fake = qdrant_with([])
+    monkeypatch.setattr(memories_module, "is_hybrid_search_enabled", lambda db: False)
+    if path.endswith("/internal/search"):
+        client.get(path, params={"query": "garage", "mode": "guest", "guest_session_id": 5}, headers=_key_headers())
+    else:
+        client.post(path, json={"query": "garage", "mode": "guest", "guest_session_id": 5}, headers=_key_headers())
+    assert _conditions(fake.filters[-1]) == [
+        (("guest_session_id", 5), ("scope", "guest")),
+        (("scope", "global"),),
+    ]
+
+
+def test_forget_filter_isolated_between_guests(client, db, qdrant_with):
+    fake = qdrant_with([])
+    _forget(client, mode="guest", guest_session_id=5)
+    assert _conditions(fake.filters[-1]) == [(("guest_session_id", 5), ("scope", "guest"))]

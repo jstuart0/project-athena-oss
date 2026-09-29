@@ -5,6 +5,11 @@ test environment collides on the `main`/`app` package names on sys.path, so
 the admin side is read by introspection (AST) of its route declarations and
 auth dependency. The client side is exercised for real over an
 httpx.MockTransport.
+
+Waiver limit: this proves the client sends only parameter names the admin
+routes declare, with the right header name. It does not prove the admin
+side honours them (value types, scope behaviour); that is
+admin/backend/tests/test_memory_internal_scope.py's job, over the real app.
 """
 from __future__ import annotations
 
@@ -89,10 +94,15 @@ def test_memory_client_sends_service_key(recorder):
         assert request.headers.get("X-Service-Key") == SERVICE_KEY, request.url.path
 
 
-def test_forget_passes_guest_session_id(recorder):
+@pytest.mark.parametrize("route", ["/internal/search", "/internal/create", "/internal/forget"])
+def test_guest_session_id_and_mode_forwarded(recorder, route):
+    """Search, create and forget all forward the guest's session and an
+    explicit mode (admin-backend defaults a missing mode to guest)."""
     _exercise_client()
-    forget = next(r for r in recorder.requests if r.url.path.endswith("/internal/forget"))
-    assert parse_qs(urlparse(str(forget.url)).query)["guest_session_id"] == ["5"]
+    request = next(r for r in recorder.requests if r.url.path.endswith(route))
+    query = parse_qs(urlparse(str(request.url)).query)
+    assert query["guest_session_id"] == ["5"]
+    assert query["mode"] == ["guest"]
 
 
 def _route_params(tree, method, path):
@@ -120,7 +130,7 @@ def test_client_params_are_declared_by_admin_routes(recorder):
         params, deps = _route_params(tree, request.method.lower(), route_path)
         sent = set(parse_qs(urlparse(str(request.url)).query))
         assert sent <= params, (route_path, sent - params)
-        expected_dep = "require_service_key_401" if "/internal/" in route_path else "verify_service_or_oidc"
+        expected_dep = "require_service_key_401" if "/internal/" in route_path else "require_memory_reader"
         assert expected_dep in deps, route_path
 
 

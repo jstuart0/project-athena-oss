@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import false, func as sql_func, or_
 from pydantic import BaseModel, Field
@@ -244,6 +244,35 @@ def _scope_qdrant_filter(scope_names: Tuple[str, ...], guest_session_id: Optiona
     return Filter(should=conditions) if conditions else None
 
 
+MEMORY_READER_ROLES = frozenset({"owner", "operator"})
+
+
+async def require_memory_reader(
+    request: Request,
+    db: Session = Depends(get_db),
+    x_service_key: Optional[str] = Header(default=None, alias="X-Service-Key"),
+) -> None:
+    """Service key, or a signed-in user allowed to read household memories.
+
+    verify_service_or_oidc authenticates (401 on neither). On the user
+    branch the user also needs the 'read' permission and an owner/operator
+    role: memories of every scope are household data.
+    """
+    await verify_service_or_oidc(request, db, x_service_key)
+    if x_service_key:
+        return
+    from app.auth.oidc import get_optional_user, optional_security
+
+    user = await get_optional_user(
+        credentials=await optional_security(request),
+        x_api_key=request.headers.get("X-API-Key"),
+        db=db,
+        request=request,
+    )
+    if user is None or not user.has_permission("read") or user.role not in MEMORY_READER_ROLES:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+
 def _row_in_scopes(memory: Memory, scope_names: Tuple[str, ...], guest_session_id: Optional[int]) -> bool:
     if memory.scope == "guest":
         return "guest" in scope_names and memory.guest_session_id == guest_session_id
@@ -253,7 +282,7 @@ def _row_in_scopes(memory: Memory, scope_names: Tuple[str, ...], guest_session_i
 async def keyword_search_memories(
     db: Session,
     keywords: List[str],
-    mode: str = "owner",
+    mode: str = "guest",
     guest_session_id: Optional[int] = None,
     limit: int = 5
 ) -> List[Dict[str, Any]]:
@@ -567,7 +596,7 @@ async def create_memory(
     return new_memory.to_dict()
 
 
-@router.get("", dependencies=[Depends(verify_service_or_oidc)])
+@router.get("", dependencies=[Depends(require_memory_reader)])
 async def list_memories(
     scope: Optional[str] = Query(None, description="Filter by scope (global/owner/guest)"),
     guest_session_id: Optional[int] = Query(None, description="Filter by guest session"),
@@ -615,7 +644,7 @@ async def list_memories(
 # Static Routes (MUST be defined BEFORE dynamic /{memory_id} routes)
 # =============================================================================
 
-@router.post("/search", dependencies=[Depends(verify_service_or_oidc)])
+@router.post("/search", dependencies=[Depends(require_memory_reader)])
 async def search_memories(
     request: MemorySearchRequest,
     db: Session = Depends(get_db)
@@ -765,7 +794,7 @@ async def create_guest_session(
     return new_session.to_dict()
 
 
-@router.get("/guest-sessions/active", dependencies=[Depends(verify_service_or_oidc)])
+@router.get("/guest-sessions/active", dependencies=[Depends(require_memory_reader)])
 async def get_active_guest_session(db: Session = Depends(get_db)):
     """Get the currently active guest session (if any)."""
     session = db.query(GuestSession).filter(GuestSession.status == 'active').first()
@@ -842,7 +871,7 @@ async def seed_default_config(
 @router.get("/internal/search", dependencies=[Depends(require_service_key_401)])
 async def internal_memory_search(
     query: str,
-    mode: str = "owner",
+    mode: str = "guest",
     guest_session_id: Optional[int] = None,
     limit: int = Query(default=3, le=10),
     db: Session = Depends(get_db)
@@ -962,7 +991,7 @@ async def internal_memory_search(
 @router.post("/internal/create", dependencies=[Depends(require_service_key_401)])
 async def internal_create_memory(
     content: str,
-    mode: str = "owner",
+    mode: str = "guest",
     guest_session_id: Optional[int] = None,
     category: str = "conversation",
     importance: float = 0.5,
@@ -1056,7 +1085,7 @@ async def internal_create_memory(
 @router.post("/internal/forget", dependencies=[Depends(require_service_key_401)])
 async def internal_forget_memory(
     search_query: str,
-    mode: str = "owner",
+    mode: str = "guest",
     min_score: float = 0.4,
     guest_session_id: Optional[int] = None,
     db: Session = Depends(get_db)
@@ -1149,7 +1178,7 @@ async def internal_forget_memory(
 # Qdrant Health Static Route (before /{memory_id})
 # =============================================================================
 
-@router.get("/qdrant/health", dependencies=[Depends(verify_service_or_oidc)])
+@router.get("/qdrant/health", dependencies=[Depends(require_memory_reader)])
 async def qdrant_health():
     """Check Qdrant connection and collection status."""
     available = await check_qdrant_available()
