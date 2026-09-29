@@ -33,19 +33,9 @@ _HEADERS = {"X-Service-Key": _SERVICE_KEY}
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _restore_structlog_after_module():
-    """Importing mode_service.main calls shared.logging_config.configure_logging(),
-    which globally replaces structlog's processors list and rebinds the
-    "service" contextvar (shared/logging_config.py:104-117) -- a process-wide
-    side effect. In production each service is its own process, so this never
-    collides; in this shared pytest session it would otherwise leak
-    "mode-service" into every later-running test file's log assertions.
-    Module-scoped: snapshot once before this file's first test, restore
-    once after its last.
-    """
-    snapshot = structlog.get_config()
+def _restore_structlog_after_module(isolated_structlog):
+    """See tests/unit/conftest.py::isolated_structlog."""
     yield
-    structlog.configure(**snapshot)
 
 
 @pytest.fixture(autouse=True)
@@ -62,11 +52,11 @@ def ms(_mode_service_env):
     from mode_service import main as ms_main
 
     ms_main.current_config = {}
-    ms_main.current_events = []
     ms_main.current_mode = "owner"
     ms_main.active_override = None
     ms_main._config_loaded = True
     ms_main._last_load_ok = True
+    ms_main.booking_sources = ms_main.BookingSources()
     return ms_main
 
 
@@ -138,7 +128,7 @@ class TestGetPermissionsUnknownModeFailsClosed:
     """
 
     def test_unknown_stored_mode_yields_degraded_not_owner(self, ms, client, monkeypatch):
-        monkeypatch.setattr(ms, "determine_mode", lambda: "bogus-mode")
+        monkeypatch.setattr(ms, "determine_mode", lambda *a, **kw: "bogus-mode")
         ms.current_config = {}
 
         resp = client.get("/mode/permissions", headers=_HEADERS)
@@ -153,7 +143,7 @@ class TestGetPermissionsUnknownModeFailsClosed:
     def test_unknown_stored_mode_is_never_unrestricted(self, ms, client, monkeypatch):
         """The specific exploit shape: an unvalidated mode string must never
         produce owner's `restricted_entities: []` / unrestricted response."""
-        monkeypatch.setattr(ms, "determine_mode", lambda: "Owner")
+        monkeypatch.setattr(ms, "determine_mode", lambda *a, **kw: "Owner")
         ms.current_config = {}
 
         resp = client.get("/mode/permissions", headers=_HEADERS)
@@ -187,7 +177,7 @@ class TestDegradedPermissionsParity:
     def test_mode_service_degraded_matches_orchestrator_shape(self, ms, client, monkeypatch):
         from shared.guest_policy import GUEST_BASELINE_RESTRICTED_ENTITIES_DEFAULT
 
-        monkeypatch.setattr(ms, "determine_mode", lambda: "bogus-mode")
+        monkeypatch.setattr(ms, "determine_mode", lambda *a, **kw: "bogus-mode")
         ms.current_config = {}
         resp = client.get("/mode/permissions", headers=_HEADERS)
         ms_degraded = resp.json()

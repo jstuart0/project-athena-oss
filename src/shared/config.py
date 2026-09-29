@@ -496,6 +496,30 @@ class AthenaConfig(BaseSettings):
     # rollout; any other value behaves as "enforce" and logs an ERROR once.
     mode_service_ingress_auth: str = Field(default="enforce")
 
+    # mode_bookings_source (ATHENA-127 D1): which booking source(s) the
+    #   mode service reads. "auto" (default): admin is required, the legacy
+    #   `calendar_url` iCal feed (if set) is advisory-additive -- its
+    #   bookings can only add guest time, never remove it, and its own
+    #   freshness never degrades the house. "admin": admin only. "ical":
+    #   the legacy iCal URL is the only, required, source. An unrecognised
+    #   value falls back to "auto" with one ERROR log
+    #   (mode_bookings_source_unknown).
+    mode_bookings_source: str = Field(default="auto")
+    # mode_bookings_max_age_seconds (D6): how long a source's last
+    #   successful fetch is trusted before that source is classified
+    #   "expired". Clamped at use to [max(300, 2 x the iCal poll interval),
+    #   604800]. The runtime lever for an admin outage (R2) --
+    #   `kubectl set env deploy/athena-mode-service
+    #   MODE_BOOKINGS_MAX_AGE_SECONDS=<n>` restarts the pod, so it only
+    #   helps once the outage is already over.
+    mode_bookings_max_age_seconds: int = Field(default=21600)
+    # mode_service_url (D7): same env var `module_registry.py` already reads
+    #   for the admin UI's modules page -- read here too, by the new
+    #   GET /api/guest-mode/mode-status proxy (guest_mode.py). Empty means
+    #   the proxy reports `{"reachable": false, "error":
+    #   "mode_service_url_unset"}` rather than guessing a default.
+    mode_service_url: str = Field(default="")
+
     # mode_override_lockout_threshold / mode_override_lockout_minutes: D16/
     #   D25. Read by the admin backend's per-tier owner-PIN lockout counter
     #   (POST /api/internal/guest-mode/verify-pin) -- after this many failed

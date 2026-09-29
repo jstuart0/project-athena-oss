@@ -182,6 +182,36 @@ Every Home Assistant write is authorized against the request's server-derived pe
 
 One narrow, deliberate exception to invariant 1: `music_handler.py` holds a private `self._ha_raw` (the unwrapped client) used only for one bulk `/api/states` read (`get_playing_rooms_from_ha`/`check_music_assistant_players`) — reads are out of the guard's scope entirely (D10), and `tests/unit/test_ha_permission_guard.py` asserts `self._ha_raw` never calls `.call_service(` anywhere in `src/` and that its only attribute accesses are `.url`/`.headers` at that one site.
 
+**Guest-mode booking source (ATHENA-127)**
+
+While guest mode is enabled, the mode service decides guest vs owner from
+`calendar_events` (fed by `calendar_sources`, incl. Lodgify), not from
+polling the legacy single-iCal `calendar_url` field directly. `MODE_BOOKINGS_SOURCE`
+(`auto` default / `admin` / `ical`) picks the source(s): in `auto`, admin
+is required and a configured legacy `calendar_url` is advisory-additive
+only — its last-good bookings add guest time in every state except
+`never_loaded` (even `expired`), but its own freshness never degrades the
+house; it's fetched https-only through `shared.url_safety.safe_get`.
+Precedence: an active unexpired override wins; `enabled == false` →
+owner; any active considered booking → guest; the required source `fresh`
+or `stale` → owner; otherwise → `degraded`. `MODE_BOOKINGS_MAX_AGE_SECONDS`
+(default 21600s / 6h) bounds how long a source's last success is trusted
+before it's `expired`; while merely `stale` (a fetch failure after a prior
+success), an owner may still see a residual: a booking created, moved
+earlier, or extended after that last success is unknown for up to
+`max_age`, and the house can briefly read owner while a guest is actually
+present. There is no PIN-override escape from `degraded` during an
+admin-backend outage — PIN verification itself requires admin-backend.
+Feed blocks (`Blocked`/`Closed Period`/`Not available`/etc.) are classified
+`status='blocked'` and never count as a stay. Date-only and floating
+(no `Z`/`TZID`) booking times are localised in `DEFAULT_TIMEZONE` — see
+`src/shared/booking_window.py`. Mode-service sibling modules import as
+`mode_service.<name>` (e.g. `mode_service.bookings`), never a bare or
+relative import — the image copies the package to `/app/mode_service/`
+and runs uvicorn from `/app`, so anything else fails at container boot,
+not at test time. See `docs/CONFIGURATION.md` "Guest-mode booking source"
+for the full model.
+
 ---
 
 ### Control Agent
@@ -308,7 +338,7 @@ Key configuration in `manifests/athena-prod/config.yaml`:
 - `ATHENA_DEFAULT_MODEL` - Default model for seeding
 - `ATHENA_DOMAIN` / `CHAT_DOMAIN` - Your domain names
 - `ADMIN_API_URL` - Admin backend URL; resolution order (`ADMIN_API_URL` → `ADMIN_BACKEND_URL` → `ADMIN_INTERNAL_URL` [deprecated] → `LOCAL_DEV=true` → K8s auto-discovery → `""`) is centralized in `src/shared/admin_url.py::get_admin_url()` — do not add new `os.getenv("ADMIN_*_URL")` calls outside that module
-- Centralized configuration: 52 env vars (`OLLAMA_URL`, `LLM_SERVICE_URL`, `REDIS_URL`, `DATABASE_URL`, `SERVICE_API_KEY`, `DEFAULT_TIMEZONE`, `DEFAULT_CITY`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_VALIDATE_ISS`, `DEV_MODE`, `DEMO_MODE`, `CONTROL_AGENT_ENABLED`, `SERVICE_CONTROL_K8S_ENABLED`, `LOGIN_RATE_LIMIT_PER_MINUTE`, `LOGIN_LOCKOUT_THRESHOLD`, `LOGIN_LOCKOUT_MINUTES`, `LOGIN_MINIMUM_DELAY_MS`, `SERVICE_REGISTRY_WRITE_PER_MINUTE`, `SERVICE_REGISTRY_ENDPOINT_URL`, `HEALTH_POLL_INTERVAL_SECONDS`, `HEALTH_POLL_TIMEOUT_SECONDS`, `HEALTH_POLL_CONCURRENCY`, `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`, `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`, `CONTENT_FETCHER_ALLOW_BROWSER_FETCH`, `SESSION_MAX_COUNT`, `NEW_CONVERSATION_PER_MINUTE_PER_IP`, `TRUSTED_PROXY_CIDRS`, `NEW_CONVERSATION_RESET_GRACE_SECONDS`, `ORCHESTRATOR_INGRESS_AUTH`, `MUSIC_ASSISTANT_URL`, `SEARXNG_BASE_URL`, `TRANSIT_REGION_NAME`, `TRANSIT_GTFS_FEEDS`, `TRANSIT_STATIC_SERVICES`, `COMMUNITY_EVENTS_SOURCES`, `DEFAULT_AMTRAK_STATION`, `HA_SATELLITE_ROOM_MAP`, `HA_TV_ENTITIES`, `HA_MUSIC_PLAYERS`, `HA_BED_WARMER_ENTITIES`, `HA_LIGHT_GROUPS`, `HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES`, `GUEST_BASELINE_RESTRICTED_ENTITIES`, `GUEST_BASELINE_ALLOWED_INTENTS`, `GUEST_BASELINE_ALLOWED_DOMAINS`, `MODE_SERVICE_INGRESS_AUTH`, `MODE_OVERRIDE_LOCKOUT_THRESHOLD`, `MODE_OVERRIDE_LOCKOUT_MINUTES`, `LIVEKIT_USER_TOKEN_TTL_MINUTES`, `OVERRIDE_MAX_TIMEOUT_MINUTES`) are read via `get_config()` from `src/shared/config.py::AthenaConfig` (pydantic-settings BaseSettings). New env vars: prefer adding fields to `AthenaConfig` over inline `os.getenv` — see `CONTRIBUTING.md`.
+- Centralized configuration: 55 env vars (`OLLAMA_URL`, `LLM_SERVICE_URL`, `REDIS_URL`, `DATABASE_URL`, `SERVICE_API_KEY`, `DEFAULT_TIMEZONE`, `DEFAULT_CITY`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_VALIDATE_ISS`, `DEV_MODE`, `DEMO_MODE`, `CONTROL_AGENT_ENABLED`, `SERVICE_CONTROL_K8S_ENABLED`, `LOGIN_RATE_LIMIT_PER_MINUTE`, `LOGIN_LOCKOUT_THRESHOLD`, `LOGIN_LOCKOUT_MINUTES`, `LOGIN_MINIMUM_DELAY_MS`, `SERVICE_REGISTRY_WRITE_PER_MINUTE`, `SERVICE_REGISTRY_ENDPOINT_URL`, `HEALTH_POLL_INTERVAL_SECONDS`, `HEALTH_POLL_TIMEOUT_SECONDS`, `HEALTH_POLL_CONCURRENCY`, `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS`, `SITESCRAPER_ALLOWED_PRIVATE_HOSTS`, `CONTENT_FETCHER_ALLOW_BROWSER_FETCH`, `SESSION_MAX_COUNT`, `NEW_CONVERSATION_PER_MINUTE_PER_IP`, `TRUSTED_PROXY_CIDRS`, `NEW_CONVERSATION_RESET_GRACE_SECONDS`, `ORCHESTRATOR_INGRESS_AUTH`, `MUSIC_ASSISTANT_URL`, `SEARXNG_BASE_URL`, `TRANSIT_REGION_NAME`, `TRANSIT_GTFS_FEEDS`, `TRANSIT_STATIC_SERVICES`, `COMMUNITY_EVENTS_SOURCES`, `DEFAULT_AMTRAK_STATION`, `HA_SATELLITE_ROOM_MAP`, `HA_TV_ENTITIES`, `HA_MUSIC_PLAYERS`, `HA_BED_WARMER_ENTITIES`, `HA_LIGHT_GROUPS`, `HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES`, `GUEST_BASELINE_RESTRICTED_ENTITIES`, `GUEST_BASELINE_ALLOWED_INTENTS`, `GUEST_BASELINE_ALLOWED_DOMAINS`, `MODE_SERVICE_INGRESS_AUTH`, `MODE_OVERRIDE_LOCKOUT_THRESHOLD`, `MODE_OVERRIDE_LOCKOUT_MINUTES`, `LIVEKIT_USER_TOKEN_TTL_MINUTES`, `OVERRIDE_MAX_TIMEOUT_MINUTES`, `MODE_BOOKINGS_SOURCE`, `MODE_BOOKINGS_MAX_AGE_SECONDS`, `MODE_SERVICE_URL`) are read via `get_config()` from `src/shared/config.py::AthenaConfig` (pydantic-settings BaseSettings). New env vars: prefer adding fields to `AthenaConfig` over inline `os.getenv` — see `CONTRIBUTING.md`.
   - `SITESCRAPER_ALLOWED_PRIVATE_HOSTS` — comma-separated CIDRs/hostnames that the sitescraper SSRF guard will allow. Empty by default (all private IPs blocked). Warning: wide CIDRs like `10.0.0.0/8` bypass the guard for the entire RFC-1918 10/8 range; scope narrowly.
   - `CONTENT_FETCHER_ALLOW_BROWSER_FETCH` — `true` to enable Playwright-based browser fetching in ContentFetcher (default `false`). Playwright fetches bypass the SSRF guard for user-supplied URLs; only enable in isolated environments where the sitescraper allowlist is already locked down.
   - `HA_URL` — Home Assistant base URL for artist-search endpoints in `music_config.py`. No hardcoded default (previously a hardcoded maintainer IP). The server logs a warning at startup if unset; HA artist-search endpoints will return errors until this is set.

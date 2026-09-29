@@ -13,6 +13,7 @@ import structlog
 
 from app.database import SessionLocal, DEV_MODE
 from app.models import CalendarSource
+from shared.booking_window import DEFAULT_CHECKIN_TIME, DEFAULT_CHECKOUT_TIME
 
 logger = structlog.get_logger()
 
@@ -47,14 +48,14 @@ async def sync_single_source(source_id: int, db_session) -> bool:
 
         events = []
         sync_method = 'ical'
+        checkin_time = source.default_checkin_time or DEFAULT_CHECKIN_TIME
+        checkout_time = source.default_checkout_time or DEFAULT_CHECKOUT_TIME
 
         # For Lodgify sources, try API first for full guest details
         if source.source_type == 'lodgify':
             lodgify_api_key = get_lodgify_api_key(db_session)
             if lodgify_api_key:
                 try:
-                    checkin_time = source.default_checkin_time or '16:00'
-                    checkout_time = source.default_checkout_time or '11:00'
                     events = await fetch_lodgify_reservations(
                         lodgify_api_key,
                         checkin_time=checkin_time,
@@ -69,13 +70,22 @@ async def sync_single_source(source_id: int, db_session) -> bool:
                                   source_id=source_id,
                                   error=str(api_error))
                     ical_data = await fetch_ical_data(source.ical_url)
-                    events = parse_ical_events(ical_data, source.source_type)
+                    events = parse_ical_events(
+                        ical_data, source.source_type,
+                        checkin_time=checkin_time, checkout_time=checkout_time
+                    )
             else:
                 ical_data = await fetch_ical_data(source.ical_url)
-                events = parse_ical_events(ical_data, source.source_type)
+                events = parse_ical_events(
+                    ical_data, source.source_type,
+                    checkin_time=checkin_time, checkout_time=checkout_time
+                )
         else:
             ical_data = await fetch_ical_data(source.ical_url)
-            events = parse_ical_events(ical_data, source.source_type)
+            events = parse_ical_events(
+                ical_data, source.source_type,
+                checkin_time=checkin_time, checkout_time=checkout_time
+            )
 
         added = 0
         updated = 0
@@ -96,6 +106,10 @@ async def sync_single_source(source_id: int, db_session) -> bool:
                 existing.notes = event_data['notes']
                 existing.source = event_data['source']
                 existing.source_id = source.id
+                # ATHENA-127 D11: reclassify confirmed<->blocked on re-sync,
+                # but never overwrite an owner-set cancelled/pending status.
+                if existing.status in ('confirmed', 'blocked'):
+                    existing.status = event_data.get('status', existing.status)
                 existing.synced_at = datetime.now(timezone.utc)
                 updated += 1
             else:
@@ -162,6 +176,17 @@ async def sync_single_source(source_id: int, db_session) -> bool:
             db_session.rollback()
 
         return False
+
+
+async def sync_source_in_new_session(source_id: int) -> bool:
+    """Sync one source in a fresh SessionLocal(), for use as a
+    BackgroundTasks callback (ATHENA-127 bob H3d) -- the request session is
+    gone by the time a background task runs."""
+    db = SessionLocal()
+    try:
+        return await sync_single_source(source_id, db)
+    finally:
+        db.close()
 
 
 async def check_and_sync_sources():

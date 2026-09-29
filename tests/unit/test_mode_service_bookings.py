@@ -1,0 +1,721 @@
+"""ATHENA-127 Phase 3 -- src/mode_service/bookings.py: source selection,
+fetch/window/freshness (D6), and cadence/single-flight (D9).
+
+The admin backend is faked with httpx.MockTransport (module-level
+ADMIN_API_URL is monkeypatched to a dummy host, matching
+test_mode_service_config_and_pin.py's pattern for main.py's ADMIN_API_URL).
+"""
+from __future__ import annotations
+
+import asyncio
+import sys
+import time
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+sys.path.insert(0, "src")
+
+import httpx
+import pytest
+import structlog
+
+from shared import config as config_module
+from shared.booking_window import Booking
+
+NY = ZoneInfo("America/New_York")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_structlog_after_module(isolated_structlog):
+    """See tests/unit/conftest.py::isolated_structlog."""
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _mode_service_env(monkeypatch):
+    monkeypatch.setenv("SERVICE_API_KEY", "test-mode-service-key")
+    monkeypatch.setenv("DEV_MODE", "true")
+    config_module._clear_cache_for_tests()
+    yield
+    config_module._clear_cache_for_tests()
+
+
+@pytest.fixture
+def bs(_mode_service_env):
+    from mode_service.bookings import BookingSources
+    import mode_service.bookings as bookings_module
+
+    bookings_module.ADMIN_API_URL = "http://admin.test"
+    yield BookingSources()
+
+
+def _admin_handler(payload, status_code=200):
+    def handler(request):
+        return httpx.Response(status_code, json=payload)
+    return handler
+
+
+def _admin_client(handler):
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _ical_factory(handler):
+    def factory(timeout=30.0):
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=timeout)
+    return factory
+
+
+def _bookings_payload(rows, suppressed=None):
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "property_timezone": "America/New_York",
+        "property_timezone_valid": True,
+        "bookings": rows,
+        "suppressed": suppressed or [],
+    }
+
+
+def _row(id_, key, checkin, checkout, is_test=False, source="admin"):
+    return {
+        "id": id_, "key": key, "source": source,
+        "checkin": checkin.isoformat(), "checkout": checkout.isoformat(), "is_test": is_test,
+    }
+
+
+class TestSourceSelection:
+    def test_unknown_source_falls_back_to_auto_with_one_error(self, bs, monkeypatch, captured_logs):
+        monkeypatch.setenv("MODE_BOOKINGS_SOURCE", "bogus")
+        config_module._clear_cache_for_tests()
+
+        now = datetime.now(timezone.utc)
+        admin_client = _admin_client(_admin_handler(_bookings_payload([])))
+
+        asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=admin_client))
+        asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=admin_client))
+
+        errors = [e for e in captured_logs if e.get("event") == "mode_bookings_source_unknown"]
+        assert len(errors) == 1
+
+        snapshot = bs.snapshot({"enabled": True}, now=now, now_monotonic=time.monotonic())
+        assert snapshot.required == "admin"
+
+    def test_auto_without_calendar_url_has_no_advisory(self, bs):
+        now = datetime.now(timezone.utc)
+        admin_client = _admin_client(_admin_handler(_bookings_payload([])))
+        asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=admin_client))
+        snapshot = bs.snapshot({"enabled": True}, now=now, now_monotonic=time.monotonic())
+        assert snapshot.required == "admin"
+        assert snapshot.advisory == ()
+
+    def test_auto_with_calendar_url_has_ical_advisory(self, bs):
+        now = datetime.now(timezone.utc)
+        admin_client = _admin_client(_admin_handler(_bookings_payload([])))
+        ical_client_factory = _ical_factory(lambda r: httpx.Response(200, content=b"BEGIN:VCALENDAR\nEND:VCALENDAR\n"))
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        asyncio.run(bs.refresh(config, now=now, admin_client=admin_client, ical_client_factory=ical_client_factory))
+        snapshot = bs.snapshot(config, now=now, now_monotonic=time.monotonic())
+        assert snapshot.advisory == ("ical",)
+
+    def test_admin_only_mode_never_fetches_ical(self, bs, monkeypatch):
+        monkeypatch.setenv("MODE_BOOKINGS_SOURCE", "admin")
+        config_module._clear_cache_for_tests()
+
+        now = datetime.now(timezone.utc)
+        admin_client = _admin_client(_admin_handler(_bookings_payload([])))
+        called = []
+
+        def factory(timeout=30.0):
+            called.append(1)
+            raise AssertionError("ical should not be fetched in admin mode")
+
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        asyncio.run(bs.refresh(config, now=now, admin_client=admin_client, ical_client_factory=factory))
+        assert called == []
+        snapshot = bs.snapshot(config, now=now, now_monotonic=time.monotonic())
+        assert snapshot.required == "admin"
+        assert snapshot.advisory == ()
+
+    def test_ical_only_mode_required_source_is_ical(self, bs, monkeypatch):
+        monkeypatch.setenv("MODE_BOOKINGS_SOURCE", "ical")
+        config_module._clear_cache_for_tests()
+
+        now = datetime.now(timezone.utc)
+        ical_client_factory = _ical_factory(lambda r: httpx.Response(200, content=b"BEGIN:VCALENDAR\nEND:VCALENDAR\n"))
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        asyncio.run(bs.refresh(config, now=now, admin_client=None, ical_client_factory=ical_client_factory))
+        snapshot = bs.snapshot(config, now=now, now_monotonic=time.monotonic())
+        assert snapshot.required == "ical"
+
+    def test_ical_only_mode_empty_url_is_misconfigured_never_loaded(self, bs, monkeypatch, captured_logs):
+        monkeypatch.setenv("MODE_BOOKINGS_SOURCE", "ical")
+        config_module._clear_cache_for_tests()
+
+        now = datetime.now(timezone.utc)
+        config = {"enabled": True, "calendar_url": ""}
+
+        asyncio.run(bs.refresh(config, now=now, admin_client=None, ical_client_factory=_ical_factory(lambda r: httpx.Response(200))))
+
+        errors = [e for e in captured_logs if e.get("event") == "mode_bookings_source_misconfigured"]
+        assert len(errors) == 1
+        snapshot = bs.snapshot(config, now=now, now_monotonic=time.monotonic())
+        assert snapshot.statuses["ical"] == "never_loaded"
+
+
+class TestAdminFetch:
+    def test_request_carries_service_key_and_window(self, bs):
+        captured = {}
+
+        def handler(request):
+            captured["headers"] = dict(request.headers)
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json=_bookings_payload([]))
+
+        now = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        config = {
+            "enabled": True,
+            "buffer_before_checkin_hours": 2,
+            "buffer_after_checkout_hours": 1,
+            "calendar_poll_interval_minutes": 10,
+        }
+        asyncio.run(bs.refresh(config, now=now, admin_client=_admin_client(handler)))
+
+        assert captured["headers"].get("x-service-key") == "test-mode-service-key"
+
+        start = datetime.fromisoformat(captured["params"]["start"])
+        end = datetime.fromisoformat(captured["params"]["end"])
+        max_age = bs._max_age_seconds(config)
+        expected_end = now + timedelta(seconds=max_age) + timedelta(hours=2) + timedelta(hours=1)
+        assert end == expected_end
+
+    def test_non_200_is_failed_attempt_last_good_retained(self, bs):
+        now = datetime.now(timezone.utc)
+        good_row = _row(1, "k1", now - timedelta(hours=1), now + timedelta(hours=1))
+        asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=_admin_client(_admin_handler(_bookings_payload([good_row])))))
+
+        for status_code in (500, 404):
+            asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=_admin_client(_admin_handler({}, status_code=status_code))))
+            snapshot = bs.snapshot({"enabled": True}, now=now, now_monotonic=time.monotonic())
+            assert len(snapshot.bookings) == 1, f"status {status_code} should not clear last-good"
+            assert snapshot.statuses["admin"] == "stale"
+
+    def test_timeout_is_failed_attempt(self, bs):
+        now = datetime.now(timezone.utc)
+
+        def handler(request):
+            raise httpx.TimeoutException("timed out")
+
+        asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=_admin_client(handler)))
+        snapshot = bs.snapshot({"enabled": True}, now=now, now_monotonic=time.monotonic())
+        assert snapshot.statuses["admin"] == "never_loaded"
+
+    def test_malformed_body_is_failed_attempt(self, bs):
+        now = datetime.now(timezone.utc)
+
+        def handler(request):
+            return httpx.Response(200, text="not json")
+
+        asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=_admin_client(handler)))
+        snapshot = bs.snapshot({"enabled": True}, now=now, now_monotonic=time.monotonic())
+        assert snapshot.statuses["admin"] == "never_loaded"
+
+
+class TestFreshnessClassification:
+    def test_success_long_ago_no_retry_is_expired(self, bs, monkeypatch):
+        # The clamp floor is max(300, 2 x ical_poll_seconds); with the
+        # default 10-minute poll interval that floor is 1200s, so elapsing
+        # past it (not just past the requested "100") is what proves the
+        # clamp, not just the raw config value.
+        monkeypatch.setenv("MODE_BOOKINGS_MAX_AGE_SECONDS", "100")
+        config_module._clear_cache_for_tests()
+        config = {"enabled": True, "calendar_poll_interval_minutes": 10}
+        now = datetime.now(timezone.utc)
+        asyncio.run(bs.refresh(config, now=now, admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
+        effective_max_age = bs._max_age_seconds(config)
+        assert effective_max_age == 1200  # clamp floor, not the raw "100"
+
+        # Simulate time passing past the clamped max_age with no retry.
+        bs._admin.last_success_at -= (effective_max_age + 50)
+        bs._admin.last_attempt_at -= (effective_max_age + 50)
+        snapshot = bs.snapshot(config, now=now, now_monotonic=time.monotonic())
+        assert snapshot.statuses["admin"] == "expired"
+
+    def test_failed_with_recent_success_is_stale(self, bs, monkeypatch):
+        monkeypatch.setenv("MODE_BOOKINGS_MAX_AGE_SECONDS", "21600")
+        config_module._clear_cache_for_tests()
+        now = datetime.now(timezone.utc)
+        asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
+        asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=_admin_client(_admin_handler({}, status_code=500))))
+        snapshot = bs.snapshot({"enabled": True}, now=now, now_monotonic=time.monotonic())
+        assert snapshot.statuses["admin"] == "stale"
+
+    def test_max_age_clamps(self, bs, monkeypatch):
+        monkeypatch.setenv("MODE_BOOKINGS_MAX_AGE_SECONDS", "1")
+        config_module._clear_cache_for_tests()
+        config = {"calendar_poll_interval_minutes": 10}
+        assert bs._max_age_seconds(config) == max(300, 2 * 600)
+
+        monkeypatch.setenv("MODE_BOOKINGS_MAX_AGE_SECONDS", "99999999")
+        config_module._clear_cache_for_tests()
+        assert bs._max_age_seconds(config) == 604800
+
+    def test_lookback_formula(self, bs):
+        now = datetime.now(timezone.utc)
+        config = {"buffer_after_checkout_hours": 72}
+        start, end, before, after, max_age = bs._fetch_window(config, now)
+        expected_lookback = max(timedelta(days=2), timedelta(hours=72) + timedelta(days=1))
+        assert now - start == expected_lookback
+        assert expected_lookback == timedelta(days=4)
+
+
+class TestIcalFetch:
+    # A wide config (max clamped buffers/max_age) so the D6 fetch window
+    # comfortably covers `now` plus a few days either side -- these tests
+    # are about parsing/classification, not the window formula itself
+    # (covered by TestFreshnessClassification.test_lookback_formula).
+    _WIDE_CONFIG = {
+        "enabled": True,
+        "calendar_url": "https://example.com/x.ics",
+        "buffer_before_checkin_hours": 168,
+        "buffer_after_checkout_hours": 168,
+    }
+
+    def test_date_only_localised_to_new_york(self, bs, monkeypatch):
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "America/New_York")
+        monkeypatch.setenv("MODE_BOOKINGS_MAX_AGE_SECONDS", "604800")
+        config_module._clear_cache_for_tests()
+
+        ical = (
+            "BEGIN:VCALENDAR\r\n"
+            "BEGIN:VEVENT\r\n"
+            "UID:date-only@example.com\r\n"
+            "DTSTART;VALUE=DATE:20260701\r\n"
+            "DTEND;VALUE=DATE:20260705\r\n"
+            "SUMMARY:Reserved\r\n"
+            "END:VEVENT\r\n"
+            "END:VCALENDAR\r\n"
+        ).encode()
+
+        now = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        factory = _ical_factory(lambda r: httpx.Response(200, content=ical))
+        asyncio.run(bs.refresh(self._WIDE_CONFIG, now=now, admin_client=_admin_client(_admin_handler(_bookings_payload([]))), ical_client_factory=factory))
+
+        assert len(bs._ical.last_good) == 1
+        assert bs._ical.last_good[0].start.isoformat() == "2026-07-01T20:00:00+00:00"
+        assert bs._ical.last_good[0].end.isoformat() == "2026-07-05T15:00:00+00:00"
+
+    def test_floating_datetime_localised_to_new_york(self, bs, monkeypatch):
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "America/New_York")
+        monkeypatch.setenv("MODE_BOOKINGS_MAX_AGE_SECONDS", "604800")
+        config_module._clear_cache_for_tests()
+
+        ical = (
+            "BEGIN:VCALENDAR\r\n"
+            "BEGIN:VEVENT\r\n"
+            "UID:floating@example.com\r\n"
+            "DTSTART:20260701T160000\r\n"
+            "DTEND:20260705T110000\r\n"
+            "SUMMARY:Reserved\r\n"
+            "END:VEVENT\r\n"
+            "END:VCALENDAR\r\n"
+        ).encode()
+
+        now = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        factory = _ical_factory(lambda r: httpx.Response(200, content=ical))
+        asyncio.run(bs.refresh(self._WIDE_CONFIG, now=now, admin_client=_admin_client(_admin_handler(_bookings_payload([]))), ical_client_factory=factory))
+
+        assert len(bs._ical.last_good) == 1
+        assert bs._ical.last_good[0].start.isoformat() == "2026-07-01T20:00:00+00:00"
+        assert bs._ical.last_good[0].end.isoformat() == "2026-07-05T15:00:00+00:00"
+
+    def test_blocked_vevent_dropped(self, bs, monkeypatch):
+        monkeypatch.setenv("MODE_BOOKINGS_MAX_AGE_SECONDS", "604800")
+        config_module._clear_cache_for_tests()
+        ical = (
+            "BEGIN:VCALENDAR\r\n"
+            "BEGIN:VEVENT\r\n"
+            "UID:blocked@example.com\r\n"
+            "DTSTART;VALUE=DATE:20260701\r\n"
+            "DTEND;VALUE=DATE:20260705\r\n"
+            "SUMMARY:Blocked\r\n"
+            "END:VEVENT\r\n"
+            "END:VCALENDAR\r\n"
+        ).encode()
+        now = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        factory = _ical_factory(lambda r: httpx.Response(200, content=ical))
+        asyncio.run(bs.refresh(self._WIDE_CONFIG, now=now, admin_client=_admin_client(_admin_handler(_bookings_payload([]))), ical_client_factory=factory))
+        assert bs._ical.last_good == []
+        assert bs._ical.last_attempt_ok is True
+
+    def test_vevent_without_dtend_skipped_not_feed_fatal(self, bs, monkeypatch):
+        monkeypatch.setenv("MODE_BOOKINGS_MAX_AGE_SECONDS", "604800")
+        config_module._clear_cache_for_tests()
+        ical = (
+            "BEGIN:VCALENDAR\r\n"
+            "BEGIN:VEVENT\r\n"
+            "UID:no-dtend@example.com\r\n"
+            "DTSTART;VALUE=DATE:20260701\r\n"
+            "SUMMARY:Reserved\r\n"
+            "END:VEVENT\r\n"
+            "BEGIN:VEVENT\r\n"
+            "UID:good@example.com\r\n"
+            "DTSTART;VALUE=DATE:20260701\r\n"
+            "DTEND;VALUE=DATE:20260705\r\n"
+            "SUMMARY:Reserved\r\n"
+            "END:VEVENT\r\n"
+            "END:VCALENDAR\r\n"
+        ).encode()
+        now = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        factory = _ical_factory(lambda r: httpx.Response(200, content=ical))
+        asyncio.run(bs.refresh(self._WIDE_CONFIG, now=now, admin_client=_admin_client(_admin_handler(_bookings_payload([]))), ical_client_factory=factory))
+        assert len(bs._ical.last_good) == 1
+        assert bs._ical.last_attempt_ok is True
+
+
+class TestSingleFlightAndCadence:
+    def test_second_refresh_while_first_blocked_skips_request(self, bs):
+        call_count = {"n": 0}
+        release = asyncio.Event()
+
+        async def handler(request):
+            call_count["n"] += 1
+            await release.wait()
+            return httpx.Response(200, json=_bookings_payload([]))
+
+        now = datetime.now(timezone.utc)
+        admin_client = _admin_client(handler)
+
+        async def run():
+            first = asyncio.create_task(bs.refresh({"enabled": True}, now=now, admin_client=admin_client))
+            await asyncio.sleep(0.01)
+            second = asyncio.create_task(bs.refresh({"enabled": True}, now=now, admin_client=admin_client))
+            await asyncio.sleep(0.01)
+            release.set()
+            await first
+            await second
+
+        asyncio.run(run())
+        assert call_count["n"] == 1
+
+    def test_loop_fetches_when_enabled_is_false(self, bs, monkeypatch):
+        """One real bookings_refresh_loop iteration (sleep patched), with
+        guest mode disabled: the loop still calls refresh (D9)."""
+        from mode_service import main as ms_main
+
+        class _Stop(Exception):
+            pass
+
+        sleeps = []
+        calls = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) > 1:
+                raise _Stop
+
+        async def spy_refresh(config, *, now, admin_client, **kw):
+            calls.append((dict(config), admin_client))
+
+        monkeypatch.setattr(ms_main, "current_config", {"enabled": False})
+        monkeypatch.setattr(ms_main, "booking_sources", bs)
+        monkeypatch.setattr(ms_main, "_admin_http_client", None)
+        monkeypatch.setattr(bs, "refresh", spy_refresh)
+        monkeypatch.setattr(ms_main.asyncio, "sleep", fake_sleep)
+
+        with pytest.raises(_Stop):
+            asyncio.run(ms_main.bookings_refresh_loop())
+
+        assert sleeps == [60, 60]
+        assert len(calls) == 1
+        assert calls[0][0] == {"enabled": False}
+        assert calls[0][1] is ms_main._admin_http_client
+        asyncio.run(ms_main._admin_http_client.aclose())
+
+    def test_first_tick_fetches_ical_immediately(self, bs):
+        now = datetime.now(timezone.utc)
+        called = {"n": 0}
+
+        def handler(request):
+            called["n"] += 1
+            return httpx.Response(200, content=b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")
+
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics", "calendar_poll_interval_minutes": 60}
+        asyncio.run(bs.refresh(config, now=now, admin_client=_admin_client(_admin_handler(_bookings_payload([]))), ical_client_factory=_ical_factory(handler)))
+        assert called["n"] == 1
+
+
+_FIXED_NOW = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+_EMPTY_ICAL = b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"
+
+
+class TestFailSafeReconcile:
+    def test_required_ical_url_emptied_resets_to_never_loaded(self, bs, monkeypatch):
+        """A required iCal source whose URL is cleared must stop reporting
+        the old URL's freshness -- otherwise the house stays `owner` on a
+        feed nobody is reading any more."""
+        monkeypatch.setenv("MODE_BOOKINGS_SOURCE", "ical")
+        config_module._clear_cache_for_tests()
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=None,
+                               ical_client_factory=_ical_factory(lambda r: httpx.Response(200, content=_EMPTY_ICAL))))
+        assert bs.snapshot(config, now=_FIXED_NOW, now_monotonic=time.monotonic()).statuses["ical"] == "fresh"
+
+        emptied = {"enabled": True, "calendar_url": ""}
+        asyncio.run(bs.refresh(emptied, now=_FIXED_NOW, admin_client=None))
+        snapshot = bs.snapshot(emptied, now=_FIXED_NOW, now_monotonic=time.monotonic())
+        assert snapshot.statuses["ical"] == "never_loaded"
+        assert bs._ical.last_good == []
+        assert bs._ical.last_success_at is None
+
+    def test_in_flight_attempt_after_success_does_not_report_fresh(self, bs):
+        """A hung fetch must not keep reporting the previous attempt's
+        `fresh` for as long as it hangs."""
+        asyncio.run(bs.refresh({"enabled": True}, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
+
+        async def run():
+            release = asyncio.Event()
+
+            async def handler(request):
+                await release.wait()
+                return httpx.Response(200, json=_bookings_payload([]))
+
+            task = asyncio.create_task(bs.refresh({"enabled": True}, now=_FIXED_NOW,
+                                                  admin_client=_admin_client(handler)))
+            await asyncio.sleep(0.01)
+            during = bs.snapshot({"enabled": True}, now=_FIXED_NOW, now_monotonic=time.monotonic()).statuses["admin"]
+            release.set()
+            await task
+            after = bs.snapshot({"enabled": True}, now=_FIXED_NOW, now_monotonic=time.monotonic()).statuses["admin"]
+            return during, after
+
+        during, after = asyncio.run(run())
+        assert during == "stale"
+        assert after == "fresh"
+
+    @pytest.mark.parametrize("body", [
+        {},
+        {"bookings": "x"},
+        {"bookings": {}},
+        {"bookings": ""},
+        {"bookings": None},
+        [],
+        {"bookings": [], "suppressed": "x"},
+        {"bookings": [], "suppressed": {}},
+        {"bookings": [{"id": 1}]},
+    ], ids=["empty-object", "bookings-str", "bookings-dict", "bookings-empty-str",
+            "bookings-null", "top-level-list", "suppressed-str", "suppressed-dict", "row-missing-fields"])
+    def test_malformed_200_body_is_failed_attempt_not_zero_bookings(self, bs, body):
+        good_row = _row(1, "k1", _FIXED_NOW - timedelta(hours=1), _FIXED_NOW + timedelta(hours=1))
+        asyncio.run(bs.refresh({"enabled": True}, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([good_row])))))
+        asyncio.run(bs.refresh({"enabled": True}, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(body))))
+        assert bs._admin.last_attempt_ok is False
+        assert [b.id for b in bs._admin.last_good] == [1]
+        assert bs.snapshot({"enabled": True}, now=_FIXED_NOW, now_monotonic=time.monotonic()).statuses["admin"] == "stale"
+
+    def test_admin_label_is_source_and_id(self, bs):
+        row = _row(12, "k12", _FIXED_NOW, _FIXED_NOW + timedelta(days=1), source="lodgify")
+        asyncio.run(bs.refresh({"enabled": True}, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([row])))))
+        assert bs._admin.last_good[0].label == "lodgify #12"
+        # The Booking's own source stays the origin ("admin"): D13's
+        # (source, key) dedupe and non-ical label preference depend on it.
+        assert bs._admin.last_good[0].source == "admin"
+
+    def test_default_ical_fetch_goes_through_safe_get_https_only(self, bs, monkeypatch):
+        import mode_service.bookings as bookings_module
+
+        monkeypatch.setenv("SITESCRAPER_ALLOWED_PRIVATE_HOSTS", "10.9.0.0/16,cal.lan")
+        config_module._clear_cache_for_tests()
+        captured = {}
+
+        async def fake_safe_get(url, **kw):
+            captured["url"] = url
+            captured.update(kw)
+            return httpx.Response(200, content=_EMPTY_ICAL, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(bookings_module, "safe_get", fake_safe_get, raising=False)
+        config = {"enabled": True, "calendar_url": "https://calendar.invalid/x.ics"}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
+        assert captured.get("url") == "https://calendar.invalid/x.ics"
+        assert captured["allowed_schemes"] == frozenset({"https"})
+        assert list(captured["allowed_private_hosts"]) == ["10.9.0.0/16", "cal.lan"]
+        assert bs._ical.last_attempt_ok is True
+
+    def test_default_ical_fetch_refuses_plain_http(self, bs, captured_logs):
+        config = {"enabled": True, "calendar_url": "http://calendar.invalid/x.ics"}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
+        assert bs._ical.last_attempt_ok is False
+        failures = [e for e in captured_logs if e.get("event") == "mode_bookings_ical_fetch_failed"]
+        assert [e.get("error") for e in failures] == ["SsrfBlockedError"]
+
+    def test_bookings_module_owns_no_http_client(self):
+        import mode_service.bookings as bookings_module
+
+        assert not hasattr(bookings_module, "get_bookings_http_client")
+        assert not hasattr(bookings_module, "_bookings_http_client")
+
+
+class TestCoverageGaps:
+    """tessa's coverage gaps: each test here is paired with the mutant it
+    kills in the reconcile report."""
+
+    def test_clamped_buffer_before_bounds_the_request_window(self, bs):
+        captured = {}
+
+        def handler(request):
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(200, json=_bookings_payload([]))
+
+        config = {"enabled": True, "buffer_before_checkin_hours": 500, "calendar_poll_interval_minutes": 10}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=_admin_client(handler)))
+        end = datetime.fromisoformat(captured["params"]["end"])
+        max_age = bs._max_age_seconds(config)
+        assert end - _FIXED_NOW == timedelta(seconds=max_age) + timedelta(hours=168) + timedelta(hours=1)
+
+    def test_max_age_boundary_is_exclusive(self, bs):
+        config = {"enabled": True, "calendar_poll_interval_minutes": 10}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
+        max_age = bs._max_age_seconds(config)
+        success = bs._admin.last_success_at
+        at_limit = bs.snapshot(config, now=_FIXED_NOW, now_monotonic=success + max_age)
+        past_limit = bs.snapshot(config, now=_FIXED_NOW, now_monotonic=success + max_age + 0.5)
+        assert at_limit.statuses["admin"] == "fresh"
+        assert past_limit.statuses["admin"] == "expired"
+
+    def test_ical_not_refetched_before_its_poll_interval(self, bs):
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            return httpx.Response(200, content=_EMPTY_ICAL)
+
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics", "calendar_poll_interval_minutes": 10}
+        admin = _admin_client(_admin_handler(_bookings_payload([])))
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=admin, ical_client_factory=_ical_factory(handler)))
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=admin, ical_client_factory=_ical_factory(handler)))
+        assert calls["n"] == 1
+
+        bs._ical.last_attempt_at -= 601
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=admin, ical_client_factory=_ical_factory(handler)))
+        assert calls["n"] == 2
+
+    def test_ical_events_outside_the_fetch_window_are_dropped(self, bs, monkeypatch):
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "UTC")
+        config_module._clear_cache_for_tests()
+        ical = (
+            "BEGIN:VCALENDAR\r\n"
+            "BEGIN:VEVENT\r\nUID:inside@example.com\r\n"
+            "DTSTART;VALUE=DATE:20260630\r\nDTEND;VALUE=DATE:20260702\r\nSUMMARY:Reserved\r\nEND:VEVENT\r\n"
+            "BEGIN:VEVENT\r\nUID:long-past@example.com\r\n"
+            "DTSTART;VALUE=DATE:20260601\r\nDTEND;VALUE=DATE:20260605\r\nSUMMARY:Reserved\r\nEND:VEVENT\r\n"
+            "BEGIN:VEVENT\r\nUID:far-future@example.com\r\n"
+            "DTSTART;VALUE=DATE:20261201\r\nDTEND;VALUE=DATE:20261205\r\nSUMMARY:Reserved\r\nEND:VEVENT\r\n"
+            "END:VCALENDAR\r\n"
+        ).encode()
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=_admin_client(_admin_handler(_bookings_payload([]))),
+                               ical_client_factory=_ical_factory(lambda r: httpx.Response(200, content=ical))))
+        assert [b.start.date().isoformat() for b in bs._ical.last_good] == ["2026-06-30"]
+
+
+class TestFailureLogsCarryNoUrl:
+    _TOKEN = "s3cr3tTOKEN42"
+
+    def test_ical_http_error_logs_status_not_url(self, bs, captured_logs):
+        config = {"enabled": True, "calendar_url": f"https://calendar.example.com/export/{self._TOKEN}.ics?k={self._TOKEN}"}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([]))),
+                               ical_client_factory=_ical_factory(lambda r: httpx.Response(403))))
+        failures = [e for e in captured_logs if e.get("event") == "mode_bookings_ical_fetch_failed"]
+        assert len(failures) == 1
+        assert failures[0].get("status_code") == 403
+        rendered = " ".join(repr(e) for e in captured_logs)
+        assert self._TOKEN not in rendered
+        assert "calendar.example.com" not in rendered
+
+    def test_admin_transport_error_logs_class_not_text(self, bs, captured_logs):
+        def handler(request):
+            raise httpx.ConnectError(f"connect failed: {request.url}?token={self._TOKEN}")
+
+        asyncio.run(bs.refresh({"enabled": True}, now=_FIXED_NOW, admin_client=_admin_client(handler)))
+        failures = [e for e in captured_logs if e.get("event") == "mode_bookings_admin_fetch_failed"]
+        assert [e.get("error") for e in failures] == ["ConnectError"]
+        assert self._TOKEN not in " ".join(repr(e) for e in captured_logs)
+
+
+def _vevent(uid, dtstart, dtend, summary="Reserved"):
+    return (f"BEGIN:VEVENT\r\nUID:{uid}\r\nDTSTART;VALUE=DATE:{dtstart}\r\n"
+            f"DTEND;VALUE=DATE:{dtend}\r\nSUMMARY:{summary}\r\nEND:VEVENT\r\n")
+
+
+def _feed(*events):
+    return ("BEGIN:VCALENDAR\r\n" + "".join(events) + "END:VCALENDAR\r\n").encode()
+
+
+class TestRound2IcalHardening:
+    def _refresh(self, bs, config, feed):
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([]))),
+                               ical_client_factory=_ical_factory(lambda r: httpx.Response(200, content=feed))))
+
+    def test_snapshot_treats_cleared_or_replaced_url_as_never_loaded_before_next_refresh(self, bs, monkeypatch):
+        monkeypatch.setenv("MODE_BOOKINGS_SOURCE", "ical")
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "UTC")
+        config_module._clear_cache_for_tests()
+        old = {"enabled": True, "calendar_url": "https://old.example.com/x.ics"}
+        self._refresh(bs, old, _feed(_vevent("a@x", "20260630", "20260702")))
+        assert bs.snapshot(old, now=_FIXED_NOW, now_monotonic=time.monotonic()).statuses["ical"] == "fresh"
+
+        for changed in ({"enabled": True, "calendar_url": ""},
+                        {"enabled": True, "calendar_url": "https://new.example.com/y.ics"}):
+            snap = bs.snapshot(changed, now=_FIXED_NOW, now_monotonic=time.monotonic())
+            assert snap.statuses["ical"] == "never_loaded", changed
+            assert snap.bookings == []
+            assert snap.counts["ical"] == 0
+
+    def test_replaced_advisory_url_does_not_inherit_old_bookings(self, bs, monkeypatch):
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "UTC")
+        config_module._clear_cache_for_tests()
+        old = {"enabled": True, "calendar_url": "https://old.example.com/x.ics"}
+        self._refresh(bs, old, _feed(_vevent("a@x", "20260630", "20260702")))
+        assert len(bs.snapshot(old, now=_FIXED_NOW, now_monotonic=time.monotonic()).bookings) == 1
+        new = {"enabled": True, "calendar_url": "https://new.example.com/y.ics"}
+        snap = bs.snapshot(new, now=_FIXED_NOW, now_monotonic=time.monotonic())
+        assert snap.bookings == []
+        assert snap.statuses["ical"] == "never_loaded"
+
+    def test_inverted_and_overlong_events_dropped_at_parse_with_one_count_log_per_fetch(self, bs, monkeypatch, captured_logs):
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "UTC")
+        config_module._clear_cache_for_tests()
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        feed = _feed(
+            _vevent("good@x", "20260630", "20260702"),
+            _vevent("inverted-1@x", "20260702", "20260630"),
+            _vevent("inverted-2@x", "20260701", "20260701"),
+            _vevent("forever@x", "20260701", "20270701"),
+        )
+        self._refresh(bs, config, feed)
+        assert [b.start.date().isoformat() for b in bs._ical.last_good] == ["2026-06-30"]
+        drops = [e for e in captured_logs if e.get("event") == "mode_bookings_ical_events_dropped"]
+        assert len(drops) == 1
+        assert drops[0]["invalid_window"] == 2
+        assert drops[0]["too_long"] == 1
+
+        bs._ical.last_attempt_at -= 10_000
+        self._refresh(bs, config, feed)
+        drops = [e for e in captured_logs if e.get("event") == "mode_bookings_ical_events_dropped"]
+        assert len(drops) == 2
+        # The per-booking latch never sees feed-controlled inverted keys.
+        assert not [e for e in captured_logs if e.get("event") == "mode_booking_invalid_window"]
+
+    def test_exactly_60_day_event_is_kept(self, bs, monkeypatch):
+        monkeypatch.setenv("DEFAULT_TIMEZONE", "UTC")
+        config_module._clear_cache_for_tests()
+        config = {"enabled": True, "calendar_url": "https://example.com/x.ics"}
+        # 2026-06-30 16:00 -> 2026-08-29 16:00 is exactly 60 d; checkout at 11:00 is under.
+        self._refresh(bs, config, _feed(_vevent("long-ok@x", "20260630", "20260829")))
+        assert len(bs._ical.last_good) == 1

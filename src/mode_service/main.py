@@ -1,15 +1,23 @@
 """
 Mode Service - Guest Mode Detection and Management
 
-Polls Airbnb iCal calendar, detects active stays, and determines current mode (guest/owner).
-Provides API for orchestrator to query current mode and permissions.
+Reads bookings from the admin backend (required, `calendar_events` fed by
+`calendar_sources`), optionally supplemented by a legacy iCal URL, detects
+active stays, and determines current mode (guest/owner/degraded). Provides
+API for the orchestrator/gateway to query current mode and permissions.
+
+ATHENA-127: booking source selection, fetch/merge/freshness, and the D5
+stay-window math live in `mode_service.bookings` (BookingSources) and
+`shared.booking_window`. See docs/CONFIGURATION.md's "Guest-mode booking
+source" section for the full model (MODE_BOOKINGS_SOURCE, freshness
+classification, the stale-lookahead residual, precedence).
 
 API Endpoints:
 - GET /health - Health check (no auth)
 - GET /mode - Get current mode (guest/owner/degraded)
 - GET /mode/permissions - Get current permissions for mode (?mode=guest to force guest)
 - POST /mode/override - Manually override mode (voice PIN, verified by the admin backend)
-- GET /mode/events - Get current calendar events
+- GET /mode/events - Get current merged bookings
 
 Authentication (ATHENA-69 D15): every route below except /health requires
 X-Service-Key, gated by `mode_service_ingress_auth`
@@ -33,7 +41,6 @@ from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
 import httpx
-from icalendar import Calendar
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -53,6 +60,15 @@ from shared.guest_policy import (
     parse_json_array_env,
 )
 from shared.service_ingress_auth import make_require_service_caller
+from shared.booking_window import active_booking as bw_active_booking, clamp_buffer_hours
+
+# ATHENA-127 D10: imported as `mode_service.bookings` -- the image copies
+# this package to /app/mode_service/ and runs uvicorn from /app, so any
+# unqualified or dot-relative sibling-module import fails in the real
+# container even though it'd resolve in a test process with `src`
+# manually inserted onto sys.path. Verified by the Phase 3 real-image boot
+# gate and by tests/unit/test_mode_service_bookings.py's import-form check.
+from mode_service.bookings import BookingSources, BookingSnapshot
 
 # Configure logging
 logger = configure_logging("mode-service")
@@ -61,9 +77,14 @@ logger = configure_logging("mode-service")
 ADMIN_API_URL = get_admin_url()
 REDIS_URL = get_config().redis_url
 SERVICE_PORT = int(os.getenv("MODE_SERVICE_PORT", "8021"))
-POLL_INTERVAL_SECONDS = int(os.getenv("CALENDAR_POLL_INTERVAL_SECONDS", "600"))  # 10 minutes
 
 _POSTURE_REMINDER_INTERVAL_SECONDS = 3600
+_BOOKINGS_REFRESH_INTERVAL_SECONDS = 60
+# uvicorn serves nothing (not even /health) until lifespan startup returns,
+# and the liveness probe starts 10 s in: the initial booking refresh may
+# hold startup for at most this long. The admin fetch's own timeout is 3 s;
+# a slow iCal feed (30 s timeout) finishes in the background.
+_STARTUP_BOOKINGS_REFRESH_TIMEOUT_SECONDS = 5.0
 _CONFIG_STALE_AFTER_SECONDS = 15 * 60
 _CONFIG_STALE_LOG_INTERVAL_SECONDS = 10 * 60
 
@@ -73,9 +94,15 @@ _require_caller = make_require_service_caller("mode_service_ingress_auth", "mode
 # Global state
 cache: Optional[CacheClient] = None
 current_config: Dict[str, Any] = {}
-current_events: List[Dict[str, Any]] = []
 current_mode = "degraded"  # Safe default until the first config load succeeds (D38)
 active_override: Optional[Dict[str, Any]] = None
+
+# ATHENA-127: the merged/suppressed booking snapshot lives behind
+# BookingSources (mode_service.bookings) -- the admin fetch (required) and
+# the legacy iCal fetch (advisory-additive in "auto") with their own
+# freshness state (D6).
+booking_sources = BookingSources()
+_startup_bookings_refresh: Optional[asyncio.Task] = None
 
 # Last-good config tracking (D26/D37/D38).
 _config_loaded = False  # sticky True once any load has ever succeeded
@@ -126,6 +153,15 @@ class ModeResponse(BaseModel):
     override_active: bool
     events_count: int
     current_event: Optional[Dict[str, Any]] = None
+    # ATHENA-127: booking-source visibility (bob L1 -- property_timezone_valid
+    # included alongside the rest, not just on the mode-status proxy).
+    bookings_source: Optional[str] = None
+    bookings_status: Optional[str] = None
+    bookings_age_seconds: Optional[float] = None
+    property_timezone: Optional[str] = None
+    property_timezone_valid: Optional[bool] = None
+    # {source: {"status", "required"}} -- statuses only; counts stay on /health.
+    bookings_sources: Optional[Dict[str, Dict[str, Any]]] = None
 
 
 class PermissionsResponse(BaseModel):
@@ -156,7 +192,7 @@ class ModeOverrideRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
-    global cache
+    global cache, _startup_bookings_refresh
 
     # Startup
     logger.info("mode_service.startup", msg="Starting Mode Service")
@@ -169,8 +205,31 @@ async def lifespan(app: FastAPI):
     # Load initial config
     await load_config()
 
+    # ATHENA-127 D9: one booking refresh before serving traffic, so a fresh
+    # pod never answers /mode from an empty snapshot when admin is already
+    # reachable -- bounded, and shielded so a slow fetch keeps running in
+    # the background instead of being cancelled (a cancelled iCal attempt
+    # would not be retried until its poll interval elapsed).
+    _startup_bookings_refresh = asyncio.create_task(
+        booking_sources.refresh(
+            current_config,
+            now=datetime.now(timezone.utc),
+            admin_client=_get_admin_http_client(),
+        )
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(_startup_bookings_refresh),
+            timeout=_STARTUP_BOOKINGS_REFRESH_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "mode_bookings_startup_refresh_pending",
+            timeout_seconds=_STARTUP_BOOKINGS_REFRESH_TIMEOUT_SECONDS,
+        )
+
     # Start background tasks
-    asyncio.create_task(calendar_polling_loop())
+    asyncio.create_task(bookings_refresh_loop())
     asyncio.create_task(config_refresh_loop())
     asyncio.create_task(_posture_reminder_loop(_POSTURE_REMINDER_INTERVAL_SECONDS))
 
@@ -182,6 +241,8 @@ async def lifespan(app: FastAPI):
     logger.info("mode_service.shutdown", msg="Shutting down Mode Service")
     if cache:
         await cache.disconnect()
+    if _startup_bookings_refresh is not None and not _startup_bookings_refresh.done():
+        _startup_bookings_refresh.cancel()
     if _admin_http_client is not None:
         await _admin_http_client.aclose()
 
@@ -206,10 +267,55 @@ def _config_age_seconds() -> Optional[float]:
     return time.monotonic() - _config_loaded_at
 
 
+def _bookings_snapshot(now: datetime, now_monotonic: float) -> Optional[BookingSnapshot]:
+    """`booking_sources.snapshot()` needs a loaded config to read buffers/
+    calendar_url/poll-interval from; before the first config load there's
+    nothing meaningful to report."""
+    if not _config_loaded:
+        return None
+    return booking_sources.snapshot(current_config, now=now, now_monotonic=now_monotonic)
+
+
+def _source_statuses(snapshot: BookingSnapshot) -> Dict[str, Dict[str, Any]]:
+    return {
+        name: {"status": status, "required": name == snapshot.required}
+        for name, status in snapshot.statuses.items()
+    }
+
+
+def _bookings_status_for_response(snapshot: Optional[BookingSnapshot]) -> Optional[str]:
+    """The required source's freshness status, or "not_required" while
+    guest mode is disabled (bookings are still fetched per D9, but not
+    consulted for mode) -- distinct from "never_loaded", which means
+    disabled or not, nothing has ever been fetched."""
+    if snapshot is None:
+        return None
+    if not current_config.get('enabled'):
+        return "not_required"
+    return snapshot.statuses.get(snapshot.required, "never_loaded")
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint. Never behind ingress auth (D15)."""
-    _refresh_mode()
+    now = datetime.now(timezone.utc)
+    now_monotonic = time.monotonic()
+    _refresh_mode(now=now, now_monotonic=now_monotonic)
+
+    snapshot = _bookings_snapshot(now, now_monotonic)
+    bookings_by_source: Dict[str, Any] = {}
+    bookings_window = None
+    if snapshot is not None:
+        bookings_by_source = {
+            name: {**info, "count": snapshot.counts.get(name, 0)}
+            for name, info in _source_statuses(snapshot).items()
+        }
+        if snapshot.window is not None:
+            bookings_window = {
+                "start": snapshot.window[0].isoformat(),
+                "end": snapshot.window[1].isoformat(),
+            }
+
     return JSONResponse(
         status_code=200,
         content={
@@ -217,17 +323,23 @@ async def health_check():
             "service": "mode-service",
             "version": "1.0.0",
             "current_mode": current_mode,
-            "events_loaded": len(current_events),
+            "events_loaded": len(snapshot.bookings) if snapshot else 0,
             "config_enabled": current_config.get('enabled', False),
             "config_source": _config_source(),
             "config_age_seconds": _config_age_seconds(),
             "pin_authority": "admin",
             "ready": _config_loaded,
+            "bookings_source": snapshot.label if snapshot else None,
+            "bookings_status": _bookings_status_for_response(snapshot),
+            "bookings_age_seconds": snapshot.age_seconds if snapshot else None,
+            "bookings_by_source": bookings_by_source,
+            "bookings_window": bookings_window,
+            "property_timezone_valid": snapshot.property_timezone_valid if snapshot else None,
         }
     )
 
 
-def _refresh_mode() -> None:
+def _refresh_mode(now: Optional[datetime] = None, now_monotonic: Optional[float] = None) -> None:
     """Recompute `current_mode` from live state (D26: cheap, in-memory, run
     on every read). Cold start (D38): never owner/guest until the first
     admin-config load has succeeded at least once.
@@ -236,7 +348,7 @@ def _refresh_mode() -> None:
     if not _config_loaded:
         current_mode = "degraded"
         return
-    current_mode = determine_mode()
+    current_mode = determine_mode(now=now, now_monotonic=now_monotonic)
 
 
 @app.get("/mode", response_model=ModeResponse, dependencies=[Depends(_require_caller)])
@@ -247,15 +359,24 @@ async def get_current_mode():
     Returns:
         ModeResponse with mode, reason, and current event details
     """
-    _refresh_mode()
-    current_event = get_current_event()
+    now = datetime.now(timezone.utc)
+    now_monotonic = time.monotonic()
+    _refresh_mode(now=now, now_monotonic=now_monotonic)
+    current_event = get_current_event(now=now, now_monotonic=now_monotonic)
+    snapshot = _bookings_snapshot(now, now_monotonic)
 
     return ModeResponse(
         mode=current_mode,
-        reason=determine_mode_reason(),
+        reason=determine_mode_reason(now=now, now_monotonic=now_monotonic),
         override_active=active_override is not None,
-        events_count=len(current_events),
-        current_event=current_event
+        events_count=len(snapshot.bookings) if snapshot else 0,
+        current_event=current_event,
+        bookings_source=snapshot.label if snapshot else None,
+        bookings_status=_bookings_status_for_response(snapshot),
+        bookings_age_seconds=snapshot.age_seconds if snapshot else None,
+        property_timezone=snapshot.property_timezone if snapshot else None,
+        property_timezone_valid=snapshot.property_timezone_valid if snapshot else None,
+        bookings_sources=_source_statuses(snapshot) if snapshot else None,
     )
 
 
@@ -470,15 +591,29 @@ async def override_mode(request: ModeOverrideRequest):
 @app.get("/mode/events", dependencies=[Depends(_require_caller)])
 async def get_events():
     """
-    Get current calendar events.
+    Get the current merged/suppressed booking snapshot (ATHENA-127).
 
     Returns:
-        List of calendar events with checkin/checkout times
+        List of bookings with checkin/checkout times
     """
+    now = datetime.now(timezone.utc)
+    now_monotonic = time.monotonic()
+    snapshot = _bookings_snapshot(now, now_monotonic)
+    bookings = snapshot.bookings if snapshot else []
+    events = [
+        {
+            'uid': b.key,
+            'summary': b.label,
+            'dtstart': b.start.isoformat(),
+            'dtend': b.end.isoformat(),
+            'is_test': b.is_test,
+        }
+        for b in bookings
+    ]
     return {
-        "events": current_events,
-        "count": len(current_events),
-        "current_event": get_current_event()
+        "events": events,
+        "count": len(events),
+        "current_event": get_current_event(now=now, now_monotonic=now_monotonic)
     }
 
 
@@ -561,69 +696,51 @@ async def _posture_reminder_loop(interval: float) -> None:
         await asyncio.sleep(interval)
 
 
-async def calendar_polling_loop():
-    """Periodically poll iCal calendar for events."""
-    global current_events, current_mode
-
+async def bookings_refresh_loop():
+    """ATHENA-127 D9: ticks every 60 s and fetches regardless of `enabled`
+    -- enabling guest mode must never start from a `never_loaded` snapshot
+    (bob M2-i)."""
     while True:
+        await asyncio.sleep(_BOOKINGS_REFRESH_INTERVAL_SECONDS)
         try:
-            if current_config.get('enabled') and current_config.get('calendar_url'):
-                # Fetch iCal feed
-                calendar_url = current_config['calendar_url']
-                logger.info("mode_service.calendar.fetching", url=calendar_url[:50] + "...")
-
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.get(calendar_url)
-                    response.raise_for_status()
-
-                    # Parse iCal
-                    cal = Calendar.from_ical(response.content)
-                    events = []
-
-                    for component in cal.walk():
-                        if component.name == "VEVENT":
-                            dtstart = component.get('dtstart').dt
-                            dtend = component.get('dtend').dt
-
-                            # Convert to datetime with timezone if needed
-                            if not isinstance(dtstart, datetime):
-                                dtstart = datetime.combine(dtstart, datetime.min.time()).replace(tzinfo=timezone.utc)
-                            if not isinstance(dtend, datetime):
-                                dtend = datetime.combine(dtend, datetime.min.time()).replace(tzinfo=timezone.utc)
-
-                            events.append({
-                                'uid': str(component.get('uid')),
-                                'summary': str(component.get('summary', '')),
-                                'dtstart': dtstart,
-                                'dtend': dtend,
-                            })
-
-                    current_events = events
-                    logger.info("mode_service.calendar.loaded", count=len(events))
-
-                    # Update current mode
-                    _refresh_mode()
-
+            await booking_sources.refresh(
+                current_config,
+                now=datetime.now(timezone.utc),
+                admin_client=_get_admin_http_client(),
+            )
         except Exception as e:
-            logger.error("mode_service.calendar.fetch_failed", error=str(e), exc_info=True)
-
-        # Wait for next poll
-        poll_interval = current_config.get('calendar_poll_interval_minutes', 10) * 60
-        await asyncio.sleep(poll_interval)
+            logger.error("mode_bookings_refresh_loop_error", error=type(e).__name__)
 
 
-def determine_mode() -> str:
+def _clamped_buffers() -> tuple[timedelta, timedelta]:
+    before = timedelta(hours=clamp_buffer_hours(current_config.get('buffer_before_checkin_hours', 2)))
+    after = timedelta(hours=clamp_buffer_hours(current_config.get('buffer_after_checkout_hours', 1)))
+    return before, after
+
+
+def determine_mode(now: Optional[datetime] = None, now_monotonic: Optional[float] = None) -> str:
     """
-    Determine current mode based on calendar events and overrides.
+    Determine current mode from bookings and overrides (ATHENA-127).
+
+    Normative precedence:
+      1. (handled by _refresh_mode) config never loaded -> degraded.
+      2. an active, unexpired override -> that mode.
+      3. enabled == false -> owner.
+      4. any considered booking active (D5/D6 rule 1) -> guest.
+      5. the required booking source is fresh or stale -> owner.
+      6. otherwise -> degraded.
 
     Returns:
-        'guest' or 'owner'
+        'guest', 'owner', or 'degraded'
     """
     global active_override
 
+    now = now if now is not None else datetime.now(timezone.utc)
+    now_monotonic = now_monotonic if now_monotonic is not None else time.monotonic()
+
     # Check for active override
     if active_override:
-        if datetime.now(timezone.utc) < active_override['expires_at']:
+        if now < active_override['expires_at']:
             stored_mode = active_override['mode']
             if stored_mode not in ("owner", "guest"):
                 # ATHENA-69 Pass H2 (xander delta review, High): belt and
@@ -631,7 +748,7 @@ def determine_mode() -> str:
                 # a stored value that predates this fix, or that somehow
                 # reached this dict outside override_mode(), must not be
                 # returned verbatim. Treat as if there were no override at
-                # all (fall through to calendar-based determination) rather
+                # all (fall through to booking-based determination) rather
                 # than propagating an unvalidated mode string.
                 logger.error("active_override_invalid_mode_discarded", stored_mode=stored_mode)
                 active_override = None
@@ -641,64 +758,72 @@ def determine_mode() -> str:
             # Override expired
             active_override = None
 
-    # If guest mode disabled, always owner mode
+    # If guest mode disabled, always owner mode -- bookings are still
+    # fetched (D9), just not consulted.
     if not current_config.get('enabled'):
         return "owner"
 
-    # Check for active stay
-    now = datetime.now(timezone.utc)
-    buffer_before = timedelta(hours=current_config.get('buffer_before_checkin_hours', 2))
-    buffer_after = timedelta(hours=current_config.get('buffer_after_checkout_hours', 1))
+    snapshot = booking_sources.snapshot(current_config, now=now, now_monotonic=now_monotonic)
+    buffer_before, buffer_after = _clamped_buffers()
 
-    for event in current_events:
-        checkin = event['dtstart'] - buffer_before
-        checkout = event['dtend'] + buffer_after
+    if bw_active_booking(snapshot.bookings, now, buffer_before, buffer_after):
+        return "guest"
 
-        if checkin <= now <= checkout:
-            return "guest"
+    if snapshot.statuses.get(snapshot.required) in ("fresh", "stale"):
+        return "owner"
 
-    return "owner"
+    return "degraded"
 
 
-def determine_mode_reason() -> str:
+def determine_mode_reason(now: Optional[datetime] = None, now_monotonic: Optional[float] = None) -> str:
     """Get human-readable reason for current mode."""
     global active_override
+
+    now = now if now is not None else datetime.now(timezone.utc)
+    now_monotonic = now_monotonic if now_monotonic is not None else time.monotonic()
 
     if not _config_loaded:
         return "Mode service starting up (config not yet loaded)"
 
-    if active_override:
+    if active_override and now < active_override['expires_at']:
         return "Manual override via voice PIN"
 
     if not current_config.get('enabled'):
         return "Guest mode disabled"
 
-    event = get_current_event()
+    event = get_current_event(now=now, now_monotonic=now_monotonic)
     if event:
-        return f"Active booking: {event['summary']}"
+        prefix = "[TEST] " if event.get('is_test') else ""
+        return f"{prefix}Active booking: {event['summary']} (until {event['checkout']})"
 
-    return "No active bookings"
+    snapshot = booking_sources.snapshot(current_config, now=now, now_monotonic=now_monotonic)
+    required_status = snapshot.statuses.get(snapshot.required)
+    if required_status in ("fresh", "stale"):
+        return "No active bookings"
+
+    return f"Booking data unavailable ({snapshot.required}: {required_status})"
 
 
-def get_current_event() -> Optional[Dict[str, Any]]:
-    """Get the currently active calendar event, if any."""
-    now = datetime.now(timezone.utc)
-    buffer_before = timedelta(hours=current_config.get('buffer_before_checkin_hours', 2))
-    buffer_after = timedelta(hours=current_config.get('buffer_after_checkout_hours', 1))
+def get_current_event(now: Optional[datetime] = None, now_monotonic: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Get the currently active booking, if any (D3 label as `summary`,
+    `uid` = the opaque booking key)."""
+    now = now if now is not None else datetime.now(timezone.utc)
+    now_monotonic = now_monotonic if now_monotonic is not None else time.monotonic()
 
-    for event in current_events:
-        checkin = event['dtstart'] - buffer_before
-        checkout = event['dtend'] + buffer_after
+    snapshot = booking_sources.snapshot(current_config, now=now, now_monotonic=now_monotonic)
+    buffer_before, buffer_after = _clamped_buffers()
 
-        if checkin <= now <= checkout:
-            return {
-                'summary': event['summary'],
-                'checkin': event['dtstart'].isoformat(),
-                'checkout': event['dtend'].isoformat(),
-                'uid': event['uid']
-            }
+    active = bw_active_booking(snapshot.bookings, now, buffer_before, buffer_after)
+    if not active:
+        return None
 
-    return None
+    return {
+        'summary': active.label,
+        'checkin': active.start.isoformat(),
+        'checkout': active.end.isoformat(),
+        'uid': active.key,
+        'is_test': active.is_test,
+    }
 
 
 if __name__ == "__main__":
