@@ -10,7 +10,7 @@ Lodgify API Integration:
 - When a Lodgify API key is available, we fetch full guest details via API
 - API returns type: "Booking" for real guests, "ClosedPeriod" for manual blocks
 """
-from typing import List, Optional
+from typing import List, Literal, Optional
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
@@ -120,6 +120,8 @@ class SyncResponse(BaseModel):
     events_added: int = 0
     events_updated: int = 0
     events_removed: int = 0
+    events_matched_deleted: int = 0
+    events_rekeyed: int = 0
 
 
 # ============================================================================
@@ -196,26 +198,81 @@ def _audit(db: Session, user: User, request: Optional[Request], action: str,
         success=True,
     ))
 
-def get_lodgify_api_key(db: Session) -> Optional[str]:
-    """
-    Get Lodgify API key from external_api_keys table.
+def safe_error(exc: BaseException) -> dict:
+    """The only form in which an exception reaches a log line or a status
+    string in the calendar modules: its class and, when it has one, its
+    HTTP status. Never the text -- httpx messages embed the feed URL (and
+    its token), SQLAlchemy errors embed bound parameters."""
+    http_status = None
+    if isinstance(exc, httpx.HTTPStatusError):
+        http_status = exc.response.status_code
+    elif isinstance(exc, HTTPException):
+        http_status = exc.status_code
+    return {"error_class": type(exc).__name__, "http_status": http_status}
 
-    Returns decrypted API key or None if not configured.
+
+def describe_error(exc: BaseException) -> str:
+    """`<Class>` or `<Class> HTTP <n>`, for user-facing status text."""
+    info = safe_error(exc)
+    suffix = f" HTTP {info['http_status']}" if info['http_status'] is not None else ""
+    return f"{info['error_class']}{suffix}"
+
+
+KeyStatus = Literal["absent", "ok", "unreadable"]
+_multiple_keys_logged: set = set()
+
+
+def resolve_lodgify_api_key(db: Session) -> tuple:
+    """(status, key) for the Lodgify API key. Fails closed:
+
+    - no enabled `lodgify` row -> ("absent", None);
+    - an empty ciphertext, a decrypt error, or a decrypted None/blank value
+      on ANY enabled row -> ("unreadable", None);
+    - a query error -> ("unreadable", None);
+    - otherwise ("ok", key of the lowest-id enabled row).
+
+    "unreadable" means a key is configured but can't be used: the caller
+    must write nothing rather than fall back to the iCal export. No key
+    material is ever logged.
     """
+    from app.utils import encryption
+
     try:
-        from app.utils.encryption import decrypt_value
+        rows = (
+            db.query(ExternalAPIKey)
+            .filter(ExternalAPIKey.service_name == 'lodgify', ExternalAPIKey.enabled == True)  # noqa: E712
+            .order_by(ExternalAPIKey.id)
+            .all()
+        )
+    except Exception as exc:
+        logger.error("lodgify_api_key_query_failed", **safe_error(exc))
+        db.rollback()
+        return "unreadable", None
 
-        api_key_record = db.query(ExternalAPIKey).filter(
-            ExternalAPIKey.service_name == 'lodgify',
-            ExternalAPIKey.enabled == True
-        ).first()
+    if not rows:
+        return "absent", None
 
-        if api_key_record and api_key_record.api_key_encrypted:
-            return decrypt_value(api_key_record.api_key_encrypted)
-        return None
-    except Exception as e:
-        logger.warning("failed_to_get_lodgify_api_key", error=str(e))
-        return None
+    keys = []
+    for row in rows:
+        if not row.api_key_encrypted:
+            logger.error("lodgify_api_key_unreadable", key_id=row.id, reason="empty_ciphertext")
+            return "unreadable", None
+        try:
+            plaintext = encryption.decrypt_value(row.api_key_encrypted)
+        except Exception as exc:
+            logger.error("lodgify_api_key_unreadable", key_id=row.id, reason="decrypt_failed", **safe_error(exc))
+            return "unreadable", None
+        if plaintext is None or not str(plaintext).strip():
+            logger.error("lodgify_api_key_unreadable", key_id=row.id, reason="blank")
+            return "unreadable", None
+        keys.append(plaintext)
+
+    if len(rows) > 1:
+        ids = tuple(r.id for r in rows)
+        if ids not in _multiple_keys_logged:
+            _multiple_keys_logged.add(ids)
+            logger.warning("lodgify_api_key_multiple_enabled", key_ids=list(ids), using=ids[0])
+    return "ok", keys[0]
 
 
 async def fetch_lodgify_reservations(
@@ -361,8 +418,8 @@ async def fetch_ical_data(url: str, timeout: float = 30.0) -> str:
             timeout=timeout,
             headers={"User-Agent": "Athena-Calendar-Sync/1.0"},
         )
-    except SsrfBlockedError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except SsrfBlockedError:
+        raise HTTPException(status_code=400, detail="iCal URL host is not allowed")
 
     response.raise_for_status()
     return response.text
@@ -492,7 +549,7 @@ async def list_calendar_sources(
         return [source.to_dict_safe() for source in sources]
 
     except Exception as e:
-        logger.error("failed_to_list_calendar_sources", error=str(e))
+        logger.error("failed_to_list_calendar_sources", **safe_error(e))
         raise HTTPException(status_code=500, detail="Failed to retrieve calendar sources")
 
 
@@ -553,7 +610,7 @@ async def get_calendar_source(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("failed_to_get_calendar_source", error=str(e), source_id=source_id)
+        logger.error("failed_to_get_calendar_source", source_id=source_id, **safe_error(e))
         raise HTTPException(status_code=500, detail="Failed to retrieve calendar source")
 
 
@@ -620,7 +677,7 @@ async def create_calendar_source(
         raise
     except Exception as e:
         db.rollback()
-        logger.error("failed_to_create_calendar_source", error=str(e))
+        logger.error("failed_to_create_calendar_source", **safe_error(e))
         raise HTTPException(status_code=500, detail="Failed to create calendar source")
 
 
@@ -693,7 +750,7 @@ async def update_calendar_source(
         raise
     except Exception as e:
         db.rollback()
-        logger.error("failed_to_update_calendar_source", error=str(e), source_id=source_id)
+        logger.error("failed_to_update_calendar_source", source_id=source_id, **safe_error(e))
         raise HTTPException(status_code=500, detail="Failed to update calendar source")
 
 
@@ -730,7 +787,7 @@ async def delete_calendar_source(
         raise
     except Exception as e:
         db.rollback()
-        logger.error("failed_to_delete_calendar_source", error=str(e), source_id=source_id)
+        logger.error("failed_to_delete_calendar_source", source_id=source_id, **safe_error(e))
         raise HTTPException(status_code=500, detail="Failed to delete calendar source")
 
 
@@ -799,20 +856,16 @@ async def test_calendar_source(
         )
 
     except httpx.HTTPError as e:
-        logger.warning("calendar_source_test_http_error",
-                      source_id=source_id,
-                      error=str(e))
+        logger.warning("calendar_source_test_http_error", source_id=source_id, **safe_error(e))
         return TestConnectionResponse(
             success=False,
-            message=f"HTTP error connecting to iCal URL: {str(e)}"
+            message=f"HTTP error connecting to iCal URL ({describe_error(e)})"
         )
     except Exception as e:
-        logger.error("calendar_source_test_failed",
-                    source_id=source_id,
-                    error=str(e))
+        logger.error("calendar_source_test_failed", source_id=source_id, **safe_error(e))
         return TestConnectionResponse(
             success=False,
-            message=f"Failed to parse iCal data: {str(e)}"
+            message=f"Failed to fetch or parse iCal data ({describe_error(e)})"
         )
 
 
@@ -866,14 +919,16 @@ async def test_ical_url(
         )
 
     except httpx.HTTPError as e:
+        logger.warning("ical_url_test_http_error", **safe_error(e))
         return TestConnectionResponse(
             success=False,
-            message=f"HTTP error: {str(e)}"
+            message=f"HTTP error ({describe_error(e)})"
         )
     except Exception as e:
+        logger.warning("ical_url_test_failed", **safe_error(e))
         return TestConnectionResponse(
             success=False,
-            message=f"Failed to parse iCal: {str(e)}"
+            message=f"Failed to fetch or parse iCal ({describe_error(e)})"
         )
 
 
@@ -890,146 +945,35 @@ async def sync_calendar_source(
     For Lodgify sources, uses API if key is available for full guest names.
     """
 
-    source = db.query(CalendarSource).filter(CalendarSource.id == source_id).first()
-    if not source:
+    from app.services.calendar_sync import run_source_sync
+
+    outcome = await run_source_sync(source_id, db, trigger="manual")
+    if outcome.status == "not_found":
         raise HTTPException(status_code=404, detail="Calendar source not found")
 
-    try:
-        events = []
-        sync_method = 'ical'
-        checkin_time = source.default_checkin_time or DEFAULT_CHECKIN_TIME
-        checkout_time = source.default_checkout_time or DEFAULT_CHECKOUT_TIME
+    return SyncResponse(
+        success=outcome.status == "success",
+        message=_sync_message(outcome),
+        events_synced=outcome.events_total,
+        events_added=outcome.added,
+        events_updated=outcome.updated,
+        events_matched_deleted=outcome.matched_deleted,
+        events_rekeyed=outcome.rekeyed,
+    )
 
-        # For Lodgify sources, try API first for full guest details
-        if source.source_type == 'lodgify':
-            lodgify_api_key = get_lodgify_api_key(db)
-            if lodgify_api_key:
-                try:
-                    events = await fetch_lodgify_reservations(
-                        lodgify_api_key,
-                        checkin_time=checkin_time,
-                        checkout_time=checkout_time
-                    )
-                    sync_method = 'lodgify_api'
-                    logger.info("lodgify_api_sync",
-                               source_id=source_id,
-                               event_count=len(events),
-                               checkin_time=checkin_time,
-                               checkout_time=checkout_time)
-                except Exception as api_error:
-                    logger.warning("lodgify_api_failed_fallback_to_ical",
-                                  source_id=source_id,
-                                  error=str(api_error))
-                    # Fall back to iCal
-                    ical_data = await fetch_ical_data(source.ical_url)
-                    events = parse_ical_events(
-                        ical_data, source.source_type,
-                        checkin_time=checkin_time, checkout_time=checkout_time
-                    )
-            else:
-                # No API key, use iCal
-                ical_data = await fetch_ical_data(source.ical_url)
-                events = parse_ical_events(
-                    ical_data, source.source_type,
-                    checkin_time=checkin_time, checkout_time=checkout_time
-                )
-        else:
-            # Non-Lodgify sources use iCal
-            ical_data = await fetch_ical_data(source.ical_url)
-            events = parse_ical_events(
-                ical_data, source.source_type,
-                checkin_time=checkin_time, checkout_time=checkout_time
-            )
 
-        added = 0
-        updated = 0
+SYNC_BUSY_MESSAGE = "A sync for this source is already running"
 
-        # Process each event
-        for event_data in events:
-            existing = db.query(CalendarEvent).filter(
-                CalendarEvent.external_id == event_data['external_id']
-            ).first()
 
-            if existing:
-                # Update existing event
-                existing.title = event_data['title']
-                existing.checkin = event_data['checkin']
-                existing.checkout = event_data['checkout']
-                existing.guest_name = event_data['guest_name']
-                existing.guest_phone = event_data.get('guest_phone')
-                existing.guest_email = event_data.get('guest_email')
-                existing.notes = event_data['notes']
-                existing.source = event_data['source']
-                existing.source_id = source.id
-                # ATHENA-127 D11: reclassify confirmed<->blocked on re-sync,
-                # but never overwrite an owner-set cancelled/pending status.
-                if existing.status in ('confirmed', 'blocked'):
-                    existing.status = event_data.get('status', existing.status)
-                existing.synced_at = datetime.now(timezone.utc)
-                updated += 1
-            else:
-                # Create new event
-                new_event = CalendarEvent(
-                    external_id=event_data['external_id'],
-                    title=event_data['title'],
-                    checkin=event_data['checkin'],
-                    checkout=event_data['checkout'],
-                    guest_name=event_data['guest_name'],
-                    guest_phone=event_data.get('guest_phone'),
-                    guest_email=event_data.get('guest_email'),
-                    notes=event_data['notes'],
-                    source=event_data['source'],
-                    source_id=source.id,
-                    status=event_data.get('status', 'confirmed'),
-                    created_by=f'{sync_method}_sync',
-                    synced_at=datetime.now(timezone.utc)
-                )
-                db.add(new_event)
-                added += 1
-
-        # Update source status
-        source.last_sync_at = datetime.now(timezone.utc)
-        source.last_sync_status = 'success'
-        source.last_sync_error = None
-        source.last_event_count = len(events)
-
-        db.commit()
-
-        logger.info("calendar_source_sync_complete",
-                   source_id=source_id,
-                   sync_method=sync_method,
-                   events_total=len(events),
-                   added=added,
-                   updated=updated)
-
-        # Auto-sync to guest sessions for Lodgify sources
-        if source.source_type == 'lodgify':
-            await sync_lodgify_to_guest_sessions(db)
-            await update_guest_session_statuses(db)
-
-        return SyncResponse(
-            success=True,
-            message=f"Sync completed successfully via {sync_method}",
-            events_synced=len(events),
-            events_added=added,
-            events_updated=updated
-        )
-
-    except Exception as e:
-        # Update source with error
-        source.last_sync_at = datetime.now(timezone.utc)
-        source.last_sync_status = 'failed'
-        source.last_sync_error = str(e)
-        db.commit()
-
-        logger.error("calendar_source_sync_failed",
-                    source_id=source_id,
-                    error=str(e))
-
-        return SyncResponse(
-            success=False,
-            message=f"Sync failed: {str(e)}"
-        )
+def _sync_message(outcome) -> str:
+    """User-facing sync result. Never starts with "Sync failed" (the admin
+    UI adds its own prefix) and never carries exception text."""
+    if outcome.status == "success":
+        message = f"Synced via {outcome.method}"
+        return f"{message}. {outcome.warning}" if outcome.warning else message
+    if outcome.status == "busy":
+        return SYNC_BUSY_MESSAGE
+    return outcome.error or "The sync did not complete; no changes written"
 
 
 @router.post("/sync-all", response_model=dict)
@@ -1156,8 +1100,8 @@ async def sync_lodgify_to_guest_sessions(db: Session):
 
     except Exception as e:
         db.rollback()
-        logger.error("guest_session_sync_failed", error=str(e))
-        return {"synced": 0, "error": str(e)}
+        logger.error("guest_session_sync_failed", **safe_error(e))
+        return {"synced": 0, "error": describe_error(e)}
 
 
 async def update_guest_session_statuses(db: Session):
@@ -1191,7 +1135,7 @@ async def update_guest_session_statuses(db: Session):
 
     except Exception as e:
         db.rollback()
-        logger.error("guest_session_status_update_failed", error=str(e))
+        logger.error("guest_session_status_update_failed", **safe_error(e))
 
 
 @router.post("/sync-guest-sessions")
