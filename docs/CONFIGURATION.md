@@ -1013,7 +1013,9 @@ mode). An address in both lists is a guest (with a warning).
    case-sensitively; anyone else gets `403 not_household`. The edge must
    strip both header names from inbound requests; a name outside the
    template's strip list stops jarvis-web at startup until
-   `JARVIS_EDGE_HEADERS_ACK_STRIPPED=true` confirms you added it there (the
+   `JARVIS_EDGE_HEADERS_ACK_STRIPPED` lists exactly those custom names
+   (comma-separated) to confirm you added them there; `true`, or an ack
+   naming other headers, doesn't pass (the
    full set it expects stripped is logged as `jarvis_edge_strip_headers`).
    Edge mode that can't serve the household doesn't start: no
    `TRUSTED_PROXY_CIDRS`, no usable `JARVIS_LOCAL_NETWORKS` entry, or no
@@ -1021,7 +1023,10 @@ mode). An address in both lists is a guest (with a warning).
    rolling deploy stalls instead of going Ready and answering every
    household browser with 401. A deployment with no home network at all
    sets `JARVIS_EDGE_SIGN_IN_ONLY=true` (then everyone signs in; the
-   trusted proxy is still required). An optional
+   trusted proxy is still required, and `JARVIS_ALLOWED_HOSTS` is still
+   needed for WebSockets: with it empty jarvis-web logs the ERROR
+   `jarvis_websockets_disabled` and refuses every WebSocket, which stops
+   browser music playback). An optional
    sign-in host always requires sign-in, so an owner at home during a guest
    stay can sign in for control (`JARVIS_SIGNIN_URL` puts a "Household
    sign-in" link on the page). The attestation value must be at least 32
@@ -1065,7 +1070,7 @@ readings or device status from it. Add `control` to the guest profile's
 allowed intents if guests should have those answers (it also lets them
 control what the guest domains allow).
 
-**Voice.** Push-to-talk (`/api/voice/*`) is for every browser class (home network, also during a guest stay; the guest network; signed in); anonymous callers and the embed relay get none. A voice turn is a chat turn, so it is refused whatever chat would refuse. Always-on voice (LiveKit rooms) stays owner-only.
+**Voice.** Push-to-talk (`/api/voice/*`) is for every browser class (home network, also during a guest stay; the guest network; signed in); anonymous callers and the embed relay get none. A voice turn is a chat turn, so it is refused whatever chat would refuse. Each client gets `JARVIS_VOICE_REQUESTS_PER_MINUTE` (default 30) voice calls a minute, per replica (`429` beyond that), text to speak is capped at `JARVIS_TTS_MAX_CHARS` (default 5000; `422` beyond), and uploads are decoded as WebM only (ffmpeg with a pinned input format and the file protocol alone). Always-on voice (LiveKit rooms) stays owner-only.
 
 **Browser rules.** Mutating requests from the page carry
 `X-Jarvis-Request: 1`; a request without it gets `403 reload_required`

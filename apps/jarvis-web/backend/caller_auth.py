@@ -115,19 +115,24 @@ def _with_names(names: Tuple[str, ...], extra: Tuple[str, ...]) -> Tuple[str, ..
 def _edge_header_names(env: Mapping[str, str]) -> Tuple[str, str]:
     """(identity, groups) header names. In edge mode a name outside the
     documented strip list is fatal unless JARVIS_EDGE_HEADERS_ACK_STRIPPED
-    confirms the operator added it to the edge's strip Middleware: a header
-    the edge doesn't strip is one any client can set."""
+    names exactly those custom headers (comma-separated, any case), which
+    the operator sets after adding them to the edge's strip Middleware: a
+    header the edge doesn't strip is one any client can set. The ack is
+    bound to the names, so an ack left over from another configuration
+    doesn't pass."""
     identity = env.get("JARVIS_EDGE_IDENTITY_HEADER", "").strip() or _DEFAULT_IDENTITY_HEADER
     groups = env.get("JARVIS_EDGE_GROUPS_HEADER", "").strip() or _DEFAULT_GROUPS_HEADER
     if not env.get("JARVIS_EDGE_ATTESTATION_SECRET"):
         return identity, groups
     documented = {n.lower() for n in EDGE_STRIPPED_HEADERS}
     custom = [n for n in (identity, groups) if n.lower() not in documented]
-    if custom and not _flag(env.get("JARVIS_EDGE_HEADERS_ACK_STRIPPED")):
+    acked = {n.lower() for n in _csv(env.get("JARVIS_EDGE_HEADERS_ACK_STRIPPED"))}
+    if custom and acked != {n.lower() for n in custom}:
         logger.error(
             "jarvis_edge_header_not_in_strip_list",
             headers=custom,
-            hint="add them to the edge's strip Middleware, then set JARVIS_EDGE_HEADERS_ACK_STRIPPED=true",
+            hint="add them to the edge's strip Middleware, then set JARVIS_EDGE_HEADERS_ACK_STRIPPED to exactly "
+                 + ",".join(custom),
         )
         raise SystemExit(f"jarvis-web edge header names not in the documented strip list: {', '.join(custom)}")
     logger.info("jarvis_edge_strip_headers", headers=list(_with_names(EDGE_STRIPPED_HEADERS, (identity, groups))))
@@ -189,6 +194,7 @@ class AuthSettings:
     relay_key: str = field(default="", repr=False)
     relay_per_minute: int = 20
     relay_global_per_minute: int = 300
+    voice_per_minute: int = 30
 
     @property
     def edge_mode(self) -> bool:
@@ -529,9 +535,16 @@ def load_settings(
         relay_key=relay_key,
         relay_per_minute=_positive_int(env, "JARVIS_RELAY_REQUESTS_PER_MINUTE", 20),
         relay_global_per_minute=_positive_int(env, "JARVIS_RELAY_GLOBAL_PER_MINUTE", 300),
+        voice_per_minute=_positive_int(env, "JARVIS_VOICE_REQUESTS_PER_MINUTE", 30),
     )
     if settings.any_browser_access and not settings.allowed_hosts:
-        logger.warning("jarvis_websockets_disabled", reason="JARVIS_ALLOWED_HOSTS is empty; WebSocket Origins are checked against it")
+        # Reachable only in edge sign-in-only mode: every other posture
+        # needs JARVIS_ALLOWED_HOSTS to serve a browser at all.
+        logger.error(
+            "jarvis_websockets_disabled",
+            reason="JARVIS_ALLOWED_HOSTS is empty; WebSocket Origins are checked against it",
+            hint="list the host names browsers use, even in sign-in-only mode",
+        )
     if not settings.any_browser_access:
         logger.error(
             "jarvis_no_browser_access_configured",
@@ -632,13 +645,25 @@ _auth_me_override: Optional[AuthMeCallable] = None
 _auth_attempts = throttle.SlidingWindowLimiter(per_minute=_AUTH_ATTEMPTS_PER_MINUTE)
 _relay_visitors = throttle.SlidingWindowLimiter(per_minute=SETTINGS.relay_per_minute)
 _relay_global = throttle.SlidingWindowLimiter(per_minute=SETTINGS.relay_global_per_minute, max_keys=1)
+_voice_callers = throttle.SlidingWindowLimiter(per_minute=SETTINGS.voice_per_minute)
 
 
 def _reset_limiters(s: AuthSettings) -> None:
-    global _auth_attempts, _relay_visitors, _relay_global
+    global _auth_attempts, _relay_visitors, _relay_global, _voice_callers
     _auth_attempts = throttle.SlidingWindowLimiter(per_minute=_AUTH_ATTEMPTS_PER_MINUTE)
     _relay_visitors = throttle.SlidingWindowLimiter(per_minute=s.relay_per_minute)
     _relay_global = throttle.SlidingWindowLimiter(per_minute=s.relay_global_per_minute, max_keys=1)
+    _voice_callers = throttle.SlidingWindowLimiter(per_minute=s.voice_per_minute)
+
+
+async def require_voice_budget(request: Request) -> None:
+    """Per-client budget on /api/voice/* (JARVIS_VOICE_REQUESTS_PER_MINUTE,
+    default 30): each call spawns ffmpeg/curl and a speech model. Runs after
+    the browser gate, before the upload is read."""
+    key = rate_client(_peer(request.client), request.headers, SETTINGS)
+    if not await _voice_callers.allow(key):
+        logger.warning("jarvis_voice_rate_limited", key_hash=_digest(key)[:12])
+        raise HTTPException(status_code=429, detail="rate_limited", headers={"Retry-After": "60"})
 
 
 def _reset_for_tests() -> None:

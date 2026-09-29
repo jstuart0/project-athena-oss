@@ -27,7 +27,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocke
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import structlog
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
@@ -2646,12 +2646,24 @@ async def power_control(entity_id: str, action: str):
 # Voice Services (STT/TTS proxy)
 # =============================================================================
 
+TTS_MAX_CHARS = int(os.getenv("JARVIS_TTS_MAX_CHARS", "5000"))
+
+
 class TTSRequest(BaseModel):
     """Text-to-speech request"""
-    text: str
+    text: str = Field(..., min_length=1, max_length=TTS_MAX_CHARS)
 
 
-@app.post("/api/voice/transcribe", dependencies=[Depends(_require_browser_caller)])
+def voice_ffmpeg_argv(src: str, dst: str) -> List[str]:
+    """ffmpeg converting the page's recording to 16 kHz mono WAV. The input
+    format is pinned to WebM (MediaRecorder records audio/webm), so an
+    upload can't be probed as a playlist or any other demuxer, and only the
+    file protocol may be opened, so nothing it names is fetched."""
+    return ["ffmpeg", "-y", "-protocol_whitelist", "file", "-f", "webm", "-i", src,
+            "-ar", "16000", "-ac", "1", "-f", "wav", dst]
+
+
+@app.post("/api/voice/transcribe", dependencies=[Depends(_require_browser_caller), Depends(caller_auth.require_voice_budget)])
 async def transcribe_audio(request: Request):
     """
     Transcribe audio to text via Voice REST API.
@@ -2726,7 +2738,7 @@ async def transcribe_audio(request: Request):
         try:
             # Convert webm to wav using ffmpeg
             convert_result = subprocess.run(
-                ["ffmpeg", "-y", "-i", webm_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
+                voice_ffmpeg_argv(webm_path, wav_path),
                 capture_output=True,
                 timeout=10
             )
@@ -2794,7 +2806,7 @@ async def transcribe_audio(request: Request):
         raise HTTPException(status_code=503, detail="Voice service unavailable")
 
 
-@app.post("/api/voice/synthesize", dependencies=[Depends(_require_browser_caller)])
+@app.post("/api/voice/synthesize", dependencies=[Depends(_require_browser_caller), Depends(caller_auth.require_voice_budget)])
 async def synthesize_speech(request: TTSRequest):
     """
     Synthesize speech from text via Voice REST API.

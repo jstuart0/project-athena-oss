@@ -143,11 +143,32 @@ def test_custom_edge_header_names_need_the_strip_ack(captured_logs):
         caller_auth.load_settings(custom, own_ips=())
     assert "X-Remote-User" in str(excinfo.value) and "X-Remote-Groups" in str(excinfo.value)
     assert any(e["event"] == "jarvis_edge_header_not_in_strip_list" for e in captured_logs)
-    s = caller_auth.load_settings({**custom, "JARVIS_EDGE_HEADERS_ACK_STRIPPED": "true"}, own_ips=())
+    s = caller_auth.load_settings({**custom, "JARVIS_EDGE_HEADERS_ACK_STRIPPED": "x-remote-groups, X-Remote-User"},
+                                  own_ips=())
     assert {"X-Remote-User", "X-Remote-Groups"} <= set(s.edge_strip_headers)
     assert set(caller_auth.EDGE_STRIPPED_HEADERS) <= set(s.edge_strip_headers)
     logged = [e for e in captured_logs if e["event"] == "jarvis_edge_strip_headers"]
     assert logged and "X-Remote-User" in logged[-1]["headers"]
+
+
+@pytest.mark.parametrize("ack", ["true", "1", "X-Remote-User", "X-Remote-User,X-Remote-Groups,X-Other", "X-Old-User,X-Old-Groups"])
+def test_edge_header_ack_is_bound_to_the_names(ack):
+    """xander (named: "true"): the ack must list exactly the custom header
+    names in use; a boolean, a partial list, an extra name or an ack left
+    from another configuration doesn't pass."""
+    custom = {**EDGE_ENV, "JARVIS_EDGE_IDENTITY_HEADER": "X-Remote-User", "JARVIS_EDGE_GROUPS_HEADER": "X-Remote-Groups",
+              "JARVIS_EDGE_HEADERS_ACK_STRIPPED": ack}
+    with pytest.raises(SystemExit):
+        caller_auth.load_settings(custom, own_ips=())
+
+
+def test_sign_in_only_without_allowed_hosts_logs_websockets_error(captured_logs):
+    """xander: sign-in-only mode can start with JARVIS_ALLOWED_HOSTS empty;
+    then every WebSocket is refused, and that is an ERROR, not a warning."""
+    caller_auth.load_settings({**EDGE_ENV, "JARVIS_LOCAL_NETWORKS": "", "JARVIS_GUEST_NETWORKS": "",
+                               "JARVIS_ALLOWED_HOSTS": "", "JARVIS_EDGE_SIGN_IN_ONLY": "true"}, own_ips=())
+    events = [e for e in captured_logs if e["event"] == "jarvis_websockets_disabled"]
+    assert events and events[-1]["log_level"] == "error"
 
 
 def test_default_edge_header_names_need_no_ack():

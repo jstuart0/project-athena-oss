@@ -56,7 +56,7 @@ def test_browser_callers_have_voice(monkeypatch, who):
         assert caps["control"] is False, who  # voice is not control
     health, synth = _voice_calls(c, headers)
     assert health == 200, who
-    assert synth not in {401, 403}, who
+    assert synth == 200, who
 
 
 def test_anonymous_and_relay_have_no_voice(monkeypatch):
