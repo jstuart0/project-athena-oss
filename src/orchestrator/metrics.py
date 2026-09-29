@@ -77,3 +77,23 @@ ha_write_denied_total = Counter(
     'Home Assistant writes denied by the permission-enforcing guard',
     ['domain', 'scope_mode']  # domain: HA service domain; scope_mode: owner/guest/degraded/system
 )
+
+# ---------------------------------------------------------------------------
+# State-question routing and write fan-out confirmation (ATHENA-128)
+# ---------------------------------------------------------------------------
+
+state_question_routed_total = Counter(
+    'athena_state_question_routed_total',
+    'State-question utterances routed by path',
+    ['device_type', 'path']
+    # device_type: light|switch|lock|cover|climate|media_player|fan|unknown
+    # path: bulk_optimizer|get_status_dispatch|llm_coerced|json_fallback|write_blocked
+)
+
+ha_write_fanout_confirm_total = Counter(
+    'athena_ha_write_fanout_confirm_total',
+    'Write fan-out confirmation gate outcomes',
+    ['domain', 'outcome']
+    # outcome: exempt_scope|exempt_imperative|requested|reworded|confirmed|
+    #          declined|reasked|cross_identity|replay_claim_lost
+)

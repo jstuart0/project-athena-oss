@@ -12,11 +12,14 @@ from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside each
 # ha_client-accepting method below (not at module scope) -- this module is
 # imported by route_control.py and other lightweight test fixtures that
 # don't need orchestrator.metrics -> prometheus_client as a hard
 # import-time dependency. See the identical note in sequence_executor.py.
+# ATHENA-128: orchestrator.metrics is imported lazily for the same reason
+# (state_question_routed_total, inside extract_intent below).
 
 
 # Round 17: Response variety templates for natural conversation
@@ -125,7 +128,8 @@ class SmartHomeController:
     
     async def extract_intent(self, query: str, light_count: int = 3, device_room: str = None,
                               prev_query: str = None, prev_response: str = None,
-                              prev_intent_entities: Dict = None) -> Dict:
+                              prev_intent_entities: Dict = None,
+                              utterance: Optional[UtteranceClassification] = None) -> Dict:
         """Use LLM to extract structured intent from natural language query
 
         Args:
@@ -135,9 +139,17 @@ class SmartHomeController:
             prev_query: Previous user query (for context in follow-ups)
             prev_response: Previous assistant response (for context in corrections like "no, just my side")
             prev_intent_entities: Previous intent entities (device_type, room, action, parameters) for context
+            utterance: ATHENA-128 -- the caller's classify_utterance() result.
+                route_control_node always passes this. When None (no
+                non-route_control caller exists today), classified locally
+                so the 3.3(b)/(c) guarantees still hold standalone.
         """
         import logging
         logger = logging.getLogger(__name__)
+        from .metrics import state_question_routed_total
+
+        if utterance is None:
+            utterance = classify_utterance(query)
 
         query_lower = query.lower()
 
@@ -1385,7 +1397,7 @@ Number of lights to control: {light_count}{room_context}
 
 Return JSON with this structure:
 {{
-    "device_type": "light|switch|scene|climate|oven|fridge|freezer|sensor|media_player|bed_warmer|lock",
+    "device_type": "light|switch|scene|climate|oven|fridge|freezer|sensor|media_player|bed_warmer|lock|cover|fan",
     "room": "room name or null (use 'whole_house' for all rooms)",
     "excluded_rooms": ["list of rooms to exclude"] or null,
     "action": "turn_on|turn_off|set_color|set_brightness|set_temperature|set_level|get_status|play|pause|stop|warm_bed|increase|decrease|lock|unlock",
@@ -1413,7 +1425,7 @@ DEVICE TYPE DETECTION:
 - bed_warmer: bed warmer, mattress pad, bed heater, warm the bed, heated bed
 - lock: door lock, lock, unlock, front door lock, back door lock, deadbolt
 
-STATUS QUERIES: For questions like "what is", "what's", "check", "tell me about", use action "get_status".
+STATUS QUERIES: Questions about current state (e.g. "what is", "what's", "check", "tell me about", "is X on", "are the Y lights on or off", "is the door locked") are NEVER actions: always use action "get_status", even when the words on/off/lock/open appear. A question never turns anything on or off.
 
 For hs_colors: hue is 0-360 (red=0, green=120, blue=240), saturation is 0-100.
 IMPORTANT:
@@ -1429,7 +1441,12 @@ Examples:
 "what is the thermostat set to" -> {{"device_type": "climate", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
 "check the fridge temperature" -> {{"device_type": "fridge", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
 "is the oven on" -> {{"device_type": "oven", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
-"where is there motion" -> {{"device_type": "sensor", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"are the office lights on" -> {{"device_type": "light", "room": "office", "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"are the kitchen lights currently on or off" -> {{"device_type": "light", "room": "kitchen", "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"is the bedroom lamp off" -> {{"device_type": "light", "room": "bedroom", "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"is the hallway switch on" -> {{"device_type": "switch", "room": "hallway", "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"is the garage door open" -> {{"device_type": "cover", "room": "garage", "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
+"where is there motion" ->{{"device_type": "sensor", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
 "what's playing on the TV" -> {{"device_type": "media_player", "room": null, "action": "get_status", "target_scope": "group", "parameters": {{}}, "color_description": null}}
 "turn on the office lights" -> {{"device_type": "light", "room": "office", "action": "turn_on", "target_scope": "group", "parameters": {{}}, "color_description": null}}
 "turn on all lights except the bedroom" -> {{"device_type": "light", "room": "whole_house", "excluded_rooms": ["bedroom"], "action": "turn_on", "target_scope": "group", "parameters": {{}}, "color_description": null}}
@@ -1498,13 +1515,55 @@ Return ONLY the JSON, no other text."""
                 text = text.split('```')[1].split('```')[0].strip()
 
             intent = json.loads(text)
+            # 3.3(b): post-LLM coercion. A STATE_QUESTION never leaves this
+            # function with a write action, even if the LLM (or a hostile
+            # one) returned one -- this is the coercion path referent
+            # questions and other non-3.2-dispatched questions rely on.
+            if utterance.kind == UtteranceKind.STATE_QUESTION and intent.get("action") != "get_status":
+                logger.info(
+                    "state_question_llm_action_coerced",
+                    original_action=intent.get("action"),
+                    query=query[:80],
+                )
+                intent["action"] = "get_status"
+                # The label is the classifier's noun-map device type, never
+                # the LLM's free-text device_type (closed label set).
+                state_question_routed_total.labels(
+                    device_type=utterance.device_type or "unknown",
+                    path="llm_coerced",
+                ).inc()
             return intent
         except json.JSONDecodeError as e:
-            # Fallback to simple parsing
+            # 3.3(c): fallback parsing when the LLM didn't return valid
+            # JSON. Never defaults to a write for a non-imperative
+            # utterance -- an IMPERATIVE without explicit on/off vocabulary
+            # falls back to today's is_turn_on/is_turn_off heuristic;
+            # STATE_QUESTION and UNKNOWN always answer get_status.
+            if utterance.kind == UtteranceKind.IMPERATIVE:
+                if utterance.target_state == "on":
+                    fallback_action = "turn_on"
+                elif utterance.target_state == "off":
+                    fallback_action = "turn_off"
+                elif is_turn_on:
+                    fallback_action = "turn_on"
+                elif is_turn_off:
+                    fallback_action = "turn_off"
+                else:
+                    fallback_action = "get_status"
+            else:
+                fallback_action = "get_status"
+                state_question_routed_total.labels(
+                    device_type=utterance.device_type or "unknown", path="json_fallback"
+                ).inc()
+            # A question the classifier couldn't attach to a device stays
+            # device-less rather than becoming a question about lights.
+            fallback_device = utterance.device_type or (
+                None if utterance.kind == UtteranceKind.STATE_QUESTION else "light"
+            )
             return {
-                "device_type": "light",
+                "device_type": fallback_device,
                 "room": None,
-                "action": "turn_on" if "turn on" in query.lower() else "turn_off",
+                "action": fallback_action,
                 "target_scope": "group",
                 "parameters": {}
             }
@@ -1927,6 +1986,12 @@ Return ONLY valid JSON."""
             if device_type == 'sensor':
                 return await self._handle_sensor_intent(device_type, parameters, original_query)
 
+            # Handle media player state questions (3.4): route to the HA
+            # state read instead of the jarvis-web HTTP path used by
+            # _handle_media_intent.
+            if device_type in ['media', 'media_player', 'tv', 'speaker'] and action == 'get_status':
+                return await self._handle_entity_state_query('media_player', room, original_query)
+
             # Handle media player queries
             if device_type in ['media', 'media_player', 'tv', 'speaker']:
                 return _finish(await self._handle_media_intent(action, parameters, original_query, room, ha_client))
@@ -1954,6 +2019,12 @@ Return ONLY valid JSON."""
             # Handle scene/routine activation
             if device_type == 'scene':
                 return _finish(await self._handle_scene_intent(action, parameters, ha_client, original_query))
+
+            # Handle switch state questions (3.4): switch has no dedicated
+            # handler today, so route its get_status read before the
+            # "only lights" refusal.
+            if device_type == 'switch' and action == 'get_status':
+                return await self._handle_entity_state_query('switch', room, original_query)
 
             if device_type != 'light':
                 return "I can only control lights right now. For other devices like security systems, please use the Home Assistant app."
@@ -2050,6 +2121,17 @@ Return ONLY valid JSON."""
             else:
                 # Work with the group
                 target_lights = [light_group['entity_id']]
+
+        # ATHENA-128 4.3: gate before any task list is built. Every branch
+        # below (turn_on/turn_off/set_color, all sub-branches) writes the
+        # same finalized target_lights set.
+        from . import write_fanout
+        _fanout_service = "turn_off" if action == "turn_off" else "turn_on"
+        _fanout_prompt = write_fanout.gate(
+            "light", _fanout_service, tuple(target_lights), original_query, room=room,
+        )
+        if _fanout_prompt:
+            return _fanout_prompt
 
         # Execute action based on type
         # Use brief responses suitable for voice output
@@ -2318,6 +2400,16 @@ Return ONLY valid JSON."""
             logger.info(f"Climate status query: {response}")
             return response
 
+        # ATHENA-128 (K1): one target, so commands pass unchanged; a real
+        # state question (routing reverted by the kill switch) is confirmed
+        # or reworded instead of writing silently.
+        from . import write_fanout
+        _climate_prompt = write_fanout.gate(
+            "climate", "set_temperature", (climate_state.get('entity_id', 'climate.thermostat'),), original_query,
+        )
+        if _climate_prompt:
+            return _climate_prompt
+
         # Handle temperature adjustment actions
         current_target = climate_state.get('target_temp')
         # Check if dual-setpoint mode (heat_cool)
@@ -2421,9 +2513,12 @@ Return ONLY valid JSON."""
         logger = logging.getLogger(__name__)
 
         # Use jarvis-web API for appliance queries (it has the full implementation)
-        jarvis_url = "http://localhost:3001"  # jarvis-web external URL
+        jarvis_url = get_config().jarvis_web_url
 
         query_lower = (original_query or "").lower()
+
+        if not jarvis_url:
+            return "I couldn't check the appliance status right now."
 
         try:
             async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2473,7 +2568,7 @@ Return ONLY valid JSON."""
         import logging
         logger = logging.getLogger(__name__)
 
-        jarvis_url = "http://localhost:3001"
+        jarvis_url = get_config().jarvis_web_url
         query_lower = (original_query or "").lower()
 
         # Check for occupancy estimation queries
@@ -2523,18 +2618,22 @@ Return ONLY valid JSON."""
             if healthy_sensors:
                 return await self._format_motion_status(healthy_sensors, is_last_motion_query)
 
-            # Fallback to jarvis-web
-            try:
-                async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-                    response = await client.get(f"{jarvis_url}/api/sensors/motion")
-                    if response.status_code == 200:
-                        data = response.json()
-                        active_rooms = data.get('active_rooms', [])
-                        if active_rooms:
-                            return f"Motion detected in: {', '.join(active_rooms)}."
-                        return "No motion detected in any room right now."
-            except:
-                pass
+            # Fallback to jarvis-web (skipped when JARVIS_WEB_URL is unset --
+            # ATHENA-128 3.5 -- the effective in-cluster behaviour today,
+            # since the previous hardcoded host isn't reachable from the
+            # orchestrator pod)
+            if jarvis_url:
+                try:
+                    async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                        response = await client.get(f"{jarvis_url}/api/sensors/motion")
+                        if response.status_code == 200:
+                            data = response.json()
+                            active_rooms = data.get('active_rooms', [])
+                            if active_rooms:
+                                return f"Motion detected in: {', '.join(active_rooms)}."
+                            return "No motion detected in any room right now."
+                except:
+                    pass
 
         try:
             async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -2542,6 +2641,8 @@ Return ONLY valid JSON."""
                     pass
 
                 elif 'light' in query_lower or 'bright' in query_lower or 'dark' in query_lower or 'lux' in query_lower:
+                    if not jarvis_url:
+                        return "I couldn't check the sensor status right now."
                     response = await client.get(f"{jarvis_url}/api/sensors/illuminance")
                     if response.status_code == 200:
                         data = response.json()
@@ -2556,6 +2657,8 @@ Return ONLY valid JSON."""
                     return await self._get_window_sensor_status()
 
                 # Default: get summary
+                if not jarvis_url:
+                    return "I couldn't check the sensor status right now."
                 response = await client.get(f"{jarvis_url}/api/sensors/summary")
                 if response.status_code == 200:
                     data = response.json()
@@ -3416,7 +3519,7 @@ Do NOT mention rooms that have no current or recent motion."""
         from music_handler import get_room_configs, get_room_display_names
         logger = logging.getLogger(__name__)
 
-        jarvis_url = "http://localhost:3001"
+        jarvis_url = get_config().jarvis_web_url
         query_lower = (original_query or "").lower()
 
         # Handle TV power on/off commands
@@ -3440,6 +3543,14 @@ Do NOT mention rooms that have no current or recent motion."""
 
                 # Execute turn_on or turn_off
                 service = "turn_on" if action == "turn_on" else "turn_off"
+
+                from . import write_fanout
+                fanout_prompt = write_fanout.gate(
+                    "media_player", service, tuple(e for e, _ in target_tvs), original_query, room=room,
+                )
+                if fanout_prompt:
+                    return fanout_prompt
+
                 await asyncio.gather(*[
                     ha_client.call_service("media_player", service, {"entity_id": entity_id})
                     for entity_id, _ in target_tvs
@@ -3451,6 +3562,9 @@ Do NOT mention rooms that have no current or recent motion."""
             except Exception as e:
                 logger.error(f"TV control error: {e}")
                 return "I couldn't control the TV right now."
+
+        if not jarvis_url:
+            return "I couldn't check media player status right now."
 
         try:
             async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
@@ -3550,6 +3664,15 @@ Do NOT mention rooms that have no current or recent motion."""
         level = parameters.get('level', 1)  # Default to level 1 (low)
         left_level = parameters.get('left_level')
         right_level = parameters.get('right_level')
+
+        # ATHENA-128 (K1): gated as one target (the pad), so commands pass
+        # unchanged and only a real state question is confirmed/reworded.
+        from . import write_fanout
+        _bed_prompt = write_fanout.gate(
+            POWER_MAIN.split(".", 1)[0], action or "set_level", (POWER_MAIN,), original_query,
+        )
+        if _bed_prompt:
+            return _bed_prompt
 
         try:
             if action == "turn_off":
@@ -3691,7 +3814,7 @@ Do NOT mention rooms that have no current or recent motion."""
 
             if not lights_on:
                 if room:
-                    return f"No lights are currently on {room}."
+                    return f"No lights are currently on in the {room}."
                 else:
                     return "No lights are currently on anywhere in the house."
 
@@ -3708,6 +3831,65 @@ Do NOT mention rooms that have no current or recent motion."""
         except Exception as e:
             logger.error(f"Light status query error: {e}")
             return "I couldn't check the light status right now."
+
+    _ENTITY_STATE_QUERY_NOUNS = {"switch": ("switch", "switches"), "media_player": ("media player", "media players")}
+    _ENTITY_STATE_ON_STATES = frozenset({
+        "on", "playing", "running", "open", "unlocked", "heating", "cooling",
+    })
+
+    async def _handle_entity_state_query(self, domain: str, room: Optional[str], original_query: str = None) -> str:
+        """ATHENA-128 3.4: generic read-only entity-state answer for
+        domains that don't have their own status handler (switch,
+        media_player). Never touches ha_client -- entity_manager only.
+        """
+        noun, nouns = self._ENTITY_STATE_QUERY_NOUNS.get(domain, (domain, f"{domain}s"))
+        try:
+            all_entities = await self.entity_manager.get_entities()
+            entities = {k: v for k, v in all_entities.items() if k.startswith(f"{domain}.")}
+
+            if not entities:
+                if room:
+                    return f"I couldn't find a {noun} in the {room}."
+                return f"I couldn't find any {nouns} in the home automation system."
+
+            room_lower = (room or "").lower()
+            matched = []
+            for entity_id, state_data in entities.items():
+                friendly_name = state_data.get("attributes", {}).get(
+                    "friendly_name", entity_id.split(".")[-1].replace("_", " ")
+                )
+                if room:
+                    entity_lower = entity_id.lower()
+                    friendly_lower = friendly_name.lower()
+                    if room_lower not in entity_lower and room_lower not in friendly_lower:
+                        continue
+                matched.append((friendly_name, state_data.get("state", "unknown")))
+
+            if not matched:
+                if room:
+                    return f"I couldn't find a {noun} in the {room}."
+                return f"I couldn't find any {nouns}."
+
+            if len(matched) == 1:
+                name, state = matched[0]
+                return f"The {name} is {state}."
+
+            on_list = [name for name, state in matched if state in self._ENTITY_STATE_ON_STATES]
+            if not on_list:
+                if room:
+                    return f"No {nouns} are currently on in the {room}."
+                return f"No {nouns} are currently on."
+
+            if len(on_list) == 1:
+                names = on_list[0]
+            elif len(on_list) <= 5:
+                names = ", ".join(on_list[:-1]) + f" and {on_list[-1]}"
+            else:
+                names = ", ".join(on_list[:3]) + f" and {len(on_list) - 3} more"
+            return f"{len(on_list)} of {len(matched)} {nouns} are on: {names}."
+        except Exception as e:
+            logger.error(f"Entity state query error ({domain}): {e}")
+            return f"I couldn't check the {noun} status right now."
 
     async def _handle_lock_intent(self, action: str, room: str, ha_client, original_query: str = None) -> str:
         """Handle lock control and status queries"""
@@ -3762,7 +3944,19 @@ Do NOT mention rooms that have no current or recent motion."""
                     statuses.append(f"{friendly_name} is {state}")
                 return ". ".join(statuses) + "."
 
-            elif action == "lock":
+            # ATHENA-128 4.3 (bob r2 (1)): gated unconditionally at the
+            # try-body level, before either write branch, so the gate
+            # dominates both -- an elif chain would let the gate placed in
+            # one arm miss the sibling arm's write entirely.
+            from . import write_fanout
+            _lock_service = action if action in ("lock", "unlock") else "lock"
+            _lock_prompt = write_fanout.gate(
+                "lock", _lock_service, tuple(e for e, _ in target_locks), original_query, room=room,
+            )
+            if _lock_prompt:
+                return _lock_prompt
+
+            if action == "lock":
                 # Lock the door(s)
                 await asyncio.gather(*[
                     ha_client.call_service("lock", "lock", {"entity_id": entity_id})
@@ -3775,7 +3969,7 @@ Do NOT mention rooms that have no current or recent motion."""
                     lock_names = ', '.join([s.get('attributes', {}).get('friendly_name', e.split('.')[-1].replace('_', ' ')) for e, s in target_locks])
                     return f"Done! I've locked {lock_names}."
 
-            elif action == "unlock":
+            if action == "unlock":
                 # Unlock the door(s)
                 await asyncio.gather(*[
                     ha_client.call_service("lock", "unlock", {"entity_id": entity_id})
@@ -3848,7 +4042,17 @@ Do NOT mention rooms that have no current or recent motion."""
                     statuses.append(f"{friendly_name} is {state}")
                 return ". ".join(statuses) + "."
 
-            elif action == "turn_on":
+            # ATHENA-128 4.3 (bob r2 (1)): unconditional gate dominates both
+            # write branches.
+            from . import write_fanout
+            _fan_service = action if action in ("turn_on", "turn_off") else "turn_on"
+            _fan_prompt = write_fanout.gate(
+                "fan", _fan_service, tuple(e for e, _ in target_fans), original_query, room=room,
+            )
+            if _fan_prompt:
+                return _fan_prompt
+
+            if action == "turn_on":
                 await asyncio.gather(*[
                     ha_client.call_service("fan", "turn_on", {"entity_id": entity_id})
                     for entity_id, _ in target_fans
@@ -3856,7 +4060,7 @@ Do NOT mention rooms that have no current or recent motion."""
                 fan_names = ', '.join([s.get('attributes', {}).get('friendly_name', e.split('.')[-1].replace('_', ' ')) for e, s in target_fans])
                 return f"Done! I've turned on {fan_names}."
 
-            elif action == "turn_off":
+            if action == "turn_off":
                 await asyncio.gather(*[
                     ha_client.call_service("fan", "turn_off", {"entity_id": entity_id})
                     for entity_id, _ in target_fans
@@ -3917,7 +4121,17 @@ Do NOT mention rooms that have no current or recent motion."""
                     statuses.append(f"The {friendly_name} is {state_desc}")
                 return ". ".join(statuses) + "."
 
-            elif action == "open":
+            # ATHENA-128 4.3 (bob r2 (1)): unconditional gate dominates both
+            # write branches.
+            from . import write_fanout
+            _cover_service = "open_cover" if action == "open" else "close_cover"
+            _cover_prompt = write_fanout.gate(
+                "cover", _cover_service, tuple(e for e, _ in target_covers), original_query, room=room,
+            )
+            if _cover_prompt:
+                return _cover_prompt
+
+            if action == "open":
                 await asyncio.gather(*[
                     ha_client.call_service("cover", "open_cover", {"entity_id": entity_id})
                     for entity_id, _ in target_covers
@@ -3925,7 +4139,7 @@ Do NOT mention rooms that have no current or recent motion."""
                 cover_names = ', '.join([s.get('attributes', {}).get('friendly_name', e.split('.')[-1].replace('_', ' ')) for e, s in target_covers])
                 return f"Done! I've opened the {cover_names}."
 
-            elif action == "close":
+            if action == "close":
                 await asyncio.gather(*[
                     ha_client.call_service("cover", "close_cover", {"entity_id": entity_id})
                     for entity_id, _ in target_covers
@@ -3975,6 +4189,14 @@ Do NOT mention rooms that have no current or recent motion."""
             # of ever reaching the intended "not configured yet" message.
             scene_name = entity_id.split('.')[-1].replace('_', ' ').title()
 
+            # ATHENA-128 (K1): one scene/script, so commands pass unchanged;
+            # a real state question ("is good night mode on?") never
+            # activates it silently.
+            from . import write_fanout
+            _scene_prompt = write_fanout.gate(domain, service, (entity_id,), original_query)
+            if _scene_prompt:
+                return _scene_prompt
+
             # Try to activate the scene/script
             try:
                 await ha_client.call_service(domain, service, {"entity_id": entity_id})
@@ -4009,70 +4231,110 @@ Do NOT mention rooms that have no current or recent motion."""
                 # Scene/script doesn't exist - try a fallback
                 logger.warning(f"Scene/script {entity_id} failed: {e}")
 
-                # Provide fallback behavior based on what was requested
-                if 'movie' in query_lower:
-                    # Dim the living room's lights as a fallback (DC17
-                    # item 1: a specific room's group, configured via
-                    # HA_LIGHT_GROUPS -- never a house-wide "all" target).
-                    living_room_group = _get_light_groups().get("living_room")
-                    if living_room_group:
-                        try:
-                            await ha_client.call_service("light", "turn_on", {
-                                "entity_id": living_room_group,
-                                "brightness_pct": 20
-                            })
-                            return "Movie mode ready! I've dimmed the living room lights."
-                        except:
-                            pass
-                elif 'good night' in query_lower or 'goodnight' in query_lower:
-                    # Turn off all lights as a fallback
-                    try:
-                        await ha_client.call_service("light", "turn_off", {"entity_id": "all"})
-                        return "Good night! I've turned off the lights."
-                    except:
-                        pass
-                elif 'good morning' in query_lower:
-                    # Turn on the office's lights as a fallback (DC17
-                    # item 1: a specific room's group, never "all").
-                    office_group = _get_light_groups().get("office")
-                    if office_group:
-                        try:
-                            await ha_client.call_service("light", "turn_on", {
-                                "entity_id": office_group,
-                                "brightness_pct": 100
-                            })
-                            return "Good morning! I've turned on the lights."
-                        except:
-                            pass
-                elif 'leaving' in query_lower or 'goodbye' in query_lower:
-                    # Turn off all lights and lock doors as a fallback
-                    try:
-                        await ha_client.call_service("light", "turn_off", {"entity_id": "all"})
-                        await ha_client.call_service("lock", "lock", {"entity_id": "all"})
-                        return "Goodbye! I've turned off the lights and locked the doors."
-                    except:
-                        pass
-                elif 'home' in query_lower:
-                    # Turn on the living room's lights as a fallback (DC17
-                    # item 1: a specific room's group, never "all"; P9
-                    # fixed the room -- the original hardcoded target here
-                    # was light.living_room_all, not light.office_all).
-                    arriving_group = _get_light_groups().get("living_room")
-                    if arriving_group:
-                        try:
-                            await ha_client.call_service("light", "turn_on", {
-                                "entity_id": arriving_group,
-                                "brightness_pct": 80
-                            })
-                            return "Welcome home! I've turned on the lights."
-                        except:
-                            pass
+                fallback_result = await self._run_scene_fallback(query_lower, ha_client, original_query)
+                if fallback_result is not None:
+                    return fallback_result
 
                 return f"I tried to activate {scene_name}, but it may not be configured yet. I'll try a basic version."
 
         except Exception as e:
             logger.error(f"Scene activation error: {e}")
             return "I couldn't activate the scene or routine right now."
+
+    async def _run_scene_fallback(self, query_lower: str, ha_client, original_query: str = None) -> Optional[str]:
+        """ATHENA-128 4.3: the scene-activation fallback, extracted from
+        _handle_scene_intent so it can be gated once at the top of each
+        matched branch. Returns None when no fallback branch matches (the
+        caller then falls back to its own "not configured" text).
+
+        Good night and leaving are unbounded ("all"), so on a non-exempt
+        utterance they're always refused with the rewording (D7 rule 0),
+        never confirmed -- "good night"/"goodbye" alone don't carry an
+        explicit scope cue.
+        """
+        from . import write_fanout
+
+        if 'movie' in query_lower:
+            # Dim the living room's lights as a fallback (DC17 item 1: a
+            # specific room's group, configured via HA_LIGHT_GROUPS --
+            # never a house-wide "all" target).
+            living_room_group = _get_light_groups().get("living_room")
+            if living_room_group:
+                prompt = write_fanout.gate("light", "turn_on", (living_room_group,), original_query)
+                if prompt:
+                    return prompt
+                try:
+                    await ha_client.call_service("light", "turn_on", {
+                        "entity_id": living_room_group,
+                        "brightness_pct": 20
+                    })
+                    return "Movie mode ready! I've dimmed the living room lights."
+                except:
+                    pass
+        elif 'good night' in query_lower or 'goodnight' in query_lower:
+            # Turn off all lights as a fallback
+            prompt = write_fanout.gate("light", "turn_off", ("all",), original_query, unbounded=True)
+            if prompt:
+                return prompt
+            try:
+                await ha_client.call_service("light", "turn_off", {"entity_id": "all"})
+                return "Good night! I've turned off the lights."
+            except:
+                pass
+        elif 'good morning' in query_lower:
+            # Turn on the office's lights as a fallback (DC17 item 1: a
+            # specific room's group, never "all").
+            office_group = _get_light_groups().get("office")
+            if office_group:
+                prompt = write_fanout.gate("light", "turn_on", (office_group,), original_query)
+                if prompt:
+                    return prompt
+                try:
+                    await ha_client.call_service("light", "turn_on", {
+                        "entity_id": office_group,
+                        "brightness_pct": 100
+                    })
+                    return "Good morning! I've turned on the lights."
+                except:
+                    pass
+        elif 'leaving' in query_lower or 'goodbye' in query_lower:
+            # Turn off all lights and lock doors as a fallback
+            prompt = write_fanout.gate_many(
+                [
+                    write_fanout.PlannedWrite("light", "turn_off", ("all",)),
+                    write_fanout.PlannedWrite("lock", "lock", ("all",)),
+                ],
+                original_query,
+                unbounded=True,
+            )
+            if prompt:
+                return prompt
+            try:
+                await ha_client.call_service("light", "turn_off", {"entity_id": "all"})
+                await ha_client.call_service("lock", "lock", {"entity_id": "all"})
+                return "Goodbye! I've turned off the lights and locked the doors."
+            except:
+                pass
+        elif 'home' in query_lower:
+            # Turn on the living room's lights as a fallback (DC17 item 1:
+            # a specific room's group, never "all"; P9 fixed the room --
+            # the original hardcoded target here was light.living_room_all,
+            # not light.office_all).
+            arriving_group = _get_light_groups().get("living_room")
+            if arriving_group:
+                prompt = write_fanout.gate("light", "turn_on", (arriving_group,), original_query)
+                if prompt:
+                    return prompt
+                try:
+                    await ha_client.call_service("light", "turn_on", {
+                        "entity_id": arriving_group,
+                        "brightness_pct": 80
+                    })
+                    return "Welcome home! I've turned on the lights."
+                except:
+                    pass
+
+        return None
 
     async def _execute_whole_house_command(
         self, action: str, target_scope: str, parameters: Dict,
@@ -4124,6 +4386,20 @@ Do NOT mention rooms that have no current or recent motion."""
         # Detect Christmas theme
         is_christmas = 'christmas' in query_lower or ('red' in query_lower and 'green' in query_lower)
         wants_white_accent = 'white' in query_lower and ('visibility' in query_lower or 'couple' in query_lower or 'some' in query_lower)
+
+        # ATHENA-128 4.3: resolve the flat member list first, gate once,
+        # then build the task list.
+        _flat_members = []
+        for _group in all_light_groups:
+            _members = _group.get('members') or [_group.get('entity_id')]
+            _flat_members.extend(m for m in _members if m)
+        from . import write_fanout
+        _whole_house_service = "turn_off" if action == "turn_off" else "turn_on"
+        _whole_house_prompt = write_fanout.gate(
+            "light", _whole_house_service, tuple(_flat_members), original_query, scope_hint="whole_house",
+        )
+        if _whole_house_prompt:
+            return _whole_house_prompt
 
         # Collect all tasks first, then execute in parallel
         tasks = []
@@ -4247,11 +4523,9 @@ Do NOT mention rooms that have no current or recent motion."""
 
         logger.info(f"Executing multi-room command: action={action}, rooms={rooms}")
 
-        # Collect all lights to control from all rooms
-        all_tasks = []
-        all_light_names = []
-        total_count = 0
-
+        # ATHENA-128 4.3: resolve every room's members first (no task
+        # building yet), gate once, then build all_tasks.
+        resolved_rooms = []
         for room_name in rooms:
             # Find lights for this room
             light_matches = await self.entity_manager.find_lights_by_room(room_name)
@@ -4274,6 +4548,23 @@ Do NOT mention rooms that have no current or recent motion."""
                 # If no members, use the group entity itself
                 members = [light_group.get('entity_id')]
 
+            resolved_rooms.append((group_name, members))
+
+        from . import write_fanout
+        _multi_room_service = "turn_off" if action == "turn_off" else "turn_on"
+        _all_members = tuple(m for _, members in resolved_rooms for m in members)
+        _multi_room_prompt = write_fanout.gate(
+            "light", _multi_room_service, _all_members, original_query, scope_hint=("multi_room", rooms),
+        )
+        if _multi_room_prompt:
+            return _multi_room_prompt
+
+        # Collect all lights to control from all rooms
+        all_tasks = []
+        all_light_names = []
+        total_count = 0
+
+        for group_name, members in resolved_rooms:
             # Queue up tasks for this room
             for light in members:
                 if action == "turn_on":
@@ -4370,6 +4661,20 @@ Do NOT mention rooms that have no current or recent motion."""
 
         # Get all room lights in parallel
         room_lights_results = await asyncio.gather(*[get_room_lights(m) for m in members])
+
+        # ATHENA-128 4.3: gate once, after resolution and before any task
+        # is built.
+        from . import write_fanout
+        _room_group_service = "turn_off" if action == "turn_off" else "turn_on"
+        _room_group_members = tuple(
+            light for members_lights in room_lights_results if members_lights for light in members_lights
+        )
+        _room_group_prompt = write_fanout.gate(
+            "light", _room_group_service, _room_group_members, original_query,
+            scope_hint=("room_group", group_name),
+        )
+        if _room_group_prompt:
+            return _room_group_prompt
 
         # Step 2: Collect all HA tasks
         tasks = []
@@ -4634,6 +4939,16 @@ Return ONLY the JSON, no other text."""
 
         duration = parameters.get("duration_minutes", 60)
         brightness = parameters.get("brightness_percent")
+
+        # ATHENA-128 (K1): gated as one target (the room's motion override),
+        # so commands pass unchanged and only a real state question is
+        # confirmed/reworded.
+        from . import write_fanout
+        _motion_prompt = write_fanout.gate(
+            "input_boolean", action or "change", (motion_disable_bool,), original_query, room=room,
+        )
+        if _motion_prompt:
+            return _motion_prompt
 
         try:
             if action == "leave_lights_on":

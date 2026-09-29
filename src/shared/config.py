@@ -55,12 +55,15 @@ from __future__ import annotations
 import functools
 import logging
 
-from pydantic import Field, computed_field, field_validator
+from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from shared.admin_url import get_admin_url
 
 logger = logging.getLogger(__name__)
+
+_FANOUT_CONFIRM_THRESHOLD_DEFAULT = 6
+_FANOUT_HARD_LIMIT_DEFAULT = 18
 
 
 class AthenaConfig(BaseSettings):
@@ -373,6 +376,13 @@ class AthenaConfig(BaseSettings):
     #   (default) means the SearXNG search provider is disabled and its
     #   admin status reads "not configured" with no network probe made.
     searxng_base_url: str = Field(default="")
+    # jarvis_web_url: jarvis-web API base for the appliance/sensor/media
+    #   lookups in smart_home_controller.py (ATHENA-128 3.5). Empty
+    #   (default) means those lookups are skipped and each site takes its
+    #   existing error/unavailable branch -- the effective in-cluster
+    #   behaviour today, since the previous hardcoded localhost:3001 isn't
+    #   reachable from the orchestrator pod. Example: http://jarvis-web:3001.
+    jarvis_web_url: str = Field(default="")
 
     # ------------------------------------------------------------------
     # Region-configurable RAG services (ATHENA-89 / D2, D3)
@@ -546,6 +556,34 @@ class AthenaConfig(BaseSettings):
     #   bounds *joining* a room; it doesn't disconnect an already-connected
     #   participant.
     livekit_user_token_ttl_minutes: int = Field(default=30)
+
+    # ha_write_fanout_confirm_threshold / ha_write_fanout_hard_limit
+    #   (ATHENA-128, D7/D11): bounds on how many distinct HA entities a
+    #   single utterance may write without naming that scope explicitly.
+    #   0 disables the corresponding bound entirely (never confirm /
+    #   never hard-block on count alone). A non-zero hard_limit must be
+    #   >= threshold -- see the model_validator below.
+    ha_write_fanout_confirm_threshold: int = Field(default=_FANOUT_CONFIRM_THRESHOLD_DEFAULT, ge=0)
+    ha_write_fanout_hard_limit: int = Field(default=_FANOUT_HARD_LIMIT_DEFAULT, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_fanout_limits(self) -> "AthenaConfig":
+        # Every service loading the shared config reads these, so an
+        # inverted pair must not fail startup stack-wide: log one ERROR and
+        # fall back to the defaults for the pair (the gate stays on).
+        if 0 < self.ha_write_fanout_hard_limit < self.ha_write_fanout_confirm_threshold:
+            logger.error(
+                "ha_write_fanout_limits_invalid: HA_WRITE_FANOUT_HARD_LIMIT=%d is below "
+                "HA_WRITE_FANOUT_CONFIRM_THRESHOLD=%d (a non-zero hard limit must be >= the "
+                "threshold; 0 disables it); using the defaults %d/%d",
+                self.ha_write_fanout_hard_limit,
+                self.ha_write_fanout_confirm_threshold,
+                _FANOUT_HARD_LIMIT_DEFAULT,
+                _FANOUT_CONFIRM_THRESHOLD_DEFAULT,
+            )
+            self.ha_write_fanout_confirm_threshold = _FANOUT_CONFIRM_THRESHOLD_DEFAULT
+            self.ha_write_fanout_hard_limit = _FANOUT_HARD_LIMIT_DEFAULT
+        return self
 
     # ------------------------------------------------------------------
     # Deferred fields — see CONTRIBUTING.md for the extension pattern

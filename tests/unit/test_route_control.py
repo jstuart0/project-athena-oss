@@ -102,6 +102,19 @@ def _make_smart_controller(**overrides):
     return sc
 
 
+KILL_SWITCH_FLAG = "state_question_routing_kill_switch"
+
+
+def _flags(*, kill_switch=False):
+    """Name-aware feature flags: the bulk-status flags enabled, the
+    ATHENA-128 kill switch OFF (its shipped default) unless asked for."""
+    async def _get(name):
+        if name == KILL_SWITCH_FLAG:
+            return {"enabled": kill_switch, "config": {}}
+        return {"enabled": True, "config": {}}
+    return _get
+
+
 def _make_status_result(query_type: str = "all_lights", entities=None, raw_states=None):
     sr = MagicMock()
     sr.query_type = query_type
@@ -174,8 +187,8 @@ class TestStatusQueryOptimisation:
         sr = _make_status_result()
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
-                  return_value={"enabled": True, "config": {}}),
-            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value=True),
+                  side_effect=_flags()),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value="lights_on"),
             patch("orchestrator.nodes.route_control.optimize_status_query",
                   new_callable=AsyncMock, return_value=sr),
             patch("orchestrator.nodes.route_control.should_skip_synthesis",
@@ -196,8 +209,8 @@ class TestStatusQueryOptimisation:
         sr = _make_status_result()
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
-                  return_value={"enabled": True, "config": {}}),
-            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value=True),
+                  side_effect=_flags()),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value="lights_on"),
             patch("orchestrator.nodes.route_control.optimize_status_query",
                   new_callable=AsyncMock, return_value=sr),
             patch("orchestrator.nodes.route_control.should_skip_synthesis",
@@ -211,8 +224,11 @@ class TestStatusQueryOptimisation:
         # ha_status_data should be injected into state.context
         assert result.context is not None
         assert "ha_status_data" in result.context
-        # Falls through to normal extraction; smart controller was called
-        sc.extract_intent.assert_awaited()
+        # ATHENA-128: falls through to the state-question get_status
+        # dispatch (not LLM extraction) with the kill switch off.
+        sc.extract_intent.assert_not_awaited()
+        sc.execute_intent.assert_awaited_once()
+        assert sc.execute_intent.await_args.args[0]["action"] == "get_status"
 
     def test_status_query_optimisation_exception_falls_back(self):
         sc = _make_smart_controller()
@@ -223,8 +239,8 @@ class TestStatusQueryOptimisation:
         state = _make_state(query="what lights are on?")
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
-                  return_value={"enabled": True, "config": {}}),
-            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value=True),
+                  side_effect=_flags()),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value="lights_on"),
             patch("orchestrator.nodes.route_control.optimize_status_query",
                   new_callable=AsyncMock, side_effect=RuntimeError("HA down")),
             patch("orchestrator.nodes.route_control.get_automation_system_mode",
@@ -233,9 +249,33 @@ class TestStatusQueryOptimisation:
                   new_callable=AsyncMock),
         ):
             result = _run(route_control_node(state))
-        # Optimisation failed; normal path executes
-        sc.extract_intent.assert_awaited()
+        # Optimisation failed; ATHENA-128: the question is answered by the
+        # get_status dispatch (kill switch off), not LLM extraction.
+        sc.extract_intent.assert_not_awaited()
+        assert sc.execute_intent.await_args.args[0]["action"] == "get_status"
         assert "route_control" in result.node_timings
+
+    def test_kill_switch_on_restores_legacy_extraction(self):
+        """With the kill switch on, routing is legacy: the bulk fall-through
+        reaches LLM extraction as before ATHENA-128."""
+        sc = _make_smart_controller()
+        _runtime.set_smart_controller(sc)
+        _runtime.set_entity_manager(MagicMock())
+        _runtime.set_automation_agent(None)
+        state = _make_state(query="what lights are on?")
+        with (
+            patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
+                  side_effect=_flags(kill_switch=True)),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value="lights_on"),
+            patch("orchestrator.nodes.route_control.optimize_status_query",
+                  new_callable=AsyncMock, side_effect=RuntimeError("HA down")),
+            patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                  new_callable=AsyncMock, return_value="pattern"),
+            patch("orchestrator.nodes.route_control.store_conversation_context",
+                  new_callable=AsyncMock),
+        ):
+            _run(route_control_node(state))
+        sc.extract_intent.assert_awaited()
 
 
 class TestDynamicAgentRouting:
@@ -519,7 +559,13 @@ class TestNormalExtraction:
             patch("orchestrator.nodes.route_control.store_conversation_context", new_callable=AsyncMock),
         ):
             result = _run(route_control_node(state))
-        sc.extract_intent.assert_awaited_once_with("turn on the kitchen lights", device_room="living room")
+        # ATHENA-128 3.2(f): extract_intent now also receives the
+        # classify_utterance() result as `utterance` -- asserted loosely
+        # (mock.ANY) since its exact value is the classifier's contract,
+        # not route_control's.
+        sc.extract_intent.assert_awaited_once_with(
+            "turn on the kitchen lights", device_room="living room", utterance=mock.ANY
+        )
         assert result.answer == "Done! Lights on."
         assert result.retrieved_data == {"intent": {"device_type": "light", "action": "turn_on", "room": "living room"}}
 

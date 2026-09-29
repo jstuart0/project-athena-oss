@@ -93,6 +93,13 @@ class OrchestratorState(BaseModel):
     # Phase 2: Guest Mode permissions
     permissions: Dict[str, Any] = Field(default_factory=dict, description="User permissions from mode service")
 
+    # ATHENA-128 (D13/D14): pending write-confirmation carriage. Both are
+    # set server-side at each construction site, never copied from stored
+    # context. caller_fingerprint binds a pending confirmation to the
+    # caller that created it and is never used for authorization.
+    supports_followup: bool = Field(False, description="Server-set: the calling surface carries a follow-up turn on the same session")
+    caller_fingerprint: Optional[str] = Field(None, description="Server-computed caller fingerprint binding a pending confirmation")
+
     # SMS Integration: Additional context (phone_number, calendar_event_id, guest_name, etc.)
     context: Dict[str, Any] = Field(default_factory=dict, description="Additional context for SMS and guest integration")
 

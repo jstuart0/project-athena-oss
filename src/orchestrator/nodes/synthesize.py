@@ -12,6 +12,7 @@ import structlog
 from orchestrator.nodes._runtime import get_llm_router
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.helpers import (
+    holds_foreign_pending,
     _direct_general_info_response,
     get_component_config,
     _component_system_prompt,
@@ -361,7 +362,8 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
 
         # Store conversation context for follow-up queries
         # This enables "what about tomorrow?" for weather, "how about the Lakers?" for sports, etc.
-        if state.session_id and state.answer and state.intent:
+        # Never over another caller's pending write confirmation.
+        if state.session_id and state.answer and state.intent and not holds_foreign_pending(state.prev_context, state.caller_fingerprint):
             try:
                 # Extract entities based on intent type
                 context_entities = {}

@@ -709,6 +709,16 @@ class PermissionScope:
     denials: List[HADenial] = field(default_factory=list)
     allowed_writes: int = 0
     halted: bool = False
+    # ATHENA-128: structural read-only guarantee (D4) and write fan-out
+    # confirmation carriage (D9, D16). ``utterance`` holds the
+    # UtteranceClassification the gate reads (real classification even
+    # under the D15 kill switch); ``fanout_block`` and
+    # ``confirmed_entity_ids`` are set/read by write_fanout.py only.
+    read_only: bool = False
+    utterance: Any = None
+    fanout_block: Any = None
+    can_carry_pending: bool = False
+    confirmed_entity_ids: Optional[frozenset] = None
 
 
 def degraded_permissions() -> Dict[str, Any]:
@@ -761,6 +771,8 @@ def ha_permission_scope(
     mode: str = "system",
     request_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    read_only: bool = False,
+    utterance: Any = None,
 ):
     """Open a new PermissionScope for the duration of the with-block.
 
@@ -783,6 +795,8 @@ def ha_permission_scope(
         mode=mode,
         request_id=request_id,
         session_id=session_id,
+        read_only=read_only,
+        utterance=utterance,
     )
     token = _ha_permission_scope_var.set(scope)
     try:
@@ -1143,6 +1157,13 @@ def _noun_for_domains(domains: Iterable[str]) -> str:
     return ", ".join(names[:-1]) + " and " + names[-1]
 
 
+# Public alias (L5): write_fanout.py needs the noun-for-domains mapping
+# and must not import a private name.
+noun_for_domains = _noun_for_domains
+
+READ_ONLY_REFUSAL = "I couldn't check that right now."
+
+
 def permission_refusal_message(
     domains: Iterable[str],
     scope: "PermissionScope",
@@ -1158,6 +1179,8 @@ def permission_refusal_message(
     can be "degraded" even when ``scope.mode`` reports "owner" during a D4
     outage), not ``scope.mode`` itself.
     """
+    if scope is not None and scope.read_only:
+        return READ_ONLY_REFUSAL
     noun = _noun_for_domains(domains)
     perm_mode = scope.permissions.get("mode") if scope and scope.permissions else "guest"
     if perm_mode == "degraded":
@@ -1265,6 +1288,8 @@ class PermissionEnforcingHAClient:
         service_data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         scope = self._resolve_scope()
+        if scope.read_only:
+            self._deny(scope, domain, service, tuple(_extract_targets(domain, service_data)), "read_only_scope")
         if scope.halted:
             self._deny(scope, domain, service, (), "halted_after_denial")
         decision = authorize_ha_write(domain, service, service_data, scope.permissions)
@@ -1275,6 +1300,8 @@ class PermissionEnforcingHAClient:
 
     async def create_automation(self, automation_id: str, config: Dict[str, Any]) -> bool:
         scope = self._resolve_scope()
+        if scope.read_only:
+            self._deny(scope, "automation", "create", (automation_id,), "read_only_scope")
         if scope.halted:
             self._deny(scope, "automation", "create", (), "halted_after_denial")
         decision = authorize_automation_config(automation_id, config, scope.permissions)
@@ -1285,6 +1312,8 @@ class PermissionEnforcingHAClient:
 
     async def delete_automation(self, automation_id: str) -> bool:
         scope = self._resolve_scope()
+        if scope.read_only:
+            self._deny(scope, "automation", "delete", (automation_id,), "read_only_scope")
         if scope.halted:
             self._deny(scope, "automation", "delete", (), "halted_after_denial")
         decision = authorize_ha_write(
@@ -1297,6 +1326,8 @@ class PermissionEnforcingHAClient:
 
     async def disable_automation(self, automation_id: str) -> bool:
         scope = self._resolve_scope()
+        if scope.read_only:
+            self._deny(scope, "automation", "disable", (automation_id,), "read_only_scope")
         if scope.halted:
             self._deny(scope, "automation", "disable", (), "halted_after_denial")
         decision = authorize_ha_write(

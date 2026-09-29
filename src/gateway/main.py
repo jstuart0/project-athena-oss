@@ -1156,7 +1156,9 @@ async def route_to_orchestrator(
     request: ChatCompletionRequest,
     device_id: Optional[str] = None,
     session_id: Optional[str] = None,
-    return_session_id: bool = False
+    return_session_id: bool = False,
+    voice_device_id: Optional[str] = None,
+    supports_followup: bool = False,
 ) -> Union[ChatCompletionResponse, tuple]:
     """
     Route request to Athena orchestrator.
@@ -1166,6 +1168,11 @@ async def route_to_orchestrator(
         device_id: Optional Voice PE device identifier for session management
         session_id: Optional session ID to continue conversation
         return_session_id: If True, returns tuple of (response, session_id)
+        voice_device_id: The caller's real device identifier, forwarded as the
+            orchestrator's voice_device_id (a pending-confirmation fingerprint
+            input only). `device_id` above is the mapped room, used for audio.
+        supports_followup: True only from a caller whose surface carries a
+            follow-up turn on the same session (the HA conversation route).
 
     Returns:
         ChatCompletionResponse with orchestrator's answer, or tuple if return_session_id=True
@@ -1212,6 +1219,15 @@ async def route_to_orchestrator(
                 # PIN override path.
                 "caller_trust": "household",
             }
+
+            # ATHENA-128 D14: a literal, set only for callers that opt in --
+            # never derived from an inbound request field.
+            if supports_followup:
+                payload["supports_followup"] = True
+            # A caller-fingerprint input only. Never sent as device_id: that
+            # field is the orchestrator's guest-session lookup key.
+            if voice_device_id:
+                payload["voice_device_id"] = voice_device_id
 
             # Include session_id if provided (for conversation context)
             if session_id:
@@ -2776,7 +2792,9 @@ async def ha_conversation(request: HAConversationRequest):
                 request=chat_request,
                 device_id=room,  # Use mapped room name for audio routing
                 session_id=existing_session_id,
-                return_session_id=True
+                return_session_id=True,
+                voice_device_id=request.device_id,
+                supports_followup=True,
             )
 
         # Extract answer from chat response

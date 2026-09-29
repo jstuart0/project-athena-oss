@@ -215,6 +215,46 @@ class TestDeviceFingerprintedGuestGetsGuestPermissionsWhileHouseOwner:
         assert initial_state.permissions["allowed_intents"] == ["fetched_weather"]
 
 
+class TestVoiceDeviceIdIsOnlyAFingerprintInput:
+    """An HA Assist-shaped request carries the device's own id as
+    voice_device_id: it feeds the pending-confirmation fingerprint and
+    never the guest-session-by-device lookup."""
+
+    def _post(self, client, monkeypatch, voice_device_id, path="/query"):
+        _install_mode_client(server_mode="owner")
+        fake_admin = mock.MagicMock()
+        fake_admin.get_user_session_by_device = mock.AsyncMock(return_value=None)
+        monkeypatch.setattr(_main_module, "get_admin_client", lambda: fake_admin)
+        graph = _FakeGraph({"intent": SimpleNamespace(value="control")} if path != "/query" else None)
+        monkeypatch.setattr(_main_module, "orchestrator_graph", graph)
+        body = {
+            "query": "office lights off please", "room": "office", "caller_trust": "household",
+            "supports_followup": True, "voice_device_id": voice_device_id,
+        }
+        if path == "/query":
+            resp = client.post(path, json=body, headers=_service_headers())
+            assert resp.status_code == 200
+        else:
+            with client.stream("POST", path, json=body, headers=_service_headers()) as resp:
+                assert resp.status_code == 200
+                for _ in resp.iter_lines():
+                    pass
+        return fake_admin, graph.calls[0]
+
+    @pytest.mark.parametrize("path", ["/query", "/query/stream/v2"])
+    def test_ha_shaped_request_skips_the_device_guest_lookup(self, client, monkeypatch, path):
+        from orchestrator.write_fanout import caller_fingerprint
+        fake_admin, initial_state = self._post(client, monkeypatch, "ha-device-1", path)
+        fake_admin.get_user_session_by_device.assert_not_awaited()
+        assert initial_state.caller_fingerprint == caller_fingerprint("household", "ha-device-1", "office", "owner")
+
+    def test_two_devices_in_the_same_room_have_different_fingerprints(self, client, monkeypatch):
+        _, a = self._post(client, monkeypatch, "ha-device-1")
+        _, b = self._post(client, monkeypatch, "ha-device-2")
+        assert a.caller_fingerprint and b.caller_fingerprint
+        assert a.caller_fingerprint != b.caller_fingerprint
+
+
 class TestStreamV2DeviceFingerprintLookup:
     def test_stream_v2_device_fingerprint_lookup(self, client, monkeypatch):
         """The device-fingerprint lookup added to /query/stream/v2 (it had

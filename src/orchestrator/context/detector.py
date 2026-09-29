@@ -629,16 +629,25 @@ def detect_location_correction(query: str) -> Dict[str, Any]:
 # untouched.
 # ============================================================================
 
-_YES_NO_BASE_WORDS = ("yes", "yeah", "yep", "yup", "no", "nope", "ok", "okay", "sure", "nah")
+# Public: orchestrator.write_fanout builds its bare-confirmation regexes
+# from these, so the anaphora tag and the confirmation reply share one
+# vocabulary.
+AFFIRMATION_WORDS = ("yes", "yeah", "yep", "yup", "ok", "okay", "sure")
+NEGATION_WORDS = ("no", "nope", "nah")
+GRATITUDE_WORDS = ("thanks", "thank you")
+POLITE_SUFFIX_WORDS = ("please",) + GRATITUDE_WORDS
+PROCEED_PHRASES = ("do it", "go ahead")
+
+_YES_NO_BASE_WORDS = AFFIRMATION_WORDS + NEGATION_WORDS
 _YES_NO_STANDALONE_WORDS = ("any", "anything", "whatever")
-_YES_NO_SUFFIX = r"(?:please|thanks|thank you|do it|go ahead)"
+_YES_NO_SUFFIX = r"(?:" + "|".join(POLITE_SUFFIX_WORDS + PROCEED_PHRASES) + r")"
 
 _YES_NO_WITH_SUFFIX_RE = re.compile(
     r"^(?:" + "|".join(_YES_NO_BASE_WORDS) + r")(?:\s+" + _YES_NO_SUFFIX + r")?$"
 )
 _YES_NO_STANDALONE_RE = re.compile(r"^(?:" + "|".join(_YES_NO_STANDALONE_WORDS) + r")$")
 _YES_NO_COMMA_RE = re.compile(r"^(?:" + "|".join(_YES_NO_BASE_WORDS) + r")\s*,")
-_TRAILING_PUNCT_RE = re.compile(r"[?.!]+$")
+_TRAILING_PUNCT = "?.!"  # stripped with rstrip: linear, unlike an end-anchored regex
 
 _REPEAT_RE = re.compile(r"\b(?:do (?:that|it) again|same thing|do the same|repeat that)\b")
 _TRAILING_AGAIN_RE = re.compile(r"\bagain\b\s*[?.!]*$")
@@ -687,7 +696,7 @@ def _is_room_only(query_lower: str) -> bool:
 
 def _compute_anaphora_types(query_lower: str) -> Set[str]:
     types: Set[str] = set()
-    stripped_query = _TRAILING_PUNCT_RE.sub("", query_lower).strip()
+    stripped_query = query_lower.rstrip(_TRAILING_PUNCT).strip()
 
     if (
         _YES_NO_WITH_SUFFIX_RE.match(stripped_query)

@@ -1,0 +1,100 @@
+Extract the smart home control intent from this query. Return ONLY valid JSON.
+
+Query: "do the thing in the den"
+Number of lights to control: 3
+
+Return JSON with this structure:
+{
+    "device_type": "light|switch|scene|climate|oven|fridge|freezer|sensor|media_player|bed_warmer|lock|cover|fan",
+    "room": "room name or null (use 'whole_house' for all rooms)",
+    "excluded_rooms": ["list of rooms to exclude"] or null,
+    "action": "turn_on|turn_off|set_color|set_brightness|set_temperature|set_level|get_status|play|pause|stop|warm_bed|increase|decrease|lock|unlock",
+    "target_scope": "group|individual_lights|all_individual",
+    "parameters": {
+        "brightness": 0-255 or null,
+        "hs_colors": [[hue, saturation], ...] or null,
+        "temperature": number or null,
+        "level": 1-10 or null,
+        "side": "left|right|both" or null
+    },
+    "color_description": "brief description of the colors chosen"
+}
+
+EXCLUSIONS: When user says "except [room]" or "but not [room]", set room="whole_house" and excluded_rooms=["room_name"].
+Example: "turn on all lights except the bedroom" -> room="whole_house", excluded_rooms=["bedroom"]
+
+DEVICE TYPE DETECTION:
+- climate: thermostat, temperature setting, HVAC, heating, cooling
+- oven: oven, stove, baking
+- fridge: refrigerator, fridge, freezer
+- sensor: motion, occupancy, light level, lux, brightness sensor
+- media_player: TV, Apple TV, HomePod, Sonos, speaker, music, playing
+- light: lights, lamps, lighting
+- bed_warmer: bed warmer, mattress pad, bed heater, warm the bed, heated bed
+- lock: door lock, lock, unlock, front door lock, back door lock, deadbolt
+
+STATUS QUERIES: Questions about current state (e.g. "what is", "what's", "check", "tell me about", "is X on", "are the Y lights on or off", "is the door locked") are NEVER actions: always use action "get_status", even when the words on/off/lock/open appear. A question never turns anything on or off.
+
+For hs_colors: hue is 0-360 (red=0, green=120, blue=240), saturation is 0-100.
+IMPORTANT:
+- For a SINGLE color request (e.g., "turn lights blue", "make it red"), use ONE hs_color pair repeated for all 3 lights.
+- For VARIED/DIFFERENT colors (e.g., "rainbow", "sunset", "different colors", "random"), generate 3 different pairs.
+
+ROOM EXTRACTION: Extract the room name from phrases like "the [room] lights", "[room] to [color]", "in the [room]".
+Room groups like "first floor", "downstairs", "upstairs", "second floor" are valid room names.
+
+CRITICAL: Only use action "set_color" when a COLOR is explicitly mentioned. For "turn on", "turn off", "switch on", "switch off" WITHOUT any color, use "turn_on" or "turn_off".
+
+Examples:
+"what is the thermostat set to" -> {"device_type": "climate", "room": null, "action": "get_status", "target_scope": "group", "parameters": {}, "color_description": null}
+"check the fridge temperature" -> {"device_type": "fridge", "room": null, "action": "get_status", "target_scope": "group", "parameters": {}, "color_description": null}
+"is the oven on" -> {"device_type": "oven", "room": null, "action": "get_status", "target_scope": "group", "parameters": {}, "color_description": null}
+"are the office lights on" -> {"device_type": "light", "room": "office", "action": "get_status", "target_scope": "group", "parameters": {}, "color_description": null}
+"are the kitchen lights currently on or off" -> {"device_type": "light", "room": "kitchen", "action": "get_status", "target_scope": "group", "parameters": {}, "color_description": null}
+"is the bedroom lamp off" -> {"device_type": "light", "room": "bedroom", "action": "get_status", "target_scope": "group", "parameters": {}, "color_description": null}
+"is the hallway switch on" -> {"device_type": "switch", "room": "hallway", "action": "get_status", "target_scope": "group", "parameters": {}, "color_description": null}
+"is the garage door open" -> {"device_type": "cover", "room": "garage", "action": "get_status", "target_scope": "group", "parameters": {}, "color_description": null}
+"where is there motion" ->{"device_type": "sensor", "room": null, "action": "get_status", "target_scope": "group", "parameters": {}, "color_description": null}
+"what's playing on the TV" -> {"device_type": "media_player", "room": null, "action": "get_status", "target_scope": "group", "parameters": {}, "color_description": null}
+"turn on the office lights" -> {"device_type": "light", "room": "office", "action": "turn_on", "target_scope": "group", "parameters": {}, "color_description": null}
+"turn on all lights except the bedroom" -> {"device_type": "light", "room": "whole_house", "excluded_rooms": ["bedroom"], "action": "turn_on", "target_scope": "group", "parameters": {}, "color_description": null}
+"turn off everything but the kitchen" -> {"device_type": "light", "room": "whole_house", "excluded_rooms": ["kitchen"], "action": "turn_off", "target_scope": "group", "parameters": {}, "color_description": null}
+"lock the front door" -> {"device_type": "lock", "room": "front_door", "action": "lock", "target_scope": "group", "parameters": {}, "color_description": null}
+"unlock the back door" -> {"device_type": "lock", "room": "back_door", "action": "unlock", "target_scope": "group", "parameters": {}, "color_description": null}
+"is the front door locked" -> {"device_type": "lock", "room": "front_door", "action": "get_status", "target_scope": "group", "parameters": {}, "color_description": null}
+"turn on the first floor lights" -> {"device_type": "light", "room": "first floor", "action": "turn_on", "target_scope": "group", "parameters": {}, "color_description": null}
+"turn off the downstairs lights" -> {"device_type": "light", "room": "downstairs", "action": "turn_off", "target_scope": "group", "parameters": {}, "color_description": null}
+"turn the upstairs lights on" -> {"device_type": "light", "room": "upstairs", "action": "turn_on", "target_scope": "group", "parameters": {}, "color_description": null}
+"lights on in the kitchen" -> {"device_type": "light", "room": "kitchen", "action": "turn_on", "target_scope": "group", "parameters": {}, "color_description": null}
+"turn the office lights blue" -> {"device_type": "light", "room": "office", "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[240, 100], [240, 100], [240, 100]]}, "color_description": "blue"}
+"turn the lights blue" -> {"device_type": "light", "room": null, "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[240, 100], [240, 100], [240, 100]]}, "color_description": "blue"}
+"set office to red" -> {"device_type": "light", "room": "office", "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[0, 100], [0, 100], [0, 100]]}, "color_description": "red"}
+"make the bedroom lights green" -> {"device_type": "light", "room": "bedroom", "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[120, 100], [120, 100], [120, 100]]}, "color_description": "green"}
+"make living room lights sunset colors" -> {"device_type": "light", "room": "living room", "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[20, 100], [35, 90], [10, 95]]}, "color_description": "warm sunset oranges and reds"}
+"make it feel like sunset" -> {"device_type": "light", "room": null, "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[20, 100], [35, 90], [10, 95]]}, "color_description": "warm sunset oranges and reds"}
+"sunset vibes" -> {"device_type": "light", "room": null, "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[25, 95], [15, 100], [40, 80]]}, "color_description": "sunset warm tones"}
+"set kitchen to ocean vibes" -> {"device_type": "light", "room": "kitchen", "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[180, 70], [200, 85], [160, 60]]}, "color_description": "ocean blues and teals"}
+"different shades of purple" -> {"device_type": "light", "room": null, "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[270, 100], [280, 70], [290, 85]]}, "color_description": "various purple shades"}
+"christmas colors" -> {"device_type": "light", "room": null, "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[0, 100], [120, 100], [0, 100]]}, "color_description": "red and green christmas"}
+"random colors" -> {"device_type": "light", "room": null, "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[0, 100], [120, 100], [240, 100]]}, "color_description": "vibrant random colors"}
+
+SPORTS TEAM COLORS (use these hue values for team color requests):
+NFL: Ravens(270,45), Steelers(50,0), Browns(30,0), Bengals(30,0), Chiefs(0,50), Bills(240,0), Dolphins(175,30), Patriots(220,0), Jets(120,0), Raiders(0,0), Broncos(30,240), Chargers(50,210), Cowboys(220,0), Eagles(180,0), Giants(240,0), Commanders(45,0), Packers(120,50), Bears(30,220), Lions(210,0), Vikings(270,50), 49ers(0,50), Seahawks(120,220), Cardinals(0,0), Rams(240,50), Falcons(0,0), Panthers(210,0), Saints(50,0), Buccaneers(0,0), Colts(240,0), Titans(210,0), Texans(220,0), Jaguars(175,50)
+MLB: Orioles(30), Yankees(220), Red Sox(0), Blue Jays(240), Rays(210), Mets(240,30), Phillies(0), Braves(220,0), Marlins(210), Nationals(0), Cubs(240,0), Cardinals(0), Brewers(50,220), Reds(0), Pirates(50,0), Dodgers(240), Giants(30,0), Padres(50,45), Diamondbacks(0,175), Rockies(270,0), Astros(30,220), Rangers(240,0), Mariners(175,220), Angels(0), Athletics(120,50), Twins(220,0), White Sox(0,0), Tigers(30,220), Royals(240), Indians/Guardians(0,220)
+NBA: Lakers(270,50), Celtics(120), Warriors(50,240), Bulls(0), Heat(0,0), Nets(0,0), Knicks(240,30), 76ers(240,0), Suns(30,270), Bucks(120), Hawks(0), Spurs(0,0), Mavericks(220,0), Nuggets(50,220), Clippers(0,240), Kings(270), Blazers(0,0), Jazz(50,120,220), Pacers(50,220), Cavaliers(45,0), Pistons(0,240), Magic(240,0), Hornets(175,270), Wizards(220,0), Grizzlies(210), Pelicans(50,0,220), Timberwolves(220,120), Thunder(240,30), Raptors(0,0)
+NHL: Capitals(0,220), Penguins(50,0), Flyers(30,0), Rangers(240,0), Bruins(50,0), Canadiens(0,240), Maple Leafs(240), Red Wings(0), Blackhawks(0,0), Blues(240,50), Avalanche(45,240), Golden Knights(50,0), Kraken(175,0), Sharks(175), Ducks(30,50), Kings(0,0), Flames(0,50), Oilers(30,220), Canucks(120,240), Jets(220), Wild(120,0), Stars(120,0), Predators(50,220), Lightning(240), Panthers(0,220), Devils(0,0), Islanders(30,240), Hurricanes(0,0), Blue Jackets(220,0), Senators(0,50), Sabres(50,220)
+College: Michigan(50,240), Ohio State(0), Penn State(220), Alabama(45,0), Georgia(0,0), Clemson(30,270), LSU(50,270), Notre Dame(50,240), Oklahoma(45,0), Texas(210,30), USC(45,0), UCLA(50,240), Florida(30,240), Auburn(30,220), Tennessee(30,0), Wisconsin(0,0), Oregon(120,50), Washington(270,50), Florida State(45,0), Miami(30,120), NC State(0,0), Duke(240), UNC(210), Kentucky(240), Kansas(240,0), Gonzaga(220,0), Villanova(220,0), Syracuse(30), Army(50,0), Navy(220,50), Air Force(240,0), West Point(50,0)
+Soccer/MLS: LAFC(50,0), LA Galaxy(220,50), Atlanta United(0,50), Seattle Sounders(120,240), NYCFC(210,30), Inter Miami(0,270), Austin FC(120,0), Nashville SC(50,0), Portland Timbers(120,50), Philadelphia Union(50,220), Columbus Crew(50,0), FC Cincinnati(240,30), Toronto FC(0), Vancouver Whitecaps(220,240), Montreal(0,220)
+Premier League: Manchester United(0), Manchester City(210), Liverpool(0), Chelsea(240), Arsenal(0,0), Tottenham(220,0), Newcastle(0,0), Brighton(240), Aston Villa(45,210), West Ham(45,210), Everton(240), Crystal Palace(0,240), Wolves(45,0), Leicester(240), Fulham(0,0), Bournemouth(0,0), Brentford(0,0), Nottingham Forest(0)
+World: Barcelona(45,0), Real Madrid(0,0), Bayern Munich(0), Juventus(0,0), PSG(220,0), AC Milan(0,0), Inter Milan(240,0), Dortmund(50,0), Ajax(0,0), Celtic(120,0), Rangers(240)
+
+For team colors, alternate between the team's primary colors. Example:
+"michigan wolverines" -> maize(50,100) and blue(240,100) alternating
+"ravens" -> purple(270,100) and gold(45,100) alternating
+"orioles" -> orange(30,100)
+
+"michigan wolverines colors" -> {"device_type": "light", "room": null, "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[50, 100], [240, 100], [50, 100]]}, "color_description": "Michigan maize and blue"}
+"ravens colors" -> {"device_type": "light", "room": null, "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[270, 100], [45, 100], [270, 100]]}, "color_description": "Ravens purple and gold"}
+"orioles colors" -> {"device_type": "light", "room": null, "action": "set_color", "target_scope": "all_individual", "parameters": {"hs_colors": [[30, 100], [30, 100], [30, 100]]}, "color_description": "Orioles orange"}
+
+Return ONLY the JSON, no other text.

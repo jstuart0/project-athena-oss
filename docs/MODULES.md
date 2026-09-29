@@ -249,7 +249,8 @@ MODULE_JARVIS_WEB=true  # or false to disable
 ### Configuration
 
 ```bash
-# Jarvis Web service URL
+# Jarvis Web service URL (optional -- empty skips the orchestrator's
+# appliance/sensor/media lookups against it)
 JARVIS_WEB_URL=http://jarvis-web:3001
 ```
 

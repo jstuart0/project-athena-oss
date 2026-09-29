@@ -187,7 +187,7 @@ DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 |----------|---------|-------------|
 | `MODE_SERVICE_URL` | `http://localhost:8022` | Mode service (ATHENA-69). **Required** on both the orchestrator and the gateway — without it, mode/permission resolution degrades every request (orchestrator: `get_current_mode`'s outage fallback; gateway: `mode_gate.py`'s fast-path check always returns `False`). Also read by admin-backend for the admin modules page and the Guest Mode page's `GET /api/guest-mode/mode-status` proxy — unset there just means that proxy reports `mode_service_url_unset` rather than a live mode. See "Mode and permissions" under Module Settings below. |
 | `NOTIFICATIONS_SERVICE_URL` | `http://localhost:8050` | Notifications service |
-| `JARVIS_WEB_URL` | `http://localhost:3001` | Jarvis Web UI |
+| `JARVIS_WEB_URL` | *(empty)* | jarvis-web API base for appliance/sensor/media lookups in the orchestrator's smart-home controller; empty skips them. |
 | `CONTROL_AGENT_URL` | `http://localhost:8099` | Service management API |
 | `CONTROL_AGENT_SERVICES_FILE` | *(empty)* | Path to a JSON file (read by the Control Agent process itself, not admin-backend) naming which bare processes, watchdog exclusions, and Docker containers this Control Agent may manage. Empty means it manages nothing. See below. |
 
@@ -658,6 +658,110 @@ protects against PIN-guessing; **changing the PIN in the admin UI clears
 the lockout counter** for every tier. The lockout is per-tier
 (`household`/`sms`/`web_authenticated`), never keyed on session id, room,
 or device id, so a caller can't dodge it by rotating identifiers.
+
+**State questions are answered, never written.** A question about device
+state ("are the office lights on or off right now", "is the front door
+locked", "check if the garage is closed") is answered from Home Assistant
+state under a read-only permission scope: the permission guard refuses
+every write for that request before anything else is checked, whatever the
+LLM extracts. Commands phrased as requests ("can you turn off the lights?",
+"make sure the doors are locked", "leave the porch light on") are still
+commands. A status-sounding command ("turn the office lights on", "set the
+temperature to 70") now executes; it used to get a house-wide status read
+back instead. The question/command classifier is English-only; it strips
+a leading "hey"/"ok" and the assistant's name (the admin profile's
+configured name as well as "Athena" and "Jarvis"), and classifies only the
+first 300 characters of an utterance. Questions that reach the music or TV
+handlers ("is music playing", "did you turn off the TV") run read-only too.
+
+**Large writes need explicit wording.** One utterance may write at most
+`HA_WRITE_FANOUT_CONFIRM_THRESHOLD` distinct entities (default 6) unless it
+names that scope itself: `all`, `every`, `everything`, `whole`, `entire`,
+`house`, the room group's name, or two or more of the rooms it covers. A
+plain command ("turn off the office lights") is allowed up to
+`HA_WRITE_FANOUT_HARD_LIMIT` (default 18). A target of every entity in a
+domain, area, floor or label is never confirmable: without explicit wording
+it's always answered with the command to say instead. That covers the
+fallbacks for a missing "good night" scene (every light) and "leaving" /
+"goodbye" scene (every light and every lock): with no such scene
+configured, those phrases now get the commands to say instead of acting.
+`0` disables either limit. Both variables are read by every service that
+loads the shared configuration (so a shared ConfigMap reaches all of
+them); a hard limit below the threshold, other than `0`, logs one ERROR at
+startup and both fall back to the defaults, so the check stays on. An HA
+light group entity counts as one.
+
+Above the bound, what happens depends on the surface:
+
+| Surface | Response |
+|---------|----------|
+| Home Assistant Assist (gateway HA conversation route), LiveKit, jarvis-web chat, SMS | "That would turn off 11 lights in the office. Should I go ahead?" A bare "yes" (or "Yes, please.", "okay do it", "go ahead", "do it") within 60 seconds runs exactly those entities; "no" cancels; anything else is treated as a new request. |
+| Wyoming satellites, the OpenAI-compatible `/v1/chat/completions` path, any other caller | "That would turn off 11 lights in the office. To do it, say: turn off all the office lights." Nothing is stored. |
+
+Which response a request gets comes from the `/query` body's
+`supports_followup` field, set in server code by the callers above. The
+orchestrator trusts it from any caller that passes ingress authentication
+(`X-Service-Key`), the same trust class as `caller_trust`. Setting it only
+changes the phrasing (a prompt instead of the command to say): a
+confirmation can be replayed only by a matching caller on the same session,
+under full re-authorization.
+
+A confirmation is bound to the caller that got the prompt: the caller
+trust tier, device id, room and resolved mode. For Home Assistant Assist,
+the gateway forwards the HA device's own id as `voice_device_id`, which is
+used only for this binding (it isn't the `device_id` used to look up a
+guest session). A caller that sends neither a trust tier nor a device id
+can't hold a confirmation and always gets the command to say. A "yes" from
+anyone else on the same session gets "I'm not sure what you're agreeing
+to." and changes nothing; that caller's own requests on the session store
+no context, so they can't overwrite the pending confirmation either. The
+replay runs under the replying turn's own permissions, so a mode change in
+between is enforced. With Redis configured, a "yes" whose single-use claim
+can't reach Redis is treated as already used (nothing runs), so two
+replicas can never both replay it. If Home Assistant's gateway
+pre-routing (`ha_intent_prerouting`, off by default) is enabled, it may
+answer a short "yes" itself before it reaches the orchestrator; the
+pending write then simply expires unexecuted.
+
+**Kill switch.** The admin UI feature `state_question_routing_kill_switch`
+(seeded **disabled**) is an emergency revert: **enabling** it turns
+state-question routing **off** and restores the previous routing. It's
+inverted on purpose: the orchestrator treats a missing flag, or an admin
+API it can't reach, as disabled, so an enable-style flag would silently
+switch the protection off on a fresh install or during an outage. The
+read-only guard and the large-write limits stay active either way; to relax
+the limits, set both variables above to `0`.
+
+While the kill switch is on, a question goes back to the previous
+smart-home path, which can resolve it to a device change. That change is
+never made silently, whatever the limits (including `0`): even a
+single-device change from a question gets "Should I go ahead?" (or the
+exact command to say, on surfaces without a follow-up). That includes
+single-device changes such as the thermostat, the bed warmer, motion
+overrides and scene or routine activation ("is good night mode on?"),
+timed sequences, and the dynamic automation agent's actions (service
+calls, creating or deleting automations, notifications). A TV
+or music question is answered from the device's state, followed by the
+command form ("To turn it off, say: turn off the living room TV."). A
+command the classifier misread as a question still works after "yes" or
+the suggested wording. As a rollback step, turning the switch on reverts routing
+without letting questions write.
+
+Other state-question behaviour:
+
+- A question about a device the classifier can't name ("is the heater
+  on") is resolved by the intent extractor, still as a read. If neither
+  can name the device, the answer asks which device is meant rather than
+  reporting on the lights. The reply ("the thermostat", "the kitchen",
+  even "yes") is answered as that question, read-only; it never continues
+  an earlier command. An explicit command ("turn on the kitchen lights")
+  still runs.
+- The house-wide status reports ("which lights are on", "are the doors
+  locked") answer only questions about their own device type. A question
+  about a specific device ("garage door status", "what's the status of
+  the thermostat") gets that device's own state instead.
+- A TV question ("is the TV on", "did you turn off the TV") is answered
+  from the TV's Home Assistant state.
 Public/unauthenticated callers (`web_public`) can never attempt the PIN at
 all — see the caller table above.
 

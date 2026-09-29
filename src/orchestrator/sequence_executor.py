@@ -204,7 +204,11 @@ class SequenceExecutor:
             return ack
         else:
             # Execute synchronously
-            await self._execute_sequence_steps(sequence, session_id)
+            step_results = await self._execute_sequence_steps(sequence, session_id)
+            refused = [r for r in step_results if r.get("status") == "refused_fanout"]
+            if refused:
+                skipped_text = " ".join(f"Skipped: {r['message']}" for r in refused)
+                return f"Sequence complete. {skipped_text}"
             return "Sequence complete."
 
     async def _execute_sequence_steps(
@@ -226,6 +230,9 @@ class SequenceExecutor:
         per call, defeating the latch).
         """
         from orchestrator.mode_permission import current_ha_scope, ha_permission_scope
+        from orchestrator import write_fanout
+
+        step_results: List[Dict] = []
 
         scope_cm = ha_permission_scope(None, mode="system") if current_ha_scope() is None else contextlib.nullcontext()
         with scope_cm:
@@ -242,8 +249,24 @@ class SequenceExecutor:
                             logger.info(f"Sequence step {step_num}/{total_steps}: waiting {wait_seconds}s until {at_time}")
                             await asyncio.sleep(wait_seconds)
 
-                    # Execute the action
-                    await self._execute_step(step, step_num, total_steps)
+                    # Execute the action. ATHENA-128 4.7: can_carry_pending
+                    # is False here (outside pending_carrier, D16), so a
+                    # fan-out block always returns the rewording refusal,
+                    # never a dangling "Should I go ahead?" prompt.
+                    result = await self._execute_step(step, step_num, total_steps)
+                    blk = write_fanout.take_block()
+                    if blk is not None:
+                        domains = sorted({w.domain for w in blk.writes})
+                        n = sum(len(w.entity_ids) for w in blk.writes)
+                        logger.warning(
+                            f"sequence_step_fanout_refused: step={step_num}/{total_steps} "
+                            f"domains={domains} n={n}"
+                        )
+                        step_results.append({
+                            "step": step_num,
+                            "status": "refused_fanout",
+                            "message": result,
+                        })
 
                     # Handle delay after action
                     delay_after = step.get('delay_after')
@@ -265,6 +288,10 @@ class SequenceExecutor:
             if session_id and session_id in self._running_sequences:
                 del self._running_sequences[session_id]
 
+        # The synchronous caller reports refused steps; for a background
+        # run the sequence_step_fanout_refused log is the record.
+        return step_results
+
     async def _execute_step(self, step: Dict, step_num: int, total_steps: int):
         """Execute a single sequence step."""
         action = step.get('action', 'turn_on')
@@ -279,10 +306,13 @@ class SequenceExecutor:
         logger.info(f"Executing step {step_num}/{total_steps}: {action} on {device_type} in {room or entity_id}")
 
         if entity_id:
-            # Direct entity control
-            await self._execute_direct_action(entity_id, action, parameters)
+            # Direct entity control: gated on its own target like every
+            # other write (a refusal is returned as the step result).
+            return await self._execute_direct_action(entity_id, action, parameters)
         else:
-            # Use smart controller for room-based control
+            # Use smart controller for room-based control. ATHENA-128 4.7:
+            # the result (a gate rewording, on a fan-out block) is
+            # returned instead of discarded.
             intent = {
                 'device_type': device_type,
                 'room': room,
@@ -291,7 +321,7 @@ class SequenceExecutor:
                 'parameters': parameters,
                 'color_description': parameters.get('color_description')
             }
-            await self.smart_controller.execute_intent(intent, self.ha_client)
+            return await self.smart_controller.execute_intent(intent, self.ha_client)
 
     async def _execute_direct_action(self, entity_id: str, action: str, parameters: Dict):
         """Execute action directly on an entity."""
@@ -326,7 +356,18 @@ class SequenceExecutor:
         elif 'temperature' in parameters:
             service_data['temperature'] = parameters['temperature']
 
+        # ATHENA-128: the fan-out gate reads the request's classification
+        # from the scope, so a real state question (routing reverted by the
+        # kill switch) never writes through a sequence step. Outside
+        # pending_carrier, a block is always the rewording, recorded by the
+        # step loop as refused_fanout -- never a dangling prompt.
+        from orchestrator import write_fanout
+        refusal = write_fanout.gate(domain, service, (entity_id,), None)
+        if refusal:
+            return refusal
+
         await self.ha_client.call_service(domain, service, service_data)
+        return None
 
     def _calculate_wait_until(self, time_str: str) -> float:
         """

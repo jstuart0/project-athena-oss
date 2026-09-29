@@ -45,6 +45,19 @@ from orchestrator import mode_permission as mp  # noqa: E402
 # Helpers
 # ---------------------------------------------------------------------------
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _kill_switch_flag_off():
+    """ATHENA-128: the node reads the state-question kill switch; keep it
+    off (the shipped default) without an admin-API call."""
+    with patch("orchestrator.nodes.route_music.get_feature_config", new_callable=AsyncMock,
+               return_value={"enabled": False, "config": {}}), \
+            patch("orchestrator.nodes.route_music.configured_assistant_names", new_callable=AsyncMock, return_value=()):
+        yield
+
+
 def _run(coro):
     return asyncio.run(coro)
 

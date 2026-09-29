@@ -16,15 +16,36 @@ import structlog
 
 from orchestrator.nodes._runtime import get_tv_handler
 from orchestrator.state import OrchestratorState
-from orchestrator.helpers import store_conversation_context
+from orchestrator.helpers import (
+    configured_assistant_names,
+    get_feature_config,
+    holds_foreign_pending,
+    store_conversation_context,
+)
 from orchestrator.mode_permission import (
     HAWritePermissionDenied,
     check_intent_permission,
     ha_permission_scope,
     permission_refusal_message,
 )
+from orchestrator.utterance_kind import (
+    STATE_QUESTION_KILL_SWITCH_FLAG,
+    UtteranceKind,
+    classify_utterance,
+)
 
 logger = structlog.get_logger(__name__)
+
+
+def _tv_command_hint(intent, room) -> "str | None":
+    """The command form of a TV question's parsed action, for when the kill
+    switch has routing reverted and the question may be a misread command."""
+    where = f"the {str(room).replace('_', ' ')} TV" if room else "the TV"
+    if intent.action == "power" and intent.power_action in ("on", "off"):
+        return f"To turn it {intent.power_action}, say: turn {intent.power_action} {where}."
+    if intent.action == "launch" and intent.app_name:
+        return f"To open {intent.app_name}, say: open {intent.app_name} on {where}."
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -79,11 +100,18 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
             state.node_timings["route_tv"] = time.time() - start
             return state
 
+        # ATHENA-128: a state question ("is the TV on") runs under a
+        # read-only scope -- defence in depth for a parse that would turn
+        # it into a power/launch write. The kill switch reverts it.
+        uk = classify_utterance(state.query, assistant_names=await configured_assistant_names())
+        kill_switch = (await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)).get("enabled", False)
         with ha_permission_scope(
             state.permissions,
             mode=state.mode,
             request_id=state.request_id,
             session_id=state.session_id,
+            read_only=(uk.kind == UtteranceKind.STATE_QUESTION and not kill_switch),
+            utterance=uk,
         ) as scope:
             n0 = len(scope.denials)
             w0 = scope.allowed_writes
@@ -116,7 +144,20 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
 
             result = None
 
-            if intent.action == "launch":
+            if uk.kind == UtteranceKind.STATE_QUESTION:
+                # A question ("is the TV on", "did you turn off the TV") is
+                # answered from the resolved TV's Home Assistant state -- a
+                # read -- instead of dispatching whatever action the parse
+                # found. Also with the kill switch on: a real question never
+                # powers or launches anything; it gets the command to say.
+                result = await tv_handler.handle_status(
+                    room=intent.room or state.room, all_tvs=intent.all_tvs
+                )
+                hint = _tv_command_hint(intent, intent.room or state.room) if kill_switch else None
+                if hint and result.get("success"):
+                    result = {**result, "message": f"{result['message']} {hint}"}
+
+            elif intent.action == "launch":
                 if intent.all_tvs:
                     result = await tv_handler.handle_launch_everywhere(
                         app_name=intent.app_name,
@@ -172,7 +213,8 @@ async def route_tv_node(state: OrchestratorState) -> OrchestratorState:
             )
 
             # Store context for potential follow-up commands
-            if state.session_id and result.get("success"):
+            # Never over another caller's pending write confirmation.
+            if state.session_id and result.get("success") and not holds_foreign_pending(state.prev_context, state.caller_fingerprint):
                 await store_conversation_context(
                     session_id=state.session_id,
                     intent="tv_control",

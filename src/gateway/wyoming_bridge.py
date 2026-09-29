@@ -52,6 +52,13 @@ class WyomingInterruptionContext:
     audio_position_ms: int = 0
     interruption_point: float = 0.0
 
+
+def orchestrator_answer_text(result: Dict[str, Any]) -> str:
+    """The spoken text of an orchestrator /query response. The response
+    model's field is `answer`; `response` is accepted only as a fallback
+    for an older or proxied shape."""
+    return result.get('answer') or result.get('response') or ''
+
 # Check if wyoming is available
 try:
     from wyoming.server import AsyncServer
@@ -555,7 +562,7 @@ if WYOMING_AVAILABLE:
 
                     if response.status_code == 200:
                         result = response.json()
-                        self.current_response = result.get('response', '')
+                        self.current_response = orchestrator_answer_text(result)
                         llm_model = result.get('model', 'orchestrator')
 
                         # Record LLM metrics

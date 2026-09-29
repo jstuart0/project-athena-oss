@@ -17,15 +17,45 @@ import structlog
 
 from orchestrator.nodes._runtime import get_music_handler
 from orchestrator.state import IntentCategory, OrchestratorState
-from orchestrator.helpers import store_conversation_context
+from orchestrator.helpers import (
+    configured_assistant_names,
+    get_feature_config,
+    holds_foreign_pending,
+    store_conversation_context,
+)
 from orchestrator.mode_permission import (
     HAWritePermissionDenied,
     check_intent_permission,
     ha_permission_scope,
     permission_refusal_message,
 )
+from orchestrator.utterance_kind import (
+    STATE_QUESTION_KILL_SWITCH_FLAG,
+    UtteranceKind,
+    classify_utterance,
+)
 
 logger = structlog.get_logger(__name__)
+
+
+_MUSIC_COMMANDS = {
+    "pause": "pause the music",
+    "play": "resume the music",
+    "next": "skip this song",
+    "previous": "play the previous song",
+    "shuffle": "turn on shuffle",
+    "repeat": "turn on repeat",
+    "volume_up": "turn the music up",
+    "volume_down": "turn the music down",
+}
+
+
+def _music_command_hint(action) -> "str | None":
+    """The command form of a music question's parsed action, for when the
+    kill switch has routing reverted and the question may be a misread
+    command."""
+    command = _MUSIC_COMMANDS.get(action or "")
+    return f"To do that, say: {command}." if command else None
 
 
 # ---------------------------------------------------------------------------
@@ -80,11 +110,18 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
             state.node_timings["route_music"] = time.time() - start
             return state
 
+        # ATHENA-128: a state question ("is music playing") runs under a
+        # read-only scope here too -- defence in depth, since its parse
+        # already yields a read (now_playing). The kill switch reverts it.
+        uk = classify_utterance(state.query, assistant_names=await configured_assistant_names())
+        kill_switch = (await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)).get("enabled", False)
         with ha_permission_scope(
             state.permissions,
             mode=state.mode,
             request_id=state.request_id,
             session_id=state.session_id,
+            read_only=(uk.kind == UtteranceKind.STATE_QUESTION and not kill_switch),
+            utterance=uk,
         ) as scope:
             n0 = len(scope.denials)
             w0 = scope.allowed_writes
@@ -103,7 +140,20 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
                 state.node_timings["route_music"] = time.time() - start
                 return state
 
-            if state.intent == IntentCategory.MUSIC_PLAY:
+            if uk.kind == UtteranceKind.STATE_QUESTION:
+                # A question ("is the music paused", "is shuffle on") is
+                # answered with what's playing -- a read -- whatever control
+                # action its words parse to. Also with the kill switch on,
+                # where it gets the command to say instead of a write.
+                intent_data = await music_handler.parse_music_control_intent(state.query, room=state.room)
+                result = await music_handler.handle_control(
+                    action="now_playing", room=intent_data.get("room"), volume_level=None
+                )
+                hint = _music_command_hint(intent_data.get("action")) if kill_switch else None
+                state.answer = f"{result} {hint}" if hint else result
+                state.retrieved_data = {"music_intent": {**intent_data, "action": "now_playing"}}
+
+            elif state.intent == IntentCategory.MUSIC_PLAY:
                 # Parse the play intent, passing interface_type for browser detection
                 intent_data = await music_handler.parse_music_play_intent(
                     state.query,
@@ -198,7 +248,9 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
                 )
 
             # Store context for potential follow-up commands
-            if state.session_id and state.answer and "sorry" not in state.answer.lower():
+            # Never over another caller's pending write confirmation.
+            if (state.session_id and state.answer and "sorry" not in state.answer.lower()
+                    and not holds_foreign_pending(state.prev_context, state.caller_fingerprint)):
                 await store_conversation_context(
                     session_id=state.session_id,
                     intent="music",

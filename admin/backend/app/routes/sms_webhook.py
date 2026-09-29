@@ -398,6 +398,7 @@ async def route_to_orchestrator(
                 "query": query,
                 "mode": "guest",
                 "caller_trust": "sms",
+                "supports_followup": True,  # ATHENA-128 D14: the sms_<phone> session persists
                 "interface_type": "text",  # Full details for SMS
                 "session_id": f"sms_{phone_number}",
                 "room": "sms",

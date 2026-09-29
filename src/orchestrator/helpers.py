@@ -63,6 +63,7 @@ from orchestrator.urls import (
     WEBSEARCH_SERVICE_URL,
 )
 from shared.admin_config import get_admin_client
+from shared.assistant_profile import get_assistant_profile
 from shared.service_registry import get_service_url as registry_get_service_url
 from orchestrator.config_loader import ADMIN_API_URL
 from orchestrator.utils.constants import DEFAULT_LOCATION, DEFAULT_TIMEZONE
@@ -399,6 +400,45 @@ async def prepare_openai_session(
 # =============================================================================
 # Feature Flag Helpers (Pattern 1 — use _runtime.get_orch_feature_flag_cache())
 # =============================================================================
+
+# The configured assistant name is a classifier vocative filler ("Friday,
+# are the lights on"). Looked up best-effort from the assistant profile
+# with a bounded wait, and the result (or the lookup failure) is kept for
+# a TTL so a slow admin API costs at most one bounded wait per TTL.
+ASSISTANT_NAME_LOOKUP_TIMEOUT_SECONDS = 0.5
+ASSISTANT_NAME_CACHE_TTL_SECONDS = 300.0
+_assistant_names_cache: Dict[str, Any] = {"names": (), "expires_at": 0.0}
+
+
+async def configured_assistant_names() -> tuple:
+    now = time.monotonic()
+    if now < _assistant_names_cache["expires_at"]:
+        return _assistant_names_cache["names"]
+    names: tuple = ()
+    try:
+        profile = await asyncio.wait_for(
+            get_assistant_profile(), timeout=ASSISTANT_NAME_LOOKUP_TIMEOUT_SECONDS
+        )
+        name = str((profile or {}).get("assistant_name") or "").strip()
+        names = (name,) if name else ()
+    except Exception as e:
+        logger.warning("assistant_name_lookup_failed", error=str(e))
+    _assistant_names_cache.update(names=names, expires_at=now + ASSISTANT_NAME_CACHE_TTL_SECONDS)
+    return names
+
+
+def holds_foreign_pending(prev_context: Optional[dict], caller_fingerprint: Optional[str]) -> bool:
+    """The session's stored context holds a pending write confirmation
+    created by a different caller (or one with no fingerprint). A turn for
+    which this is true must not store any context: it would overwrite
+    that caller's pending."""
+    params = (prev_context or {}).get("parameters") or {}
+    pending = params.get("pending_write_confirmation") if isinstance(params, dict) else None
+    if not pending:
+        return False
+    fingerprint = pending.get("fingerprint")
+    return not (bool(fingerprint) and fingerprint == caller_fingerprint)
+
 
 async def get_feature_config(flag_name: str) -> Dict[str, Any]:
     """

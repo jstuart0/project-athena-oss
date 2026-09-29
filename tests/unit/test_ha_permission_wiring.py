@@ -388,7 +388,11 @@ class TestControlDeviceDomainsEqualHandlerWrites:
         "lock": "_handle_lock_intent",
         "fan": "_handle_fan_intent",
         "cover": "_handle_cover_intent",
-        "scene": "_handle_scene_intent",
+        # ATHENA-128 4.3: the good_night/leaving/morning/home fallback
+        # (light/lock domains) was extracted from _handle_scene_intent
+        # into _run_scene_fallback so it could be gated once at its top --
+        # the domain surface for "scene" now spans both functions.
+        "scene": ("_handle_scene_intent", "_run_scene_fallback"),
         "whole_house": "_execute_whole_house_command",
         "light": "_dispatch_light_or_room_command",
         "oven": "_handle_appliance_intent",
@@ -431,10 +435,14 @@ class TestControlDeviceDomainsEqualHandlerWrites:
     def test_control_device_domains_equal_handler_writes(self):
         funcs = _controller_functions()
         mismatches = {}
-        for device_type, handler_name in self._DEVICE_TYPE_TO_HANDLER.items():
-            node = funcs.get(handler_name)
-            assert node is not None, f"missing handler {handler_name}"
-            actual = self._literal_call_service_domains(node)
+        for device_type, handler_names in self._DEVICE_TYPE_TO_HANDLER.items():
+            if isinstance(handler_names, str):
+                handler_names = (handler_names,)
+            actual = set()
+            for handler_name in handler_names:
+                node = funcs.get(handler_name)
+                assert node is not None, f"missing handler {handler_name}"
+                actual |= self._literal_call_service_domains(node)
             expected = set(mp.CONTROL_DEVICE_DOMAINS.get(device_type, ()))
             if actual != expected:
                 mismatches[device_type] = (expected, actual)
@@ -570,14 +578,15 @@ class _QueryCallVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def _resolve_caller_trust_tag(func_node: ast.AST, json_value: ast.AST):
-    """Resolve the caller_trust tag for a json= value passed to a /query
-    POST: a literal dict, or a Name resolved to the last `<name> = {...}`
-    dict-literal assignment in the same function (M3's fix), plus any
-    later `<name>["caller_trust"] = ...` mutation in the same function.
-    Returns None if no caller_trust key is present anywhere; a literal
-    value for a Constant; or the unparsed source for a non-constant
-    expression (e.g. jarvis-web's `caller.trust` attribute access)."""
+def _resolve_payload_tag(func_node: ast.AST, json_value: ast.AST, key: str):
+    """Resolve the value of payload key `key` for a json= value passed to
+    a /query POST: a literal dict, or a Name resolved to the last
+    `<name> = {...}` dict-literal assignment in the same function (M3's
+    fix), plus any later `<name>[key] = ...` mutation in the same
+    function. Returns None if `key` is present nowhere; a literal value
+    for a Constant; or the unparsed source for a non-constant expression
+    (e.g. jarvis-web's `caller.trust` attribute access, or a passthrough
+    of a client-supplied request field)."""
     dict_node = None
     name = None
     if isinstance(json_value, ast.Dict):
@@ -599,7 +608,7 @@ def _resolve_caller_trust_tag(func_node: ast.AST, json_value: ast.AST):
     value_node = None
     if dict_node is not None:
         for key_node, val_node in zip(dict_node.keys, dict_node.values):
-            if isinstance(key_node, ast.Constant) and key_node.value == "caller_trust":
+            if isinstance(key_node, ast.Constant) and key_node.value == key:
                 value_node = val_node
 
     if name is not None:
@@ -611,8 +620,8 @@ def _resolve_caller_trust_tag(func_node: ast.AST, json_value: ast.AST):
                 and isinstance(node.targets[0].value, ast.Name)
                 and node.targets[0].value.id == name
             ):
-                key = node.targets[0].slice
-                if isinstance(key, ast.Constant) and key.value == "caller_trust":
+                subscript_key = node.targets[0].slice
+                if isinstance(subscript_key, ast.Constant) and subscript_key.value == key:
                     value_node = node.value
 
     if value_node is None:
@@ -625,6 +634,12 @@ def _resolve_caller_trust_tag(func_node: ast.AST, json_value: ast.AST):
         return "<unparseable>"
 
 
+def _resolve_caller_trust_tag(func_node: ast.AST, json_value: ast.AST):
+    """caller_trust view of _resolve_payload_tag, kept so the existing
+    caller_trust drift test reads unchanged."""
+    return _resolve_payload_tag(func_node, json_value, "caller_trust")
+
+
 _QUERY_CALLER_SCAN_ROOTS = [
     SRC / "gateway",
     REPO_ROOT / "apps",
@@ -632,11 +647,11 @@ _QUERY_CALLER_SCAN_ROOTS = [
 ]
 
 
-def _scan_query_callers() -> dict:
+def _scan_query_callers(key: str = "caller_trust") -> dict:
     """Population of every real /query or /query/stream caller under
     src/gateway, apps, and admin/backend/app, keyed by (relpath,
-    function_name), mapped to its resolved caller_trust tag (None if
-    untagged)."""
+    function_name), mapped to its resolved value for payload `key`
+    (None if absent)."""
     results = {}
     for root in _QUERY_CALLER_SCAN_ROOTS:
         if not root.exists():
@@ -652,8 +667,9 @@ def _scan_query_callers() -> dict:
             visitor = _QueryCallVisitor()
             visitor.visit(tree)
             for func_node, json_value in visitor.found:
-                key = (str(path.relative_to(REPO_ROOT)), func_node.name)
-                results[key] = _resolve_caller_trust_tag(func_node, json_value)
+                results[(str(path.relative_to(REPO_ROOT)), func_node.name)] = _resolve_payload_tag(
+                    func_node, json_value, key
+                )
     return results
 
 
@@ -728,6 +744,100 @@ class TestOrchestratorQueryCallersTagCallerTrust:
         func_node, json_value = visitor.found[0]
         assert func_node.name == "synthetic_caller"
         assert _resolve_caller_trust_tag(func_node, json_value) is None
+
+
+class TestOrchestratorQueryCallersTagSupportsFollowup:
+    """ATHENA-128 5.1 / D14: every follow-up-capable /query caller sets
+    `supports_followup` to a literal True in server code (never derived
+    from a request field); Wyoming, whose session ends with each wake,
+    omits the key. Same population as the caller_trust test."""
+
+    EXPECTED_SUPPORTS_FOLLOWUP = {
+        ("src/gateway/main.py", "route_to_orchestrator"): True,
+        ("src/gateway/livekit_integration.py", "_handle_query"): True,
+        ("admin/backend/app/routes/sms_webhook.py", "route_to_orchestrator"): True,
+        ("apps/jarvis-web/backend/main.py", "chat"): True,
+        ("apps/jarvis-web/backend/main.py", "chat_stream"): True,
+    }
+    WYOMING = ("src/gateway/wyoming_bridge.py", "_process_query")
+    GATEWAY = ("src/gateway/main.py", "route_to_orchestrator")
+
+    def test_orchestrator_query_callers_tag_supports_followup(self):
+        found = _scan_query_callers("supports_followup")
+
+        assert set(found.keys()) == TestOrchestratorQueryCallersTagCallerTrust.EXPECTED_POPULATION
+        assert set(self.EXPECTED_SUPPORTS_FOLLOWUP) | {self.WYOMING} == set(found.keys())
+
+        for member in self.EXPECTED_SUPPORTS_FOLLOWUP:
+            assert found[member] is True, f"{member}: expected literal True, got {found[member]!r}"
+
+        assert found[self.WYOMING] is None, f"Wyoming must not set supports_followup, got {found[self.WYOMING]!r}"
+
+    def test_gateway_supports_followup_true_only_from_ha_conversation(self):
+        """route_to_orchestrator is shared, so its literal is guarded by a
+        kwarg; the only call site passing it is the HA conversation
+        handler, with a literal True."""
+        tree = ast.parse((SRC / "gateway" / "main.py").read_text(encoding="utf-8"))
+        sites = []
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(func):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "route_to_orchestrator"
+                ):
+                    kw = {k.arg: k.value for k in node.keywords}
+                    sites.append((func.name, kw))
+        assert len(sites) >= 1
+        followup_sites = [(name, kw) for name, kw in sites if "supports_followup" in kw]
+        assert [name for name, _ in followup_sites] == ["ha_conversation"]
+        value = followup_sites[0][1]["supports_followup"]
+        assert isinstance(value, ast.Constant) and value.value is True
+        voice = followup_sites[0][1].get("voice_device_id")
+        assert voice is not None and ast.unparse(voice) == "request.device_id"
+
+    def test_gateway_sends_voice_device_id_never_device_id(self):
+        """The HA device id is a fingerprint input only. Sent as the
+        orchestrator's device_id it would trigger the guest-session
+        lookup by device (and let POST /api/user-sessions bind a guest to
+        a satellite)."""
+        assert _scan_query_callers("voice_device_id")[self.GATEWAY] == "voice_device_id"
+        assert _scan_query_callers("device_id")[self.GATEWAY] is None
+
+    def test_passthrough_of_request_field_fails_literal_check(self):
+        source = (
+            "import httpx\n\n"
+            "async def synthetic_caller(request):\n"
+            "    payload = {'query': 'hi', 'supports_followup': request.supports_followup}\n"
+            "    async with httpx.AsyncClient() as client:\n"
+            "        return await client.post('http://orchestrator/query', json=payload)\n"
+        )
+        visitor = _QueryCallVisitor()
+        visitor.visit(ast.parse(source))
+        assert len(visitor.found) == 1
+        func_node, json_value = visitor.found[0]
+        resolved = _resolve_payload_tag(func_node, json_value, "supports_followup")
+        assert resolved == "request.supports_followup"
+        assert resolved is not True
+
+    def test_literal_true_resolves_true(self):
+        """Positive control for the check above: the same shape with a
+        literal resolves to True, so the negative fails for the right
+        reason."""
+        source = (
+            "import httpx\n\n"
+            "async def synthetic_caller(request):\n"
+            "    payload = {'query': 'hi'}\n"
+            "    payload['supports_followup'] = True\n"
+            "    async with httpx.AsyncClient() as client:\n"
+            "        return await client.post('http://orchestrator/query', json=payload)\n"
+        )
+        visitor = _QueryCallVisitor()
+        visitor.visit(ast.parse(source))
+        func_node, json_value = visitor.found[0]
+        assert _resolve_payload_tag(func_node, json_value, "supports_followup") is True
 
 
 class TestLiveKitBrowserTokenSitesUseDefaultTTL:

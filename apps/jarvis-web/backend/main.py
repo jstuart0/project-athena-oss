@@ -641,6 +641,7 @@ async def chat(message: ChatMessage, request: Request):
                 "interface_type": message.interface_type or "chat",  # chat/text prevents TTS normalization
                 "source": message.source or "jarvis",  # forward caller's source or default to "jarvis"
                 "caller_trust": caller.trust,
+                "supports_followup": True,  # ATHENA-128 D14: the chat session persists
             }
 
             # Build context with guest info and location override
@@ -886,6 +887,7 @@ async def chat_stream(message: ChatMessage, request: Request):
                 "source": message.source or "jarvis",
                 "chat_history": chat_history_msgs if inject_history else None,
                 "caller_trust": caller.trust,
+                "supports_followup": True,  # ATHENA-128 D14: the chat session persists
             }
 
             if context:
