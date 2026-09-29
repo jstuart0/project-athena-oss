@@ -1554,3 +1554,5 @@ class TestHoldsForeignPending:
         assert holds_foreign_pending(ctx, "fp-a") is False
         assert holds_foreign_pending(None, "fp-b") is False
         assert holds_foreign_pending({"parameters": {"action": "turn_off"}}, "fp-b") is False
+        # tessa N14: a pending with no fingerprint is foreign even to a caller with none
+        assert holds_foreign_pending({"parameters": {"pending_write_confirmation": {"nonce": "n"}}}, None) is True

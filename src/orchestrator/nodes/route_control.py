@@ -58,6 +58,7 @@ from orchestrator.mode_permission import READ_ONLY_REFUSAL
 from orchestrator.metrics import state_question_routed_total
 from orchestrator.utterance_kind import (
     STATE_QUESTION_KILL_SWITCH_FLAG,
+    UtteranceClassification,
     UtteranceKind,
     classify_utterance,
 )
@@ -76,6 +77,44 @@ CROSS_IDENTITY_TEXT = "I'm not sure what you're agreeing to."
 DECLINED_TEXT = "Okay, I won't."
 ALREADY_DONE_TEXT = "Already done."
 UNIDENTIFIED_DEVICE_TEXT = "I couldn't tell which device you're asking about. Which one do you mean?"
+CLARIFICATION_TTL_SECONDS = 60
+
+
+async def _await_state_question_clarification(state: OrchestratorState, room: Optional[str], foreign_pending: bool) -> None:
+    """Answer an unidentified-device question: ask which device, and store a
+    read-only clarification context that also replaces any earlier write
+    context, so the reply ("the kitchen", "yes") can't continue that write.
+    Never stored over another caller's pending confirmation."""
+    state.answer = UNIDENTIFIED_DEVICE_TEXT
+    if not state.session_id or foreign_pending:
+        return
+    await store_conversation_context(
+        session_id=state.session_id,
+        intent="control",
+        query=state.query,
+        entities={"room": room},
+        parameters={"action": "get_status", "room": room, "awaiting_state_question": True},
+        response=UNIDENTIFIED_DEVICE_TEXT,
+        ttl=CLARIFICATION_TTL_SECONDS,
+    )
+
+
+def _clarification_reply(state: OrchestratorState, real_uk: UtteranceClassification):
+    """(classification, extraction query) for a reply to "which device do you
+    mean?". Anything but an explicit command stays a state question, with
+    the reply's device and room (or the question's room); the extractor
+    sees the question and the reply together. None when not a reply."""
+    prev = state.prev_context or {}
+    params = prev.get("parameters") or {}
+    if not params.get("awaiting_state_question") or real_uk.kind == UtteranceKind.IMPERATIVE:
+        return None
+    clarified = UtteranceClassification(
+        kind=UtteranceKind.STATE_QUESTION,
+        device_type=real_uk.device_type,
+        room=real_uk.room or params.get("room"),
+        rule="clarification_reply",
+    )
+    return clarified, f"{prev.get('query') or ''} ({state.query})".strip()
 
 NONCE_CLAIM_TIMEOUT_SECONDS = 2.0
 
@@ -470,6 +509,14 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
         kill_switch_config = await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)
         state_question_kill_switch = kill_switch_config.get("enabled", False)
         real_uk = classify_utterance(state.query, assistant_names=await _configured_assistant_names())
+        extraction_query = state.query
+        clarification = _clarification_reply(state, real_uk)
+        if clarification is not None:
+            # A reply to "which device do you mean?": still the question it
+            # answers. The clarification context carries no write to merge.
+            real_uk, extraction_query = clarification
+            state.prev_context = None
+            state.context_ref_info = context_ref_view(state.context_ref_info or {}, "declined")
         uk = _KILL_SWITCH_CLASSIFICATION if state_question_kill_switch else real_uk
 
         # HA STATUS QUERY OPTIMIZATION (2026-01-12)
@@ -605,12 +652,12 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         # about. Still under the read-only scope, and only a
                         # get_status is ever dispatched.
                         extracted = await smart_controller.extract_intent(
-                            state.query, device_room=state.room, utterance=uk
+                            extraction_query, device_room=state.room, utterance=uk
                         )
                         sq_device_type = extracted.get("device_type")
                         sq_room = sq_room or extracted.get("room")
                     if not sq_device_type:
-                        state.answer = UNIDENTIFIED_DEVICE_TEXT
+                        await _await_state_question_clarification(state, sq_room, foreign_pending)
                         state.node_timings["route_control"] = time.time() - start
                         return state
                     state_question_intent = {
@@ -891,7 +938,9 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     if uk.kind == UtteranceKind.STATE_QUESTION:
                         intent["action"] = "get_status"
                         if not intent.get("device_type"):
-                            state.answer = UNIDENTIFIED_DEVICE_TEXT
+                            await _await_state_question_clarification(
+                                state, intent.get("room") or uk.room, foreign_pending
+                            )
                             state.node_timings["route_control"] = time.time() - start
                             return state
 

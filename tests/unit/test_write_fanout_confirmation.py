@@ -1591,3 +1591,135 @@ class TestReplyNormalizationIsLinear:
         from orchestrator.context.detector import _compute_anaphora_types
         assert write_fanout.normalize_reply("Yes, please!!?") == "yes please"
         assert "yes_no" in _compute_anaphora_types("yes please?!.")
+
+
+# ---------------------------------------------------------------------------
+# Round 3 / Q1: an unidentified-device question must not leave an earlier
+# write context for the reply to continue
+# ---------------------------------------------------------------------------
+
+UNIDENTIFIED_TEXT = "I couldn't tell which device you're asking about. Which one do you mean?"
+NO_DEVICE_JSON = '{"room": null, "action": "turn_off", "target_scope": "group", "parameters": {}}'
+KITCHEN_LIGHTS_OFF_JSON = (
+    '{"device_type": "light", "room": "kitchen", "action": "turn_off", "target_scope": "group", "parameters": {}}'
+)
+ROOM_ONLY = {"anaphora_types": ["room_only"], "has_context_ref": True, "ref_types": ["room_only"], "is_continuation": True}
+
+
+class _TwoRoomEntityManager:
+    """3 office + 3 kitchen lights (under the fan-out threshold, so the gate
+    can't be what stops a write) plus a thermostat."""
+
+    ROOMS = ("office", "kitchen")
+
+    async def get_entities(self):
+        ents = {}
+        for room in self.ROOMS:
+            for i in range(3):
+                ents[f"light.{room}_{i}"] = {"state": "on", "attributes": {"friendly_name": f"{room.title()} Light {i}"}}
+        return ents
+
+    async def find_lights_by_room(self, room):
+        for known in self.ROOMS:
+            if room and known in room.lower():
+                return [{"entity_id": f"light.{known}_{i}", "friendly_name": f"{known.title()} Light {i}",
+                         "members": [], "state": "on", "type": "individual"} for i in range(3)]
+        return []
+
+    async def get_all_light_groups(self):
+        return []
+
+    async def get_climate_state(self):
+        return {"entity_id": "climate.thermostat", "state": "heat", "current_temp": 68, "target_temp": 70}
+
+
+def _prev_from_store(stored):
+    return {k: stored[k] for k in ("intent", "query", "entities", "parameters", "response")}
+
+
+def _clarification_scenario(reply, reply_ref, reply_llm_text):
+    """T1 a stored write ("turn off the office lights"), T2 a question
+    neither the classifier nor the LLM can attach to a device, T3 the
+    reply. Returns (harness, T2 state, T3 state, writes during T3)."""
+    h = _Harness(llm_text=NO_DEVICE_JSON)
+    h.em = _TwoRoomEntityManager()
+    h.controller.entity_manager = h.em
+
+    t1 = h.run(_state54("turn off the office lights", context_ref_info={}))
+    assert len(set(_written(h.client, "light"))) == 3, t1.answer
+    prev = _prev_from_store(h.stores[-1])
+
+    t2 = h.run(_state54("is the heater on", prev_context=prev, context_ref_info={}))
+    assert t2.answer == UNIDENTIFIED_TEXT, t2.answer
+    if h.stores and h.stores[-1]["query"] == "is the heater on":
+        prev = _prev_from_store(h.stores[-1])
+
+    h.client.call_service.reset_mock()
+    h.llm.response_text = reply_llm_text
+    t3 = h.run(_state54(reply, prev_context=prev, context_ref_info=reply_ref))
+    return h, t2, t3, _written(h.client)
+
+
+class TestUnidentifiedDeviceReplyNeverWrites:
+    def test_room_reply_does_not_continue_the_earlier_write(self):
+        h, t2, t3, writes = _clarification_scenario("the kitchen", ROOM_ONLY, KITCHEN_LIGHTS_OFF_JSON)
+        assert writes == [], (writes, t3.answer)
+        assert t3.answer
+
+    def test_yes_reply_does_not_continue_the_earlier_write(self):
+        h, t2, t3, writes = _clarification_scenario("yes", YES_NO, KITCHEN_LIGHTS_OFF_JSON)
+        assert writes == [], (writes, t3.answer)
+
+    def test_unidentified_question_stores_a_read_only_clarification(self):
+        h, t2, t3, writes = _clarification_scenario("the kitchen", ROOM_ONLY, KITCHEN_LIGHTS_OFF_JSON)
+        stored = next(s for s in h.stores if s["query"] == "is the heater on")
+        assert stored["ttl"] == 60
+        assert stored["parameters"] == {"action": "get_status", "room": None, "awaiting_state_question": True}
+        assert stored["response"] == UNIDENTIFIED_TEXT
+
+    def test_room_reply_is_answered_as_the_question(self):
+        h, t2, t3, writes = _clarification_scenario("the kitchen", ROOM_ONLY, KITCHEN_LIGHTS_OFF_JSON)
+        assert writes == []
+        assert t3.error is None
+        assert "kitchen" in t3.answer.lower() and "light" in t3.answer.lower(), t3.answer
+
+    def test_device_reply_is_answered(self):
+        h, t2, t3, writes = _clarification_scenario("the thermostat", ROOM_ONLY, NO_DEVICE_JSON)
+        assert writes == []
+        assert "thermostat" in t3.answer.lower(), t3.answer
+
+    def test_explicit_command_reply_executes(self):
+        h, t2, t3, writes = _clarification_scenario(
+            "turn on the kitchen lights", {}, KITCHEN_LIGHTS_OFF_JSON.replace("turn_off", "turn_on"),
+        )
+        assert sorted(set(writes)) == [f"light.kitchen_{i}" for i in range(3)], (writes, t3.answer)
+        assert {c.args[1] for c in h.client.call_service.await_args_list} == {"turn_on"}
+
+    def test_unidentified_again_asks_again(self):
+        h, t2, t3, writes = _clarification_scenario("yes", YES_NO, NO_DEVICE_JSON)
+        assert writes == []
+        assert t3.answer == UNIDENTIFIED_TEXT
+
+    def test_no_clarification_stored_over_a_foreign_pending(self):
+        h = _Harness(llm_text=NO_DEVICE_JSON)
+        prev = _prev_with_pending(fingerprint=_fp(device="voice-a"), expires_at=_time_mod.time() + 60)
+        out = h.run(_state54(
+            "is the heater on", prev_context=prev, context_ref_info={}, fingerprint=_fp(device="voice-b"),
+        ))
+        assert out.answer == UNIDENTIFIED_TEXT
+        assert h.stores == [], h.stores
+
+
+class TestNormalExtractionUnidentifiedDevice:
+    """tessa N11: a referent question with no context goes through normal
+    extraction; an LLM intent without a device_type gets the clarification
+    (and its store), not a guessed device."""
+
+    def test_is_it_on_without_context(self):
+        h = _Harness(llm_text=NO_DEVICE_JSON)
+        out = h.run(_state54("is it on", prev_context=None, context_ref_info={}))
+        assert h.extract_calls, "normal extraction must run"
+        assert out.answer == UNIDENTIFIED_TEXT
+        assert _written(h.client) == []
+        assert h.stores and h.stores[-1]["parameters"]["awaiting_state_question"] is True
+        assert h.stores[-1]["ttl"] == 60
