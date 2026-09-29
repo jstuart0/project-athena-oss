@@ -33,11 +33,18 @@ def test_no_wholesale_header_forwarding_in_source():
                         assert text not in {"request.headers", "dict(request.headers)", "websocket.headers"}, (path.name, text)
 
 
+@pytest.mark.parametrize("via", ["relay", "home_browser"])
 @pytest.mark.parametrize("path", ["/api/chat", "/api/chat/stream"])
-def test_chat_forwards_none_of_the_inbound_headers(monkeypatch, path):
-    h.configure()
+def test_chat_forwards_none_of_the_inbound_headers(monkeypatch, path, via):
+    # relay: the relay key is valid, so the chat is relayed; home_browser:
+    # no relay key, so the home-network browser path runs. Neither may carry
+    # any inbound header upstream.
+    h.configure({**h.HOME_ENV, "JARVIS_RELAY_KEY": SENSITIVE["X-Jarvis-Relay-Key"]})
     out = h.install_outbound(monkeypatch)
-    h.client().post(path, json={"message": "hi"}, headers={**h.via_proxy(h.LAN), **h.CSRF, **SENSITIVE})
+    inbound = dict(SENSITIVE)
+    if via == "home_browser":
+        inbound.pop("X-Jarvis-Relay-Key")
+    h.client().post(path, json={"message": "hi"}, headers={**h.via_proxy(h.LAN), **h.CSRF, **inbound})
     sent = [kw for method, url, kw in out.calls if url.endswith(("/query", "/query/stream"))]
     assert sent, "floor: the orchestrator was called"
     for kw in sent:

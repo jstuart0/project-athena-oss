@@ -641,8 +641,21 @@ def _new_session_id(browser_key: str) -> str:
     return f"{part}.{_session_mac(part, browser_key)}"
 
 
-def _bound_session_id(presented: Optional[str], request: Request) -> tuple:
-    """(session id to use, browser key cookie value to set or None)."""
+_PUBLIC_SESSION_PREFIX = "pub-"
+_MAX_SESSION_ID_LENGTH = 128
+
+
+def _bound_session_id(presented: Optional[str], request: Request, caller: Caller) -> tuple:
+    """(session id to use, browser key cookie value to set or None).
+
+    The embed relay (the public audience) uses "pub-" ids: the orchestrator
+    only ever lets a public caller resume a public session, so a relayed
+    visitor keeps its own id across turns and can never reach anyone
+    else's history."""
+    if caller.caller_class == caller_auth.CLASS_RELAY:
+        if presented and presented.startswith(_PUBLIC_SESSION_PREFIX) and len(presented) <= _MAX_SESSION_ID_LENGTH:
+            return presented, None
+        return f"{_PUBLIC_SESSION_PREFIX}{uuid.uuid4()}", None
     browser_key = request.cookies.get(_CHAT_KEY_COOKIE)
     new_key = None
     if not browser_key:
@@ -679,7 +692,7 @@ async def chat(message: ChatMessage, request: Request, response: Response):
     start_time = datetime.now()
     caller: Caller = request.state.caller
 
-    session_id, browser_key = _bound_session_id(message.session_id, request)
+    session_id, browser_key = _bound_session_id(message.session_id, request, caller)
     _set_chat_key_cookie(response, request, browser_key)
 
     if session_id not in sessions:
@@ -893,7 +906,7 @@ async def clear_session(request: Request):
 async def chat_stream(message: ChatMessage, request: Request):
     """Stream a response from Athena with optional session persistence."""
     caller: Caller = request.state.caller
-    session_id, browser_key = _bound_session_id(message.session_id, request)
+    session_id, browser_key = _bound_session_id(message.session_id, request, caller)
     stream_browser_key = browser_key or request.cookies.get(_CHAT_KEY_COOKIE)
 
     if session_id not in sessions:
@@ -911,8 +924,8 @@ async def chat_stream(message: ChatMessage, request: Request):
     # anything the browser sends.
     current_mode = caller.mode
 
-    # --- Persistent session setup ---
-    config = await get_persistent_sessions_config()
+    # --- Persistent session setup (browsers only: the relay has no cookie) ---
+    config = await get_persistent_sessions_config() if caller.is_browser else None
     thread = None
     thread_id = None
     chat_history_msgs: List[Dict[str, str]] = []

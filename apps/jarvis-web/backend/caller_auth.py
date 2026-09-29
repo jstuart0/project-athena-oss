@@ -13,6 +13,9 @@ only (nothing in the body counts):
   web_guest_net      the rental guest network (JARVIS_GUEST_NETWORKS):
                      UI and chat, mode always "guest", guest reads only
   service            a valid X-Service-Key, household-read routes only
+  web_public_relay   the embed relay (chat-embed) on the chat routes: a
+                     valid X-Jarvis-Relay-Key, always the public audience,
+                     rate-limited per visitor and globally
   web_public         none of the above: 401, no upstream call
 
 Edge mode (JARVIS_EDGE_ATTESTATION_SECRET set): an auth proxy in front of
@@ -23,8 +26,9 @@ secret. The attested class is honoured only from a trusted proxy peer, and
 home/guest only when the D8 candidate and Host corroborate it; the network
 alone never grants home in edge mode.
 
-Evidence order: edge verdict, Bearer, service (allow_service routes only),
-local (app mode only), public.
+Evidence order: relay (chat routes only, and first: a relay call can
+never become household however it's decorated), edge verdict, Bearer,
+service (allow_service routes only), local (app mode only), public.
 
 Hides: every setting and its startup validation, the network rules
 (candidate, exclusions, gateways, Host allowlist, Cloudflare headers), the
@@ -73,6 +77,10 @@ _EDGE_ATTESTATION_HEADER = "X-Jarvis-Edge-Attestation"
 _DEFAULT_IDENTITY_HEADER = "X-authentik-username"
 _DEFAULT_GROUPS_HEADER = "X-authentik-groups"
 _EDGE_CLASSES = frozenset({"home", "guest", "authenticated"})
+_MIN_RELAY_KEY_LENGTH = 32
+_MAX_RELAY_CLIENT_LENGTH = 64
+_RELAY_KEY_HEADER = "x-jarvis-relay-key"
+_RELAY_CLIENT_HEADER = "x-jarvis-relay-client"
 
 # Every header the edge must strip from inbound requests before it sets its
 # own (the template's named strip list is pinned to be a superset of this).
@@ -96,6 +104,7 @@ CLASS_GUEST_NET = "web_guest_net"
 CLASS_SERVICE = "service"
 CLASS_PUBLIC = "web_public"
 CLASS_NOT_HOUSEHOLD = "not_household"  # signed in at the edge, not in a household group
+CLASS_RELAY = "web_public_relay"
 
 BROWSER_CLASSES = frozenset({CLASS_AUTHENTICATED, CLASS_LOCAL, CLASS_GUEST_NET})
 
@@ -106,6 +115,7 @@ UPSTREAM_TRUST = {
     CLASS_LOCAL: "web_local",
     CLASS_GUEST_NET: "web_local",
     CLASS_PUBLIC: "web_public",
+    CLASS_RELAY: "web_public",
 }
 
 HouseholdModeResolver = Callable[[], Awaitable[str]]
@@ -140,6 +150,9 @@ class AuthSettings:
     groups_header: str = _DEFAULT_GROUPS_HEADER
     groups_separator: str = "|"
     household_groups: frozenset = frozenset()
+    relay_key: str = field(default="", repr=False)
+    relay_per_minute: int = 20
+    relay_global_per_minute: int = 300
 
     @property
     def edge_mode(self) -> bool:
@@ -299,6 +312,38 @@ def _edge_settings(env: Mapping[str, str], service_key: str) -> Tuple[str, str]:
     return current, previous
 
 
+def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
+    try:
+        value = int(env.get(name, "") or default)
+    except ValueError:
+        logger.error("jarvis_invalid_integer_setting", setting=name)
+        return default
+    return value if value > 0 else default
+
+
+def _relay_key(env: Mapping[str, str], service_key: str, edge_values: Tuple[str, str]) -> str:
+    """D16 R5: the relay key is at least 32 characters, not a placeholder,
+    and shared with nothing else; otherwise startup stops (value never
+    logged)."""
+    key = env.get("JARVIS_RELAY_KEY", "")
+    if not key:
+        return ""
+    lowered = key.strip().lower()
+    fault = None
+    if lowered.startswith(_PLACEHOLDER_PREFIXES) or lowered == "changeme":
+        fault = "placeholder"
+    elif len(key) < _MIN_RELAY_KEY_LENGTH:
+        fault = "too_short"
+    else:
+        for name, other in (("service_key", service_key), ("edge_current", edge_values[0]), ("edge_previous", edge_values[1])):
+            if other and hmac.compare_digest(key.encode("utf-8"), other.encode("utf-8")):
+                fault = f"equals_{name}"
+    if fault:
+        logger.error("jarvis_relay_key_rejected", reason=fault)
+        raise SystemExit(f"JARVIS_RELAY_KEY rejected: {fault}")
+    return key
+
+
 def load_settings(
     env: Mapping[str, str],
     *,
@@ -321,6 +366,7 @@ def load_settings(
 
     service_key = env.get("SERVICE_API_KEY", "")
     edge_current, edge_previous = _edge_settings(env, service_key)
+    relay_key = _relay_key(env, service_key, (edge_current, edge_previous))
     trusted = _networks(env, "TRUSTED_PROXY_CIDRS")
     local = _networks(env, "JARVIS_LOCAL_NETWORKS")
     guest = _networks(env, "JARVIS_GUEST_NETWORKS")
@@ -418,6 +464,9 @@ def load_settings(
         groups_header=env.get("JARVIS_EDGE_GROUPS_HEADER", "").strip() or _DEFAULT_GROUPS_HEADER,
         groups_separator=env.get("JARVIS_EDGE_GROUPS_SEPARATOR", "") or "|",
         household_groups=household_groups,
+        relay_key=relay_key,
+        relay_per_minute=_positive_int(env, "JARVIS_RELAY_REQUESTS_PER_MINUTE", 20),
+        relay_global_per_minute=_positive_int(env, "JARVIS_RELAY_GLOBAL_PER_MINUTE", 300),
     )
     if not settings.any_browser_access:
         logger.error(
@@ -437,6 +486,7 @@ def load_settings(
         edge_mode=settings.edge_mode,
         edge_previous_set=bool(settings.edge_previous),
         household_groups=len(settings.household_groups),
+        relay_enabled=bool(settings.relay_key),
     )
     return settings
 
@@ -515,14 +565,23 @@ class _AuthDecision:
 _auth_cache: "OrderedDict[str, Tuple[_AuthDecision, float]]" = OrderedDict()
 _auth_me_override: Optional[AuthMeCallable] = None
 _auth_attempts = throttle.SlidingWindowLimiter(per_minute=_AUTH_ATTEMPTS_PER_MINUTE)
+_relay_visitors = throttle.SlidingWindowLimiter(per_minute=SETTINGS.relay_per_minute)
+_relay_global = throttle.SlidingWindowLimiter(per_minute=SETTINGS.relay_global_per_minute, max_keys=1)
+
+
+def _reset_limiters(s: AuthSettings) -> None:
+    global _auth_attempts, _relay_visitors, _relay_global
+    _auth_attempts = throttle.SlidingWindowLimiter(per_minute=_AUTH_ATTEMPTS_PER_MINUTE)
+    _relay_visitors = throttle.SlidingWindowLimiter(per_minute=s.relay_per_minute)
+    _relay_global = throttle.SlidingWindowLimiter(per_minute=s.relay_global_per_minute, max_keys=1)
 
 
 def _reset_for_tests() -> None:
-    """PRIVATE -- test isolation only: caches, limiters, the auth adapter."""
-    global _auth_me_override, _auth_attempts
+    """PRIVATE -- test isolation only: caches, every limiter, the auth adapter."""
+    global _auth_me_override
     _auth_cache.clear()
     _auth_me_override = None
-    _auth_attempts = throttle.SlidingWindowLimiter(per_minute=_AUTH_ATTEMPTS_PER_MINUTE)
+    _reset_limiters(SETTINGS)
 
 
 def _configure_for_tests(env: Mapping[str, str], **kwargs) -> AuthSettings:
@@ -531,6 +590,7 @@ def _configure_for_tests(env: Mapping[str, str], **kwargs) -> AuthSettings:
     global SETTINGS
     kwargs.setdefault("own_ips", ())
     SETTINGS = load_settings(env, **kwargs)
+    _reset_limiters(SETTINGS)
     return SETTINGS
 
 
@@ -880,8 +940,51 @@ async def require_browser_caller(request: Request, household_mode_resolver: Opti
     return _store(request, caller)
 
 
+def _relay_refusal(status: int, detail: str, **extra) -> HTTPException:
+    return HTTPException(status_code=status, detail=detail, **extra)
+
+
+async def _resolve_relay(request: Request, presented: str) -> Caller:
+    """D16: a present relay key decides the whole request. Valid -> the
+    public audience, rate-limited; invalid -> 401, no fall-through."""
+    s = SETTINGS
+    if not s.relay_key or not hmac.compare_digest(presented.encode("utf-8"), s.relay_key.encode("utf-8")):
+        logger.error(
+            "jarvis_relay_key_invalid",
+            key_hash=_digest(presented)[:12],
+            relay_enabled=bool(s.relay_key),
+            hint="chat-embed's JARVIS_RELAY_KEY must equal jarvis-web's",
+        )
+        raise _relay_refusal(401, "relay_key_invalid")
+    client = request.headers.get(_RELAY_CLIENT_HEADER) or ""
+    addr = throttle.parse_ip(client) if len(client) <= _MAX_RELAY_CLIENT_LENGTH else None
+    if addr is None:
+        raise _relay_refusal(400, "relay_client_required")
+    visitor = throttle.rate_limit_key(str(addr))
+    if not await _relay_visitors.allow(visitor):
+        logger.warning("jarvis_relay_visitor_rate_limited", key_hash=_digest(visitor)[:12])
+        raise _relay_refusal(429, "rate_limited", headers={"Retry-After": "60"})
+    if not await _relay_global.allow("relay"):
+        logger.warning("jarvis_relay_global_rate_limited")
+        raise _relay_refusal(429, "rate_limited", headers={"Retry-After": "60"})
+    caller = Caller(CLASS_RELAY, "guest", False, None, "relay_key", "relay")
+    logger.info(
+        "jarvis_caller_resolved",
+        caller_class=caller.caller_class,
+        trust=caller.trust,
+        source=caller.source,
+        mode=caller.mode,
+        key_hash=_digest(visitor)[:12],
+    )
+    return caller
+
+
 async def require_relay_chat(request: Request, household_mode_resolver: Optional[HouseholdModeResolver] = None) -> Caller:
-    """relay_chat routes (chat): browsers today; the embed relay joins later."""
+    """relay_chat routes (chat): the embed relay, resolved first, or a
+    browser caller."""
+    presented = request.headers.get(_RELAY_KEY_HEADER)
+    if presented is not None:
+        return _store(request, await _resolve_relay(request, presented))
     return await require_browser_caller(request, household_mode_resolver)
 
 
