@@ -33,11 +33,12 @@ import contextvars
 import re
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import structlog
 
-from orchestrator.metrics import ha_write_denied_total
+from orchestrator.metrics import ha_write_denied_total, intent_gate_refused_total
 from orchestrator.state import IntentCategory
 from shared.config import get_config
 from shared.guest_policy import apply_guest_baseline, baseline_allowed_domains, guest_baseline, parse_json_array_env
@@ -1222,6 +1223,53 @@ noun_for_domains = _noun_for_domains
 
 READ_ONLY_REFUSAL = "I couldn't check that right now."
 
+# Intents whose node refuses them itself, with a domain-specific message,
+# before any dispatch. The intent gate leaves them to their node.
+SELF_GATED_INTENTS = frozenset({
+    IntentCategory.CONTROL,
+    IntentCategory.MUSIC_PLAY,
+    IntentCategory.MUSIC_CONTROL,
+    IntentCategory.TV_CONTROL,
+    IntentCategory.NOTIFICATION_PREF,
+})
+_SELF_GATED_VALUES = frozenset(i.value for i in SELF_GATED_INTENTS)
+
+
+def intent_refusal_message(permissions: Optional[Dict[str, Any]]) -> str:
+    """The one source of intent-refusal wording: public, degraded, or guest."""
+    if is_public_audience(permissions):
+        return PUBLIC_INTENT_REFUSAL
+    if (permissions or {}).get("mode") == "degraded":
+        return DEGRADED_INTENT_REFUSAL
+    return GUEST_INTENT_REFUSAL
+
+
+def intent_gate_refusal(intent: Any, permissions: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The refusal text when ``intent`` isn't allowed, else None. Pure.
+
+    Exempt: no intent, UNKNOWN (chit-chat reaches only the audience's
+    already-narrowed tools), and SELF_GATED_INTENTS (their node refuses
+    before any dispatch with a domain-specific message). Every entry path
+    asks this before routing: the graph router, the streaming runner and
+    /query's post-graph check.
+    """
+    if intent is None:
+        return None
+    value = getattr(intent, "value", intent)
+    if value == IntentCategory.UNKNOWN.value or value in _SELF_GATED_VALUES:
+        return None
+    subject = intent if hasattr(intent, "value") else SimpleNamespace(value=str(value))
+    if check_intent_permission(subject, permissions or {}):
+        return None
+    return intent_refusal_message(permissions)
+
+
+def record_intent_gate_refusal(intent: Any, permissions: Optional[Dict[str, Any]]) -> None:
+    audience = "public" if is_public_audience(permissions) else (permissions or {}).get("mode", "unknown")
+    value = getattr(intent, "value", intent)
+    intent_gate_refused_total.labels(audience=audience, intent=str(value)).inc()
+    logger.info("intent_gate_refused", audience=audience, intent=str(value))
+
 
 def permission_refusal_message(
     domains: Iterable[str],
@@ -1241,6 +1289,10 @@ def permission_refusal_message(
     if scope is not None and scope.read_only:
         return READ_ONLY_REFUSAL
     noun = _noun_for_domains(domains)
+    if scope is not None and is_public_audience(scope.permissions):
+        if partial:
+            return f"I did part of that, but I can't control the {noun} from here."
+        return f"Sorry, I can't control the {noun} from here."
     perm_mode = scope.permissions.get("mode") if scope and scope.permissions else "guest"
     if perm_mode == "degraded":
         if partial:
@@ -1261,6 +1313,8 @@ def sequence_refusal_message(decision: HAWriteDecision, scope: "PermissionScope"
         first = decision.denied_targets[0]
         domain = first.split(".")[0] if "." in first else first
     noun = _noun_for_domains([domain] if domain else [])
+    if scope is not None and is_public_audience(scope.permissions):
+        return f"Sorry, I can't schedule that from here -- it includes the {noun}."
     perm_mode = scope.permissions.get("mode") if scope and scope.permissions else "guest"
     if perm_mode == "degraded":
         return f"Sorry, I can't schedule that right now because I couldn't verify permissions -- it includes the {noun}."

@@ -144,7 +144,7 @@ from orchestrator.self_building_tools import (
 
 # Runtime context accessor (Phase 4.2 — sole singleton read/write path)
 from orchestrator.nodes import _runtime
-from orchestrator.nodes import finalize_node, notification_pref_node, retrieve_node, route_control_node, route_info_node, route_music_node, route_tv_node, send_sms_node, synthesize_node, validate_node
+from orchestrator.nodes import finalize_node, intent_refused_node, notification_pref_node, retrieve_node, route_control_node, route_info_node, route_music_node, route_tv_node, send_sms_node, synthesize_node, validate_node
 
 # Helpers extracted to helpers.py (Phase 2.1, ATHENA-10)
 from orchestrator.mode_permission import (
@@ -153,9 +153,11 @@ from orchestrator.mode_permission import (
     ensure_permission_enforcing,
     extract_pin_from_query,
     handle_owner_mode_utterance,
+    intent_gate_refusal,
     is_public_audience,
     is_public_caller,
     PUBLIC_ALLOWED_TOOLS,
+    record_intent_gate_refusal,
     resolve_request_authorization,
 )
 from orchestrator.write_fanout import caller_fingerprint as compute_caller_fingerprint
@@ -5955,6 +5957,11 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
 # (logger, should_use_tool_calling, is_conversational_reference,
 # IntentCategory) — no closure-scoped dependencies on create_orchestrator_graph.
 async def route_after_classify(state: OrchestratorState) -> str:
+    # One intent gate before any routing: a disallowed intent never
+    # reaches a routing, retrieval or tool node.
+    if intent_gate_refusal(state.intent, state.permissions):
+        return "intent_refused"
+
     # DEBUG: Log routing function call
     logger.info(f"route_after_classify called: intent={state.intent.value if state.intent else None}, confidence={state.confidence}")
 
@@ -6084,6 +6091,7 @@ def create_orchestrator_graph() -> StateGraph:
     graph.add_node("tool_call", tool_call_node)  # Phase 4: Tool calling node
     graph.add_node("send_sms", send_sms_node)  # SMS Integration: "text me that" handler
     graph.add_node("notification_pref", notification_pref_node)  # Notification opt-out/opt-in
+    graph.add_node("intent_refused", intent_refused_node)  # Intent gate refusal
     graph.add_node("finalize", finalize_node)
 
     # Define edges
@@ -6103,7 +6111,8 @@ def create_orchestrator_graph() -> StateGraph:
             "finalize": "finalize",
             "synthesize": "synthesize",  # For continuation responses with context
             "send_sms": "send_sms",  # SMS Integration: Handle "text me that" requests
-            "notification_pref": "notification_pref"  # Notification preferences (opt-out/opt-in)
+            "notification_pref": "notification_pref",  # Notification preferences (opt-out/opt-in)
+            "intent_refused": "intent_refused",  # Disallowed intent: refuse before routing
         }
     )
 
@@ -6121,6 +6130,9 @@ def create_orchestrator_graph() -> StateGraph:
 
     # Notification preferences: goes directly to finalize
     graph.add_edge("notification_pref", "finalize")
+
+    # Intent gate refusal: goes directly to finalize
+    graph.add_edge("intent_refused", "finalize")
 
     # Info path
     graph.add_edge("route_info", "retrieve")
@@ -6790,25 +6802,23 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         log_continuation_decision(final_state, session.session_id)
         tool_exec_time = time.time() - tool_exec_start
 
-        # Phase 2: Check intent permission AFTER classification. Skipped
-        # when a node already refused (bob M8) -- a route_control_node/
-        # route_music_node/route_tv_node denial already set state.error ==
-        # "permission_denied" and a specific refusal answer; running this
-        # generic check on top would either double-refuse with a less
-        # specific message or (for a non-CONTROL intent a node doesn't
-        # gate) redundantly re-check what authz.permissions already covers.
+        # The intent gate, again after the graph (defence in depth: the graph
+        # router already applies it). Skipped when a node already refused
+        # (bob M8): that node's domain-specific answer stands.
         permission_check_start = time.time()
         intent = final_state.get("intent")
         node_already_refused = final_state.get("error") == "permission_denied"
-        if not node_already_refused and intent and not check_intent_permission(intent, permissions):
+        refusal = None if node_already_refused else intent_gate_refusal(intent, permissions)
+        if refusal:
+            record_intent_gate_refusal(intent, permissions)
             logger.warning(
-                "intent_blocked_by_guest_mode",
+                "intent_blocked_post_graph",
                 intent=intent.value if hasattr(intent, "value") else intent,
                 mode=current_mode
             )
             # Return permission denied response
             return QueryResponse(
-                answer="I'm sorry, that feature is not available in guest mode.",
+                answer=refusal,
                 intent=intent.value if hasattr(intent, "value") else str(intent),
                 confidence=1.0,
                 citations=[],
@@ -6816,7 +6826,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 or hashlib.md5(f"denied_{time.time()}".encode()).hexdigest()[:8],
                 session_id=session.session_id,
                 processing_time=time.time() - initial_state.start_time,
-                metadata={"model_used": "permission_check", "reasoning_path": ["Permission check: Intent blocked in guest mode"]},
+                metadata={"model_used": "permission_check", "reasoning_path": ["Permission check: intent refused"]},
                 timings=final_state.get("node_timings", {}),
             )
 
@@ -8097,6 +8107,10 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
     # Run classification
     state = await classify_node(state)
 
+    # The same intent gate the graph router applies, before any dispatch.
+    if intent_gate_refusal(state.intent, state.permissions):
+        return await intent_refused_node(state)
+
     # Handle special intents that don't need RAG
     if state.intent == IntentCategory.CONTROL:
         # Control commands - handled by HA, not LLM
@@ -8116,6 +8130,11 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
     if state.intent == IntentCategory.TEXT_ME_THAT:
         # SMS - handled by SMS node
         state = await send_sms_node(state)
+        return state
+
+    if state.intent == IntentCategory.NOTIFICATION_PREF:
+        # Notification preferences - the node gates and writes itself
+        state = await notification_pref_node(state)
         return state
 
     # Check for tool calling (Phase 2 services)

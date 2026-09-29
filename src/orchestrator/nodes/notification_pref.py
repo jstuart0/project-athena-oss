@@ -1,13 +1,48 @@
 """Notification preference opt-in/opt-out handler (main.py:7964-8117)."""
 
+import re
 import time
+from typing import Optional
 
 import structlog
 
-from orchestrator.state import OrchestratorState
+from orchestrator.helpers import configured_assistant_names
+from orchestrator.mode_permission import check_intent_permission, intent_refusal_message
+from orchestrator.state import IntentCategory, OrchestratorState
 from orchestrator.urls import NOTIFICATIONS_SERVICE_URL
+from orchestrator.utterance_kind import UtteranceKind, classify_utterance
 
 logger = structlog.get_logger(__name__)
+
+STATE_QUESTION_REPLY = (
+    "I can't check notification settings, but I can change them. Say 'stop morning "
+    "notifications' or 'turn on morning notifications'."
+)
+AMBIGUOUS_REPLY = (
+    "Do you want morning notifications off or on? Say 'stop morning notifications' "
+    "or 'turn on morning notifications'."
+)
+
+# An explicit first-person desire makes an UNKNOWN utterance a request.
+_DESIRE_PHRASE_RE = re.compile(
+    r"\bi (?:don't|do not) want\b|\bno more\b|\bi(?:'d| would) like\b|\bopt[ -]?(?:in|out)\b|\bunsubscribe\b"
+)
+_NEGATED_WANT_RE = re.compile(r"\b(?:don't|do not) want\b")
+_OPT_OUT_RE = re.compile(
+    r"\b(?:stop|disable|turn off|pause|no more|opt[ -]?out|unsubscribe)\b|\b(?:don't|do not) want\b"
+)
+_OPT_IN_RE = re.compile(
+    r"\b(?:start|enable|turn on|resume|back on|opt[ -]?in|want)\b|\bi(?:'d| would) like\b"
+)
+
+
+def _direction(query_lower: str) -> Optional[str]:
+    """"opt-out", "opt-in", or None when the utterance names neither or both."""
+    opts_out = bool(_OPT_OUT_RE.search(query_lower))
+    opts_in = bool(_OPT_IN_RE.search(_NEGATED_WANT_RE.sub(" ", query_lower)))
+    if opts_out == opts_in:
+        return None
+    return "opt-out" if opts_out else "opt-in"
 
 
 async def notification_pref_node(state: OrchestratorState) -> OrchestratorState:
@@ -22,31 +57,38 @@ async def notification_pref_node(state: OrchestratorState) -> OrchestratorState:
     - "Pause notifications" -> opt-out of all
 
     Uses the notifications service at NOTIFICATIONS_SERVICE_URL.
+
+    Writes only when the caller may use this intent, the utterance is a
+    command (or states a first-person desire), and it names exactly one
+    direction. A question gets instructions instead; an unclear request
+    gets asked which way.
     """
     import httpx
 
     start = time.time()
+
+    # Permission first, before any I/O (including the assistant-name read).
+    if not check_intent_permission(IntentCategory.NOTIFICATION_PREF, state.permissions or {}):
+        state.answer = intent_refusal_message(state.permissions)
+        state.error = "permission_denied"
+        logger.warning("notification_pref_denied", mode=(state.permissions or {}).get("mode"))
+        return _finish(state, start)
+
     query_lower = state.query.lower()
 
-    # Determine if opt-in or opt-out
-    opt_out_keywords = ["stop", "disable", "turn off", "don't want", "no more", "pause", "opt out"]
-    opt_in_keywords = ["start", "enable", "turn on", "resume", "opt in", "back on", "want"]
-
-    is_opt_out = any(kw in query_lower for kw in opt_out_keywords)
-    is_opt_in = any(kw in query_lower for kw in opt_in_keywords)
-
-    # If both or neither, default based on common patterns
-    if is_opt_out == is_opt_in:
-        # "I want morning updates" vs "I don't want morning updates"
-        if "don't" in query_lower or "not" in query_lower:
-            is_opt_out = True
-            is_opt_in = False
-        else:
-            # Ambiguous - default to opt-out since most voice requests are to stop something
-            is_opt_out = True
-            is_opt_in = False
-
-    action = "opt-out" if is_opt_out else "opt-in"
+    # D6 write rule: only a command (or an explicit first-person desire)
+    # with exactly one direction changes a setting. A question never writes.
+    kind = classify_utterance(state.query, assistant_names=await configured_assistant_names()).kind
+    if kind == UtteranceKind.STATE_QUESTION:
+        state.answer = STATE_QUESTION_REPLY
+        return _finish(state, start)
+    is_request = kind == UtteranceKind.IMPERATIVE or (
+        kind == UtteranceKind.UNKNOWN and bool(_DESIRE_PHRASE_RE.search(query_lower))
+    )
+    action = _direction(query_lower) if is_request else None
+    if action is None:
+        state.answer = AMBIGUOUS_REPLY
+        return _finish(state, start)
 
     # Determine which rule(s) are affected
     rule_slugs = []
@@ -160,9 +202,12 @@ async def notification_pref_node(state: OrchestratorState) -> OrchestratorState:
         state.answer = "I had trouble updating your notification preferences. Please try again."
         state.error = f"Notification preference update failed: {str(e)}"
 
-    notif_pref_duration = time.time() - start
-    state.node_timings["notification_pref"] = notif_pref_duration
-    if state.timing_tracker:
-        state.timing_tracker.track_sync("graph", "notification_pref", notif_pref_duration)
+    return _finish(state, start)
 
+
+def _finish(state: OrchestratorState, start: float) -> OrchestratorState:
+    duration = time.time() - start
+    state.node_timings["notification_pref"] = duration
+    if state.timing_tracker:
+        state.timing_tracker.track_sync("graph", "notification_pref", duration)
     return state

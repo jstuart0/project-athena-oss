@@ -748,6 +748,9 @@ async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
     """
     if not web_search_allowed(state):
         return False
+    # A refusal is the answer; a web search must never route around it.
+    if getattr(state, "error", None) == "permission_denied":
+        return False
 
     # Get feature config
     fallback_config = await get_post_synthesis_fallback_config()

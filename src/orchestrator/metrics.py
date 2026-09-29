@@ -97,3 +97,13 @@ ha_write_fanout_confirm_total = Counter(
     # outcome: exempt_scope|exempt_imperative|requested|reworded|confirmed|
     #          declined|reasked|cross_identity|replay_claim_lost
 )
+
+# ---------------------------------------------------------------------------
+# Intent gate (one refusal rule before routing, on every entry path)
+# ---------------------------------------------------------------------------
+
+intent_gate_refused_total = Counter(
+    'athena_intent_gate_refused_total',
+    'Requests refused by the intent gate before any routing',
+    ['audience', 'intent']  # audience: public|guest|degraded|<mode>
+)

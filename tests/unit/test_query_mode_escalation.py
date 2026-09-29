@@ -297,8 +297,8 @@ class TestPostGraphCheckSkippedWhenNodeRefused:
         })
         monkeypatch.setattr(_main_module, "orchestrator_graph", graph)
 
-        check_spy = mock.MagicMock(wraps=mode_permission.check_intent_permission)
-        monkeypatch.setattr(_main_module, "check_intent_permission", check_spy)
+        gate_spy = mock.MagicMock(wraps=mode_permission.intent_gate_refusal)
+        monkeypatch.setattr(_main_module, "intent_gate_refusal", gate_spy)
 
         resp = client.post(
             "/query",
@@ -306,13 +306,13 @@ class TestPostGraphCheckSkippedWhenNodeRefused:
             headers=_service_headers(),
         )
         assert resp.status_code == 200
-        check_spy.assert_not_called()
+        gate_spy.assert_not_called()
         # The response must NOT be the generic post-graph refusal text --
         # process_query falls through to normal answer synthesis in the
         # test double (answer defaults to None/empty via the fake state,
         # but the important assertion is that the guest-mode generic
         # message was never substituted in).
-        assert resp.json()["answer"] != "I'm sorry, that feature is not available in guest mode."
+        assert resp.json()["answer"] != mode_permission.GUEST_INTENT_REFUSAL
 
     def test_early_return_response_validates_when_intent_blocked_without_node_refusal(self, client, monkeypatch):
         """tessa's Pass C mutation review, item 3: the OTHER (non-M8) trigger
@@ -334,8 +334,11 @@ class TestPostGraphCheckSkippedWhenNodeRefused:
         })
         monkeypatch.setattr(_main_module, "orchestrator_graph", graph)
 
-        check_spy = mock.MagicMock(wraps=mode_permission.check_intent_permission)
-        monkeypatch.setattr(_main_module, "check_intent_permission", check_spy)
+        # The post-graph check is the shared intent gate now, with the one
+        # guest refusal string (the old "not available in guest mode"
+        # literal is gone).
+        gate_spy = mock.MagicMock(wraps=mode_permission.intent_gate_refusal)
+        monkeypatch.setattr(_main_module, "intent_gate_refusal", gate_spy)
 
         resp = client.post(
             "/query",
@@ -344,9 +347,9 @@ class TestPostGraphCheckSkippedWhenNodeRefused:
         )
 
         assert resp.status_code == 200
-        check_spy.assert_called_once()
+        gate_spy.assert_called_once()
         body = resp.json()
-        assert body["answer"] == "I'm sorry, that feature is not available in guest mode."
+        assert body["answer"] == mode_permission.GUEST_INTENT_REFUSAL
         assert body["request_id"] == "req-tesla-1"
         assert body["session_id"]
         assert isinstance(body["processing_time"], float)

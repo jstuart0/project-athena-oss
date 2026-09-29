@@ -38,12 +38,11 @@ from orchestrator.helpers import (
     store_conversation_context,
 )
 from orchestrator.mode_permission import (
-    DEGRADED_INTENT_REFUSAL,
-    GUEST_INTENT_REFUSAL,
     authorize_ha_write,
     authorize_sequence,
     check_intent_permission,
     ha_permission_scope,
+    intent_refusal_message,
     intent_write_domains,
     permission_refusal_message,
     sequence_refusal_message,
@@ -612,10 +611,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 # the automation agent, sequence detection, or intent
                 # extraction never run for a denied intent.
                 if not check_intent_permission(IntentCategory.CONTROL, scope.permissions):
-                    state.answer = (
-                        DEGRADED_INTENT_REFUSAL if scope.permissions.get("mode") == "degraded"
-                        else GUEST_INTENT_REFUSAL
-                    )
+                    state.answer = intent_refusal_message(scope.permissions)
                     state.error = "permission_denied"
                     logger.warning(
                         "control_request_denied",
