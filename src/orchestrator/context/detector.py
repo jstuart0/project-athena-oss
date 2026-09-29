@@ -629,9 +629,18 @@ def detect_location_correction(query: str) -> Dict[str, Any]:
 # untouched.
 # ============================================================================
 
-_YES_NO_BASE_WORDS = ("yes", "yeah", "yep", "yup", "no", "nope", "ok", "okay", "sure", "nah")
+# Public: orchestrator.write_fanout builds its bare-confirmation regexes
+# from these, so the anaphora tag and the confirmation reply share one
+# vocabulary.
+AFFIRMATION_WORDS = ("yes", "yeah", "yep", "yup", "ok", "okay", "sure")
+NEGATION_WORDS = ("no", "nope", "nah")
+GRATITUDE_WORDS = ("thanks", "thank you")
+POLITE_SUFFIX_WORDS = ("please",) + GRATITUDE_WORDS
+PROCEED_PHRASES = ("do it", "go ahead")
+
+_YES_NO_BASE_WORDS = AFFIRMATION_WORDS + NEGATION_WORDS
 _YES_NO_STANDALONE_WORDS = ("any", "anything", "whatever")
-_YES_NO_SUFFIX = r"(?:please|thanks|thank you|do it|go ahead)"
+_YES_NO_SUFFIX = r"(?:" + "|".join(POLITE_SUFFIX_WORDS + PROCEED_PHRASES) + r")"
 
 _YES_NO_WITH_SUFFIX_RE = re.compile(
     r"^(?:" + "|".join(_YES_NO_BASE_WORDS) + r")(?:\s+" + _YES_NO_SUFFIX + r")?$"

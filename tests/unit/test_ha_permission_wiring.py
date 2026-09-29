@@ -798,9 +798,13 @@ class TestOrchestratorQueryCallersTagSupportsFollowup:
         voice = followup_sites[0][1].get("voice_device_id")
         assert voice is not None and ast.unparse(voice) == "request.device_id"
 
-    def test_gateway_device_id_resolves_to_voice_device_id(self):
-        found = _scan_query_callers("device_id")
-        assert found[self.GATEWAY] == "voice_device_id"
+    def test_gateway_sends_voice_device_id_never_device_id(self):
+        """The HA device id is a fingerprint input only. Sent as the
+        orchestrator's device_id it would trigger the guest-session
+        lookup by device (and let POST /api/user-sessions bind a guest to
+        a satellite)."""
+        assert _scan_query_callers("voice_device_id")[self.GATEWAY] == "voice_device_id"
+        assert _scan_query_callers("device_id")[self.GATEWAY] is None
 
     def test_passthrough_of_request_field_fails_literal_check(self):
         source = (

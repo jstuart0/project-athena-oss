@@ -1169,8 +1169,8 @@ async def route_to_orchestrator(
         session_id: Optional session ID to continue conversation
         return_session_id: If True, returns tuple of (response, session_id)
         voice_device_id: The caller's real device identifier, forwarded as the
-            orchestrator's device_id (a pending-confirmation fingerprint
-            input). `device_id` above is the mapped room, used for audio.
+            orchestrator's voice_device_id (a pending-confirmation fingerprint
+            input only). `device_id` above is the mapped room, used for audio.
         supports_followup: True only from a caller whose surface carries a
             follow-up turn on the same session (the HA conversation route).
 
@@ -1224,8 +1224,10 @@ async def route_to_orchestrator(
             # never derived from an inbound request field.
             if supports_followup:
                 payload["supports_followup"] = True
+            # A caller-fingerprint input only. Never sent as device_id: that
+            # field is the orchestrator's guest-session lookup key.
             if voice_device_id:
-                payload["device_id"] = voice_device_id
+                payload["voice_device_id"] = voice_device_id
 
             # Include session_id if provided (for conversation context)
             if session_id:

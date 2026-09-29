@@ -8,8 +8,8 @@ and session can carry a follow-up, D14/D16) or an exact rewording
 (everyone else) instead of executing.
 
 R2-C3: imports `utterance_kind`, `metrics`, `shared.config`,
-`mode_permission` (`noun_for_domains`, `current_ha_scope`) -- never
-`orchestrator.main`.
+`mode_permission` (`noun_for_domains`, `current_ha_scope`) and the context
+detector's yes/no vocabulary -- never `orchestrator.main`.
 """
 from __future__ import annotations
 
@@ -19,6 +19,13 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence, Tuple
 
 from shared.config import get_config
+from orchestrator.context.detector import (
+    AFFIRMATION_WORDS,
+    GRATITUDE_WORDS,
+    NEGATION_WORDS,
+    POLITE_SUFFIX_WORDS,
+    PROCEED_PHRASES,
+)
 from orchestrator.metrics import ha_write_fanout_confirm_total
 from orchestrator.mode_permission import current_ha_scope, noun_for_domains
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
@@ -40,14 +47,23 @@ class FanoutBlock:
 
 _SCOPE_CUE_RE = re.compile(r"\b(?:all|every|everything|whole|entire|house)\b", re.IGNORECASE)
 
-# 5.3 rules 4/5, matched against normalize_reply() output. Anything with
-# more content than these ("yes, just the desk lamp") is a new utterance,
-# never a confirmation.
+
+def _alternation(words: Iterable[str]) -> str:
+    return "|".join(re.escape(w) for w in words)
+
+
+# 5.3 rules 4/5, matched against normalize_reply() output, built from the
+# context detector's yes/no vocabulary. Anything with more content than
+# these ("yes, just the desk lamp") is a new utterance, never a
+# confirmation.
 BARE_AFFIRMATION_RE = re.compile(
-    r"^(?:yes|yeah|yep|yup|ok|okay|sure)(?:\s+(?:please|thanks|thank you|do it|go ahead))?$"
-    r"|^(?:go ahead|do it)$"
+    rf"^(?:{_alternation(AFFIRMATION_WORDS)})"
+    rf"(?:\s+(?:{_alternation(POLITE_SUFFIX_WORDS + PROCEED_PHRASES)}))?$"
+    rf"|^(?:{_alternation(PROCEED_PHRASES)})$"
 )
-BARE_NEGATION_RE = re.compile(r"^(?:no|nope|nah)(?:\s+(?:thanks|thank you))?$")
+BARE_NEGATION_RE = re.compile(
+    rf"^(?:{_alternation(NEGATION_WORDS)})(?:\s+(?:{_alternation(GRATITUDE_WORDS)}))?$"
+)
 
 
 def normalize_reply(query: Optional[str]) -> str:
@@ -75,9 +91,15 @@ def caller_fingerprint(
     caller_trust: Optional[str], device_id: Optional[str], room: Optional[str], permissions_mode: Optional[str]
 ) -> Optional[str]:
     """D13: a server-side-only fingerprint binding a pending confirmation
-    to the caller that created it. Never used for authorization."""
+    to the caller that created it. Never used for authorization.
+
+    None when the caller supplied no identity at all (neither a trust tag
+    nor a device id): room and mode alone are shared by everyone in the
+    house, so such a caller is treated as a non-follow-up surface."""
     import hashlib
 
+    if not caller_trust and not device_id:
+        return None
     parts = "|".join([caller_trust or "", device_id or "", room or "", permissions_mode or ""])
     return hashlib.sha256(parts.encode("utf-8")).hexdigest()[:16]
 

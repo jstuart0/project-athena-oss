@@ -6195,6 +6195,25 @@ class QueryRequest(BaseModel):
             "anything, since a pending confirmation is fingerprint-bound."
         ),
     )
+    voice_device_id: Optional[str] = Field(
+        None,
+        description=(
+            "Set by the calling service in server code: the voice device's "
+            "own identifier (e.g. the HA Assist device id). Used ONLY as a "
+            "caller-fingerprint input for pending write confirmations -- "
+            "never for the device_id guest-session lookup."
+        ),
+    )
+
+
+def _request_caller_fingerprint(request: "QueryRequest", permissions_mode: Optional[str]) -> Optional[str]:
+    """D13 fingerprint for a /query-family request. A voice caller's own
+    device id (voice_device_id) is preferred over device_id, which stays
+    the multi-guest session-lookup key."""
+    return compute_caller_fingerprint(
+        request.caller_trust, request.voice_device_id or request.device_id, request.room, permissions_mode
+    )
+
 
 class QueryResponse(BaseModel):
     """Response model for query endpoint."""
@@ -6454,8 +6473,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             entities=initial_entities,  # Include location from request
             interruption_context=request.interruption_context,  # Barge-in: Pass interruption context for natural acknowledgment
             supports_followup=request.supports_followup,
-            caller_fingerprint=compute_caller_fingerprint(
-                request.caller_trust, request.device_id, request.room, permissions.get("mode")
+            caller_fingerprint=_request_caller_fingerprint(
+                request, permissions.get("mode")
             ),
         )
 
@@ -7209,8 +7228,8 @@ async def process_query_stream(request: QueryRequest):
                 temperature=request.temperature,
                 interface_type=request.interface_type,
                 supports_followup=request.supports_followup,
-                caller_fingerprint=compute_caller_fingerprint(
-                    request.caller_trust, request.device_id, request.room, authz.permissions.get("mode")
+                caller_fingerprint=_request_caller_fingerprint(
+                    request, authz.permissions.get("mode")
                 ),
             )
 
@@ -7454,8 +7473,8 @@ async def process_query_stream_v2(request: QueryRequest):
                 memory_context="",
                 timing_tracker=timing_tracker,
                 supports_followup=request.supports_followup,
-                caller_fingerprint=compute_caller_fingerprint(
-                    request.caller_trust, request.device_id, request.room, authz.permissions.get("mode")
+                caller_fingerprint=_request_caller_fingerprint(
+                    request, authz.permissions.get("mode")
                 ),
             )
 

@@ -1034,3 +1034,217 @@ class TestReplyNormalization:
             n = write_fanout.normalize_reply(p)
             assert not write_fanout.BARE_AFFIRMATION_RE.match(n), p
             assert not write_fanout.BARE_NEGATION_RE.match(n), p
+
+
+# ---------------------------------------------------------------------------
+# Reconcile: replies through the real classify path, nonce fail-closed,
+# identity before expiry, foreign pendings, fingerprint without identity
+# ---------------------------------------------------------------------------
+
+ALREADY_DONE_TEXT = "Already done."
+
+
+def _import_main_for_classify():
+    """orchestrator.main with the same import preamble as
+    test_context_continuation.py (config_loader stub, service key)."""
+    import os
+    os.environ.setdefault("SERVICE_API_KEY", "test-key-fanout-replies")
+    os.environ.setdefault("ADMIN_API_URL", "http://localhost:8080")
+    loader = mock.MagicMock()
+    loader.get_config = config_module.get_config
+    loader.ADMIN_API_URL = os.environ["ADMIN_API_URL"]
+    loader.get_feature_flag = AsyncMock(return_value=False)
+    loader.get_feature_flags = AsyncMock(return_value={})
+    loader.clear_cache = AsyncMock()
+    sys.modules.setdefault("orchestrator.config_loader", loader)
+    import orchestrator.nodes  # noqa: F401
+    import orchestrator.main as main_module
+    return main_module
+
+
+class TestRealClassifyPathReplies:
+    """A reply to the prompt goes through the real classify_node (anaphora
+    detector -> continuation decision -> context_ref_info) and then
+    route_control_node, exactly as in production."""
+
+    def _classify(self, monkeypatch, reply, prev):
+        from types import SimpleNamespace
+        from orchestrator.search_providers.intent_classifier import IntentClassifier
+        from orchestrator.state import ConversationContext, IntentCategory
+
+        main_module = _import_main_for_classify()
+        cache = SimpleNamespace(get=AsyncMock(return_value={
+            "intent": "general_info", "confidence": 0.5, "entities": {}, "complexity": "simple",
+        }))
+        _runtime.set_cache_client(cache)
+        _runtime.set_llm_router(MagicMock())
+        _runtime.set_intent_classifier(IntentClassifier())
+        monkeypatch.setattr(main_module, "get_conversation_context", AsyncMock(return_value=ConversationContext(**prev)))
+        state = OrchestratorState(query=reply)
+        state.session_id = "sess-1"
+        state.mode = "owner"
+        state.node_timings = {}
+        classified = _run(main_module.classify_node(state))
+        assert classified.intent == IntentCategory.CONTROL, (reply, classified.intent)
+        classified.permissions = {"mode": "owner"}
+        classified.room = "office"
+        classified.supports_followup = True
+        classified.caller_fingerprint = _fp()
+        return classified
+
+    @pytest.mark.parametrize("reply", ["go ahead.", "do it.", "Yes, please."])
+    def test_affirmations_replay_through_real_classify(self, monkeypatch, reply):
+        h = _Harness()
+        _, prev = _first_turn(h)
+        classified = self._classify(monkeypatch, reply, prev)
+        out = h.run(classified)
+        assert sorted(set(_written(h.client, "light"))) == sorted(f"light.office_{i}" for i in range(OFFICE_N)), (reply, out.answer)
+
+    def test_no_thanks_declines_through_real_classify(self, monkeypatch):
+        h = _Harness()
+        _, prev = _first_turn(h)
+        classified = self._classify(monkeypatch, "No, thanks.", prev)
+        out = h.run(classified)
+        assert _written(h.client) == []
+        assert out.answer == DECLINED_TEXT
+
+    def test_detector_tags_are_unchanged(self):
+        """The global yes_no tag is not widened (it feeds
+        decide_context_continuation everywhere)."""
+        from orchestrator.context.detector import detect_context_reference
+        assert "yes_no" not in detect_context_reference("go ahead").get("anaphora_types", [])
+        assert "yes_no" not in detect_context_reference("do it").get("anaphora_types", [])
+        assert "yes_no" in detect_context_reference("yes please").get("anaphora_types", [])
+
+    def test_bare_reply_vocabulary_is_the_detectors(self):
+        from orchestrator.context import detector
+        for word in detector.AFFIRMATION_WORDS:
+            assert write_fanout.BARE_AFFIRMATION_RE.match(word), word
+        for word in detector.NEGATION_WORDS:
+            assert write_fanout.BARE_NEGATION_RE.match(word), word
+        for phrase in detector.PROCEED_PHRASES:
+            assert write_fanout.BARE_AFFIRMATION_RE.match(phrase), phrase
+
+
+class _RaisingRedis:
+    def __init__(self):
+        self.client = self
+
+    async def set(self, *a, **kw):
+        raise ConnectionError("redis down")
+
+
+class _HangingRedis:
+    def __init__(self):
+        self.client = self
+
+    async def set(self, *a, **kw):
+        await asyncio.sleep(3600)
+
+
+class TestNonceClaimFailsClosed:
+    def _yes_after_pending(self, cache):
+        h = _Harness(cache=cache)
+        _, prev = _first_turn(h)
+        h.client.call_service.reset_mock()
+        out = h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO))
+        return h, out
+
+    def test_redis_error_loses_the_claim(self):
+        h, out = self._yes_after_pending(_RaisingRedis())
+        assert _written(h.client) == []
+        assert out.answer == ALREADY_DONE_TEXT
+
+    def test_redis_timeout_loses_the_claim(self, monkeypatch):
+        monkeypatch.setattr(rc_module, "NONCE_CLAIM_TIMEOUT_SECONDS", 0.05)
+        h, out = self._yes_after_pending(_HangingRedis())
+        assert _written(h.client) == []
+        assert out.answer == ALREADY_DONE_TEXT
+
+    def test_redis_error_does_not_fall_back_to_the_process_set(self, monkeypatch):
+        rc_module._NONCE_FALLBACK.clear()
+        monkeypatch.setattr(rc_module, "get_cache_client", lambda: _RaisingRedis())
+        assert _run(rc_module._claim_nonce("n-raise")) is False
+        assert "n-raise" not in rc_module._NONCE_FALLBACK
+
+    def test_process_set_only_without_redis(self, monkeypatch):
+        """Positive control: no Redis configured (no cache client, or one
+        with no connection) -> the process-local set claims exactly once."""
+        from types import SimpleNamespace
+        for cache in (None, SimpleNamespace(client=None)):
+            rc_module._NONCE_FALLBACK.clear()
+            monkeypatch.setattr(rc_module, "get_cache_client", lambda c=cache: c)
+            assert _run(rc_module._claim_nonce("n-local")) is True
+            assert _run(rc_module._claim_nonce("n-local")) is False
+
+    def test_working_redis_claims_once(self, monkeypatch):
+        cache = _NxCache()
+        monkeypatch.setattr(rc_module, "get_cache_client", lambda: cache)
+        assert _run(rc_module._claim_nonce("n-redis")) is True
+        assert _run(rc_module._claim_nonce("n-redis")) is False
+
+
+class TestIdentityBeforeExpiry:
+    NOW = 1_900_000_000.0
+
+    def test_foreign_expired_pending_is_neither_cleared_nor_answered(self):
+        h = _Harness()
+        prev = _prev_with_pending(fingerprint=_fp(device="voice-a"), expires_at=self.NOW)
+        out = h.run(
+            _state54("yes", prev_context=prev, context_ref_info=YES_NO, fingerprint=_fp(device="voice-b")),
+            now=self.NOW,
+        )
+        assert _written(h.client) == []
+        assert out.answer != EXPIRED_TEXT
+        assert h.stores == [], h.stores
+
+    def test_own_expired_pending_still_answers_expired(self):
+        """Positive control for the test above."""
+        h = _Harness()
+        prev = _prev_with_pending(fingerprint=_fp(), expires_at=self.NOW)
+        out = h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO), now=self.NOW)
+        assert out.answer == EXPIRED_TEXT
+        assert h.stores and "pending_write_confirmation" not in h.stores[0]["parameters"]
+
+
+class TestForeignPendingIsNotOverwritten:
+    def test_cross_identity_state_question_success_skips_the_store(self):
+        h = _Harness()
+        prev = _prev_with_pending(fingerprint=_fp(device="voice-a"), expires_at=_time_mod.time() + 60)
+        ref = {"anaphora_types": [], "has_context_ref": False}
+        out = h.run(_state54(
+            "are the office lights on", prev_context=prev, context_ref_info=ref, fingerprint=_fp(device="voice-b"),
+        ))
+        assert _written(h.client) == []
+        assert out.answer and out.answer != NEUTRAL_TEXT
+        assert h.stores == [], h.stores
+
+    def test_cross_identity_block_is_reworded_not_stored(self):
+        h = _Harness()
+        prev = _prev_with_pending(fingerprint=_fp(device="voice-a"), expires_at=_time_mod.time() + 60)
+        ref = {"anaphora_types": [], "has_context_ref": False}
+        out = h.run(_state54(
+            "office lights off please", prev_context=prev, context_ref_info=ref, fingerprint=_fp(device="voice-b"),
+        ))
+        assert _written(h.client) == []
+        assert not out.answer.endswith("?"), out.answer
+        assert "say:" in out.answer
+        assert h.stores == [], h.stores
+
+    def test_same_caller_success_still_stores(self):
+        """Positive control: with no foreign pending the same turn stores
+        its success context as before."""
+        h = _Harness()
+        ref = {"anaphora_types": [], "has_context_ref": False}
+        h.run(_state54("are the office lights on", prev_context=None, context_ref_info=ref))
+        assert h.stores and h.stores[-1]["ttl"] == 300
+
+
+class TestFingerprintNeedsIdentity:
+    def test_no_trust_and_no_device_is_none(self):
+        assert write_fanout.caller_fingerprint(None, None, "office", "owner") is None
+        assert write_fanout.caller_fingerprint("", "", "office", "owner") is None
+
+    def test_either_identity_input_is_enough(self):
+        assert write_fanout.caller_fingerprint("household", None, "office", "owner")
+        assert write_fanout.caller_fingerprint(None, "ha-device-1", "office", "owner")
