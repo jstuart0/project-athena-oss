@@ -150,3 +150,92 @@ def test_query_entry_points_pass_caller_class():
                 (passing if "caller_class" in keywords else defaulting).add(fn.name)
     assert {"process_query", "process_query_stream", "process_query_stream_v2"} <= passing
     assert defaulting <= {"chat_completions"}
+
+
+# ---------------------------------------------------------------------------
+# Public session ids carry a "pub-" prefix, and binding holds on every
+# query entry point, expired sessions included.
+# ---------------------------------------------------------------------------
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_public_sessions_are_prefixed(monkeypatch):
+    from orchestrator.session_manager import CALLER_CLASS_PUBLIC, PUBLIC_SESSION_PREFIX
+
+    h.patch_conversation_config(monkeypatch)
+    sm = h._runtime.get_session_manager()
+    fresh = _run(sm.get_or_create_session(caller_class=CALLER_CLASS_PUBLIC))
+    assert fresh.session_id.startswith(PUBLIC_SESSION_PREFIX)
+    # an unknown id without the prefix is never adopted
+    chosen = _run(sm.get_or_create_session(session_id="abc123", caller_class=CALLER_CLASS_PUBLIC))
+    assert chosen.session_id.startswith(PUBLIC_SESSION_PREFIX) and chosen.session_id != "abc123"
+    assert _run(sm.get_session("abc123")) is None
+    # a prefixed id that belongs to a non-public session is not resumed
+    other = _run(sm.create_session(session_id="pub-household"))
+    other.add_message("user", "private")
+    _run(sm._save_session(other))
+    taken = _run(sm.get_or_create_session(session_id="pub-household", caller_class=CALLER_CLASS_PUBLIC))
+    assert taken.session_id != "pub-household" and taken.messages == []
+
+
+ENTRY_POINTS = ["/query", "/query/stream", "/query/stream/v2"]
+
+
+@pytest.mark.parametrize("expired", [False, True], ids=["live", "expired"])
+@pytest.mark.parametrize("path", ENTRY_POINTS)
+def test_public_binding_on_every_entry_point(client, monkeypatch, path, expired):
+    sm = h._runtime.get_session_manager()
+    _household_session(sm, expired=expired)
+    graph = _Graph()
+    monkeypatch.setattr(h.main, "orchestrator_graph", graph)
+    streamed = []
+
+    async def _stream_run(state):
+        streamed.append(state)
+        state.answer = "ok"
+        return state
+
+    monkeypatch.setattr(h.main, "run_orchestrator_for_streaming", _stream_run)
+    with client.stream(
+        "POST", path,
+        json={"query": "what did I tell you", "caller_trust": "web_public", "session_id": "household-1"},
+        headers=h.service_headers(),
+    ) as resp:
+        assert resp.status_code == 200
+        list(resp.iter_text())
+    states = graph.states + streamed
+    assert len(states) == 1
+    assert states[0].session_id != "household-1"
+    assert states[0].session_id.startswith("pub-")
+    assert states[0].conversation_history == []
+    stored = _run(sm.get_session("household-1"))
+    assert [m["content"] for m in stored.messages] == ["my garage code is 4417", "Noted."]
+
+
+@pytest.mark.parametrize("path", ["/query", "/query/stream"])
+def test_household_resumes_on_streaming_too(client, monkeypatch, path):
+    """Positive control for the capture: a household caller does get the
+    history, so the empty history above isn't vacuous."""
+    sm = h._runtime.get_session_manager()
+    _household_session(sm)
+    graph = _Graph()
+    monkeypatch.setattr(h.main, "orchestrator_graph", graph)
+    streamed = []
+
+    async def _stream_run(state):
+        streamed.append(state)
+        state.answer = "ok"
+        return state
+
+    monkeypatch.setattr(h.main, "run_orchestrator_for_streaming", _stream_run)
+    with client.stream(
+        "POST", path,
+        json={"query": "what did I tell you", "caller_trust": "household", "session_id": "household-1"},
+        headers=h.service_headers(),
+    ) as resp:
+        list(resp.iter_text())
+    state = (graph.states + streamed)[0]
+    assert state.session_id == "household-1"
+    assert state.conversation_history

@@ -142,8 +142,22 @@ def test_web_search_allowed_predicate():
 # PP11: population of web-search executions
 # ---------------------------------------------------------------------------
 
-_SEARCH_RECEIVERS = {"parallel_search_engine", "psearch"}
+_SEARCH_RECEIVERS = {"parallel_search_engine", "psearch", "parallel_engine"}
+_SEARCH_METHODS = {"search", "search_primary_parallel"}
 _EXECUTOR = "execute_tools_parallel"
+
+# The exact population (tessa M2). A new site fails here until it's added,
+# guarded or pinned as the tool executor.
+EXPECTED_GUARDED = {
+    ("src/orchestrator/helpers.py", "maybe_post_synthesis_fallback", "parallel_search"): 1,
+    ("src/orchestrator/helpers.py", "_fallback_to_web_search", "parallel_search"): 1,
+    ("src/orchestrator/main.py", "tool_call_node", "parallel_search"): 2,
+    ("src/orchestrator/nodes/retrieve.py", "retrieve_node", "parallel_search"): 1,
+    ("src/orchestrator/nodes/retrieve.py", "retrieve_node", "websearch_service"): 1,
+}
+EXPECTED_EXECUTOR = {
+    ("src/orchestrator/main.py", "execute_tools_parallel", "parallel_search"): 1,
+}
 
 
 def _outermost_functions(tree):
@@ -152,15 +166,28 @@ def _outermost_functions(tree):
             yield node
 
 
+def _is_engine_receiver(receiver):
+    """`parallel_search_engine.search(`, `psearch.search(`, and the chained
+    `get_parallel_search_engine().search(` / `(await get_parallel_search_engine(...)).search(`."""
+    if isinstance(receiver, ast.Await):
+        receiver = receiver.value
+    if isinstance(receiver, ast.Name):
+        return receiver.id in _SEARCH_RECEIVERS
+    if isinstance(receiver, ast.Call):
+        func = receiver.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        return name == "get_parallel_search_engine"
+    return False
+
+
 def _search_sites(fn, rel):
     sites = []
     for node in ast.walk(fn):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            receiver = node.func.value
-            if node.func.attr == "search" and isinstance(receiver, ast.Name) and receiver.id in _SEARCH_RECEIVERS:
-                sites.append(("parallel_search", node.lineno))
-            if node.func.attr == "search_primary_parallel":
-                sites.append(("primary_parallel", node.lineno))
+        if (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _SEARCH_METHODS and _is_engine_receiver(node.func.value)
+        ):
+            sites.append(("parallel_search", node.lineno))
         # retrieve_node's WEBSEARCH branch calls the websearch service; other
         # loads of the constant (the URL registry) execute nothing.
         if (
@@ -179,27 +206,36 @@ def _calls(fn, name):
     )
 
 
-def test_web_search_sites_guarded():
-    guarded, executor = [], []
+def _population():
+    guarded, executor = {}, {}
     for path in sorted(h.ORCH_DIR.rglob("*.py")):
         rel = path.relative_to(h.REPO_ROOT).as_posix()
         if "/search_providers/" in rel or rel.endswith(("parallel_search.py", "web_search.py", "urls.py")):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for fn in _outermost_functions(tree):
-            sites = _search_sites(fn, rel)
-            if not sites:
-                continue
-            if fn.name == _EXECUTOR:
-                executor.extend(sites)
-                continue
-            assert _calls(fn, "web_search_allowed"), f"{rel}:{fn.name} runs web search without web_search_allowed"
-            guarded.extend((rel, fn.name, kind) for kind, _ in sites)
-    functions = {(rel, name) for rel, name, _ in guarded}
-    assert len(guarded) >= 6, guarded
-    assert len(executor) >= 1
-    assert ("src/orchestrator/nodes/retrieve.py", "retrieve_node") in functions
-    assert ("src/orchestrator/helpers.py", "_fallback_to_web_search") in functions
-    assert ("src/orchestrator/helpers.py", "maybe_post_synthesis_fallback") in functions
-    assert ("src/orchestrator/main.py", "tool_call_node") in functions
-    assert ("src/orchestrator/nodes/retrieve.py", "retrieve_node", "websearch_service") in guarded
+            for kind, _ in _search_sites(fn, rel):
+                bucket = executor if fn.name == _EXECUTOR else guarded
+                key = (rel, fn.name, kind)
+                bucket[key] = bucket.get(key, 0) + 1
+                if bucket is guarded:
+                    assert _calls(fn, "web_search_allowed"), f"{rel}:{fn.name} runs web search without web_search_allowed"
+    return guarded, executor
+
+
+def test_web_search_sites_guarded():
+    guarded, executor = _population()
+    assert guarded == EXPECTED_GUARDED
+    assert executor == EXPECTED_EXECUTOR
+    assert sum(guarded.values()) >= 6
+
+
+def test_recogniser_sees_chained_engine_calls():
+    tree = ast.parse(
+        "async def f():\n"
+        "    await get_parallel_search_engine().search(q)\n"
+        "    await (await get_parallel_search_engine(rag)).search_primary_parallel(q, 5)\n"
+        "    await _runtime.get_parallel_search_engine().search(q)\n"
+        "    re.search(p, q)\n"
+    )
+    assert len(_search_sites(tree.body[0], "x.py")) == 3

@@ -62,6 +62,9 @@ _memory_sessions: Dict[str, Dict[str, Any]] = {}
 
 CALLER_CLASS_PUBLIC = "public"
 CALLER_CLASS_OTHER = "other"
+# Every public session id carries this prefix, so a public caller can never
+# adopt or guess its way into an id another caller uses.
+PUBLIC_SESSION_PREFIX = "pub-"
 
 
 class ConversationSession:
@@ -303,7 +306,11 @@ class SessionManager:
             New ConversationSession instance
         """
         # Use provided session_id or generate new one
-        session_id = session_id or str(uuid.uuid4())
+        if caller_class == CALLER_CLASS_PUBLIC and not (session_id or "").startswith(PUBLIC_SESSION_PREFIX):
+            session_id = None
+        session_id = session_id or (
+            f"{PUBLIC_SESSION_PREFIX}{uuid.uuid4()}" if caller_class == CALLER_CLASS_PUBLIC else str(uuid.uuid4())
+        )
         session = ConversationSession(
             session_id=session_id,
             user_id=user_id,
@@ -390,8 +397,10 @@ class SessionManager:
 
         A public caller presenting the id of a session that isn't public
         (live or expired) gets a brand-new session under a new id: it never
-        reads that session's history and never overwrites it. Any caller
-        may resume a public session; that only loads public history.
+        reads that session's history and never overwrites it. Public ids
+        always start with PUBLIC_SESSION_PREFIX; an id without it is never
+        adopted for a public caller. Any caller may resume a public
+        session; that only loads public history.
         """
         if session_id:
             session = await self.get_session(session_id)

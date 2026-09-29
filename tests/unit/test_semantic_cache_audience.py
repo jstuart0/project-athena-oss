@@ -67,7 +67,9 @@ def client(monkeypatch):
     return TestClient(h.main.app)
 
 
-def _ask(client, monkeypatch, *, answer, guest=None, caller_trust="household"):
+def _ask(client, monkeypatch, *, answer, guest=None, caller_trust="household", server_mode=None):
+    if server_mode:
+        h.install_mode_client(server_mode=server_mode)
     admin = h.fake_admin_client(guest_info=guest)
     monkeypatch.setattr(h.main, "get_admin_client", lambda: admin)
     graph = _Graph(answer)
@@ -150,3 +152,27 @@ def test_cache_calls_have_one_site_each():
                 counts[node.func.id] += 1
                 assert {k.arg for k in node.keywords} >= {"mode", "guest_id"}, f"{path.name}:{node.lineno}"
     assert counts == {"get_cached_response": 1, "cache_response": 1}
+
+
+def test_house_flips_to_guest_then_nobody_else_gets_owner_answer(client, monkeypatch, cache):
+    """Owner asks while the house is owner; the house flips to guest; an
+    anonymous caller and a household caller now both get a fresh answer."""
+    _ask(client, monkeypatch, answer="OWNER ANSWER", server_mode="owner")
+    _wait_for_sets(cache, 1)
+    answer, graph = _ask(client, monkeypatch, answer="PUBLIC ANSWER", caller_trust="web_public", server_mode="guest")
+    assert answer == "PUBLIC ANSWER" and graph.calls == 1
+    answer, graph = _ask(client, monkeypatch, answer="GUEST HOUSE ANSWER", server_mode="guest")
+    assert answer == "GUEST HOUSE ANSWER" and graph.calls == 1
+
+
+def test_guest_house_guest_answer_stays_with_that_guest(client, monkeypatch, cache):
+    """House in guest mode: guest 1's cached answer is not served to an
+    anonymous caller nor to an unidentified guest-mode caller."""
+    _ask(client, monkeypatch, answer="GUEST ONE", guest={"guest_id": 1, "guest_name": "A"}, server_mode="guest")
+    _wait_for_sets(cache, 1)
+    answer, graph = _ask(client, monkeypatch, answer="PUBLIC ANSWER", caller_trust="web_public", server_mode="guest")
+    assert answer == "PUBLIC ANSWER" and graph.calls == 1
+    answer, graph = _ask(client, monkeypatch, answer="UNIDENTIFIED", server_mode="guest")
+    assert answer == "UNIDENTIFIED" and graph.calls == 1
+    answer, graph = _ask(client, monkeypatch, answer="SECOND", guest={"guest_id": 1, "guest_name": "A"}, server_mode="guest")
+    assert answer == "GUEST ONE" and graph.calls == 0

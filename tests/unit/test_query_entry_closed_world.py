@@ -8,8 +8,11 @@ point that skips any of these fails here.
 from __future__ import annotations
 
 import ast
+import types
+import typing
 
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from . import _public_audience_harness as h
@@ -17,19 +20,35 @@ from . import _public_audience_harness as h
 ALLOWED_EXCEPTIONS: set[str] = set()
 
 
-def _query_request_handlers(tree):
-    for fn in tree.body:
-        if not isinstance(fn, ast.AsyncFunctionDef):
+def test_unwrap_handles_optional():
+    assert _unwrap(typing.Optional[h.main.QueryRequest]) is h.main.QueryRequest
+    assert _unwrap(h.main.QueryRequest | None) is h.main.QueryRequest
+
+
+def _unwrap(annotation):
+    """Optional[X] / X | None -> X."""
+    args = [a for a in typing.get_args(annotation) if a is not type(None)]
+    if typing.get_origin(annotation) in (typing.Union, types.UnionType) and len(args) == 1:
+        return args[0]
+    return annotation
+
+
+def _query_request_endpoints():
+    """Every registered route whose endpoint takes a QueryRequest, read from
+    the running app, not from source text."""
+    found = {}
+    for route in h.main.app.routes:
+        if not isinstance(route, APIRoute):
             continue
-        is_route = any(
-            isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr in {"post", "get"}
-            for d in fn.decorator_list
-        )
-        takes_query_request = any(
-            isinstance(a.annotation, ast.Name) and a.annotation.id == "QueryRequest" for a in fn.args.args
-        )
-        if is_route and takes_query_request:
-            yield fn
+        hints = typing.get_type_hints(route.endpoint)
+        hints.pop("return", None)
+        if any(_unwrap(t) is h.main.QueryRequest for t in hints.values()):
+            found[route.endpoint.__name__] = route.path
+    return found
+
+
+def _functions_by_name(tree):
+    return {fn.name: fn for fn in tree.body if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
 
 def _calls_named(fn, name):
@@ -40,13 +59,14 @@ def _calls_named(fn, name):
 
 
 def test_every_query_entry_point_is_closed():
-    tree = ast.parse(h.MAIN_PY.read_text(encoding="utf-8"))
-    handlers = list(_query_request_handlers(tree))
-    names = {fn.name for fn in handlers}
-    assert {"process_query", "process_query_stream", "process_query_stream_v2"} <= names
-    for fn in handlers:
-        if fn.name in ALLOWED_EXCEPTIONS:
+    endpoints = _query_request_endpoints()
+    assert len(endpoints) >= 3
+    assert {"process_query", "process_query_stream", "process_query_stream_v2"} <= set(endpoints)
+    functions = _functions_by_name(ast.parse(h.MAIN_PY.read_text(encoding="utf-8")))
+    for name in endpoints:
+        if name in ALLOWED_EXCEPTIONS:
             continue
+        fn = functions[name]
         authz = _calls_named(fn, "resolve_request_authorization")
         assert authz, fn.name
         for call in authz:
