@@ -738,7 +738,9 @@ never made silently, whatever the limits (including `0`): even a
 single-device change from a question gets "Should I go ahead?" (or the
 exact command to say, on surfaces without a follow-up). That includes
 single-device changes such as the thermostat, the bed warmer, motion
-overrides and scene or routine activation ("is good night mode on?"). A TV
+overrides and scene or routine activation ("is good night mode on?"),
+timed sequences, and the dynamic automation agent's actions (service
+calls, creating or deleting automations, notifications). A TV
 or music question is answered from the device's state, followed by the
 command form ("To turn it off, say: turn off the living room TV."). A
 command the classifier misread as a question still works after "yes" or

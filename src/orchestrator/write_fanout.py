@@ -74,6 +74,9 @@ def normalize_reply(query: Optional[str]) -> str:
     return re.sub(r"\s+", " ", q).strip()
 
 _VERB_FOR_SERVICE = {
+    "create": "create",
+    "delete": "delete",
+    "notify": "send",
     "turn_on": "turn on",
     "turn_off": "turn off",
     "lock": "lock",
@@ -99,6 +102,8 @@ _COUNTED_NOUNS = {
     "input_boolean": ("motion setting", "motion settings"),
     "scene": ("scene", "scenes"),
     "script": ("routine", "routines"),
+    "automation": ("automation", "automations"),
+    "notify": ("notification", "notifications"),
 }
 
 
@@ -317,6 +322,24 @@ def _block(scope, writes, room, scope_hint, domain_for_metric: str, prompt_outco
         verb = _verb_for(writes[0].service, writes[0].domain)
         return f"That would {verb} {n} {_counted_noun(n, [w.domain for w in writes])}{_room_text(room, scope_hint)}. Should I go ahead?"
     ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome=reword_outcome).inc()
+    return rewording(block)
+
+
+def question_refusal(domain: str, service: str, entity_ids: Iterable[str]) -> Optional[str]:
+    """For writers without a pending carrier or a fan-out count (the
+    automation agent's tools): the rewording when the request's real
+    classification is a STATE_QUESTION, else None -- commands (IMPERATIVE,
+    UNKNOWN) pass exactly as before, whatever the limits. A read-only scope
+    is left to the permission guard, whose refusal already applies. Records
+    no block: the caller returns the text as its result."""
+    scope = current_ha_scope()
+    if scope is None or scope.read_only or scope.utterance is None:
+        return None
+    if getattr(scope.utterance, "kind", None) != UtteranceKind.STATE_QUESTION:
+        return None
+    ids = tuple(entity_ids) or (domain,)
+    block = FanoutBlock(writes=(PlannedWrite(domain, service, ids),), unbounded="all" in ids)
+    ha_write_fanout_confirm_total.labels(domain=domain, outcome="reworded").inc()
     return rewording(block)
 
 

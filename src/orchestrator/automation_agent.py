@@ -704,6 +704,14 @@ class AutomationAgent:
         if entity_id:
             data["entity_id"] = entity_id
 
+        # ATHENA-128: a real state question (routing reverted by the kill
+        # switch) never writes through the agent; the rewording goes back
+        # as the tool result.
+        from orchestrator import write_fanout  # lazy, like mode_permission (see above)
+        refusal = write_fanout.question_refusal(domain, service, (entity_id,) if entity_id else ())
+        if refusal:
+            return refusal
+
         try:
             await self.ha_client.call_service(domain, service, data)
             return f"Called {domain}.{service} on {entity_id}"
@@ -713,6 +721,11 @@ class AutomationAgent:
 
     async def _create_automation(self, args: Dict, context: Dict) -> str:
         """Create automation in HA and optionally store in admin backend."""
+        from orchestrator import write_fanout  # lazy, like mode_permission (see above)
+        refusal = write_fanout.question_refusal("automation", "create", (args.get("name") or "automation",))
+        if refusal:
+            return refusal
+
         mode = context.get("mode", "owner")
         session_id = context.get("session_id")
         guest_name = context.get("guest_name")
@@ -1157,6 +1170,13 @@ class AutomationAgent:
 
     async def _delete_automation(self, args: Dict, context: Dict) -> str:
         """Delete or archive an automation."""
+        from orchestrator import write_fanout  # lazy, like mode_permission (see above)
+        refusal = write_fanout.question_refusal(
+            "automation", "delete", (args.get("automation_id") or args.get("name_search") or "automation",)
+        )
+        if refusal:
+            return refusal
+
         automation_id = args.get("automation_id")
         name_search = args.get("name_search")
         mode = context.get("mode", "owner")
@@ -1229,6 +1249,11 @@ class AutomationAgent:
 
     async def _send_notification(self, args: Dict, context: Dict) -> str:
         """Send a notification via TTS, mobile push, or flashing lights."""
+        from orchestrator import write_fanout  # lazy, like mode_permission (see above)
+        refusal = write_fanout.question_refusal("notify", "notify", (args.get("target", "tts"),))
+        if refusal:
+            return refusal
+
         message = args.get("message", "")
         target = args.get("target", "tts")
         room = args.get("room", context.get("room", "office"))

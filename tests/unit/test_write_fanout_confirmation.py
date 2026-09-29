@@ -1949,3 +1949,307 @@ class TestSequenceDirectEntityWrites:
         assert h.client.call_service.await_count == 0
         assert results == [], results
         assert out.answer != "Okay.", out.answer
+
+
+# ---------------------------------------------------------------------------
+# Round 5: the dynamic automation agent never writes for a real question
+# ---------------------------------------------------------------------------
+
+from orchestrator.automation_agent import AutomationAgent
+
+AGENT_QUESTION = "did the office light turn off at 6pm"
+AGENT_REFERENT_QUESTION = "did they turn off at 6pm"
+AGENT_COMMAND = "turn off the office light at 6pm"
+
+
+def _tool_call(name, arguments, call_id="c1"):
+    return {"tool_calls": [{"id": call_id, "function": {"name": name, "arguments": arguments}}]}
+
+
+class _AgentLLM:
+    """chat_with_tools returns the scripted tool calls in order, then done."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses) + [_tool_call("done", {"message": "All set."}, "c-done")]
+        self.chat_with_tools = AsyncMock(side_effect=self._next)
+
+    async def _next(self, **kwargs):
+        return self.responses.pop(0)
+
+
+class _AgentHarness(_Harness):
+    """The _Harness runtime routed into the dynamic automation agent
+    (automation_mode == "dynamic_agent"), with a real AutomationAgent over
+    the same raw HA client and a recording admin client."""
+
+    def __init__(self, *agent_responses, kill_switch):
+        super().__init__(n_lights=3, flags=KILL_SWITCH_ON if kill_switch else None)
+        self.admin = MagicMock()
+        for name in ("create_voice_automation", "archive_voice_automation", "delete_voice_automation"):
+            setattr(self.admin, name, AsyncMock(return_value=True))
+        self.admin.get_voice_automations = AsyncMock(return_value=[{"id": "voice_1"}])
+        self.client.create_automation = AsyncMock(return_value=True)
+        self.agent = AutomationAgent(self.client, _AgentLLM(*agent_responses), admin_client=self.admin)
+
+    def _install(self):
+        super()._install()
+        _runtime.set_automation_agent(self.agent)
+
+    def run_agent(self, query, **state_kw):
+        async def _go():
+            with self.patched(), \
+                    mock.patch("orchestrator.nodes.route_control.get_automation_system_mode",
+                               new_callable=AsyncMock, return_value="dynamic_agent"), \
+                    mock.patch("orchestrator.nodes.route_control.should_use_automation_agent", return_value=True), \
+                    mock.patch("orchestrator.automation_agent.build_automation_system_prompt",
+                               new_callable=AsyncMock, return_value="SYSTEM"):
+                return await self.arun(_state54(query, context_ref_info={}, **state_kw), patch=False)
+        return _run(_go())
+
+    def admin_writes(self):
+        return [n for n in ("create_voice_automation", "archive_voice_automation", "delete_voice_automation")
+                if getattr(self.admin, n).await_count]
+
+
+HA_OFF = ("ha_service", {"entity_id": "light.office_0", "service": "turn_off"})
+
+
+class TestAutomationAgentQuestionGuard:
+    def test_population_question_and_command(self):
+        assert classify_utterance(AGENT_QUESTION).kind == UtteranceKind.STATE_QUESTION
+        assert classify_utterance(AGENT_COMMAND).kind == UtteranceKind.IMPERATIVE
+
+    def test_question_under_the_kill_switch_never_calls_a_service(self):
+        """codex r5: kill switch on, dynamic_agent, the agent emits the write."""
+        h = _AgentHarness(_tool_call(*HA_OFF), kill_switch=True)
+        out = h.run_agent(AGENT_QUESTION)
+        assert h.client.call_service.await_count == 0, h.client.call_service.await_args_list
+        # The refusal went back to the agent as the tool result.
+        tool_results = [m["content"] for m in h.agent.llm.chat_with_tools.await_args_list[-1].kwargs["messages"] if m["role"] == "tool"]
+        assert tool_results and tool_results[0].startswith("That would turn off 1 light"), tool_results
+        assert not tool_results[0].endswith("?")
+
+    def test_question_under_the_kill_switch_never_creates_an_automation(self):
+        create = ("create_automation", {"name": "Office off", "trigger": {"type": "time", "time": "18:00"},
+                                        "actions": [{"type": "service", "entity_id": "light.office_0", "service": "turn_off"}]})
+        h = _AgentHarness(_tool_call(*create), kill_switch=True)
+        h.run_agent(AGENT_QUESTION)
+        assert h.client.create_automation.await_count == 0
+        assert h.admin_writes() == []
+
+    def test_question_under_the_kill_switch_never_deletes_an_automation(self):
+        h = _AgentHarness(_tool_call("delete_automation", {"automation_id": "voice_1"}), kill_switch=True)
+        h.run_agent(AGENT_QUESTION)
+        assert h.admin_writes() == []
+
+    def test_question_under_the_kill_switch_never_notifies(self):
+        h = _AgentHarness(_tool_call("notify", {"message": "hi", "target": "all", "room": "office"}), kill_switch=True)
+        h.run_agent(AGENT_QUESTION)
+        assert h.client.call_service.await_count == 0, h.client.call_service.await_args_list
+
+    def test_command_writes_with_the_kill_switch(self):
+        h = _AgentHarness(_tool_call(*HA_OFF), kill_switch=True)
+        h.run_agent(AGENT_COMMAND)
+        assert [c.args[:2] for c in h.client.call_service.await_args_list] == [("light", "turn_off")]
+
+    def test_command_writes_without_the_kill_switch(self):
+        h = _AgentHarness(_tool_call(*HA_OFF), kill_switch=False)
+        h.run_agent(AGENT_COMMAND)
+        assert [c.args[:2] for c in h.client.call_service.await_args_list] == [("light", "turn_off")]
+
+    def test_command_creates_an_automation(self):
+        create = ("create_automation", {"name": "Office off", "trigger": {"type": "time", "time": "18:00"},
+                                        "actions": [{"type": "service", "entity_id": "light.office_0", "service": "turn_off"}]})
+        h = _AgentHarness(_tool_call(*create), kill_switch=True)
+        h.run_agent(AGENT_COMMAND)
+        assert h.client.create_automation.await_count == 1
+        assert h.admin_writes() == ["create_voice_automation"]
+
+    def test_referent_question_without_the_kill_switch_keeps_the_read_only_refusal(self):
+        uk = classify_utterance(AGENT_REFERENT_QUESTION)
+        assert uk.kind == UtteranceKind.STATE_QUESTION and uk.needs_referent
+        h = _AgentHarness(_tool_call(*HA_OFF), kill_switch=False)
+        out = h.run_agent(AGENT_REFERENT_QUESTION)
+        assert h.client.call_service.await_count == 0
+        assert out.answer == mp.READ_ONLY_REFUSAL, out.answer
+
+
+class TestQuestionRefusal:
+    def _refusal(self, text, **scope_kw):
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance(text), **scope_kw):
+            return write_fanout.question_refusal("light", "turn_off", ("light.office_0",))
+
+    def test_real_question_gets_the_rewording(self):
+        r = self._refusal("is the office light on")
+        assert r and r.startswith("That would turn off 1 light") and not r.endswith("?")
+
+    def test_commands_pass(self):
+        assert self._refusal("turn off the office light") is None
+        assert self._refusal("office light please") is None
+
+    def test_read_only_scope_is_left_to_the_guard(self):
+        assert self._refusal("is the office light on", read_only=True) is None
+
+    def test_no_scope_or_classification_passes(self):
+        assert write_fanout.question_refusal("light", "turn_off", ("light.office_0",)) is None
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner"):
+            assert write_fanout.question_refusal("light", "turn_off", ("light.office_0",)) is None
+
+    def test_never_leaves_a_block_behind(self):
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance("is it on")):
+            write_fanout.question_refusal("light", "turn_off", ("light.office_0",))
+            assert write_fanout.take_block() is None
+
+
+# ---------------------------------------------------------------------------
+# Round 5: closed-world guard over AutomationAgent's write tools
+# ---------------------------------------------------------------------------
+
+AGENT_SRC_PATH = Path("src/orchestrator/automation_agent.py")
+# State-mutating calls the agent can make: HA services and automations, and
+# the admin backend's voice-automation records.
+AGENT_WRITE_ATTRS = frozenset({
+    "call_service", "create_automation",
+    "create_voice_automation", "archive_voice_automation", "delete_voice_automation",
+})
+# Tool entry methods that write (directly or through helpers); each binds
+# and checks write_fanout.question_refusal before any write. None is
+# allowlisted.
+AGENT_GUARDED = {"_exec_ha_service", "_create_automation", "_delete_automation", "_send_notification"}
+AGENT_ALLOWLIST: dict = {}
+
+
+def _agent_methods(tree, class_name="AutomationAgent"):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return {m.name: m for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return {}
+
+
+def _write_calls(node):
+    return [c for c in ast.walk(node) if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+            and c.func.attr in AGENT_WRITE_ATTRS]
+
+
+def _self_calls(node, names):
+    return [c for c in ast.walk(node) if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+            and isinstance(c.func.value, ast.Name) and c.func.value.id == "self" and c.func.attr in names]
+
+
+def _agent_writers(methods):
+    """Methods that write directly or through another method (closure)."""
+    writers = {n for n, m in methods.items() if _write_calls(m)}
+    changed = True
+    while changed:
+        changed = False
+        for n, m in methods.items():
+            if n not in writers and _self_calls(m, writers):
+                writers.add(n)
+                changed = True
+    return writers
+
+
+def _agent_tool_methods(methods):
+    """The methods the tool dispatcher (_execute_tool) calls."""
+    return {c.func.attr for c in _self_calls(methods["_execute_tool"], set(methods))}
+
+
+def _is_question_refusal_call(call_node):
+    return (
+        isinstance(call_node, ast.Call) and isinstance(call_node.func, ast.Attribute)
+        and call_node.func.attr == "question_refusal"
+        and isinstance(call_node.func.value, ast.Name) and call_node.func.value.id == "write_fanout"
+    )
+
+
+def agent_method_is_guarded(method_node, writers) -> bool:
+    """Every write call and every call to another writer in the method comes
+    after an `x = write_fanout.question_refusal(...)` / `if x: return x`
+    pair in the same statement list."""
+    targets = {id(c) for c in _write_calls(method_node)} | {id(c) for c in _self_calls(method_node, writers)}
+    if not targets:
+        return False
+    dominated = set()
+    for stmts in _stmt_lists(method_node.body):
+        for i, stmt in enumerate(stmts):
+            if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                    and _is_question_refusal_call(stmt.value)):
+                bound = stmt.targets[0].id
+                if i + 1 < len(stmts) and _is_check_and_return(stmts[i + 1], bound):
+                    for later in stmts[i + 2:]:
+                        dominated.update(id(c) for c in ast.walk(later))
+    return targets <= dominated
+
+
+def _agent_violations(tree):
+    methods = _agent_methods(tree)
+    writers = _agent_writers(methods)
+    write_tools = _agent_tool_methods(methods) & writers
+    unguarded = sorted(n for n in write_tools if not agent_method_is_guarded(methods[n], writers))
+    # A writer that isn't a tool entry must only be reachable from writers
+    # that are guarded tools (helpers like _register_ha_automation).
+    helpers = writers - write_tools - {"_execute_tool", "execute"}
+    stray = sorted(
+        h for h in helpers
+        if not all(caller in write_tools for caller, m in methods.items() if _self_calls(m, {h}))
+    )
+    return write_tools, unguarded, stray
+
+
+class TestAutomationAgentClosedWorld:
+    def test_every_agent_write_tool_is_guarded(self):
+        write_tools, unguarded, stray = _agent_violations(ast.parse(AGENT_SRC_PATH.read_text()))
+        assert write_tools == AGENT_GUARDED | set(AGENT_ALLOWLIST), write_tools ^ (AGENT_GUARDED | set(AGENT_ALLOWLIST))
+        assert unguarded == [], unguarded
+        assert stray == [], stray
+        assert "_exec_ha_service" in write_tools
+
+    def test_read_tools_are_not_in_the_population(self):
+        methods = _agent_methods(ast.parse(AGENT_SRC_PATH.read_text()))
+        writers = _agent_writers(methods)
+        assert {"_list_automations", "_get_state"} <= _agent_tool_methods(methods)
+        assert not ({"_list_automations", "_get_state"} & writers)
+
+    def test_negative_new_unguarded_write_tool_is_caught(self):
+        src = """
+class AutomationAgent:
+    async def _execute_tool(self, name, args, context):
+        if name == "ha_service":
+            return await self._exec_ha_service(args, context)
+        elif name == "unlock_everything":
+            return await self._unlock_everything(args)
+
+    async def _exec_ha_service(self, args, context):
+        refusal = write_fanout.question_refusal("light", "turn_off", ())
+        if refusal:
+            return refusal
+        await self.ha_client.call_service("light", "turn_off", {})
+
+    async def _unlock_everything(self, args):
+        await self.ha_client.call_service("lock", "unlock", {"entity_id": "all"})
+"""
+        write_tools, unguarded, stray = _agent_violations(ast.parse(src))
+        assert write_tools == {"_exec_ha_service", "_unlock_everything"}
+        assert unguarded == ["_unlock_everything"]
+
+    def test_negative_helper_reached_from_an_unguarded_method_is_caught(self):
+        src = """
+class AutomationAgent:
+    async def _execute_tool(self, name, args, context):
+        return await self._create_automation(args, context)
+
+    async def _create_automation(self, args, context):
+        refusal = write_fanout.question_refusal("automation", "create", ())
+        if refusal:
+            return refusal
+        await self._register(args)
+
+    async def _register(self, args):
+        await self.ha_client.create_automation("x", {})
+
+    async def _sneaky(self):
+        await self._register({})
+"""
+        write_tools, unguarded, stray = _agent_violations(ast.parse(src))
+        assert unguarded == []
+        assert stray == ["_register"]
