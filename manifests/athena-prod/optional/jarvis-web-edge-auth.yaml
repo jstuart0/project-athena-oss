@@ -1,0 +1,239 @@
+# =============================================================================
+# jarvis-web edge auth (OPTIONAL): home network without sign-in, everyone
+# else signs in through an Authentik forward-auth outpost.
+# =============================================================================
+#
+# jarvis-web never trusts a network on its own in this mode. Traefik decides
+# each request's class (home / guest / authenticated), and jarvis-web honours
+# that class only when:
+#   - X-Jarvis-Edge-Attestation equals jarvis-web's
+#     JARVIS_EDGE_ATTESTATION_SECRET (or _PREVIOUS during a rotation), and
+#   - the TCP peer is in TRUSTED_PROXY_CIDRS, and
+#   - for home/guest, the hop Traefik appended to X-Forwarded-For is in
+#     JARVIS_LOCAL_NETWORKS / JARVIS_GUEST_NETWORKS and the Host is in
+#     JARVIS_ALLOWED_HOSTS (so a mis-authored route can't make the internet
+#     "home" on its own).
+#
+# Placeholders only. Replace every example.com host, every documentation
+# CIDR (192.0.2.0/24, 198.51.100.0/24, 2001:db8::/32) and
+# CONFIGURE_ME_EDGE_ATTESTATION before applying. Not applied by
+# `kubectl apply -f manifests/athena-prod/` (not recursive); apply explicitly.
+#
+# The attestation value (CONFIGURE_ME_EDGE_ATTESTATION below):
+#   - lives in the Secret athena-prod/jarvis-edge-attestation (keys `current`
+#     and optional `previous`); render it into the three attest-* Middlewares
+#     at apply time from a private overlay -- never commit the real value.
+#     Traefik's headers Middleware can't reference a Secret.
+#   - at least 32 characters, distinct from SERVICE_API_KEY and
+#     JARVIS_RELAY_KEY (jarvis-web refuses to start otherwise).
+#   - must never appear in access logs or tracing header capture: keep
+#     Traefik's access log from recording request headers.
+#   - rotation: set the new value as `current` and the old as `previous`,
+#     roll jarvis-web, re-render these Middlewares, then drop `previous`
+#     and roll again.
+#
+# Requirements this file can't enforce:
+#   - Traefik v3: ClientIP matches the TCP source. If your ingress hides the
+#     client address (externalTrafficPolicy Cluster, SNAT), use an
+#     ipAllowList with ipStrategy.depth 0 instead, or every caller looks
+#     like a node.
+#   - The route set on websecure for jarvis-web must be exactly these routes
+#     (plus a house-specific deny route if you run one, at priority 1000);
+#     any other router for these hosts can outrank them. The web entrypoint
+#     only redirects.
+#   - Each authed host needs its own single-application Authentik forward
+#     provider; the application's policy binds the same group as
+#     JARVIS_HOUSEHOLD_GROUPS.
+#   - Don't expose Traefik's dashboard/API.
+#   - allowCrossNamespace lets any IngressRoute author reference these
+#     Middlewares (and so mint attested requests): audit who can create
+#     IngressRoutes/Middlewares, or turn it off.
+#   - forwardAuth trustForwardHeader must stay false: with it on, a client
+#     behind a trusted proxy CIDR can forge X-Forwarded-Host and pass the
+#     outpost without a session.
+#   - The Traefik -> jarvis-web hop is plaintext; mTLS via serversTransport
+#     is a follow-up.
+#
+# Order on every attested route: strip -> (forwardAuth) -> attest. The
+# attestation is set last, so it is never sent to the outpost.
+#
+# jarvis-web Deployment additions (see jarvis-web.yaml):
+# DEPLOYMENT-SNIPPET-BEGIN
+#         - name: JARVIS_EDGE_ATTESTATION_SECRET
+#           valueFrom:
+#             secretKeyRef:
+#               name: jarvis-edge-attestation
+#               key: current
+#         - name: JARVIS_EDGE_ATTESTATION_SECRET_PREVIOUS
+#           valueFrom:
+#             secretKeyRef:
+#               name: jarvis-edge-attestation
+#               key: previous
+#               optional: true
+#         - name: JARVIS_LOCAL_NETWORKS
+#           value: "192.0.2.0/24,2001:db8:1::/64"
+#         - name: JARVIS_GUEST_NETWORKS
+#           value: "198.51.100.0/24"
+#         - name: JARVIS_LOCAL_EXCLUDE
+#           value: "192.0.2.1/32,192.0.2.14/32"
+#         - name: JARVIS_ALLOWED_HOSTS
+#           value: "jarvis.example.com,chat.example.com,jarvis-signin.example.com"
+#         - name: JARVIS_HOUSEHOLD_GROUPS
+#           value: "household"
+#         - name: JARVIS_SIGNIN_URL
+#           value: "https://jarvis-signin.example.com/"
+# DEPLOYMENT-SNIPPET-END
+# `current` is deliberately not optional: a missing Secret stalls the new
+# pod while the old one keeps serving, instead of a pod that 401s everyone.
+# =============================================================================
+---
+# Removes, by exact name, every header jarvis-web reads from the edge
+# (caller_auth.EDGE_STRIPPED_HEADERS), so nothing a client sends survives.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: jarvis-edge-strip
+  namespace: athena-prod
+spec:
+  headers:
+    customRequestHeaders:
+      X-Jarvis-Edge-Class: ""
+      X-Jarvis-Edge-Attestation: ""
+      X-authentik-username: ""
+      X-authentik-groups: ""
+      X-authentik-email: ""
+      X-authentik-name: ""
+      X-authentik-uid: ""
+      X-Service-Key: ""
+      X-Jarvis-Relay-Key: ""
+      X-Jarvis-Relay-Client: ""
+---
+# Authentik's embedded outpost. The regex copies back only what Authentik
+# returned and drops every inbound X-authentik-* header (Go canonicalises
+# header names to X-Authentik-*, hence case-insensitive).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: jarvis-edge-forwardauth
+  namespace: athena-prod
+spec:
+  forwardAuth:
+    address: http://authentik-server.authentik.svc.cluster.local/outpost.goauthentik.io/auth/traefik
+    trustForwardHeader: false
+    authResponseHeadersRegex: "(?i)^x-authentik-"
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: jarvis-edge-attest-home
+  namespace: athena-prod
+spec:
+  headers:
+    customRequestHeaders:
+      X-Jarvis-Edge-Class: "home"
+      X-Jarvis-Edge-Attestation: "CONFIGURE_ME_EDGE_ATTESTATION"
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: jarvis-edge-attest-guest
+  namespace: athena-prod
+spec:
+  headers:
+    customRequestHeaders:
+      X-Jarvis-Edge-Class: "guest"
+      X-Jarvis-Edge-Attestation: "CONFIGURE_ME_EDGE_ATTESTATION"
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: jarvis-edge-attest-authenticated
+  namespace: athena-prod
+spec:
+  headers:
+    customRequestHeaders:
+      X-Jarvis-Edge-Class: "authenticated"
+      X-Jarvis-Edge-Attestation: "CONFIGURE_ME_EDGE_ATTESTATION"
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: jarvis-web-edge
+  namespace: athena-prod
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # O: the outpost's own paths (sign-in callback, sign-out) on every authed
+    # host. No Middlewares at all: never stripped, never attested.
+    - match: (Host(`jarvis.example.com`) || Host(`chat.example.com`) || Host(`jarvis-signin.example.com`)) && PathPrefix(`/outpost.goauthentik.io/`)
+      kind: Rule
+      priority: 3000
+      services:
+        - name: authentik-server
+          namespace: authentik
+          port: 80
+
+    # S: the sign-in host always goes through Authentik, even from home, so
+    # an owner at home during a guest stay can sign in for control.
+    # Optional: delete if you don't run a sign-in host.
+    - match: Host(`jarvis-signin.example.com`)
+      kind: Rule
+      priority: 2000
+      middlewares:
+        - name: jarvis-edge-strip
+        - name: jarvis-edge-forwardauth
+        - name: jarvis-edge-attest-authenticated
+      services:
+        - name: athena-jarvis-web
+          port: 80
+
+    # Relay-exempt (optional, only for an off-cluster chat-embed): relay
+    # requests skip forward-auth and are never attested; jarvis-web checks
+    # the relay key itself. The strip list keeps the relay headers.
+    # - match: Host(`chat.example.com`) && (Path(`/api/chat`) || Path(`/api/chat/stream`)) && HeaderRegexp(`X-Jarvis-Relay-Key`, `.+`)
+    #   kind: Rule
+    #   priority: 950
+    #   middlewares:
+    #     - name: jarvis-edge-strip-except-relay
+    #   services:
+    #     - name: athena-jarvis-web
+    #       port: 80
+
+    # G: the guest network (rental Wi-Fi). Always guest in jarvis-web.
+    - match: (Host(`jarvis.example.com`) || Host(`chat.example.com`)) && !HeaderRegexp(`Cf-Connecting-Ip`, `.+`) && !HeaderRegexp(`Cf-Ray`, `.+`) && (ClientIP(`198.51.100.0/24`)) && !ClientIP(`198.51.100.1/32`)
+      kind: Rule
+      priority: 910
+      middlewares:
+        - name: jarvis-edge-strip
+        - name: jarvis-edge-attest-guest
+      services:
+        - name: athena-jarvis-web
+          port: 80
+
+    # H: the household network. No Cloudflare headers (each negated on its
+    # own), a home source, and none of the excluded addresses (gateways,
+    # nodes, the ingress VIP when inside a home range).
+    - match: (Host(`jarvis.example.com`) || Host(`chat.example.com`)) && !HeaderRegexp(`Cf-Connecting-Ip`, `.+`) && !HeaderRegexp(`Cf-Ray`, `.+`) && (ClientIP(`192.0.2.0/24`) || ClientIP(`2001:db8:1::/64`)) && !ClientIP(`192.0.2.1/32`) && !ClientIP(`192.0.2.14/32`)
+      kind: Rule
+      priority: 900
+      middlewares:
+        - name: jarvis-edge-strip
+        - name: jarvis-edge-attest-home
+      services:
+        - name: athena-jarvis-web
+          port: 80
+
+    # A: everyone else signs in.
+    - match: (Host(`jarvis.example.com`) || Host(`chat.example.com`))
+      kind: Rule
+      priority: 100
+      middlewares:
+        - name: jarvis-edge-strip
+        - name: jarvis-edge-forwardauth
+        - name: jarvis-edge-attest-authenticated
+      services:
+        - name: athena-jarvis-web
+          port: 80
+  tls:
+    secretName: jarvis-web-tls

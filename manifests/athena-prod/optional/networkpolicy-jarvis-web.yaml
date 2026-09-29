@@ -1,0 +1,42 @@
+# =============================================================================
+# jarvis-web NetworkPolicy (OPTIONAL): only the ingress controller and
+# in-namespace services may reach jarvis-web.
+# =============================================================================
+#
+# Why: in app mode (JARVIS_LOCAL_NETWORKS behind TRUSTED_PROXY_CIDRS, no edge
+# attestation), jarvis-web trusts the X-Forwarded-For hop appended by any
+# peer inside TRUSTED_PROXY_CIDRS. That is only sound if every such peer is
+# a proxy that appends what it saw. On a flat pod network any pod can
+# connect and forge that hop, so app mode is safe only where this policy is
+# enforced, or in edge mode (optional/jarvis-web-edge-auth.yaml), where the
+# network alone never grants home.
+#
+# Enforced only by a NetworkPolicy-capable CNI (Calico, Cilium, ...);
+# flannel ignores NetworkPolicy entirely -- verify your CNI first.
+#
+# Not applied by `kubectl apply -f manifests/athena-prod/` (not recursive):
+#   kubectl apply -f manifests/athena-prod/optional/networkpolicy-jarvis-web.yaml
+#
+# Adjust the ingress controller's namespace label below to yours
+# (kubernetes.io/metadata.name is set automatically on every namespace).
+# Any other in-cluster caller (a chat-embed in another namespace, a metrics
+# scraper) needs its own `from:` entry.
+# =============================================================================
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: athena-jarvis-web-ingress
+  namespace: athena-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: athena-jarvis-web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+        - podSelector: {}

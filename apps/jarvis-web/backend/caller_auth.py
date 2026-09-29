@@ -15,7 +15,16 @@ only (nothing in the body counts):
   service            a valid X-Service-Key, household-read routes only
   web_public         none of the above: 401, no upstream call
 
-Evidence order: Bearer, service (allow_service routes only), local, public.
+Edge mode (JARVIS_EDGE_ATTESTATION_SECRET set): an auth proxy in front of
+jarvis-web (Traefik + forwardAuth, see
+manifests/athena-prod/optional/jarvis-web-edge-auth.yaml) classifies each
+request as home, guest or authenticated and attests it with a shared
+secret. The attested class is honoured only from a trusted proxy peer, and
+home/guest only when the D8 candidate and Host corroborate it; the network
+alone never grants home in edge mode.
+
+Evidence order: edge verdict, Bearer, service (allow_service routes only),
+local (app mode only), public.
 
 Hides: every setting and its startup validation, the network rules
 (candidate, exclusions, gateways, Host allowlist, Cloudflare headers), the
@@ -58,12 +67,35 @@ _CSRF_HEADER = "x-jarvis-request"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _DEFAULT_ROUTE_FILE = "/proc/net/route"
 _DEFAULT_ROUTE6_FILE = "/proc/net/ipv6_route"
+_MIN_EDGE_SECRET_LENGTH = 32
+_EDGE_CLASS_HEADER = "X-Jarvis-Edge-Class"
+_EDGE_ATTESTATION_HEADER = "X-Jarvis-Edge-Attestation"
+_DEFAULT_IDENTITY_HEADER = "X-authentik-username"
+_DEFAULT_GROUPS_HEADER = "X-authentik-groups"
+_EDGE_CLASSES = frozenset({"home", "guest", "authenticated"})
+
+# Every header the edge must strip from inbound requests before it sets its
+# own (the template's named strip list is pinned to be a superset of this).
+# Traefik strips by exact name only.
+EDGE_STRIPPED_HEADERS = (
+    _EDGE_CLASS_HEADER,
+    _EDGE_ATTESTATION_HEADER,
+    "X-authentik-username",
+    "X-authentik-groups",
+    "X-authentik-email",
+    "X-authentik-name",
+    "X-authentik-uid",
+    "X-Service-Key",
+    "X-Jarvis-Relay-Key",
+    "X-Jarvis-Relay-Client",
+)
 
 CLASS_AUTHENTICATED = "web_authenticated"
 CLASS_LOCAL = "web_local"
 CLASS_GUEST_NET = "web_guest_net"
 CLASS_SERVICE = "service"
 CLASS_PUBLIC = "web_public"
+CLASS_NOT_HOUSEHOLD = "not_household"  # signed in at the edge, not in a household group
 
 BROWSER_CLASSES = frozenset({CLASS_AUTHENTICATED, CLASS_LOCAL, CLASS_GUEST_NET})
 
@@ -102,10 +134,20 @@ class AuthSettings:
     logout_url: str = ""
     signin_url: str = ""
     local_enabled: bool = False
+    edge_current: str = field(default="", repr=False)
+    edge_previous: str = field(default="", repr=False)
+    identity_header: str = _DEFAULT_IDENTITY_HEADER
+    groups_header: str = _DEFAULT_GROUPS_HEADER
+    groups_separator: str = "|"
+    household_groups: frozenset = frozenset()
+
+    @property
+    def edge_mode(self) -> bool:
+        return bool(self.edge_current)
 
     @property
     def any_browser_access(self) -> bool:
-        return self.local_enabled
+        return self.local_enabled or self.edge_mode
 
 
 def _flag(value: Optional[str]) -> bool:
@@ -218,6 +260,45 @@ def _filter_home_entries(
     return tuple(kept)
 
 
+_PLACEHOLDER_PREFIXES = ("configure_me", "your_")
+
+
+def _edge_secret_fault(value: str, others: Dict[str, str]) -> Optional[str]:
+    """Why an attestation value can't be used, or None. Never returns or
+    logs the value itself."""
+    lowered = value.strip().lower()
+    if lowered.startswith(_PLACEHOLDER_PREFIXES) or lowered == "changeme":
+        return "placeholder"
+    if len(value) < _MIN_EDGE_SECRET_LENGTH:
+        return "too_short"
+    for name, other in others.items():
+        if other and hmac.compare_digest(value.encode("utf-8"), other.encode("utf-8")):
+            return f"equals_{name}"
+    return None
+
+
+def _edge_settings(env: Mapping[str, str], service_key: str) -> Tuple[str, str]:
+    """(current, previous) attestation values. A5: any fault is fatal, so a
+    rolling deploy stalls the new pod instead of serving 401 to everyone."""
+    current = env.get("JARVIS_EDGE_ATTESTATION_SECRET", "")
+    previous = env.get("JARVIS_EDGE_ATTESTATION_SECRET_PREVIOUS", "")
+    relay_key = env.get("JARVIS_RELAY_KEY", "")
+    if previous and not current:
+        logger.error("jarvis_edge_attestation_rejected", which="previous", reason="previous_without_current")
+        raise SystemExit("JARVIS_EDGE_ATTESTATION_SECRET_PREVIOUS is set without JARVIS_EDGE_ATTESTATION_SECRET")
+    for which, value, others in (
+        ("current", current, {"service_key": service_key, "relay_key": relay_key, "previous": previous}),
+        ("previous", previous, {"service_key": service_key, "relay_key": relay_key, "current": current}),
+    ):
+        if not value:
+            continue
+        fault = _edge_secret_fault(value, others)
+        if fault:
+            logger.error("jarvis_edge_attestation_rejected", which=which, reason=fault)
+            raise SystemExit(f"jarvis-web edge attestation ({which}) rejected: {fault}")
+    return current, previous
+
+
 def load_settings(
     env: Mapping[str, str],
     *,
@@ -239,6 +320,7 @@ def load_settings(
         logger.warning("jarvis_public_mode_deprecated", value=public_mode, effect="ignored")
 
     service_key = env.get("SERVICE_API_KEY", "")
+    edge_current, edge_previous = _edge_settings(env, service_key)
     trusted = _networks(env, "TRUSTED_PROXY_CIDRS")
     local = _networks(env, "JARVIS_LOCAL_NETWORKS")
     guest = _networks(env, "JARVIS_GUEST_NETWORKS")
@@ -250,6 +332,22 @@ def load_settings(
     except ValueError:
         logger.error("jarvis_local_trusted_hops_invalid", value=env.get("JARVIS_LOCAL_TRUSTED_HOPS"))
         hops = 1
+
+    if direct and edge_current:
+        logger.error("jarvis_direct_clients_with_edge_mode")
+        raise SystemExit("JARVIS_DIRECT_CLIENTS can't be combined with edge attestation")
+    if edge_current and not trusted:
+        logger.error("jarvis_edge_without_trusted_proxy", effect="no request can be attested; every browser gets 401")
+    if edge_current and not (local and allowed_hosts):
+        logger.error(
+            "jarvis_edge_home_disabled",
+            reason="JARVIS_LOCAL_NETWORKS and JARVIS_ALLOWED_HOSTS are required to corroborate an attested home",
+            effect="every browser must sign in",
+        )
+
+    household_groups = frozenset(_csv(env.get("JARVIS_HOUSEHOLD_GROUPS")))
+    if edge_current and not household_groups:
+        logger.error("jarvis_household_groups_empty", effect="no signed-in identity is honoured")
 
     if direct and env.get("KUBERNETES_SERVICE_HOST") and not _flag(env.get("JARVIS_DIRECT_CLIENTS_ACK_SOURCE_PRESERVED")):
         logger.error(
@@ -314,6 +412,12 @@ def load_settings(
         logout_url=env.get("JARVIS_LOGOUT_URL", "").strip(),
         signin_url=env.get("JARVIS_SIGNIN_URL", "").strip(),
         local_enabled=local_enabled,
+        edge_current=edge_current,
+        edge_previous=edge_previous,
+        identity_header=env.get("JARVIS_EDGE_IDENTITY_HEADER", "").strip() or _DEFAULT_IDENTITY_HEADER,
+        groups_header=env.get("JARVIS_EDGE_GROUPS_HEADER", "").strip() or _DEFAULT_GROUPS_HEADER,
+        groups_separator=env.get("JARVIS_EDGE_GROUPS_SEPARATOR", "") or "|",
+        household_groups=household_groups,
     )
     if not settings.any_browser_access:
         logger.error(
@@ -330,6 +434,9 @@ def load_settings(
         direct_clients=settings.direct_clients,
         allowed_hosts=len(settings.allowed_hosts),
         cors_origins=len(settings.cors_origins),
+        edge_mode=settings.edge_mode,
+        edge_previous_set=bool(settings.edge_previous),
+        household_groups=len(settings.household_groups),
     )
     return settings
 
@@ -352,9 +459,10 @@ class Caller:
     authenticated: bool = False
     role: Optional[str] = None
     reason: str = ""
-    source: str = "none"  # bearer | local | guest_network | service | none
+    source: str = "none"  # edge | bearer | local | guest_network | service | none
     matched_network: Optional[str] = None
     identity: Optional[str] = None
+    edge_attestation: str = "none"  # current | previous | none
 
     @property
     def trust(self) -> str:
@@ -567,6 +675,76 @@ def rate_client(peer: Optional[str], headers, s: AuthSettings) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Edge attestation (D1)
+# ---------------------------------------------------------------------------
+
+def _single(headers, name: str) -> Optional[str]:
+    """The header's value when it's present exactly once (a duplicated
+    header is ambiguous, so it counts as absent)."""
+    values = headers.getlist(name) if hasattr(headers, "getlist") else (
+        [headers.get(name)] if headers.get(name) is not None else []
+    )
+    if len(values) != 1:
+        return None
+    return values[0]
+
+
+def _attestation(headers, s: AuthSettings) -> str:
+    presented = _single(headers, _EDGE_ATTESTATION_HEADER)
+    if not presented:
+        return "none"
+    raw = presented.encode("utf-8")
+    matched = "none"
+    # compare against both, always, so timing doesn't reveal which matched
+    if hmac.compare_digest(raw, s.edge_current.encode("utf-8")):
+        matched = "current"
+    if s.edge_previous and hmac.compare_digest(raw, s.edge_previous.encode("utf-8")):
+        matched = "current" if matched == "current" else "previous"
+    return matched
+
+
+def _household_member(groups_value: Optional[str], s: AuthSettings) -> bool:
+    if not groups_value or not s.household_groups:
+        return False
+    groups = {g.strip() for g in groups_value.split(s.groups_separator)}
+    return bool(groups & s.household_groups)
+
+
+def edge_verdict(peer: Optional[str], headers, s: AuthSettings) -> Tuple[Optional[str], str, Optional[str], Optional[str]]:
+    """(caller class or None, attestation, identity, matched CIDR).
+
+    The class header counts only when the attestation matches and the TCP
+    peer is a trusted proxy. home/guest must also be corroborated by the D8
+    candidate and the Host; identity headers are read only for an
+    authenticated verdict.
+    """
+    if not s.edge_mode:
+        return None, "none", None, None
+    attestation = _attestation(headers, s)
+    if attestation == "none":
+        return None, "none", None, None
+    peer_addr = throttle.parse_ip(peer)
+    if not throttle.in_networks(peer_addr, s.trusted_proxies):
+        logger.warning("jarvis_edge_attestation_from_untrusted_peer", edge_attestation=attestation)
+        return None, attestation, None, None
+    edge_class = _single(headers, _EDGE_CLASS_HEADER)
+    if edge_class not in _EDGE_CLASSES:
+        return None, attestation, None, None
+    if edge_class == "authenticated":
+        identity = _single(headers, s.identity_header)
+        identity = identity.strip() if identity else None
+        if identity and _household_member(_single(headers, s.groups_header), s):
+            return CLASS_AUTHENTICATED, attestation, identity, None
+        return CLASS_NOT_HOUSEHOLD, attestation, None, None
+    network_class, matched = classify_network(peer, headers, s)
+    wanted = CLASS_LOCAL if edge_class == "home" else CLASS_GUEST_NET
+    if network_class == wanted:
+        return wanted, attestation, None, matched
+    logger.warning("jarvis_edge_class_not_corroborated", edge_class=edge_class, edge_attestation=attestation)
+    return None, attestation, None, None
+
+
+# ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
 
@@ -589,20 +767,31 @@ async def _resolve(
     s = SETTINGS
     rate_key = rate_client(peer, headers, s)
 
-    decision = await _resolve_auth_decision(_extract_bearer_token(headers), rate_key)
-    if decision.authenticated:
-        mode = await _mode_for(CLASS_AUTHENTICATED, resolver)
-        caller = Caller(CLASS_AUTHENTICATED, mode, True, decision.role, decision.reason, "bearer")
-    elif allow_service and _valid_service_key(headers.get("x-service-key"), s):
-        caller = Caller(CLASS_SERVICE, "guest", False, None, "service_key", "service")
-    else:
-        cls, matched = classify_network(peer, headers, s)
-        if cls is not None:
-            mode = await _mode_for(cls, resolver)
-            source = "local" if cls == CLASS_LOCAL else "guest_network"
-            caller = Caller(cls, mode, False, decision.role, decision.reason, source, matched)
-        else:
-            caller = Caller(CLASS_PUBLIC, "guest", False, decision.role, decision.reason, "none")
+    edge_class, attestation, identity, edge_matched = edge_verdict(peer, headers, s)
+    caller: Optional[Caller] = None
+    if edge_class is not None:
+        mode = await _mode_for(edge_class, resolver)
+        caller = Caller(
+            edge_class, mode, edge_class == CLASS_AUTHENTICATED, None, "edge", "edge",
+            edge_matched, identity, attestation,
+        )
+    if caller is None or caller.caller_class == CLASS_NOT_HOUSEHOLD:
+        decision = await _resolve_auth_decision(_extract_bearer_token(headers), rate_key)
+        if decision.authenticated:
+            mode = await _mode_for(CLASS_AUTHENTICATED, resolver)
+            caller = Caller(CLASS_AUTHENTICATED, mode, True, decision.role, decision.reason, "bearer",
+                            edge_attestation=attestation)
+        elif caller is None and allow_service and _valid_service_key(headers.get("x-service-key"), s):
+            caller = Caller(CLASS_SERVICE, "guest", False, None, "service_key", "service")
+        elif caller is None:
+            cls, matched = (None, None) if s.edge_mode else classify_network(peer, headers, s)
+            if cls is not None:
+                mode = await _mode_for(cls, resolver)
+                source = "local" if cls == CLASS_LOCAL else "guest_network"
+                caller = Caller(cls, mode, False, decision.role, decision.reason, source, matched)
+            else:
+                caller = Caller(CLASS_PUBLIC, "guest", False, decision.role, decision.reason, "none",
+                                edge_attestation=attestation)
 
     logger.info(
         "jarvis_caller_resolved",
@@ -613,6 +802,7 @@ async def _resolve(
         role=caller.role,
         reason=caller.reason,
         matched_local_network=caller.matched_network,
+        edge_attestation=caller.edge_attestation,
         key_hash=_digest(rate_key)[:12],
     )
     return caller
@@ -660,6 +850,14 @@ def unauthenticated() -> HTTPException:
     return HTTPException(status_code=401, detail="sign_in_required", headers={"WWW-Authenticate": "Jarvis"})
 
 
+def refuse(caller: Caller) -> HTTPException:
+    """Signed in at the edge but not in a household group: 403, not 401
+    (signing in again won't help)."""
+    if caller.caller_class == CLASS_NOT_HOUSEHOLD:
+        return HTTPException(status_code=403, detail="not_household")
+    return unauthenticated()
+
+
 def _require_csrf_header(request: Request, caller: Caller) -> None:
     if request.method.upper() in _SAFE_METHODS or caller.caller_class == CLASS_SERVICE:
         return
@@ -677,7 +875,7 @@ async def require_browser_caller(request: Request, household_mode_resolver: Opti
     """browser routes: any home-network or signed-in browser."""
     caller = await resolve_caller(request, household_mode_resolver)
     if not caller.is_browser:
-        raise unauthenticated()
+        raise refuse(caller)
     _require_csrf_header(request, caller)
     return _store(request, caller)
 
@@ -691,7 +889,7 @@ async def require_guest_reader(request: Request, household_mode_resolver: Option
     """guest_read routes: household readers and the guest network."""
     caller = await resolve_caller(request, household_mode_resolver)
     if not caller.is_browser:
-        raise unauthenticated()
+        raise refuse(caller)
     _require_csrf_header(request, caller)
     return _store(request, caller)
 
@@ -707,7 +905,7 @@ async def require_household_reader(
     if caller.caller_class == CLASS_GUEST_NET:
         raise HTTPException(status_code=403, detail="guest_network")
     if not caller.can_read_household:
-        raise unauthenticated()
+        raise refuse(caller)
     _require_csrf_header(request, caller)
     return _store(request, caller)
 
@@ -719,7 +917,7 @@ async def require_owner_caller(request: Request, household_mode_resolver: Option
     caller = await resolve_caller(request, household_mode_resolver)
     if not caller.is_browser:
         logger.warning("jarvis_owner_only_route_refused", path=request.url.path, reason=caller.reason)
-        raise unauthenticated()
+        raise refuse(caller)
     if not caller.owner_permitted:
         logger.warning("jarvis_owner_only_route_refused", path=request.url.path, reason=caller.control_reason)
         raise HTTPException(status_code=403, detail="guest_stay_active")

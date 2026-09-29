@@ -155,9 +155,70 @@ spec:
     app: jarvis-web
 
 ---
-# IngressRoute with conditional authentication
-# - Local IPs: No authentication required
-# - External IPs: Authentik forward auth required
+# Edge auth, the same shape as manifests/athena-prod/optional/jarvis-web-edge-auth.yaml
+# (read that file's header for the requirements; they apply here too):
+# home network without sign-in, everyone else through Authentik, and every
+# request attested so jarvis-web knows the class came from this proxy.
+# Order: strip -> (forwardAuth) -> attest. Replace CONFIGURE_ME_EDGE_ATTESTATION
+# at apply time from the jarvis-edge-attestation Secret; never commit it.
+# jarvis-web also needs, in its env above: JARVIS_EDGE_ATTESTATION_SECRET
+# (secretKeyRef jarvis-edge-attestation/current, not optional),
+# JARVIS_EDGE_ATTESTATION_SECRET_PREVIOUS (key previous, optional: true),
+# TRUSTED_PROXY_CIDRS (your Traefik pods), JARVIS_LOCAL_NETWORKS (the same
+# CIDR as below), JARVIS_ALLOWED_HOSTS (YOUR_DOMAIN_HERE) and
+# JARVIS_HOUSEHOLD_GROUPS.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: jarvis-edge-strip
+  namespace: jarvis-web
+spec:
+  headers:
+    customRequestHeaders:
+      X-Jarvis-Edge-Class: ""
+      X-Jarvis-Edge-Attestation: ""
+      X-authentik-username: ""
+      X-authentik-groups: ""
+      X-authentik-email: ""
+      X-authentik-name: ""
+      X-authentik-uid: ""
+      X-Service-Key: ""
+      X-Jarvis-Relay-Key: ""
+      X-Jarvis-Relay-Client: ""
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: jarvis-edge-forwardauth
+  namespace: jarvis-web
+spec:
+  forwardAuth:
+    address: http://authentik-server.authentik.svc.cluster.local/outpost.goauthentik.io/auth/traefik
+    trustForwardHeader: false
+    authResponseHeadersRegex: "(?i)^x-authentik-"
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: jarvis-edge-attest-home
+  namespace: jarvis-web
+spec:
+  headers:
+    customRequestHeaders:
+      X-Jarvis-Edge-Class: "home"
+      X-Jarvis-Edge-Attestation: "CONFIGURE_ME_EDGE_ATTESTATION"
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: jarvis-edge-attest-authenticated
+  namespace: jarvis-web
+spec:
+  headers:
+    customRequestHeaders:
+      X-Jarvis-Edge-Class: "authenticated"
+      X-Jarvis-Edge-Attestation: "CONFIGURE_ME_EDGE_ATTESTATION"
+---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -169,26 +230,32 @@ spec:
   entryPoints:
     - websecure
   routes:
-    # Route 1: Local network access - NO authentication
-    # Higher priority (100) means this route is evaluated first
-    # Only local network bypasses auth — pod networks excluded to require tunnel auth
-    # REQUIRED: replace YOUR_DOMAIN_HERE with your domain (e.g., jarvis.yourdomain.com)
-    # REQUIRED: replace YOUR_LOCAL_CIDR with your LAN's CIDR (e.g., 192.168.0.0/16, 10.0.0.0/8)
-    - match: Host(`YOUR_DOMAIN_HERE`) && ClientIP(`YOUR_LOCAL_CIDR`)
+    # O: the outpost's sign-in callback and sign-out, untouched.
+    - match: Host(`YOUR_DOMAIN_HERE`) && PathPrefix(`/outpost.goauthentik.io/`)
       kind: Rule
-      priority: 100
+      priority: 3000
+      services:
+        - name: authentik-server
+          namespace: authentik
+          port: 80
+    # H: home network, no Cloudflare headers. REQUIRED: replace YOUR_LOCAL_CIDR.
+    - match: Host(`YOUR_DOMAIN_HERE`) && !HeaderRegexp(`Cf-Connecting-Ip`, `.+`) && !HeaderRegexp(`Cf-Ray`, `.+`) && ClientIP(`YOUR_LOCAL_CIDR`)
+      kind: Rule
+      priority: 900
+      middlewares:
+        - name: jarvis-edge-strip
+        - name: jarvis-edge-attest-home
       services:
         - name: jarvis-web
           port: 80
-
-    # Route 2: External access - Authentik authentication required
-    # Lower priority (10) means this route is evaluated if Route 1 doesn't match
+    # A: everyone else signs in through Authentik.
     - match: Host(`YOUR_DOMAIN_HERE`)
       kind: Rule
-      priority: 10
+      priority: 100
       middlewares:
-        - name: jarvis-forwardauth
-          namespace: jarvis-web
+        - name: jarvis-edge-strip
+        - name: jarvis-edge-forwardauth
+        - name: jarvis-edge-attest-authenticated
       services:
         - name: jarvis-web
           port: 80
