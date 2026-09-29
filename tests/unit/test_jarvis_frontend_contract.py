@@ -207,3 +207,130 @@ def test_node_network_error_probes_once():
 def test_node_reload_required_offers_reload():
     result = _run([{"status": 403, "body": {"detail": "reload_required"}}])
     assert result["notices"] == 1 and result["signedOut"] is False
+
+
+# ---------------------------------------------------------------------------
+# ruby r1 (B1-B7)
+# ---------------------------------------------------------------------------
+
+def _css_var(name):
+    return re.search(rf"--{name}:\s*(#[0-9a-fA-F]{{6}})", INDEX).group(1)
+
+
+def _contrast(fg, bg):
+    def lum(hexc):
+        r, g, b = (int(hexc[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        f = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4  # noqa: E731
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+    hi, lo = sorted((lum(fg), lum(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _rule(selector):
+    return re.search(re.escape(selector) + r"\s*\{([^}]*)\}", INDEX).group(1)
+
+
+def test_red_surfaces_and_links_meet_contrast():
+    """B1 (named: the banner): white on the red surface and the header
+    links both reach 4.5:1."""
+    surface = _css_var("error-surface")
+    assert _contrast("#ffffff", surface) >= 4.5
+    assert "background: var(--error-surface)" in _rule(".session-banner, .jarvis-notice")
+    assert "background: var(--error-surface)" in _rule(".error-toast")
+    assert "color: var(--link)" in _rule(".signed-in a, .control-note a")
+    for bg in ("bg-primary", "bg-secondary"):
+        assert _contrast(_css_var("link"), _css_var(bg)) >= 4.5, bg
+
+
+def test_narrow_header_keeps_sign_out_and_drops_the_name():
+    """B2: at 480px and below the name is visually hidden (still read by a
+    screen reader) and the Sign out link stays."""
+    narrow = INDEX.split("@media (max-width: 480px) {\n            .header-right { gap: 4px; }", 1)[1].split("\n        }\n", 1)[0]
+    assert "#signed-in-name, #status-text" in narrow and "clip: rect(0 0 0 0)" in narrow
+    assert "signout-link" not in narrow and "display: none" not in narrow
+
+
+def test_rate_limited_message_marked_not_sent():
+    """B3 (named): a 429 marks the bubble "Not sent", adds an aria-live
+    notice in the transcript with chat-embed's wording, and restores the
+    draft, for typed and spoken messages alike."""
+    embed = (h.REPO_ROOT / "apps" / "chat-embed" / "main.py").read_text(encoding="utf-8")
+    wording = "You're going a bit fast. Please wait a minute, then try again."
+    assert wording in embed
+    assert f'const RATE_LIMIT_MESSAGE = "{wording}";' in INDEX
+    not_sent = _function_body(INDEX, "markNotSent")
+    for needle in ("classList.add('not-sent')", "textContent = 'Not sent'", "showTranscriptNotice(RATE_LIMIT_MESSAGE)",
+                   "messageInput.value = message", "saveDraft(message)"):
+        assert needle in not_sent, needle
+    notice = _function_body(INDEX, "showTranscriptNotice")
+    assert "setAttribute('aria-live', 'polite')" in notice and "textContent = text" in notice
+    for sender in ("sendMessage", "sendMessageWithVoice"):
+        body = _function_body(INDEX, sender)
+        assert "const userBubble = addMessage(message, 'user');" in body, sender
+        assert "if (error.status === 429) {\n                    markNotSent(userBubble, message);" in body, sender
+    assert "sending messages too quickly" not in INDEX
+
+
+def _emoji_outside_hidden():
+    from html.parser import HTMLParser
+
+    emoji = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿⌀-⏿←-⇿]")
+    markup = INDEX.split("<body>", 1)[1].split('<script src="/static/jarvis-fetch.js">', 1)[0]
+    found, stack = [], []
+
+    class _P(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag not in {"br", "img", "input", "path", "circle", "line", "rect", "polyline", "meta"}:
+                stack.append(dict(attrs).get("aria-hidden") == "true")
+
+        def handle_endtag(self, tag):
+            if tag not in {"br", "img", "input", "path", "circle", "line", "rect", "polyline", "meta"} and stack:
+                stack.pop()
+
+        def handle_data(self, data):
+            for char in emoji.findall(data):
+                found.append((char, any(stack)))
+
+    _P().feed(markup)
+    return found
+
+
+def test_decorative_emoji_are_hidden_from_screen_readers():
+    """B4: floor 13 decorative symbols in the page markup; named member the
+    TV icon; every one sits inside aria-hidden="true"."""
+    found = _emoji_outside_hidden()
+    assert len(found) >= 13
+    assert ("📺", True) in found
+    assert [char for char, hidden in found if not hidden] == []
+
+
+def test_capabilities_load_before_music_and_voice():
+    """B5 (named): welcome (capabilities) loads first; the music socket,
+    voice and LiveKit only start when this caller may control."""
+    init = INDEX.split("document.addEventListener('DOMContentLoaded', async () => {", 1)[1].split("\n        });", 1)[0]
+    welcome = init.index("await loadWelcome();")
+    gate = init.index("if (canControl()) {")
+    assert welcome < gate
+    gated = init[gate:init.index("} else {", gate)]
+    for starter in ("await checkVoiceHealth();", "await initializeLiveKit();", "await initMusicPlayer();"):
+        assert starter in gated and init.count(starter) == 1, starter
+    assert "disableVoice(" in init[gate:]
+    assert "Sign-in required for" not in INDEX
+
+
+def test_view_only_disables_every_control():
+    """B6: the Apple TV remote, playback and app buttons join the controls
+    that view-only disables and takes out of the tab order, including after
+    the app buttons are re-rendered."""
+    assert "'.tv-apps button, .tv-remote-btn[data-cmd], .tv-playback-btn[data-cmd]'" in INDEX
+    state = _function_body(INDEX, "applyControlState")
+    assert "el.disabled = !allowed" in state and "setAttribute('tabindex', '-1')" in state
+    assert "applyControlState();" in _function_body(INDEX, "applyCapabilities")
+    render = INDEX.split("tvApps.innerHTML = streamingApps", 1)[1].split("async function launchApp", 1)[0]
+    assert "applyControlState();" in render
+
+
+def test_no_dead_sign_in_required_branches():
+    """B7: 403 sign_in_required no longer exists; nothing checks for it."""
+    for source in (INDEX, (h.FRONTEND / "music-player.js").read_text(encoding="utf-8")):
+        assert "detail === 'sign_in_required'" not in source

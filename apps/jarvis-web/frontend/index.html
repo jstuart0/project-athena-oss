@@ -24,6 +24,10 @@
             --accent-glow: rgba(59, 130, 246, 0.3);
             --success: #22c55e;
             --error: #ef4444;
+            /* Surfaces that carry white text: #b91c1c keeps it at 6.5:1. */
+            --error-surface: #b91c1c;
+            /* Links on the header and page backgrounds (8:1 and up). */
+            --link: #93c5fd;
             --border: #334155;
             --message-user: #3b82f6;
             --message-assistant: #1e293b;
@@ -907,7 +911,7 @@
             justify-content: center;
             gap: 12px;
             padding: 12px 16px;
-            background: var(--error);
+            background: var(--error-surface);
             color: #ffffff;
             font-size: 0.9375rem;
         }
@@ -932,13 +936,53 @@
             text-align: center;
         }
         .control-note[hidden] { display: none; }
-        .control-note a { color: inherit; margin-left: 8px; }
+        .control-note a { margin-left: 8px; }
         body.controls-disabled .tv-apps button,
         body.controls-disabled .temp-btn,
-        body.controls-disabled .tv-power-btn { opacity: 0.5; pointer-events: none; }
+        body.controls-disabled .tv-power-btn,
+        body.controls-disabled .tv-remote-btn,
+        body.controls-disabled .tv-playback-btn { opacity: 0.5; pointer-events: none; }
         .mode-menu-option[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
-        .signed-in { font-size: 0.8125rem; color: var(--text-secondary); }
+        .signed-in { font-size: 0.8125rem; color: var(--text-secondary); white-space: nowrap; }
         .signed-in[hidden] { display: none; }
+        .signed-in a, .control-note a { color: var(--link); }
+        .signed-in a { margin-left: 6px; }
+
+        /* Header at phone widths: the controls stay on screen. The name
+           goes, "Sign out" stays; the connection state keeps its dot. */
+        .header-title { min-width: 0; }
+        .header-right { min-width: 0; flex-shrink: 1; }
+        @media (max-width: 480px) {
+            .header-right { gap: 4px; }
+            .header h1 { font-size: 1.0625rem; }
+            #signed-in-name, #status-text {
+                position: absolute; width: 1px; height: 1px; overflow: hidden;
+                clip: rect(0 0 0 0); white-space: nowrap;
+            }
+            .signed-in a { margin-left: 0; }
+        }
+        @media (max-width: 400px) {
+            /* The logo carries the name; the title stays for screen readers. */
+            .header h1 {
+                position: absolute; width: 1px; height: 1px; overflow: hidden;
+                clip: rect(0 0 0 0); white-space: nowrap;
+            }
+        }
+
+        /* A message that wasn't sent (rate limited) and the note about it */
+        .message.not-sent .message-content { opacity: 0.6; }
+        .message-status { font-size: 0.75rem; color: #fca5a5; margin-top: 4px; }
+        .transcript-notice {
+            align-self: center;
+            max-width: 90%;
+            padding: 8px 14px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            text-align: center;
+        }
 
         /* Error message */
         .error-toast {
@@ -946,7 +990,7 @@
             bottom: 100px;
             left: 50%;
             transform: translateX(-50%);
-            background: var(--error);
+            background: var(--error-surface);
             color: white;
             padding: 12px 24px;
             border-radius: var(--radius-sm);
@@ -1762,20 +1806,20 @@
                 <!-- Mode Badge (revealed once /api/mode answers) -->
                 <div style="position: relative;" id="mode-indicator" hidden>
                     <div class="mode-badge owner" id="mode-badge" title="Click to change mode">
-                        <span class="mode-icon">🏠</span>
+                        <span class="mode-icon" aria-hidden="true">🏠</span>
                         <span id="mode-text">Owner</span>
                     </div>
                     <div class="mode-menu" id="mode-menu">
                         <div class="mode-menu-title">Access Mode</div>
                         <div class="mode-menu-option" data-mode="null" id="mode-auto">
-                            <span>🔄</span> Auto-detect
+                            <span aria-hidden="true">🔄</span> Auto-detect
                         </div>
                         <div class="mode-menu-divider"></div>
                         <div class="mode-menu-option" data-mode="owner" id="mode-owner">
-                            <span>🏠</span> Owner Mode
+                            <span aria-hidden="true">🏠</span> Owner Mode
                         </div>
                         <div class="mode-menu-option" data-mode="guest" id="mode-guest">
-                            <span>👋</span> Guest Mode
+                            <span aria-hidden="true">👋</span> Guest Mode
                         </div>
                         <div class="mode-menu-divider"></div>
                         <div class="mode-menu-info" id="mode-info">No guest booked</div>
@@ -1809,11 +1853,11 @@
 
         <!-- Location Bar (shown when using current location) -->
         <div class="location-bar" id="location-bar">
-            <span class="location-bar-icon">📍</span>
+            <span class="location-bar-icon" aria-hidden="true">📍</span>
             <span>Using location:</span>
             <span class="location-bar-text" id="location-text">Current location</span>
-            <button class="location-bar-edit" id="location-edit" title="Edit location">✏️ Edit</button>
-            <button class="location-bar-clear" id="location-clear" title="Use home location">✕ Clear</button>
+            <button class="location-bar-edit" id="location-edit" title="Edit location"><span aria-hidden="true">✏️</span> Edit</button>
+            <button class="location-bar-clear" id="location-clear" title="Use home location"><span aria-hidden="true">✕</span> Clear</button>
         </div>
 
         <!-- Location Search (shown when editing) -->
@@ -1853,7 +1897,7 @@
             <div class="tv-widget-content">
                 <div class="tv-header">
                     <div class="tv-info">
-                        <div class="tv-icon">📺</div>
+                        <div class="tv-icon" aria-hidden="true">📺</div>
                         <div>
                             <div class="tv-name" id="tv-name">Apple TV</div>
                             <div class="tv-status" id="tv-status">Loading...</div>
@@ -1878,27 +1922,27 @@
                 </div>
                 <!-- Remote Control -->
                 <div class="tv-remote">
-                    <button class="tv-remote-btn blank"></button>
-                    <button class="tv-remote-btn" data-cmd="up" title="Up">▲</button>
-                    <button class="tv-remote-btn blank"></button>
-                    <button class="tv-remote-btn" data-cmd="left" title="Left">◀</button>
+                    <button class="tv-remote-btn blank" tabindex="-1" aria-hidden="true"></button>
+                    <button class="tv-remote-btn" data-cmd="up" title="Up" aria-label="Up"><span aria-hidden="true">▲</span></button>
+                    <button class="tv-remote-btn blank" tabindex="-1" aria-hidden="true"></button>
+                    <button class="tv-remote-btn" data-cmd="left" title="Left" aria-label="Left"><span aria-hidden="true">◀</span></button>
                     <button class="tv-remote-btn select-btn" data-cmd="select" title="Select">OK</button>
-                    <button class="tv-remote-btn" data-cmd="right" title="Right">▶</button>
-                    <button class="tv-remote-btn" data-cmd="menu" title="Menu">☰</button>
-                    <button class="tv-remote-btn" data-cmd="down" title="Down">▼</button>
-                    <button class="tv-remote-btn" data-cmd="home" title="Home">⌂</button>
+                    <button class="tv-remote-btn" data-cmd="right" title="Right" aria-label="Right"><span aria-hidden="true">▶</span></button>
+                    <button class="tv-remote-btn" data-cmd="menu" title="Menu" aria-label="Menu"><span aria-hidden="true">☰</span></button>
+                    <button class="tv-remote-btn" data-cmd="down" title="Down" aria-label="Down"><span aria-hidden="true">▼</span></button>
+                    <button class="tv-remote-btn" data-cmd="home" title="Home" aria-label="Home"><span aria-hidden="true">⌂</span></button>
                 </div>
                 <!-- Playback Controls -->
                 <div class="tv-playback">
-                    <button class="tv-playback-btn" data-cmd="play" title="Play">▶</button>
-                    <button class="tv-playback-btn" data-cmd="pause" title="Pause">⏸</button>
+                    <button class="tv-playback-btn" data-cmd="play" title="Play" aria-label="Play"><span aria-hidden="true">▶</span></button>
+                    <button class="tv-playback-btn" data-cmd="pause" title="Pause" aria-label="Pause"><span aria-hidden="true">⏸</span></button>
                 </div>
             </div>
         </div>
 
         <div class="restore-banner" id="restore-banner">
             <div class="restore-banner-text">
-                <span class="restore-banner-icon">🕐</span>
+                <span class="restore-banner-icon" aria-hidden="true">🕐</span>
                 <span id="restore-banner-label">Your previous conversation has been restored.</span>
             </div>
             <div class="restore-banner-actions">
@@ -1955,7 +1999,7 @@
                     <!-- LiveKit Mode Toggle -->
                     <div class="voice-side-control" id="livekit-control" style="display: none;">
                         <button class="voice-mode-toggle" id="voice-mode-toggle" title="Toggle voice mode">
-                            <span class="mode-icon">🎙️</span>
+                            <span class="mode-icon" aria-hidden="true">🎙️</span>
                         </button>
                         <span class="voice-side-control-label" id="voice-mode-label">PTT</span>
                     </div>
@@ -2020,6 +2064,10 @@
         let modeTimer = null;
         const DRAFT_KEY = 'jarvis_draft';
         const CONTROL_IDS = ['temp-down', 'temp-up', 'tv-power'];
+        // Every control button, including the Apple TV remote and the app
+        // buttons (those are re-rendered, so applyControlState runs again).
+        const CONTROL_SELECTOR = '.tv-apps button, .tv-remote-btn[data-cmd], .tv-playback-btn[data-cmd]';
+        const RATE_LIMIT_MESSAGE = "You're going a bit fast. Please wait a minute, then try again.";
         const CONTROL_NOTES = {
             guest_stay: 'Controls are view-only during a guest stay.',
             guest_network: 'Controls are view-only on the guest network.',
@@ -2046,17 +2094,30 @@
             return !capabilities || capabilities.control !== false;
         }
 
+        // View-only: controls are disabled, out of the tab order, and
+        // described by the note that says why.
+        function applyControlState() {
+            const allowed = canControl();
+            const controls = CONTROL_IDS.map((id) => document.getElementById(id))
+                .concat(Array.from(document.querySelectorAll(CONTROL_SELECTOR)));
+            for (const el of controls) {
+                if (!el) continue;
+                el.disabled = !allowed;
+                if (allowed) {
+                    el.removeAttribute('aria-describedby');
+                    el.removeAttribute('tabindex');
+                } else {
+                    el.setAttribute('aria-describedby', 'control-note-text');
+                    el.setAttribute('tabindex', '-1');
+                }
+            }
+        }
+
         function applyCapabilities(caps) {
             capabilities = caps || {};
             const allowed = canControl();
             document.body.classList.toggle('controls-disabled', !allowed);
-            for (const id of CONTROL_IDS) {
-                const el = document.getElementById(id);
-                if (!el) continue;
-                el.disabled = !allowed;
-                if (allowed) el.removeAttribute('aria-describedby');
-                else el.setAttribute('aria-describedby', 'control-note-text');
-            }
+            applyControlState();
             document.querySelectorAll('.mode-menu-option').forEach((option) => {
                 option.setAttribute('aria-disabled', allowed ? 'false' : 'true');
                 if (allowed) option.removeAttribute('aria-describedby');
@@ -2212,8 +2273,9 @@
 
                     maClient.onError = (error) => {
                         if (error && error.message === 'sign_in_required') {
-                            console.warn('[Music] Browser music playback requires sign-in');
-                            showError('Sign-in required for browser music playback');
+                            // The socket was refused; the page already shows
+                            // what this caller may do.
+                            console.warn('[Music] Browser music playback refused');
                             return;
                         }
                         console.error('[Music] MA Client error:', error);
@@ -2641,11 +2703,18 @@
 
         // Initialize
         document.addEventListener('DOMContentLoaded', async () => {
+            // Capabilities first: what this caller may use decides what
+            // starts at all.
+            await loadWelcome();
             await checkHealth();
             await loadModeState();
-            await checkVoiceHealth();
-            await initializeLiveKit();
-            await initMusicPlayer();  // Initialize browser music playback
+            if (canControl()) {
+                await checkVoiceHealth();
+                await initializeLiveKit();
+                await initMusicPlayer();  // Initialize browser music playback
+            } else {
+                disableVoice('Voice is available to the household');
+            }
 
             // Listen for music playback errors
             window.addEventListener('musicPlaybackError', (e) => {
@@ -2657,7 +2726,6 @@
             });
 
             await checkForRestoredSession();
-            await loadWelcome();
             setupInputHandlers();
             setupVoiceHandlers();
             setupModeHandlers();
@@ -2728,8 +2796,7 @@
 
                 livekitClient.onError = (error) => {
                     if (error && error.message === 'sign_in_required') {
-                        console.warn('[LiveKit] Always-on voice requires sign-in');
-                        showError('Sign-in required for always-on voice mode');
+                        console.warn('[LiveKit] Always-on voice refused');
                         return;
                     }
                     console.error('[LiveKit] Error:', error);
@@ -2917,7 +2984,7 @@
             if (!is_override) {
                 modeAuto.querySelector('span').nextSibling.textContent = ` Auto (${auto_mode})`;
             } else {
-                modeAuto.innerHTML = '<span>🔄</span> Auto-detect';
+                modeAuto.innerHTML = '<span aria-hidden="true">🔄</span> Auto-detect';
             }
 
             // Update location button visibility based on mode
@@ -2964,17 +3031,9 @@
                     const modeText = currentModeState.mode === 'owner' ? 'Owner' : 'Guest';
                     const suffix = currentModeState.is_override ? ' (override)' : ' (auto)';
                     showNotification(`Mode: ${modeText}${suffix}`);
-                } else if (response.status === 403) {
-                    modeMenu.classList.remove('visible');
-                    const body = await response.json().catch(() => ({}));
-                    if (body.detail === 'sign_in_required') {
-                        showError('Sign-in required to change mode');
-                    } else {
-                        // Guest trying to switch to owner mode
-                        showError('Cannot switch to owner mode while in guest mode');
-                    }
                 } else {
-                    showError('Failed to change mode');
+                    modeMenu.classList.remove('visible');
+                    await showErrorForResponse(response, 'Failed to change mode');
                 }
             } catch (error) {
                 console.error('Failed to set mode:', error);
@@ -3110,7 +3169,7 @@
             sendButton.disabled = true;
 
             // Add user message
-            addMessage(message, 'user');
+            const userBubble = addMessage(message, 'user');
 
             // Show typing indicator with context-aware message
             const typingId = showTyping(message);
@@ -3214,16 +3273,14 @@
 
             } catch (error) {
                 removeTyping(typingId);
-                if (window.jarvisSession.isSignedOut() || error.status === 429) {
-                    // Keep what they typed: after signing in again (or a
-                    // minute), it's still there to send.
+                if (error.status === 429) {
+                    markNotSent(userBubble, message);
+                } else if (window.jarvisSession.isSignedOut()) {
+                    // Keep what they typed: after signing in again it's
+                    // still there to send.
                     messageInput.value = message;
                     sendButton.disabled = false;
                     saveDraft(message);
-                    if (error.status === 429) {
-                        showError("You're sending messages too quickly. Please wait a minute.");
-                        voiceStatus.textContent = 'Please wait a minute, then try again.';
-                    }
                 } else {
                     showError('Sorry, something went wrong. Please try again.');
                 }
@@ -3279,6 +3336,35 @@
             `;
 
             chatContainer.appendChild(messageDiv);
+            scrollToBottom();
+            return messageDiv;
+        }
+
+        // A message the server refused to take (rate limited): the bubble
+        // says so, the transcript explains, and the text goes back in the
+        // input to send again.
+        function markNotSent(bubble, message) {
+            if (bubble) {
+                bubble.classList.add('not-sent');
+                const status = document.createElement('div');
+                status.className = 'message-status';
+                status.textContent = 'Not sent';
+                const body = bubble.querySelector('.message-content');
+                if (body) body.after(status);
+            }
+            showTranscriptNotice(RATE_LIMIT_MESSAGE);
+            messageInput.value = message;
+            sendButton.disabled = false;
+            saveDraft(message);
+        }
+
+        function showTranscriptNotice(text) {
+            const notice = document.createElement('div');
+            notice.className = 'transcript-notice';
+            notice.setAttribute('role', 'status');
+            notice.setAttribute('aria-live', 'polite');
+            notice.textContent = text;
+            chatContainer.appendChild(notice);
             scrollToBottom();
         }
 
@@ -3463,15 +3549,15 @@
             setTimeout(() => toast.remove(), 4000);
         }
 
-        // ATHENA-69 (D19): every direct device/mode-write route now requires
-        // a signed-in owner/operator and answers 403 {"detail":"sign_in_required"}
-        // for anyone else. Show that distinctly from a generic failure.
+        // A refused control or mode write: 401 ended the session (the banner
+        // says what to do), 403 names why this caller can't (a guest stay,
+        // the guest network, a stale tab), 429 is the rate limit.
         async function showErrorForResponse(response, fallbackMessage) {
             if (response.status === 401) {
                 return;  // jarvisFetch ended the session; the banner says what to do
             }
             if (response.status === 429) {
-                showError("You're sending messages too quickly. Please wait a minute.");
+                showError(RATE_LIMIT_MESSAGE);
                 return;
             }
             if (response.status === 403) {
@@ -3947,6 +4033,7 @@
                     <span class="tv-app-name">${escapeHtml(app.name)}</span>
                 </button>
             `).join('');
+            applyControlState();
         }
 
         async function launchApp(appName) {
@@ -3980,6 +4067,15 @@
         // =============================================================================
         // Voice Input/Output
         // =============================================================================
+
+        function disableVoice(reason) {
+            voiceServicesAvailable = false;
+            voiceButton.disabled = true;
+            voicePanelToggle.disabled = true;
+            voiceButton.title = reason;
+            voicePanelToggle.title = reason;
+            updateSpeakerButton();
+        }
 
         async function checkVoiceHealth() {
             try {
@@ -4158,7 +4254,7 @@
             } catch (error) {
                 console.error('Transcription error:', error);
                 if (error.status === 429) {
-                    showError("You're sending messages too quickly. Please wait a minute.");
+                    showTranscriptNotice(RATE_LIMIT_MESSAGE);
                 } else if (!window.jarvisSession.isSignedOut()) {
                     showError('Failed to transcribe audio');
                 }
@@ -4186,7 +4282,7 @@
             sendButton.disabled = true;
 
             // Add user message
-            addMessage(message, 'user');
+            const userBubble = addMessage(message, 'user');
 
             // Show typing indicator with context-aware message
             const typingId = showTyping(message);
@@ -4294,16 +4390,14 @@
 
             } catch (error) {
                 removeTyping(typingId);
-                if (window.jarvisSession.isSignedOut() || error.status === 429) {
-                    // Keep what they typed: after signing in again (or a
-                    // minute), it's still there to send.
+                if (error.status === 429) {
+                    markNotSent(userBubble, message);
+                } else if (window.jarvisSession.isSignedOut()) {
+                    // Keep what they typed: after signing in again it's
+                    // still there to send.
                     messageInput.value = message;
                     sendButton.disabled = false;
                     saveDraft(message);
-                    if (error.status === 429) {
-                        showError("You're sending messages too quickly. Please wait a minute.");
-                        voiceStatus.textContent = 'Please wait a minute, then try again.';
-                    }
                 } else {
                     showError('Sorry, something went wrong. Please try again.');
                 }
