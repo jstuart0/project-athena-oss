@@ -207,17 +207,20 @@ class SendspinClient {
                 this._stopClockSync();
                 this._setState('disconnected');
 
-                // ATHENA-69 (D19): the server closes with 1008 before accept()
-                // when the caller isn't a signed-in owner/operator. Retrying
-                // won't help without auth, so surface it distinctly and skip
-                // the reconnect loop.
+                // The server closes with 1008 before accept() when this
+                // caller may not control. Retrying won't help, so surface it
+                // distinctly and skip the reconnect loop.
                 if (event.code === 1008) {
-                    if (this.onError) this.onError(new Error('sign_in_required'));
+                    if (this.onError) this.onError(new Error('not_permitted'));
                     return;
                 }
 
-                // Auto-reconnect on unexpected close
+                // Auto-reconnect on unexpected close -- unless the session
+                // ended (jarvisFetch's signed-out state): retrying can't help.
+                const session = window.jarvisSession;
+                if (session && session.isSignedOut()) return;
                 if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+                    if (session) session.probe();
                     this._scheduleReconnect(playerId);
                 }
             };
@@ -1029,6 +1032,7 @@ class SendspinClient {
         console.log(`[Sendspin] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
 
         setTimeout(() => {
+            if (window.jarvisSession && window.jarvisSession.isSignedOut()) return;
             if (this.state === 'disconnected') {
                 this.connect(playerId).catch(err => {
                     console.error('[Sendspin] Reconnection failed:', err.message);

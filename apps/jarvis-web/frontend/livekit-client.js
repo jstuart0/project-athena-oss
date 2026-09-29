@@ -77,7 +77,7 @@ class LiveKitClient {
      */
     async checkAvailability() {
         try {
-            const response = await fetch(`${this.config.gatewayUrl}/livekit/config`);
+            const response = await jarvisFetch(`${this.config.gatewayUrl}/livekit/config`);
             const config = await response.json();
 
             if (config.enabled) {
@@ -121,7 +121,7 @@ class LiveKitClient {
             });
 
             // Create room on server
-            const roomResponse = await fetch(`${this.config.gatewayUrl}/livekit/rooms`, {
+            const roomResponse = await jarvisFetch(`${this.config.gatewayUrl}/livekit/rooms`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -131,10 +131,11 @@ class LiveKitClient {
             });
 
             if (!roomResponse.ok) {
-                // ATHENA-69 (D19): unauthenticated callers get 403
-                // sign_in_required from this owner-only route.
+                // Owner-only route: 403 means this caller may not control
+                // (a guest stay, the guest network); 401 already ended the
+                // session through jarvisFetch.
                 if (roomResponse.status === 403) {
-                    throw new Error('sign_in_required');
+                    throw new Error('not_permitted');
                 }
                 throw new Error(`Room creation failed: ${roomResponse.status}`);
             }
@@ -148,7 +149,7 @@ class LiveKitClient {
             await this._connectToRoom();
 
             // Have Athena join the room for server-side processing
-            const joinResponse = await fetch(`${this.config.gatewayUrl}/livekit/rooms/${this.roomName}/athena-join`, {
+            const joinResponse = await jarvisFetch(`${this.config.gatewayUrl}/livekit/rooms/${this.roomName}/athena-join`, {
                 method: 'POST'
             });
             if (!joinResponse.ok) {
@@ -500,7 +501,7 @@ class LiveKitClient {
         // Close room on server
         if (this.roomName) {
             try {
-                const deleteResponse = await fetch(`${this.config.gatewayUrl}/livekit/rooms/${this.roomName}`, {
+                const deleteResponse = await jarvisFetch(`${this.config.gatewayUrl}/livekit/rooms/${this.roomName}`, {
                     method: 'DELETE'
                 });
                 if (!deleteResponse.ok) {

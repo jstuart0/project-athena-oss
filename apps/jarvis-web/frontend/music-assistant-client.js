@@ -94,19 +94,22 @@ class MusicAssistantClient {
                     this.onDisconnect(event);
                 }
 
-                // ATHENA-69 (D19): the server closes with 1008 before accept()
-                // when the caller isn't a signed-in owner/operator. Retrying
-                // won't help without auth, so surface it distinctly and skip
-                // the reconnect loop.
+                // The server closes with 1008 before accept() when this
+                // caller may not control. Retrying won't help, so surface it
+                // distinctly and skip the reconnect loop.
                 if (event.code === 1008) {
                     if (this.onError) {
-                        this.onError(new Error('sign_in_required'));
+                        this.onError(new Error('not_permitted'));
                     }
                     return;
                 }
 
-                // Auto-reconnect if not explicitly closed
+                // Auto-reconnect if not explicitly closed -- unless the session
+                // ended (jarvisFetch's signed-out state): retrying can't help.
+                const session = window.jarvisSession;
+                if (session && session.isSignedOut()) return;
                 if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+                    if (session) session.probe();
                     this._scheduleReconnect();
                 }
             };
@@ -460,6 +463,7 @@ class MusicAssistantClient {
         console.log(`[MA Client] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
 
         setTimeout(() => {
+            if (window.jarvisSession && window.jarvisSession.isSignedOut()) return;
             if (this.state === 'disconnected') {
                 this.connect().catch(err => {
                     console.error('[MA Client] Reconnection failed:', err.message);

@@ -45,6 +45,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 from shared.logging_config import configure_logging
 
 from orchestrator.context.storage import clear_conversation_context
+from orchestrator.mode_permission import is_public_audience, is_public_caller
 from orchestrator.nodes import _runtime
 from orchestrator.state import ConversationContext
 from orchestrator.urls import (
@@ -691,6 +692,46 @@ def detect_insufficient_response(response: str, config: Dict[str, Any]) -> Optio
 # maybe_post_synthesis_fallback (Pattern 1 — uses _runtime at call time)
 # =============================================================================
 
+# ---------------------------------------------------------------------------
+# Audience-scoped request context and web search
+# ---------------------------------------------------------------------------
+
+PUBLIC_CONTEXT_KEYS = frozenset({"location_override"})
+
+
+def build_query_context(request: Any, guest_info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The ``state.context`` for one query-family request.
+
+    A public caller keeps only ``PUBLIC_CONTEXT_KEYS`` from the request's
+    context and never receives guest identity: a name the model is never
+    told can't reach any node that reads ``state.context``. Everyone else
+    gets the request's context plus the device-identified guest's id,
+    name, device type and preferences.
+    """
+    raw = getattr(request, "context", None)
+    raw = dict(raw) if isinstance(raw, dict) else {}
+    if is_public_caller(getattr(request, "caller_trust", None)):
+        return {key: value for key, value in raw.items() if key in PUBLIC_CONTEXT_KEYS}
+    context = raw
+    if guest_info:
+        context["guest_id"] = guest_info.get("guest_id")
+        context["guest_name"] = guest_info.get("guest_name")
+        context["device_type"] = guest_info.get("device_type", "web")
+        context["guest_preferences"] = guest_info.get("preferences", {})
+    return context
+
+
+def web_search_allowed(state: Any) -> bool:
+    """False for the public audience: no web search runs for it by any
+    path (tool, fallback, retrieval), since a search on visitor-controlled
+    text from the house's providers is exactly what the embed must not do.
+    """
+    allowed = not is_public_audience(getattr(state, "permissions", None))
+    if not allowed:
+        logger.info("web_search_skipped_public_audience")
+    return allowed
+
+
 async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
     """
     Check if synthesis produced insufficient response and retry with web search.
@@ -705,6 +746,12 @@ async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
     Returns:
         True if fallback was triggered and succeeded, False otherwise
     """
+    if not web_search_allowed(state):
+        return False
+    # A refusal is the answer; a web search must never route around it.
+    if getattr(state, "error", None) == "permission_denied":
+        return False
+
     # Get feature config
     fallback_config = await get_post_synthesis_fallback_config()
 
@@ -1157,6 +1204,11 @@ async def _fallback_to_web_search(state: 'Any', rag_service: str, error_msg: str
         rag_service: Name of the failed RAG service (for logging)
         error_msg: Error message from the failed service
     """
+    if not web_search_allowed(state):
+        state.retrieved_data = {}
+        state.data_source = "LLM knowledge (web search unavailable here)"
+        return
+
     logger.warning(f"{rag_service} RAG service failed ({error_msg}), falling back to web search")
 
     try:

@@ -65,6 +65,8 @@ COPY apps/jarvis-web/backend/ /app/backend/
 # Copied as a sibling of main.py so `from admin_url import get_admin_url` resolves
 # against WORKDIR /app/backend in sys.path. Source of truth: src/shared/admin_url.py.
 COPY src/shared/admin_url.py /app/backend/admin_url.py
+# Shared client-address resolution and limiter; overwrites the local-dev shim.
+COPY src/shared/client_throttle.py /app/backend/client_throttle.py
 COPY apps/jarvis-web/frontend/ /app/frontend/
 
 # Set working directory to backend

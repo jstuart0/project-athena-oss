@@ -14,11 +14,21 @@ import structlog
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from shared.admin_url import get_admin_url
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
 # Admin API URL (resolved by shared.admin_url.get_admin_url)
 ADMIN_API_URL = get_admin_url()
+
+
+def _service_headers() -> Dict[str, str]:
+    """X-Service-Key for admin-backend's memory routes (its /internal/*
+    routes require it; the read routes accept it). Omitted when unset, so a
+    misconfigured orchestrator degrades to "no memories" instead of sending
+    an empty key."""
+    key = get_config().service_api_key
+    return {"X-Service-Key": key} if key else {}
 
 
 class MemoryManager:
@@ -38,7 +48,8 @@ class MemoryManager:
             import httpx
             self._client = httpx.AsyncClient(
                 base_url=ADMIN_API_URL,
-                timeout=5.0
+                timeout=5.0,
+                headers=_service_headers(),
             )
             logger.info("memory_manager_initialized", admin_api_url=ADMIN_API_URL)
             self._initialized = True
@@ -59,14 +70,15 @@ class MemoryManager:
             import httpx
             self._client = httpx.AsyncClient(
                 base_url=ADMIN_API_URL,
-                timeout=5.0
+                timeout=5.0,
+                headers=_service_headers(),
             )
         return self._client
 
     async def get_relevant_memories(
         self,
         query: str,
-        mode: str = "owner",
+        mode: str = "guest",
         guest_session_id: Optional[int] = None,
         limit: int = 3
     ) -> List[Dict[str, Any]]:
@@ -129,7 +141,7 @@ class MemoryManager:
     async def create_memory(
         self,
         content: str,
-        mode: str = "owner",
+        mode: str = "guest",
         guest_session_id: Optional[int] = None,
         category: str = "conversation",
         importance: float = 0.5,
@@ -402,7 +414,8 @@ class MemoryManager:
     async def delete_memory_by_content(
         self,
         search_query: str,
-        mode: str = "owner"
+        mode: str = "guest",
+        guest_session_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Search for and delete memories matching the search query.
@@ -410,6 +423,8 @@ class MemoryManager:
         Args:
             search_query: Content to search for
             mode: "owner" or "guest"
+            guest_session_id: A guest's own session; without it a guest
+                can't delete anything (admin-backend enforces this too)
 
         Returns:
             Dict with deleted count and details
@@ -419,12 +434,12 @@ class MemoryManager:
 
         try:
             # Call admin API to delete by content search
+            params = {"search_query": search_query, "mode": mode}
+            if guest_session_id:
+                params["guest_session_id"] = guest_session_id
             response = await self.client.post(
                 "/api/memories/internal/forget",
-                params={
-                    "search_query": search_query,
-                    "mode": mode
-                }
+                params=params
             )
 
             if response.status_code == 200:

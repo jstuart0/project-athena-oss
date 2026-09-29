@@ -23,7 +23,7 @@ async function loadMemories() {
         if (category) url += `category=${category}&`;
 
         const response = await fetch(url, {
-            credentials: 'include'  // Use session cookie
+            headers: { 'Authorization': `Bearer ${getToken()}` }
         });
 
         if (!response.ok) throw new Error('Failed to load memories');

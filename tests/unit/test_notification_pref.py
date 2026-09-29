@@ -26,7 +26,15 @@ import asyncio
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, "src")
+
+# prometheus_client isn't installed in the unit-test environment; without
+# this stub the file only collected when another module had stubbed it first.
+for _mod in ("prometheus_client", "langgraph", "langgraph.graph"):
+    if _mod not in sys.modules:
+        sys.modules[_mod] = MagicMock()
 
 from orchestrator.nodes import notification_pref_node
 from orchestrator.state import OrchestratorState
@@ -41,12 +49,26 @@ def _make_state(
     query: str = "stop the morning notifications",
     room: str | None = None,
     timing_tracker=None,
+    permissions: dict | None = None,
+    mode: str = "owner",
 ) -> OrchestratorState:
     """Return a minimal OrchestratorState for notification_pref_node testing."""
-    state = OrchestratorState(query=query)
+    state = OrchestratorState(query=query, mode=mode)
     state.room = room
     state.timing_tracker = timing_tracker
+    state.permissions = permissions or {"mode": "owner"}
     return state
+
+
+@pytest.fixture(autouse=True)
+def _assistant_names(monkeypatch):
+    """The node reads the configured assistant name for the utterance
+    classifier; keep it off the network and observable."""
+    import orchestrator.nodes.notification_pref as module
+
+    names = AsyncMock(return_value=())
+    monkeypatch.setattr(module, "configured_assistant_names", names, raising=False)
+    return names
 
 
 def _ok_response(status: str = "opted_out") -> MagicMock:
@@ -204,17 +226,40 @@ def test_dont_present_resolves_to_opt_out():
 
 
 # ---------------------------------------------------------------------------
-# Test 8: Ambiguous query (no clear keyword) → defaults to opt-out
+# Test 8: Ambiguous query (no clear keyword) → asks, never writes
+# (deliberate contract change: this used to default to opt-out, so a
+# question or an unclear phrase silently changed settings)
 # ---------------------------------------------------------------------------
 
-def test_ambiguous_defaults_to_opt_out():
-    """No strong opt-in or opt-out keyword → defaults to opt-out."""
-    # "morning" is present, no clear opt-in or opt-out keyword.
-    # is_opt_out == is_opt_in == False → fallback fires; no "don't"/"not" → is_opt_out = True.
-    state = _make_state(query="morning notifications please")
-    with _patch_client(_ok_response("opted_out")):
-        result = asyncio.run(notification_pref_node(state))
-    assert "turned off the morning notifications" in result.answer
+AMBIGUOUS_REPLY = (
+    "Do you want morning notifications off or on? Say 'stop morning notifications' "
+    "or 'turn on morning notifications'."
+)
+STATE_QUESTION_REPLY = (
+    "I can't check notification settings, but I can change them. Say 'stop morning "
+    "notifications' or 'turn on morning notifications'."
+)
+
+
+def _counting_client():
+    posts = []
+
+    async def _post(url, json=None):
+        posts.append((url, json))
+        return _ok_response("ok")
+
+    cm_mock = MagicMock()
+    cm_mock.__aenter__ = AsyncMock(return_value=MagicMock(post=_post))
+    cm_mock.__aexit__ = AsyncMock(return_value=False)
+    return posts, patch("httpx.AsyncClient", return_value=cm_mock)
+
+
+def test_ambiguous_asks_not_writes():
+    posts, client = _counting_client()
+    with client:
+        result = asyncio.run(notification_pref_node(_make_state(query="morning notifications please")))
+    assert posts == []
+    assert result.answer == AMBIGUOUS_REPLY
 
 
 # ---------------------------------------------------------------------------
@@ -295,3 +340,104 @@ def test_room_override_propagated():
 
     assert captured_payloads, "Expected at least one POST"
     assert captured_payloads[0]["room"] == "kitchen"
+
+
+# ---------------------------------------------------------------------------
+# D6: the write rule. A write needs permission, an imperative (or an
+# explicit first-person desire phrase), and one unambiguous direction.
+# ---------------------------------------------------------------------------
+
+def _guest_permissions():
+    from orchestrator.mode_permission import normalize_permissions
+
+    return normalize_permissions({"mode": "guest", "allowed_intents": ["weather"], "restricted_entities": [], "allowed_domains": []})
+
+
+def test_guest_never_posts(_assistant_names):
+    from orchestrator.mode_permission import GUEST_INTENT_REFUSAL
+
+    posts, client = _counting_client()
+    with client:
+        result = asyncio.run(notification_pref_node(
+            _make_state(query="stop all alerts", permissions=_guest_permissions(), mode="guest")
+        ))
+    assert posts == []
+    assert result.answer == GUEST_INTENT_REFUSAL
+    assert result.error == "permission_denied"
+    _assistant_names.assert_not_awaited()
+
+
+def test_public_never_posts(_assistant_names):
+    from orchestrator.mode_permission import PUBLIC_INTENT_REFUSAL, normalize_permissions, public_permissions
+
+    posts, client = _counting_client()
+    with client:
+        result = asyncio.run(notification_pref_node(
+            _make_state(query="stop the morning notifications", permissions=normalize_permissions(public_permissions()), mode="guest")
+        ))
+    assert posts == []
+    assert result.answer == PUBLIC_INTENT_REFUSAL
+    _assistant_names.assert_not_awaited()
+
+
+@pytest.mark.parametrize("query, reply", [
+    ("did you turn off morning notifications", STATE_QUESTION_REPLY),
+    ("are morning notifications on", STATE_QUESTION_REPLY),
+    ("are the alerts off", STATE_QUESTION_REPLY),
+    ("is the morning greeting enabled", AMBIGUOUS_REPLY),
+    ("what about morning notifications", AMBIGUOUS_REPLY),
+    # UNKNOWN-kind questions that name a direction: still never a write
+    ("why did the morning notifications stop", AMBIGUOUS_REPLY),
+    ("should the morning notifications stop", AMBIGUOUS_REPLY),
+    ("how do I turn off morning notifications", AMBIGUOUS_REPLY),
+    ("what if I stop morning notifications", AMBIGUOUS_REPLY),
+])
+def test_owner_question_never_posts(query, reply):
+    """Floor 5; named member 'did you turn off morning notifications'."""
+    posts, client = _counting_client()
+    with client:
+        result = asyncio.run(notification_pref_node(_make_state(query=query)))
+    assert posts == []
+    assert result.answer == reply
+
+
+def test_owner_imperative_opts_out():
+    posts, client = _counting_client()
+    with client:
+        asyncio.run(notification_pref_node(_make_state(query="stop the morning notifications")))
+    assert len(posts) == 1
+    url, payload = posts[0]
+    assert url.endswith("/api/preferences/opt-out")
+    assert payload["rule_slug"] == "morning_greeting"
+
+
+def test_owner_desire_phrase_opts_out():
+    posts, client = _counting_client()
+    with client:
+        asyncio.run(notification_pref_node(_make_state(query="I don't want morning updates")))
+    assert [p[0].rsplit("/", 1)[-1] for p in posts] == ["opt-out"]
+
+
+@pytest.mark.parametrize("query", ["I'd like morning updates", "opt in to morning updates"])
+def test_owner_desire_phrase_opts_in(query):
+    posts, client = _counting_client()
+    with client:
+        asyncio.run(notification_pref_node(_make_state(query=query)))
+    assert [p[0].rsplit("/", 1)[-1] for p in posts] == ["opt-in"]
+
+
+@pytest.mark.parametrize("query", ["set the morning notifications", "stop and start the morning notifications"])
+def test_ambiguous_direction_imperative_never_posts(query):
+    posts, client = _counting_client()
+    with client:
+        result = asyncio.run(notification_pref_node(_make_state(query=query)))
+    assert posts == []
+    assert result.answer == AMBIGUOUS_REPLY
+
+
+def test_non_desire_unknown_never_posts():
+    posts, client = _counting_client()
+    with client:
+        result = asyncio.run(notification_pref_node(_make_state(query="please, no morning updates")))
+    assert posts == []
+    assert result.answer == AMBIGUOUS_REPLY

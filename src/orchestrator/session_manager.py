@@ -60,6 +60,12 @@ return evicted
 # In-memory fallback storage
 _memory_sessions: Dict[str, Dict[str, Any]] = {}
 
+CALLER_CLASS_PUBLIC = "public"
+CALLER_CLASS_OTHER = "other"
+# Every public session id carries this prefix, so a public caller can never
+# adopt or guess its way into an id another caller uses.
+PUBLIC_SESSION_PREFIX = "pub-"
+
 
 class ConversationSession:
     """Represents a conversation session with history and metadata."""
@@ -87,6 +93,8 @@ class ConversationSession:
         self.last_activity = datetime.utcnow()
         self.messages: List[Dict[str, Any]] = []
         self.metadata: Dict[str, Any] = {}
+        # "public" for an anonymous embed caller's session, else "other".
+        self.caller_class: str = CALLER_CLASS_OTHER
 
     def add_message(self, role: str, content: str, metadata: Optional[Dict] = None):
         """
@@ -201,7 +209,8 @@ class ConversationSession:
             "created_at": self.created_at.isoformat(),
             "last_activity": self.last_activity.isoformat(),
             "messages": self.messages,
-            "metadata": self.metadata
+            "metadata": self.metadata,
+            "caller_class": self.caller_class,
         }
 
     @classmethod
@@ -216,6 +225,9 @@ class ConversationSession:
         session.last_activity = datetime.fromisoformat(data["last_activity"])
         session.messages = data.get("messages", [])
         session.metadata = data.get("metadata", {})
+        session.caller_class = (
+            CALLER_CLASS_PUBLIC if data.get("caller_class") == CALLER_CLASS_PUBLIC else CALLER_CLASS_OTHER
+        )
         return session
 
 
@@ -279,7 +291,8 @@ class SessionManager:
         self,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
-        zone: Optional[str] = None
+        zone: Optional[str] = None,
+        caller_class: str = CALLER_CLASS_OTHER,
     ) -> ConversationSession:
         """
         Create a new conversation session.
@@ -293,12 +306,17 @@ class SessionManager:
             New ConversationSession instance
         """
         # Use provided session_id or generate new one
-        session_id = session_id or str(uuid.uuid4())
+        if (caller_class == CALLER_CLASS_PUBLIC) != (session_id or PUBLIC_SESSION_PREFIX).startswith(PUBLIC_SESSION_PREFIX):
+            session_id = None
+        session_id = session_id or (
+            f"{PUBLIC_SESSION_PREFIX}{uuid.uuid4()}" if caller_class == CALLER_CLASS_PUBLIC else str(uuid.uuid4())
+        )
         session = ConversationSession(
             session_id=session_id,
             user_id=user_id,
             zone=zone
         )
+        session.caller_class = caller_class
 
         # Save to storage
         await self._save_session(session)
@@ -362,7 +380,8 @@ class SessionManager:
         self,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
-        zone: Optional[str] = None
+        zone: Optional[str] = None,
+        caller_class: str = CALLER_CLASS_OTHER,
     ) -> ConversationSession:
         """
         Get existing session or create new one.
@@ -371,12 +390,29 @@ class SessionManager:
             session_id: Optional existing session ID
             user_id: Optional user identifier
             zone: Optional zone identifier
+            caller_class: "public" for an anonymous embed caller, else "other"
 
         Returns:
             ConversationSession instance
+
+        A public caller presenting the id of a session that isn't public
+        (live or expired) gets a brand-new session under a new id: it never
+        reads that session's history and never overwrites it. Public ids
+        always start with PUBLIC_SESSION_PREFIX; an id without it is never
+        adopted for a public caller. The reverse holds too: a caller that
+        isn't public never resumes (or claims the id of) a public session,
+        so public and household conversations never mix in either
+        direction.
         """
         if session_id:
             session = await self.get_session(session_id)
+            if session and (caller_class == CALLER_CLASS_PUBLIC) != (session.caller_class == CALLER_CLASS_PUBLIC):
+                logger.warning(
+                    "session_audience_mismatch_refused",
+                    session_id=session_id,
+                    caller_public=caller_class == CALLER_CLASS_PUBLIC,
+                )
+                return await self.create_session(user_id=user_id, zone=zone, caller_class=caller_class)
             if session:
                 # Check if session is expired
                 config = await get_config()
@@ -392,7 +428,9 @@ class SessionManager:
                     # Session expired, create new one with same ID for continuity
 
         # Create new session with provided session_id if given
-        return await self.create_session(session_id=session_id, user_id=user_id, zone=zone)
+        return await self.create_session(
+            session_id=session_id, user_id=user_id, zone=zone, caller_class=caller_class
+        )
 
     async def add_message(
         self,

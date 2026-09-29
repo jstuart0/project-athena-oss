@@ -24,6 +24,10 @@
             --accent-glow: rgba(59, 130, 246, 0.3);
             --success: #22c55e;
             --error: #ef4444;
+            /* Surfaces that carry white text: #b91c1c keeps it at 6.5:1. */
+            --error-surface: #b91c1c;
+            /* Links on the header and page backgrounds (8:1 and up). */
+            --link: #93c5fd;
             --border: #334155;
             --message-user: #3b82f6;
             --message-assistant: #1e293b;
@@ -900,13 +904,93 @@
             }
         }
 
+        /* Session ended / reload notices */
+        .session-banner, .jarvis-notice {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            padding: 12px 16px;
+            background: var(--error-surface);
+            color: #ffffff;
+            font-size: 0.9375rem;
+        }
+        .session-banner[hidden] { display: none; }
+        .session-banner button, .jarvis-notice button {
+            min-height: 44px;
+            padding: 8px 16px;
+            border: 2px solid #ffffff;
+            border-radius: var(--radius-sm);
+            background: transparent;
+            color: #ffffff;
+            font: inherit;
+            cursor: pointer;
+        }
+        .session-banner button:focus-visible, .jarvis-notice button:focus-visible { outline: 3px solid #ffffff; outline-offset: 2px; }
+
+        /* View-only controls (guest stay, guest network) */
+        .control-note {
+            padding: 8px 16px;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            text-align: center;
+        }
+        .control-note[hidden] { display: none; }
+        .control-note a { margin-left: 8px; }
+        body.controls-disabled .tv-apps button,
+        body.controls-disabled .temp-btn,
+        body.controls-disabled .tv-power-btn,
+        body.controls-disabled .tv-remote-btn,
+        body.controls-disabled .tv-playback-btn { opacity: 0.5; pointer-events: none; }
+        .mode-menu-option[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+        .signed-in { font-size: 0.8125rem; color: var(--text-secondary); white-space: nowrap; }
+        .signed-in[hidden] { display: none; }
+        .signed-in a, .control-note a { color: var(--link); }
+        .signed-in a { margin-left: 6px; }
+
+        /* Header at phone widths: the controls stay on screen. The name
+           goes, "Sign out" stays; the connection state keeps its dot. */
+        .header-title { min-width: 0; }
+        .header-right { min-width: 0; flex-shrink: 1; }
+        @media (max-width: 480px) {
+            .header-right { gap: 4px; }
+            .header h1 { font-size: 1.0625rem; }
+            #signed-in-name, #status-text {
+                position: absolute; width: 1px; height: 1px; overflow: hidden;
+                clip: rect(0 0 0 0); white-space: nowrap;
+            }
+            .signed-in a { margin-left: 0; }
+        }
+        @media (max-width: 400px) {
+            /* The logo carries the name; the title stays for screen readers. */
+            .header h1 {
+                position: absolute; width: 1px; height: 1px; overflow: hidden;
+                clip: rect(0 0 0 0); white-space: nowrap;
+            }
+        }
+
+        /* A message that wasn't sent (rate limited) and the note about it */
+        .message.not-sent .message-content { opacity: 0.6; }
+        .message-status { font-size: 0.75rem; color: #fca5a5; margin-top: 4px; }
+        .transcript-notice {
+            align-self: center;
+            max-width: 90%;
+            padding: 8px 14px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            text-align: center;
+        }
+
         /* Error message */
         .error-toast {
             position: fixed;
             bottom: 100px;
             left: 50%;
             transform: translateX(-50%);
-            background: var(--error);
+            background: var(--error-surface);
             color: white;
             padding: 12px 24px;
             border-radius: var(--radius-sm);
@@ -1701,6 +1785,10 @@
 </head>
 <body>
     <div class="app">
+        <div class="session-banner" id="session-banner" role="alert" hidden>
+            <span id="session-banner-text"></span>
+            <button type="button" id="session-banner-action"></button>
+        </div>
         <header class="header">
             <div class="header-title">
                 <div class="logo">J</div>
@@ -1715,23 +1803,23 @@
                     </svg>
                 </button>
 
-                <!-- Mode Badge -->
-                <div style="position: relative;">
+                <!-- Mode Badge (revealed once /api/mode answers) -->
+                <div style="position: relative;" id="mode-indicator" hidden>
                     <div class="mode-badge owner" id="mode-badge" title="Click to change mode">
-                        <span class="mode-icon">🏠</span>
+                        <span class="mode-icon" aria-hidden="true">🏠</span>
                         <span id="mode-text">Owner</span>
                     </div>
                     <div class="mode-menu" id="mode-menu">
                         <div class="mode-menu-title">Access Mode</div>
                         <div class="mode-menu-option" data-mode="null" id="mode-auto">
-                            <span>🔄</span> Auto-detect
+                            <span aria-hidden="true">🔄</span> Auto-detect
                         </div>
                         <div class="mode-menu-divider"></div>
                         <div class="mode-menu-option" data-mode="owner" id="mode-owner">
-                            <span>🏠</span> Owner Mode
+                            <span aria-hidden="true">🏠</span> Owner Mode
                         </div>
                         <div class="mode-menu-option" data-mode="guest" id="mode-guest">
-                            <span>👋</span> Guest Mode
+                            <span aria-hidden="true">👋</span> Guest Mode
                         </div>
                         <div class="mode-menu-divider"></div>
                         <div class="mode-menu-info" id="mode-info">No guest booked</div>
@@ -1741,6 +1829,10 @@
                     <span class="status-dot" id="status-dot"></span>
                     <span id="status-text">Connecting...</span>
                 </div>
+                <span class="signed-in" id="signed-in" hidden>
+                    <span id="signed-in-name"></span>
+                    <a id="signout-link" href="#" hidden>Sign out</a>
+                </span>
                 <button class="temp-toggle" id="temp-toggle" title="Temperature Control">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>
@@ -1754,14 +1846,18 @@
                 </button>
             </div>
         </header>
+        <div class="control-note" id="control-note" tabindex="0" hidden>
+            <span id="control-note-text"></span>
+            <a id="signin-link" href="#" hidden>Household sign-in</a>
+        </div>
 
         <!-- Location Bar (shown when using current location) -->
         <div class="location-bar" id="location-bar">
-            <span class="location-bar-icon">📍</span>
+            <span class="location-bar-icon" aria-hidden="true">📍</span>
             <span>Using location:</span>
             <span class="location-bar-text" id="location-text">Current location</span>
-            <button class="location-bar-edit" id="location-edit" title="Edit location">✏️ Edit</button>
-            <button class="location-bar-clear" id="location-clear" title="Use home location">✕ Clear</button>
+            <button class="location-bar-edit" id="location-edit" title="Edit location"><span aria-hidden="true">✏️</span> Edit</button>
+            <button class="location-bar-clear" id="location-clear" title="Use home location"><span aria-hidden="true">✕</span> Clear</button>
         </div>
 
         <!-- Location Search (shown when editing) -->
@@ -1801,7 +1897,7 @@
             <div class="tv-widget-content">
                 <div class="tv-header">
                     <div class="tv-info">
-                        <div class="tv-icon">📺</div>
+                        <div class="tv-icon" aria-hidden="true">📺</div>
                         <div>
                             <div class="tv-name" id="tv-name">Apple TV</div>
                             <div class="tv-status" id="tv-status">Loading...</div>
@@ -1826,27 +1922,27 @@
                 </div>
                 <!-- Remote Control -->
                 <div class="tv-remote">
-                    <button class="tv-remote-btn blank"></button>
-                    <button class="tv-remote-btn" data-cmd="up" title="Up">▲</button>
-                    <button class="tv-remote-btn blank"></button>
-                    <button class="tv-remote-btn" data-cmd="left" title="Left">◀</button>
+                    <button class="tv-remote-btn blank" tabindex="-1" aria-hidden="true"></button>
+                    <button class="tv-remote-btn" data-cmd="up" title="Up" aria-label="Up"><span aria-hidden="true">▲</span></button>
+                    <button class="tv-remote-btn blank" tabindex="-1" aria-hidden="true"></button>
+                    <button class="tv-remote-btn" data-cmd="left" title="Left" aria-label="Left"><span aria-hidden="true">◀</span></button>
                     <button class="tv-remote-btn select-btn" data-cmd="select" title="Select">OK</button>
-                    <button class="tv-remote-btn" data-cmd="right" title="Right">▶</button>
-                    <button class="tv-remote-btn" data-cmd="menu" title="Menu">☰</button>
-                    <button class="tv-remote-btn" data-cmd="down" title="Down">▼</button>
-                    <button class="tv-remote-btn" data-cmd="home" title="Home">⌂</button>
+                    <button class="tv-remote-btn" data-cmd="right" title="Right" aria-label="Right"><span aria-hidden="true">▶</span></button>
+                    <button class="tv-remote-btn" data-cmd="menu" title="Menu" aria-label="Menu"><span aria-hidden="true">☰</span></button>
+                    <button class="tv-remote-btn" data-cmd="down" title="Down" aria-label="Down"><span aria-hidden="true">▼</span></button>
+                    <button class="tv-remote-btn" data-cmd="home" title="Home" aria-label="Home"><span aria-hidden="true">⌂</span></button>
                 </div>
                 <!-- Playback Controls -->
                 <div class="tv-playback">
-                    <button class="tv-playback-btn" data-cmd="play" title="Play">▶</button>
-                    <button class="tv-playback-btn" data-cmd="pause" title="Pause">⏸</button>
+                    <button class="tv-playback-btn" data-cmd="play" title="Play" aria-label="Play"><span aria-hidden="true">▶</span></button>
+                    <button class="tv-playback-btn" data-cmd="pause" title="Pause" aria-label="Pause"><span aria-hidden="true">⏸</span></button>
                 </div>
             </div>
         </div>
 
         <div class="restore-banner" id="restore-banner">
             <div class="restore-banner-text">
-                <span class="restore-banner-icon">🕐</span>
+                <span class="restore-banner-icon" aria-hidden="true">🕐</span>
                 <span id="restore-banner-label">Your previous conversation has been restored.</span>
             </div>
             <div class="restore-banner-actions">
@@ -1903,7 +1999,7 @@
                     <!-- LiveKit Mode Toggle -->
                     <div class="voice-side-control" id="livekit-control" style="display: none;">
                         <button class="voice-mode-toggle" id="voice-mode-toggle" title="Toggle voice mode">
-                            <span class="mode-icon">🎙️</span>
+                            <span class="mode-icon" aria-hidden="true">🎙️</span>
                         </button>
                         <span class="voice-side-control-label" id="voice-mode-label">PTT</span>
                     </div>
@@ -1939,6 +2035,8 @@
         </div>
     </div>
 
+    <!-- The one fetch wrapper every script below uses -->
+    <script src="/static/jarvis-fetch.js"></script>
     <!-- LiveKit Client (loaded conditionally) -->
     <script src="/static/livekit-client.js"></script>
     <!-- Music Assistant Client for Browser Playback -->
@@ -1949,6 +2047,145 @@
     <script>
         const API_BASE = window.location.origin;
         let sessionId = localStorage.getItem('jarvis_session') || null;
+
+        // jarvis-web mints the session id (bound to this browser); keep
+        // whatever it hands back for the next turn.
+        function adoptSession(id) {
+            if (typeof id === 'string' && id) {
+                sessionId = id;
+                localStorage.setItem('jarvis_session', id);
+            }
+        }
+
+        // What this caller may do (from /api/welcome), and the timers a
+        // signed-out page must stop.
+        let capabilities = null;
+        let healthTimer = null;
+        let modeTimer = null;
+        const DRAFT_KEY = 'jarvis_draft';
+        const CONTROL_IDS = ['temp-down', 'temp-up', 'tv-power'];
+        // Every control button, including the Apple TV remote and the app
+        // buttons (those are re-rendered, so applyControlState runs again).
+        const CONTROL_SELECTOR = '.tv-apps button, .tv-remote-btn[data-cmd], .tv-playback-btn[data-cmd]';
+        const RATE_LIMIT_MESSAGE = "You're going a bit fast. Please wait a minute, then try again.";
+        const CONTROL_NOTES = {
+            guest_stay: 'Controls are view-only during a guest stay.',
+            guest_network: 'Controls are view-only on the guest network.',
+        };
+
+        function saveDraft(text) {
+            try {
+                if (text) sessionStorage.setItem(DRAFT_KEY, text);
+            } catch (e) { /* storage unavailable */ }
+        }
+
+        function restoreDraft() {
+            try {
+                const draft = sessionStorage.getItem(DRAFT_KEY);
+                if (draft) {
+                    messageInput.value = draft;
+                    sendButton.disabled = false;
+                    sessionStorage.removeItem(DRAFT_KEY);
+                }
+            } catch (e) { /* storage unavailable */ }
+        }
+
+        function canControl() {
+            return !capabilities || capabilities.control !== false;
+        }
+
+        // What to say when the server refuses a control this caller may not
+        // use (owner-only 403, WebSocket 1008): the same words the page
+        // already shows for view-only, never "sign in" (a signed-out caller
+        // gets the session banner instead).
+        function notPermittedMessage() {
+            return CONTROL_NOTES[capabilities && capabilities.control_reason] || "That isn't available here.";
+        }
+
+        // View-only: controls are disabled, out of the tab order, and
+        // described by the note that says why.
+        function applyControlState() {
+            const allowed = canControl();
+            const controls = CONTROL_IDS.map((id) => document.getElementById(id))
+                .concat(Array.from(document.querySelectorAll(CONTROL_SELECTOR)));
+            for (const el of controls) {
+                if (!el) continue;
+                el.disabled = !allowed;
+                if (allowed) {
+                    el.removeAttribute('aria-describedby');
+                    el.removeAttribute('tabindex');
+                } else {
+                    el.setAttribute('aria-describedby', 'control-note-text');
+                    el.setAttribute('tabindex', '-1');
+                }
+            }
+        }
+
+        function applyCapabilities(caps) {
+            capabilities = caps || {};
+            const allowed = canControl();
+            document.body.classList.toggle('controls-disabled', !allowed);
+            applyControlState();
+            document.querySelectorAll('.mode-menu-option').forEach((option) => {
+                option.setAttribute('aria-disabled', allowed ? 'false' : 'true');
+                if (allowed) option.removeAttribute('aria-describedby');
+                else option.setAttribute('aria-describedby', 'control-note-text');
+            });
+
+            const note = document.getElementById('control-note');
+            const noteText = document.getElementById('control-note-text');
+            const signinLink = document.getElementById('signin-link');
+            const noteCopy = CONTROL_NOTES[capabilities.control_reason];
+            note.hidden = allowed || !noteCopy;
+            noteText.textContent = noteCopy || '';
+            // The household sign-in link only during a guest stay (never on
+            // the guest network).
+            const signinUrl = capabilities.control_reason === 'guest_stay' ? capabilities.signin_url : null;
+            signinLink.hidden = !signinUrl;
+            if (signinUrl) signinLink.href = signinUrl;
+
+            const signedIn = document.getElementById('signed-in');
+            const nameEl = document.getElementById('signed-in-name');
+            const signoutLink = document.getElementById('signout-link');
+            nameEl.textContent = capabilities.display_name || '';
+            signoutLink.hidden = !(capabilities.signed_in && capabilities.logout_url);
+            if (!signoutLink.hidden) signoutLink.href = capabilities.logout_url;
+            signedIn.hidden = !(capabilities.display_name || !signoutLink.hidden);
+        }
+
+        function showSessionBanner() {
+            const banner = document.getElementById('session-banner');
+            const text = document.getElementById('session-banner-text');
+            const action = document.getElementById('session-banner-action');
+            if (capabilities && capabilities.signed_in) {
+                text.textContent = 'Your sign-in has expired.';
+                action.textContent = 'Sign in again';
+            } else {
+                text.textContent = "This device doesn't look like it's on the home network anymore.";
+                action.textContent = 'Try again';
+            }
+            action.onclick = () => {
+                saveDraft(messageInput.value);
+                window.location.reload();
+            };
+            banner.hidden = false;  // role="alert" announces it; focus stays put
+        }
+
+        // The session ended (auth proxy redirect or 401): say so once, keep
+        // the draft, and stop everything that would keep retrying.
+        window.jarvisSession.onSessionEnded(() => {
+            showSessionBanner();
+            setStatus('offline', 'Signed out');
+            if (healthTimer) clearInterval(healthTimer);
+            if (modeTimer) clearInterval(modeTimer);
+            try { if (maClient) maClient.disconnect(); } catch (e) { /* already closed */ }
+            try {
+                if (musicPlayer && musicPlayer.sendspinClient) musicPlayer.sendspinClient.disconnect();
+            } catch (e) { /* already closed */ }
+            if (livekitClient) livekitClient.disconnect().catch(() => {});
+            voiceStatus.textContent = 'Signed out';
+            saveDraft(messageInput.value);
+        });
         let isWelcomeVisible = true;
 
         const chatContainer = document.getElementById('chat-container');
@@ -2018,7 +2255,7 @@
         async function initMusicPlayer() {
             try {
                 // Check if music config is available
-                const configResponse = await fetch(`${API_BASE}/api/music/config`);
+                const configResponse = await jarvisFetch(`${API_BASE}/api/music/config`);
                 const config = await configResponse.json();
 
                 if (config.enabled) {
@@ -2043,9 +2280,9 @@
                     };
 
                     maClient.onError = (error) => {
-                        if (error && error.message === 'sign_in_required') {
-                            console.warn('[Music] Browser music playback requires sign-in');
-                            showError('Sign-in required for browser music playback');
+                        if (error && error.message === 'not_permitted') {
+                            console.warn('[Music] Browser music playback refused');
+                            showError(notPermittedMessage());
                             return;
                         }
                         console.error('[Music] MA Client error:', error);
@@ -2112,7 +2349,7 @@
 
                 // Search for the media via HTTP API (more reliable than WebSocket)
                 updateStatus(`🔍 Searching for "${browserPlayback.media_id}"...`);
-                const searchResponse = await fetch(`${API_BASE}/api/music/search`, {
+                const searchResponse = await jarvisFetch(`${API_BASE}/api/music/search`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -2199,7 +2436,7 @@
                 } else if (results && results.artists && results.artists.length > 0) {
                     // Found artist, search for their tracks via HTTP
                     updateStatus(`🔍 Found ${results.artists[0].name}, searching for tracks...`);
-                    const artistSearchResponse = await fetch(`${API_BASE}/api/music/search`, {
+                    const artistSearchResponse = await jarvisFetch(`${API_BASE}/api/music/search`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -2342,7 +2579,7 @@
         // Reverse geocode coordinates to address
         async function reverseGeocode(lat, lon) {
             try {
-                const response = await fetch(`${API_BASE}/api/geocode/reverse?lat=${lat}&lon=${lon}`);
+                const response = await jarvisFetch(`${API_BASE}/api/geocode/reverse?lat=${lat}&lon=${lon}`);
                 if (response.ok) {
                     const data = await response.json();
                     return data.address;
@@ -2392,7 +2629,7 @@
             locationSuggestions.classList.add('visible');
 
             try {
-                const response = await fetch(`${API_BASE}/api/geocode/search?q=${encodeURIComponent(query)}`);
+                const response = await jarvisFetch(`${API_BASE}/api/geocode/search?q=${encodeURIComponent(query)}`);
                 if (response.ok) {
                     const data = await response.json();
                     displaySuggestions(data.results || []);
@@ -2473,11 +2710,22 @@
 
         // Initialize
         document.addEventListener('DOMContentLoaded', async () => {
+            // Capabilities first: what this caller may use decides what
+            // starts at all.
+            await loadWelcome();
             await checkHealth();
             await loadModeState();
-            await checkVoiceHealth();
-            await initializeLiveKit();
-            await initMusicPlayer();  // Initialize browser music playback
+            // Push-to-talk for every browser caller; always-on voice
+            // (LiveKit) and the music socket only for callers who may control.
+            if (capabilities.voice) {
+                await checkVoiceHealth();
+            } else {
+                disableVoice('Voice is not available here');
+            }
+            if (canControl()) {
+                await initializeLiveKit();
+                await initMusicPlayer();  // Initialize browser music playback
+            }
 
             // Listen for music playback errors
             window.addEventListener('musicPlaybackError', (e) => {
@@ -2489,14 +2737,14 @@
             });
 
             await checkForRestoredSession();
-            await loadWelcome();
             setupInputHandlers();
             setupVoiceHandlers();
             setupModeHandlers();
+            restoreDraft();
             // Check health every 30 seconds
-            setInterval(checkHealth, 30000);
+            healthTimer = setInterval(checkHealth, 30000);
             // Check mode every 60 seconds (in case guest status changes)
-            setInterval(loadModeState, 60000);
+            modeTimer = setInterval(loadModeState, 60000);
         });
 
         // =============================================================================
@@ -2558,9 +2806,9 @@
                 };
 
                 livekitClient.onError = (error) => {
-                    if (error && error.message === 'sign_in_required') {
-                        console.warn('[LiveKit] Always-on voice requires sign-in');
-                        showError('Sign-in required for always-on voice mode');
+                    if (error && error.message === 'not_permitted') {
+                        console.warn('[LiveKit] Always-on voice refused');
+                        showError(notPermittedMessage());
                         return;
                     }
                     console.error('[LiveKit] Error:', error);
@@ -2645,11 +2893,12 @@
         // =============================================================================
 
         async function checkHealth() {
+            if (window.jarvisSession.isSignedOut()) return;
             try {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-                const response = await fetch(`${API_BASE}/api/health`, {
+                const response = await jarvisFetch(`${API_BASE}/api/health`, {
                     signal: controller.signal
                 });
                 clearTimeout(timeoutId);
@@ -2682,11 +2931,13 @@
         // =============================================================================
 
         async function loadModeState() {
+            if (window.jarvisSession.isSignedOut()) return;
             try {
-                const response = await fetch(`${API_BASE}/api/mode`);
+                const response = await jarvisFetch(`${API_BASE}/api/mode`);
                 if (response.ok) {
                     currentModeState = await response.json();
                     updateModeUI();
+                    document.getElementById('mode-indicator').hidden = false;
                 }
             } catch (error) {
                 console.error('Failed to load mode:', error);
@@ -2745,7 +2996,7 @@
             if (!is_override) {
                 modeAuto.querySelector('span').nextSibling.textContent = ` Auto (${auto_mode})`;
             } else {
-                modeAuto.innerHTML = '<span>🔄</span> Auto-detect';
+                modeAuto.innerHTML = '<span aria-hidden="true">🔄</span> Auto-detect';
             }
 
             // Update location button visibility based on mode
@@ -2770,14 +3021,14 @@
             });
 
             // Mode option handlers
-            modeAuto.addEventListener('click', () => setMode(null));
-            modeOwner.addEventListener('click', () => setMode('owner'));
-            modeGuest.addEventListener('click', () => setMode('guest'));
+            modeAuto.addEventListener('click', () => canControl() && setMode(null));
+            modeOwner.addEventListener('click', () => canControl() && setMode('owner'));
+            modeGuest.addEventListener('click', () => canControl() && setMode('guest'));
         }
 
         async function setMode(mode) {
             try {
-                const response = await fetch(`${API_BASE}/api/mode`, {
+                const response = await jarvisFetch(`${API_BASE}/api/mode`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ mode: mode })
@@ -2792,17 +3043,9 @@
                     const modeText = currentModeState.mode === 'owner' ? 'Owner' : 'Guest';
                     const suffix = currentModeState.is_override ? ' (override)' : ' (auto)';
                     showNotification(`Mode: ${modeText}${suffix}`);
-                } else if (response.status === 403) {
-                    modeMenu.classList.remove('visible');
-                    const body = await response.json().catch(() => ({}));
-                    if (body.detail === 'sign_in_required') {
-                        showError('Sign-in required to change mode');
-                    } else {
-                        // Guest trying to switch to owner mode
-                        showError('Cannot switch to owner mode while in guest mode');
-                    }
                 } else {
-                    showError('Failed to change mode');
+                    modeMenu.classList.remove('visible');
+                    await showErrorForResponse(response, 'Failed to change mode');
                 }
             } catch (error) {
                 console.error('Failed to set mode:', error);
@@ -2812,11 +3055,12 @@
 
         async function loadWelcome() {
             try {
-                const response = await fetch(`${API_BASE}/api/welcome`);
+                const response = await jarvisFetch(`${API_BASE}/api/welcome`);
                 if (response.ok) {
                     const data = await response.json();
                     welcomeTitle.textContent = data.greeting;
                     welcomeSubtitle.textContent = data.subtitle;
+                    applyCapabilities(data.capabilities);
 
                     // Render suggestions
                     suggestionsContainer.innerHTML = data.suggestions
@@ -2865,7 +3109,7 @@
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 3000);
             try {
-                const resp = await fetch('/api/session/restore', { signal: controller.signal });
+                const resp = await jarvisFetch('/api/session/restore', { signal: controller.signal });
                 clearTimeout(timeout);
                 if (!resp.ok) return;
                 const data = await resp.json();
@@ -2901,7 +3145,7 @@
         async function startFreshSession() {
             dismissRestoreBanner();
             try {
-                await fetch('/api/session/current', { method: 'DELETE' });
+                await jarvisFetch('/api/session/current', { method: 'DELETE' });
             } catch (e) {
                 console.debug('[Session] Clear session failed:', e.message);
             }
@@ -2937,13 +3181,13 @@
             sendButton.disabled = true;
 
             // Add user message
-            addMessage(message, 'user');
+            const userBubble = addMessage(message, 'user');
 
             // Show typing indicator with context-aware message
             const typingId = showTyping(message);
 
             try {
-                const response = await fetch(`${API_BASE}/api/chat/stream`, {
+                const response = await jarvisFetch(`${API_BASE}/api/chat/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -2959,7 +3203,9 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error('Failed to get response');
+                    const failure = new Error('Failed to get response');
+                    failure.status = response.status;
+                    throw failure;
                 }
 
                 // Remove typing indicator and create assistant bubble for streaming
@@ -3002,7 +3248,9 @@
 
                         try {
                             const event = JSON.parse(payload);
-                            if (event.stage === 'answer_chunk') {
+                            if (event.stage === 'session') {
+                                adoptSession(event.session_id);
+                            } else if (event.stage === 'answer_chunk') {
                                 fullText += event.content;
                                 contentEl.textContent = fullText;
                                 scrollToBottom();
@@ -3037,7 +3285,17 @@
 
             } catch (error) {
                 removeTyping(typingId);
-                showError('Sorry, something went wrong. Please try again.');
+                if (error.status === 429) {
+                    markNotSent(userBubble, message);
+                } else if (window.jarvisSession.isSignedOut()) {
+                    // Keep what they typed: after signing in again it's
+                    // still there to send.
+                    messageInput.value = message;
+                    sendButton.disabled = false;
+                    saveDraft(message);
+                } else {
+                    showError('Sorry, something went wrong. Please try again.');
+                }
                 console.error('Chat error:', error);
             }
         }
@@ -3091,6 +3349,35 @@
 
             chatContainer.appendChild(messageDiv);
             scrollToBottom();
+            return messageDiv;
+        }
+
+        // A message the server refused to take (rate limited): the bubble
+        // says so, the transcript explains, and the text goes back in the
+        // input to send again.
+        function markNotSent(bubble, message) {
+            if (bubble) {
+                bubble.classList.add('not-sent');
+                const status = document.createElement('div');
+                status.className = 'message-status';
+                status.textContent = 'Not sent';
+                const body = bubble.querySelector('.message-content');
+                if (body) body.after(status);
+            }
+            showTranscriptNotice(RATE_LIMIT_MESSAGE);
+            messageInput.value = message;
+            sendButton.disabled = false;
+            saveDraft(message);
+        }
+
+        function showTranscriptNotice(text) {
+            const notice = document.createElement('div');
+            notice.className = 'transcript-notice';
+            notice.setAttribute('role', 'status');
+            notice.setAttribute('aria-live', 'polite');
+            notice.textContent = text;
+            chatContainer.appendChild(notice);
+            scrollToBottom();
         }
 
         // Handle Continue button click for truncated responses
@@ -3107,7 +3394,7 @@
             const startTime = Date.now();
 
             try {
-                const response = await fetch(`${API_BASE}/api/chat`, {
+                const response = await jarvisFetch(`${API_BASE}/api/chat`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -3127,6 +3414,7 @@
                 }
 
                 const data = await response.json();
+                adoptSession(data.session_id);
 
                 // Remove the Continue button from the previous message
                 button.remove();
@@ -3267,20 +3555,35 @@
         function showError(message) {
             const toast = document.createElement('div');
             toast.className = 'error-toast';
+            toast.setAttribute('role', 'alert');
             toast.textContent = message;
             document.body.appendChild(toast);
             setTimeout(() => toast.remove(), 4000);
         }
 
-        // ATHENA-69 (D19): every direct device/mode-write route now requires
-        // a signed-in owner/operator and answers 403 {"detail":"sign_in_required"}
-        // for anyone else. Show that distinctly from a generic failure.
+        // A refused control or mode write: 401 ended the session (the banner
+        // says what to do), 403 names why this caller can't (a guest stay,
+        // the guest network, a stale tab), 429 is the rate limit.
         async function showErrorForResponse(response, fallbackMessage) {
+            if (response.status === 401) {
+                return;  // jarvisFetch ended the session; the banner says what to do
+            }
+            if (response.status === 429) {
+                showError(RATE_LIMIT_MESSAGE);
+                return;
+            }
             if (response.status === 403) {
                 const body = await response.json().catch(() => ({}));
-                if (body.detail === 'sign_in_required') {
-                    showError('Sign-in required');
+                if (body.detail === 'guest_stay_active') {
+                    showError('Controls are view-only during a guest stay.');
                     return;
+                }
+                if (body.detail === 'guest_network') {
+                    showError('Controls are view-only on the guest network.');
+                    return;
+                }
+                if (body.detail === 'reload_required') {
+                    return;  // jarvisFetch already offered a reload
                 }
             }
             showError(fallbackMessage);
@@ -3486,7 +3789,7 @@
 
         async function loadClimate() {
             try {
-                const response = await fetch(`${API_BASE}/api/climate`);
+                const response = await jarvisFetch(`${API_BASE}/api/climate`);
                 if (response.ok) {
                     climateState = await response.json();
                     targetTemp = climateState.target_temp;
@@ -3554,7 +3857,7 @@
             updateClimateUI();
 
             try {
-                const response = await fetch(`${API_BASE}/api/climate/temperature`, {
+                const response = await jarvisFetch(`${API_BASE}/api/climate/temperature`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ temperature: temp })
@@ -3619,7 +3922,7 @@
             if (!currentTV) return;
             const action = currentTV.state === 'off' ? 'on' : 'off';
             try {
-                const response = await fetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/power/${action}`, {
+                const response = await jarvisFetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/power/${action}`, {
                     method: 'POST'
                 });
                 if (response.ok) {
@@ -3639,7 +3942,7 @@
                 if (!currentTV) return;
                 const cmd = btn.dataset.cmd;
                 try {
-                    const response = await fetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/remote`, {
+                    const response = await jarvisFetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/remote`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ command: cmd })
@@ -3656,7 +3959,7 @@
         async function loadAppleTVs() {
             try {
                 // Load Apple TVs
-                const tvResponse = await fetch(`${API_BASE}/api/appletv`);
+                const tvResponse = await jarvisFetch(`${API_BASE}/api/appletv`);
                 if (tvResponse.ok) {
                     allTVs = await tvResponse.json();
                     if (allTVs.length > 0) {
@@ -3686,7 +3989,7 @@
                 }
 
                 // Load streaming apps
-                const appsResponse = await fetch(`${API_BASE}/api/appletv/apps`);
+                const appsResponse = await jarvisFetch(`${API_BASE}/api/appletv/apps`);
                 if (appsResponse.ok) {
                     streamingApps = await appsResponse.json();
                     renderApps();
@@ -3742,12 +4045,13 @@
                     <span class="tv-app-name">${escapeHtml(app.name)}</span>
                 </button>
             `).join('');
+            applyControlState();
         }
 
         async function launchApp(appName) {
             if (!currentTV) return;
             try {
-                const response = await fetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/launch/${encodeURIComponent(appName)}`, {
+                const response = await jarvisFetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/launch/${encodeURIComponent(appName)}`, {
                     method: 'POST'
                 });
                 if (response.ok) {
@@ -3776,9 +4080,18 @@
         // Voice Input/Output
         // =============================================================================
 
+        function disableVoice(reason) {
+            voiceServicesAvailable = false;
+            voiceButton.disabled = true;
+            voicePanelToggle.disabled = true;
+            voiceButton.title = reason;
+            voicePanelToggle.title = reason;
+            updateSpeakerButton();
+        }
+
         async function checkVoiceHealth() {
             try {
-                const response = await fetch(`${API_BASE}/api/voice/health`);
+                const response = await jarvisFetch(`${API_BASE}/api/voice/health`);
                 if (response.ok) {
                     const data = await response.json();
                     voiceServicesAvailable = data.stt?.status === 'healthy' && data.tts?.status === 'healthy';
@@ -3928,13 +4241,15 @@
                 const formData = new FormData();
                 formData.append('audio', audioBlob, 'recording.webm');
 
-                const response = await fetch(`${API_BASE}/api/voice/transcribe`, {
+                const response = await jarvisFetch(`${API_BASE}/api/voice/transcribe`, {
                     method: 'POST',
                     body: formData
                 });
 
                 if (!response.ok) {
-                    throw new Error('Transcription failed');
+                    const failure = new Error('Transcription failed');
+                    failure.status = response.status;
+                    throw failure;
                 }
 
                 const result = await response.json();
@@ -3950,7 +4265,11 @@
                 }
             } catch (error) {
                 console.error('Transcription error:', error);
-                showError('Failed to transcribe audio');
+                if (error.status === 429) {
+                    showTranscriptNotice(RATE_LIMIT_MESSAGE);
+                } else if (!window.jarvisSession.isSignedOut()) {
+                    showError('Failed to transcribe audio');
+                }
             } finally {
                 voiceButton.classList.remove('processing');
                 hideVoiceStatus();
@@ -3975,13 +4294,13 @@
             sendButton.disabled = true;
 
             // Add user message
-            addMessage(message, 'user');
+            const userBubble = addMessage(message, 'user');
 
             // Show typing indicator with context-aware message
             const typingId = showTyping(message);
 
             try {
-                const response = await fetch(`${API_BASE}/api/chat/stream`, {
+                const response = await jarvisFetch(`${API_BASE}/api/chat/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -3997,7 +4316,9 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error('Failed to get response');
+                    const failure = new Error('Failed to get response');
+                    failure.status = response.status;
+                    throw failure;
                 }
 
                 // Remove typing indicator and create assistant bubble for streaming
@@ -4039,7 +4360,9 @@
 
                         try {
                             const event = JSON.parse(payload);
-                            if (event.stage === 'answer_chunk') {
+                            if (event.stage === 'session') {
+                                adoptSession(event.session_id);
+                            } else if (event.stage === 'answer_chunk') {
                                 fullText += event.content;
                                 contentEl.textContent = fullText;
                                 scrollToBottom();
@@ -4079,7 +4402,17 @@
 
             } catch (error) {
                 removeTyping(typingId);
-                showError('Sorry, something went wrong. Please try again.');
+                if (error.status === 429) {
+                    markNotSent(userBubble, message);
+                } else if (window.jarvisSession.isSignedOut()) {
+                    // Keep what they typed: after signing in again it's
+                    // still there to send.
+                    messageInput.value = message;
+                    sendButton.disabled = false;
+                    saveDraft(message);
+                } else {
+                    showError('Sorry, something went wrong. Please try again.');
+                }
                 console.error('Chat error:', error);
             }
         }
@@ -4099,7 +4432,7 @@
             if (!cleanText) return;
 
             try {
-                const response = await fetch(`${API_BASE}/api/voice/synthesize`, {
+                const response = await jarvisFetch(`${API_BASE}/api/voice/synthesize`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text: cleanText })
@@ -4133,8 +4466,8 @@
         }
 
         function hideVoiceStatus() {
-            // Reset to default message
-            setVoiceStatus('Hold the microphone to speak', '');
+            // Reset to default message (a signed-out page says so instead)
+            setVoiceStatus(window.jarvisSession.isSignedOut() ? 'Signed out' : 'Hold the microphone to speak', '');
         }
     </script>
 </body>

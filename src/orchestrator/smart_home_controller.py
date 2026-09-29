@@ -13,6 +13,62 @@ from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
 from shared.config import get_config
 from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance
+
+
+_jarvis_key_warned = False
+
+# RFC 1918, loopback and IPv6 ULA/loopback. Built from integers so the
+# addresses don't read as a deployment's own.
+import ipaddress as _ipaddress
+
+_INTERNAL_NETWORKS = (
+    _ipaddress.IPv4Network((0x0A000000, 8)),
+    _ipaddress.IPv4Network((0xAC100000, 12)),
+    _ipaddress.IPv4Network((0xC0A80000, 16)),
+    _ipaddress.IPv4Network((0x7F000000, 8)),
+    _ipaddress.IPv6Network("fc00::/7"),
+    _ipaddress.IPv6Network("::1/128"),
+)
+
+
+def _is_internal_host(url: str) -> bool:
+    """A private/loopback literal, a single-label name, or an in-cluster
+    (.svc / .cluster.local) name. Only such hosts get the service key."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    host = (urlsplit(url).hostname or "").rstrip(".").lower()
+    if not host:
+        return False
+    try:
+        addr = ipaddress.ip_address(host)
+        return any(addr in net for net in _INTERNAL_NETWORKS if net.version == addr.version)
+    except ValueError:
+        pass
+    return "." not in host or host.endswith(".svc") or host.endswith(".cluster.local")
+
+
+def _jarvis_web_headers(jarvis_url: str) -> Dict[str, str]:
+    global _jarvis_key_warned
+    key = get_config().service_api_key
+    if not key:
+        return {}
+    if _is_internal_host(jarvis_url):
+        return {"X-Service-Key": key}
+    if not _jarvis_key_warned:
+        _jarvis_key_warned = True
+        import logging
+        logging.getLogger(__name__).warning(
+            "jarvis_web_url_not_internal: JARVIS_WEB_URL isn't an in-cluster or private host; "
+            "the service key is not sent and jarvis-web's household reads will be refused"
+        )
+    return {}
+
+
+async def _jarvis_get(client, jarvis_url: str, path: str):
+    """The one way this module reads jarvis-web: household-read routes need
+    the service key, which is only ever sent to an internal host."""
+    return await client.get(f"{jarvis_url}{path}", headers=_jarvis_web_headers(jarvis_url))
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside each
 # ha_client-accepting method below (not at module scope) -- this module is
 # imported by route_control.py and other lightweight test fixtures that
@@ -2523,7 +2579,7 @@ Return ONLY valid JSON."""
         try:
             async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
                 if device_type == 'oven' or 'oven' in query_lower:
-                    response = await client.get(f"{jarvis_url}/api/appliances/oven")
+                    response = await _jarvis_get(client, jarvis_url, "/api/appliances/oven")
                     if response.status_code == 200:
                         data = response.json()
                         state = data.get('state', 'off')
@@ -2544,7 +2600,7 @@ Return ONLY valid JSON."""
                         return response_text + "."
 
                 elif device_type == 'fridge' or 'fridge' in query_lower or 'freezer' in query_lower:
-                    response = await client.get(f"{jarvis_url}/api/appliances/fridge")
+                    response = await _jarvis_get(client, jarvis_url, "/api/appliances/fridge")
                     if response.status_code == 200:
                         data = response.json()
                         fridge_temp = data.get('fridge_target_temp')
@@ -2625,7 +2681,7 @@ Return ONLY valid JSON."""
             if jarvis_url:
                 try:
                     async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-                        response = await client.get(f"{jarvis_url}/api/sensors/motion")
+                        response = await _jarvis_get(client, jarvis_url, "/api/sensors/motion")
                         if response.status_code == 200:
                             data = response.json()
                             active_rooms = data.get('active_rooms', [])
@@ -2643,7 +2699,7 @@ Return ONLY valid JSON."""
                 elif 'light' in query_lower or 'bright' in query_lower or 'dark' in query_lower or 'lux' in query_lower:
                     if not jarvis_url:
                         return "I couldn't check the sensor status right now."
-                    response = await client.get(f"{jarvis_url}/api/sensors/illuminance")
+                    response = await _jarvis_get(client, jarvis_url, "/api/sensors/illuminance")
                     if response.status_code == 200:
                         data = response.json()
                         sensors = data.get('sensors', [])
@@ -2659,7 +2715,7 @@ Return ONLY valid JSON."""
                 # Default: get summary
                 if not jarvis_url:
                     return "I couldn't check the sensor status right now."
-                response = await client.get(f"{jarvis_url}/api/sensors/summary")
+                response = await _jarvis_get(client, jarvis_url, "/api/sensors/summary")
                 if response.status_code == 200:
                     data = response.json()
                     motion = data.get('motion', {})
@@ -3568,7 +3624,7 @@ Do NOT mention rooms that have no current or recent motion."""
 
         try:
             async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-                response = await client.get(f"{jarvis_url}/api/media")
+                response = await _jarvis_get(client, jarvis_url, "/api/media")
                 if response.status_code == 200:
                     data = response.json()
                     players = data.get('players', [])

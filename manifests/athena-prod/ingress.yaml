@@ -108,6 +108,11 @@ spec:
           port: 80
 ---
 # Jarvis Web / Chat Interface (chat.local)
+# No authentication at the edge here: jarvis-web itself serves only the
+# home network it's configured for (JARVIS_LOCAL_NETWORKS behind
+# TRUSTED_PROXY_CIDRS) and answers everyone else 401, so this base route is
+# household-only. For sign-in from the internet, replace it with
+# optional/jarvis-web-edge-auth.yaml.
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:

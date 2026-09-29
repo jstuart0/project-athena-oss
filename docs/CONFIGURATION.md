@@ -584,7 +584,8 @@ can never claim owner. The precedence, most to least trusted:
 | SMS (`sms_webhook.py`) | server-resolved | `sms` |
 | LiveKit (`livekit_integration.py`) | server-resolved | `household` (a LiveKit room can only be created by a signed-in owner/operator, see below) |
 | jarvis-web, signed-in owner/operator | server-resolved via step 1-3 above | `web_authenticated` |
-| jarvis-web, unauthenticated | forced `guest` (or `JARVIS_PUBLIC_MODE=household`'s legacy behavior) | `web_public` |
+| jarvis-web, home network | server-resolved via step 1-3 above (the guest network is always `guest`) | `web_local` |
+| jarvis-web, anyone else | never forwarded: 401 sign-in required | — |
 
 `household` is not a physical-presence check — it's every in-cluster caller
 holding the shared `X-Service-Key`: the gateway's satellite/HA-voice path,
@@ -937,30 +938,163 @@ stays valid for *joining* a room — it doesn't disconnect an
 already-connected participant early. Server-side Athena participant
 tokens are unaffected (they pass an explicit 24-hour TTL).
 
-**jarvis-web (`JARVIS_PUBLIC_MODE`).** See [Service URLs](#service-urls)
-above and `manifests/athena-prod/jarvis-web.yaml`'s inline comment. Default
-`guest`: an unauthenticated caller is a guest and every owner_only write
-route (climate, media, Apple TV, appliances, music playback, LiveKit room
-management, mode changes — 29 routes total, HTTP and the two WebSocket
-proxies) answers `403 {"detail":"sign_in_required"}` (or closes the
-WebSocket upgrade with code 1008 before accepting it). `household` is the
-legacy pre-ATHENA-69 behavior for a LAN-only deployment: every caller gets
-the household's actual mode and the write-route gate is bypassed.
+**jarvis-web: who may use it.** jarvis-web serves a browser without
+sign-in only when the request provably comes from the home network, and
+requires sign-in for everything else: `401 sign_in_required` (with
+`WWW-Authenticate: Jarvis`) on every route, static files included, with no
+orchestrator, Home Assistant or admin-backend call. The only anonymous
+answers are `/api/health` (`{"status": ...}` and nothing else, for probes),
+the static 401 sign-in page at `/`, and the embed relay below. The API docs
+(`/docs`, `/redoc`, `/openapi.json`) exist only with
+`JARVIS_ENABLE_DOCS=true`, a development flag. With nothing configured,
+every browser gets the sign-in page.
+Each request resolves to one class, from server-side evidence only:
 
-**Reads are never gated.** Only *writes* go through the permission guard
-and the jarvis-web sign-in gate. `GET` routes — climate/media/appliance/
-Apple TV/sensor state, `/api/mode`, `/livekit/config`, music config — stay
-open to every caller, authenticated or not. This matters beyond jarvis-web
-itself: the **orchestrator directly reads several jarvis-web GET routes**
-for voice answers (`smart_home_controller.py`, hardcoded to jarvis-web's
-in-cluster/co-located URL) — `GET /api/appliances/oven`,
-`GET /api/appliances/fridge`, `GET /api/sensors/motion`,
-`GET /api/sensors/illuminance`, `GET /api/sensors/summary`, and
-`GET /api/media` — none of which are gated, so this integration keeps
-working unchanged regardless of `JARVIS_PUBLIC_MODE` or who's signed in.
-(`GET /api/mode` is the one partial exception: it suppresses the guest's
-name from its response for a `web_public` caller, but still returns
-`mode`/`has_guest`/etc. — see D31.)
+| Class | How | What it gets |
+|---|---|---|
+| Home network (`web_local`) | the home rule below, or an attested `home` from an auth proxy | UI, chat and household reads; owner-only routes while the house is in owner mode, else `403 guest_stay_active` |
+| Guest network | the address is in `JARVIS_GUEST_NETWORKS` | UI, chat and push-to-talk, always guest mode (even when the house is vacant or owner mode is forced), view-only controls, only the reads the guest UI loads (`403 guest_network` on sensors, media and appliances) |
+| Signed in (`web_authenticated`) | an auth proxy's attested identity in a household group, or a Bearer token for an owner/operator | everything |
+| Service | the orchestrator's `X-Service-Key` | the household GET routes it uses for voice answers (`/api/appliances/*`, `/api/sensors/*`, `/api/media`), nothing else |
+| Embed relay | chat-embed with `JARVIS_RELAY_KEY` | chat only, as the public audience |
+
+**The home rule.** A request is home when all of these hold:
+
+- its candidate address is in `JARVIS_LOCAL_NETWORKS` and not in
+  `JARVIS_LOCAL_EXCLUDE`. Behind a reverse proxy the candidate is the hop the
+  proxy appended to `X-Forwarded-For` (the peer must be in
+  `TRUSTED_PROXY_CIDRS`; `JARVIS_LOCAL_TRUSTED_HOPS` for a proxy chain), never
+  a deeper hop and never `Cf-Connecting-Ip`. With
+  `JARVIS_DIRECT_CLIENTS=true` it's the TCP peer.
+- it carries no non-empty `Cf-Connecting-Ip` or `Cf-Ray` header.
+- its `Host` header (port and trailing dot stripped) is in
+  `JARVIS_ALLOWED_HOSTS`. This is the DNS-rebinding guard; `X-Forwarded-Host`
+  is never read. Without `JARVIS_ALLOWED_HOSTS` home networks are disabled.
+
+At startup jarvis-web drops, with an ERROR, any home or guest entry that
+contains its own pod/host address, a trusted proxy (or is wider than one),
+or, in direct mode, a default gateway, unless that address is listed in
+`JARVIS_LOCAL_EXCLUDE` (so excluding a node's /32 keeps the LAN entry).
+Home networks are disabled without `TRUSTED_PROXY_CIDRS` (outside direct
+mode). An address in both lists is a guest (with a warning).
+
+**Deployment shapes.**
+
+1. **Household only, behind a proxy.** `TRUSTED_PROXY_CIDRS` (the proxy's
+   addresses), `JARVIS_LOCAL_NETWORKS`, `JARVIS_ALLOWED_HOSTS`. This trusts
+   that every peer in `TRUSTED_PROXY_CIDRS` is a proxy that appends what it
+   saw. On a flat pod network (flannel) any pod can connect and forge that
+   hop: apply `optional/networkpolicy-jarvis-web.yaml` on a CNI that
+   enforces it, or use shape 3.
+2. **Household only, browsers reach jarvis-web directly.**
+   `JARVIS_DIRECT_CLIENTS=true`, `JARVIS_LOCAL_NETWORKS`,
+   `JARVIS_ALLOWED_HOSTS`, and no `TRUSTED_PROXY_CIDRS`. The source address
+   must be preserved (host networking, or a LoadBalancer/NodePort with
+   `externalTrafficPolicy: Local`); behind SNAT or `externalTrafficPolicy:
+   Cluster` every internet caller looks like a node. In Kubernetes it
+   refuses to start until you set
+   `JARVIS_DIRECT_CLIENTS_ACK_SOURCE_PRESERVED=true`. Before relying on it,
+   send one request from outside your network (for example a phone on
+   cellular) and check jarvis-web logs `jarvis_caller_resolved` with
+   `caller_class=web_public`.
+3. **Household plus sign-in from the internet (edge mode).** An auth proxy
+   in front of jarvis-web classifies every request and attests it:
+   `optional/jarvis-web-edge-auth.yaml` is a Traefik + Authentik
+   forward-auth template (read its header). jarvis-web needs
+   `JARVIS_EDGE_ATTESTATION_SECRET` (Secret key `current`, not optional)
+   and optionally `JARVIS_EDGE_ATTESTATION_SECRET_PREVIOUS` (key `previous`,
+   optional), `TRUSTED_PROXY_CIDRS` (the proxy), `JARVIS_LOCAL_NETWORKS` and
+   `JARVIS_ALLOWED_HOSTS` (to corroborate an attested home: in edge mode the
+   network alone never grants home), and `JARVIS_HOUSEHOLD_GROUPS`. The
+   signed-in identity is read from `JARVIS_EDGE_IDENTITY_HEADER` (default
+   `X-authentik-username`) and its groups from `JARVIS_EDGE_GROUPS_HEADER`
+   (default `X-authentik-groups`), split on `JARVIS_EDGE_GROUPS_SEPARATOR`
+   (default `|`, Authentik's format) and matched exactly and
+   case-sensitively; anyone else gets `403 not_household`. The edge must
+   strip both header names from inbound requests; a name outside the
+   template's strip list stops jarvis-web at startup until
+   `JARVIS_EDGE_HEADERS_ACK_STRIPPED` lists exactly those custom names
+   (comma-separated) to confirm you added them there; `true`, or an ack
+   naming other headers, doesn't pass (the
+   full set it expects stripped is logged as `jarvis_edge_strip_headers`).
+   Edge mode that can't serve the household doesn't start: no
+   `TRUSTED_PROXY_CIDRS`, no usable `JARVIS_LOCAL_NETWORKS` entry, or no
+   `JARVIS_ALLOWED_HOSTS` exits with `jarvis_edge_misconfigured`, so a
+   rolling deploy stalls instead of going Ready and answering every
+   household browser with 401. A deployment with no home network at all
+   sets `JARVIS_EDGE_SIGN_IN_ONLY=true` (then everyone signs in; the
+   trusted proxy is still required, and `JARVIS_ALLOWED_HOSTS` is still
+   needed for WebSockets: with it empty jarvis-web logs the ERROR
+   `jarvis_websockets_disabled` and refuses every WebSocket, which stops
+   browser music playback). An optional
+   sign-in host always requires sign-in, so an owner at home during a guest
+   stay can sign in for control (`JARVIS_SIGNIN_URL` puts a "Household
+   sign-in" link on the page). The attestation value must be at least 32
+   characters and not a placeholder, `SERVICE_API_KEY` or `JARVIS_RELAY_KEY`,
+   or jarvis-web won't start. Rotate it with `current` + `previous`: new
+   value as `current`, old as `previous`, roll jarvis-web, re-render the
+   proxy's Middlewares, drop `previous`, roll again. MFA on the sign-in flow
+   is recommended.
+
+`JARVIS_LOGIN_URL` adds a Sign in link to the 401 page; `JARVIS_LOGOUT_URL`
+is the page's Sign out link for a signed-in user (point it at a flow that
+ends the identity provider's session).
+
+**The embed.** An optional add-on to any shape: chat-embed relays a website
+visitor's chat with `JARVIS_RELAY_KEY` (the same value on both sides, off
+by default). A relayed message is always the public audience, however it's
+decorated, and a wrong key is `401` with no fall-through. Each visitor gets
+`JARVIS_RELAY_REQUESTS_PER_MINUTE` (20) and all relayed traffic
+`JARVIS_RELAY_GLOBAL_PER_MINUTE` (300), per replica (so 2x with two
+replicas). Two supported shapes: chat-embed in the cluster calling
+jarvis-web's Service (recommended), or an off-cluster chat-embed through a
+proxy route that skips sign-in and attestation for requests carrying the
+relay key (commented in the edge template, with its strip Middleware).
+Anything else is unsupported. A relayed conversation continues only with
+the `session_id` jarvis-web returned, and only for the visitor it was
+minted for (the id is bound to the visitor's address, a /64 for IPv6,
+under the relay key); anything else starts a new conversation. Rotating
+`JARVIS_RELAY_KEY` starts every embedded conversation afresh.
+
+**The public audience** (a relayed visitor, or any orchestrator caller with
+`caller_trust="web_public"`) is a hard-coded narrow profile, not the guest
+profile: weather, news, recipes, what's streaming and general questions;
+no control of anything; no guest identity, base knowledge, home address,
+memories, semantic cache or web search. Widening the guest profile never
+widens it.
+
+**Guests and house state.** The control handler checks the control
+permission before anything else, so a caller without it (a guest, under the
+default guest profile) no longer gets presence ("is anyone home"), sensor
+readings or device status from it. Add `control` to the guest profile's
+allowed intents if guests should have those answers (it also lets them
+control what the guest domains allow).
+
+**Voice.** Push-to-talk (`/api/voice/*`) is for every browser class (home network, also during a guest stay; the guest network; signed in); anonymous callers and the embed relay get none. A voice turn is a chat turn, so it is refused whatever chat would refuse. Each client gets `JARVIS_VOICE_REQUESTS_PER_MINUTE` (default 30) voice calls a minute, per replica (`429` beyond that), text to speak is capped at `JARVIS_TTS_MAX_CHARS` (default 5000; `422` beyond), and uploads are decoded as WebM only (ffmpeg with a pinned input format and the file protocol alone). Always-on voice (LiveKit rooms) stays owner-only.
+
+**Browser rules.** Mutating requests from the page carry
+`X-Jarvis-Request: 1`; a request without it gets `403 reload_required`
+(reload open tabs after upgrading); the page and its scripts are served
+with `Cache-Control: no-cache`, so a reload always gets the current ones.
+WebSockets need an `Origin` whose host is in `JARVIS_ALLOWED_HOSTS` (the
+request's own `Host` is not enough; with `JARVIS_ALLOWED_HOSTS` empty,
+jarvis-web logs `jarvis_websockets_disabled` and refuses every WebSocket).
+CORS is off unless `JARVIS_CORS_ORIGINS` lists exact origins (`*` and
+`null` are refused). Chat session ids are minted by jarvis-web and bound to
+the browser that started them; the binding key derives from
+`SERVICE_API_KEY`, so every replica shares it. Without `SERVICE_API_KEY`
+each process draws its own (logged as
+`jarvis_chat_session_key_per_process`): a chat that moves between replicas
+or survives a restart starts over. Uncached Bearer checks are limited to 10
+a minute per client. `TRUST_CF_CONNECTING_IP=true` (default off) lets the
+per-client rate limits read `Cf-Connecting-Ip`, only when the whole
+forwarding chain is in `TRUSTED_PROXY_CIDRS` (a Cloudflare tunnel); it never
+affects the home rule. chat-embed reads the same variable for its
+per-visitor limit.
+
+`JARVIS_PUBLIC_MODE` was removed: `household` now stops jarvis-web at
+startup (configure the home network instead: shape 1 or 2), and any other
+value is ignored with a warning.
 
 **Denial observability.** Every guard-refused Home Assistant write
 increments the `athena_ha_write_denied_total{domain, scope_mode}` Prometheus

@@ -33,11 +33,12 @@ import contextvars
 import re
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import structlog
 
-from orchestrator.metrics import ha_write_denied_total
+from orchestrator.metrics import ha_write_denied_total, intent_gate_refused_total
 from orchestrator.state import IntentCategory
 from shared.config import get_config
 from shared.guest_policy import apply_guest_baseline, baseline_allowed_domains, guest_baseline, parse_json_array_env
@@ -748,6 +749,65 @@ def degraded_permissions() -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# The public audience (anonymous embed visitors)
+# ---------------------------------------------------------------------------
+
+PUBLIC_CALLER_TRUST = "web_public"
+
+PUBLIC_ALLOWED_INTENTS = frozenset({
+    IntentCategory.WEATHER.value,
+    IntentCategory.GENERAL_INFO.value,
+    IntentCategory.NEWS.value,
+    IntentCategory.RECIPES.value,
+    IntentCategory.STREAMING.value,
+})
+
+PUBLIC_ALLOWED_TOOLS = frozenset({"get_weather", "get_news", "search_recipes", "search_streaming"})
+
+PUBLIC_INTENT_REFUSAL = (
+    "Sorry, I can't help with that here. I can answer general questions, "
+    "or help with the weather, news, recipes, and what's streaming."
+)
+
+
+def public_permissions() -> Dict[str, Any]:
+    """The permission set for an anonymous public caller (an embedded
+    website chatbot, relayed by jarvis-web).
+
+    Hard-coded and never fetched: not the mode service's guest profile,
+    not the degraded baseline, not GUEST_BASELINE_* env. Widening what a
+    rental guest may do must never widen what the internet may do.
+
+    It's a guest dict, so every existing guest branch still fires, and the
+    ``audience`` marker only narrows further. ``restricted_entities [".*"]``
+    denies every HA target before domains are consulted; the ``__none__``
+    domain sentinel stops apply_guest_baseline refilling the baseline
+    domains. Returns a fresh dict each call.
+    """
+    return {
+        "mode": "guest",
+        "audience": "public",
+        "allowed_intents": sorted(PUBLIC_ALLOWED_INTENTS),
+        "restricted_intents": [],
+        "restricted_entities": [".*"],
+        "allowed_domains": ["__none__"],
+    }
+
+
+def is_public_audience(permissions: Optional[Dict[str, Any]]) -> bool:
+    """True when ``permissions`` belong to the public audience. The single
+    way code asks this question after authorization."""
+    return isinstance(permissions, dict) and permissions.get("audience") == "public"
+
+
+def is_public_caller(caller_trust: Optional[str]) -> bool:
+    """True when the calling service classified this request as public.
+    Used before authorization (device lookup, context, session); after
+    authorization ask ``is_public_audience``."""
+    return caller_trust == PUBLIC_CALLER_TRUST
+
+
 def normalize_permissions(permissions: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Normalize a raw permissions dict for use by the guard (D5).
 
@@ -1163,6 +1223,59 @@ noun_for_domains = _noun_for_domains
 
 READ_ONLY_REFUSAL = "I couldn't check that right now."
 
+# Intents whose node refuses them itself, with a domain-specific message,
+# before any dispatch. The intent gate leaves them to their node.
+SELF_GATED_INTENTS = frozenset({
+    IntentCategory.CONTROL,
+    IntentCategory.MUSIC_PLAY,
+    IntentCategory.MUSIC_CONTROL,
+    IntentCategory.TV_CONTROL,
+    IntentCategory.NOTIFICATION_PREF,
+})
+_SELF_GATED_VALUES = frozenset(i.value for i in SELF_GATED_INTENTS)
+
+
+def intent_refusal_message(permissions: Optional[Dict[str, Any]]) -> str:
+    """The one source of intent-refusal wording: public, degraded, or guest."""
+    if is_public_audience(permissions):
+        return PUBLIC_INTENT_REFUSAL
+    if (permissions or {}).get("mode") == "degraded":
+        return DEGRADED_INTENT_REFUSAL
+    return GUEST_INTENT_REFUSAL
+
+
+def intent_gate_refusal(intent: Any, permissions: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The refusal text when ``intent`` isn't allowed, else None. Pure.
+
+    Exempt: no intent and UNKNOWN (chit-chat reaches only the audience's
+    already-narrowed tools). SELF_GATED_INTENTS are left to their node
+    (which refuses before any dispatch with a domain-specific message),
+    except for the public audience: it never enters those nodes at all,
+    since some of them answer house-state reads before their own check.
+    Every entry path asks this before routing: the graph router, the
+    streaming runner and /query's post-graph check.
+    """
+    if intent is None:
+        return None
+    value = getattr(intent, "value", intent)
+    if value == IntentCategory.UNKNOWN.value:
+        return None
+    if is_public_audience(permissions):
+        return None if value in PUBLIC_ALLOWED_INTENTS else PUBLIC_INTENT_REFUSAL
+    if value in _SELF_GATED_VALUES:
+        return None
+    subject = intent if hasattr(intent, "value") else SimpleNamespace(value=str(value))
+    if check_intent_permission(subject, permissions or {}):
+        return None
+    return intent_refusal_message(permissions)
+
+
+def record_intent_gate_refusal(intent: Any, permissions: Optional[Dict[str, Any]]) -> None:
+    audience = "public" if is_public_audience(permissions) else (permissions or {}).get("mode", "unknown")
+    value = getattr(intent, "value", intent)
+    intent_gate_refused_total.labels(audience=audience, intent=str(value)).inc()
+    logger.info("intent_gate_refused", audience=audience, intent=str(value))
+
 
 def permission_refusal_message(
     domains: Iterable[str],
@@ -1182,6 +1295,10 @@ def permission_refusal_message(
     if scope is not None and scope.read_only:
         return READ_ONLY_REFUSAL
     noun = _noun_for_domains(domains)
+    if scope is not None and is_public_audience(scope.permissions):
+        if partial:
+            return f"I did part of that, but I can't control the {noun} from here."
+        return f"Sorry, I can't control the {noun} from here."
     perm_mode = scope.permissions.get("mode") if scope and scope.permissions else "guest"
     if perm_mode == "degraded":
         if partial:
@@ -1202,6 +1319,8 @@ def sequence_refusal_message(decision: HAWriteDecision, scope: "PermissionScope"
         first = decision.denied_targets[0]
         domain = first.split(".")[0] if "." in first else first
     noun = _noun_for_domains([domain] if domain else [])
+    if scope is not None and is_public_audience(scope.permissions):
+        return f"Sorry, I can't schedule that from here -- it includes the {noun}."
     perm_mode = scope.permissions.get("mode") if scope and scope.permissions else "guest"
     if perm_mode == "degraded":
         return f"Sorry, I can't schedule that right now because I couldn't verify permissions -- it includes the {noun}."
@@ -1397,7 +1516,9 @@ class RequestAuthorization:
 
 
 async def resolve_request_authorization(
-    request_mode: Optional[str], guest_info: Optional[Dict[str, Any]]
+    request_mode: Optional[str],
+    guest_info: Optional[Dict[str, Any]],
+    caller_trust: Optional[str] = None,
 ) -> RequestAuthorization:
     """The single mode/permissions resolution path for every orchestrator
     entry point (D7, D6, D5).
@@ -1414,10 +1535,34 @@ async def resolve_request_authorization(
     guest -- fingerprinted or request-asserted -- while the house is
     nominally owner needs the REAL guest allowlist, not the owner
     permissions the server returned for its own mode).
+
+    A public caller (``is_public_caller(caller_trust)``) always gets
+    ``mode="guest"`` with ``public_permissions()``, whatever the server's
+    mode, the guest profile or a degraded mode service say. The mode
+    service is still read, for ``mode_info`` only.
     """
     mode_info = await get_current_mode()
     server_mode = mode_info.get("mode", "owner")
     degraded = bool(mode_info.get("degraded", False))
+
+    if is_public_caller(caller_trust):
+        escalation_ignored = request_mode == "owner"
+        if escalation_ignored:
+            logger.info(
+                "request_mode_escalation_ignored",
+                request_mode=request_mode,
+                effective_mode="guest",
+                server_mode=server_mode,
+            )
+        logger.info("public_audience_resolved", server_mode=server_mode, degraded=degraded)
+        return RequestAuthorization(
+            mode="guest",
+            permissions=normalize_permissions(public_permissions()),
+            server_mode=server_mode,
+            degraded=degraded,
+            escalation_ignored=escalation_ignored,
+            mode_info=mode_info,
+        )
 
     effective_mode = "guest" if (guest_info or request_mode == "guest" or server_mode == "guest") else server_mode
 

@@ -31,6 +31,7 @@ from orchestrator.helpers import (
     get_rag_service_url,
     enhance_query_with_year,
     _fallback_to_web_search,
+    web_search_allowed,
 )
 
 logger = structlog.get_logger(__name__)
@@ -461,6 +462,10 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                     # RAG service failed - fall back to web search
                     await _fallback_to_web_search(state, "Sports", str(e))
 
+        elif state.intent == IntentCategory.WEBSEARCH and not web_search_allowed(state):
+            state.retrieved_data = {}
+            state.data_source = "LLM knowledge (web search unavailable here)"
+
         elif state.intent == IntentCategory.WEBSEARCH:
             # Explicit web search request - use Brave Search via websearch RAG service
             service_url = await get_rag_service_url("websearch")
@@ -539,6 +544,10 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                     logger.error(f"WebSearch: Exception occurred: {e}", exc_info=True)
                     state.retrieved_data = {}
                     state.data_source = f"LLM knowledge (websearch exception)"
+
+        elif not web_search_allowed(state):
+            state.retrieved_data = {}
+            state.data_source = "LLM knowledge (web search unavailable here)"
 
         else:
             # Use intent-based parallel web search for unknown/general queries

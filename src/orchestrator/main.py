@@ -58,6 +58,8 @@ from orchestrator.search_providers.result_fusion import ResultFusion
 
 # Session manager imports
 from orchestrator.session_manager import (
+    CALLER_CLASS_OTHER,
+    CALLER_CLASS_PUBLIC,
     get_session_manager,
     get_session_summary, update_session_summary
 )
@@ -142,7 +144,7 @@ from orchestrator.self_building_tools import (
 
 # Runtime context accessor (Phase 4.2 — sole singleton read/write path)
 from orchestrator.nodes import _runtime
-from orchestrator.nodes import finalize_node, notification_pref_node, retrieve_node, route_control_node, route_info_node, route_music_node, route_tv_node, send_sms_node, synthesize_node, validate_node
+from orchestrator.nodes import finalize_node, intent_refused_node, notification_pref_node, retrieve_node, route_control_node, route_info_node, route_music_node, route_tv_node, send_sms_node, synthesize_node, validate_node
 
 # Helpers extracted to helpers.py (Phase 2.1, ATHENA-10)
 from orchestrator.mode_permission import (
@@ -151,6 +153,12 @@ from orchestrator.mode_permission import (
     ensure_permission_enforcing,
     extract_pin_from_query,
     handle_owner_mode_utterance,
+    intent_gate_refusal,
+    is_public_audience,
+    is_public_caller,
+    PUBLIC_ALLOWED_TOOLS,
+    PUBLIC_INTENT_REFUSAL,
+    record_intent_gate_refusal,
     resolve_request_authorization,
 )
 from orchestrator.write_fanout import caller_fingerprint as compute_caller_fingerprint
@@ -179,6 +187,8 @@ from orchestrator.helpers import (
     query_mentions_location,
     city_phrases,
     is_transit_query,
+    build_query_context,
+    web_search_allowed,
 )
 
 # Event system imports for real-time pipeline monitoring
@@ -367,12 +377,14 @@ def detect_tool_creation_intent(query: str) -> bool:
 async def handle_tool_creation_request(
     query: str,
     session_id: str,
-    user_mode: str
+    user_mode: str,
+    public: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Handle a request to create a new tool.
 
     Returns a response dict if handled, None if tool creation is disabled.
+    The public audience gets its own refusal, never the owner-mode copy.
     """
     # Get the self-building tools manager
     manager = SelfBuildingToolsFactory.get()
@@ -381,6 +393,9 @@ async def handle_tool_creation_request(
     if not await manager.check_enabled():
         logger.info("tool_creation_disabled", query=query[:50])
         return None
+
+    if public:
+        return {"answer": PUBLIC_INTENT_REFUSAL, "intent": "tool_creation", "success": False}
 
     # Only allow owner mode to create tools
     if user_mode != "owner":
@@ -4575,6 +4590,14 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
         timing_breakdown["tool_loading"] = time.time() - tool_load_start
 
+        # The public audience is offered only its hard-coded allowlist. A new
+        # list, so the cached schemas are never narrowed for later callers.
+        if tools and is_public_audience(state.permissions):
+            tools = [t for t in tools if t["function"]["name"] in PUBLIC_ALLOWED_TOOLS]
+        # What this caller may execute: after the mode and public filters,
+        # before the per-intent narrowing below (which only shapes the offer).
+        entitled_tool_names = frozenset(t["function"]["name"] for t in (tools or []))
+
         if not tools:
             logger.warning("No tools available for tool calling")
             state.error = "No tools available"
@@ -4756,20 +4779,23 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
         home_address = DEFAULT_LOCATION  # Permanent home address (for "directions from home")
         search_location = DEFAULT_LOCATION  # Current location for searches (may differ from home)
 
-        # Inject base knowledge context from Admin API
+        # Inject base knowledge context from Admin API. The public audience
+        # gets neither base knowledge nor the home address: its searches use
+        # the city-level default location.
         try:
-            admin_client = get_admin_client()
-            user_mode = _tool_user_mode
-            knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
-            if knowledge_context:
-                system_content += f"\n{knowledge_context}"
-                state.base_knowledge_populated = True
-                logger.info(f"Base knowledge context injected for mode={user_mode} in tool_call")
+            if not is_public_audience(state.permissions):
+                admin_client = get_admin_client()
+                user_mode = _tool_user_mode
+                knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
+                if knowledge_context:
+                    system_content += f"\n{knowledge_context}"
+                    state.base_knowledge_populated = True
+                    logger.info(f"Base knowledge context injected for mode={user_mode} in tool_call")
 
-            # Get permanent home address (for "directions from home" type queries)
-            home_address = await get_home_address_for_user(admin_client, user_mode)
-            search_location = home_address  # Default search location to home
-            logger.info(f"Home address: {home_address}")
+                # Get permanent home address (for "directions from home" type queries)
+                home_address = await get_home_address_for_user(admin_client, user_mode)
+                search_location = home_address  # Default search location to home
+                logger.info(f"Home address: {home_address}")
 
             # Check for location from request entities (browser geolocation)
             # This is set when location is passed in the QueryRequest
@@ -5276,6 +5302,8 @@ If the user is asking to repeat, search again, or modify the previous request, u
                     )
                 except Exception as ctx_err:
                     logger.warning(f"Failed to store direct answer context: {ctx_err}")
+            elif not web_search_allowed(state):
+                state.error = "Unable to process request - no tools selected"
             else:
                 # LLM provided nothing - fallback to web search
                 logger.warning("LLM provided neither tools nor content - attempting web search fallback")
@@ -5360,6 +5388,21 @@ Provide a helpful answer:"""
         max_parallel = settings.get("max_parallel_tools", 3)
         timeout_seconds = settings.get("tool_call_timeout_seconds", 30)
 
+        # Execution-time entitlement: never run a tool this caller wasn't
+        # entitled to be offered, whatever the model emitted.
+        entitled_calls = []
+        for tc in tool_calls:
+            name = tc.get("function", {}).get("name", "")
+            if name in entitled_tool_names:
+                entitled_calls.append(tc)
+            else:
+                logger.warning("tool_call_not_entitled_dropped", tool=name, mode=state.mode)
+        tool_calls = entitled_calls
+        if not tool_calls:
+            state.error = "No entitled tool calls"
+            state.node_timings["tool_call"] = time.time() - start
+            return state
+
         # Limit parallelism
         tool_calls_limited = tool_calls[:max_parallel]
 
@@ -5439,6 +5482,7 @@ Provide a helpful answer:"""
         # Track web fallback timing
         web_fallback_start = time.time()
         web_fallback_occurred = False
+        web_fallback_allowed = web_search_allowed(state)
 
         failed_tools = []
         for tool_call in tool_calls_limited:
@@ -5452,7 +5496,7 @@ Provide a helpful answer:"""
                 logger.warning(f"Tool '{function_name}' failed: {result.get('error')}")
 
         # If any tools failed, try web search fallback (if enabled for that tool)
-        if failed_tools:
+        if failed_tools and web_fallback_allowed:
             logger.info(f"Checking web search fallback for {len(failed_tools)} failed tool(s)")
 
             for tool_call_id, function_name, error_msg in failed_tools:
@@ -5579,7 +5623,7 @@ Provide a helpful answer:"""
             elif result is None or result == {}:
                 is_empty = True
 
-            if is_empty:
+            if is_empty and web_fallback_allowed:
                 logger.warning(f"Tool '{function_name}' returned empty/irrelevant results - triggering web search fallback")
 
                 # Check if web search fallback is enabled for this tool
@@ -5909,6 +5953,20 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
     return state
 
 
+def post_graph_intent_refusal(intent: Any, error: Optional[str], permissions: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The intent gate again after the pipeline ran, on every entry point
+    (/query, both streams, /v1 streaming): defence in depth, since routing
+    already applies it. None when a node already refused (bob M8): that
+    node's domain-specific answer stands."""
+    if error == "permission_denied":
+        return None
+    refusal = intent_gate_refusal(intent, permissions)
+    if refusal:
+        record_intent_gate_refusal(intent, permissions)
+        logger.warning("intent_blocked_post_graph", intent=getattr(intent, "value", intent))
+    return refusal
+
+
 # ============================================================================
 # LangGraph State Machine
 # ============================================================================
@@ -5919,6 +5977,11 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
 # (logger, should_use_tool_calling, is_conversational_reference,
 # IntentCategory) — no closure-scoped dependencies on create_orchestrator_graph.
 async def route_after_classify(state: OrchestratorState) -> str:
+    # One intent gate before any routing: a disallowed intent never
+    # reaches a routing, retrieval or tool node.
+    if intent_gate_refusal(state.intent, state.permissions):
+        return "intent_refused"
+
     # DEBUG: Log routing function call
     logger.info(f"route_after_classify called: intent={state.intent.value if state.intent else None}, confidence={state.confidence}")
 
@@ -6048,6 +6111,7 @@ def create_orchestrator_graph() -> StateGraph:
     graph.add_node("tool_call", tool_call_node)  # Phase 4: Tool calling node
     graph.add_node("send_sms", send_sms_node)  # SMS Integration: "text me that" handler
     graph.add_node("notification_pref", notification_pref_node)  # Notification opt-out/opt-in
+    graph.add_node("intent_refused", intent_refused_node)  # Intent gate refusal
     graph.add_node("finalize", finalize_node)
 
     # Define edges
@@ -6067,7 +6131,8 @@ def create_orchestrator_graph() -> StateGraph:
             "finalize": "finalize",
             "synthesize": "synthesize",  # For continuation responses with context
             "send_sms": "send_sms",  # SMS Integration: Handle "text me that" requests
-            "notification_pref": "notification_pref"  # Notification preferences (opt-out/opt-in)
+            "notification_pref": "notification_pref",  # Notification preferences (opt-out/opt-in)
+            "intent_refused": "intent_refused",  # Disallowed intent: refuse before routing
         }
     )
 
@@ -6085,6 +6150,9 @@ def create_orchestrator_graph() -> StateGraph:
 
     # Notification preferences: goes directly to finalize
     graph.add_edge("notification_pref", "finalize")
+
+    # Intent gate refusal: goes directly to finalize
+    graph.add_edge("intent_refused", "finalize")
 
     # Info path
     graph.add_edge("route_info", "retrieve")
@@ -6164,13 +6232,16 @@ class QueryRequest(BaseModel):
             "never claim owner."
         ),
     )
-    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_public"]] = Field(
+    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_local", "web_public"]] = Field(
         None,
         description=(
             "Set by the calling service in server code, never by an end "
-            "user (ATHENA-69 D24). Gates only the owner-PIN override "
-            "utterance -- absent or 'web_public' means untrusted and the "
-            "PIN path is refused before any throttle or mode-service call."
+            "user (ATHENA-69 D24). Gates the owner-PIN override utterance "
+            "(only PIN_TRUSTED_TIERS may use it; absent, 'web_local' and "
+            "'web_public' are refused before any throttle or mode-service "
+            "call). 'web_public' also selects the public audience: a "
+            "hard-coded narrow allowlist, no guest identity, no base "
+            "knowledge, memories, cache or web search."
         ),
     )
     room: str = Field("unknown", description="Room identifier")
@@ -6204,6 +6275,14 @@ class QueryRequest(BaseModel):
             "never for the device_id guest-session lookup."
         ),
     )
+
+
+def _session_caller_class(request: "QueryRequest") -> str:
+    return CALLER_CLASS_PUBLIC if is_public_caller(request.caller_trust) else CALLER_CLASS_OTHER
+
+
+def _cache_guest_id(guest_info: Optional[Dict[str, Any]]) -> Optional[Any]:
+    return guest_info.get("guest_id") if guest_info else None
 
 
 def _request_caller_fingerprint(request: "QueryRequest", permissions_mode: Optional[str]) -> Optional[str]:
@@ -6257,7 +6336,10 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             guest_info = None
             user_id = request.mode  # Default: use mode as user_id
 
-            if request.device_id:
+            # A public caller never gets a device-identified guest's identity.
+            if is_public_caller(request.caller_trust):
+                user_id = "public"
+            elif request.device_id:
                 admin_client = get_admin_client()
                 guest_info = await admin_client.get_user_session_by_device(request.device_id)
                 if guest_info:
@@ -6281,7 +6363,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
-                zone=request.room
+                zone=request.room,
+                caller_class=_session_caller_class(request),
             )
 
         logger.info(f"Processing query in session {session.session_id}")
@@ -6291,7 +6374,9 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # a narrowing hint only; it can never escalate above the server's
         # own mode.
         with timing_tracker.track("pre_graph", "mode_determination"):
-            authz = await resolve_request_authorization(request.mode, guest_info)
+            authz = await resolve_request_authorization(
+                request.mode, guest_info, caller_trust=request.caller_trust
+            )
             current_mode = authz.mode
             permissions = authz.permissions
 
@@ -6408,7 +6493,9 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # Retrieve relevant memories from Qdrant for context augmentation
         memory_context = ""
         async with timing_tracker.track_async("pre_graph", "memory_retrieval"):
-            if _direct_general_info_response(request.query):
+            if is_public_audience(permissions):
+                logger.info("memory_retrieval_skipped", reason="public_audience")
+            elif _direct_general_info_response(request.query):
                 logger.info("memory_retrieval_skipped", reason="direct_general_info_fast_path", query_preview=request.query[:50])
             else:
                 try:
@@ -6443,12 +6530,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     logger.warning("memory_retrieval_skipped", error=str(e), error_type=type(e).__name__)
 
         # Build context with guest info (if identified via device fingerprint)
-        query_context = dict(request.context) if request.context else {}
-        if guest_info:
-            query_context["guest_id"] = guest_info.get("guest_id")
-            query_context["guest_name"] = guest_info.get("guest_name")
-            query_context["device_type"] = guest_info.get("device_type", "web")
-            query_context["guest_preferences"] = guest_info.get("preferences", {})
+        query_context = build_query_context(request, guest_info)
 
         # Create initial state with conversation history, mode, and permissions
         # Initialize entities with location if provided in request
@@ -6501,15 +6583,17 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             strong_intent_result = detect_strong_intent(request.query)
             detected_strong_intent = strong_intent_result.get("detected_intent") if strong_intent_result.get("has_strong_intent") else None
 
-            # Benchmark flag: skip semantic cache entirely (prevents poisoning N≥20 repeats)
-            if request.skip_semantic_cache:
+            # Benchmark flag: skip semantic cache entirely (prevents poisoning N≥20 repeats).
+            # The public audience never reads the cache.
+            if request.skip_semantic_cache or is_public_caller(request.caller_trust):
                 cached_response = None
             else:
                 cached_response = await get_cached_response(
                     query=request.query,
                     room=request.room,
                     mode=current_mode,
-                    location_override=location_override
+                    location_override=location_override,
+                    guest_id=_cache_guest_id(guest_info),
                 )
 
             # Skip cache if strong intent doesn't match cached intent
@@ -6650,7 +6734,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             tool_result = await handle_tool_creation_request(
                 query=request.query,
                 session_id=session.session_id,
-                user_mode=current_mode
+                user_mode=current_mode,
+                public=is_public_audience(permissions),
             )
 
             if tool_result is not None:
@@ -6683,18 +6768,24 @@ async def process_query(request: QueryRequest) -> QueryResponse:
 
         # Check for memory forget intent BEFORE running the state machine
         try:
-            memory_manager = await get_memory_manager()
-            if memory_manager.should_forget_memory(request.query):
+            memory_manager = None if is_public_audience(permissions) else await get_memory_manager()
+            if memory_manager is not None and memory_manager.should_forget_memory(request.query):
                 logger.info("memory_forget_intent_detected", query=request.query[:50])
 
                 # Extract what to forget
                 forget_content = memory_manager.extract_forget_content(request.query)
 
                 if forget_content:
-                    # Delete matching memories
+                    # Delete matching memories (a guest only within their own session)
+                    forget_guest_session_id = None
+                    if current_mode == "guest" and guest_info:
+                        active_session = await memory_manager.get_active_guest_session()
+                        if active_session:
+                            forget_guest_session_id = active_session.get("id")
                     result = await memory_manager.delete_memory_by_content(
                         search_query=forget_content,
-                        mode=current_mode
+                        mode=current_mode,
+                        guest_session_id=forget_guest_session_id,
                     )
 
                     deleted_count = result.get("deleted", 0)
@@ -6738,25 +6829,15 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         log_continuation_decision(final_state, session.session_id)
         tool_exec_time = time.time() - tool_exec_start
 
-        # Phase 2: Check intent permission AFTER classification. Skipped
-        # when a node already refused (bob M8) -- a route_control_node/
-        # route_music_node/route_tv_node denial already set state.error ==
-        # "permission_denied" and a specific refusal answer; running this
-        # generic check on top would either double-refuse with a less
-        # specific message or (for a non-CONTROL intent a node doesn't
-        # gate) redundantly re-check what authz.permissions already covers.
+        # The intent gate, again after the graph (defence in depth: the graph
+        # router already applies it). Skipped when a node already refused
+        # (bob M8): that node's domain-specific answer stands.
         permission_check_start = time.time()
         intent = final_state.get("intent")
-        node_already_refused = final_state.get("error") == "permission_denied"
-        if not node_already_refused and intent and not check_intent_permission(intent, permissions):
-            logger.warning(
-                "intent_blocked_by_guest_mode",
-                intent=intent.value if hasattr(intent, "value") else intent,
-                mode=current_mode
-            )
-            # Return permission denied response
+        refusal = post_graph_intent_refusal(intent, final_state.get("error"), permissions)
+        if refusal:
             return QueryResponse(
-                answer="I'm sorry, that feature is not available in guest mode.",
+                answer=refusal,
                 intent=intent.value if hasattr(intent, "value") else str(intent),
                 confidence=1.0,
                 citations=[],
@@ -6764,7 +6845,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 or hashlib.md5(f"denied_{time.time()}".encode()).hexdigest()[:8],
                 session_id=session.session_id,
                 processing_time=time.time() - initial_state.start_time,
-                metadata={"model_used": "permission_check", "reasoning_path": ["Permission check: Intent blocked in guest mode"]},
+                metadata={"model_used": "permission_check", "reasoning_path": ["Permission check: intent refused"]},
                 timings=final_state.get("node_timings", {}),
             )
 
@@ -6877,8 +6958,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # Memory creation: Check if this conversation should create a memory
         memory_creation_start = time.time()
         try:
-            memory_manager = await get_memory_manager()
-            if memory_manager.should_create_memory(request.query, answer, intent_str):
+            memory_manager = None if is_public_audience(permissions) else await get_memory_manager()
+            if memory_manager is not None and memory_manager.should_create_memory(request.query, answer, intent_str):
                 # Extract memorable content and calculate importance
                 memorable_content = memory_manager.extract_memorable_fact(request.query, answer, intent_str)
                 importance = memory_manager.calculate_importance(request.query, answer, intent_str)
@@ -6997,6 +7078,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # don't poison the cache for concurrent real traffic.
         should_cache = (
             not request.skip_semantic_cache
+            and not is_public_caller(request.caller_trust)
             and response.answer
             and not final_state.get("is_fallback", False)
             and not _looks_like_fallback(response.answer)
@@ -7014,7 +7096,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                         response=response_dict,
                         room=request.room,
                         mode=current_mode,
-                        location_override=cache_location_override
+                        location_override=cache_location_override,
+                        guest_id=_cache_guest_id(guest_info),
                     )
                 )
             except Exception as cache_err:
@@ -7110,7 +7193,9 @@ async def process_query_stream(request: QueryRequest):
             guest_info = None
             user_id = request.mode  # Default: use mode as user_id
 
-            if request.device_id:
+            if is_public_caller(request.caller_trust):
+                user_id = "public"
+            elif request.device_id:
                 admin_client = get_admin_client()
                 guest_info = await admin_client.get_user_session_by_device(request.device_id)
                 if guest_info:
@@ -7125,12 +7210,15 @@ async def process_query_stream(request: QueryRequest):
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
-                zone=request.room
+                zone=request.room,
+                caller_class=_session_caller_class(request),
             )
 
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares.
-            authz = await resolve_request_authorization(request.mode, guest_info)
+            authz = await resolve_request_authorization(
+                request.mode, guest_info, caller_trust=request.caller_trust
+            )
             current_mode = authz.mode
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
@@ -7205,12 +7293,7 @@ async def process_query_stream(request: QueryRequest):
                 logger.info(f"chat_history_injected", turns=len(conversation_history), source="persistent_sessions")
 
             # Build context with guest info (if identified via device fingerprint)
-            query_context = dict(request.context) if request.context else {}
-            if guest_info:
-                query_context["guest_id"] = guest_info.get("guest_id")
-                query_context["guest_name"] = guest_info.get("guest_name")
-                query_context["device_type"] = guest_info.get("device_type", "web")
-                query_context["guest_preferences"] = guest_info.get("preferences", {})
+            query_context = build_query_context(request, guest_info)
 
             # Initialize state with skip_synthesis flag to get RAG data without LLM call
             request_id = hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8]
@@ -7239,6 +7322,9 @@ async def process_query_stream(request: QueryRequest):
             tool_start_time = time.time()
             state = await run_orchestrator_for_streaming(initial_state)
             log_continuation_decision(state, session.session_id)
+            refusal = post_graph_intent_refusal(state.intent, state.error, authz.permissions)
+            if refusal:
+                state.answer, state.retrieved_data = refusal, {}
             tool_exec_time = time.time() - tool_start_time
 
             if state.retrieved_data:
@@ -7420,7 +7506,9 @@ async def process_query_stream_v2(request: QueryRequest):
             guest_info = None
             user_id = request.mode  # Default: use mode as user_id
 
-            if request.device_id:
+            if is_public_caller(request.caller_trust):
+                user_id = "public"
+            elif request.device_id:
                 admin_client = get_admin_client()
                 guest_info = await admin_client.get_user_session_by_device(request.device_id)
                 if guest_info:
@@ -7435,12 +7523,15 @@ async def process_query_stream_v2(request: QueryRequest):
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
-                zone=request.room
+                zone=request.room,
+                caller_class=_session_caller_class(request),
             )
 
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares.
-            authz = await resolve_request_authorization(request.mode, guest_info)
+            authz = await resolve_request_authorization(
+                request.mode, guest_info, caller_trust=request.caller_trust
+            )
             current_mode = authz.mode
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
@@ -7469,7 +7560,7 @@ async def process_query_stream_v2(request: QueryRequest):
                 history_summary="",
                 permissions=authz.permissions,
                 interface_type=request.interface_type,
-                context=dict(request.context) if request.context else {},
+                context=build_query_context(request, guest_info),
                 memory_context="",
                 timing_tracker=timing_tracker,
                 supports_followup=request.supports_followup,
@@ -7481,6 +7572,9 @@ async def process_query_stream_v2(request: QueryRequest):
             # Run through classification and RAG nodes only (stop before synthesis)
             final_state = await orchestrator_graph.ainvoke(initial_state)
             log_continuation_decision(final_state, session.session_id)
+            refusal = post_graph_intent_refusal(final_state.get("intent"), final_state.get("error"), authz.permissions)
+            if refusal:
+                final_state["answer"] = refusal
 
             intent_value = final_state.get("intent")
             intent_str = intent_value.value if hasattr(intent_value, "value") else str(intent_value)
@@ -7957,14 +8051,15 @@ Response:"""
         interface_type=state.interface_type,
     ) + "\n"
 
-    # Inject base knowledge context from Admin API
+    # Inject base knowledge context from Admin API (never for the public audience)
     try:
-        admin_client = get_admin_client()
-        user_mode = state.mode if state.mode else "guest"
-        knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
-        if knowledge_context:
-            system_context += knowledge_context
-            state.base_knowledge_populated = True
+        if not is_public_audience(state.permissions):
+            admin_client = get_admin_client()
+            user_mode = state.mode if state.mode else "guest"
+            knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
+            if knowledge_context:
+                system_context += knowledge_context
+                state.base_knowledge_populated = True
     except Exception as e:
         logger.warning(f"Failed to fetch base knowledge context for streaming: {e}")
 
@@ -8037,6 +8132,10 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
     # Run classification
     state = await classify_node(state)
 
+    # The same intent gate the graph router applies, before any dispatch.
+    if intent_gate_refusal(state.intent, state.permissions):
+        return await intent_refused_node(state)
+
     # Handle special intents that don't need RAG
     if state.intent == IntentCategory.CONTROL:
         # Control commands - handled by HA, not LLM
@@ -8056,6 +8155,11 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
     if state.intent == IntentCategory.TEXT_ME_THAT:
         # SMS - handled by SMS node
         state = await send_sms_node(state)
+        return state
+
+    if state.intent == IntentCategory.NOTIFICATION_PREF:
+        # Notification preferences - the node gates and writes itself
+        state = await notification_pref_node(state)
         return state
 
     # Check for tool calling (Phase 2 services)
@@ -8248,6 +8352,9 @@ async def chat_completions(request: OpenAIChatRequest):
                 # Run orchestrator through RAG collection (no synthesis)
                 state = await run_orchestrator_for_streaming(initial_state)
                 log_continuation_decision(state, resolved_session.session_id)
+                refusal = post_graph_intent_refusal(state.intent, state.error, authz.permissions)
+                if refusal:
+                    state.answer, state.retrieved_data = refusal, {}
 
                 # Check if already answered by a handler (control, music, TV, SMS)
                 if state.answer:

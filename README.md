@@ -67,8 +67,9 @@ Best for: hands-free operation, whole-home coverage, smart home control.
 
 A lightweight CORS-relay proxy that lets any website embed an Athena-backed chatbot without browser CORS errors. It does NOT render UI itself — it sits between your website's own chat widget and the jarvis-web `/api/chat` endpoint, and fetches the assistant profile and persona from the admin backend at startup so embedders don't need direct access to the admin API.
 
-- **CORS relay** — exposes `/api/chat` and `/api/chat/stream` with configurable `CORS_ORIGINS` so any origin can embed the chatbot
-- **Rate limiting** — per-IP sliding-window rate limiting (`RATE_LIMIT_RPM`, default 30 req/min)
+- **CORS relay** — exposes `/api/chat` and `/api/chat/stream` to the sites listed in `CORS_ORIGINS` (empty by default: no browser can call it until you list your site)
+- **Public audience** — authenticates to jarvis-web with `JARVIS_RELAY_KEY`; every visitor is served as the public audience (general questions, weather, news, recipes, what's streaming), never the household
+- **Rate limiting** — per-visitor sliding-window rate limiting (`RATE_LIMIT_RPM`, default 20 req/min)
 - **Profile endpoint** — `/api/profile` returns the assistant name and identity fetched from the admin backend, letting your widget display the correct persona
 - **Source tagging** — marks all relayed requests with a `SOURCE_TAG` for analytics attribution
 

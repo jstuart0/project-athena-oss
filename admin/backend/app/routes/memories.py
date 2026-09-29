@@ -14,18 +14,21 @@ import re
 import uuid
 import json
 import asyncio
-from typing import List, Optional, Dict, Any
+from dataclasses import dataclass
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
-from sqlalchemy import func as sql_func, or_
+from sqlalchemy import false, func as sql_func, or_
 from pydantic import BaseModel, Field
 import structlog
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, Memory, GuestSession, MemoryConfig, Feature
+from app.routes.internal import require_service_key_401
+from app.utils.service_auth import verify_service_or_oidc
 from app.utils.url_validators import redact_url_userinfo
 
 logger = structlog.get_logger()
@@ -187,10 +190,99 @@ def extract_keywords(query: str) -> List[str]:
     return stems
 
 
+# =============================================================================
+# Scope rules (one place decides what a caller may read, delete and create)
+# =============================================================================
+
+@dataclass(frozen=True)
+class MemoryScopes:
+    """What one caller may touch. ``"guest"`` in a tuple means the guest
+    memories of ``guest_session_id`` only, never other guests'."""
+    readable: Tuple[str, ...]
+    deletable: Tuple[str, ...]
+    create_scope: Optional[str]
+    guest_session_id: Optional[int]
+
+
+def _memory_scopes(mode: Optional[str], guest_session_id: Optional[int]) -> MemoryScopes:
+    """Owner: read and delete global + owner, create owner. Any other mode
+    is a guest (fail closed): with a session, read global + that session's
+    guest memories, delete only those, create guest; without one, read
+    global only, delete nothing, create nothing."""
+    if mode == "owner":
+        return MemoryScopes(("global", "owner"), ("global", "owner"), "owner", None)
+    if guest_session_id:
+        return MemoryScopes(("global", "guest"), ("guest",), "guest", guest_session_id)
+    return MemoryScopes(("global",), (), None, None)
+
+
+def _scope_sql_filter(scope_names: Tuple[str, ...], guest_session_id: Optional[int]):
+    """SQL rendering of a scope set; an empty set matches nothing."""
+    clauses = []
+    for name in scope_names:
+        if name == "guest":
+            clauses.append((Memory.scope == "guest") & (Memory.guest_session_id == guest_session_id))
+        else:
+            clauses.append(Memory.scope == name)
+    return or_(*clauses) if clauses else false()
+
+
+def _scope_qdrant_filter(scope_names: Tuple[str, ...], guest_session_id: Optional[int]):
+    """Qdrant rendering of a scope set; None when the set is empty (the
+    caller must then not search at all)."""
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+    conditions = []
+    for name in scope_names:
+        if name == "guest":
+            conditions.append(Filter(must=[
+                FieldCondition(key="scope", match=MatchValue(value="guest")),
+                FieldCondition(key="guest_session_id", match=MatchValue(value=guest_session_id)),
+            ]))
+        else:
+            conditions.append(FieldCondition(key="scope", match=MatchValue(value=name)))
+    return Filter(should=conditions) if conditions else None
+
+
+MEMORY_READER_ROLES = frozenset({"owner", "operator"})
+
+
+async def require_memory_reader(
+    request: Request,
+    db: Session = Depends(get_db),
+    x_service_key: Optional[str] = Header(default=None, alias="X-Service-Key"),
+) -> None:
+    """Service key, or a signed-in user allowed to read household memories.
+
+    verify_service_or_oidc authenticates (401 on neither). On the user
+    branch the user also needs the 'read' permission and an owner/operator
+    role: memories of every scope are household data.
+    """
+    await verify_service_or_oidc(request, db, x_service_key)
+    if x_service_key:
+        return
+    from app.auth.oidc import get_optional_user, optional_security
+
+    user = await get_optional_user(
+        credentials=await optional_security(request),
+        x_api_key=request.headers.get("X-API-Key"),
+        db=db,
+        request=request,
+    )
+    if user is None or not user.has_permission("read") or user.role not in MEMORY_READER_ROLES:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+
+def _row_in_scopes(memory: Memory, scope_names: Tuple[str, ...], guest_session_id: Optional[int]) -> bool:
+    if memory.scope == "guest":
+        return "guest" in scope_names and memory.guest_session_id == guest_session_id
+    return memory.scope in scope_names
+
+
 async def keyword_search_memories(
     db: Session,
     keywords: List[str],
-    mode: str = "owner",
+    mode: str = "guest",
     guest_session_id: Optional[int] = None,
     limit: int = 5
 ) -> List[Dict[str, Any]]:
@@ -202,18 +294,8 @@ async def keyword_search_memories(
         return []
 
     try:
-        # Build scope filter
-        if mode == "guest" and guest_session_id:
-            scope_filter = or_(
-                Memory.scope == "global",
-                (Memory.scope == "guest") & (Memory.guest_session_id == guest_session_id)
-            )
-        else:
-            # Owner mode
-            scope_filter = or_(
-                Memory.scope == "global",
-                Memory.scope == "owner"
-            )
+        scopes = _memory_scopes(mode, guest_session_id)
+        scope_filter = _scope_sql_filter(scopes.readable, scopes.guest_session_id)
 
         # Build keyword filter (any keyword matches)
         keyword_filters = [Memory.content.ilike(f"%{kw}%") for kw in keywords]
@@ -514,7 +596,7 @@ async def create_memory(
     return new_memory.to_dict()
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_memory_reader)])
 async def list_memories(
     scope: Optional[str] = Query(None, description="Filter by scope (global/owner/guest)"),
     guest_session_id: Optional[int] = Query(None, description="Filter by guest session"),
@@ -526,7 +608,7 @@ async def list_memories(
     """
     List memories with optional filtering.
 
-    Public endpoint (no auth) to allow internal service calls.
+    Requires X-Service-Key or a signed-in user.
     """
     query = db.query(Memory).filter(Memory.is_deleted == False)
 
@@ -562,7 +644,7 @@ async def list_memories(
 # Static Routes (MUST be defined BEFORE dynamic /{memory_id} routes)
 # =============================================================================
 
-@router.post("/search")
+@router.post("/search", dependencies=[Depends(require_memory_reader)])
 async def search_memories(
     request: MemorySearchRequest,
     db: Session = Depends(get_db)
@@ -570,41 +652,17 @@ async def search_memories(
     """
     Scoped semantic search over memories.
 
-    - Guest mode: Returns global + current guest session memories
-    - Owner mode: Returns global + all owner memories
+    - Owner: global + owner memories
+    - Guest with a session: global + that session's guest memories
+    - Anything else (guest without a session, unknown mode): global only
 
-    Public endpoint (no auth) to allow orchestrator calls.
+    Requires X-Service-Key or a signed-in user.
     """
     if not await check_qdrant_available():
         return {"results": [], "qdrant_available": False}
 
-    # Build filter based on mode
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
-
-    if request.mode == "guest":
-        if not request.guest_session_id:
-            raise HTTPException(status_code=400, detail="Guest mode requires guest_session_id")
-
-        # Guest sees: global OR their specific session
-        filter_condition = Filter(
-            should=[
-                FieldCondition(key="scope", match=MatchValue(value="global")),
-                Filter(
-                    must=[
-                        FieldCondition(key="scope", match=MatchValue(value="guest")),
-                        FieldCondition(key="guest_session_id", match=MatchValue(value=request.guest_session_id))
-                    ]
-                )
-            ]
-        )
-    else:
-        # Owner sees: global OR owner scope
-        filter_condition = Filter(
-            should=[
-                FieldCondition(key="scope", match=MatchValue(value="global")),
-                FieldCondition(key="scope", match=MatchValue(value="owner"))
-            ]
-        )
+    scopes = _memory_scopes(request.mode, request.guest_session_id)
+    filter_condition = _scope_qdrant_filter(scopes.readable, scopes.guest_session_id)
 
     # Generate query embedding
     query_vector = embed_text(request.query)
@@ -736,7 +794,7 @@ async def create_guest_session(
     return new_session.to_dict()
 
 
-@router.get("/guest-sessions/active")
+@router.get("/guest-sessions/active", dependencies=[Depends(require_memory_reader)])
 async def get_active_guest_session(db: Session = Depends(get_db)):
     """Get the currently active guest session (if any)."""
     session = db.query(GuestSession).filter(GuestSession.status == 'active').first()
@@ -810,10 +868,10 @@ async def seed_default_config(
 # Internal API Static Routes (before /{memory_id})
 # =============================================================================
 
-@router.get("/internal/search")
+@router.get("/internal/search", dependencies=[Depends(require_service_key_401)])
 async def internal_memory_search(
     query: str,
-    mode: str = "owner",
+    mode: str = "guest",
     guest_session_id: Optional[int] = None,
     limit: int = Query(default=3, le=10),
     db: Session = Depends(get_db)
@@ -930,10 +988,10 @@ async def internal_memory_search(
         return {"results": [], "qdrant_available": False}
 
 
-@router.post("/internal/create")
+@router.post("/internal/create", dependencies=[Depends(require_service_key_401)])
 async def internal_create_memory(
     content: str,
-    mode: str = "owner",
+    mode: str = "guest",
     guest_session_id: Optional[int] = None,
     category: str = "conversation",
     importance: float = 0.5,
@@ -954,11 +1012,10 @@ async def internal_create_memory(
     if importance < float(threshold):
         return {"created": False, "reason": "below_importance_threshold"}
 
-    # Determine scope
-    if mode == "guest" and guest_session_id:
-        scope = "guest"
-    else:
-        scope = "owner"
+    scopes = _memory_scopes(mode, guest_session_id)
+    scope = scopes.create_scope
+    if scope is None:
+        return {"created": False, "reason": "guest_without_session"}
 
     try:
         # Generate embedding and store
@@ -1025,38 +1082,29 @@ async def internal_create_memory(
         return {"created": False, "reason": str(e)}
 
 
-@router.post("/internal/forget")
+@router.post("/internal/forget", dependencies=[Depends(require_service_key_401)])
 async def internal_forget_memory(
     search_query: str,
-    mode: str = "owner",
+    mode: str = "guest",
     min_score: float = 0.4,
+    guest_session_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
     """
     Internal endpoint for orchestrator to delete memories by content search.
-    Searches for matching memories and deletes them.
+    Searches for matching memories the caller may delete and deletes them:
+    an owner deletes global + owner memories; a guest only their own
+    session's guest memories; a guest without a session nothing.
     """
+    scopes = _memory_scopes(mode, guest_session_id)
+    if not scopes.deletable:
+        return {"deleted": 0, "message": "Nothing this caller may forget"}
+
     if not await check_qdrant_available():
         return {"deleted": 0, "error": "Qdrant unavailable"}
 
     try:
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
-
-        # Build filter based on mode (same as search)
-        if mode == "owner":
-            filter_condition = Filter(
-                should=[
-                    FieldCondition(key="scope", match=MatchValue(value="global")),
-                    FieldCondition(key="scope", match=MatchValue(value="owner"))
-                ]
-            )
-        else:
-            # Guest mode - would need guest_session_id
-            filter_condition = Filter(
-                should=[
-                    FieldCondition(key="scope", match=MatchValue(value="global"))
-                ]
-            )
+        filter_condition = _scope_qdrant_filter(scopes.deletable, scopes.guest_session_id)
 
         # Generate query embedding
         query_vector = embed_text(search_query)
@@ -1082,7 +1130,11 @@ async def internal_forget_memory(
         for hit in results:
             # Find in PostgreSQL
             memory = db.query(Memory).filter(Memory.vector_id == str(hit.id)).first()
-            if memory and not memory.is_deleted:
+            if (
+                memory
+                and not memory.is_deleted
+                and _row_in_scopes(memory, scopes.deletable, scopes.guest_session_id)
+            ):
                 # Soft delete in PostgreSQL
                 memory.is_deleted = True
                 memory.deleted_at = datetime.utcnow()
@@ -1126,7 +1178,7 @@ async def internal_forget_memory(
 # Qdrant Health Static Route (before /{memory_id})
 # =============================================================================
 
-@router.get("/qdrant/health")
+@router.get("/qdrant/health", dependencies=[Depends(require_memory_reader)])
 async def qdrant_health():
     """Check Qdrant connection and collection status."""
     available = await check_qdrant_available()

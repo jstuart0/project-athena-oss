@@ -50,7 +50,6 @@ admin/backend/tests/test_phase4_health_poller.py	generic-rfc1918-192-168	assert 
 admin/backend/tests/test_security_hardening.py	generic-rfc1918-192-168	("192.168.1.5", "192.168.1.5"),	generic RFC1918 example/CIDR-constant, not the maintainer's subnet
 admin/backend/tests/test_service_manager_resolution.py	generic-rfc1918-192-168	pytest.param("192.168.1.5", "none", id="bare_ip"),	generic RFC1918 example/CIDR-constant, not the maintainer's subnet
 apps/jarvis-web/k8s/deployment.yaml	generic-rfc1918-192-168	#   YOUR_LOCAL_CIDR  - your LAN CIDR (e.g., 192.168.0.0/16 or 10.0.0.0/8)	generic RFC1918 example/CIDR-constant, not the maintainer's subnet
-apps/jarvis-web/k8s/deployment.yaml	generic-rfc1918-192-168	# REQUIRED: replace YOUR_LOCAL_CIDR with your LAN's CIDR (e.g., 192.168.0.0/16, 10.0.0.0/8)	generic RFC1918 example/CIDR-constant, not the maintainer's subnet
 manifests/athena-prod/config.yaml	generic-rfc1918-192-168	#   CONTROL_AGENT_URL: "http://192.168.1.100:8099"	generic RFC1918 example/CIDR-constant, not the maintainer's subnet
 src/control_agent/url_validator.py	generic-rfc1918-192-168	ip_network("192.168.0.0/16"),	generic RFC1918 example/CIDR-constant, not the maintainer's subnet
 src/shared/config.py	generic-rfc1918-192-168	#   ``10.0.0.0/8`` or ``192.168.0.0/16``) re-opens the entire RFC1918	generic RFC1918 example/CIDR-constant, not the maintainer's subnet
