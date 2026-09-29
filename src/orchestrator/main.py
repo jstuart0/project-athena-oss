@@ -6755,10 +6755,16 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 forget_content = memory_manager.extract_forget_content(request.query)
 
                 if forget_content:
-                    # Delete matching memories
+                    # Delete matching memories (a guest only within their own session)
+                    forget_guest_session_id = None
+                    if current_mode == "guest" and guest_info:
+                        active_session = await memory_manager.get_active_guest_session()
+                        if active_session:
+                            forget_guest_session_id = active_session.get("id")
                     result = await memory_manager.delete_memory_by_content(
                         search_query=forget_content,
-                        mode=current_mode
+                        mode=current_mode,
+                        guest_session_id=forget_guest_session_id,
                     )
 
                     deleted_count = result.get("deleted", 0)
