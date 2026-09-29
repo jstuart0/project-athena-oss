@@ -98,7 +98,7 @@ _DEVICE_NOUN = (
     r"thermostat(?:s)?|heat(?:ing)?|\bac\b|a/c|air conditioning|hvac|furnace|"
     r"tv|television|speaker(?:s)?|music|media|fan(?:s)?)"
 )
-_DEVICE_NOUN_RE = re.compile(_DEVICE_NOUN, re.I)
+_DEVICE_NOUN_RE = re.compile(rf"\b{_DEVICE_NOUN}\b", re.I)  # whole words: "locked" is not a lock
 
 _STATE_WORDS = (
     r"\b(?:on|off|open|opened|closed|locked|unlocked|playing|running|paused|"

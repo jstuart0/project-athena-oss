@@ -84,6 +84,12 @@ REFERENT_QUESTIONS = [
     "did those come back on?",
     "is it on",
     "are they off",
+    "is it locked",
+    "are they unlocked",
+    # Named member: a referent question that also matches a status
+    # pattern ("status of"), so it proves referents never reach the bulk
+    # optimizer.
+    "what's the status of those",
 ]
 
 IMPERATIVE_CORPUS = [
@@ -342,6 +348,9 @@ EXPECTED_ROOMS = {
     "did those come back on?": None,
     "is it on": None,
     "are they off": None,
+    "is it locked": None,
+    "are they unlocked": None,
+    "what's the status of those": None,
     "turn off the office lights": "office",
     "turn the office lights on": "office",
     "switch off the kitchen light": "kitchen",
@@ -699,6 +708,13 @@ class TestQuestionCorpusNeverWrites:
                 if not any(term in answer for term in _ANSWER_TERMS[uk.device_type or "light"]):
                     failures.append((q, "answer_not_about_device", uk.device_type, result.answer))
         assert not failures, failures
+
+    def test_a_referent_question_matches_a_status_pattern(self):
+        """Population check for the test below: without a referent that the
+        bulk optimizer's patterns would accept, 'referents never reach the
+        optimizer' can't be observed."""
+        assert _real_detect_status_query_type("what's the status of those")
+        assert classify_utterance("what's the status of those").needs_referent
 
     def test_referent_questions_without_context_read_under_read_only(self):
         """No context to resolve against: the referent question reaches
