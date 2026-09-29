@@ -87,6 +87,15 @@ spec:
         #   value: "192.0.2.14/32"
         # - name: JARVIS_ALLOWED_HOSTS
         #   value: "jarvis.example.com"
+        # Sign-in from the internet (edge mode): see the Deployment snippet
+        # in optional/jarvis-web-edge-auth.yaml (attestation Secret, household
+        # groups, sign-in host).
+        # Website chatbot relay (chat-embed); the same Secret on chat-embed:
+        # - name: JARVIS_RELAY_KEY
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: jarvis-relay
+        #       key: relay-key
         resources:
           requests:
             memory: "128Mi"

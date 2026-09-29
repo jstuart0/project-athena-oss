@@ -699,12 +699,42 @@ own container, wherever you host it) and point it at jarvis-web:
 # apps/chat-embed/.env
 ATHENA_CHAT_URL=http://<your-jarvis-web>/api/chat
 STREAM_URL=http://<your-jarvis-web>:3001/api/chat/stream
+JARVIS_RELAY_KEY=<the same value as jarvis-web's JARVIS_RELAY_KEY>
+CORS_ORIGINS=https://www.example.com
+# TRUSTED_PROXY_CIDRS=<the proxy in front of chat-embed, if any>
 ```
 
-`STREAM_URL` **must** point at jarvis-web's own streaming endpoint, never at
-the orchestrator directly — chat-embed sends no `X-Service-Key`, and the
-orchestrator's `/query/stream` rejects an unauthenticated caller under the
-default `ORCHESTRATOR_INGRESS_AUTH=enforce`.
+Build it from the repository root: `docker build -f apps/chat-embed/Dockerfile .`
+
+- `STREAM_URL` **must** point at jarvis-web's own streaming endpoint, never
+  at the orchestrator directly — chat-embed sends no `X-Service-Key`, and
+  the orchestrator's `/query/stream` rejects an unauthenticated caller under
+  the default `ORCHESTRATOR_INGRESS_AUTH=enforce`.
+- `JARVIS_RELAY_KEY` must match jarvis-web's (at least 32 characters). If
+  they differ, every message fails and chat-embed logs
+  `jarvis_relay_rejected`. Deploy chat-embed with the key before upgrading
+  jarvis-web.
+- `CORS_ORIGINS` must list the site that embeds the chat; with it empty no
+  browser can call chat-embed (it logs "embed disabled for browsers until
+  CORS_ORIGINS is set"). `*` is refused.
+- Every visitor is the public audience: weather, news, recipes, what's
+  streaming and general questions, nothing about the house.
+- Visitors are limited to `RATE_LIMIT_RPM` (default 20) messages a minute
+  each.
+
+In the embedding page, render the stream's terminal events and keep the
+message list announced to screen readers:
+
+```html
+<div id="chat-messages" aria-live="polite"></div>
+```
+
+- `{"type": "error", "reason": "rate_limited"}` (or HTTP `429` from
+  `/api/chat`): "You're going a bit fast. Please wait a minute, then try
+  again."
+- `{"type": "error"}`: "Something went wrong. Please try again."
+- `{"type": "done", "session_id": ...}`: send that `session_id` with the
+  next message to continue the conversation.
 
 #### Deploy RAG Services
 

@@ -114,6 +114,21 @@ spec:
         - name: MAX_TEMP
           value: "75"
         # Voice services (STT/TTS)
+        # Who may use jarvis-web (see docs/CONFIGURATION.md, "jarvis-web: who
+        # may use it"). Without these every browser gets 401. Placeholders only.
+        # - name: TRUSTED_PROXY_CIDRS
+        #   value: "10.42.0.0/16"          # your Traefik pods
+        # - name: JARVIS_LOCAL_NETWORKS
+        #   value: "192.0.2.0/24"          # YOUR_LOCAL_CIDR, same as the IngressRoute's route H
+        # - name: JARVIS_ALLOWED_HOSTS
+        #   value: "YOUR_DOMAIN_HERE"
+        # - name: JARVIS_HOUSEHOLD_GROUPS
+        #   value: "household"
+        # - name: JARVIS_EDGE_ATTESTATION_SECRET
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: jarvis-edge-attestation
+        #       key: current
         - name: VOICE_API_URL
           value: "http://voice-service:10201"
         resources:
