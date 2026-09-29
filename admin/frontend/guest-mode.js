@@ -340,18 +340,33 @@ function _gmTimezoneText(modeStatus) {
 }
 
 // The mode service's reason carries a raw ISO checkout ("(until 2026-...)");
-// show it in the reader's locale instead.
-function _gmFormatReason(reason) {
+// show it in the property's timezone when that zone is valid (the stay's
+// times are the property's), else in the browser's.
+function _gmFormatReason(reason, modeStatus) {
+    const options = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+    if (modeStatus && modeStatus.property_timezone_valid === true && modeStatus.property_timezone) {
+        options.timeZone = modeStatus.property_timezone;
+    }
     return String(reason || '').replace(/\(until ([0-9]{4}-[0-9]{2}-[0-9]{2}T[^)]+)\)/, (match, iso) => {
         const when = new Date(iso);
         if (Number.isNaN(when.getTime())) return match;
-        const text = when.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+        let text;
+        try {
+            text = when.toLocaleString('en-US', options);
+        } catch (e) {
+            // A zone the browser doesn't know: fall back to its own.
+            delete options.timeZone;
+            text = when.toLocaleString('en-US', options);
+        }
         return `(until ${text})`;
     });
 }
 
 function _gmUnreachableMessage(modeStatus) {
     const error = modeStatus.error;
+    if (error === 'mode_service_url_invalid') {
+        return 'MODE_SERVICE_URL on admin-backend isn\'t a valid http(s) URL (check the host and port, for example http://athena-mode-service:8022) and restart admin-backend.';
+    }
     if (error === 'mode_service_url_unset') {
         return 'Admin-backend has no mode service address. Set MODE_SERVICE_URL on admin-backend (for example http://athena-mode-service:8022) and restart it.';
     }
@@ -376,7 +391,7 @@ function _gmUnreachableMessage(modeStatus) {
     return 'The mode service couldn\'t be reached. Check that its pod is running and look at its logs.';
 }
 
-function _modeStatusWarnings(modeStatus, { guestModeEnabled, hasCurrentGuests }) {
+function _modeStatusWarnings(modeStatus, { guestModeEnabled, hasCurrentGuests, calendarUrlSet }) {
     // Unreachable is the banner's own headline; repeating it here adds nothing.
     if (!modeStatus.reachable) return [];
     const warnings = [];
@@ -388,6 +403,11 @@ function _modeStatusWarnings(modeStatus, { guestModeEnabled, hasCurrentGuests })
         warnings.push('Degraded mode refuses locks, cameras and other restricted devices for everyone. Check that the mode service can reach admin-backend; it recovers on its next successful fetch.');
     } else if (['expired', 'never_loaded'].includes(modeStatus.bookings_status)) {
         warnings.push(`Booking data is ${_GM_BOOKINGS_STATUS_WORDS[modeStatus.bookings_status]}. Check that the mode service can reach admin-backend.`);
+    }
+    const advisoryUnusable = Object.values(modeStatus.bookings_sources || {})
+        .some(src => src && src.required === false && ['never_loaded', 'expired'].includes(src.status));
+    if (calendarUrlSet && advisoryUnusable) {
+        warnings.push('The legacy iCal URL on this page isn\'t being read, so its bookings are ignored. It must be an https:// URL the mode service can reach; a private host needs SITESCRAPER_ALLOWED_PRIVATE_HOSTS.');
     }
     if (modeStatus.property_timezone_valid === false) {
         warnings.push('The property timezone is invalid, so booking times are read as UTC. Set DEFAULT_TIMEZONE to an IANA zone (for example America/New_York) on admin-backend and the mode service.');
@@ -490,6 +510,7 @@ async function updateGuestModeStatus() {
     const warnings = _modeStatusWarnings(modeStatus, {
         guestModeEnabled: config ? config.enabled : undefined,
         hasCurrentGuests,
+        calendarUrlSet: !!(config && config.calendar_url),
     });
     const warningBanner = warnings.length ? `
         <div class="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-200 text-sm mt-3 space-y-1">
@@ -507,7 +528,7 @@ async function updateGuestModeStatus() {
                 <span class="text-2xl" aria-hidden="true">${escapeHtml(theme.icon)}</span>
                 <div>
                     <div class="${escapeHtml(theme.title)}">Mode: ${escapeHtml(theme.label)}</div>
-                    <div class="${escapeHtml(theme.body)}">${escapeHtml(_gmFormatReason(modeStatus.reason))}</div>
+                    <div class="${escapeHtml(theme.body)}">${escapeHtml(_gmFormatReason(modeStatus.reason, modeStatus))}</div>
                     <div class="${escapeHtml(theme.meta)}">${escapeHtml(_gmMetadataLine(modeStatus))}</div>
                     <div class="${escapeHtml(theme.meta)}">${escapeHtml(dbLine)}</div>
                 </div>
@@ -833,6 +854,8 @@ function getStatusClass(status) {
             return 'badge-warning';
         case 'cancelled':
             return 'bg-red-900/20 text-red-400';
+        case 'blocked':
+            return 'bg-gray-800 text-gray-400';
         default:
             return '';
     }
