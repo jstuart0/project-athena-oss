@@ -1553,3 +1553,27 @@ class TestSequenceImperativeStepUnderHardLimit:
         result = _run(_drive())
         assert result == "Sequence complete."
         assert client.call_service.await_count == 8
+
+
+class TestReplyNormalizationIsLinear:
+    """A long run of "!"/"?"/"." that doesn't end the input made the old
+    end-anchored `[.!?]+$` patterns quadratic (40 K chars: ~6 s)."""
+
+    CRAFTED = "yes" + "!" * 100_000 + "x"
+    BUDGET_SECONDS = 0.5
+
+    def test_normalize_reply_is_linear(self):
+        t0 = _time_mod.perf_counter()
+        write_fanout.normalize_reply(self.CRAFTED)
+        assert _time_mod.perf_counter() - t0 < self.BUDGET_SECONDS
+
+    def test_anaphora_types_are_linear(self):
+        from orchestrator.context.detector import _compute_anaphora_types
+        t0 = _time_mod.perf_counter()
+        _compute_anaphora_types(self.CRAFTED)
+        assert _time_mod.perf_counter() - t0 < self.BUDGET_SECONDS
+
+    def test_trailing_punctuation_still_stripped(self):
+        from orchestrator.context.detector import _compute_anaphora_types
+        assert write_fanout.normalize_reply("Yes, please!!?") == "yes please"
+        assert "yes_no" in _compute_anaphora_types("yes please?!.")

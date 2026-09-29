@@ -70,7 +70,7 @@ def normalize_reply(query: Optional[str]) -> str:
     """5.3 rule 0: lowercase, strip trailing punctuation, remove commas,
     collapse whitespace -- STT emits "Yes, please." for a bare yes."""
     q = (query or "").strip().lower()
-    q = re.sub(r"[.!?]+$", "", q).replace(",", "")
+    q = q.rstrip(".!?").replace(",", "")  # rstrip: linear on any input
     return re.sub(r"\s+", " ", q).strip()
 
 _VERB_FOR_SERVICE = {
