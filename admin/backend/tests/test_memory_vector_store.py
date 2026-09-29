@@ -600,10 +600,16 @@ def test_module_scoped_client_starts_no_maintenance(module_client):
 # ---------------------------------------------------------------------------
 
 DRIFT_PATTERNS = [
-    r"QdrantClient\(",
-    r"athena_memories",
+    r"PointStruct",
+    r"PointIdsList",
     r"query_points\(",
-    r"from qdrant_client import QdrantClient",
+    r"\.upsert\(",
+    r"\.retrieve\(",
+    r"athena_memories",
+    r"from qdrant_client",
+    r"QdrantClient\(",
+    r"COLLECTION_NAME",
+    r"TextEmbedding\(",
 ]
 DRIFT_ALLOWLIST = {
     ("app/routes/rag_connectors.py", r"QdrantClient\("),
@@ -626,3 +632,9 @@ def test_no_direct_qdrant_access_outside_module():
     assert len(scanned) >= 90
     assert "app/routes/memories.py" in scanned
     assert violations == set()
+
+
+def test_transitional_helpers_are_gone():
+    for path in sorted(APP_DIR.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        assert "_client_or_none" not in text and "_embed_one_or_empty" not in text, path

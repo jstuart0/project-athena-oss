@@ -358,7 +358,29 @@ def collection_info() -> Dict[str, Any]:
     vectors_count = getattr(info, "vectors_count", None)
     if vectors_count is None:
         vectors_count = getattr(info, "indexed_vectors_count", 0)
-    return {"points_count": getattr(info, "points_count", 0), "vectors_count": vectors_count}
+    return {"collection": COLLECTION_NAME, "points_count": getattr(info, "points_count", 0),
+            "vectors_count": vectors_count}
+
+
+def describe() -> Dict[str, Any]:
+    """The vector store's side of the status report (URL redacted)."""
+    state = get_state()
+    report: Dict[str, Any] = {
+        "url": redact_url_userinfo(QDRANT_URL),
+        "collection": COLLECTION_NAME,
+        "state": state.status,
+        "detail": state.detail,
+    }
+    if state.status in (UNAVAILABLE, EMBEDDER_UNAVAILABLE):
+        report["status"] = "unavailable"
+        return report
+    try:
+        report.update(collection_info())
+    except Exception as exc:
+        report.update(status="error", error=_error_text(exc))
+        return report
+    report["status"] = "healthy" if state.status == READY else "error"
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -493,19 +515,50 @@ def delete_points(ids: Iterable[str]) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# Transitional (Phase 1 only): the write paths not yet moved to store_vector
-# ---------------------------------------------------------------------------
+def _upsert(vector_id: str, vector: Sequence[float], payload: Dict[str, Any]) -> None:
+    from qdrant_client.models import PointStruct
 
-def _client_or_none():
-    return _get_client() if _collection_state().status == READY else None
+    _get_client().upsert(
+        collection_name=COLLECTION_NAME,
+        points=[PointStruct(id=vector_id, vector=list(vector), payload=payload)],
+        wait=True,
+    )
 
 
-def _embed_one_or_empty(text: str) -> List[float]:
-    try:
-        return embed([text])[0]
-    except EmbeddingUnavailable:
-        return []
+def store_vector(memory) -> bool:
+    """Embed ``memory`` and upsert its point under its own ``vector_id``;
+    the only path that sets ``vector_status='stored'``. On any failure the
+    row is left ``pending`` (the pending pass retries it). Never raises and
+    never commits: the caller owns the transaction."""
+    state = get_state()
+    reason = state.status
+    error = state.detail
+    if state.status in (READY, EMBEDDER_UNAVAILABLE):
+        try:
+            vector = embed([memory.content])[0]
+        except EmbeddingUnavailable as exc:
+            reason, error = EMBEDDER_UNAVAILABLE, str(exc)
+        else:
+            for attempt in (0, 1):
+                try:
+                    _upsert(memory.vector_id, vector, build_payload(memory))
+                    memory.vector_status = "stored"
+                    return True
+                except Exception as exc:
+                    if attempt == 0 and _is_not_found(exc):
+                        logger.warning("memory_vector_collection_not_found", operation="upsert")
+                        _invalidate()
+                        retry_state = _collection_state()
+                        if retry_state.status == READY:
+                            continue
+                        reason, error = retry_state.status, retry_state.detail
+                        break
+                    reason, error = "upsert_error", _error_text(exc)
+                    _mark_unavailable(exc)
+                    break
+    memory.vector_status = "pending"
+    logger.error("memory_vector_store_failed", memory_id=memory.id, reason=reason, error=error)
+    return False
 
 
 # ---------------------------------------------------------------------------

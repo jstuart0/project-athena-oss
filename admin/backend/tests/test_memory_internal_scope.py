@@ -74,6 +74,7 @@ def _memory(db, content, scope, guest_session_id=None, vector_id=None):
     memory = Memory(
         content=content, scope=scope, guest_session_id=guest_session_id,
         vector_id=vector_id or str(uuid.uuid4()), category="fact", importance=0.9, source_type="conversation",
+        vector_status="stored",
     )
     db.add(memory)
     db.commit()
