@@ -229,8 +229,10 @@ def _gate_writes(
 
     # D7 rule 1: an explicit scope cue in the utterance text always
     # proceeds, evaluated before the unbounded/imperative/threshold
-    # checks.
-    if _has_explicit_scope_cue(original_query, scope_hint):
+    # checks. Never for a question ("are all the lights on?"): a question
+    # reaches a write only when routing was bypassed (kill switch), and
+    # "all" there names what is asked about, not what to change.
+    if uk.kind != UtteranceKind.STATE_QUESTION and _has_explicit_scope_cue(original_query, scope_hint):
         ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome="exempt_scope").inc()
         return None
 

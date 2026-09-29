@@ -17,12 +17,17 @@ import structlog
 
 from orchestrator.nodes._runtime import get_music_handler
 from orchestrator.state import IntentCategory, OrchestratorState
-from orchestrator.helpers import store_conversation_context
+from orchestrator.helpers import get_feature_config, store_conversation_context
 from orchestrator.mode_permission import (
     HAWritePermissionDenied,
     check_intent_permission,
     ha_permission_scope,
     permission_refusal_message,
+)
+from orchestrator.utterance_kind import (
+    STATE_QUESTION_KILL_SWITCH_FLAG,
+    UtteranceKind,
+    classify_utterance,
 )
 
 logger = structlog.get_logger(__name__)
@@ -80,11 +85,18 @@ async def route_music_node(state: OrchestratorState) -> OrchestratorState:
             state.node_timings["route_music"] = time.time() - start
             return state
 
+        # ATHENA-128: a state question ("is music playing") runs under a
+        # read-only scope here too -- defence in depth, since its parse
+        # already yields a read (now_playing). The kill switch reverts it.
+        uk = classify_utterance(state.query)
+        kill_switch = (await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)).get("enabled", False)
         with ha_permission_scope(
             state.permissions,
             mode=state.mode,
             request_id=state.request_id,
             session_id=state.session_id,
+            read_only=(uk.kind == UtteranceKind.STATE_QUESTION and not kill_switch),
+            utterance=uk,
         ) as scope:
             n0 = len(scope.denials)
             w0 = scope.allowed_writes

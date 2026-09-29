@@ -1526,8 +1526,10 @@ Return ONLY the JSON, no other text."""
                     query=query[:80],
                 )
                 intent["action"] = "get_status"
+                # The label is the classifier's noun-map device type, never
+                # the LLM's free-text device_type (closed label set).
                 state_question_routed_total.labels(
-                    device_type=intent.get("device_type") or utterance.device_type or "unknown",
+                    device_type=utterance.device_type or "unknown",
                     path="llm_coerced",
                 ).inc()
             return intent

@@ -445,12 +445,22 @@ class TestSequenceStepFanoutRefusal:
             ):
                 return await executor.execute_sequence(steps, session_id="seq-1", background=False)
 
+        recorded = []
+        real_steps = executor._execute_sequence_steps
+
+        async def _spy(*a, **kw):
+            results = await real_steps(*a, **kw)
+            recorded.append(results)
+            return results
+
+        executor._execute_sequence_steps = _spy
         result = _run(_drive())
         assert client.call_service.await_count == 0
-        assert "skipped" in result.lower()
-        step_results = executor._last_results.get("seq-1")
+        step_results = recorded[0]
         assert step_results == [{"step": 1, "status": "refused_fanout", "message": step_results[0]["message"]}]
+        assert "say:" in step_results[0]["message"]
         assert not step_results[0]["message"].endswith("?")
+        assert result == f"Sequence complete. Skipped: {step_results[0]['message']}"
         assert write_fanout.take_block() is None
 
     def test_sequence_step_over_hard_limit_refused_background(self, monkeypatch):
@@ -464,14 +474,17 @@ class TestSequenceStepFanoutRefusal:
             ):
                 ack = await executor.execute_sequence(steps, session_id="seq-2", background=True)
                 task = executor._running_sequences.get("seq-2")
-                if task is not None:
-                    await task
-                return ack
+                assert task is not None
+                return ack, await task
 
-        ack = _run(_drive())
+        with mock.patch("orchestrator.sequence_executor.logger") as seq_logger:
+            ack, step_results = _run(_drive())
         assert client.call_service.await_count == 0
-        step_results = executor._last_results.get("seq-2")
         assert step_results[0]["status"] == "refused_fanout"
+        assert any(
+            "sequence_step_fanout_refused" in str(c.args[0]) for c in seq_logger.warning.call_args_list
+        ), seq_logger.warning.call_args_list
+        assert "seq-2" not in executor._running_sequences
         assert write_fanout.take_block() is None
 
 
@@ -1248,3 +1261,47 @@ class TestFingerprintNeedsIdentity:
     def test_either_identity_input_is_enough(self):
         assert write_fanout.caller_fingerprint("household", None, "office", "owner")
         assert write_fanout.caller_fingerprint(None, "ha-device-1", "office", "owner")
+
+
+# ---------------------------------------------------------------------------
+# Reconcile: a question's "all" is not a scope cue; the sequence executor
+# keeps no per-session state
+# ---------------------------------------------------------------------------
+
+class TestQuestionScopeCueIsNotAnExemption:
+    def test_all_in_a_question_is_counted(self, monkeypatch):
+        """Only reachable with routing bypassed (kill switch): the gate
+        sees the real STATE_QUESTION and must not read its "all" as an
+        explicit write scope."""
+        monkeypatch.setattr(write_fanout, "get_config", lambda: _fake_config(threshold=6, hard_limit=18))
+        q = "are all the office lights on"
+        assert classify_utterance(q).kind == UtteranceKind.STATE_QUESTION
+        with _scope(q) as scope:
+            r = write_fanout.gate("light", "turn_off", tuple(f"light.{i}" for i in range(12)), q)
+            assert r is not None
+            assert scope.fanout_block is not None
+
+    def test_all_in_a_command_still_exempts(self, monkeypatch):
+        """Positive control."""
+        monkeypatch.setattr(write_fanout, "get_config", lambda: _fake_config(threshold=6, hard_limit=18))
+        q = "turn off all the office lights"
+        with _scope(q):
+            assert write_fanout.gate("light", "turn_off", tuple(f"light.{i}" for i in range(30)), q) is None
+
+
+class TestSequenceExecutorKeepsNoPerSessionState:
+    def test_no_per_session_results_accumulate(self, monkeypatch):
+        monkeypatch.setattr(write_fanout, "get_config", lambda: _fake_config(threshold=6, hard_limit=10))
+        em = _FakeEntityManagerSeq(n=12)
+        controller = shc.SmartHomeController(entity_manager=em, llm_router=MagicMock())
+        executor = SequenceExecutor(controller, _raw_ha_client_seq())
+        steps = [{"action": "turn_off", "target": {"device_type": "light", "room": "office"}}]
+
+        async def _drive(session_id):
+            with mp.ha_permission_scope({"mode": "owner"}, mode="owner", utterance=classify_utterance("turn off the office lights")):
+                return await executor.execute_sequence(steps, session_id=session_id, background=False)
+
+        for i in range(3):
+            _run(_drive(f"seq-{i}"))
+        assert set(vars(executor)) == {"smart_controller", "ha_client", "_running_sequences"}
+        assert executor._running_sequences == {}

@@ -39,6 +39,11 @@ class UtteranceClassification:
 
 UNKNOWN_CLASSIFICATION = UtteranceClassification(kind=UtteranceKind.UNKNOWN, rule="kill_switch")
 
+# Admin feature flag (inverted, seeded disabled): when enabled, the nodes
+# that open an HA permission scope route as if every utterance were
+# UNKNOWN (no read-only scope, legacy status gating).
+STATE_QUESTION_KILL_SWITCH_FLAG = "state_question_routing_kill_switch"
+
 
 # ---------------------------------------------------------------------------
 # Vocabulary (D2, 2.2 rules 2-5)

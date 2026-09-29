@@ -747,6 +747,43 @@ class TestReverseBugCommandsSkipBulkOptimizer:
             assert spy.await_count == 0, q
 
 
+def _is_reuse_aware_test(test):
+    """`current_ha_scope() is None`."""
+    return (
+        isinstance(test, _ast.Compare)
+        and isinstance(test.left, _ast.Call)
+        and getattr(test.left.func, "id", getattr(test.left.func, "attr", None)) == "current_ha_scope"
+        and len(test.ops) == 1 and isinstance(test.ops[0], _ast.Is)
+        and isinstance(test.comparators[0], _ast.Constant) and test.comparators[0].value is None
+    )
+
+
+def _classify_scope_openers(tree):
+    """[(Call, conditional)] for every ha_permission_scope(...) call. A call
+    is conditional only as the body of `... if current_ha_scope() is None
+    else ...` (the reuse-aware form)."""
+    conditional_ids = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.IfExp) and _is_reuse_aware_test(node.test) and isinstance(node.body, _ast.Call):
+            conditional_ids.add(id(node.body))
+    found = []
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) == "ha_permission_scope":
+            found.append((node, id(node) in conditional_ids))
+    return sorted(found, key=lambda t: t[0].lineno)
+
+
+def _scan_scope_openers():
+    results = []
+    for path in sorted(Path("src/orchestrator").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "ha_permission_scope(" not in text:
+            continue
+        for call, conditional in _classify_scope_openers(_ast.parse(text)):
+            results.append((str(path), call, conditional))
+    return results
+
+
 class TestScopeReopenDrift:
     """3.6(g): route_control_node opens exactly one ha_permission_scope(
     whose read_only= keyword references uk; every scope opener reachable
@@ -769,19 +806,52 @@ class TestScopeReopenDrift:
         names_in_expr = {n.id for n in _ast.walk(read_only_kw.value) if isinstance(n, _ast.Name)}
         assert "uk" in names_in_expr
 
+    NODE_ENTRY_OPENERS = {
+        "src/orchestrator/nodes/route_control.py",
+        "src/orchestrator/nodes/route_music.py",
+        "src/orchestrator/nodes/route_tv.py",
+    }
+
     def test_unconditional_scope_openers_are_exactly_the_node_entry_set(self):
-        import subprocess
-        out = subprocess.run(
-            ["grep", "-rn", "ha_permission_scope(", "src/orchestrator"],
-            capture_output=True, text=True,
-        ).stdout
-        unconditional_files = set()
-        for line in out.splitlines():
-            path = line.split(":", 1)[0]
-            if "nodes/route_control.py" in path or "nodes/route_music.py" in path or "nodes/route_tv.py" in path:
-                unconditional_files.add(path.split("/")[-1])
+        openers = _scan_scope_openers()
+        unconditional = {path for path, call, conditional in openers if not conditional}
+        assert unconditional == self.NODE_ENTRY_OPENERS
+        outside_nodes = [(p, c) for p, c, _ in openers if "/nodes/" not in p]
+        assert all(cond for p, _, cond in openers if "/nodes/" not in p), outside_nodes
+        conditional_files = {p for p, _, cond in openers if cond}
+        assert len([1 for _, _, cond in openers if cond]) >= 3
+        assert "src/orchestrator/smart_home_controller.py" in conditional_files
+
+    def test_every_node_entry_opener_passes_read_only_from_the_classifier(self):
+        for path, call, conditional in _scan_scope_openers():
+            if conditional:
                 continue
-        assert unconditional_files == {"route_control.py", "route_music.py", "route_tv.py"}
+            read_only_kw = next((kw for kw in call.keywords if kw.arg == "read_only"), None)
+            assert read_only_kw is not None, path
+            names = {n.id for n in _ast.walk(read_only_kw.value) if isinstance(n, _ast.Name)}
+            assert "uk" in names, (path, _ast.unparse(read_only_kw.value))
+
+    def test_scanner_flags_an_unconditional_opener_outside_nodes(self):
+        src = (
+            "import contextlib\n"
+            "def f():\n"
+            "    with ha_permission_scope(None, mode='system'):\n"
+            "        pass\n"
+            "def g():\n"
+            "    cm = ha_permission_scope(None, mode='system') if current_ha_scope() is None else contextlib.nullcontext()\n"
+            "    with cm:\n"
+            "        pass\n"
+        )
+        found = _classify_scope_openers(_ast.parse(src))
+        assert [cond for _, cond in found] == [False, True]
+
+    def test_scanner_rejects_a_conditional_on_the_wrong_test(self):
+        src = (
+            "import contextlib\n"
+            "def f(x):\n"
+            "    cm = ha_permission_scope(None) if x else contextlib.nullcontext()\n"
+        )
+        assert [cond for _, cond in _classify_scope_openers(_ast.parse(src))] == [False]
 
 
 class TestGuestQuestionStillDenied:
@@ -904,3 +974,118 @@ class TestConfiguredAssistantNameRouting:
             assert _time.perf_counter() - t0 < 1.0
         finally:
             self._reset_cache()
+
+
+# ---------------------------------------------------------------------------
+# Music and TV nodes: a state question runs under a read-only scope
+# ---------------------------------------------------------------------------
+
+import orchestrator.tv_handler as _tv_handler_module
+from orchestrator.nodes import route_music_node, route_tv_node
+from orchestrator.state import IntentCategory
+
+_TV_CONFIGS = {"living room": {"media_player_entity_id": "media_player.living_room", "display_name": "living room"}}
+
+
+def _node_state(query, intent):
+    state = OrchestratorState(query=query)
+    state.intent = intent
+    state.mode = "owner"
+    state.permissions = {"mode": "owner"}
+    state.room = "living room"
+    state.session_id = "sess-node"
+    state.node_timings = {}
+    state.retrieved_data = {}
+    return state
+
+
+def _drive_tv(query, *, kill_switch=False):
+    _runtime.reset_for_test()
+    raw = _raw_ha_client_3_6()
+    _runtime.set_tv_handler(_tv_handler_module.AppleTVHandler(raw, mock.MagicMock()))
+    with (
+        mock.patch.object(_tv_handler_module, "get_tv_configs", new_callable=mock.AsyncMock, return_value=_TV_CONFIGS),
+        mock.patch("orchestrator.nodes.route_tv.get_feature_config", new_callable=mock.AsyncMock,
+                   return_value={"enabled": kill_switch}),
+        mock.patch("orchestrator.nodes.route_tv.store_conversation_context", new_callable=mock.AsyncMock),
+    ):
+        out = _run(route_tv_node(_node_state(query, IntentCategory.TV_CONTROL)))
+    return out, raw
+
+
+class TestTvNodeQuestionsAreReadOnly:
+    def test_past_tense_question_never_powers_the_tv(self):
+        """"did you turn off the tv" parses to a power-off; the read-only
+        scope denies it before the HA client."""
+        assert classify_utterance("did you turn off the tv").kind == UtteranceKind.STATE_QUESTION
+        out, raw = _drive_tv("did you turn off the tv")
+        assert raw.call_service.await_count == 0, raw.call_service.await_args_list
+        assert out.answer == READ_ONLY_REFUSAL
+
+    def test_command_still_powers_the_tv(self):
+        """Positive control: the same harness records the write for a
+        command."""
+        out, raw = _drive_tv("turn off the tv")
+        assert [c.args[:2] for c in raw.call_service.await_args_list] == [("media_player", "turn_off")]
+
+    def test_kill_switch_reverts_the_read_only_scope(self):
+        out, raw = _drive_tv("did you turn off the tv", kill_switch=True)
+        assert raw.call_service.await_count == 1
+
+
+class _ScopeRecordingMusicHandler:
+    def __init__(self):
+        self.read_only_seen = []
+
+    async def parse_music_control_intent(self, query, room=None):
+        return {"action": "now_playing" if "playing" in query else "pause", "room": room}
+
+    async def handle_control(self, action, room=None, volume_level=None):
+        self.read_only_seen.append(current_ha_scope().read_only)
+        return "Nothing is playing in the living room right now."
+
+
+def _drive_music(query, *, kill_switch=False):
+    _runtime.reset_for_test()
+    handler = _ScopeRecordingMusicHandler()
+    _runtime.set_music_handler(handler)
+    with (
+        mock.patch("orchestrator.nodes.route_music.get_feature_config", new_callable=mock.AsyncMock,
+                   return_value={"enabled": kill_switch}),
+        mock.patch("orchestrator.nodes.route_music.store_conversation_context", new_callable=mock.AsyncMock),
+    ):
+        _run(route_music_node(_node_state(query, IntentCategory.MUSIC_CONTROL)))
+    return handler
+
+
+class TestMusicNodeQuestionsAreReadOnly:
+    def test_is_music_playing_runs_read_only(self):
+        assert _drive_music("is music playing").read_only_seen == [True]
+
+    def test_music_command_runs_writable(self):
+        assert _drive_music("pause the music").read_only_seen == [False]
+
+    def test_kill_switch_reverts_the_read_only_scope(self):
+        assert _drive_music("is music playing", kill_switch=True).read_only_seen == [False]
+
+
+# ---------------------------------------------------------------------------
+# Metric labels come from the classifier, never from LLM text
+# ---------------------------------------------------------------------------
+
+class TestCoercionMetricLabelIsClosed:
+    def test_llm_device_type_never_becomes_a_label(self):
+        hostile = _HostileLLMRouter(response_text=(
+            '{"device_type": "attacker-chosen-label", "room": "office", "action": "turn_off", '
+            '"target_scope": "group", "parameters": {}}'
+        ))
+        controller = shc.SmartHomeController(entity_manager=_FakeEntityManager3_6(), llm_router=hostile)
+        metric = mock.MagicMock()
+        with mock.patch("orchestrator.metrics.state_question_routed_total", metric), \
+                mock.patch.object(shc, "get_admin_client") as admin:
+            admin.return_value.get_component_model = mock.AsyncMock(return_value=None)
+            for q, expected in (("did those come back on?", "unknown"), ("is the office lamp on?", "light")):
+                metric.reset_mock()
+                intent = _run(controller.extract_intent(q, utterance=classify_utterance(q)))
+                assert intent["action"] == "get_status"
+                metric.labels.assert_called_once_with(device_type=expected, path="llm_coerced")

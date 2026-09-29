@@ -154,10 +154,6 @@ class SequenceExecutor:
         self.smart_controller = smart_controller
         self.ha_client = ensure_permission_enforcing(ha_client)
         self._running_sequences: Dict[str, asyncio.Task] = {}
-        # ATHENA-128 4.7: per-session step results for the admin/debug
-        # view -- includes refused_fanout entries the background branch
-        # has no other surface for.
-        self._last_results: Dict[str, List[Dict]] = {}
 
     async def execute_sequence(
         self,
@@ -291,9 +287,9 @@ class SequenceExecutor:
             # Clean up
             if session_id and session_id in self._running_sequences:
                 del self._running_sequences[session_id]
-            if session_id:
-                self._last_results[session_id] = step_results
 
+        # The synchronous caller reports refused steps; for a background
+        # run the sequence_step_fanout_refused log is the record.
         return step_results
 
     async def _execute_step(self, step: Dict, step_num: int, total_steps: int):

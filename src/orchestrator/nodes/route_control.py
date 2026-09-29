@@ -55,6 +55,7 @@ from orchestrator.automation_agent import should_use_automation_agent
 from orchestrator.mode_permission import READ_ONLY_REFUSAL
 from orchestrator.metrics import state_question_routed_total
 from orchestrator.utterance_kind import (
+    STATE_QUESTION_KILL_SWITCH_FLAG,
     UtteranceKind,
     classify_utterance,
 )
@@ -472,7 +473,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
         # IMPERATIVE/explicit-scope exemptions keep working. ``uk`` drives
         # every OTHER routing decision in this node and is substituted to
         # UNKNOWN when the kill switch is enabled (legacy behaviour).
-        kill_switch_config = await get_feature_config("state_question_routing_kill_switch")
+        kill_switch_config = await get_feature_config(STATE_QUESTION_KILL_SWITCH_FLAG)
         state_question_kill_switch = kill_switch_config.get("enabled", False)
         real_uk = classify_utterance(state.query, assistant_names=await _configured_assistant_names())
         uk = _KILL_SWITCH_CLASSIFICATION if state_question_kill_switch else real_uk
