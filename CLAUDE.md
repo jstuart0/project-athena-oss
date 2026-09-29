@@ -106,13 +106,13 @@ Project Athena is an AI-powered smart home assistant with voice interface, RAG (
 | `helpers.py` | 17 stateless helpers. Helpers that need runtime singletons call `_runtime.get_X()` at call time (Pattern 1). |
 | `mode_permission.py` | Mode/permission resolution and the HA-write permission guard (ATHENA-69). Entry points: `resolve_request_authorization` (server-derived mode/permissions, D6/D7), `handle_owner_mode_utterance` (the sole PIN-utterance path, D24), `authorize_ha_write`/`authorize_automation_config`/`authorize_sequence` (pure authorization checks), `ha_permission_scope`/`current_ha_scope` (per-request `ContextVar` scope), `PermissionEnforcingHAClient`/`ensure_permission_enforcing` (the write-interception wrapper), plus the original 6 mode helpers (`get_current_mode`, `detect_owner_mode_command`, `extract_pin_from_query`, `activate_owner_override`, `check_intent_permission`, `check_entity_permission`) and `OWNER_MODE_PATTERNS`. See "HA write authorization (ATHENA-69)" below. |
 | `urls.py` | 25 service URL constants (23 RAG + `MODE_SERVICE_URL` + `NOTIFICATIONS_SERVICE_URL`); canonical env spelling `RAG_<NAME>_URL`, legacy `<NAME>_RAG_URL` accepted with a warning. |
-| `metrics.py` | 10 Prometheus metric objects (`request_counter`, `request_duration`, `node_duration`, `tool_call_breakdown`, `validation_counter`, `hallucination_counter`, `validation_layer_duration`, `ha_write_denied_total`, `state_question_routed_total`, `ha_write_fanout_confirm_total`). |
+| `metrics.py` | 11 Prometheus metric objects (`request_counter`, `request_duration`, `node_duration`, `tool_call_breakdown`, `validation_counter`, `hallucination_counter`, `validation_layer_duration`, `ha_write_denied_total`, `state_question_routed_total`, `ha_write_fanout_confirm_total`, `intent_gate_refused_total`). |
 | `utterance_kind.py` | Stdlib-only `classify_utterance(q) -> UtteranceClassification` (`STATE_QUESTION` / `IMPERATIVE` / `UNKNOWN`, plus room, device type, `needs_referent`). Computed once per turn in `route_control_node` and passed down; English-only. |
 | `write_fanout.py` | The write fan-out gate (ATHENA-128): `gate`/`gate_many` (bind-and-check before any task list or `call_service(`), `take_block`, `pending_carrier` (sole setter of `PermissionScope.can_carry_pending`), `confirmed`, `caller_fingerprint`, `rewording`, `BARE_AFFIRMATION_RE`/`BARE_NEGATION_RE`/`normalize_reply`. |
 
 **`nodes/` package at `src/orchestrator/nodes/`**
 
-`nodes/__init__.py` exports all 10 node functions via `__all__`. Each node module also contains one or more proxy classes that defer singleton access to `_runtime.get_X()` at call time.
+`nodes/__init__.py` exports all 11 node functions via `__all__`. Each node module also contains one or more proxy classes that defer singleton access to `_runtime.get_X()` at call time.
 
 | Module | Node function |
 |---|---|
@@ -122,6 +122,7 @@ Project Athena is an AI-powered smart home assistant with voice interface, RAG (
 | `synthesize.py` | `synthesize_node` |
 | `validate.py` | `validate_node` |
 | `finalize.py` | `finalize_node` |
+| `intent_refused.py` | `intent_refused_node` (the intent gate's refusal; `intent_gate_refusal` in `mode_permission.py` decides, and the graph router, the streaming runner and `/query` all ask it) |
 | `route_control.py` | `route_control_node` |
 | `route_music.py` | `route_music_node` |
 | `route_tv.py` | `route_tv_node` |
