@@ -900,6 +900,46 @@
             }
         }
 
+        /* Session ended / reload notices */
+        .session-banner, .jarvis-notice {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            padding: 12px 16px;
+            background: var(--error);
+            color: #ffffff;
+            font-size: 0.9375rem;
+        }
+        .session-banner[hidden] { display: none; }
+        .session-banner button, .jarvis-notice button {
+            min-height: 44px;
+            padding: 8px 16px;
+            border: 2px solid #ffffff;
+            border-radius: var(--radius-sm);
+            background: transparent;
+            color: #ffffff;
+            font: inherit;
+            cursor: pointer;
+        }
+        .session-banner button:focus-visible, .jarvis-notice button:focus-visible { outline: 3px solid #ffffff; outline-offset: 2px; }
+
+        /* View-only controls (guest stay, guest network) */
+        .control-note {
+            padding: 8px 16px;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            text-align: center;
+        }
+        .control-note[hidden] { display: none; }
+        .control-note a { color: inherit; margin-left: 8px; }
+        body.controls-disabled .tv-apps button,
+        body.controls-disabled .temp-btn,
+        body.controls-disabled .tv-power-btn { opacity: 0.5; pointer-events: none; }
+        .mode-menu-option[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+        .signed-in { font-size: 0.8125rem; color: var(--text-secondary); }
+        .signed-in[hidden] { display: none; }
+
         /* Error message */
         .error-toast {
             position: fixed;
@@ -1701,6 +1741,10 @@
 </head>
 <body>
     <div class="app">
+        <div class="session-banner" id="session-banner" role="alert" hidden>
+            <span id="session-banner-text"></span>
+            <button type="button" id="session-banner-action"></button>
+        </div>
         <header class="header">
             <div class="header-title">
                 <div class="logo">J</div>
@@ -1715,8 +1759,8 @@
                     </svg>
                 </button>
 
-                <!-- Mode Badge -->
-                <div style="position: relative;">
+                <!-- Mode Badge (revealed once /api/mode answers) -->
+                <div style="position: relative;" id="mode-indicator" hidden>
                     <div class="mode-badge owner" id="mode-badge" title="Click to change mode">
                         <span class="mode-icon">🏠</span>
                         <span id="mode-text">Owner</span>
@@ -1741,6 +1785,10 @@
                     <span class="status-dot" id="status-dot"></span>
                     <span id="status-text">Connecting...</span>
                 </div>
+                <span class="signed-in" id="signed-in" hidden>
+                    <span id="signed-in-name"></span>
+                    <a id="signout-link" href="#" hidden>Sign out</a>
+                </span>
                 <button class="temp-toggle" id="temp-toggle" title="Temperature Control">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>
@@ -1754,6 +1802,10 @@
                 </button>
             </div>
         </header>
+        <div class="control-note" id="control-note" tabindex="0" hidden>
+            <span id="control-note-text"></span>
+            <a id="signin-link" href="#" hidden>Household sign-in</a>
+        </div>
 
         <!-- Location Bar (shown when using current location) -->
         <div class="location-bar" id="location-bar">
@@ -1960,6 +2012,111 @@
                 localStorage.setItem('jarvis_session', id);
             }
         }
+
+        // What this caller may do (from /api/welcome), and the timers a
+        // signed-out page must stop.
+        let capabilities = null;
+        let healthTimer = null;
+        let modeTimer = null;
+        const DRAFT_KEY = 'jarvis_draft';
+        const CONTROL_IDS = ['temp-down', 'temp-up', 'tv-power'];
+        const CONTROL_NOTES = {
+            guest_stay: 'Controls are view-only during a guest stay.',
+            guest_network: 'Controls are view-only on the guest network.',
+        };
+
+        function saveDraft(text) {
+            try {
+                if (text) sessionStorage.setItem(DRAFT_KEY, text);
+            } catch (e) { /* storage unavailable */ }
+        }
+
+        function restoreDraft() {
+            try {
+                const draft = sessionStorage.getItem(DRAFT_KEY);
+                if (draft) {
+                    messageInput.value = draft;
+                    sendButton.disabled = false;
+                    sessionStorage.removeItem(DRAFT_KEY);
+                }
+            } catch (e) { /* storage unavailable */ }
+        }
+
+        function canControl() {
+            return !capabilities || capabilities.control !== false;
+        }
+
+        function applyCapabilities(caps) {
+            capabilities = caps || {};
+            const allowed = canControl();
+            document.body.classList.toggle('controls-disabled', !allowed);
+            for (const id of CONTROL_IDS) {
+                const el = document.getElementById(id);
+                if (!el) continue;
+                el.disabled = !allowed;
+                if (allowed) el.removeAttribute('aria-describedby');
+                else el.setAttribute('aria-describedby', 'control-note-text');
+            }
+            document.querySelectorAll('.mode-menu-option').forEach((option) => {
+                option.setAttribute('aria-disabled', allowed ? 'false' : 'true');
+                if (allowed) option.removeAttribute('aria-describedby');
+                else option.setAttribute('aria-describedby', 'control-note-text');
+            });
+
+            const note = document.getElementById('control-note');
+            const noteText = document.getElementById('control-note-text');
+            const signinLink = document.getElementById('signin-link');
+            const noteCopy = CONTROL_NOTES[capabilities.control_reason];
+            note.hidden = allowed || !noteCopy;
+            noteText.textContent = noteCopy || '';
+            // The household sign-in link only during a guest stay (never on
+            // the guest network).
+            const signinUrl = capabilities.control_reason === 'guest_stay' ? capabilities.signin_url : null;
+            signinLink.hidden = !signinUrl;
+            if (signinUrl) signinLink.href = signinUrl;
+
+            const signedIn = document.getElementById('signed-in');
+            const nameEl = document.getElementById('signed-in-name');
+            const signoutLink = document.getElementById('signout-link');
+            nameEl.textContent = capabilities.display_name || '';
+            signoutLink.hidden = !(capabilities.signed_in && capabilities.logout_url);
+            if (!signoutLink.hidden) signoutLink.href = capabilities.logout_url;
+            signedIn.hidden = !(capabilities.display_name || !signoutLink.hidden);
+        }
+
+        function showSessionBanner() {
+            const banner = document.getElementById('session-banner');
+            const text = document.getElementById('session-banner-text');
+            const action = document.getElementById('session-banner-action');
+            if (capabilities && capabilities.signed_in) {
+                text.textContent = 'Your sign-in has expired.';
+                action.textContent = 'Sign in again';
+            } else {
+                text.textContent = "This device doesn't look like it's on the home network anymore.";
+                action.textContent = 'Try again';
+            }
+            action.onclick = () => {
+                saveDraft(messageInput.value);
+                window.location.reload();
+            };
+            banner.hidden = false;  // role="alert" announces it; focus stays put
+        }
+
+        // The session ended (auth proxy redirect or 401): say so once, keep
+        // the draft, and stop everything that would keep retrying.
+        window.jarvisSession.onSessionEnded(() => {
+            showSessionBanner();
+            setStatus('offline', 'Signed out');
+            if (healthTimer) clearInterval(healthTimer);
+            if (modeTimer) clearInterval(modeTimer);
+            try { if (maClient) maClient.disconnect(); } catch (e) { /* already closed */ }
+            try {
+                if (musicPlayer && musicPlayer.sendspinClient) musicPlayer.sendspinClient.disconnect();
+            } catch (e) { /* already closed */ }
+            if (livekitClient) livekitClient.disconnect().catch(() => {});
+            voiceStatus.textContent = 'Signed out';
+            saveDraft(messageInput.value);
+        });
         let isWelcomeVisible = true;
 
         const chatContainer = document.getElementById('chat-container');
@@ -2504,10 +2661,11 @@
             setupInputHandlers();
             setupVoiceHandlers();
             setupModeHandlers();
+            restoreDraft();
             // Check health every 30 seconds
-            setInterval(checkHealth, 30000);
+            healthTimer = setInterval(checkHealth, 30000);
             // Check mode every 60 seconds (in case guest status changes)
-            setInterval(loadModeState, 60000);
+            modeTimer = setInterval(loadModeState, 60000);
         });
 
         // =============================================================================
@@ -2656,6 +2814,7 @@
         // =============================================================================
 
         async function checkHealth() {
+            if (window.jarvisSession.isSignedOut()) return;
             try {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 5000);
@@ -2693,11 +2852,13 @@
         // =============================================================================
 
         async function loadModeState() {
+            if (window.jarvisSession.isSignedOut()) return;
             try {
                 const response = await jarvisFetch(`${API_BASE}/api/mode`);
                 if (response.ok) {
                     currentModeState = await response.json();
                     updateModeUI();
+                    document.getElementById('mode-indicator').hidden = false;
                 }
             } catch (error) {
                 console.error('Failed to load mode:', error);
@@ -2781,9 +2942,9 @@
             });
 
             // Mode option handlers
-            modeAuto.addEventListener('click', () => setMode(null));
-            modeOwner.addEventListener('click', () => setMode('owner'));
-            modeGuest.addEventListener('click', () => setMode('guest'));
+            modeAuto.addEventListener('click', () => canControl() && setMode(null));
+            modeOwner.addEventListener('click', () => canControl() && setMode('owner'));
+            modeGuest.addEventListener('click', () => canControl() && setMode('guest'));
         }
 
         async function setMode(mode) {
@@ -2828,6 +2989,7 @@
                     const data = await response.json();
                     welcomeTitle.textContent = data.greeting;
                     welcomeSubtitle.textContent = data.subtitle;
+                    applyCapabilities(data.capabilities);
 
                     // Render suggestions
                     suggestionsContainer.innerHTML = data.suggestions
@@ -2970,7 +3132,9 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error('Failed to get response');
+                    const failure = new Error('Failed to get response');
+                    failure.status = response.status;
+                    throw failure;
                 }
 
                 // Remove typing indicator and create assistant bubble for streaming
@@ -3050,7 +3214,19 @@
 
             } catch (error) {
                 removeTyping(typingId);
-                showError('Sorry, something went wrong. Please try again.');
+                if (window.jarvisSession.isSignedOut() || error.status === 429) {
+                    // Keep what they typed: after signing in again (or a
+                    // minute), it's still there to send.
+                    messageInput.value = message;
+                    sendButton.disabled = false;
+                    saveDraft(message);
+                    if (error.status === 429) {
+                        showError("You're sending messages too quickly. Please wait a minute.");
+                        voiceStatus.textContent = 'Please wait a minute, then try again.';
+                    }
+                } else {
+                    showError('Sorry, something went wrong. Please try again.');
+                }
                 console.error('Chat error:', error);
             }
         }
@@ -3281,6 +3457,7 @@
         function showError(message) {
             const toast = document.createElement('div');
             toast.className = 'error-toast';
+            toast.setAttribute('role', 'alert');
             toast.textContent = message;
             document.body.appendChild(toast);
             setTimeout(() => toast.remove(), 4000);
@@ -3291,7 +3468,10 @@
         // for anyone else. Show that distinctly from a generic failure.
         async function showErrorForResponse(response, fallbackMessage) {
             if (response.status === 401) {
-                showError('Sign-in required');
+                return;  // jarvisFetch ended the session; the banner says what to do
+            }
+            if (response.status === 429) {
+                showError("You're sending messages too quickly. Please wait a minute.");
                 return;
             }
             if (response.status === 403) {
@@ -3959,7 +4139,9 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error('Transcription failed');
+                    const failure = new Error('Transcription failed');
+                    failure.status = response.status;
+                    throw failure;
                 }
 
                 const result = await response.json();
@@ -3975,7 +4157,11 @@
                 }
             } catch (error) {
                 console.error('Transcription error:', error);
-                showError('Failed to transcribe audio');
+                if (error.status === 429) {
+                    showError("You're sending messages too quickly. Please wait a minute.");
+                } else if (!window.jarvisSession.isSignedOut()) {
+                    showError('Failed to transcribe audio');
+                }
             } finally {
                 voiceButton.classList.remove('processing');
                 hideVoiceStatus();
@@ -4022,7 +4208,9 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error('Failed to get response');
+                    const failure = new Error('Failed to get response');
+                    failure.status = response.status;
+                    throw failure;
                 }
 
                 // Remove typing indicator and create assistant bubble for streaming
@@ -4106,7 +4294,19 @@
 
             } catch (error) {
                 removeTyping(typingId);
-                showError('Sorry, something went wrong. Please try again.');
+                if (window.jarvisSession.isSignedOut() || error.status === 429) {
+                    // Keep what they typed: after signing in again (or a
+                    // minute), it's still there to send.
+                    messageInput.value = message;
+                    sendButton.disabled = false;
+                    saveDraft(message);
+                    if (error.status === 429) {
+                        showError("You're sending messages too quickly. Please wait a minute.");
+                        voiceStatus.textContent = 'Please wait a minute, then try again.';
+                    }
+                } else {
+                    showError('Sorry, something went wrong. Please try again.');
+                }
                 console.error('Chat error:', error);
             }
         }
@@ -4160,8 +4360,8 @@
         }
 
         function hideVoiceStatus() {
-            // Reset to default message
-            setVoiceStatus('Hold the microphone to speak', '');
+            // Reset to default message (a signed-out page says so instead)
+            setVoiceStatus(window.jarvisSession.isSignedOut() ? 'Signed out' : 'Hold the microphone to speak', '');
         }
     </script>
 </body>

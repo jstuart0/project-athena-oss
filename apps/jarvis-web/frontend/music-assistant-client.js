@@ -105,8 +105,12 @@ class MusicAssistantClient {
                     return;
                 }
 
-                // Auto-reconnect if not explicitly closed
+                // Auto-reconnect if not explicitly closed -- unless the session
+                // ended (jarvisFetch's signed-out state): retrying can't help.
+                const session = window.jarvisSession;
+                if (session && session.isSignedOut()) return;
                 if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+                    if (session) session.probe();
                     this._scheduleReconnect();
                 }
             };
@@ -460,6 +464,7 @@ class MusicAssistantClient {
         console.log(`[MA Client] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
 
         setTimeout(() => {
+            if (window.jarvisSession && window.jarvisSession.isSignedOut()) return;
             if (this.state === 'disconnected') {
                 this.connect().catch(err => {
                     console.error('[MA Client] Reconnection failed:', err.message);

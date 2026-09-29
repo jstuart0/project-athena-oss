@@ -216,8 +216,12 @@ class SendspinClient {
                     return;
                 }
 
-                // Auto-reconnect on unexpected close
+                // Auto-reconnect on unexpected close -- unless the session
+                // ended (jarvisFetch's signed-out state): retrying can't help.
+                const session = window.jarvisSession;
+                if (session && session.isSignedOut()) return;
                 if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+                    if (session) session.probe();
                     this._scheduleReconnect(playerId);
                 }
             };
@@ -1029,6 +1033,7 @@ class SendspinClient {
         console.log(`[Sendspin] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
 
         setTimeout(() => {
+            if (window.jarvisSession && window.jarvisSession.isSignedOut()) return;
             if (this.state === 'disconnected') {
                 this.connect(playerId).catch(err => {
                     console.error('[Sendspin] Reconnection failed:', err.message);
