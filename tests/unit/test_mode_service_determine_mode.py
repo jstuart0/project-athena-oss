@@ -343,7 +343,7 @@ class TestPII:
         assert "Zelda" not in combined
         assert "@" not in combined
 
-    def test_legacy_ical_path_no_leak(self, ms, client, monkeypatch):
+    def test_legacy_ical_path_no_leak(self, ms, client, monkeypatch, captured_logs):
         """codex r2 Medium: this fails on base behaviour --
         determine_mode_reason returns event['summary'] verbatim
         (main.py:676-678) and get_current_event returns the raw uid/summary
@@ -373,14 +373,13 @@ class TestPII:
         def factory(timeout=30.0):
             return httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=timeout)
 
-        with structlog.testing.capture_logs() as logs:
-            asyncio.run(ms.booking_sources.refresh(ms.current_config, now=now, admin_client=None, ical_client_factory=factory))
-            health_resp = client.get("/health")
-            mode_resp = client.get("/mode", headers=_HEADERS)
-            events_resp = client.get("/mode/events", headers=_HEADERS)
+        asyncio.run(ms.booking_sources.refresh(ms.current_config, now=now, admin_client=None, ical_client_factory=factory))
+        health_resp = client.get("/health")
+        mode_resp = client.get("/mode", headers=_HEADERS)
+        events_resp = client.get("/mode/events", headers=_HEADERS)
 
         bodies = health_resp.text + mode_resp.text + events_resp.text
-        log_text = " ".join(repr(e) for e in logs)
+        log_text = " ".join(repr(e) for e in captured_logs)
         for forbidden in ("Zelda", "Quux", "zq@example.org", "1418fb94e984"):
             assert forbidden not in bodies, forbidden
             assert forbidden not in log_text, forbidden

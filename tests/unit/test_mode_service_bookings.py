@@ -83,18 +83,17 @@ def _row(id_, key, checkin, checkout, is_test=False, source="admin"):
 
 
 class TestSourceSelection:
-    def test_unknown_source_falls_back_to_auto_with_one_error(self, bs, monkeypatch):
+    def test_unknown_source_falls_back_to_auto_with_one_error(self, bs, monkeypatch, captured_logs):
         monkeypatch.setenv("MODE_BOOKINGS_SOURCE", "bogus")
         config_module._clear_cache_for_tests()
 
         now = datetime.now(timezone.utc)
         admin_client = _admin_client(_admin_handler(_bookings_payload([])))
 
-        with structlog.testing.capture_logs() as logs:
-            asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=admin_client))
-            asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=admin_client))
+        asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=admin_client))
+        asyncio.run(bs.refresh({"enabled": True}, now=now, admin_client=admin_client))
 
-        errors = [e for e in logs if e.get("event") == "mode_bookings_source_unknown"]
+        errors = [e for e in captured_logs if e.get("event") == "mode_bookings_source_unknown"]
         assert len(errors) == 1
 
         snapshot = bs.snapshot({"enabled": True}, now=now, now_monotonic=time.monotonic())
@@ -147,17 +146,16 @@ class TestSourceSelection:
         snapshot = bs.snapshot(config, now=now, now_monotonic=time.monotonic())
         assert snapshot.required == "ical"
 
-    def test_ical_only_mode_empty_url_is_misconfigured_never_loaded(self, bs, monkeypatch):
+    def test_ical_only_mode_empty_url_is_misconfigured_never_loaded(self, bs, monkeypatch, captured_logs):
         monkeypatch.setenv("MODE_BOOKINGS_SOURCE", "ical")
         config_module._clear_cache_for_tests()
 
         now = datetime.now(timezone.utc)
         config = {"enabled": True, "calendar_url": ""}
 
-        with structlog.testing.capture_logs() as logs:
-            asyncio.run(bs.refresh(config, now=now, admin_client=None, ical_client_factory=_ical_factory(lambda r: httpx.Response(200))))
+        asyncio.run(bs.refresh(config, now=now, admin_client=None, ical_client_factory=_ical_factory(lambda r: httpx.Response(200))))
 
-        errors = [e for e in logs if e.get("event") == "mode_bookings_source_misconfigured"]
+        errors = [e for e in captured_logs if e.get("event") == "mode_bookings_source_misconfigured"]
         assert len(errors) == 1
         snapshot = bs.snapshot(config, now=now, now_monotonic=time.monotonic())
         assert snapshot.statuses["ical"] == "never_loaded"
@@ -546,13 +544,12 @@ class TestFailSafeReconcile:
         assert list(captured["allowed_private_hosts"]) == ["10.9.0.0/16", "cal.lan"]
         assert bs._ical.last_attempt_ok is True
 
-    def test_default_ical_fetch_refuses_plain_http(self, bs):
+    def test_default_ical_fetch_refuses_plain_http(self, bs, captured_logs):
         config = {"enabled": True, "calendar_url": "http://calendar.invalid/x.ics"}
-        with structlog.testing.capture_logs() as logs:
-            asyncio.run(bs.refresh(config, now=_FIXED_NOW,
-                                   admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([])))))
         assert bs._ical.last_attempt_ok is False
-        failures = [e for e in logs if e.get("event") == "mode_bookings_ical_fetch_failed"]
+        failures = [e for e in captured_logs if e.get("event") == "mode_bookings_ical_fetch_failed"]
         assert [e.get("error") for e in failures] == ["SsrfBlockedError"]
 
     def test_bookings_module_owns_no_http_client(self):

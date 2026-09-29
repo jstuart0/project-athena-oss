@@ -37,3 +37,15 @@ def isolated_structlog():
     yield
     structlog.configure(**snapshot)
     _uncache_lazy_loggers()
+
+
+@pytest.fixture
+def captured_logs():
+    """structlog.testing.capture_logs() that also sees loggers first used
+    under an earlier config: lazy proxies are uncached on entry, so they
+    rebind to the list capture_logs edits in place (e.g. after a mid-module
+    `import mode_service.main` reran configure_logging())."""
+    _uncache_lazy_loggers()
+    with structlog.testing.capture_logs() as logs:
+        yield logs
+    _uncache_lazy_loggers()
