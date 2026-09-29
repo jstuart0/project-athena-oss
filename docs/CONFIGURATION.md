@@ -185,7 +185,7 @@ DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODE_SERVICE_URL` | `http://localhost:8022` | Mode service (ATHENA-69). **Required** on both the orchestrator and the gateway — without it, mode/permission resolution degrades every request (orchestrator: `get_current_mode`'s outage fallback; gateway: `mode_gate.py`'s fast-path check always returns `False`). Also read by admin-backend (ATHENA-127) for the admin modules page and the Guest Mode page's `GET /api/guest-mode/mode-status` proxy — unset there just means that proxy reports `mode_service_url_unset` rather than a live mode. See "Mode and permissions" under Module Settings below. |
+| `MODE_SERVICE_URL` | `http://localhost:8022` | Mode service (ATHENA-69). **Required** on both the orchestrator and the gateway — without it, mode/permission resolution degrades every request (orchestrator: `get_current_mode`'s outage fallback; gateway: `mode_gate.py`'s fast-path check always returns `False`). Also read by admin-backend for the admin modules page and the Guest Mode page's `GET /api/guest-mode/mode-status` proxy — unset there just means that proxy reports `mode_service_url_unset` rather than a live mode. See "Mode and permissions" under Module Settings below. |
 | `NOTIFICATIONS_SERVICE_URL` | `http://localhost:8050` | Notifications service |
 | `JARVIS_WEB_URL` | `http://localhost:3001` | Jarvis Web UI |
 | `CONTROL_AGENT_URL` | `http://localhost:8099` | Service management API |
@@ -703,7 +703,7 @@ the older, possibly more permissive config in the meantime; this is an
 accepted residual risk, surfaced by `config_age_seconds` and the stale-log
 signal above, not silently hidden.
 
-**Guest-mode booking source (ATHENA-127).** The mode service decides guest
+**Guest-mode booking source.** The mode service decides guest
 vs owner from bookings, not from an in-process iCal poll of `calendar_url`
 directly.
 
@@ -788,6 +788,16 @@ directly.
 - **Manual entries** are still entered and stored in the browser's local
   timezone (unchanged) — the Guest Mode page's manual-entry modal shows
   the property timezone alongside the input for reference.
+- **Visibility.** `/mode` reports `bookings_source`, `bookings_status`
+  (the required source's status, or `not_required` while guest mode is
+  disabled), `bookings_age_seconds`, `property_timezone`,
+  `property_timezone_valid`, and `bookings_sources` — a
+  `{source: {"status", "required"}}` map. `/health` carries the same plus
+  per-source counts (`bookings_by_source`) and the fetch window. A guest
+  `reason` names the booking by label, not by guest name: `<source> #<id>`
+  for an admin row (e.g. `lodgify #42`), `ical <key prefix>` for a
+  legacy-iCal booking. The Guest Mode page shows the
+  mode service's live mode and reason and refreshes every 30 s.
 - **The admin UI's mode-status panel** (`GET /api/guest-mode/mode-status`)
   needs `HEALTH_POLL_ALLOWED_PRIVATE_HOSTS` to cover the mode service's
   ClusterIP/CIDR, or it reports `{"reachable": false, "error":
