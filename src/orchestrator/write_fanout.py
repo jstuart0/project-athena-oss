@@ -187,7 +187,7 @@ def rewording(block: FanoutBlock) -> str:
     say = "To do it, say: " + (", then say: ".join(commands)) + "."
     noun = noun_for_domains([w.domain for w in block.writes])
     if block.unbounded:
-        lead = f"That would affect every {noun}."
+        lead = f"That would affect all the {noun}."
     else:
         n = sum(len(w.entity_ids) for w in block.writes)
         verb = _verb_for(block.writes[0].service) if block.writes else "control"

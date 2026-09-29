@@ -394,6 +394,7 @@ class TestGateThresholds:
         assert "say:" in r.lower()
         assert "turn off all the lights" in r.lower()
         assert "lock all the locks" in r.lower()
+        assert r.startswith("That would affect all the lights and locks. "), r
 
 
 # ---------------------------------------------------------------------------
