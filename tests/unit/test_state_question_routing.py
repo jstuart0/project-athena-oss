@@ -726,6 +726,31 @@ _ANSWER_TERMS = {
 }
 
 
+# A stand-in for each bulk report's templated answer, naming what the real
+# report describes, so the bulk branch's answers are domain-checked too.
+_BULK_REPORTS = {
+    "lights_on": "These lights are on: Office Light 0.",
+    "lights_off": "These lights are off: Office Light 1.",
+    "locks_status": "The Front Door Lock is locked.",
+    "climate_status": "The thermostat is at 70.",
+    "general_status": "Office Light 0 is on.",
+}
+# Which device each report is about; a report for another device is not
+# an answer, and the whole-house general_status report only answers a
+# question that names no device.
+_BULK_REPORT_DEVICE = {"lights_on": "light", "lights_off": "light", "locks_status": "lock", "climate_status": "climate"}
+
+
+def _bulk_expected(q, uk):
+    report = _real_detect_status_query_type(q)
+    if not report or uk.room or uk.needs_referent:
+        return False
+    report_device = _BULK_REPORT_DEVICE.get(report)
+    if report_device is None:
+        return uk.device_type is None
+    return uk.device_type is None or report_device == uk.device_type
+
+
 def _question_path_run(q, room):
     """One question through route_control with spies on the three layers a
     zero-write result could come from: the bulk optimizer, the get_status
@@ -741,14 +766,19 @@ def _question_path_run(q, room):
         seen.append((intent.get("action"), scope.read_only if scope else None))
         return await real_execute(self, intent, *a, **kw)
 
-    optimize = mock.AsyncMock(return_value=mock.MagicMock(
-        query_type="lights_on", entities=[{"entity_id": "light.office_0", "state": "on"}], raw_states={},
-    ))
+    async def _optimize(query, **kwargs):
+        return mock.MagicMock(
+            query_type=_real_detect_status_query_type(query),
+            entities=[{"entity_id": "light.office_0", "state": "on"}], raw_states={},
+        )
+
+    optimize = mock.AsyncMock(side_effect=_optimize)
     gate_spy = mock.MagicMock(side_effect=_wf.gate)
     gate_many_spy = mock.MagicMock(side_effect=_wf.gate_many)
     with (
         mock.patch("orchestrator.nodes.route_control.optimize_status_query", optimize),
-        mock.patch("orchestrator.nodes.route_control.should_skip_synthesis", return_value=(True, "Some lights are on.")),
+        mock.patch("orchestrator.nodes.route_control.should_skip_synthesis",
+                   side_effect=lambda result, **kw: (True, _BULK_REPORTS[result.query_type])),
         mock.patch.object(shc.SmartHomeController, "execute_intent", _execute_spy),
         mock.patch.object(_wf, "gate", gate_spy),
         mock.patch.object(_wf, "gate_many", gate_many_spy),
@@ -770,7 +800,7 @@ class TestQuestionCorpusNeverWrites:
         for q in QUESTION_CORPUS:
             uk = classify_utterance(q)
             room = "office" if uk.room else None
-            bulk_expected = bool(not uk.room and not uk.needs_referent and _real_detect_status_query_type(q))
+            bulk_expected = _bulk_expected(q, uk)
             result, client, optimize, seen, gate_calls = _question_path_run(q, room)
             answer = (result.answer or "").lower()
             if client.call_service.await_count != 0:
@@ -787,8 +817,8 @@ class TestQuestionCorpusNeverWrites:
             else:
                 if optimize.await_count != 0 or seen != [("get_status", True)]:
                     failures.append((q, "expected_read_only_get_status", optimize.await_count, seen))
-                if not any(term in answer for term in _ANSWER_TERMS[uk.device_type or "light"]):
-                    failures.append((q, "answer_not_about_device", uk.device_type, result.answer))
+            if not any(term in answer for term in _ANSWER_TERMS[uk.device_type or "light"]):
+                failures.append((q, "answer_not_about_device", uk.device_type, bulk_expected, result.answer))
         assert not failures, failures
 
     def test_a_referent_question_matches_a_status_pattern(self):
@@ -1369,3 +1399,70 @@ class TestCoercionMetricLabelIsClosed:
                 intent = _run(controller.extract_intent(q, utterance=classify_utterance(q)))
                 assert intent["action"] == "get_status"
                 metric.labels.assert_called_once_with(device_type=expected, path="llm_coerced")
+
+
+# ---------------------------------------------------------------------------
+# A question with no identifiable device; extractor shortcuts on questions
+# ---------------------------------------------------------------------------
+
+_CLIMATE_TURN_ON = (
+    '{"device_type": "climate", "room": null, "action": "turn_on", "target_scope": "group", "parameters": {}}'
+)
+
+
+class TestQuestionWithoutADeviceNoun:
+    Q = "is the heater on"
+
+    def test_classifier_names_no_device(self):
+        uk = classify_utterance(self.Q)
+        assert uk.kind == UtteranceKind.STATE_QUESTION and uk.device_type is None and not uk.needs_referent
+
+    def test_extractor_names_the_device_and_it_is_read(self):
+        seen = []
+        real_execute = shc.SmartHomeController.execute_intent
+
+        async def _spy(self, intent, *a, **kw):
+            seen.append((intent.get("device_type"), intent.get("action"), current_ha_scope().read_only))
+            return await real_execute(self, intent, *a, **kw)
+
+        with mock.patch.object(shc.SmartHomeController, "execute_intent", _spy):
+            result, controller, llm, client = _drive_route_control(
+                self.Q, room=None, llm_router=_HostileLLMRouter(response_text=_CLIMATE_TURN_ON),
+            )
+        assert client.call_service.await_count == 0
+        assert seen == [("climate", "get_status", True)], seen
+        assert "thermostat" in result.answer.lower(), result.answer
+
+    def test_nobody_names_the_device_so_it_asks(self):
+        from orchestrator.nodes.route_control import UNIDENTIFIED_DEVICE_TEXT
+        result, controller, llm, client = _drive_route_control(
+            self.Q, room=None, llm_router=_HostileLLMRouter(response_text="not json"),
+        )
+        assert llm.generate.await_count == 1
+        assert client.call_service.await_count == 0
+        assert result.answer == UNIDENTIFIED_DEVICE_TEXT
+        assert "light" not in result.answer.lower()
+
+
+class TestExtractorShortcutOnAQuestionIsARead:
+    """"did they turn off" is resolved by an extract_intent shortcut (no
+    LLM, so no coercion) as turn_off; with no context to continue, the
+    normal-extraction branch must still dispatch a read and answer it."""
+
+    Q = "did they turn off"
+
+    def test_shortcut_write_action_is_forced_to_a_read(self):
+        seen = []
+        real_execute = shc.SmartHomeController.execute_intent
+
+        async def _spy(self, intent, *a, **kw):
+            seen.append(intent.get("action"))
+            return await real_execute(self, intent, *a, **kw)
+
+        with mock.patch.object(shc.SmartHomeController, "execute_intent", _spy):
+            result, controller, llm, client = _drive_route_control(self.Q)
+        assert llm.generate.await_count == 0, "the shortcut, not the LLM, must be what resolved it"
+        assert seen == ["get_status"], seen
+        assert client.call_service.await_count == 0
+        assert result.error is None, result.error
+        assert result.answer and result.answer != READ_ONLY_REFUSAL

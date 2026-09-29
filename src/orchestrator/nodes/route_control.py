@@ -98,6 +98,7 @@ EXPIRED_PENDING_TEXT = "That request expired. Please say it again."
 CROSS_IDENTITY_TEXT = "I'm not sure what you're agreeing to."
 DECLINED_TEXT = "Okay, I won't."
 ALREADY_DONE_TEXT = "Already done."
+UNIDENTIFIED_DEVICE_TEXT = "I couldn't tell which device you're asking about. Which one do you mean?"
 
 NONCE_CLAIM_TIMEOUT_SECONDS = 2.0
 
@@ -160,6 +161,26 @@ async def _clear_pending(state: OrchestratorState, prev: Dict[str, Any], ttl: in
         response=cleared.get("response") or "",
         ttl=ttl,
     )
+
+
+# The device each bulk status report describes. A report for a different
+# device than the one asked about ("garage door status" matches the locks
+# report's "door status") is the wrong answer, and the whole-house
+# general_status report only answers a question that names no device
+# ("what's on", not "what's the status of the front door lock").
+_BULK_REPORT_DEVICE = {
+    "lights_on": "light",
+    "lights_off": "light",
+    "locks_status": "lock",
+    "climate_status": "climate",
+}
+
+
+def _bulk_report_matches(query_type: Optional[str], device_type: Optional[str]) -> bool:
+    report_device = _BULK_REPORT_DEVICE.get(query_type or "")
+    if report_device is None:
+        return device_type is None
+    return device_type is None or report_device == device_type
 
 
 def _pending_confirmation(state: OrchestratorState) -> Optional[Dict[str, Any]]:
@@ -496,6 +517,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 and not uk.room
                 and not uk.needs_referent
                 and detect_status_query_type(state.query)
+                and _bulk_report_matches(detect_status_query_type(state.query), uk.device_type)
             )
 
         if status_bulk_config.get("enabled", True) and bulk_eligible:
@@ -603,9 +625,24 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 # (e.g. "did those come back on?") fall through to that
                 # chain unchanged -- still under the same read-only scope.
                 if uk.kind == UtteranceKind.STATE_QUESTION and not uk.needs_referent:
+                    sq_device_type, sq_room = uk.device_type, uk.room
+                    if not sq_device_type:
+                        # The classifier couldn't name the device ("is the
+                        # heater on"): ask the extractor what the query is
+                        # about. Still under the read-only scope, and only a
+                        # get_status is ever dispatched.
+                        extracted = await smart_controller.extract_intent(
+                            state.query, device_room=state.room, utterance=uk
+                        )
+                        sq_device_type = extracted.get("device_type")
+                        sq_room = sq_room or extracted.get("room")
+                    if not sq_device_type:
+                        state.answer = UNIDENTIFIED_DEVICE_TEXT
+                        state.node_timings["route_control"] = time.time() - start
+                        return state
                     state_question_intent = {
-                        "device_type": uk.device_type or "light",
-                        "room": uk.room,
+                        "device_type": sq_device_type,
+                        "room": sq_room,
                         "action": "get_status",
                         "target_scope": "group",
                         "parameters": {},
@@ -641,7 +678,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                                 session_id=state.session_id,
                                 intent="control",
                                 query=state.query,
-                                entities={"room": uk.room, "device_type": uk.device_type or "light"},
+                                entities={"room": sq_room, "device_type": sq_device_type},
                                 parameters=state_question_intent,
                                 response=sq_result,
                                 ttl=300,
@@ -874,6 +911,16 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     # Normal extraction - no context continuation
                     # Pass device room for context when query doesn't specify room
                     intent = await smart_controller.extract_intent(state.query, device_room=state.room, utterance=uk)
+                    # Some extract_intent shortcuts answer before the LLM
+                    # (and its get_status coercion) with a write action; a
+                    # question is always a read, whichever path produced
+                    # the intent.
+                    if uk.kind == UtteranceKind.STATE_QUESTION:
+                        intent["action"] = "get_status"
+                        if not intent.get("device_type"):
+                            state.answer = UNIDENTIFIED_DEVICE_TEXT
+                            state.node_timings["route_control"] = time.time() - start
+                            return state
 
                 logger.info(f"Extracted intent: {intent}")
 

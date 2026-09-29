@@ -1555,8 +1555,13 @@ Return ONLY the JSON, no other text."""
                 state_question_routed_total.labels(
                     device_type=utterance.device_type or "unknown", path="json_fallback"
                 ).inc()
+            # A question the classifier couldn't attach to a device stays
+            # device-less rather than becoming a question about lights.
+            fallback_device = utterance.device_type or (
+                None if utterance.kind == UtteranceKind.STATE_QUESTION else "light"
+            )
             return {
-                "device_type": utterance.device_type or "light",
+                "device_type": fallback_device,
                 "room": None,
                 "action": fallback_action,
                 "target_scope": "group",

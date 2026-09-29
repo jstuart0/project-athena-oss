@@ -188,7 +188,7 @@ class TestStatusQueryOptimisation:
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
                   side_effect=_flags()),
-            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value=True),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value="lights_on"),
             patch("orchestrator.nodes.route_control.optimize_status_query",
                   new_callable=AsyncMock, return_value=sr),
             patch("orchestrator.nodes.route_control.should_skip_synthesis",
@@ -210,7 +210,7 @@ class TestStatusQueryOptimisation:
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
                   side_effect=_flags()),
-            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value=True),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value="lights_on"),
             patch("orchestrator.nodes.route_control.optimize_status_query",
                   new_callable=AsyncMock, return_value=sr),
             patch("orchestrator.nodes.route_control.should_skip_synthesis",
@@ -240,7 +240,7 @@ class TestStatusQueryOptimisation:
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
                   side_effect=_flags()),
-            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value=True),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value="lights_on"),
             patch("orchestrator.nodes.route_control.optimize_status_query",
                   new_callable=AsyncMock, side_effect=RuntimeError("HA down")),
             patch("orchestrator.nodes.route_control.get_automation_system_mode",
@@ -266,7 +266,7 @@ class TestStatusQueryOptimisation:
         with (
             patch("orchestrator.nodes.route_control.get_feature_config", new_callable=AsyncMock,
                   side_effect=_flags(kill_switch=True)),
-            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value=True),
+            patch("orchestrator.nodes.route_control.detect_status_query_type", return_value="lights_on"),
             patch("orchestrator.nodes.route_control.optimize_status_query",
                   new_callable=AsyncMock, side_effect=RuntimeError("HA down")),
             patch("orchestrator.nodes.route_control.get_automation_system_mode",
