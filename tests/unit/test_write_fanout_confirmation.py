@@ -1672,6 +1672,8 @@ class TestUnidentifiedDeviceReplyNeverWrites:
     def test_yes_reply_does_not_continue_the_earlier_write(self):
         h, t2, t3, writes = _clarification_scenario("yes", YES_NO, KITCHEN_LIGHTS_OFF_JSON)
         assert writes == [], (writes, t3.answer)
+        # "yes" names nothing; the extractor sees the question it answers.
+        assert h.extract_calls[-1][0] == "is the heater on (yes)", h.extract_calls[-1]
 
     def test_unidentified_question_stores_a_read_only_clarification(self):
         h, t2, t3, writes = _clarification_scenario("the kitchen", ROOM_ONLY, KITCHEN_LIGHTS_OFF_JSON)
