@@ -941,9 +941,13 @@ tokens are unaffected (they pass an explicit 24-hour TTL).
 **jarvis-web: who may use it.** jarvis-web serves a browser without
 sign-in only when the request provably comes from the home network, and
 requires sign-in for everything else: `401 sign_in_required` (with
-`WWW-Authenticate: Jarvis`) on every route except its health checks, static
-files and a static sign-in page, with no orchestrator, Home Assistant or
-admin-backend call. With nothing configured, every browser gets that page.
+`WWW-Authenticate: Jarvis`) on every route, static files included, with no
+orchestrator, Home Assistant or admin-backend call. The only anonymous
+answers are `/api/health` (`{"status": ...}` and nothing else, for probes),
+the static 401 sign-in page at `/`, and the embed relay below. The API docs
+(`/docs`, `/redoc`, `/openapi.json`) exist only with
+`JARVIS_ENABLE_DOCS=true`, a development flag. With nothing configured,
+every browser gets the sign-in page.
 Each request resolves to one class, from server-side evidence only:
 
 | Class | How | What it gets |
@@ -1006,7 +1010,18 @@ mode). An address in both lists is a guest (with a warning).
    `X-authentik-username`) and its groups from `JARVIS_EDGE_GROUPS_HEADER`
    (default `X-authentik-groups`), split on `JARVIS_EDGE_GROUPS_SEPARATOR`
    (default `|`, Authentik's format) and matched exactly and
-   case-sensitively; anyone else gets `403 not_household`. An optional
+   case-sensitively; anyone else gets `403 not_household`. The edge must
+   strip both header names from inbound requests; a name outside the
+   template's strip list stops jarvis-web at startup until
+   `JARVIS_EDGE_HEADERS_ACK_STRIPPED=true` confirms you added it there (the
+   full set it expects stripped is logged as `jarvis_edge_strip_headers`).
+   Edge mode that can't serve the household doesn't start: no
+   `TRUSTED_PROXY_CIDRS`, no usable `JARVIS_LOCAL_NETWORKS` entry, or no
+   `JARVIS_ALLOWED_HOSTS` exits with `jarvis_edge_misconfigured`, so a
+   rolling deploy stalls instead of going Ready and answering every
+   household browser with 401. A deployment with no home network at all
+   sets `JARVIS_EDGE_SIGN_IN_ONLY=true` (then everyone signs in; the
+   trusted proxy is still required). An optional
    sign-in host always requires sign-in, so an owner at home during a guest
    stay can sign in for control (`JARVIS_SIGNIN_URL` puts a "Household
    sign-in" link on the page). The attestation value must be at least 32
@@ -1029,7 +1044,12 @@ decorated, and a wrong key is `401` with no fall-through. Each visitor gets
 replicas). Two supported shapes: chat-embed in the cluster calling
 jarvis-web's Service (recommended), or an off-cluster chat-embed through a
 proxy route that skips sign-in and attestation for requests carrying the
-relay key (commented in the edge template). Anything else is unsupported.
+relay key (commented in the edge template, with its strip Middleware).
+Anything else is unsupported. A relayed conversation continues only with
+the `session_id` jarvis-web returned, and only for the visitor it was
+minted for (the id is bound to the visitor's address, a /64 for IPv6,
+under the relay key); anything else starts a new conversation. Rotating
+`JARVIS_RELAY_KEY` starts every embedded conversation afresh.
 
 **The public audience** (a relayed visitor, or any orchestrator caller with
 `caller_trust="web_public"`) is a hard-coded narrow profile, not the guest
@@ -1047,11 +1067,23 @@ control what the guest domains allow).
 
 **Browser rules.** Mutating requests from the page carry
 `X-Jarvis-Request: 1`; a request without it gets `403 reload_required`
-(reload open tabs after upgrading). WebSockets need an `Origin` whose host
-is allowlisted. CORS is off unless `JARVIS_CORS_ORIGINS` lists exact origins
-(`*` and `null` are refused). Chat session ids are minted by jarvis-web and
-bound to the browser that started them. Uncached Bearer checks are limited
-to 10 a minute per client.
+(reload open tabs after upgrading); the page and its scripts are served
+with `Cache-Control: no-cache`, so a reload always gets the current ones.
+WebSockets need an `Origin` whose host is in `JARVIS_ALLOWED_HOSTS` (the
+request's own `Host` is not enough; with `JARVIS_ALLOWED_HOSTS` empty,
+jarvis-web logs `jarvis_websockets_disabled` and refuses every WebSocket).
+CORS is off unless `JARVIS_CORS_ORIGINS` lists exact origins (`*` and
+`null` are refused). Chat session ids are minted by jarvis-web and bound to
+the browser that started them; the binding key derives from
+`SERVICE_API_KEY`, so every replica shares it. Without `SERVICE_API_KEY`
+each process draws its own (logged as
+`jarvis_chat_session_key_per_process`): a chat that moves between replicas
+or survives a restart starts over. Uncached Bearer checks are limited to 10
+a minute per client. `TRUST_CF_CONNECTING_IP=true` (default off) lets the
+per-client rate limits read `Cf-Connecting-Ip`, only when the whole
+forwarding chain is in `TRUSTED_PROXY_CIDRS` (a Cloudflare tunnel); it never
+affects the home rule. chat-embed reads the same variable for its
+per-visitor limit.
 
 `JARVIS_PUBLIC_MODE` was removed: `household` now stops jarvis-web at
 startup (configure the home network instead: shape 1 or 2), and any other

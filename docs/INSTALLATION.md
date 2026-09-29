@@ -702,6 +702,8 @@ STREAM_URL=http://<your-jarvis-web>:3001/api/chat/stream
 JARVIS_RELAY_KEY=<the same value as jarvis-web's JARVIS_RELAY_KEY>
 CORS_ORIGINS=https://www.example.com
 # TRUSTED_PROXY_CIDRS=<the proxy in front of chat-embed, if any>
+# TRUST_CF_CONNECTING_IP=false  # "true" only behind a Cloudflare tunnel whose whole chain is trusted
+RATE_LIMIT_RPM=20
 ```
 
 Build it from the repository root: `docker build -f apps/chat-embed/Dockerfile .`
@@ -720,7 +722,23 @@ Build it from the repository root: `docker build -f apps/chat-embed/Dockerfile .
 - Every visitor is the public audience: weather, news, recipes, what's
   streaming and general questions, nothing about the house.
 - Visitors are limited to `RATE_LIMIT_RPM` (default 20) messages a minute
-  each.
+  each. A visitor is its address as resolved through `TRUSTED_PROXY_CIDRS`
+  (and `Cf-Connecting-Ip` only with `TRUST_CF_CONNECTING_IP=true`, off by
+  default); when no address can be resolved chat-embed answers `503`
+  rather than sharing one budget between everyone.
+- Use https for `ATHENA_CHAT_URL`/`STREAM_URL`, or an in-cluster
+  (`*.svc`, `*.cluster.local`, a bare Service name) or loopback address:
+  the relay key rides on every request, and chat-embed logs
+  `upstream_plaintext_off_cluster` at startup for anything else.
+
+Changes for an existing embed (the contract a widget depends on):
+
+- Adopt the `session_id` chat-embed returns (`/api/chat`'s response, or the
+  stream's `done` event) and send that one back. Session ids are minted by
+  jarvis-web and bound to the visitor: an id the widget made up, or one
+  from another visitor, starts a new conversation instead of continuing.
+- `CORS_ORIGINS` is empty by default (it used to be `*`): list your site.
+- An unresolvable visitor gets `503` instead of sharing a rate limit.
 
 In the embedding page, render the stream's terminal events and keep the
 message list announced to screen readers:
