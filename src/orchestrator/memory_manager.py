@@ -78,7 +78,7 @@ class MemoryManager:
     async def get_relevant_memories(
         self,
         query: str,
-        mode: str = "owner",
+        mode: str = "guest",
         guest_session_id: Optional[int] = None,
         limit: int = 3
     ) -> List[Dict[str, Any]]:
@@ -141,7 +141,7 @@ class MemoryManager:
     async def create_memory(
         self,
         content: str,
-        mode: str = "owner",
+        mode: str = "guest",
         guest_session_id: Optional[int] = None,
         category: str = "conversation",
         importance: float = 0.5,
@@ -414,7 +414,7 @@ class MemoryManager:
     async def delete_memory_by_content(
         self,
         search_query: str,
-        mode: str = "owner",
+        mode: str = "guest",
         guest_session_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """

@@ -427,12 +427,10 @@ data:
   # is clamped, never rejected. Default 240 (4 hours).
   # OVERRIDE_MAX_TIMEOUT_MINUTES: "240"
 
-  # JARVIS_PUBLIC_MODE (D18/D19): jarvis-web (not this ConfigMap -- set on
-  # the athena-jarvis-web Deployment, see jarvis-web.yaml). "guest"
-  # (default) treats every unauthenticated caller as a guest; "household"
-  # is the legacy pre-ATHENA-69 behavior (every caller gets the household's
-  # actual mode) for LAN-only deployments not reachable from the internet.
-  # Logs jarvis_public_mode_household_active hourly while active.
+  # jarvis-web's home network (JARVIS_LOCAL_NETWORKS, JARVIS_GUEST_NETWORKS,
+  # JARVIS_LOCAL_EXCLUDE, JARVIS_ALLOWED_HOSTS) is set on the
+  # athena-jarvis-web Deployment, not here -- see jarvis-web.yaml. It also
+  # reads TRUSTED_PROXY_CIDRS above to find the hop the proxy appended.
 
   # Logging
   LOG_LEVEL: "INFO"

@@ -1939,6 +1939,8 @@
         </div>
     </div>
 
+    <!-- The one fetch wrapper every script below uses -->
+    <script src="/static/jarvis-fetch.js"></script>
     <!-- LiveKit Client (loaded conditionally) -->
     <script src="/static/livekit-client.js"></script>
     <!-- Music Assistant Client for Browser Playback -->
@@ -1949,6 +1951,15 @@
     <script>
         const API_BASE = window.location.origin;
         let sessionId = localStorage.getItem('jarvis_session') || null;
+
+        // jarvis-web mints the session id (bound to this browser); keep
+        // whatever it hands back for the next turn.
+        function adoptSession(id) {
+            if (typeof id === 'string' && id) {
+                sessionId = id;
+                localStorage.setItem('jarvis_session', id);
+            }
+        }
         let isWelcomeVisible = true;
 
         const chatContainer = document.getElementById('chat-container');
@@ -2018,7 +2029,7 @@
         async function initMusicPlayer() {
             try {
                 // Check if music config is available
-                const configResponse = await fetch(`${API_BASE}/api/music/config`);
+                const configResponse = await jarvisFetch(`${API_BASE}/api/music/config`);
                 const config = await configResponse.json();
 
                 if (config.enabled) {
@@ -2112,7 +2123,7 @@
 
                 // Search for the media via HTTP API (more reliable than WebSocket)
                 updateStatus(`🔍 Searching for "${browserPlayback.media_id}"...`);
-                const searchResponse = await fetch(`${API_BASE}/api/music/search`, {
+                const searchResponse = await jarvisFetch(`${API_BASE}/api/music/search`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -2199,7 +2210,7 @@
                 } else if (results && results.artists && results.artists.length > 0) {
                     // Found artist, search for their tracks via HTTP
                     updateStatus(`🔍 Found ${results.artists[0].name}, searching for tracks...`);
-                    const artistSearchResponse = await fetch(`${API_BASE}/api/music/search`, {
+                    const artistSearchResponse = await jarvisFetch(`${API_BASE}/api/music/search`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -2342,7 +2353,7 @@
         // Reverse geocode coordinates to address
         async function reverseGeocode(lat, lon) {
             try {
-                const response = await fetch(`${API_BASE}/api/geocode/reverse?lat=${lat}&lon=${lon}`);
+                const response = await jarvisFetch(`${API_BASE}/api/geocode/reverse?lat=${lat}&lon=${lon}`);
                 if (response.ok) {
                     const data = await response.json();
                     return data.address;
@@ -2392,7 +2403,7 @@
             locationSuggestions.classList.add('visible');
 
             try {
-                const response = await fetch(`${API_BASE}/api/geocode/search?q=${encodeURIComponent(query)}`);
+                const response = await jarvisFetch(`${API_BASE}/api/geocode/search?q=${encodeURIComponent(query)}`);
                 if (response.ok) {
                     const data = await response.json();
                     displaySuggestions(data.results || []);
@@ -2649,7 +2660,7 @@
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-                const response = await fetch(`${API_BASE}/api/health`, {
+                const response = await jarvisFetch(`${API_BASE}/api/health`, {
                     signal: controller.signal
                 });
                 clearTimeout(timeoutId);
@@ -2683,7 +2694,7 @@
 
         async function loadModeState() {
             try {
-                const response = await fetch(`${API_BASE}/api/mode`);
+                const response = await jarvisFetch(`${API_BASE}/api/mode`);
                 if (response.ok) {
                     currentModeState = await response.json();
                     updateModeUI();
@@ -2777,7 +2788,7 @@
 
         async function setMode(mode) {
             try {
-                const response = await fetch(`${API_BASE}/api/mode`, {
+                const response = await jarvisFetch(`${API_BASE}/api/mode`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ mode: mode })
@@ -2812,7 +2823,7 @@
 
         async function loadWelcome() {
             try {
-                const response = await fetch(`${API_BASE}/api/welcome`);
+                const response = await jarvisFetch(`${API_BASE}/api/welcome`);
                 if (response.ok) {
                     const data = await response.json();
                     welcomeTitle.textContent = data.greeting;
@@ -2865,7 +2876,7 @@
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 3000);
             try {
-                const resp = await fetch('/api/session/restore', { signal: controller.signal });
+                const resp = await jarvisFetch('/api/session/restore', { signal: controller.signal });
                 clearTimeout(timeout);
                 if (!resp.ok) return;
                 const data = await resp.json();
@@ -2901,7 +2912,7 @@
         async function startFreshSession() {
             dismissRestoreBanner();
             try {
-                await fetch('/api/session/current', { method: 'DELETE' });
+                await jarvisFetch('/api/session/current', { method: 'DELETE' });
             } catch (e) {
                 console.debug('[Session] Clear session failed:', e.message);
             }
@@ -2943,7 +2954,7 @@
             const typingId = showTyping(message);
 
             try {
-                const response = await fetch(`${API_BASE}/api/chat/stream`, {
+                const response = await jarvisFetch(`${API_BASE}/api/chat/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -3002,7 +3013,9 @@
 
                         try {
                             const event = JSON.parse(payload);
-                            if (event.stage === 'answer_chunk') {
+                            if (event.stage === 'session') {
+                                adoptSession(event.session_id);
+                            } else if (event.stage === 'answer_chunk') {
                                 fullText += event.content;
                                 contentEl.textContent = fullText;
                                 scrollToBottom();
@@ -3107,7 +3120,7 @@
             const startTime = Date.now();
 
             try {
-                const response = await fetch(`${API_BASE}/api/chat`, {
+                const response = await jarvisFetch(`${API_BASE}/api/chat`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -3127,6 +3140,7 @@
                 }
 
                 const data = await response.json();
+                adoptSession(data.session_id);
 
                 // Remove the Continue button from the previous message
                 button.remove();
@@ -3276,11 +3290,22 @@
         // a signed-in owner/operator and answers 403 {"detail":"sign_in_required"}
         // for anyone else. Show that distinctly from a generic failure.
         async function showErrorForResponse(response, fallbackMessage) {
+            if (response.status === 401) {
+                showError('Sign-in required');
+                return;
+            }
             if (response.status === 403) {
                 const body = await response.json().catch(() => ({}));
-                if (body.detail === 'sign_in_required') {
-                    showError('Sign-in required');
+                if (body.detail === 'guest_stay_active') {
+                    showError('Controls are view-only during a guest stay.');
                     return;
+                }
+                if (body.detail === 'guest_network') {
+                    showError('Controls are view-only on the guest network.');
+                    return;
+                }
+                if (body.detail === 'reload_required') {
+                    return;  // jarvisFetch already offered a reload
                 }
             }
             showError(fallbackMessage);
@@ -3486,7 +3511,7 @@
 
         async function loadClimate() {
             try {
-                const response = await fetch(`${API_BASE}/api/climate`);
+                const response = await jarvisFetch(`${API_BASE}/api/climate`);
                 if (response.ok) {
                     climateState = await response.json();
                     targetTemp = climateState.target_temp;
@@ -3554,7 +3579,7 @@
             updateClimateUI();
 
             try {
-                const response = await fetch(`${API_BASE}/api/climate/temperature`, {
+                const response = await jarvisFetch(`${API_BASE}/api/climate/temperature`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ temperature: temp })
@@ -3619,7 +3644,7 @@
             if (!currentTV) return;
             const action = currentTV.state === 'off' ? 'on' : 'off';
             try {
-                const response = await fetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/power/${action}`, {
+                const response = await jarvisFetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/power/${action}`, {
                     method: 'POST'
                 });
                 if (response.ok) {
@@ -3639,7 +3664,7 @@
                 if (!currentTV) return;
                 const cmd = btn.dataset.cmd;
                 try {
-                    const response = await fetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/remote`, {
+                    const response = await jarvisFetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/remote`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ command: cmd })
@@ -3656,7 +3681,7 @@
         async function loadAppleTVs() {
             try {
                 // Load Apple TVs
-                const tvResponse = await fetch(`${API_BASE}/api/appletv`);
+                const tvResponse = await jarvisFetch(`${API_BASE}/api/appletv`);
                 if (tvResponse.ok) {
                     allTVs = await tvResponse.json();
                     if (allTVs.length > 0) {
@@ -3686,7 +3711,7 @@
                 }
 
                 // Load streaming apps
-                const appsResponse = await fetch(`${API_BASE}/api/appletv/apps`);
+                const appsResponse = await jarvisFetch(`${API_BASE}/api/appletv/apps`);
                 if (appsResponse.ok) {
                     streamingApps = await appsResponse.json();
                     renderApps();
@@ -3747,7 +3772,7 @@
         async function launchApp(appName) {
             if (!currentTV) return;
             try {
-                const response = await fetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/launch/${encodeURIComponent(appName)}`, {
+                const response = await jarvisFetch(`${API_BASE}/api/appletv/${encodeURIComponent(currentTV.entity_id)}/launch/${encodeURIComponent(appName)}`, {
                     method: 'POST'
                 });
                 if (response.ok) {
@@ -3778,7 +3803,7 @@
 
         async function checkVoiceHealth() {
             try {
-                const response = await fetch(`${API_BASE}/api/voice/health`);
+                const response = await jarvisFetch(`${API_BASE}/api/voice/health`);
                 if (response.ok) {
                     const data = await response.json();
                     voiceServicesAvailable = data.stt?.status === 'healthy' && data.tts?.status === 'healthy';
@@ -3928,7 +3953,7 @@
                 const formData = new FormData();
                 formData.append('audio', audioBlob, 'recording.webm');
 
-                const response = await fetch(`${API_BASE}/api/voice/transcribe`, {
+                const response = await jarvisFetch(`${API_BASE}/api/voice/transcribe`, {
                     method: 'POST',
                     body: formData
                 });
@@ -3981,7 +4006,7 @@
             const typingId = showTyping(message);
 
             try {
-                const response = await fetch(`${API_BASE}/api/chat/stream`, {
+                const response = await jarvisFetch(`${API_BASE}/api/chat/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -4039,7 +4064,9 @@
 
                         try {
                             const event = JSON.parse(payload);
-                            if (event.stage === 'answer_chunk') {
+                            if (event.stage === 'session') {
+                                adoptSession(event.session_id);
+                            } else if (event.stage === 'answer_chunk') {
                                 fullText += event.content;
                                 contentEl.textContent = fullText;
                                 scrollToBottom();
@@ -4099,7 +4126,7 @@
             if (!cleanText) return;
 
             try {
-                const response = await fetch(`${API_BASE}/api/voice/synthesize`, {
+                const response = await jarvisFetch(`${API_BASE}/api/voice/synthesize`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text: cleanText })

@@ -584,7 +584,8 @@ can never claim owner. The precedence, most to least trusted:
 | SMS (`sms_webhook.py`) | server-resolved | `sms` |
 | LiveKit (`livekit_integration.py`) | server-resolved | `household` (a LiveKit room can only be created by a signed-in owner/operator, see below) |
 | jarvis-web, signed-in owner/operator | server-resolved via step 1-3 above | `web_authenticated` |
-| jarvis-web, unauthenticated | forced `guest` (or `JARVIS_PUBLIC_MODE=household`'s legacy behavior) | `web_public` |
+| jarvis-web, home network | server-resolved via step 1-3 above (the guest network is always `guest`) | `web_local` |
+| jarvis-web, anyone else | never forwarded: 401 sign-in required | — |
 
 `household` is not a physical-presence check — it's every in-cluster caller
 holding the shared `X-Service-Key`: the gateway's satellite/HA-voice path,
@@ -937,30 +938,34 @@ stays valid for *joining* a room — it doesn't disconnect an
 already-connected participant early. Server-side Athena participant
 tokens are unaffected (they pass an explicit 24-hour TTL).
 
-**jarvis-web (`JARVIS_PUBLIC_MODE`).** See [Service URLs](#service-urls)
-above and `manifests/athena-prod/jarvis-web.yaml`'s inline comment. Default
-`guest`: an unauthenticated caller is a guest and every owner_only write
-route (climate, media, Apple TV, appliances, music playback, LiveKit room
-management, mode changes — 29 routes total, HTTP and the two WebSocket
-proxies) answers `403 {"detail":"sign_in_required"}` (or closes the
-WebSocket upgrade with code 1008 before accepting it). `household` is the
-legacy pre-ATHENA-69 behavior for a LAN-only deployment: every caller gets
-the household's actual mode and the write-route gate is bypassed.
+**jarvis-web: who may use it.** jarvis-web serves a browser without
+sign-in only when the request comes from the home network, and requires
+sign-in for everything else (401 `sign_in_required`, with no upstream
+call). The classes and their settings:
 
-**Reads are never gated.** Only *writes* go through the permission guard
-and the jarvis-web sign-in gate. `GET` routes — climate/media/appliance/
-Apple TV/sensor state, `/api/mode`, `/livekit/config`, music config — stay
-open to every caller, authenticated or not. This matters beyond jarvis-web
-itself: the **orchestrator directly reads several jarvis-web GET routes**
-for voice answers (`smart_home_controller.py`, hardcoded to jarvis-web's
-in-cluster/co-located URL) — `GET /api/appliances/oven`,
-`GET /api/appliances/fridge`, `GET /api/sensors/motion`,
-`GET /api/sensors/illuminance`, `GET /api/sensors/summary`, and
-`GET /api/media` — none of which are gated, so this integration keeps
-working unchanged regardless of `JARVIS_PUBLIC_MODE` or who's signed in.
-(`GET /api/mode` is the one partial exception: it suppresses the guest's
-name from its response for a `web_public` caller, but still returns
-`mode`/`has_guest`/etc. — see D31.)
+- **Home network** (`web_local`): the address the trusted proxy appended
+  (`TRUSTED_PROXY_CIDRS`), or the TCP peer with `JARVIS_DIRECT_CLIENTS=true`,
+  is in `JARVIS_LOCAL_NETWORKS` and not in `JARVIS_LOCAL_EXCLUDE`, the
+  request carries no Cloudflare headers, and its `Host` is in
+  `JARVIS_ALLOWED_HOSTS` (the DNS-rebinding guard). Owner-only routes work
+  while the house is in owner mode; during a guest stay they answer
+  `403 guest_stay_active`.
+- **Guest network** (`JARVIS_GUEST_NETWORKS`): UI and chat without sign-in,
+  always guest mode (even when the house is vacant), view-only controls,
+  and only the reads the guest UI loads.
+- **Signed in**: a Bearer token for an owner/operator.
+- **Service**: the orchestrator's `X-Service-Key` may read the household
+  GET routes it uses for voice answers (`/api/appliances/*`,
+  `/api/sensors/*`, `/api/media`); it sends the key only to an in-cluster
+  or private `JARVIS_WEB_URL`.
+
+Mutating requests from the page carry `X-Jarvis-Request: 1`; a request
+without it gets `403 reload_required` (reload open tabs after upgrading).
+CORS is off unless `JARVIS_CORS_ORIGINS` lists exact origins.
+
+`JARVIS_PUBLIC_MODE` was removed: `household` now stops jarvis-web at
+startup (configure the home network instead), and any other value is
+ignored with a warning.
 
 **Denial observability.** Every guard-refused Home Assistant write
 increments the `athena_ha_write_denied_total{domain, scope_mode}` Prometheus

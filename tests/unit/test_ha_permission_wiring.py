@@ -1005,60 +1005,94 @@ def _load_jarvis_web_main():
     return module
 
 
-class TestJarvisWebMutatingRoutesClassified:
-    """D19: every mutating (non-GET) HTTP route and both WS handlers in
-    jarvis-web's main.py are classified owner_only or no_side_effect in
-    ROUTE_CLASSIFICATION; the population is set-equal against what FastAPI
-    actually registered (a route added to the app without an entry here,
-    or vice versa, fails); every owner_only HTTP route carries
-    require_owner_caller (bound as _require_owner_caller, D18's
-    household_mode_resolver partial) as a route dependency."""
+def _jarvis_route_keys(app):
+    """Every registered route of a jarvis-web app: "METHOD /path" per HTTP
+    method, "WS /path" per WebSocket, "MOUNT /path" per mount."""
+    from fastapi.routing import APIRoute, APIWebSocketRoute
+    from starlette.routing import Mount, Route, WebSocketRoute
 
-    NAMED_OWNER_ONLY = {"POST /livekit/rooms", "DELETE /livekit/rooms/{room_name}"}
+    keys = {}
+    for route in app.routes:
+        if isinstance(route, Mount):
+            keys[f"MOUNT {route.path}"] = route
+        elif isinstance(route, (APIWebSocketRoute, WebSocketRoute)):
+            keys[f"WS {route.path}"] = route
+        elif isinstance(route, (APIRoute, Route)):
+            for method in route.methods or ():
+                if method != "HEAD":
+                    keys[f"{method} {route.path}"] = route
+    return keys
 
-    def test_jarvis_web_mutating_routes_classified(self):
+
+def _jarvis_census_findings(app, classification, dependencies):
+    """Problems with a census: unclassified or stale entries, and gated
+    HTTP routes missing their class's dependency."""
+    findings = []
+    keys = _jarvis_route_keys(app)
+    for key in sorted(set(keys) - set(classification)):
+        findings.append(f"unclassified: {key}")
+    for key in sorted(set(classification) - set(keys)):
+        findings.append(f"stale: {key}")
+    for key, kind in classification.items():
+        route = keys.get(key)
+        if route is None or kind == "public" or key.startswith(("WS ", "MOUNT ")):
+            continue
+        calls = [d.call for d in getattr(getattr(route, "dependant", None), "dependencies", [])]
+        if dependencies[kind] not in calls:
+            findings.append(f"missing dependency: {key} ({kind})")
+    return findings
+
+
+class TestJarvisWebRoutesClassified:
+    """D14: every jarvis-web route (all methods, WebSockets and mounts) is
+    classified, set-equal against what FastAPI registered, and every gated
+    HTTP route carries exactly its class's dependency."""
+
+    NAMED = {
+        "POST /livekit/rooms": "owner_only",
+        "GET /api/welcome": "guest_read",
+        "GET /api/sensors/summary": "household_read",
+        "POST /api/chat": "relay_chat",
+        "GET /api/health": "public",
+    }
+
+    def test_jarvis_web_routes_classified(self):
         module = _load_jarvis_web_main()
         classification = module.ROUTE_CLASSIFICATION
-
-        try:
-            import websockets  # noqa: F401
-            websockets_available = True
-        except ImportError:
-            websockets_available = False
-
-        expected_total = 35 if websockets_available else 33
-        expected_owner_only = 29 if websockets_available else 27
-
-        assert len(classification) == expected_total
+        assert _jarvis_census_findings(module.app, classification, module.ROUTE_DEPENDENCIES) == []
+        for key, kind in self.NAMED.items():
+            assert classification.get(key) == kind, key
+        for key in ("WS /ma/ws", "WS /ma/sendspin", "MOUNT /static", "MOUNT /logos", "GET /"):
+            assert key in classification, key
+        assert classification["WS /ma/ws"] == classification["WS /ma/sendspin"] == "owner_only"
+        assert len(classification) >= 60
         owner_only = {k for k, v in classification.items() if v == "owner_only"}
-        assert len(owner_only) == expected_owner_only
+        assert len(owner_only) == 29
 
-        for member in self.NAMED_OWNER_ONLY:
-            assert classification.get(member) == "owner_only", member
+    def test_census_self_test_reports_problems(self):
+        """A synthetic app with an unclassified GET and a household_read
+        route missing its dependency: both are reported."""
+        from fastapi import Depends, FastAPI
 
-        route_by_key = {}
-        for route in module.app.routes:
-            methods = getattr(route, "methods", None)
-            if methods:
-                for m in methods:
-                    if m == "HEAD":
-                        continue
-                    route_by_key[f"{m} {route.path}"] = route
-            elif route.path in ("/ma/ws", "/ma/sendspin"):
-                route_by_key[f"WS {route.path}"] = route
+        async def gate():
+            return None
 
-        mutating_keys = {k for k in route_by_key if not k.startswith("GET ")}
-        assert mutating_keys == set(classification.keys())
+        async def other():
+            return None
 
-        for key, kind in classification.items():
-            if kind != "owner_only" or key.startswith("WS "):
-                continue
-            route = route_by_key[key]
-            dep_names = {
-                getattr(d.dependency, "__name__", None) or getattr(getattr(d.dependency, "func", None), "__name__", None)
-                for d in getattr(route, "dependencies", [])
-            }
-            assert "require_owner_caller" in dep_names, f"{key} missing require_owner_caller: {dep_names}"
+        app = FastAPI()
+
+        @app.get("/unclassified")
+        async def unclassified():
+            return {}
+
+        @app.get("/reads", dependencies=[Depends(other)])
+        async def reads():
+            return {}
+
+        findings = _jarvis_census_findings(app, {"GET /reads": "household_read"}, {"household_read": gate})
+        assert "unclassified: GET /unclassified" in findings
+        assert "missing dependency: GET /reads (household_read)" in findings
 
 
 class TestWebsocketsImportableInCI:
@@ -1066,8 +1100,8 @@ class TestWebsocketsImportableInCI:
         """MUSIC_WS_AVAILABLE (and therefore the WS entries in
         ROUTE_CLASSIFICATION, and CI's coverage of the two owner_only WS
         gates) depends on the `websockets` package being importable. This
-        is a tripwire: if it silently stops being a dependency, the 35/33
-        population-size branch in the test above goes untested in CI."""
+        is a tripwire: if it silently stops being a dependency, the census's
+        two WS members above go untested in CI."""
         import websockets  # noqa: F401
 
 

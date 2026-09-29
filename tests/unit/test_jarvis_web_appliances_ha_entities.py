@@ -66,7 +66,10 @@ def client(monkeypatch):
     monkeypatch.setattr(caller_auth, "get_admin_url", lambda: "http://admin.local:8080")
     caller_auth._set_auth_me_callable_for_tests(_fake_auth_me)
     caller_auth._auth_cache.clear()
-    test_client = TestClient(jarvis_main.app, headers={"Authorization": "Bearer test-owner-token"})
+    # X-Jarvis-Request: the page's CSRF header, required on every mutating route
+    test_client = TestClient(
+        jarvis_main.app, headers={"Authorization": "Bearer test-owner-token", "X-Jarvis-Request": "1"}
+    )
     yield test_client
     caller_auth._set_auth_me_callable_for_tests(None)
     caller_auth._auth_cache.clear()

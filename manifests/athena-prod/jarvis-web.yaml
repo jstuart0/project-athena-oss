@@ -74,16 +74,19 @@ spec:
             secretKeyRef:
               name: athena-encryption
               key: SERVICE_API_KEY
-        # JARVIS_PUBLIC_MODE (ATHENA-69, D18/D19) -- OSS template, commented
-        # out (default "guest" applies). An unauthenticated caller is a
-        # guest and refused on every owner_only write route (403
-        # sign_in_required). Set to "household" only for a LAN-only
-        # deployment not reachable from the internet -- it restores the
-        # pre-ATHENA-69 behavior of serving every caller in the household's
-        # actual mode and bypasses the write-route sign-in gate. Logs
-        # jarvis_public_mode_household_active hourly while active.
-        # - name: JARVIS_PUBLIC_MODE
-        #   value: "household"
+        # Home network (OSS template, commented out). Without these every
+        # browser gets 401: jarvis-web serves without sign-in only to the
+        # home network (and to signed-in users via an auth proxy, see
+        # optional/jarvis-web-edge-auth.yaml). TRUSTED_PROXY_CIDRS comes from
+        # athena-config. Placeholder addresses only.
+        # - name: JARVIS_LOCAL_NETWORKS
+        #   value: "192.0.2.0/24"
+        # - name: JARVIS_GUEST_NETWORKS
+        #   value: "198.51.100.0/24"
+        # - name: JARVIS_LOCAL_EXCLUDE
+        #   value: "192.0.2.14/32"
+        # - name: JARVIS_ALLOWED_HOSTS
+        #   value: "jarvis.example.com"
         resources:
           requests:
             memory: "128Mi"

@@ -15,21 +15,24 @@ import os
 import uuid
 import json
 import time
-import functools
+import hashlib
+import hmac
+import secrets
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 import structlog
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from sqlalchemy import text
 from admin_url import get_admin_url
-from caller_auth import require_owner_caller, resolve_caller, resolve_caller_ws, is_owner_permitted, _posture_reminder_loop, _POSTURE_REMINDER_INTERVAL_SECONDS
+import caller_auth
+from caller_auth import Caller, resolve_caller, resolve_caller_ws, route_dependency, ws_origin_allowed
 
 # Configure logging. Guarded: structlog.configure() is process-global, and
 # this module gets exec'd more than once in the same pytest process under
@@ -55,7 +58,7 @@ ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
 # D10: the orchestrator's gated routes now require X-Service-Key outside
 # DEV_MODE/warn mode. Warn loudly at import time if this backend would send
 # an empty key, rather than let every query silently 401 at runtime.
-SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+SERVICE_API_KEY = caller_auth.SETTINGS.service_api_key
 if not SERVICE_API_KEY:
     logger.warning(
         "jarvis_web_service_api_key_unset",
@@ -103,11 +106,21 @@ async def get_current_mode() -> str:
         return "owner"
 
 
-# ATHENA-69 (D18/D19): binds get_current_mode as require_owner_caller's
-# household_mode_resolver, so its returned Caller.mode reflects real
-# household state for a signed-in owner/operator instead of the
-# no-resolver "guest" fallback (caller_auth.py never imports main.py).
-_require_owner_caller = functools.partial(require_owner_caller, household_mode_resolver=get_current_mode)
+# One gate per route class (the census vocabulary below), each bound to
+# get_current_mode so a household caller's Caller.mode is the real
+# household mode (caller_auth.py never imports main.py).
+_require_owner_caller = route_dependency("owner_only", get_current_mode)
+_require_household_reader = route_dependency("household_read", get_current_mode)
+_require_guest_reader = route_dependency("guest_read", get_current_mode)
+_require_browser_caller = route_dependency("browser", get_current_mode)
+_require_relay_chat = route_dependency("relay_chat", get_current_mode)
+ROUTE_DEPENDENCIES = {
+    "owner_only": _require_owner_caller,
+    "household_read": _require_household_reader,
+    "guest_read": _require_guest_reader,
+    "browser": _require_browser_caller,
+    "relay_chat": _require_relay_chat,
+}
 
 
 class ModeState(BaseModel):
@@ -151,31 +164,22 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS for development
-# KNOWN ISSUE (ATHENA-64, not fixed here): allow_origins=["*"] combined with
-# allow_credentials=True makes Starlette reflect the request Origin header
-# verbatim, defeating same-origin credential protection — any origin can
-# make a credentialed cross-origin request. Deliberately left unchanged by
-# ATHENA-63 (Phase 2): fixing it requires enumerating every legitimate
-# origin that currently embeds this app, which is a consumer audit outside
-# that campaign's scope, and bundling an untested CORS change into a
-# fast-tracked CVE patch risks breaking a real integration. See ATHENA-64.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS: none by default (same-origin only). JARVIS_CORS_ORIGINS lists the
+# exact origins allowed to call with credentials; "*" and "null" are
+# refused at startup. Mutating routes also require X-Jarvis-Request: 1,
+# which a cross-origin page can only send after a successful preflight.
+if caller_auth.SETTINGS.cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(caller_auth.SETTINGS.cors_origins),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["content-type", "authorization", "x-jarvis-request"],
+    )
 
 @app.on_event("startup")
 async def startup():
     global _engine, _db_available
-
-    # ATHENA-69 (D28): runs independently of DB availability -- warns at
-    # startup and hourly while JARVIS_PUBLIC_MODE=="household" bypasses
-    # every owner_only route's gate.
-    asyncio.create_task(_posture_reminder_loop(_POSTURE_REMINDER_INTERVAL_SECONDS))
 
     if not _SA_URL:
         logger.info("persistent_sessions_db_skipped", reason="DATABASE_URL_not_set")
@@ -469,6 +473,7 @@ class WelcomeInfo(BaseModel):
     greeting: str
     subtitle: str
     suggestions: List[str]
+    capabilities: Dict[str, Any] = {}
 
 
 class ClimateState(BaseModel):
@@ -565,9 +570,28 @@ def get_guest_suggestions() -> List[str]:
     ]
 
 
-@app.get("/api/welcome", response_model=WelcomeInfo)
-async def get_welcome():
+def _capabilities(caller: Caller) -> Dict[str, Any]:
+    """What this caller's UI may show and do."""
+    auth = caller_auth.SETTINGS
+    caps: Dict[str, Any] = {
+        "household_read": caller.can_read_household,
+        "control": caller.owner_permitted,
+        "control_reason": caller.control_reason,
+        "signed_in": caller.authenticated,
+    }
+    if caller.identity:
+        caps["display_name"] = caller.identity
+    if caller.control_reason == "guest_stay" and auth.signin_url:
+        caps["signin_url"] = auth.signin_url
+    if caller.authenticated and auth.logout_url:
+        caps["logout_url"] = auth.logout_url
+    return caps
+
+
+@app.get("/api/welcome", response_model=WelcomeInfo, dependencies=[Depends(_require_guest_reader)])
+async def get_welcome(request: Request):
     """Get welcome information including guest details and suggestions"""
+    caller: Caller = request.state.caller
     guest = await get_current_guest()
 
     base_greeting = get_time_based_greeting()
@@ -591,17 +615,72 @@ async def get_welcome():
         guest=guest_info,
         greeting=greeting,
         subtitle=subtitle,
-        suggestions=get_guest_suggestions()
+        suggestions=get_guest_suggestions(),
+        capabilities=_capabilities(caller),
     )
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(message: ChatMessage, request: Request):
+# Chat sessions are bound to the browser that started them: jarvis-web mints
+# every orchestrator session id itself, as "<id>.<mac>" where the mac binds
+# the id to an httponly per-browser cookie. A presented id that this browser
+# didn't receive is replaced with a fresh one, so nobody resumes another
+# person's conversation by sending its id.
+_CHAT_KEY_COOKIE = "jarvis_chat_key"
+_CHAT_SESSION_KEY = (
+    hmac.new(SERVICE_API_KEY.encode(), b"jarvis-web-chat-session", hashlib.sha256).digest()
+    if SERVICE_API_KEY else secrets.token_bytes(32)
+)
+
+
+def _session_mac(session_part: str, browser_key: str) -> str:
+    return hmac.new(_CHAT_SESSION_KEY, f"{session_part}|{browser_key}".encode(), hashlib.sha256).hexdigest()[:24]
+
+
+def _new_session_id(browser_key: str) -> str:
+    part = uuid.uuid4().hex
+    return f"{part}.{_session_mac(part, browser_key)}"
+
+
+def _bound_session_id(presented: Optional[str], request: Request) -> tuple:
+    """(session id to use, browser key cookie value to set or None)."""
+    browser_key = request.cookies.get(_CHAT_KEY_COOKIE)
+    new_key = None
+    if not browser_key:
+        browser_key = new_key = secrets.token_urlsafe(24)
+    if presented and "." in presented:
+        part, mac = presented.rsplit(".", 1)
+        if part and hmac.compare_digest(mac, _session_mac(part, browser_key)):
+            return presented, new_key
+    if presented:
+        logger.info("chat_session_id_not_bound_to_browser", action="fresh_session")
+    return _new_session_id(browser_key), new_key
+
+
+def _set_chat_key_cookie(response: Response, request: Request, value: Optional[str]) -> None:
+    if not value:
+        return
+    secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    response.set_cookie(_CHAT_KEY_COOKIE, value, max_age=30 * 86400, httponly=True, samesite="strict", secure=secure)
+
+
+def _chat_context(caller: Caller, guest: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Guest identity reaches the model only for household and guest-network
+    callers."""
+    context: Dict[str, Any] = {}
+    if guest and caller.gets_guest_context:
+        context["guest_id"] = guest.get("id")
+        context["guest_name"] = guest.get("guest_name")
+    return context
+
+
+@app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(_require_relay_chat)])
+async def chat(message: ChatMessage, request: Request, response: Response):
     """Send a message to Athena and get a response"""
     start_time = datetime.now()
+    caller: Caller = request.state.caller
 
-    # Get or create session
-    session_id = message.session_id or str(uuid.uuid4())
+    session_id, browser_key = _bound_session_id(message.session_id, request)
+    _set_chat_key_cookie(response, request, browser_key)
 
     if session_id not in sessions:
         sessions[session_id] = {
@@ -612,24 +691,15 @@ async def chat(message: ChatMessage, request: Request):
     sessions[session_id]["message_count"] += 1
     sessions[session_id]["last_message"] = datetime.now().isoformat()
 
-    # Fetch current guest information for context
-    guest = await get_current_guest()
-    context = {}
-    if guest:
-        context["guest_id"] = guest.get("id")
-        context["guest_name"] = guest.get("guest_name")
-        logger.info(
-            "guest_context_attached",
-            guest_id=guest.get("id"),
-            guest_name=guest.get("guest_name")
-        )
+    # Guest identity only for callers who may know it
+    guest = await get_current_guest() if caller.gets_guest_context else None
+    context = _chat_context(caller, guest)
+    if context:
+        logger.info("guest_context_attached", guest_id=context.get("guest_id"))
 
     try:
-        # ATHENA-69 (D18/D24): mode and caller_trust are server-derived from
-        # the request's own Bearer token, never from anything the browser
-        # sends. Unauthenticated callers are guest (or JARVIS_PUBLIC_MODE's
-        # household legacy bypass); message.source stays analytics-only.
-        caller = await resolve_caller(request, get_current_mode)
+        # mode and caller_trust are server-derived (caller_auth), never from
+        # anything the browser sends; message.source stays analytics-only.
         current_mode = caller.mode
 
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -666,20 +736,20 @@ async def chat(message: ChatMessage, request: Request):
 
             logger.info("chat_request", mode=current_mode, query_preview=message.message[:50])
 
-            response = await client.post(
+            orch_response = await client.post(
                 f"{ORCHESTRATOR_URL}/query",
                 json=request_body,
                 headers={"X-Service-Key": SERVICE_API_KEY}
             )
 
-            if response.status_code != 200:
-                logger.error("orchestrator_error", status=response.status_code, body=response.text)
+            if orch_response.status_code != 200:
+                logger.error("orchestrator_error", status=orch_response.status_code, body=orch_response.text)
                 raise HTTPException(
                     status_code=502,
                     detail="Unable to process your request. Please try again."
                 )
 
-            data = response.json()
+            data = orch_response.json()
             answer = data.get("answer", "I'm sorry, I couldn't process that request.")
 
             # Use session_id from orchestrator response (it manages the actual session)
@@ -735,7 +805,7 @@ async def chat(message: ChatMessage, request: Request):
         )
 
 
-@app.get("/api/session/restore")
+@app.get("/api/session/restore", dependencies=[Depends(_require_browser_caller)])
 async def restore_session(request: Request, response: Response):
     """
     Called on page load to check if the user has a previous session to restore.
@@ -785,7 +855,7 @@ async def restore_session(request: Request, response: Response):
     }
 
 
-@app.delete("/api/session/current")
+@app.delete("/api/session/current", dependencies=[Depends(_require_browser_caller)])
 async def clear_session(request: Request):
     """
     Soft-close the current thread (Start Fresh).
@@ -819,10 +889,12 @@ async def clear_session(request: Request):
     return {"cleared": True}
 
 
-@app.post("/api/chat/stream")
+@app.post("/api/chat/stream", dependencies=[Depends(_require_relay_chat)])
 async def chat_stream(message: ChatMessage, request: Request):
     """Stream a response from Athena with optional session persistence."""
-    session_id = message.session_id or str(uuid.uuid4())
+    caller: Caller = request.state.caller
+    session_id, browser_key = _bound_session_id(message.session_id, request)
+    stream_browser_key = browser_key or request.cookies.get(_CHAT_KEY_COOKIE)
 
     if session_id not in sessions:
         sessions[session_id] = {
@@ -831,16 +903,12 @@ async def chat_stream(message: ChatMessage, request: Request):
         }
     sessions[session_id]["message_count"] += 1
 
-    # Fetch current guest information for context
-    guest = await get_current_guest()
-    context = {}
-    if guest:
-        context["guest_id"] = guest.get("id")
-        context["guest_name"] = guest.get("guest_name")
+    # Guest identity only for callers who may know it
+    guest = await get_current_guest() if caller.gets_guest_context else None
+    context = _chat_context(caller, guest)
 
-    # ATHENA-69 (D18/D24): mode and caller_trust are server-derived from the
-    # request's own Bearer token, never from anything the browser sends.
-    caller = await resolve_caller(request, get_current_mode)
+    # mode and caller_trust are server-derived (caller_auth), never from
+    # anything the browser sends.
     current_mode = caller.mode
 
     # --- Persistent session setup ---
@@ -871,11 +939,15 @@ async def chat_stream(message: ChatMessage, request: Request):
                 max_turns = config.get("max_restored_turns", 20)
                 chat_history_msgs = await load_chat_history(thread_id, max_turns)
                 inject_history = True
-                orch_session_id = str(uuid.uuid4())
+                orch_session_id = _new_session_id(stream_browser_key)
 
     async def generate():
         buffer = []
         stream_completed = False
+
+        # The session this stream belongs to; the page adopts it for the
+        # next turn (the id is bound to this browser).
+        yield f"data: {json.dumps({'stage': 'session', 'session_id': orch_session_id})}\n\n"
 
         try:
             request_body = {
@@ -959,6 +1031,8 @@ async def chat_stream(message: ChatMessage, request: Request):
         }
     )
 
+    _set_chat_key_cookie(streaming_resp, request, browser_key)
+
     if config and cookie_id:
         ttl_days = config.get("session_ttl_days", 90)
         streaming_resp.set_cookie(
@@ -975,8 +1049,10 @@ async def chat_stream(message: ChatMessage, request: Request):
 
 
 @app.get("/api/health")
-async def health():
-    """Health check endpoint - quick check, doesn't block on slow orchestrator health"""
+async def health(request: Request):
+    """Health check endpoint - quick check, doesn't block on slow orchestrator health.
+
+    Public (probes); the orchestrator error detail is only for household readers."""
     orchestrator_healthy = False
     orchestrator_error = None
 
@@ -1001,16 +1077,19 @@ async def health():
             "timestamp": datetime.now().isoformat()
         }
     else:
-        return {
+        body = {
             "status": "degraded",
             "service": "jarvis-web",
             "orchestrator": "disconnected",
-            "orchestrator_error": orchestrator_error,
             "timestamp": datetime.now().isoformat()
         }
+        caller = await resolve_caller(request)
+        if caller.can_read_household:
+            body["orchestrator_error"] = orchestrator_error
+        return body
 
 
-@app.get("/api/geocode/reverse")
+@app.get("/api/geocode/reverse", dependencies=[Depends(_require_browser_caller)])
 async def reverse_geocode(lat: float, lon: float):
     """Reverse geocode coordinates to address using Nominatim"""
     try:
@@ -1071,7 +1150,7 @@ async def reverse_geocode(lat: float, lon: float):
         return {"address": f"{lat:.4f}, {lon:.4f}"}
 
 
-@app.get("/api/geocode/search")
+@app.get("/api/geocode/search", dependencies=[Depends(_require_browser_caller)])
 async def geocode_search(q: str, limit: int = 5):
     """Search for addresses using Nominatim"""
     if not q or len(q) < 3:
@@ -1120,7 +1199,7 @@ async def geocode_search(q: str, limit: int = 5):
         return {"results": []}
 
 
-@app.get("/api/session/{session_id}")
+@app.get("/api/session/{session_id}", dependencies=[Depends(_require_browser_caller)])
 async def get_session(session_id: str):
     """Get session information"""
     if session_id not in sessions:
@@ -1137,9 +1216,9 @@ async def _get_mode_state(request: Optional[Request]) -> ModeState:
     clear_mode_override refresh calls (both already owner_only-gated, so
     they pass request=None and skip the suppression check below).
 
-    ATHENA-69 (D31): a web_public caller (no signed-in owner/operator, and
-    not under JARVIS_PUBLIC_MODE=household) gets guest_name suppressed --
-    has_guest and the rest of the mode state are unaffected.
+    Only callers who may know the guest's identity (household and
+    guest-network browsers; the route gate already refused everyone else)
+    see guest_name.
     """
     global mode_override
 
@@ -1154,8 +1233,8 @@ async def _get_mode_state(request: Optional[Request]) -> ModeState:
 
     guest_name = guest.get("guest_name") if guest else None
     if request is not None:
-        caller = await resolve_caller(request, get_current_mode)
-        if not is_owner_permitted(caller):
+        caller = getattr(request.state, "caller", None)
+        if caller is None or not caller.gets_guest_context:
             guest_name = None
 
     return ModeState(
@@ -1167,7 +1246,7 @@ async def _get_mode_state(request: Optional[Request]) -> ModeState:
     )
 
 
-@app.get("/api/mode", response_model=ModeState)
+@app.get("/api/mode", response_model=ModeState, dependencies=[Depends(_require_guest_reader)])
 async def get_mode(request: Request):
     """
     Get current mode status.
@@ -1273,7 +1352,7 @@ async def get_ha_headers() -> Dict[str, str]:
     }
 
 
-@app.get("/api/climate", response_model=ClimateState)
+@app.get("/api/climate", response_model=ClimateState, dependencies=[Depends(_require_guest_reader)])
 async def get_climate():
     """Get current thermostat state"""
     if not HA_TOKEN:
@@ -1479,7 +1558,7 @@ async def get_all_states() -> List[Dict[str, Any]]:
     return []
 
 
-@app.get("/api/sensors/motion")
+@app.get("/api/sensors/motion", dependencies=[Depends(_require_household_reader)])
 async def get_motion_sensors():
     """Get all motion/occupancy sensors grouped by room"""
     states = await get_all_states()
@@ -1526,7 +1605,7 @@ async def get_motion_sensors():
     }
 
 
-@app.get("/api/sensors/temperature")
+@app.get("/api/sensors/temperature", dependencies=[Depends(_require_household_reader)])
 async def get_temperature_sensors():
     """Get all temperature sensors"""
     states = await get_all_states()
@@ -1572,7 +1651,7 @@ async def get_temperature_sensors():
     }
 
 
-@app.get("/api/sensors/illuminance")
+@app.get("/api/sensors/illuminance", dependencies=[Depends(_require_household_reader)])
 async def get_illuminance_sensors():
     """Get all light/illuminance sensors"""
     states = await get_all_states()
@@ -1617,7 +1696,7 @@ async def get_illuminance_sensors():
     }
 
 
-@app.get("/api/sensors/summary")
+@app.get("/api/sensors/summary", dependencies=[Depends(_require_household_reader)])
 async def get_sensors_summary():
     """Get a summary of all sensors for quick overview"""
     states = await get_all_states()
@@ -1685,7 +1764,7 @@ async def get_sensors_summary():
 # Media Player Control
 # =============================================================================
 
-@app.get("/api/media")
+@app.get("/api/media", dependencies=[Depends(_require_household_reader)])
 async def get_media_players():
     """Get all available media players and their states"""
     states = await get_all_states()
@@ -1927,7 +2006,7 @@ class SetApplianceTempRequest(BaseModel):
     temperature: int
 
 
-@app.get("/api/appliances/oven", response_model=OvenState)
+@app.get("/api/appliances/oven", response_model=OvenState, dependencies=[Depends(_require_household_reader)])
 async def get_oven_state():
     """Get current oven state, temperature, and cooking mode"""
     if not HA_TOKEN:
@@ -2118,7 +2197,7 @@ async def turn_oven_off():
         raise HTTPException(status_code=503, detail="Unable to connect to Home Assistant")
 
 
-@app.get("/api/appliances/fridge", response_model=FridgeState)
+@app.get("/api/appliances/fridge", response_model=FridgeState, dependencies=[Depends(_require_household_reader)])
 async def get_fridge_state():
     """Get fridge and freezer state"""
     if not HA_TOKEN:
@@ -2334,7 +2413,7 @@ class RemoteCommandRequest(BaseModel):
     command: str  # up, down, left, right, select, menu, home, play, pause
 
 
-@app.get("/api/appletv")
+@app.get("/api/appletv", dependencies=[Depends(_require_guest_reader)])
 async def get_apple_tvs() -> List[AppleTVState]:
     """Get all Apple TVs and their current state"""
     if not HA_TOKEN:
@@ -2517,7 +2596,7 @@ class TTSRequest(BaseModel):
     text: str
 
 
-@app.post("/api/voice/transcribe")
+@app.post("/api/voice/transcribe", dependencies=[Depends(_require_browser_caller)])
 async def transcribe_audio(request: Request):
     """
     Transcribe audio to text via Voice REST API.
@@ -2660,7 +2739,7 @@ async def transcribe_audio(request: Request):
         raise HTTPException(status_code=503, detail="Voice service unavailable")
 
 
-@app.post("/api/voice/synthesize")
+@app.post("/api/voice/synthesize", dependencies=[Depends(_require_browser_caller)])
 async def synthesize_speech(request: TTSRequest):
     """
     Synthesize speech from text via Voice REST API.
@@ -2756,7 +2835,7 @@ async def voice_health():
 # LiveKit Proxy Routes (proxy to Gateway for WebRTC voice streaming)
 # =============================================================================
 
-@app.get("/livekit/config")
+@app.get("/livekit/config", dependencies=[Depends(_require_guest_reader)])
 async def livekit_config():
     """Proxy LiveKit config from Gateway."""
     try:
@@ -2816,7 +2895,7 @@ async def livekit_delete_room(room_name: str):
 # Music Assistant Proxy Routes (for browser playback)
 # =============================================================================
 
-@app.get("/api/music/config")
+@app.get("/api/music/config", dependencies=[Depends(_require_guest_reader)])
 async def get_music_config(request: Request):
     """
     Proxy music config request to Gateway.
@@ -2859,7 +2938,7 @@ async def get_music_config(request: Request):
         return {"enabled": False, "error": str(e)}
 
 
-@app.get("/api/music/stream/{uri:path}")
+@app.get("/api/music/stream/{uri:path}", dependencies=[Depends(_require_guest_reader)])
 async def proxy_music_stream(uri: str, request: Request):
     """
     Proxy music stream from Gateway to browser.
@@ -2944,7 +3023,7 @@ async def music_play(request: MusicPlayRequest):
         raise HTTPException(status_code=502, detail="Play request failed")
 
 
-@app.post("/api/music/search")
+@app.post("/api/music/search", dependencies=[Depends(_require_guest_reader)])
 async def music_search(request: MusicSearchRequest):
     """
     Search Music Assistant for tracks/artists.
@@ -3001,11 +3080,10 @@ if MUSIC_WS_AVAILABLE:
         Proxies WebSocket connections from browser through Jarvis Web
         to the Gateway, which in turn connects to Music Assistant.
         """
-        # ATHENA-69 (D19): owner_only -- close before accept() when the
-        # caller isn't a signed-in owner/operator (or JARVIS_PUBLIC_MODE
-        # isn't the household legacy bypass).
+        # owner_only -- close before accept() unless the caller may use
+        # owner routes and the Origin is allowlisted (D21).
         caller = await resolve_caller_ws(websocket, get_current_mode)
-        if not is_owner_permitted(caller):
+        if not (caller.owner_permitted and ws_origin_allowed(websocket)):
             await websocket.close(code=1008)
             return
 
@@ -3067,11 +3145,10 @@ if MUSIC_WS_AVAILABLE:
         to the Gateway, which connects to Music Assistant's Sendspin endpoint.
         Handles both text (JSON control) and binary (audio) messages.
         """
-        # ATHENA-69 (D19): owner_only -- close before accept() when the
-        # caller isn't a signed-in owner/operator (or JARVIS_PUBLIC_MODE
-        # isn't the household legacy bypass).
+        # owner_only -- close before accept() unless the caller may use
+        # owner routes and the Origin is allowlisted (D21).
         caller = await resolve_caller_ws(websocket, get_current_mode)
-        if not is_owner_permitted(caller):
+        if not (caller.owner_permitted and ws_origin_allowed(websocket)):
             await websocket.close(code=1008)
             return
 
@@ -3149,18 +3226,24 @@ if MUSIC_WS_AVAILABLE:
 
 
 # =============================================================================
-# ATHENA-69 (D19): route classification census
+# Route classification census (D14)
 # =============================================================================
-# Every mutating (non-GET) route in this file, classified owner_only
-# (carries Depends(_require_owner_caller), or a WS close(1008) before
-# accept()) or no_side_effect (chat/voice/search -- guest-safe writes).
-# tests/unit/test_ha_permission_wiring.py's TestJarvisWebMutatingRoutesClassified
-# asserts this dict's population equals every mutating route FastAPI actually
-# registered, and that every owner_only HTTP entry carries the dependency --
-# a route added here without the dependency, or a route added to the app
-# without an entry here, fails that test.
+# Every registered route (HTTP method + path, WebSocket, and static mount)
+# is classified here. tests/unit/test_ha_permission_wiring.py's
+# TestJarvisWebRoutesClassified asserts this dict's population equals what
+# FastAPI registered and that every gated class carries its dependency from
+# ROUTE_DEPENDENCIES -- a new route without an entry, or with the wrong
+# gate, fails CI.
+#
+#   owner_only      signed-in owner/operator, or home network in owner mode
+#   household_read  household browsers and the service caller (not the
+#                   guest network: 403 guest_network)
+#   guest_read      household browsers and the guest network
+#   relay_chat      chat: browsers (and the embed relay)
+#   browser         any home-network or signed-in browser
+#   public          anyone (probes, static assets, the sign-in fallback page)
 
-_CONDITIONAL_ROUTES = {"WS /ma/ws", "WS /ma/sendspin"}
+_CONDITIONAL_ROUTES = {"WS /ma/ws", "WS /ma/sendspin", "MOUNT /static", "MOUNT /logos", "GET /"}
 
 ROUTE_CLASSIFICATION: Dict[str, str] = {
     "POST /api/mode": "owner_only",
@@ -3190,12 +3273,37 @@ ROUTE_CLASSIFICATION: Dict[str, str] = {
     "POST /livekit/rooms/{room_name}/athena-join": "owner_only",
     "DELETE /livekit/rooms/{room_name}": "owner_only",
     "POST /api/music/play": "owner_only",
-    "POST /api/chat": "no_side_effect",
-    "POST /api/chat/stream": "no_side_effect",
-    "DELETE /api/session/current": "no_side_effect",
-    "POST /api/voice/transcribe": "no_side_effect",
-    "POST /api/voice/synthesize": "no_side_effect",
-    "POST /api/music/search": "no_side_effect",
+    "GET /api/sensors/motion": "household_read",
+    "GET /api/sensors/temperature": "household_read",
+    "GET /api/sensors/illuminance": "household_read",
+    "GET /api/sensors/summary": "household_read",
+    "GET /api/media": "household_read",
+    "GET /api/appliances/oven": "household_read",
+    "GET /api/appliances/fridge": "household_read",
+    "GET /api/welcome": "guest_read",
+    "GET /api/mode": "guest_read",
+    "GET /api/climate": "guest_read",
+    "GET /api/appletv": "guest_read",
+    "GET /api/music/config": "guest_read",
+    "GET /api/music/stream/{uri:path}": "guest_read",
+    "POST /api/music/search": "guest_read",
+    "GET /livekit/config": "guest_read",
+    "POST /api/chat": "relay_chat",
+    "POST /api/chat/stream": "relay_chat",
+    "GET /api/session/restore": "browser",
+    "DELETE /api/session/current": "browser",
+    "GET /api/session/{session_id}": "browser",
+    "GET /api/geocode/reverse": "browser",
+    "GET /api/geocode/search": "browser",
+    "POST /api/voice/transcribe": "browser",
+    "POST /api/voice/synthesize": "browser",
+    "GET /api/health": "public",
+    "GET /api/voice/health": "public",
+    "GET /api/appletv/apps": "public",
+    "GET /openapi.json": "public",
+    "GET /docs": "public",
+    "GET /docs/oauth2-redirect": "public",
+    "GET /redoc": "public",
 }
 
 if MUSIC_WS_AVAILABLE:
@@ -3203,17 +3311,63 @@ if MUSIC_WS_AVAILABLE:
     ROUTE_CLASSIFICATION["WS /ma/sendspin"] = "owner_only"
 
 
+_SIGN_IN_PAGE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis</title>
+<style>
+  :root { color-scheme: light dark; --bg: #ffffff; --fg: #1a1a1a; --muted: #4a4a4a; --link: #0b57d0; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #121212; --fg: #f2f2f2; --muted: #c8c8c8; --link: #8ab4f8; } }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg);
+         font-family: system-ui, -apple-system, sans-serif; line-height: 1.5; }
+  main { max-width: 32rem; padding: 2rem 1.5rem; }
+  h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+  p { margin: 0 0 1rem; }
+  .admin { color: var(--muted); font-size: 0.875rem; }
+  a { color: var(--link); }
+</style>
+</head>
+<body>
+<main>
+<h1>Jarvis is only available on the home network.</h1>
+<p>If you're at home, your network may not be set up yet. The person who manages Jarvis can fix this.</p>
+{sign_in}
+<p class="admin">Set JARVIS_LOCAL_NETWORKS or an auth proxy: see docs/CONFIGURATION.md</p>
+</main>
+</body>
+</html>
+"""
+
+
+def _sign_in_page() -> str:
+    from html import escape
+
+    login_url = caller_auth.SETTINGS.login_url
+    link = f'<p><a href="{escape(login_url, quote=True)}">Sign in</a></p>' if login_url else ""
+    return _SIGN_IN_PAGE.replace("{sign_in}", link)
+
+
 # Serve static files in production
 static_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
 logos_path = os.path.join(static_path, "logos")
 if os.path.exists(static_path):
     app.mount("/static", StaticFiles(directory=static_path), name="static")
+    ROUTE_CLASSIFICATION["MOUNT /static"] = "public"
+    ROUTE_CLASSIFICATION["GET /"] = "public"
     # Serve logos at /logos for streaming app icons
     if os.path.exists(logos_path):
         app.mount("/logos", StaticFiles(directory=logos_path), name="logos")
+        ROUTE_CLASSIFICATION["MOUNT /logos"] = "public"
 
     @app.get("/")
-    async def serve_index():
+    async def serve_index(request: Request):
+        """The app for a home-network or signed-in browser; everyone else
+        gets a static 401 page (no scripts, no household or guest data)."""
+        caller = await resolve_caller(request, get_current_mode)
+        if not caller.is_browser:
+            return HTMLResponse(_sign_in_page(), status_code=401, headers={"WWW-Authenticate": "Jarvis"})
         return FileResponse(os.path.join(static_path, "index.html"))
 
 

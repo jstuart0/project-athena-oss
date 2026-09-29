@@ -631,7 +631,7 @@ class MusicPlayer {
             console.log('[MusicPlayer] Playing to Sendspin player:', playerId);
 
             // Play via MA API - audio will stream to our Sendspin connection
-            const response = await fetch(`${window.location.origin}/api/music/play`, {
+            const response = await jarvisFetch(`${window.location.origin}/api/music/play`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

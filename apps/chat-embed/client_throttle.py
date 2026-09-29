@@ -20,15 +20,8 @@ _src_dir = _repo_root / "src"
 if str(_src_dir) not in sys.path:
     sys.path.insert(0, str(_src_dir))
 
-from shared.client_throttle import (  # noqa: E402,F401
-    ResolvedClient,
-    SlidingWindowLimiter,
-    in_networks,
-    invalid_network_entries,
-    local_candidate,
-    parse_ip,
-    parse_networks,
-    rate_limit_key,
-    read_forwarded_for,
-    resolve_rate_client,
-)
+import shared.client_throttle as _canonical  # noqa: E402
+
+# Every name the canonical module defines, so this file is indistinguishable
+# from the one the image copies in.
+globals().update({k: v for k, v in vars(_canonical).items() if not k.startswith("__")})
