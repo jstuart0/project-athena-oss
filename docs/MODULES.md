@@ -250,7 +250,7 @@ MODULE_JARVIS_WEB=true  # or false to disable
 
 ```bash
 # Jarvis Web service URL (optional -- empty skips the orchestrator's
-# appliance/sensor/media lookups against it, ATHENA-128)
+# appliance/sensor/media lookups against it)
 JARVIS_WEB_URL=http://jarvis-web:3001
 ```
 
