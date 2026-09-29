@@ -620,3 +620,28 @@ class TestCoverageGaps:
         asyncio.run(bs.refresh(config, now=_FIXED_NOW, admin_client=_admin_client(_admin_handler(_bookings_payload([]))),
                                ical_client_factory=_ical_factory(lambda r: httpx.Response(200, content=ical))))
         assert [b.start.date().isoformat() for b in bs._ical.last_good] == ["2026-06-30"]
+
+
+class TestFailureLogsCarryNoUrl:
+    _TOKEN = "s3cr3tTOKEN42"
+
+    def test_ical_http_error_logs_status_not_url(self, bs, captured_logs):
+        config = {"enabled": True, "calendar_url": f"https://calendar.example.com/export/{self._TOKEN}.ics?k={self._TOKEN}"}
+        asyncio.run(bs.refresh(config, now=_FIXED_NOW,
+                               admin_client=_admin_client(_admin_handler(_bookings_payload([]))),
+                               ical_client_factory=_ical_factory(lambda r: httpx.Response(403))))
+        failures = [e for e in captured_logs if e.get("event") == "mode_bookings_ical_fetch_failed"]
+        assert len(failures) == 1
+        assert failures[0].get("status_code") == 403
+        rendered = " ".join(repr(e) for e in captured_logs)
+        assert self._TOKEN not in rendered
+        assert "calendar.example.com" not in rendered
+
+    def test_admin_transport_error_logs_class_not_text(self, bs, captured_logs):
+        def handler(request):
+            raise httpx.ConnectError(f"connect failed: {request.url}?token={self._TOKEN}")
+
+        asyncio.run(bs.refresh({"enabled": True}, now=_FIXED_NOW, admin_client=_admin_client(handler)))
+        failures = [e for e in captured_logs if e.get("event") == "mode_bookings_admin_fetch_failed"]
+        assert [e.get("error") for e in failures] == ["ConnectError"]
+        assert self._TOKEN not in " ".join(repr(e) for e in captured_logs)
