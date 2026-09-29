@@ -953,7 +953,7 @@ Each request resolves to one class, from server-side evidence only:
 | Class | How | What it gets |
 |---|---|---|
 | Home network (`web_local`) | the home rule below, or an attested `home` from an auth proxy | UI, chat and household reads; owner-only routes while the house is in owner mode, else `403 guest_stay_active` |
-| Guest network | the address is in `JARVIS_GUEST_NETWORKS` | UI and chat, always guest mode (even when the house is vacant or owner mode is forced), view-only controls, only the reads the guest UI loads (`403 guest_network` on sensors, media and appliances) |
+| Guest network | the address is in `JARVIS_GUEST_NETWORKS` | UI, chat and push-to-talk, always guest mode (even when the house is vacant or owner mode is forced), view-only controls, only the reads the guest UI loads (`403 guest_network` on sensors, media and appliances) |
 | Signed in (`web_authenticated`) | an auth proxy's attested identity in a household group, or a Bearer token for an owner/operator | everything |
 | Service | the orchestrator's `X-Service-Key` | the household GET routes it uses for voice answers (`/api/appliances/*`, `/api/sensors/*`, `/api/media`), nothing else |
 | Embed relay | chat-embed with `JARVIS_RELAY_KEY` | chat only, as the public audience |
@@ -1064,6 +1064,8 @@ default guest profile) no longer gets presence ("is anyone home"), sensor
 readings or device status from it. Add `control` to the guest profile's
 allowed intents if guests should have those answers (it also lets them
 control what the guest domains allow).
+
+**Voice.** Push-to-talk (`/api/voice/*`) is for every browser class (home network, also during a guest stay; the guest network; signed in); anonymous callers and the embed relay get none. A voice turn is a chat turn, so it is refused whatever chat would refuse. Always-on voice (LiveKit rooms) stays owner-only.
 
 **Browser rules.** Mutating requests from the page carry
 `X-Jarvis-Request: 1`; a request without it gets `403 reload_required`

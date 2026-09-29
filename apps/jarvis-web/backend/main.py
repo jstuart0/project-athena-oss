@@ -624,6 +624,10 @@ def _capabilities(caller: Caller) -> Dict[str, Any]:
     caps: Dict[str, Any] = {
         "household_read": caller.can_read_household,
         "control": caller.owner_permitted,
+        # Push-to-talk is for every browser caller (home, guest Wi-Fi,
+        # signed in), whether or not it may control: a voice turn is a chat
+        # turn and is refused what chat would refuse.
+        "voice": caller.is_browser,
         "control_reason": caller.control_reason,
         "signed_in": caller.authenticated,
     }
@@ -2844,7 +2848,7 @@ async def synthesize_speech(request: TTSRequest):
         raise HTTPException(status_code=503, detail="Voice service unavailable")
 
 
-@app.get("/api/voice/health", dependencies=[Depends(_require_household_reader)])
+@app.get("/api/voice/health", dependencies=[Depends(_require_guest_reader)])
 async def voice_health():
     """Check health of voice services (STT/TTS)"""
     import subprocess
@@ -3365,7 +3369,7 @@ ROUTE_CLASSIFICATION: Dict[str, str] = {
     "GET /api/geocode/search": "browser",
     "POST /api/voice/transcribe": "browser",
     "POST /api/voice/synthesize": "browser",
-    "GET /api/voice/health": "household_read",
+    "GET /api/voice/health": "guest_read",
     "GET /api/appletv/apps": "guest_read",
     "GET /api/health": "public",
 }

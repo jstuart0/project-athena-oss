@@ -2708,12 +2708,16 @@
             await loadWelcome();
             await checkHealth();
             await loadModeState();
-            if (canControl()) {
+            // Push-to-talk for every browser caller; always-on voice
+            // (LiveKit) and the music socket only for callers who may control.
+            if (capabilities.voice) {
                 await checkVoiceHealth();
+            } else {
+                disableVoice('Voice is not available here');
+            }
+            if (canControl()) {
                 await initializeLiveKit();
                 await initMusicPlayer();  // Initialize browser music playback
-            } else {
-                disableVoice('Voice is available to the household');
             }
 
             // Listen for music playback errors

@@ -305,16 +305,20 @@ def test_decorative_emoji_are_hidden_from_screen_readers():
 
 
 def test_capabilities_load_before_music_and_voice():
-    """B5 (named): welcome (capabilities) loads first; the music socket,
-    voice and LiveKit only start when this caller may control."""
+    """B5, as amended by the user's voice decision (named): welcome
+    (capabilities) loads first; push-to-talk starts on the voice
+    capability; the music socket and LiveKit only for callers who may
+    control, so guests get no sign-in toasts."""
     init = INDEX.split("document.addEventListener('DOMContentLoaded', async () => {", 1)[1].split("\n        });", 1)[0]
     welcome = init.index("await loadWelcome();")
+    voice = init.index("if (capabilities.voice) {")
     gate = init.index("if (canControl()) {")
-    assert welcome < gate
-    gated = init[gate:init.index("} else {", gate)]
-    for starter in ("await checkVoiceHealth();", "await initializeLiveKit();", "await initMusicPlayer();"):
+    assert welcome < voice < gate
+    assert "await checkVoiceHealth();" in init[voice:gate] and "disableVoice(" in init[voice:gate]
+    gated = init[gate:]
+    for starter in ("await initializeLiveKit();", "await initMusicPlayer();"):
         assert starter in gated and init.count(starter) == 1, starter
-    assert "disableVoice(" in init[gate:]
+    assert init.count("await checkVoiceHealth();") == 1
     assert "Sign-in required for" not in INDEX
 
 

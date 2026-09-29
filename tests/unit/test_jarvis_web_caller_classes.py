@@ -120,15 +120,17 @@ def test_static_assets_for_browsers_revalidated(out):
     assert c.get("/static/jarvis-fetch.js", headers=h.via_proxy(h.GUEST_WIFI)).status_code == 200
 
 
-def test_voice_health_household_only(out, monkeypatch):
+def test_voice_health_for_browsers_only(out, monkeypatch):
+    """Web voice is for every browser caller (user decision): the guest
+    network reads voice health; anonymous callers get 401."""
     import subprocess as _subprocess
 
     monkeypatch.setattr(_subprocess, "run", lambda *a, **k: _subprocess.CompletedProcess(a, 0, stdout="{}"))
     h.configure()
     c = h.client()
     assert c.get("/api/voice/health", headers=h.via_proxy(h.LAN)).status_code == 200
-    guest = c.get("/api/voice/health", headers=h.via_proxy(h.GUEST_WIFI))
-    assert guest.status_code == 403 and guest.json() == {"detail": "guest_network"}
+    assert c.get("/api/voice/health", headers=h.via_proxy(h.GUEST_WIFI)).status_code == 200
+    assert h.client(peer=h.INTERNET).get("/api/voice/health").status_code == 401
 
 
 def test_docs_only_with_the_dev_flag(monkeypatch):
@@ -624,4 +626,5 @@ def test_guest_network_welcome_capabilities(monkeypatch):
     h.configure({**h.HOME_ENV, "JARVIS_SIGNIN_URL": "https://signin.example/", "JARVIS_LOGOUT_URL": "https://x/logout"})
     h.install_outbound(monkeypatch, guest={"has_guest": True, "guest_name": "Alice Renter", "id": 7})
     caps = h.client().get("/api/welcome", headers=h.via_proxy(h.GUEST_WIFI)).json()["capabilities"]
-    assert caps == {"household_read": False, "control": False, "control_reason": "guest_network", "signed_in": False}
+    assert caps == {"household_read": False, "control": False, "voice": True, "control_reason": "guest_network",
+                    "signed_in": False}
