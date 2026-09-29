@@ -731,6 +731,28 @@ API it can't reach, as disabled, so an enable-style flag would silently
 switch the protection off on a fresh install or during an outage. The
 read-only guard and the large-write limits stay active either way; to relax
 the limits, set both variables above to `0`.
+
+While the kill switch is on, a question goes back to the previous
+smart-home path, which can resolve it to a device change. That change is
+never made silently, whatever the limits (including `0`): even a
+single-device change from a question gets "Should I go ahead?" (or the
+exact command to say, on surfaces without a follow-up). A command the
+classifier misread as a question still works after "yes" or the suggested
+wording. As a rollback step, turning the switch on reverts routing
+without letting questions write.
+
+Other state-question behaviour:
+
+- A question about a device the classifier can't name ("is the heater
+  on") is resolved by the intent extractor, still as a read. If neither
+  can name the device, the answer asks which device is meant rather than
+  reporting on the lights.
+- The house-wide status reports ("which lights are on", "are the doors
+  locked") answer only questions about their own device type. A question
+  about a specific device ("garage door status", "what's the status of
+  the thermostat") gets that device's own state instead.
+- A TV question ("is the TV on", "did you turn off the TV") is answered
+  from the TV's Home Assistant state.
 Public/unauthenticated callers (`web_public`) can never attempt the PIN at
 all — see the caller table above.
 
