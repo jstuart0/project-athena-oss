@@ -736,9 +736,13 @@ While the kill switch is on, a question goes back to the previous
 smart-home path, which can resolve it to a device change. That change is
 never made silently, whatever the limits (including `0`): even a
 single-device change from a question gets "Should I go ahead?" (or the
-exact command to say, on surfaces without a follow-up). A command the
-classifier misread as a question still works after "yes" or the suggested
-wording. As a rollback step, turning the switch on reverts routing
+exact command to say, on surfaces without a follow-up). That includes
+single-device changes such as the thermostat, the bed warmer, motion
+overrides and scene or routine activation ("is good night mode on?"). A TV
+or music question is answered from the device's state, followed by the
+command form ("To turn it off, say: turn off the living room TV."). A
+command the classifier misread as a question still works after "yes" or
+the suggested wording. As a rollback step, turning the switch on reverts routing
 without letting questions write.
 
 Other state-question behaviour:
@@ -746,7 +750,10 @@ Other state-question behaviour:
 - A question about a device the classifier can't name ("is the heater
   on") is resolved by the intent extractor, still as a read. If neither
   can name the device, the answer asks which device is meant rather than
-  reporting on the lights.
+  reporting on the lights. The reply ("the thermostat", "the kitchen",
+  even "yes") is answered as that question, read-only; it never continues
+  an earlier command. An explicit command ("turn on the kitchen lights")
+  still runs.
 - The house-wide status reports ("which lights are on", "are the doors
   locked") answer only questions about their own device type. A question
   about a specific device ("garage door status", "what's the status of

@@ -29,7 +29,8 @@ KILL_SWITCH_DESCRIPTION = (
     "enabled, questions like 'are the office lights on?' go back to the "
     "legacy smart-home path instead of a guaranteed read; if that path would "
     "change a device, the change is never made silently: the user gets a "
-    "confirmation or the exact command to say."
+    "confirmation or the exact command to say. TV and music questions are "
+    "still answered from state."
 )
 
 
