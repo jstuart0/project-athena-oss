@@ -62,8 +62,34 @@ from orchestrator.utterance_kind import UNKNOWN_CLASSIFICATION as _KILL_SWITCH_C
 from orchestrator.context.detector import context_ref_view
 from orchestrator.metrics import ha_write_fanout_confirm_total
 from orchestrator import write_fanout
+from shared.assistant_profile import get_assistant_profile
 
 logger = structlog.get_logger(__name__)
+
+# The configured assistant name is a classifier vocative filler ("Friday,
+# are the lights on"). Looked up best-effort from the assistant profile
+# with a bounded wait, and the result (or the lookup failure) is kept for
+# a TTL so a slow admin API costs at most one bounded wait per TTL.
+ASSISTANT_NAME_LOOKUP_TIMEOUT_SECONDS = 0.5
+ASSISTANT_NAME_CACHE_TTL_SECONDS = 300.0
+_assistant_names_cache: Dict[str, Any] = {"names": (), "expires_at": 0.0}
+
+
+async def _configured_assistant_names() -> tuple:
+    now = time.monotonic()
+    if now < _assistant_names_cache["expires_at"]:
+        return _assistant_names_cache["names"]
+    names: tuple = ()
+    try:
+        profile = await asyncio.wait_for(
+            get_assistant_profile(), timeout=ASSISTANT_NAME_LOOKUP_TIMEOUT_SECONDS
+        )
+        name = str((profile or {}).get("assistant_name") or "").strip()
+        names = (name,) if name else ()
+    except Exception as e:
+        logger.warning("assistant_name_lookup_failed", error=str(e))
+    _assistant_names_cache.update(names=names, expires_at=now + ASSISTANT_NAME_CACHE_TTL_SECONDS)
+    return names
 
 PENDING_CONFIRMATION_TTL_SECONDS = 60
 CONTROL_CONTEXT_TTL_SECONDS = 300
@@ -420,7 +446,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
         # UNKNOWN when the kill switch is enabled (legacy behaviour).
         kill_switch_config = await get_feature_config("state_question_routing_kill_switch")
         state_question_kill_switch = kill_switch_config.get("enabled", False)
-        real_uk = classify_utterance(state.query)
+        real_uk = classify_utterance(state.query, assistant_names=await _configured_assistant_names())
         uk = _KILL_SWITCH_CLASSIFICATION if state_question_kill_switch else real_uk
 
         # HA STATUS QUERY OPTIMIZATION (2026-01-12)

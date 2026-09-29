@@ -49,6 +49,7 @@ QUESTION_CORPUS = [
     "is the front door locked",
     "is the back door unlocked",
     "did I lock the front door",
+    "did I lock the back door",
     "what's the status of the front door lock",
     "can you check if the back door is locked",
     "are the doors locked",
@@ -230,6 +231,195 @@ class TestClassifierPurity:
             except Exception as e:  # pragma: no cover - must never happen
                 assert False, f"classify_utterance raised on {q!r}: {e}"
             assert r.kind == UtteranceKind.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Classifier hardening: bounded cost, word-boundary vocabulary, real rooms,
+# configurable assistant name
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+# Crafted to hit every former backtracking shape (`.*` chains in the wh /
+# how-many / ensure-state / door noun-map patterns). ~4 KB each.
+_CRAFTED_SLOW_INPUTS = [
+    "are the lights " + "what is " * 500,
+    "which " + "is are " * 680,
+    "how many " + "are is " * 680,
+    "make sure " + "is are " * 680,
+    "the door " * 450 + "locked",
+    "the doors " * 400 + "opened",
+]
+
+_CLASSIFY_BUDGET_SECONDS = 0.05
+
+
+class TestClassifierBoundedCost:
+    def test_crafted_inputs_are_at_least_4kb(self):
+        assert all(len(s) >= 3200 for s in _CRAFTED_SLOW_INPUTS)
+        assert max(len(s) for s in _CRAFTED_SLOW_INPUTS) >= 4000
+
+    def test_crafted_inputs_classify_within_budget(self):
+        slow = []
+        for s in _CRAFTED_SLOW_INPUTS:
+            t0 = _time.perf_counter()
+            classify_utterance(s)
+            elapsed = _time.perf_counter() - t0
+            if elapsed >= _CLASSIFY_BUDGET_SECONDS:
+                slow.append((s[:30], round(elapsed, 3)))
+        assert not slow, slow
+
+    def test_long_input_still_classifies_its_prefix(self):
+        """The bound keeps a real question at the front of an over-long
+        utterance a question -- truncation isn't a blanket UNKNOWN."""
+        r = classify_utterance(PROBE_PHRASE + " " + "blah " * 200)
+        assert r.kind == UtteranceKind.STATE_QUESTION
+        assert r.room == "office"
+
+
+class TestStateWordsAreWholeWords:
+    def test_phone_number_is_not_a_state_question(self):
+        assert classify_utterance("what is the phone number").kind != UtteranceKind.STATE_QUESTION
+
+    def test_phone_charged_is_not_a_state_question(self):
+        assert classify_utterance("is the phone charged?").kind != UtteranceKind.STATE_QUESTION
+
+    def test_word_ending_in_on_is_not_an_ensure_state_imperative(self):
+        """`on` inside a word no longer satisfies the make-sure frame."""
+        assert classify_utterance("can you make sure dinner is salmon").kind != UtteranceKind.IMPERATIVE
+
+    def test_whole_word_state_still_matches(self):
+        r = classify_utterance("what is on in the kitchen")
+        assert r.kind == UtteranceKind.STATE_QUESTION
+
+
+# Every corpus entry's expected room (None = no room named). The last five
+# are the librarian's non-room captures.
+EXPECTED_ROOMS = {
+    PROBE_PHRASE: "office",
+    "are the kitchen lights on": "kitchen",
+    "is the bedroom lamp off": "bedroom",
+    "is the hallway light off": "hallway",
+    "what is the state of the office light": "office",
+    "any lights left on": None,
+    "anything left on": None,
+    "lights still on": None,
+    "office lights on?": "office",
+    "which lights are on in the bedroom": "bedroom",
+    "what's the office light status": "office",
+    "is the hallway switch on": "hallway",
+    "is the kitchen outlet on": "kitchen",
+    "what is the state of the office switch": "office",
+    "are the plugs on": None,
+    "check if the outlet is off": None,
+    "is the front door locked": None,
+    "is the back door unlocked": None,
+    "did I lock the front door": None,
+    "did I lock the back door": None,
+    "what's the status of the front door lock": None,
+    "can you check if the back door is locked": None,
+    "are the doors locked": None,
+    "is the garage door open": None,
+    "is the garage closed": None,
+    "what is the state of the garage door": None,
+    "are the blinds open": None,
+    "did I leave the garage open": None,
+    "garage door status": None,
+    "is the heat on": None,
+    "is the ac running": None,
+    "what's the status of the thermostat": None,
+    "is the furnace on": None,
+    "is the hvac running": None,
+    "is the TV on": None,
+    "is the speaker playing": None,
+    "is the media player on": None,
+    "is the music on": None,
+    "tell me whether the TV is on": None,
+    "tell me whether the office fan is running": "office",
+    "do you know if the TV is on": None,
+    "check that the lights are off": None,
+    "did you turn off the office lights": "office",
+    "did those come back on?": None,
+    "is it on": None,
+    "are they off": None,
+    "turn off the office lights": "office",
+    "turn the office lights on": "office",
+    "switch off the kitchen light": "kitchen",
+    "can you turn off the bedroom lights?": "bedroom",
+    "could you lock the front door": None,
+    "please close the garage door": None,
+    "is it possible to turn on the office lights": "office",
+    "are you able to lock the front door": None,
+    "would it be possible to open the garage": None,
+    "do you mind turning off the office lights": "office",
+    "would you mind locking the back door": None,
+    "could you please lock the front door": None,
+    "can you please turn off the kitchen lights": "kitchen",
+    "let's turn off the office lights": "office",
+    "it's dark in here, turn on the office lights": "office",
+    "set the temperature to 70": None,
+    "turn the temperature up": None,
+    "leave the lights on": None,
+    "keep the hallway light on": "hallway",
+    "make sure the office lights are off": "office",
+    "make sure the back door is locked": None,
+    "can you make sure the garage is closed": None,
+    "lock up": None,
+    "open the blinds": None,
+    "pause the TV": None,
+    "play music in the kitchen": "kitchen",
+    "dim the living room lights": "living room",
+    "lights on in the kitchen": "kitchen",
+    "are all the lights off?": None,
+    "what lights are on": None,
+    "are any kitchen lights on": "kitchen",
+    "is my office light on": "office",
+    "turn off the lights in the living room": "living room",
+}
+
+
+class TestClassifierRooms:
+    def test_every_corpus_entry_has_an_expected_room(self):
+        missing = [q for q in QUESTION_CORPUS + REFERENT_QUESTIONS + IMPERATIVE_CORPUS if q not in EXPECTED_ROOMS]
+        assert not missing, missing
+
+    def test_room_values(self):
+        wrong = []
+        for q, expected in EXPECTED_ROOMS.items():
+            actual = classify_utterance(q).room
+            if actual != expected:
+                wrong.append((q, expected, actual))
+        assert not wrong, wrong
+
+    def test_all_the_lights_question_stays_bulk_eligible(self):
+        r = classify_utterance("are all the lights off?")
+        assert r.kind == UtteranceKind.STATE_QUESTION
+        assert r.room is None and not r.needs_referent
+
+
+class TestConfigurableAssistantName:
+    def test_default_names_are_stripped(self):
+        for name in ("jarvis", "Athena"):
+            r = classify_utterance(f"{name}, are the office lights on")
+            assert r.kind == UtteranceKind.STATE_QUESTION, name
+            assert r.room == "office", name
+
+    def test_configured_name_is_stripped(self):
+        r = classify_utterance("Friday, are the office lights on", assistant_names=("Friday",))
+        assert r.kind == UtteranceKind.STATE_QUESTION
+        assert r.room == "office"
+
+    def test_unconfigured_name_is_not_a_filler(self):
+        """Positive control: without the configured name, the vocative
+        blocks the question frame -- so the test above proves the name
+        was used."""
+        r = classify_utterance("Friday, are the office lights on")
+        assert r.kind != UtteranceKind.STATE_QUESTION
+
+    def test_name_with_regex_metacharacters_is_literal(self):
+        r = classify_utterance("a.i., are the office lights on", assistant_names=("a.i.",))
+        assert r.kind == UtteranceKind.STATE_QUESTION
+        assert classify_utterance("axib are the office lights on", assistant_names=("a.i.",)).kind != UtteranceKind.STATE_QUESTION
 
 
 # ---------------------------------------------------------------------------
@@ -657,3 +847,60 @@ class TestJsonFallbackImperativeCase:
         assert calls, "expected at least one call_service call"
         assert all(c[1] == "turn_on" for c in calls), calls
         assert not any(c[1] == "turn_off" for c in calls), calls
+
+
+class TestConfiguredAssistantNameRouting:
+    """The assistant profile's configured name is stripped as a leading
+    vocative before classification (OSS-first: not just the shipped
+    names)."""
+
+    @staticmethod
+    def _reset_cache():
+        from orchestrator.nodes import route_control as rc
+        rc._assistant_names_cache.update(names=(), expires_at=0.0)
+
+    def test_configured_name_question_takes_the_read_path(self, monkeypatch):
+        from orchestrator.nodes import route_control as rc
+
+        async def _names():
+            return ("Friday",)
+
+        monkeypatch.setattr(rc, "_configured_assistant_names", _names)
+        result, controller, llm, client = _drive_route_control("Friday, are the office lights on")
+        assert client.call_service.await_count == 0
+        assert result.retrieved_data["intent"]["action"] == "get_status"
+        assert result.retrieved_data["intent"]["room"] == "office"
+
+    def test_lookup_reads_the_profile_once_per_ttl(self, monkeypatch):
+        from orchestrator.nodes import route_control as rc
+        self._reset_cache()
+        calls = []
+
+        async def _profile():
+            calls.append(1)
+            return {"assistant_name": "Friday"}
+
+        monkeypatch.setattr(rc, "get_assistant_profile", _profile)
+        try:
+            assert _run(rc._configured_assistant_names()) == ("Friday",)
+            assert _run(rc._configured_assistant_names()) == ("Friday",)
+            assert len(calls) == 1
+        finally:
+            self._reset_cache()
+
+    def test_slow_profile_lookup_is_bounded(self, monkeypatch):
+        from orchestrator.nodes import route_control as rc
+        self._reset_cache()
+
+        async def _slow_profile():
+            await asyncio.sleep(5)
+            return {"assistant_name": "Friday"}
+
+        monkeypatch.setattr(rc, "get_assistant_profile", _slow_profile)
+        monkeypatch.setattr(rc, "ASSISTANT_NAME_LOOKUP_TIMEOUT_SECONDS", 0.01)
+        try:
+            t0 = _time.perf_counter()
+            assert _run(rc._configured_assistant_names()) == ()
+            assert _time.perf_counter() - t0 < 1.0
+        finally:
+            self._reset_cache()

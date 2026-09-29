@@ -14,10 +14,11 @@ UNKNOWN.
 """
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Iterable, Optional, Tuple
 
 
 class UtteranceKind(str, Enum):
@@ -43,7 +44,16 @@ UNKNOWN_CLASSIFICATION = UtteranceClassification(kind=UtteranceKind.UNKNOWN, rul
 # Vocabulary (D2, 2.2 rules 2-5)
 # ---------------------------------------------------------------------------
 
-_LEADING_FILLER_RE = re.compile(r"^(?:hey|ok|okay|so|um|uh|athena|jarvis)\b[\s,]*", re.I)
+# Cost bound (the classifier runs on the event loop before any permission
+# check): only a prefix is classified, and every gap between two frame
+# words is a bounded, clause-local run -- no unbounded `.*` chains.
+MAX_CLASSIFIED_CHARS = 300
+_GAP = r"[^?.,]{0,80}?"
+
+_FILLER_WORDS = ("hey", "ok", "okay", "so", "um", "uh")
+# The shipped assistant names; a deployment's configured name is added by
+# the caller (route_control reads it from the assistant profile).
+DEFAULT_ASSISTANT_NAMES = ("athena", "jarvis")
 _FILLER_ADVERB_RE = re.compile(r"\b(?:currently|right now|at the moment|still|now)\b", re.I)
 _WS_RE = re.compile(r"\s+")
 _CLAUSE_SPLIT_RE = re.compile(r"\?|\.|,| and | then ")
@@ -70,7 +80,9 @@ _GERUND_VERBS = (
     "dimming|playing|pausing|stopping|starting"
 )
 _GERUND_FRAME_RE = re.compile(rf"^(?:do you mind|would you mind)\s+(?:{_GERUND_VERBS})\b", re.I)
-_ENSURE_STATE_RE = re.compile(r"\b(?:is|are)\b.*" + r"(?:on|off|open|closed|locked|unlocked)\b", re.I)
+_ENSURE_STATE_RE = re.compile(
+    rf"\b(?:is|are)\b{_GAP}\b(?:on|off|open|closed|locked|unlocked)\b", re.I
+)
 _COMPOUND_CONNECTOR_RE = re.compile(r"^(?:if so|so|then)\s+", re.I)
 
 _FIXED_IMPERATIVE_IDIOMS = {"lock up", "lock it down", "lights out"}
@@ -84,8 +96,8 @@ _DEVICE_NOUN = (
 _DEVICE_NOUN_RE = re.compile(_DEVICE_NOUN, re.I)
 
 _STATE_WORDS = (
-    r"(?:on|off|open|opened|closed|locked|unlocked|playing|running|paused|"
-    r"idle|heating|cooling|lit|back on|back off)"
+    r"\b(?:on|off|open|opened|closed|locked|unlocked|playing|running|paused|"
+    r"idle|heating|cooling|lit|back on|back off)\b"
 )
 _STATE_WORD_RE = re.compile(_STATE_WORDS, re.I)
 
@@ -95,11 +107,18 @@ _BARE_COMMAND_RE = re.compile(
 )
 
 _AUX_INITIAL_RE = re.compile(r"^(?:is|are|was|were|did|do|does|has|have)\b", re.I)
+# Rule 3(a), past-tense check: "did I lock the back door" asks about a
+# lock/cover state without a state word.
+_PAST_ACTION_CHECK_RE = re.compile(
+    r"^(?:did|have|has)\s+(?:i|you|we|they|someone|somebody|anyone|anybody)\s+"
+    r"(?:lock|unlock|close|shut|open)\b",
+    re.I,
+)
 
 _WH_STATE_RE = re.compile(
     r"what'?(?:s| is| are)? the (?:state|status) of"
-    r"|(?:what|which)\b.*\b(?:is|are)\b.*" + _STATE_WORDS
-    + r"|how many\b.*\b(?:is|are)\b.*" + _STATE_WORDS,
+    rf"|(?:what|which)\b{_GAP}\b(?:is|are)\b{_GAP}{_STATE_WORDS}"
+    rf"|how many\b{_GAP}\b(?:is|are)\b{_GAP}{_STATE_WORDS}",
     re.I,
 )
 _NOUN_FIRST_STATUS_RE = re.compile(rf"{_DEVICE_NOUN}(?:\s+\w+)?\s+(?:state|status)$", re.I)
@@ -121,12 +140,12 @@ _NOUN_MAP = (
     (re.compile(r"\b(?:lights?|lamps?|lighting)\b", re.I), "light"),
     (re.compile(r"\b(?:switch(?:es)?|plugs?|outlets?)\b", re.I), "switch"),
     (re.compile(r"\b(?:lock(?:s)?|deadbolts?)\b", re.I), "lock"),
-    (re.compile(r"\bdoors?\b.*\b(?:locked|unlocked)\b", re.I), "lock"),
+    (re.compile(rf"\bdoors?\b{_GAP}\b(?:locked|unlocked)\b", re.I), "lock"),
     (
         re.compile(r"\b(?:garage|blinds|shades|curtains)\b", re.I),
         "cover",
     ),
-    (re.compile(r"\bdoors?\b.*\b(?:open|opened|closed)\b", re.I), "cover"),
+    (re.compile(rf"\bdoors?\b{_GAP}\b(?:open|opened|closed)\b", re.I), "cover"),
     (
         re.compile(
             r"\b(?:thermostat|heat|heating|ac|a/c|air conditioning|hvac|furnace)\b", re.I
@@ -137,23 +156,54 @@ _NOUN_MAP = (
     (re.compile(r"\bfan\b", re.I), "fan"),
 )
 
-_ROOM_RE = re.compile(
-    rf"\bin the ([a-z]+(?:\s[a-z]+)?)\s+(?:{_DEVICE_NOUN})\b"
-    rf"|\bthe ([a-z]+(?:\s[a-z]+)?)\s+(?:{_DEVICE_NOUN})\b"
-    rf"|\b([a-z]+(?:\s[a-z]+)?)\s+(?:{_DEVICE_NOUN})\b"
-    rf"|\bin the ([a-z]+(?:\s[a-z]+)?)$",
-    re.I,
+# Rule 6 (room): the words between the utterance start or a determiner and
+# a device noun, or after "in the". Candidates are filtered: leading
+# determiners / possessives / quantifiers / wh-words / verbs are dropped
+# ("any kitchen" -> "kitchen", "what" -> none) and so is a trailing door
+# qualifier or device noun ("front door" -> none).
+_ROOM_DETERMINERS = (
+    "the", "a", "an", "any", "all", "some", "every", "each", "both",
+    "my", "our", "your", "his", "her", "their", "this", "that", "these", "those",
 )
-_ROOM_STOPWORDS = {"the", "a", "an", "any", "all", "some"}
+_ROOM_FRAME_RES = (
+    re.compile(rf"^((?:[a-z]+\s+){{1,2}}?){_DEVICE_NOUN}\b", re.I),
+    re.compile(
+        rf"\b(?:{'|'.join(_ROOM_DETERMINERS)})\s+((?:[a-z]+\s+){{0,2}}?){_DEVICE_NOUN}\b", re.I
+    ),
+    re.compile(rf"\bin the ([a-z]+(?:\s[a-z]+)?)(?:\s+{_DEVICE_NOUN}\b|$)", re.I),
+)
+_ROOM_STOPWORDS = frozenset(_ROOM_DETERMINERS) | {
+    "what", "which", "whose", "how", "many", "much", "is", "are", "was", "were",
+    "did", "do", "does", "has", "have", "i", "you", "we", "they", "it",
+    "on", "off", "in", "of", "to", "up", "down", "left", "still", "other", "same",
+} | set(_CONTROL_VERBS.split("|"))
+_ROOM_TRAILING_QUALIFIERS = frozenset({"front", "back", "side", "main", "rear"})
+_DEVICE_NOUN_WORD_RE = re.compile(_DEVICE_NOUN, re.I)
 
 
-def _normalize(query: str) -> tuple[str, bool]:
-    q = (query or "").strip().lower()
+@functools.lru_cache(maxsize=32)
+def _leading_filler_re(assistant_names: Tuple[str, ...]) -> "re.Pattern[str]":
+    names = {n.strip().lower() for n in DEFAULT_ASSISTANT_NAMES + assistant_names if n and n.strip()}
+    words = sorted(set(_FILLER_WORDS) | names, key=len, reverse=True)
+    return re.compile(r"^(?:" + "|".join(re.escape(w) for w in words) + r")(?=[\s,]|$)[\s,]*", re.I)
+
+
+def _bound(query: str) -> str:
+    q = query.strip()
+    if len(q) <= MAX_CLASSIFIED_CHARS:
+        return q
+    head = q[:MAX_CLASSIFIED_CHARS]
+    return head.rsplit(" ", 1)[0] if " " in head else head
+
+
+def _normalize(query: str, assistant_names: Tuple[str, ...] = ()) -> tuple[str, bool]:
+    q = _bound(query).lower()
     had_q = q.endswith("?")
     q = q.rstrip("?.! ").strip()
+    filler_re = _leading_filler_re(assistant_names)
     while True:
-        m = _LEADING_FILLER_RE.match(q)
-        if not m:
+        m = filler_re.match(q)
+        if not m or m.end() == 0:
             break
         q = q[m.end():]
     q = _WS_RE.sub(" ", q).strip()
@@ -217,13 +267,23 @@ def _device_type_for(text: str) -> Optional[str]:
     return None
 
 
-def _room_for(text: str) -> Optional[str]:
-    m = _ROOM_RE.search(text)
-    if not m:
+def _room_candidate(words: str) -> Optional[str]:
+    tokens = words.split()
+    while tokens and tokens[0] in _ROOM_STOPWORDS:
+        tokens.pop(0)
+    while tokens and (tokens[-1] in _ROOM_TRAILING_QUALIFIERS or _DEVICE_NOUN_WORD_RE.fullmatch(tokens[-1])):
+        tokens.pop()
+    if not tokens or any(t in _ROOM_STOPWORDS for t in tokens):
         return None
-    for group in m.groups():
-        if group and group.strip() not in _ROOM_STOPWORDS:
-            return group.strip()
+    return " ".join(tokens)
+
+
+def _room_for(text: str) -> Optional[str]:
+    for pattern in _ROOM_FRAME_RES:
+        for m in pattern.finditer(text):
+            room = _room_candidate(m.group(1) or "")
+            if room:
+                return room
     return None
 
 
@@ -241,13 +301,20 @@ def _needs_referent(text: str) -> bool:
     return bool(_PRONOUN_SUBJECT_RE.search(text)) and _DEVICE_NOUN_RE.search(text) is None
 
 
-def classify_utterance(query: Optional[str]) -> UtteranceClassification:
-    """Pure classifier. Never raises; None/empty -> UNKNOWN."""
+def classify_utterance(
+    query: Optional[str], assistant_names: Iterable[str] = ()
+) -> UtteranceClassification:
+    """Pure classifier. Never raises; None/empty -> UNKNOWN.
+
+    `assistant_names` adds the deployment's configured assistant name(s) to
+    the leading vocative fillers stripped before classification ("Friday,
+    are the lights on"); DEFAULT_ASSISTANT_NAMES are always stripped. Only
+    the first MAX_CLASSIFIED_CHARS characters are classified."""
     try:
         if not query or not query.strip():
             return UtteranceClassification(kind=UtteranceKind.UNKNOWN, rule="empty")
 
-        q, had_q = _normalize(query)
+        q, had_q = _normalize(query, tuple(str(n) for n in assistant_names if n))
         if not q:
             return UtteranceClassification(kind=UtteranceKind.UNKNOWN, rule="empty")
 
@@ -325,7 +392,9 @@ def classify_utterance(query: Optional[str]) -> UtteranceClassification:
                 rule="wh_frame",
             )
 
-        if first_is_question_open and _STATE_WORD_RE.search(q2):
+        if first_is_question_open and (
+            _STATE_WORD_RE.search(q2) or _PAST_ACTION_CHECK_RE.match(first_clause)
+        ):
             return UtteranceClassification(
                 kind=UtteranceKind.STATE_QUESTION,
                 device_type=_device_type_for(q2),
