@@ -131,10 +131,11 @@ class LiveKitClient {
             });
 
             if (!roomResponse.ok) {
-                // ATHENA-69 (D19): unauthenticated callers get 403
-                // sign_in_required from this owner-only route.
+                // Owner-only route: 403 means this caller may not control
+                // (a guest stay, the guest network); 401 already ended the
+                // session through jarvisFetch.
                 if (roomResponse.status === 403) {
-                    throw new Error('sign_in_required');
+                    throw new Error('not_permitted');
                 }
                 throw new Error(`Room creation failed: ${roomResponse.status}`);
             }

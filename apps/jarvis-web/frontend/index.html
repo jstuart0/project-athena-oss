@@ -2094,6 +2094,14 @@
             return !capabilities || capabilities.control !== false;
         }
 
+        // What to say when the server refuses a control this caller may not
+        // use (owner-only 403, WebSocket 1008): the same words the page
+        // already shows for view-only, never "sign in" (a signed-out caller
+        // gets the session banner instead).
+        function notPermittedMessage() {
+            return CONTROL_NOTES[capabilities && capabilities.control_reason] || "That isn't available here.";
+        }
+
         // View-only: controls are disabled, out of the tab order, and
         // described by the note that says why.
         function applyControlState() {
@@ -2272,10 +2280,9 @@
                     };
 
                     maClient.onError = (error) => {
-                        if (error && error.message === 'sign_in_required') {
-                            // The socket was refused; the page already shows
-                            // what this caller may do.
+                        if (error && error.message === 'not_permitted') {
                             console.warn('[Music] Browser music playback refused');
+                            showError(notPermittedMessage());
                             return;
                         }
                         console.error('[Music] MA Client error:', error);
@@ -2799,8 +2806,9 @@
                 };
 
                 livekitClient.onError = (error) => {
-                    if (error && error.message === 'sign_in_required') {
+                    if (error && error.message === 'not_permitted') {
                         console.warn('[LiveKit] Always-on voice refused');
+                        showError(notPermittedMessage());
                         return;
                     }
                     console.error('[LiveKit] Error:', error);

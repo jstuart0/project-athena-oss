@@ -334,7 +334,18 @@ def test_view_only_disables_every_control():
     assert "applyControlState();" in render
 
 
-def test_no_dead_sign_in_required_branches():
-    """B7: 403 sign_in_required no longer exists; nothing checks for it."""
-    for source in (INDEX, (h.FRONTEND / "music-player.js").read_text(encoding="utf-8")):
-        assert "detail === 'sign_in_required'" not in source
+def test_no_sign_in_required_anywhere_in_the_frontend():
+    """B7 + codex r2 Low (named: livekit-client.js): the server never
+    answers 403 sign_in_required any more, so no frontend file mentions it;
+    owner-only refusals (403, WebSocket 1008) raise not_permitted and the
+    page answers with the view-only copy, never "sign in"."""
+    files = sorted(list(h.FRONTEND.glob("*.js")) + list(h.FRONTEND.glob("*.html")))
+    assert len(files) >= 6 and h.FRONTEND / "livekit-client.js" in files
+    hits = [f.name for f in files if "sign_in_required" in f.read_text(encoding="utf-8")]
+    assert hits == []
+    for name in ("livekit-client.js", "music-assistant-client.js", "sendspin-client.js"):
+        assert "new Error('not_permitted')" in (h.FRONTEND / name).read_text(encoding="utf-8"), name
+    message = _function_body(INDEX, "notPermittedMessage")
+    assert "CONTROL_NOTES[" in message and "sign" not in message.lower()
+    assert INDEX.count("error.message === 'not_permitted'") == 2
+    assert INDEX.count("showError(notPermittedMessage());") == 2
