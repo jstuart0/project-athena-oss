@@ -78,6 +78,15 @@ QUESTION_CORPUS = [
     "check that the lights are off",
     # past-tense (ATHENA-88 behaviour change: now a live read)
     "did you turn off the office lights",
+    # past-tense lock/cover checks name the device by their verb
+    "did you unlock the front door",
+    "did you close the garage door",
+    "did you close the front door",
+    # a room that is also a device noun survives before another device noun
+    "are the garage lights on",
+    "is the garage fan on",
+    "are the media room lights on",
+    "are the tvs on",
 ]
 
 REFERENT_QUESTIONS = [
@@ -121,6 +130,10 @@ IMPERATIVE_CORPUS = [
     "play music in the kitchen",
     "dim the living room lights",
     "lights on in the kitchen",
+    "is it ok to turn off the lights",
+    "do you think you could lock the door",
+    "can i get you to close the blinds",
+    "turn off the garage lights",
 ]
 
 UNKNOWN_CORPUS = [
@@ -416,7 +429,44 @@ EXPECTED_ROOMS = {
     "which office lights are on": "office",
     "what kitchen lights are on": "kitchen",
     "turn off the lights in the living room": "living room",
+    "did you unlock the front door": None,
+    "did you close the garage door": None,
+    "did you close the front door": None,
+    "are the garage lights on": "garage",
+    "is the garage fan on": "garage",
+    "are the media room lights on": "media room",
+    "are the tvs on": None,
+    "is it ok to turn off the lights": None,
+    "do you think you could lock the door": None,
+    "can i get you to close the blinds": None,
+    "turn off the garage lights": "garage",
 }
+
+
+# Device type for the entries whose type isn't carried by an obvious noun.
+EXPECTED_DEVICE_TYPES = {
+    "did you unlock the front door": "lock",
+    "did I lock the front door": "lock",
+    "did you close the garage door": "cover",
+    "did you close the front door": "cover",
+    "are the garage lights on": "light",
+    "is the garage fan on": "fan",
+    "are the media room lights on": "light",
+    "are the tvs on": "media_player",
+    "is the garage door open": "cover",
+    "what's the status of the front door lock": "lock",
+    "is the heater on": None,
+}
+
+
+class TestClassifierDeviceTypes:
+    def test_device_type_values(self):
+        wrong = []
+        for q, expected in EXPECTED_DEVICE_TYPES.items():
+            actual = classify_utterance(q).device_type
+            if actual != expected:
+                wrong.append((q, expected, actual))
+        assert not wrong, wrong
 
 
 class TestClassifierRooms:

@@ -65,6 +65,10 @@ _CLAUSE_SPLIT_RE = re.compile(r"\?|\.|,| and | then ")
 
 _REQUEST_PREFIXES = (
     "is it possible to", "would it be possible to", "are you able to",
+    "is it ok to", "is it okay to", "would it be ok to", "would it be okay to",
+    "do you think you could", "do you think you can", "would you be able to",
+    "can i get you to", "could i get you to",
+    "i'd like you to", "i would like you to",
     "can you make sure", "go ahead and",
     "i want you to", "i need you to",
     "can you", "could you", "would you", "will you",
@@ -96,7 +100,7 @@ _DEVICE_NOUN = (
     r"(?:lights?|lamp(?:s|ing)?|switch(?:es)?|plug(?:s)?|outlet(?:s)?|"
     r"lock(?:s)?|deadbolt(?:s)?|garage(?: door)?|blinds|shades|curtains|door(?:s)?|"
     r"thermostat(?:s)?|heat(?:ing)?|\bac\b|a/c|air conditioning|hvac|furnace|"
-    r"tv|television|speaker(?:s)?|music|media|fan(?:s)?)"
+    r"tvs?|televisions?|speaker(?:s)?|music|media|fan(?:s)?)"
 )
 _DEVICE_NOUN_RE = re.compile(rf"\b{_DEVICE_NOUN}\b", re.I)  # whole words: "locked" is not a lock
 
@@ -157,9 +161,26 @@ _NOUN_MAP = (
         ),
         "climate",
     ),
-    (re.compile(r"\b(?:tv|television|speaker|music|media|playing)\b", re.I), "media_player"),
+    (re.compile(r"\b(?:tvs?|televisions?|speakers?|music|media|playing)\b", re.I), "media_player"),
     (re.compile(r"\bfan\b", re.I), "fan"),
 )
+
+# Rule 5, fallback: with no device noun, a lock/cover verb names the device
+# ("did you unlock the front door", "did you close the front door").
+_VERB_DEVICE_MAP = (
+    (re.compile(r"\b(?:lock|unlock|locked|unlocked)\b", re.I), "lock"),
+    (re.compile(r"\b(?:open|opened|close|closed|shut)\b", re.I), "cover"),
+)
+
+# Words that are both a room and a device noun ("the garage lights", "the
+# media room lights"): when another device noun (or "room") follows, they
+# name the room, not the device.
+_ROOM_NOUN_MODIFIER_RE = re.compile(
+    r"\b(?:media|music|tv|television)\s+rooms?\b"
+    rf"|\bgarage\b(?=\s+(?!door\b){_DEVICE_NOUN}\b)",
+    re.I,
+)
+_ROOM_CAPABLE_NOUNS = frozenset({"garage"})
 
 # Rule 6 (room): the words between the utterance start or a determiner and
 # a device noun, or after "in the". Candidates are filtered: leading
@@ -170,10 +191,11 @@ _ROOM_DETERMINERS = (
     "the", "a", "an", "any", "all", "some", "every", "each", "both",
     "my", "our", "your", "his", "her", "their", "this", "that", "these", "those",
 )
+_HEAD_NOUN = rf"{_DEVICE_NOUN}\b(?!\s+(?:{_DEVICE_NOUN}|rooms?)\b)"
 _ROOM_FRAME_RES = (
-    re.compile(rf"^((?:[a-z]+\s+){{1,2}}?){_DEVICE_NOUN}\b", re.I),
+    re.compile(rf"^((?:[a-z]+\s+){{1,2}}?){_HEAD_NOUN}", re.I),
     re.compile(
-        rf"\b(?:{'|'.join(_ROOM_DETERMINERS)})\s+((?:[a-z]+\s+){{0,2}}?){_DEVICE_NOUN}\b", re.I
+        rf"\b(?:{'|'.join(_ROOM_DETERMINERS)})\s+((?:[a-z]+\s+){{0,2}}?){_HEAD_NOUN}", re.I
     ),
     re.compile(rf"\bin the ([a-z]+(?:\s[a-z]+)?)(?:\s+{_DEVICE_NOUN}\b|$)", re.I),
 )
@@ -266,8 +288,12 @@ def _clause_is_imperative_open(clause: str) -> bool:
 
 
 def _device_type_for(text: str) -> Optional[str]:
+    nouns_text = _ROOM_NOUN_MODIFIER_RE.sub(" ", text)
     for pattern, device_type in _NOUN_MAP:
-        if pattern.search(text):
+        if pattern.search(nouns_text):
+            return device_type
+    for pattern, device_type in _VERB_DEVICE_MAP:
+        if pattern.search(nouns_text):
             return device_type
     return None
 
@@ -276,7 +302,10 @@ def _room_candidate(words: str) -> Optional[str]:
     tokens = words.split()
     while tokens and tokens[0] in _ROOM_STOPWORDS:
         tokens.pop(0)
-    while tokens and (tokens[-1] in _ROOM_TRAILING_QUALIFIERS or _DEVICE_NOUN_WORD_RE.fullmatch(tokens[-1])):
+    while tokens and (
+        tokens[-1] in _ROOM_TRAILING_QUALIFIERS
+        or (_DEVICE_NOUN_WORD_RE.fullmatch(tokens[-1]) and tokens[-1] not in _ROOM_CAPABLE_NOUNS)
+    ):
         tokens.pop()
     if not tokens or any(t in _ROOM_STOPWORDS for t in tokens):
         return None
@@ -286,7 +315,11 @@ def _room_candidate(words: str) -> Optional[str]:
 def _room_for(text: str) -> Optional[str]:
     for pattern in _ROOM_FRAME_RES:
         for m in pattern.finditer(text):
-            room = _room_candidate(m.group(1) or "")
+            words = m.group(1) or ""
+            # "garage door" is one device, not a room plus a door.
+            if text[m.end(1):m.end()].lower().startswith("door") and words.split()[-1:] == ["garage"]:
+                words = words.rsplit("garage", 1)[0]
+            room = _room_candidate(words)
             if room:
                 return room
     return None
