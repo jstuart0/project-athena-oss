@@ -210,7 +210,7 @@ to stay complete — when you add a field, add its row here too.
 | `mode_override_lockout_threshold` | `MODE_OVERRIDE_LOCKOUT_THRESHOLD` | `5` | Failed owner-PIN verifications (per trust tier) before that tier locks out (D16/D25) |
 | `mode_override_lockout_minutes` | `MODE_OVERRIDE_LOCKOUT_MINUTES` | `30` | Owner-PIN lockout duration once the threshold is reached |
 | `ha_write_fanout_confirm_threshold` | `HA_WRITE_FANOUT_CONFIRM_THRESHOLD` | `6` | Distinct entities a non-command utterance may write before it needs a confirmation or explicit all/group wording; `0` disables |
-| `ha_write_fanout_hard_limit` | `HA_WRITE_FANOUT_HARD_LIMIT` | `18` | The same bound for plain commands; `0` disables; `0 < hard_limit < threshold` fails startup |
+| `ha_write_fanout_hard_limit` | `HA_WRITE_FANOUT_HARD_LIMIT` | `18` | The same bound for plain commands; `0` disables; `0 < hard_limit < threshold` logs an ERROR and both fall back to `6`/`18` (non-fatal: every service loading the shared config reads it) |
 | `livekit_user_token_ttl_minutes` | `LIVEKIT_USER_TOKEN_TTL_MINUTES` | `30` | TTL (clamped 1-1440) for browser-facing LiveKit room tokens (jarvis-web voice sessions); server-side Athena participant tokens are unaffected (D27) |
 | `override_max_timeout_minutes` | `OVERRIDE_MAX_TIMEOUT_MINUTES` | `240` | Server-side ceiling on `POST /mode/override`'s `timeout_minutes`, applied regardless of PIN outcome; a requested value above this is clamped, never rejected (ATHENA-69 Pass H2) |
 

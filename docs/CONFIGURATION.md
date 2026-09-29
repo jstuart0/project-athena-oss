@@ -668,7 +668,11 @@ LLM extracts. Commands phrased as requests ("can you turn off the lights?",
 "make sure the doors are locked", "leave the porch light on") are still
 commands. A status-sounding command ("turn the office lights on", "set the
 temperature to 70") now executes; it used to get a house-wide status read
-back instead. The question/command classifier is English-only.
+back instead. The question/command classifier is English-only; it strips
+a leading "hey"/"ok" and the assistant's name (the admin profile's
+configured name as well as "Athena" and "Jarvis"), and classifies only the
+first 300 characters of an utterance. Questions that reach the music or TV
+handlers ("is music playing", "did you turn off the TV") run read-only too.
 
 **Large writes need explicit wording.** One utterance may write at most
 `HA_WRITE_FANOUT_CONFIRM_THRESHOLD` distinct entities (default 6) unless it
@@ -676,24 +680,45 @@ names that scope itself: `all`, `every`, `everything`, `whole`, `entire`,
 `house`, the room group's name, or two or more of the rooms it covers. A
 plain command ("turn off the office lights") is allowed up to
 `HA_WRITE_FANOUT_HARD_LIMIT` (default 18). A target of every entity in a
-domain, area, floor or label (e.g. a missing "good night" scene's fallback
-of every light) is never confirmable: without explicit wording it's always
-answered with the command to say instead. `0` disables either limit; a hard
-limit below the threshold, other than `0`, fails orchestrator startup. An
-HA light group entity counts as one.
+domain, area, floor or label is never confirmable: without explicit wording
+it's always answered with the command to say instead. That covers the
+fallbacks for a missing "good night" scene (every light) and "leaving" /
+"goodbye" scene (every light and every lock): with no such scene
+configured, those phrases now get the commands to say instead of acting.
+`0` disables either limit. Both variables are read by every service that
+loads the shared configuration (so a shared ConfigMap reaches all of
+them); a hard limit below the threshold, other than `0`, logs one ERROR at
+startup and both fall back to the defaults, so the check stays on. An HA
+light group entity counts as one.
 
 Above the bound, what happens depends on the surface:
 
 | Surface | Response |
 |---------|----------|
-| Home Assistant Assist (gateway HA conversation route), LiveKit, jarvis-web chat, SMS | "That would turn off 11 lights in the office. Should I go ahead?" A bare "yes" (or "Yes, please.", "okay do it", "go ahead") within 60 seconds runs exactly those entities; "no" cancels; anything else is treated as a new request. |
+| Home Assistant Assist (gateway HA conversation route), LiveKit, jarvis-web chat, SMS | "That would turn off 11 lights in the office. Should I go ahead?" A bare "yes" (or "Yes, please.", "okay do it", "go ahead", "do it") within 60 seconds runs exactly those entities; "no" cancels; anything else is treated as a new request. |
 | Wyoming satellites, the OpenAI-compatible `/v1/chat/completions` path, any other caller | "That would turn off 11 lights in the office. To do it, say: turn off all the office lights." Nothing is stored. |
 
+Which response a request gets comes from the `/query` body's
+`supports_followup` field, set in server code by the callers above. The
+orchestrator trusts it from any caller that passes ingress authentication
+(`X-Service-Key`), the same trust class as `caller_trust`. Setting it only
+changes the phrasing (a prompt instead of the command to say): a
+confirmation can be replayed only by a matching caller on the same session,
+under full re-authorization.
+
 A confirmation is bound to the caller that got the prompt: the caller
-trust tier, device id, room and resolved mode. A "yes" from anyone else on
-the same session gets "I'm not sure what you're agreeing to." and changes
-nothing. The replay runs under the replying turn's own permissions, so a
-mode change in between is enforced. If Home Assistant's gateway
+trust tier, device id, room and resolved mode. For Home Assistant Assist,
+the gateway forwards the HA device's own id as `voice_device_id`, which is
+used only for this binding (it isn't the `device_id` used to look up a
+guest session). A caller that sends neither a trust tier nor a device id
+can't hold a confirmation and always gets the command to say. A "yes" from
+anyone else on the same session gets "I'm not sure what you're agreeing
+to." and changes nothing; that caller's own requests on the session store
+no context, so they can't overwrite the pending confirmation either. The
+replay runs under the replying turn's own permissions, so a mode change in
+between is enforced. With Redis configured, a "yes" whose single-use claim
+can't reach Redis is treated as already used (nothing runs), so two
+replicas can never both replay it. If Home Assistant's gateway
 pre-routing (`ha_intent_prerouting`, off by default) is enabled, it may
 answer a short "yes" itself before it reaches the orchestrator; the
 pending write then simply expires unexecuted.
