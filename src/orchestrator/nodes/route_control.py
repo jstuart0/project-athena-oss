@@ -44,6 +44,7 @@ from orchestrator.mode_permission import (
     ha_permission_scope,
     intent_refusal_message,
     intent_write_domains,
+    normalize_permissions,
     permission_refusal_message,
     sequence_refusal_message,
 )
@@ -456,6 +457,23 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
     """
     start = time.time()
 
+    # Intent gate (D9), first: every path below reads or writes house state
+    # (sensor and presence answers, bulk status, extraction, dispatch), so a
+    # caller without the control intent gets the refusal before any of them.
+    permissions = normalize_permissions(state.permissions)
+    if not check_intent_permission(IntentCategory.CONTROL, permissions):
+        state.answer = intent_refusal_message(permissions)
+        state.error = "permission_denied"
+        logger.warning(
+            "control_request_denied",
+            intent="control",
+            mode=permissions.get("mode"),
+            request_id=state.request_id,
+            session_id=state.session_id,
+        )
+        state.node_timings["route_control"] = time.time() - start
+        return state
+
     try:
         # FAST PATH: Check if this is a sensor/occupancy query from fast-path classification
         # If entities already indicate sensor, go directly to sensor handler
@@ -607,21 +625,8 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 read_only=(uk.kind == UtteranceKind.STATE_QUESTION),
                 utterance=real_uk,
             ) as scope:
-                # Intent gate (D9): refuse CONTROL before any dispatch --
-                # the automation agent, sequence detection, or intent
-                # extraction never run for a denied intent.
-                if not check_intent_permission(IntentCategory.CONTROL, scope.permissions):
-                    state.answer = intent_refusal_message(scope.permissions)
-                    state.error = "permission_denied"
-                    logger.warning(
-                        "control_request_denied",
-                        intent="control",
-                        mode=scope.permissions.get("mode"),
-                        request_id=state.request_id,
-                        session_id=state.session_id,
-                    )
-                    state.node_timings["route_control"] = time.time() - start
-                    return state
+                # The CONTROL intent was already checked at the node's top,
+                # against the same normalized permissions this scope holds.
 
                 # ATHENA-128 (5.3): a reply to a pending write confirmation
                 # resolves before any other dispatch -- a bare "yes" must

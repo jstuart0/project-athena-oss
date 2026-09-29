@@ -1247,16 +1247,22 @@ def intent_refusal_message(permissions: Optional[Dict[str, Any]]) -> str:
 def intent_gate_refusal(intent: Any, permissions: Optional[Dict[str, Any]]) -> Optional[str]:
     """The refusal text when ``intent`` isn't allowed, else None. Pure.
 
-    Exempt: no intent, UNKNOWN (chit-chat reaches only the audience's
-    already-narrowed tools), and SELF_GATED_INTENTS (their node refuses
-    before any dispatch with a domain-specific message). Every entry path
-    asks this before routing: the graph router, the streaming runner and
-    /query's post-graph check.
+    Exempt: no intent and UNKNOWN (chit-chat reaches only the audience's
+    already-narrowed tools). SELF_GATED_INTENTS are left to their node
+    (which refuses before any dispatch with a domain-specific message),
+    except for the public audience: it never enters those nodes at all,
+    since some of them answer house-state reads before their own check.
+    Every entry path asks this before routing: the graph router, the
+    streaming runner and /query's post-graph check.
     """
     if intent is None:
         return None
     value = getattr(intent, "value", intent)
-    if value == IntentCategory.UNKNOWN.value or value in _SELF_GATED_VALUES:
+    if value == IntentCategory.UNKNOWN.value:
+        return None
+    if is_public_audience(permissions):
+        return None if value in PUBLIC_ALLOWED_INTENTS else PUBLIC_INTENT_REFUSAL
+    if value in _SELF_GATED_VALUES:
         return None
     subject = intent if hasattr(intent, "value") else SimpleNamespace(value=str(value))
     if check_intent_permission(subject, permissions or {}):

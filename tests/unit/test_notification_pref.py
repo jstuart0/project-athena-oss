@@ -386,6 +386,11 @@ def test_public_never_posts(_assistant_names):
     ("are the alerts off", STATE_QUESTION_REPLY),
     ("is the morning greeting enabled", AMBIGUOUS_REPLY),
     ("what about morning notifications", AMBIGUOUS_REPLY),
+    # UNKNOWN-kind questions that name a direction: still never a write
+    ("why did the morning notifications stop", AMBIGUOUS_REPLY),
+    ("should the morning notifications stop", AMBIGUOUS_REPLY),
+    ("how do I turn off morning notifications", AMBIGUOUS_REPLY),
+    ("what if I stop morning notifications", AMBIGUOUS_REPLY),
 ])
 def test_owner_question_never_posts(query, reply):
     """Floor 5; named member 'did you turn off morning notifications'."""
