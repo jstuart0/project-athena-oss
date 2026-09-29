@@ -19,11 +19,20 @@ Two questions, two functions, deliberately different answers:
 Hides: header joining, the length and hop caps, the walk, the Cloudflare
 preconditions, IPv4-mapped IPv6 folding, the /64 rate key, the window, the
 clock and LRU eviction.
+
+It also owns the relay's public session ids (``mint_relay_session_id`` /
+``relay_session_id_valid``): chat-embed and jarvis-web both hold the relay
+key and both derive the same visitor key from ``rate_limit_key``, so each
+side can check that a presented ``pub-`` id was minted for this visitor.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import ipaddress
+import re
 import time
+import uuid
 from collections import OrderedDict
 from typing import Callable, List, NamedTuple, Optional, Sequence, Tuple, Union
 
@@ -225,6 +234,34 @@ def rate_limit_key(ip: str) -> str:
     if isinstance(addr, ipaddress.IPv6Address):
         return str(ipaddress.ip_network(f"{addr}/{IPV6_RATE_PREFIX}", strict=False))
     return str(addr)
+
+
+RELAY_SESSION_PREFIX = "pub-"
+_RELAY_SESSION_SHAPE = re.compile(r"^pub-([0-9a-f]{32})\.([0-9a-f]{24})$")
+
+
+def _relay_session_mac(relay_key: str, part: str, visitor_key: str) -> str:
+    derived = hmac.new(relay_key.encode("utf-8"), b"jarvis-relay-session", hashlib.sha256).digest()
+    return hmac.new(derived, f"{part}|{visitor_key}".encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+
+
+def mint_relay_session_id(relay_key: str, visitor_key: str) -> str:
+    """A new public session id, ``pub-<32 hex>.<24 hex mac>``, bound to
+    ``visitor_key`` (a ``rate_limit_key``) under the relay key."""
+    part = uuid.uuid4().hex
+    return f"{RELAY_SESSION_PREFIX}{part}.{_relay_session_mac(relay_key, part, visitor_key)}"
+
+
+def relay_session_id_valid(session_id: object, relay_key: str, visitor_key: str) -> bool:
+    """True only for an id ``mint_relay_session_id`` made for this visitor
+    under this relay key."""
+    if not relay_key or not isinstance(session_id, str):
+        return False
+    match = _RELAY_SESSION_SHAPE.match(session_id)
+    if not match:
+        return False
+    part, mac = match.groups()
+    return hmac.compare_digest(mac, _relay_session_mac(relay_key, part, visitor_key))
 
 
 class SlidingWindowLimiter:

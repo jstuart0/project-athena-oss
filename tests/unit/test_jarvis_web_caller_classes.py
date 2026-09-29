@@ -16,10 +16,8 @@ from . import _jarvis_web_harness as h
 
 main = h.main
 caller_auth = h.caller_auth
-PUBLIC_ROUTES = {
-    "GET /api/health", "GET /api/voice/health", "GET /api/appletv/apps", "GET /openapi.json", "GET /docs",
-    "GET /docs/oauth2-redirect", "GET /redoc", "GET /", "MOUNT /static", "MOUNT /logos",
-}
+PUBLIC_ROUTES = {"GET /api/health", "GET /"}
+DOCS_ROUTES = ["/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"]
 GUEST_READS = [
     "GET /api/welcome", "GET /api/mode", "GET /api/climate", "GET /api/appletv", "GET /api/appletv/apps",
     "GET /api/music/config", "GET /api/music/stream/{uri:path}", "POST /api/music/search", "GET /livekit/config",
@@ -93,13 +91,55 @@ def test_401_has_www_authenticate_and_no_upstream(out, monkeypatch):
     assert auth_calls == []
 
 
-def test_public_routes_stay_open(out):
-    h.configure({})
+def test_public_surface_is_health_and_the_sign_in_page(out):
+    """Named (D28): the sole anonymous surface besides the relay is
+    /api/health (status only) and the 401 sign-in page; docs, static
+    assets, the app list and voice health all refuse an anonymous caller."""
+    h.configure()
     public = {k for k, v in main.ROUTE_CLASSIFICATION.items() if v == "public"}
     assert public == PUBLIC_ROUTES
+    c = h.client(peer=h.INTERNET)
+    health = c.get("/api/health")
+    assert health.status_code == 200 and set(health.json()) == {"status"}
+    for path in DOCS_ROUTES:
+        assert c.get(path).status_code == 404, path
+    for path in ("/static/jarvis-fetch.js", "/static/index.html", "/api/appletv/apps", "/api/voice/health"):
+        resp = c.get(path, headers=h.CSRF)
+        assert resp.status_code == 401 and resp.json() == {"detail": "sign_in_required"}, path
+
+
+def test_static_assets_for_browsers_revalidated(out):
+    """B8: pages and scripts carry Cache-Control: no-cache, so an open tab
+    never runs a script older than the server."""
+    h.configure()
     c = h.client()
-    for key in ("GET /api/health", "GET /api/voice/health", "GET /api/appletv/apps"):
-        assert h.call(c, key).status_code == 200, key
+    for path in ("/", "/static/jarvis-fetch.js"):
+        resp = c.get(path, headers=h.via_proxy(h.LAN))
+        assert resp.status_code == 200, path
+        assert resp.headers["cache-control"] == "no-cache", path
+    assert c.get("/static/jarvis-fetch.js", headers=h.via_proxy(h.GUEST_WIFI)).status_code == 200
+
+
+def test_voice_health_household_only(out, monkeypatch):
+    import subprocess as _subprocess
+
+    monkeypatch.setattr(_subprocess, "run", lambda *a, **k: _subprocess.CompletedProcess(a, 0, stdout="{}"))
+    h.configure()
+    c = h.client()
+    assert c.get("/api/voice/health", headers=h.via_proxy(h.LAN)).status_code == 200
+    guest = c.get("/api/voice/health", headers=h.via_proxy(h.GUEST_WIFI))
+    assert guest.status_code == 403 and guest.json() == {"detail": "guest_network"}
+
+
+def test_docs_only_with_the_dev_flag(monkeypatch):
+    monkeypatch.setenv("JARVIS_ENABLE_DOCS", "true")
+    module = h.load_main("_jw_docs_enabled_main")
+    try:
+        public = {k for k, v in module.ROUTE_CLASSIFICATION.items() if v == "public"}
+        assert {"GET /docs", "GET /redoc", "GET /openapi.json"} <= public
+        assert h.client(peer=h.INTERNET, app=module.app).get("/openapi.json").status_code == 200
+    finally:
+        sys.modules.pop("_jw_docs_enabled_main", None)
 
 
 def test_no_browser_access_configured_logged(captured_logs):
@@ -532,6 +572,13 @@ def test_public_mode_not_set_anywhere():
     files = [h.REPO_ROOT / ".env.example", *sorted((h.REPO_ROOT / "apps").rglob(".env.example"))]
     for root in roots:
         files.extend(p for p in root.rglob("*") if p.is_file() and p.suffix in {".md", ".yaml", ".yml", ".example", ".txt"})
+    # tessa C5: the apps' own manifests and the repo-root docs too
+    apps_yaml = sorted(p for p in (h.REPO_ROOT / "apps").rglob("*")
+                       if p.suffix in {".yaml", ".yml"} and "node_modules" not in p.parts)
+    root_md = sorted(h.REPO_ROOT.glob("*.md"))
+    assert h.REPO_ROOT / "apps" / "jarvis-web" / "k8s" / "deployment.yaml" in apps_yaml
+    assert h.REPO_ROOT / "README.md" in root_md and h.REPO_ROOT / "CLAUDE.md" in root_md
+    files.extend(apps_yaml + root_md)
     assert len(files) >= 10
     hits = []
     for path in files:
@@ -539,3 +586,42 @@ def test_public_mode_not_set_anywhere():
             if "JARVIS_PUBLIC_MODE" in line and "removed" not in line:
                 hits.append(f"{path.relative_to(h.REPO_ROOT)}:{number}")
     assert hits == []
+
+
+# ---------------------------------------------------------------------------
+# tessa C6 (Lows)
+# ---------------------------------------------------------------------------
+
+def test_chat_key_cookie_attributes_and_session_mac(out):
+    """The browser-binding cookie is HttpOnly and SameSite=strict, Secure
+    whenever the page is https; the minted id's mac is 24 hex."""
+    import re
+
+    h.configure()
+    plain = h.client().post("/api/chat", json={"message": "hi"}, headers=_home_headers())
+    cookie = plain.headers["set-cookie"]
+    assert cookie.startswith("jarvis_chat_key=")
+    assert "HttpOnly" in cookie and "SameSite=strict" in cookie and "Secure" not in cookie
+    assert re.fullmatch(r"[0-9a-f]{32}\.[0-9a-f]{24}", plain.json()["session_id"])
+    secure = h.client().post("/api/chat", json={"message": "hi"}, headers=_home_headers(**{"X-Forwarded-Proto": "https"}))
+    assert "Secure" in secure.headers["set-cookie"]
+
+
+def test_raw_uppercase_host_still_home():
+    """tessa DH-e: Host compares case-insensitively even when the header
+    arrives raw (not normalised by a client library)."""
+    from starlette.datastructures import Headers
+
+    s = h.configure()
+    raw = Headers(raw=[(b"host", h.HOST.upper().encode()), (b"x-forwarded-for", h.LAN.encode())])
+    cls, _ = caller_auth.classify_network(h.PROXY, raw, s)
+    assert cls == caller_auth.CLASS_LOCAL
+
+
+def test_guest_network_welcome_capabilities(monkeypatch):
+    """tessa GN-c: the guest network sees view-only capabilities, no
+    household reads, and no sign-in link (that's for a guest stay only)."""
+    h.configure({**h.HOME_ENV, "JARVIS_SIGNIN_URL": "https://signin.example/", "JARVIS_LOGOUT_URL": "https://x/logout"})
+    h.install_outbound(monkeypatch, guest={"has_guest": True, "guest_name": "Alice Renter", "id": 7})
+    caps = h.client().get("/api/welcome", headers=h.via_proxy(h.GUEST_WIFI)).json()["capabilities"]
+    assert caps == {"household_read": False, "control": False, "control_reason": "guest_network", "signed_in": False}

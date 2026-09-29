@@ -187,7 +187,7 @@ def install_role(role: str):
 
 
 PATH_VALUES = {"entity_id": "media_player.tv", "mode": "heat", "app_name": "Netflix", "action": "on",
-               "room_name": "room1", "session_id": "s1", "uri:path": "spotify/track/1"}
+               "room_name": "room1", "session_id": "s1", "uri:path": "spotify%3A%2F%2Ftrack%2F1"}
 
 BODIES = {
     "POST /api/mode": {"mode": "owner"},

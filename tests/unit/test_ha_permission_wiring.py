@@ -1065,9 +1065,24 @@ class TestJarvisWebRoutesClassified:
         for key in ("WS /ma/ws", "WS /ma/sendspin", "MOUNT /static", "MOUNT /logos", "GET /"):
             assert key in classification, key
         assert classification["WS /ma/ws"] == classification["WS /ma/sendspin"] == "owner_only"
-        assert len(classification) >= 60
+        assert len(classification) >= 55
         owner_only = {k for k, v in classification.items() if v == "owner_only"}
         assert len(owner_only) == 29
+
+    def test_only_health_and_the_sign_in_page_are_public(self):
+        """D28: without JARVIS_ENABLE_DOCS the anonymous surface is
+        /api/health plus GET / (which answers a non-browser with the static
+        401 page); the static mounts are gated by _BrowserStaticFiles."""
+        from starlette.routing import Mount
+
+        module = _load_jarvis_web_main()
+        classification = module.ROUTE_CLASSIFICATION
+        assert {k for k, v in classification.items() if v == "public"} == {"GET /api/health", "GET /"}
+        mounts = {f"MOUNT {r.path}": r for r in module.app.routes if isinstance(r, Mount)}
+        assert set(mounts) == {"MOUNT /static", "MOUNT /logos"}
+        for key, mount in mounts.items():
+            assert classification[key] == "browser", key
+            assert isinstance(mount.app, module._BrowserStaticFiles), key
 
     def test_census_self_test_reports_problems(self):
         """A synthetic app with an unclassified GET and a household_read
@@ -1090,9 +1105,12 @@ class TestJarvisWebRoutesClassified:
         async def reads():
             return {}
 
-        findings = _jarvis_census_findings(app, {"GET /reads": "household_read"}, {"household_read": gate})
+        findings = _jarvis_census_findings(
+            app, {"GET /reads": "household_read", "GET /gone": "guest_read"}, {"household_read": gate, "guest_read": gate},
+        )
         assert "unclassified: GET /unclassified" in findings
         assert "missing dependency: GET /reads (household_read)" in findings
+        assert "stale: GET /gone" in findings  # tessa CN-f: an entry for a route that no longer exists
 
 
 class TestWebsocketsImportableInCI:

@@ -112,6 +112,26 @@ def test_nonstream_relayed_and_session_continues(monkeypatch, jarvis):
     assert jarvis.orchestrator_bodies()[-1]["session_id"] == sid
 
 
+def test_session_id_of_another_visitor_is_not_forwarded(monkeypatch, jarvis):
+    """Named (codex High): chat-embed forwards a session id only if it was
+    minted for this visitor; another visitor's id never leaves chat-embed
+    and never comes back as this visitor's session."""
+    embed = _load_chat_embed(monkeypatch, TRUSTED_PROXY_CIDRS="198.51.100.0/24")
+    sent = []
+    _wire(monkeypatch, embed, capture=sent)
+    c = _embed_client(embed)
+    first = c.post("/api/chat", json={"message": "hi"}, headers={"X-Forwarded-For": VISITOR}).json()["session_id"]
+    mine = c.post("/api/chat", json={"message": "again", "session_id": first}, headers={"X-Forwarded-For": VISITOR})
+    assert json.loads(sent[-1].content)["session_id"] == first and mine.json()["session_id"] == first
+    theirs = c.post("/api/chat", json={"message": "hi", "session_id": first}, headers={"X-Forwarded-For": "203.0.113.78"})
+    assert "session_id" not in json.loads(sent[-1].content)
+    assert theirs.json()["session_id"] != first
+    events = _events(c.post("/api/chat/stream", json={"message": "hi", "session_id": first},
+                            headers={"X-Forwarded-For": "203.0.113.78"}).text)
+    assert "session_id" not in json.loads(sent[-1].content)
+    assert events[-1]["type"] == "done" and events[-1]["session_id"] != first
+
+
 def test_21_relayed_requests_end_in_rate_limited_event(monkeypatch, jarvis):
     """Named: jarvis-web's per-visitor relay limit (20) is reached through
     chat-embed; the stream ends with a terminal rate_limited event."""
@@ -220,3 +240,83 @@ def test_chat_embed_dockerfile_builds_from_repo_root():
     assert "COPY apps/chat-embed/main.py ." in lines
     defs = (h.REPO_ROOT / "scripts" / "service-defs.sh").read_text(encoding="utf-8")
     assert '"athena-chat-embed|apps/chat-embed/Dockerfile|.|0"' in defs
+
+
+@pytest.mark.parametrize("url, off_cluster", [
+    ("http://192.0.2.40:3001/api/chat", True),
+    ("http://jarvis.example.com/api/chat", True),
+    ("http://[2001:db8::5]/api/chat", True),
+    ("https://jarvis.example.com/api/chat", False),
+    ("http://athena-jarvis-web.athena-prod.svc/api/chat", False),
+    ("http://athena-jarvis-web.athena-prod.svc.cluster.local/api/chat", False),
+    ("http://athena-jarvis-web/api/chat", False),
+    ("http://127.0.0.1:3001/api/chat", False),
+    ("http://[::1]:3001/api/chat", False),
+    ("http://localhost:3001/api/chat", False),
+])
+def test_plaintext_off_cluster_upstream_is_an_error(monkeypatch, caplog, url, off_cluster):
+    """xander L4 (named: a plain-http LAN address): the relay key would
+    cross the network in cleartext, so startup logs an ERROR naming the
+    setting (never the key)."""
+    _load_chat_embed(monkeypatch, ATHENA_CHAT_URL=url, STREAM_URL=url)
+    errors = [r for r in caplog.records if r.levelname == "ERROR" and "upstream_plaintext_off_cluster" in r.getMessage()]
+    assert bool(errors) is off_cluster
+    if off_cluster:
+        assert {"ATHENA_CHAT_URL", "STREAM_URL"} <= {n for r in errors for n in ("ATHENA_CHAT_URL", "STREAM_URL") if n in r.getMessage()}
+        assert RELAY_KEY not in caplog.text
+
+
+class _Upstream:
+    """A jarvis-web stand-in for the terminal-event rows: a 200 stream with
+    the given SSE chunks, or a connect failure."""
+
+    def __init__(self, chunks=None, connect_error=False):
+        self.chunks = chunks or []
+        self.connect_error = connect_error
+
+    def __call__(self, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    def stream(self, method, url, **kw):
+        outer = self
+
+        class _Resp:
+            status_code = 200
+            headers = {}
+
+            async def __aenter__(self_inner):
+                if outer.connect_error:
+                    raise httpx.ConnectError("connection refused")
+                return self_inner
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+            async def aiter_text(self_inner):
+                for chunk in outer.chunks:
+                    yield chunk
+
+        return _Resp()
+
+
+@pytest.mark.parametrize("upstream", [
+    _Upstream(chunks=['data: {"stage": "session", "session_id": "pub-x"}\n\n',
+                      'data: {"stage": "answer_chunk", "content": "partial"}\n\n']),
+    _Upstream(connect_error=True),
+], ids=["ends_without_complete", "connect_error"])
+def test_stream_always_ends_with_exactly_one_error(monkeypatch, upstream):
+    """tessa C3 (named: ends_without_complete): a 200 stream that stops
+    before `complete`, and an upstream that can't be reached, each end the
+    visitor's stream with exactly one terminal error event and no done."""
+    embed = _load_chat_embed(monkeypatch)
+    monkeypatch.setattr(embed, "_http_client", upstream)
+    events = _events(_embed_client(embed).post("/api/chat/stream", json={"message": "hi"}).text)
+    terminal = [e for e in events if e["type"] in {"done", "error"}]
+    assert terminal == [{"type": "error"}]
+    assert events[-1] == {"type": "error"}

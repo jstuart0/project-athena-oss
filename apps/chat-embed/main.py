@@ -69,6 +69,37 @@ TRUST_CF = os.getenv("TRUST_CF_CONNECTING_IP", "").strip().lower() in {"1", "tru
 if not JARVIS_RELAY_KEY:
     logger.error("jarvis_relay_key_unset: set JARVIS_RELAY_KEY to jarvis-web's value; every message will be refused")
 
+_IN_CLUSTER_SUFFIXES = (".svc", ".cluster.local")
+
+
+def _plaintext_off_cluster(url: str) -> bool:
+    """True for a plain-http URL whose host could be across a network:
+    anything but loopback, a Kubernetes Service name (dotless, *.svc or
+    *.cluster.local) or a dotless container name. The relay key rides on
+    every request, so it must not cross a network in cleartext."""
+    try:
+        parsed = httpx.URL(url)
+    except Exception:
+        return True
+    if parsed.scheme == "https":
+        return False
+    host = (parsed.host or "").lower().rstrip(".")
+    if not host:
+        return True
+    if host == "localhost" or host.endswith(_IN_CLUSTER_SUFFIXES) or "." not in host.replace(":", "."):
+        return False
+    addr = throttle.parse_ip(host)
+    return not (addr is not None and addr.is_loopback)
+
+
+for _name, _url in (("ATHENA_CHAT_URL", ATHENA_CHAT_URL), ("STREAM_URL", STREAM_URL)):
+    if _url and _plaintext_off_cluster(_url):
+        logger.error(
+            "upstream_plaintext_off_cluster setting=%s: the relay key would cross the network in cleartext; "
+            "use https, or an in-cluster (*.svc / *.cluster.local) or loopback address",
+            _name,
+        )
+
 
 def _cors_origins(raw: str) -> list:
     origins = []
@@ -141,10 +172,23 @@ def _relay_headers(visitor: str) -> dict:
     return {"X-Jarvis-Relay-Key": JARVIS_RELAY_KEY, "X-Jarvis-Relay-Client": visitor}
 
 
-def _relay_body(req: "ChatRequest") -> dict:
+def _visitor_session_id(req: "ChatRequest", visitor: str) -> str:
+    """The browser's session id, only if jarvis-web minted it for this
+    visitor under this relay key; otherwise "" (jarvis-web starts a fresh
+    public session). A caller can't carry on someone else's conversation by
+    sending its id."""
+    if req.session_id and throttle.relay_session_id_valid(
+        req.session_id, JARVIS_RELAY_KEY, throttle.rate_limit_key(visitor),
+    ):
+        return req.session_id
+    return ""
+
+
+def _relay_body(req: "ChatRequest", visitor: str) -> dict:
     body = {"message": req.message, "interface_type": "chat", "source": SOURCE_TAG}
-    if req.session_id:
-        body["session_id"] = req.session_id
+    session_id = _visitor_session_id(req, visitor)
+    if session_id:
+        body["session_id"] = session_id
     return body
 
 
@@ -227,7 +271,7 @@ async def chat(req: ChatRequest, request: Request):
     start = time.time()
     try:
         async with _http_client(timeout=120.0) as client:
-            resp = await client.post(ATHENA_CHAT_URL, json=_relay_body(req), headers=_relay_headers(visitor))
+            resp = await client.post(ATHENA_CHAT_URL, json=_relay_body(req, visitor), headers=_relay_headers(visitor))
             _note_upstream_status(resp.status_code)
             if resp.status_code == 429:
                 raise HTTPException(
@@ -245,7 +289,7 @@ async def chat(req: ChatRequest, request: Request):
 
     elapsed = time.time() - start
     response_text = data.get("response", "")
-    upstream_session_id = data.get("session_id") or req.session_id or ""
+    upstream_session_id = data.get("session_id") or _visitor_session_id(req, visitor)
 
     if not response_text:
         raise HTTPException(status_code=502, detail="Empty response from model")
@@ -266,11 +310,11 @@ async def chat_stream(req: ChatRequest, request: Request):
 
     async def generate():
         # Every stream ends with exactly one terminal event: done or error.
-        session_id = req.session_id or ""
+        session_id = _visitor_session_id(req, visitor)
         try:
             async with _http_client(timeout=120.0) as client:
                 async with client.stream(
-                    "POST", STREAM_URL, json=_relay_body(req), headers=_relay_headers(visitor),
+                    "POST", STREAM_URL, json=_relay_body(req, visitor), headers=_relay_headers(visitor),
                 ) as resp:
                     if resp.status_code != 200:
                         _note_upstream_status(resp.status_code)

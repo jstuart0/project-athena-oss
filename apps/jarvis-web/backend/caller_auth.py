@@ -98,6 +98,42 @@ EDGE_STRIPPED_HEADERS = (
     "X-Jarvis-Relay-Client",
 )
 
+
+
+def _with_names(names: Tuple[str, ...], extra: Tuple[str, ...]) -> Tuple[str, ...]:
+    """``names`` plus each of ``extra`` not already there (header names
+    compare case-insensitively)."""
+    seen = {n.lower() for n in names}
+    out = list(names)
+    for name in extra:
+        if name.lower() not in seen:
+            seen.add(name.lower())
+            out.append(name)
+    return tuple(out)
+
+
+def _edge_header_names(env: Mapping[str, str]) -> Tuple[str, str]:
+    """(identity, groups) header names. In edge mode a name outside the
+    documented strip list is fatal unless JARVIS_EDGE_HEADERS_ACK_STRIPPED
+    confirms the operator added it to the edge's strip Middleware: a header
+    the edge doesn't strip is one any client can set."""
+    identity = env.get("JARVIS_EDGE_IDENTITY_HEADER", "").strip() or _DEFAULT_IDENTITY_HEADER
+    groups = env.get("JARVIS_EDGE_GROUPS_HEADER", "").strip() or _DEFAULT_GROUPS_HEADER
+    if not env.get("JARVIS_EDGE_ATTESTATION_SECRET"):
+        return identity, groups
+    documented = {n.lower() for n in EDGE_STRIPPED_HEADERS}
+    custom = [n for n in (identity, groups) if n.lower() not in documented]
+    if custom and not _flag(env.get("JARVIS_EDGE_HEADERS_ACK_STRIPPED")):
+        logger.error(
+            "jarvis_edge_header_not_in_strip_list",
+            headers=custom,
+            hint="add them to the edge's strip Middleware, then set JARVIS_EDGE_HEADERS_ACK_STRIPPED=true",
+        )
+        raise SystemExit(f"jarvis-web edge header names not in the documented strip list: {', '.join(custom)}")
+    logger.info("jarvis_edge_strip_headers", headers=list(_with_names(EDGE_STRIPPED_HEADERS, (identity, groups))))
+    return identity, groups
+
+
 CLASS_AUTHENTICATED = "web_authenticated"
 CLASS_LOCAL = "web_local"
 CLASS_GUEST_NET = "web_guest_net"
@@ -129,7 +165,7 @@ Network = throttle.IPNetwork
 
 @dataclass(frozen=True)
 class AuthSettings:
-    service_api_key: str = ""
+    service_api_key: str = field(default="", repr=False)
     trusted_proxies: Tuple[Network, ...] = ()
     local_networks: Tuple[Network, ...] = ()
     guest_networks: Tuple[Network, ...] = ()
@@ -157,6 +193,13 @@ class AuthSettings:
     @property
     def edge_mode(self) -> bool:
         return bool(self.edge_current)
+
+    @property
+    def edge_strip_headers(self) -> Tuple[str, ...]:
+        """Every header the edge must strip before it sets its own: the
+        documented list plus the configured identity and groups header
+        names, whatever they are."""
+        return _with_names(EDGE_STRIPPED_HEADERS, (self.identity_header, self.groups_header))
 
     @property
     def any_browser_access(self) -> bool:
@@ -344,6 +387,30 @@ def _relay_key(env: Mapping[str, str], service_key: str, edge_values: Tuple[str,
     return key
 
 
+def _require_edge_posture(env: Mapping[str, str], trusted, local, allowed_hosts) -> None:
+    """ian H2: edge mode that can't serve the household is a startup
+    failure, not a Ready pod that 401s everyone. No trusted proxy means no
+    request can ever be attested. No usable home network (after filtering)
+    or no allowed host means no attested home can be corroborated, so every
+    browser at home would have to sign in; that is fatal unless the
+    deployment says it is sign-in only (JARVIS_EDGE_SIGN_IN_ONLY=true)."""
+    faults = []
+    if not trusted:
+        faults.append("TRUSTED_PROXY_CIDRS is empty")
+    if not _flag(env.get("JARVIS_EDGE_SIGN_IN_ONLY")):
+        if not local:
+            faults.append("JARVIS_LOCAL_NETWORKS has no usable entry")
+        if not allowed_hosts:
+            faults.append("JARVIS_ALLOWED_HOSTS is empty")
+    if faults:
+        logger.error(
+            "jarvis_edge_misconfigured",
+            faults=faults,
+            hint="set them, or JARVIS_EDGE_SIGN_IN_ONLY=true for a deployment without a home network",
+        )
+        raise SystemExit(f"jarvis-web edge mode misconfigured: {'; '.join(faults)}")
+
+
 def load_settings(
     env: Mapping[str, str],
     *,
@@ -366,6 +433,7 @@ def load_settings(
 
     service_key = env.get("SERVICE_API_KEY", "")
     edge_current, edge_previous = _edge_settings(env, service_key)
+    identity_header, groups_header = _edge_header_names(env)
     relay_key = _relay_key(env, service_key, (edge_current, edge_previous))
     trusted = _networks(env, "TRUSTED_PROXY_CIDRS")
     local = _networks(env, "JARVIS_LOCAL_NETWORKS")
@@ -382,15 +450,6 @@ def load_settings(
     if direct and edge_current:
         logger.error("jarvis_direct_clients_with_edge_mode")
         raise SystemExit("JARVIS_DIRECT_CLIENTS can't be combined with edge attestation")
-    if edge_current and not trusted:
-        logger.error("jarvis_edge_without_trusted_proxy", effect="no request can be attested; every browser gets 401")
-    if edge_current and not (local and allowed_hosts):
-        logger.error(
-            "jarvis_edge_home_disabled",
-            reason="JARVIS_LOCAL_NETWORKS and JARVIS_ALLOWED_HOSTS are required to corroborate an attested home",
-            effect="every browser must sign in",
-        )
-
     household_groups = frozenset(_csv(env.get("JARVIS_HOUSEHOLD_GROUPS")))
     if edge_current and not household_groups:
         logger.error("jarvis_household_groups_empty", effect="no signed-in identity is honoured")
@@ -435,6 +494,9 @@ def load_settings(
     else:
         local, guest = (), ()
 
+    if edge_current:
+        _require_edge_posture(env, trusted, local, allowed_hosts)
+
     cors = []
     for origin in _csv(env.get("JARVIS_CORS_ORIGINS")):
         if origin in {"*", "null"}:
@@ -460,14 +522,16 @@ def load_settings(
         local_enabled=local_enabled,
         edge_current=edge_current,
         edge_previous=edge_previous,
-        identity_header=env.get("JARVIS_EDGE_IDENTITY_HEADER", "").strip() or _DEFAULT_IDENTITY_HEADER,
-        groups_header=env.get("JARVIS_EDGE_GROUPS_HEADER", "").strip() or _DEFAULT_GROUPS_HEADER,
+        identity_header=identity_header,
+        groups_header=groups_header,
         groups_separator=env.get("JARVIS_EDGE_GROUPS_SEPARATOR", "") or "|",
         household_groups=household_groups,
         relay_key=relay_key,
         relay_per_minute=_positive_int(env, "JARVIS_RELAY_REQUESTS_PER_MINUTE", 20),
         relay_global_per_minute=_positive_int(env, "JARVIS_RELAY_GLOBAL_PER_MINUTE", 300),
     )
+    if settings.any_browser_access and not settings.allowed_hosts:
+        logger.warning("jarvis_websockets_disabled", reason="JARVIS_ALLOWED_HOSTS is empty; WebSocket Origins are checked against it")
     if not settings.any_browser_access:
         logger.error(
             "jarvis_no_browser_access_configured",
@@ -513,6 +577,7 @@ class Caller:
     matched_network: Optional[str] = None
     identity: Optional[str] = None
     edge_attestation: str = "none"  # current | previous | none
+    relay_visitor: Optional[str] = None  # the relayed visitor's rate key (relay only)
 
     @property
     def trust(self) -> str:
@@ -888,8 +953,9 @@ async def resolve_caller_ws(
 
 
 def ws_origin_allowed(websocket: WebSocket) -> bool:
-    """D21: a browser WebSocket must come from an allowlisted origin (or
-    the request's own Host). A missing Origin is refused."""
+    """D21: a browser WebSocket must come from an origin in
+    JARVIS_ALLOWED_HOSTS. The request's own Host is not enough (a client
+    sets it), and a missing Origin is refused."""
     origin = websocket.headers.get("origin")
     if not origin:
         return False
@@ -897,8 +963,7 @@ def ws_origin_allowed(websocket: WebSocket) -> bool:
         origin_host = normalize_host(httpx.URL(origin).host)
     except Exception:
         return False
-    own = normalize_host(websocket.headers.get("host"))
-    return bool(origin_host) and (origin_host in SETTINGS.allowed_hosts or origin_host == own)
+    return bool(origin_host) and origin_host in SETTINGS.allowed_hosts
 
 
 # ---------------------------------------------------------------------------
@@ -967,7 +1032,7 @@ async def _resolve_relay(request: Request, presented: str) -> Caller:
     if not await _relay_global.allow("relay"):
         logger.warning("jarvis_relay_global_rate_limited")
         raise _relay_refusal(429, "rate_limited", headers={"Retry-After": "60"})
-    caller = Caller(CLASS_RELAY, "guest", False, None, "relay_key", "relay")
+    caller = Caller(CLASS_RELAY, "guest", False, None, "relay_key", "relay", relay_visitor=visitor)
     logger.info(
         "jarvis_caller_resolved",
         caller_class=caller.caller_class,

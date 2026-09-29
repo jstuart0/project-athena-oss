@@ -51,9 +51,24 @@ def test_wrong_header_value_refused(out):
     assert h.client().post("/api/climate/mode/heat", headers=_home(**{"X-Jarvis-Request": "yes"})).status_code == 403
 
 
-def test_unauthenticated_post_is_401_before_reload_required(out):
-    resp = h.client(peer=h.INTERNET).post("/api/climate/mode/heat")
-    assert resp.status_code == 401
+AUTH_BEFORE_CSRF = {
+    "relay_chat": "POST /api/chat",
+    "browser": "DELETE /api/session/current",
+    "guest_read": "POST /api/music/search",
+    "owner_only": "POST /api/climate/mode/{mode}",
+}
+
+
+@pytest.mark.parametrize("route_class", sorted(AUTH_BEFORE_CSRF))
+def test_unauthenticated_post_is_401_before_reload_required(out, route_class):
+    """tessa C2 (named: guest_read): on every gated class a caller with
+    neither credentials nor the header is told to sign in (401), never to
+    reload (403): authentication is decided before the CSRF header."""
+    key = AUTH_BEFORE_CSRF[route_class]
+    assert main.ROUTE_CLASSIFICATION[key] == route_class
+    resp = h.call(h.client(peer=h.INTERNET), key)
+    assert resp.status_code == 401 and resp.json() == {"detail": "sign_in_required"}, key
+    assert out.calls == []
 
 
 def test_every_mutating_gated_route_requires_the_header(out):
@@ -100,6 +115,8 @@ def test_listed_origin_preflight_allowed(monkeypatch):
     )
     assert resp.headers["access-control-allow-origin"] == "https://embed.example"
     assert "x-jarvis-request" in resp.headers["access-control-allow-headers"].lower()
+    # tessa CS-j: a listed origin is a same-household origin and sends credentials
+    assert resp.headers["access-control-allow-credentials"] == "true"
     denied = h.client(app=app).options(
         "/api/chat", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"},
     )
@@ -121,8 +138,11 @@ def _ws_request(origin, host=h.HOST):
 
 
 def test_ws_origin_rule(out):
+    """xander L2 (named): the Origin must be in JARVIS_ALLOWED_HOSTS; a
+    matching Host header is not enough, since the client sets it."""
     assert caller_auth.ws_origin_allowed(_ws_request(f"https://{h.HOST}"))
-    assert caller_auth.ws_origin_allowed(_ws_request("http://other.host", host="other.host"))
+    assert caller_auth.ws_origin_allowed(_ws_request(f"https://{h.HOST.upper()}:443"))
+    assert not caller_auth.ws_origin_allowed(_ws_request("http://other.host", host="other.host"))
     assert not caller_auth.ws_origin_allowed(_ws_request("https://evil.example"))
     assert not caller_auth.ws_origin_allowed(_ws_request(None))
 

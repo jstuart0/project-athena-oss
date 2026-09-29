@@ -483,3 +483,26 @@ def test_gateway_key_folds_ipv6_to_64(ct):
     b = limiter_module.resolve_client_key("10.244.3.7", "2001:db8:1:2:ffff::9", TRUSTED)
     assert a == b == "2001:db8:1:2::/64"
     assert limiter_module.resolve_client_key("10.244.3.7", "192.0.2.55", TRUSTED) == "192.0.2.55"
+
+
+# ---------------------------------------------------------------------------
+# Relay session ids (codex High): bound to the visitor under the relay key
+# ---------------------------------------------------------------------------
+
+RELAY = "relay-key-for-tests-0123456789abcdef"
+
+
+def test_relay_session_id_valid_only_for_its_visitor_and_key():
+    from shared.client_throttle import mint_relay_session_id, rate_limit_key, relay_session_id_valid
+
+    visitor = rate_limit_key("203.0.113.5")
+    sid = mint_relay_session_id(RELAY, visitor)
+    assert sid.startswith("pub-") and len(sid) == 4 + 32 + 1 + 24
+    assert relay_session_id_valid(sid, RELAY, visitor)
+    assert not relay_session_id_valid(sid, RELAY, rate_limit_key("203.0.113.6"))
+    assert not relay_session_id_valid(sid, RELAY + "x", visitor)
+    assert not relay_session_id_valid(sid, "", visitor)
+    part, mac = sid.rsplit(".", 1)
+    assert not relay_session_id_valid(f"{part}.{'0' * 24}", RELAY, visitor)
+    assert not relay_session_id_valid(sid.upper(), RELAY, visitor)
+    assert not relay_session_id_valid(None, RELAY, visitor)

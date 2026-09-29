@@ -12,6 +12,8 @@ Mode Logic:
 - Guest Mode: When a guest is currently booked (restricted tool access)
 """
 import os
+import re
+from collections import OrderedDict
 import uuid
 import json
 import time
@@ -24,7 +26,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import structlog
 import asyncio
@@ -32,6 +34,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from sqlalchemy import text
 from admin_url import get_admin_url
 import caller_auth
+import client_throttle
 from caller_auth import Caller, resolve_caller, resolve_caller_ws, route_dependency, ws_origin_allowed
 
 # Configure logging. Guarded: structlog.configure() is process-global, and
@@ -158,10 +161,17 @@ AUDIO_UPLOAD_READ_TIMEOUT_SECONDS = float(os.getenv("AUDIO_UPLOAD_READ_TIMEOUT_S
 MIN_TEMP = int(os.getenv("MIN_TEMP", "65"))
 MAX_TEMP = int(os.getenv("MAX_TEMP", "75"))
 
+# The API docs are a development aid, off unless JARVIS_ENABLE_DOCS=true
+# (D28: the only anonymous surface is the relay and /api/health).
+DOCS_ENABLED = os.getenv("JARVIS_ENABLE_DOCS", "").strip().lower() in {"1", "true", "yes", "on"}
+
 app = FastAPI(
     title="Jarvis Web",
     description="Guest interface for Athena AI Assistant",
-    version="1.0.0"
+    version="1.0.0",
+    docs_url="/docs" if DOCS_ENABLED else None,
+    redoc_url="/redoc" if DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
 
 # CORS: none by default (same-origin only). JARVIS_CORS_ORIGINS lists the
@@ -212,8 +222,46 @@ async def shutdown():
     _db_available = False
 
 
-# In-memory session store (for simple deployment)
-sessions: Dict[str, Dict[str, Any]] = {}
+class SessionCounters:
+    """Per-session message counters for GET /api/session/{id}. In memory,
+    per replica, and bounded: an entry idle for longer than ``ttl_seconds``
+    is dropped, and past ``max_entries`` the least recently used goes, so a
+    stream of fresh session ids can't grow the process without limit."""
+
+    def __init__(self, max_entries: int = 10_000, ttl_seconds: float = 86_400.0, clock=time.monotonic):
+        self._max_entries = max_entries
+        self._ttl = ttl_seconds
+        self._clock = clock
+        self._entries: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+
+    def _expire(self) -> None:
+        cutoff = self._clock() - self._ttl
+        while self._entries and next(iter(self._entries.values()))["_seen"] <= cutoff:
+            self._entries.popitem(last=False)
+
+    def record_message(self, session_id: str) -> None:
+        self._expire()
+        entry = self._entries.get(session_id)
+        if entry is None:
+            entry = {"created": datetime.now().isoformat(), "message_count": 0}
+            self._entries[session_id] = entry
+        entry["message_count"] += 1
+        entry["last_message"] = datetime.now().isoformat()
+        entry["_seen"] = self._clock()
+        self._entries.move_to_end(session_id)
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+
+    def get(self, session_id: str) -> Optional[Dict[str, Any]]:
+        self._expire()
+        entry = self._entries.get(session_id)
+        return None if entry is None else {k: v for k, v in entry.items() if not k.startswith("_")}
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+sessions = SessionCounters()
 
 # =============================================================================
 # Persistent Session — DB Engine and Feature Cache
@@ -625,11 +673,21 @@ async def get_welcome(request: Request):
 # the id to an httponly per-browser cookie. A presented id that this browser
 # didn't receive is replaced with a fresh one, so nobody resumes another
 # person's conversation by sending its id.
+#
+# The binding key derives from SERVICE_API_KEY, so every replica agrees on
+# it. Without SERVICE_API_KEY each process draws its own random key: a
+# chat resumed on another replica, or after a restart, starts fresh.
 _CHAT_KEY_COOKIE = "jarvis_chat_key"
 _CHAT_SESSION_KEY = (
     hmac.new(SERVICE_API_KEY.encode(), b"jarvis-web-chat-session", hashlib.sha256).digest()
     if SERVICE_API_KEY else secrets.token_bytes(32)
 )
+if not SERVICE_API_KEY:
+    logger.warning(
+        "jarvis_chat_session_key_per_process",
+        effect="chat sessions don't survive a restart or move between replicas",
+        hint="set SERVICE_API_KEY",
+    )
 
 
 def _session_mac(session_part: str, browser_key: str) -> str:
@@ -641,21 +699,21 @@ def _new_session_id(browser_key: str) -> str:
     return f"{part}.{_session_mac(part, browser_key)}"
 
 
-_PUBLIC_SESSION_PREFIX = "pub-"
-_MAX_SESSION_ID_LENGTH = 128
-
-
 def _bound_session_id(presented: Optional[str], request: Request, caller: Caller) -> tuple:
     """(session id to use, browser key cookie value to set or None).
 
-    The embed relay (the public audience) uses "pub-" ids: the orchestrator
-    only ever lets a public caller resume a public session, so a relayed
-    visitor keeps its own id across turns and can never reach anyone
-    else's history."""
+    The embed relay (the public audience) uses "pub-" ids bound to the
+    relayed visitor under the relay key: a visitor keeps its own id across
+    turns, and an id another visitor was given starts a fresh session. The
+    orchestrator only ever lets a public caller resume a public session."""
     if caller.caller_class == caller_auth.CLASS_RELAY:
-        if presented and presented.startswith(_PUBLIC_SESSION_PREFIX) and len(presented) <= _MAX_SESSION_ID_LENGTH:
+        relay_key = caller_auth.SETTINGS.relay_key
+        visitor = caller.relay_visitor or ""
+        if presented and client_throttle.relay_session_id_valid(presented, relay_key, visitor):
             return presented, None
-        return f"{_PUBLIC_SESSION_PREFIX}{uuid.uuid4()}", None
+        if presented:
+            logger.info("chat_session_id_not_bound_to_visitor", action="fresh_session")
+        return client_throttle.mint_relay_session_id(relay_key, visitor), None
     browser_key = request.cookies.get(_CHAT_KEY_COOKIE)
     new_key = None
     if not browser_key:
@@ -695,14 +753,7 @@ async def chat(message: ChatMessage, request: Request, response: Response):
     session_id, browser_key = _bound_session_id(message.session_id, request, caller)
     _set_chat_key_cookie(response, request, browser_key)
 
-    if session_id not in sessions:
-        sessions[session_id] = {
-            "created": datetime.now().isoformat(),
-            "message_count": 0
-        }
-
-    sessions[session_id]["message_count"] += 1
-    sessions[session_id]["last_message"] = datetime.now().isoformat()
+    sessions.record_message(session_id)
 
     # Guest identity only for callers who may know it
     guest = await get_current_guest() if caller.gets_guest_context else None
@@ -909,12 +960,7 @@ async def chat_stream(message: ChatMessage, request: Request):
     session_id, browser_key = _bound_session_id(message.session_id, request, caller)
     stream_browser_key = browser_key or request.cookies.get(_CHAT_KEY_COOKIE)
 
-    if session_id not in sessions:
-        sessions[session_id] = {
-            "created": datetime.now().isoformat(),
-            "message_count": 0
-        }
-    sessions[session_id]["message_count"] += 1
+    sessions.record_message(session_id)
 
     # Guest identity only for callers who may know it
     guest = await get_current_guest() if caller.gets_guest_context else None
@@ -1082,24 +1128,15 @@ async def health(request: Request):
     except httpx.RequestError as e:
         orchestrator_error = str(e)
 
+    # Public and status-only (D28): the probe answer carries nothing else.
+    # A degraded answer names the orchestrator error for household readers.
     if orchestrator_healthy:
-        return {
-            "status": "healthy",
-            "service": "jarvis-web",
-            "orchestrator": "connected",
-            "timestamp": datetime.now().isoformat()
-        }
-    else:
-        body = {
-            "status": "degraded",
-            "service": "jarvis-web",
-            "orchestrator": "disconnected",
-            "timestamp": datetime.now().isoformat()
-        }
-        caller = await resolve_caller(request)
-        if caller.can_read_household:
-            body["orchestrator_error"] = orchestrator_error
-        return body
+        return {"status": "healthy"}
+    body = {"status": "degraded"}
+    caller = await resolve_caller(request)
+    if caller.can_read_household:
+        body["orchestrator_error"] = orchestrator_error
+    return body
 
 
 @app.get("/api/geocode/reverse", dependencies=[Depends(_require_browser_caller)])
@@ -1215,9 +1252,10 @@ async def geocode_search(q: str, limit: int = 5):
 @app.get("/api/session/{session_id}", dependencies=[Depends(_require_browser_caller)])
 async def get_session(session_id: str):
     """Get session information"""
-    if session_id not in sessions:
+    counters = sessions.get(session_id)
+    if counters is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    return sessions[session_id]
+    return counters
 
 
 # =============================================================================
@@ -2461,7 +2499,7 @@ async def get_apple_tvs() -> List[AppleTVState]:
     return apple_tvs
 
 
-@app.get("/api/appletv/apps")
+@app.get("/api/appletv/apps", dependencies=[Depends(_require_guest_reader)])
 async def get_streaming_apps():
     """Get list of available streaming apps"""
     return STREAMING_APPS
@@ -2806,7 +2844,7 @@ async def synthesize_speech(request: TTSRequest):
         raise HTTPException(status_code=503, detail="Voice service unavailable")
 
 
-@app.get("/api/voice/health")
+@app.get("/api/voice/health", dependencies=[Depends(_require_household_reader)])
 async def voice_health():
     """Check health of voice services (STT/TTS)"""
     import subprocess
@@ -2951,6 +2989,19 @@ async def get_music_config(request: Request):
         return {"enabled": False, "error": str(e)}
 
 
+# A Music Assistant item URI: "<provider>://<type>/<id or path>". No query,
+# fragment, backslash, percent-escape or control character, and no "." or
+# ".." segment, so the path forwarded to the gateway (and on to Music
+# Assistant's /stream/) stays inside /stream/.
+_MUSIC_URI = re.compile(r"^[A-Za-z][A-Za-z0-9_+.-]{0,63}://[^?#\\%\x00-\x1f\x7f]{1,1024}$")
+
+
+def _valid_music_uri(uri: str) -> bool:
+    if not _MUSIC_URI.match(uri):
+        return False
+    return all(segment not in {".", ".."} for segment in uri.split("://", 1)[1].split("/"))
+
+
 @app.get("/api/music/stream/{uri:path}", dependencies=[Depends(_require_guest_reader)])
 async def proxy_music_stream(uri: str, request: Request):
     """
@@ -2959,6 +3010,8 @@ async def proxy_music_stream(uri: str, request: Request):
     This allows streaming audio when the browser can't directly reach
     Music Assistant (e.g., when accessing remotely).
     """
+    if not _valid_music_uri(uri):
+        raise HTTPException(status_code=400, detail="invalid_music_uri")
     try:
         async with httpx.AsyncClient(timeout=None) as client:
             # Stream from Gateway's stream proxy
@@ -3254,7 +3307,9 @@ if MUSIC_WS_AVAILABLE:
 #   guest_read      household browsers and the guest network
 #   relay_chat      chat: browsers (and the embed relay)
 #   browser         any home-network or signed-in browser
-#   public          anyone (probes, static assets, the sign-in fallback page)
+#   public          anyone: /api/health (probes) and GET /, which answers a
+#                   caller that isn't a browser with the static 401 sign-in
+#                   page. Docs only with JARVIS_ENABLE_DOCS=true.
 
 _CONDITIONAL_ROUTES = {"WS /ma/ws", "WS /ma/sendspin", "MOUNT /static", "MOUNT /logos", "GET /"}
 
@@ -3310,14 +3365,18 @@ ROUTE_CLASSIFICATION: Dict[str, str] = {
     "GET /api/geocode/search": "browser",
     "POST /api/voice/transcribe": "browser",
     "POST /api/voice/synthesize": "browser",
+    "GET /api/voice/health": "household_read",
+    "GET /api/appletv/apps": "guest_read",
     "GET /api/health": "public",
-    "GET /api/voice/health": "public",
-    "GET /api/appletv/apps": "public",
-    "GET /openapi.json": "public",
-    "GET /docs": "public",
-    "GET /docs/oauth2-redirect": "public",
-    "GET /redoc": "public",
 }
+
+if DOCS_ENABLED:
+    ROUTE_CLASSIFICATION.update({
+        "GET /openapi.json": "public",
+        "GET /docs": "public",
+        "GET /docs/oauth2-redirect": "public",
+        "GET /redoc": "public",
+    })
 
 if MUSIC_WS_AVAILABLE:
     ROUTE_CLASSIFICATION["WS /ma/ws"] = "owner_only"
@@ -3362,17 +3421,36 @@ def _sign_in_page() -> str:
     return _SIGN_IN_PAGE.replace("{sign_in}", link)
 
 
+# Pages and scripts are revalidated on every load: a tab running a script
+# older than the server would send requests the server now refuses.
+_NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+class _BrowserStaticFiles(StaticFiles):
+    """Static assets for home-network and signed-in browsers only (D28: the
+    sole anonymous surface is the relay and /api/health), never served
+    from cache without revalidation."""
+
+    async def get_response(self, path, scope):
+        caller = await resolve_caller(Request(scope))
+        if not caller.is_browser:
+            return JSONResponse({"detail": "sign_in_required"}, status_code=401, headers={"WWW-Authenticate": "Jarvis"})
+        response = await super().get_response(path, scope)
+        response.headers.update(_NO_CACHE)
+        return response
+
+
 # Serve static files in production
 static_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
 logos_path = os.path.join(static_path, "logos")
 if os.path.exists(static_path):
-    app.mount("/static", StaticFiles(directory=static_path), name="static")
-    ROUTE_CLASSIFICATION["MOUNT /static"] = "public"
+    app.mount("/static", _BrowserStaticFiles(directory=static_path), name="static")
+    ROUTE_CLASSIFICATION["MOUNT /static"] = "browser"
     ROUTE_CLASSIFICATION["GET /"] = "public"
     # Serve logos at /logos for streaming app icons
     if os.path.exists(logos_path):
-        app.mount("/logos", StaticFiles(directory=logos_path), name="logos")
-        ROUTE_CLASSIFICATION["MOUNT /logos"] = "public"
+        app.mount("/logos", _BrowserStaticFiles(directory=logos_path), name="logos")
+        ROUTE_CLASSIFICATION["MOUNT /logos"] = "browser"
 
     @app.get("/")
     async def serve_index(request: Request):
@@ -3380,8 +3458,8 @@ if os.path.exists(static_path):
         gets a static 401 page (no scripts, no household or guest data)."""
         caller = await resolve_caller(request, get_current_mode)
         if not caller.is_browser:
-            return HTMLResponse(_sign_in_page(), status_code=401, headers={"WWW-Authenticate": "Jarvis"})
-        return FileResponse(os.path.join(static_path, "index.html"))
+            return HTMLResponse(_sign_in_page(), status_code=401, headers={"WWW-Authenticate": "Jarvis", **_NO_CACHE})
+        return FileResponse(os.path.join(static_path, "index.html"), headers=_NO_CACHE)
 
 
 if __name__ == "__main__":

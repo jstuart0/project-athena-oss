@@ -190,6 +190,28 @@ def test_relay_never_adopts_a_non_public_session_id(out):
     assert out.orchestrator_bodies()[-1]["session_id"] != "0123abcd.feedface"
 
 
+def test_relay_session_of_another_visitor_starts_fresh(out):
+    """Named (codex High, xander L3): a pub- id minted for one visitor,
+    presented by another, is a fresh session; the owner can still resume."""
+    sid = _chat(_relay(visitor="203.0.113.50")).json()["session_id"]
+    stolen = _chat(_relay(visitor="203.0.113.51"), session_id=sid)
+    assert stolen.json()["session_id"] != sid and stolen.json()["session_id"].startswith("pub-")
+    assert out.orchestrator_bodies()[-1]["session_id"] != sid
+    assert _chat(_relay(visitor="203.0.113.50"), session_id=sid).json()["session_id"] == sid
+
+
+def test_relay_session_same_ipv6_64_continues(out):
+    sid = _chat(_relay(visitor="2001:db8:5:6::1")).json()["session_id"]
+    assert _chat(_relay(visitor="2001:db8:5:6::2"), session_id=sid).json()["session_id"] == sid
+
+
+@pytest.mark.parametrize("presented", ["pub-1", "pub-" + "0" * 32 + "." + "0" * 24, "pub-" + "a" * 200])
+def test_relay_unminted_pub_id_starts_fresh(out, presented):
+    resp = _chat(_relay(), session_id=presented)
+    assert resp.json()["session_id"] != presented
+    assert out.orchestrator_bodies()[-1]["session_id"] != presented
+
+
 def test_relay_stream_announces_its_public_session(out):
     resp = _chat(_relay(), path="/api/chat/stream")
     first = resp.text.split("\n\n", 1)[0]

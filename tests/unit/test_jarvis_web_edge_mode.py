@@ -6,7 +6,7 @@ the D8 candidate and Host corroborating it.
 
 Groups fixture source: Authentik's proxy outpost joins groups with "|":
 goauthentik/authentik, tag version/2025.8.1,
-internal/outpost/proxyv2/application/mode_common.go lines 37-38:
+internal/outpost/proxyv2/application/mode_common.go lines 42-43:
     headers.Set("X-authentik-username", c.PreferredUsername)
     headers.Set("X-authentik-groups", strings.Join(c.Groups, "|"))
 Not a live capture (the cluster wasn't touched at this stage); the live
@@ -111,11 +111,48 @@ def test_edge_home_with_cf_headers_not_home(out):
     assert _welcome(_edge("home", **{"Cf-Ray": "abc"})).status_code == 401
 
 
-def test_edge_mode_requires_local_networks(out, captured_logs):
-    h.configure({**EDGE_ENV, "JARVIS_LOCAL_NETWORKS": "", "JARVIS_GUEST_NETWORKS": ""})
-    assert any(e["event"] == "jarvis_edge_home_disabled" for e in captured_logs)
+@pytest.mark.parametrize("override, fault", [
+    ({"TRUSTED_PROXY_CIDRS": ""}, "TRUSTED_PROXY_CIDRS is empty"),
+    ({"JARVIS_LOCAL_NETWORKS": "", "JARVIS_GUEST_NETWORKS": ""}, "JARVIS_LOCAL_NETWORKS has no usable entry"),
+    ({"JARVIS_LOCAL_NETWORKS": "10.0.0.0/24"}, "JARVIS_LOCAL_NETWORKS has no usable entry"),  # inside the proxies
+    ({"JARVIS_ALLOWED_HOSTS": ""}, "JARVIS_ALLOWED_HOSTS is empty"),
+])
+def test_edge_misconfig_is_a_startup_failure(override, fault, captured_logs):
+    """ian H2 (named): an edge pod that couldn't serve the household never
+    starts, so a rolling deploy stalls instead of going Ready and 401ing."""
+    with pytest.raises(SystemExit) as excinfo:
+        caller_auth.load_settings({**EDGE_ENV, **override}, own_ips=())
+    assert fault in str(excinfo.value)
+    assert any(e["event"] == "jarvis_edge_misconfigured" and fault in e["faults"] for e in captured_logs)
+
+
+def test_edge_sign_in_only_starts_without_home(out):
+    h.configure({**EDGE_ENV, "JARVIS_LOCAL_NETWORKS": "", "JARVIS_GUEST_NETWORKS": "", "JARVIS_EDGE_SIGN_IN_ONLY": "true"})
     assert _welcome(_edge("home")).status_code == 401
     assert _welcome(_signed_in()).status_code == 200
+    with pytest.raises(SystemExit):
+        caller_auth.load_settings({**EDGE_ENV, "TRUSTED_PROXY_CIDRS": "", "JARVIS_EDGE_SIGN_IN_ONLY": "true"}, own_ips=())
+
+
+def test_custom_edge_header_names_need_the_strip_ack(captured_logs):
+    """xander M1 (named): a configured identity/groups header outside the
+    documented strip list is fatal unless acknowledged; the effective strip
+    set always includes it, and is logged."""
+    custom = {**EDGE_ENV, "JARVIS_EDGE_IDENTITY_HEADER": "X-Remote-User", "JARVIS_EDGE_GROUPS_HEADER": "X-Remote-Groups"}
+    with pytest.raises(SystemExit) as excinfo:
+        caller_auth.load_settings(custom, own_ips=())
+    assert "X-Remote-User" in str(excinfo.value) and "X-Remote-Groups" in str(excinfo.value)
+    assert any(e["event"] == "jarvis_edge_header_not_in_strip_list" for e in captured_logs)
+    s = caller_auth.load_settings({**custom, "JARVIS_EDGE_HEADERS_ACK_STRIPPED": "true"}, own_ips=())
+    assert {"X-Remote-User", "X-Remote-Groups"} <= set(s.edge_strip_headers)
+    assert set(caller_auth.EDGE_STRIPPED_HEADERS) <= set(s.edge_strip_headers)
+    logged = [e for e in captured_logs if e["event"] == "jarvis_edge_strip_headers"]
+    assert logged and "X-Remote-User" in logged[-1]["headers"]
+
+
+def test_default_edge_header_names_need_no_ack():
+    s = caller_auth.load_settings({**EDGE_ENV, "JARVIS_EDGE_IDENTITY_HEADER": "x-AUTHENTIK-username"}, own_ips=())
+    assert len(s.edge_strip_headers) == len(caller_auth.EDGE_STRIPPED_HEADERS)
 
 
 def test_edge_mode_ignores_xff_for_classification(out):
@@ -154,6 +191,14 @@ def test_groups_rows(out, groups, allowed):
         assert resp.status_code == 200
     else:
         assert resp.status_code == 403 and resp.json() == {"detail": "not_household"}
+
+
+@pytest.mark.parametrize("identity", ["", "   ", "\t"])
+def test_blank_identity_is_not_household(out, identity):
+    """tessa ED-g (as read here: a blank identity must not pass as a
+    household member even with a household group)."""
+    resp = _welcome(_signed_in(user=identity))
+    assert resp.status_code == 403 and resp.json()["detail"] == "not_household"
 
 
 def test_authenticated_without_identity_is_403_not_household(out):
@@ -257,8 +302,7 @@ def test_bad_edge_secret_exits(which, fault):
 
 
 def test_good_edge_secrets_start():
-    proc = _run_settings({"SERVICE_API_KEY": h.SERVICE_KEY, "JARVIS_EDGE_ATTESTATION_SECRET": SECRET,
-                          "JARVIS_EDGE_ATTESTATION_SECRET_PREVIOUS": PREVIOUS})
+    proc = _run_settings({**EDGE_ENV, "JARVIS_EDGE_ATTESTATION_SECRET_PREVIOUS": PREVIOUS})
     assert proc.returncode == 0 and "STARTED" in proc.stdout
 
 
