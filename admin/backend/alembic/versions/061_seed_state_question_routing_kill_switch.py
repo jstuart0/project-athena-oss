@@ -27,7 +27,9 @@ KILL_SWITCH_DISPLAY_NAME = "State-Question Routing Kill Switch"
 KILL_SWITCH_DESCRIPTION = (
     "Enable to DISABLE state-question routing (emergency revert). While "
     "enabled, questions like 'are the office lights on?' go back to the "
-    "legacy smart-home path instead of a guaranteed read."
+    "legacy smart-home path instead of a guaranteed read; if that path would "
+    "change a device, the change is never made silently: the user gets a "
+    "confirmation or the exact command to say."
 )
 
 

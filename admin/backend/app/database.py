@@ -607,7 +607,7 @@ def seed_oss_features():
         (
             "state_question_routing_kill_switch",
             "State-Question Routing Kill Switch",
-            "Enable to DISABLE state-question routing (emergency revert). While enabled, questions like 'are the office lights on?' go back to the legacy smart-home path instead of a guaranteed read.",
+            "Enable to DISABLE state-question routing (emergency revert). While enabled, questions like 'are the office lights on?' go back to the legacy smart-home path instead of a guaranteed read; if that path would change a device, the change is never made silently: the user gets a confirmation or the exact command to say.",
             "routing",
             False, False, 70, None
         ),

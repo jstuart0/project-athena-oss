@@ -83,6 +83,26 @@ _VERB_FOR_SERVICE = {
 }
 
 
+# Singular/plural for a counted, single-domain target ("1 light", "7
+# fans"); anything else uses the guard's domain nouns.
+_COUNTED_NOUNS = {
+    "light": ("light", "lights"),
+    "lock": ("lock", "locks"),
+    "cover": ("cover", "covers"),
+    "fan": ("fan", "fans"),
+    "switch": ("switch", "switches"),
+    "media_player": ("media player", "media players"),
+}
+
+
+def _counted_noun(n: int, domains: Iterable[str]) -> str:
+    unique = list(dict.fromkeys(domains))
+    if len(unique) == 1 and unique[0] in _COUNTED_NOUNS:
+        singular, plural = _COUNTED_NOUNS[unique[0]]
+        return singular if n == 1 else plural
+    return noun_for_domains(unique)
+
+
 def _verb_for(service: str) -> str:
     return _VERB_FOR_SERVICE.get(service, service.replace("_", " "))
 
@@ -191,7 +211,7 @@ def rewording(block: FanoutBlock) -> str:
     else:
         n = sum(len(w.entity_ids) for w in block.writes)
         verb = _verb_for(block.writes[0].service) if block.writes else "control"
-        lead = f"That would {verb} {n} {noun}{f' in the {block.room}' if block.room else ''}."
+        lead = f"That would {verb} {n} {_counted_noun(n, [w.domain for w in block.writes])}{f' in the {block.room}' if block.room else ''}."
     return f"{lead} {say}"
 
 
@@ -247,6 +267,15 @@ def _gate_writes(
         return rewording(block)
 
     n = len(all_ids)
+
+    # A real question never writes silently. It reaches a write only with
+    # routing reverted (kill switch), where the limits would let up to t
+    # entities change unasked: every write is confirmed (or reworded)
+    # instead, so a command misread as a question still works after "yes"
+    # or the rewording. Not tied to the limits -- 0/0 doesn't turn it off.
+    if uk.kind == UtteranceKind.STATE_QUESTION and n >= 1:
+        return _block(scope, writes, room, scope_hint, domain_for_metric, "requested", "reworded")
+
     cfg = get_config()
 
     if uk.kind == UtteranceKind.IMPERATIVE:
@@ -273,8 +302,7 @@ def _block(scope, writes, room, scope_hint, domain_for_metric: str, prompt_outco
         ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome=prompt_outcome).inc()
         n = len({e for w in writes for e in w.entity_ids})
         verb = _verb_for(writes[0].service)
-        noun = noun_for_domains([w.domain for w in writes])
-        return f"That would {verb} {n} {noun}{_room_text(room, scope_hint)}. Should I go ahead?"
+        return f"That would {verb} {n} {_counted_noun(n, [w.domain for w in writes])}{_room_text(room, scope_hint)}. Should I go ahead?"
     ha_write_fanout_confirm_total.labels(domain=domain_for_metric, outcome=reword_outcome).inc()
     return rewording(block)
 

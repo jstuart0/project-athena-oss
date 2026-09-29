@@ -132,3 +132,10 @@ def test_kill_switch_seed_description_matches_across_paths():
     row = next(r for r in _seed_oss_features_rows() if r[0] == FLAG)
     assert row[2] == module.KILL_SWITCH_DESCRIPTION
     assert row[1] == module.KILL_SWITCH_DISPLAY_NAME
+
+
+def test_kill_switch_description_states_questions_never_write_silently():
+    """The admin UI text says what the switch keeps: with routing reverted,
+    a question that would change a device is confirmed or reworded."""
+    module = _load_migration()
+    assert "never made silently" in module.KILL_SWITCH_DESCRIPTION

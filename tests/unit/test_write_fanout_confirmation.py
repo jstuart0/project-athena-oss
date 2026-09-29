@@ -281,6 +281,18 @@ class TestGateThresholds:
             r_over = write_fanout.gate("light", "turn_off", tuple(f"light.{i}" for i in range(19)), "turn off the office lights")
             assert r_over is not None
 
+    def test_a_real_question_blocks_at_one_entity(self, monkeypatch):
+        """CR22: whatever the limits, a real STATE_QUESTION's write is
+        confirmed or reworded -- positive control: the same single write
+        from a command proceeds."""
+        for limits in ((6, 18), (0, 0)):
+            monkeypatch.setattr(write_fanout, "get_config", lambda l=limits: _fake_config(*l))
+            with _scope("is the office light on") as scope:
+                assert write_fanout.gate("light", "turn_off", ("light.office_0",), "is the office light on") is not None
+                assert scope.fanout_block is not None
+            with _scope("turn off the office light"):
+                assert write_fanout.gate("light", "turn_off", ("light.office_0",), "turn off the office light") is None
+
     def test_explicit_cue_above_hard_limit_proceeds(self, monkeypatch):
         monkeypatch.setattr(write_fanout, "get_config", lambda: _fake_config(threshold=6, hard_limit=18))
         with _scope("turn off all the office lights") as scope:
@@ -1360,8 +1372,8 @@ PROMPT_12 = "That would turn off 12 lights in the office. Should I go ahead?"
 
 
 class TestKillSwitchRuntime:
-    def _drive(self, query, *, threshold=6, hard_limit=18):
-        h = _Harness(n_lights=12, flags=KILL_SWITCH_ON, threshold=threshold, hard_limit=hard_limit)
+    def _drive(self, query, *, threshold=6, hard_limit=18, n_lights=12, supports_followup=True):
+        h = _Harness(n_lights=n_lights, flags=KILL_SWITCH_ON, threshold=threshold, hard_limit=hard_limit)
         seen = []
         wrapped = h.controller.execute_intent
 
@@ -1373,7 +1385,7 @@ class TestKillSwitchRuntime:
         h.controller.execute_intent = _spy
         metric = MagicMock()
         with mock.patch.object(write_fanout, "ha_write_fanout_confirm_total", metric):
-            out = h.run(_state54(query))
+            out = h.run(_state54(query, supports_followup=supports_followup))
         outcomes = [c.kwargs.get("outcome") for c in metric.labels.call_args_list]
         return h, out, seen, outcomes
 
@@ -1387,13 +1399,43 @@ class TestKillSwitchRuntime:
         assert h.stores and "pending_write_confirmation" in h.stores[-1]["parameters"]
         assert outcomes == ["requested"]
 
-    def test_both_limits_zero_the_probe_writes_twelve(self):
-        """Proves the switch really bypasses routing: with the gate off too,
-        the probe phrase is the incident again."""
+    def test_both_limits_zero_still_confirm_a_real_question(self):
+        """CR22 (replaces "both limits 0 -> 12 writes"): with routing
+        reverted and the limits off, the probe still reaches a writable
+        extraction -- the switch really bypasses routing -- but a real
+        question never writes silently."""
         h, out, seen, outcomes = self._drive(PROBE_PHRASE, threshold=0, hard_limit=0)
-        writes = [c.args[:2] for c in h.client.call_service.await_args_list]
-        assert len(writes) == 12, writes
-        assert set(writes) == {("light", "turn_off")}
+        assert seen and all(read_only is False for _, read_only, _ in seen), seen
+        assert _written(h.client) == []
+        assert out.answer == PROMPT_12
+
+    def test_question_under_the_threshold_is_confirmed_not_written(self):
+        h, out, seen, outcomes = self._drive(PROBE_PHRASE, n_lights=3)
+        assert _written(h.client) == []
+        assert out.answer == "That would turn off 3 lights in the office. Should I go ahead?"
+        assert outcomes == ["requested"]
+
+    def test_single_entity_question_is_confirmed(self):
+        h, out, seen, outcomes = self._drive(PROBE_PHRASE, n_lights=1)
+        assert _written(h.client) == []
+        assert out.answer == "That would turn off 1 light in the office. Should I go ahead?"
+
+    def test_question_on_a_surface_without_follow_up_gets_the_rewording(self):
+        h, out, seen, outcomes = self._drive(PROBE_PHRASE, n_lights=3, supports_followup=False)
+        assert _written(h.client) == []
+        assert out.answer.startswith("That would turn off 3 lights in the office. To do it, say: ")
+        assert outcomes == ["reworded"]
+
+    def test_misread_command_still_works_after_yes(self):
+        """A command the classifier misread as a question is one "yes" away
+        (routing reverted, t = h = 0)."""
+        h = _Harness(n_lights=3, flags=KILL_SWITCH_ON, threshold=0, hard_limit=0)
+        first = h.run(_state54(PROBE_PHRASE))
+        assert first.answer.endswith("Should I go ahead?")
+        stored = h.stores[-1]
+        prev = {k: stored[k] for k in ("intent", "query", "entities", "parameters", "response")}
+        h.run(_state54("yes", prev_context=prev, context_ref_info=YES_NO))
+        assert len(set(_written(h.client, "light"))) == 3
 
     def test_explicit_all_command_is_exempt_scope(self):
         h, out, seen, outcomes = self._drive("turn off all the office lights")
