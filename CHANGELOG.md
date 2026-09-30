@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Install telemetry turns on after this upgrade.** admin-backend starts sending a pseudonymous daily heartbeat (see Added). To keep it off, set `ATHENA_TELEMETRY=off` (or `DO_NOT_TRACK=1`) in admin-backend's environment or `.env` before upgrading. The first heartbeat is sent no sooner than 5 minutes after admin-backend starts.
+
+### Added
+
+- **Pseudonymous install telemetry.** admin-backend sends a `first_boot` event, then a heartbeat about once a day: version, install class, deployment shape, each LLM component's model family, size bucket and local-vs-cloud placement, and coarse feature and usage buckets. No hostnames, URLs, keys, names, queries or guest data, and model names are never sent (only a family from a public list, or `custom`). Off with `ATHENA_TELEMETRY=off`, `DO_NOT_TRACK=1`, or the new **Install telemetry** card under System Configuration, which also shows the exact last payload. The payload schema is published in `docs/telemetry/payload-v1.schema.json`; see `docs/CONFIGURATION.md` "Telemetry".
+
+### Fixed
+
+- The 0.5.0 release left `src/shared`, the gateway, jetson and the control agent at `0.4.0`, and admin-backend's API reported `2.0.0`. All of them now report `0.5.0`.
+
 ---
 
 ## [0.5.0] - 2026-09-30 — Permission before every write, fail-closed web access, calendar-backed guest mode
