@@ -13,7 +13,6 @@ import types
 import typing
 
 import pytest
-from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from . import _public_audience_harness as h
@@ -37,14 +36,15 @@ def _unwrap(annotation):
 def _query_request_endpoints():
     """Every registered route whose endpoint takes a QueryRequest, read from
     the running app, not from source text."""
+    from shared.route_walk import iter_api_routes
+
     found = {}
-    for route in h.main.app.routes:
-        if not isinstance(route, APIRoute):
-            continue
+    for walked in iter_api_routes(h.main.app):
+        route = walked.route
         hints = typing.get_type_hints(route.endpoint)
         hints.pop("return", None)
         if any(_unwrap(t) is h.main.QueryRequest for t in hints.values()):
-            found[route.endpoint.__name__] = route.path
+            found[route.endpoint.__name__] = walked.path
     return found
 
 

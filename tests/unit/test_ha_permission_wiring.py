@@ -1010,17 +1010,19 @@ def _jarvis_route_keys(app):
     method, "WS /path" per WebSocket, "MOUNT /path" per mount."""
     from fastapi.routing import APIRoute, APIWebSocketRoute
     from starlette.routing import Mount, Route, WebSocketRoute
+    from shared.route_walk import iter_routes
 
     keys = {}
-    for route in app.routes:
+    for walked in iter_routes(app):
+        route, path = walked.route, walked.path
         if isinstance(route, Mount):
-            keys[f"MOUNT {route.path}"] = route
+            keys[f"MOUNT {path}"] = route
         elif isinstance(route, (APIWebSocketRoute, WebSocketRoute)):
-            keys[f"WS {route.path}"] = route
+            keys[f"WS {path}"] = route
         elif isinstance(route, (APIRoute, Route)):
             for method in route.methods or ():
                 if method != "HEAD":
-                    keys[f"{method} {route.path}"] = route
+                    keys[f"{method} {path}"] = route
     return keys
 
 
@@ -1078,7 +1080,9 @@ class TestJarvisWebRoutesClassified:
         module = _load_jarvis_web_main()
         classification = module.ROUTE_CLASSIFICATION
         assert {k for k, v in classification.items() if v == "public"} == {"GET /api/health", "GET /"}
-        mounts = {f"MOUNT {r.path}": r for r in module.app.routes if isinstance(r, Mount)}
+        from shared.route_walk import iter_routes
+
+        mounts = {f"MOUNT {w.path}": w.route for w in iter_routes(module.app) if isinstance(w.route, Mount)}
         assert set(mounts) == {"MOUNT /static", "MOUNT /logos"}
         for key, mount in mounts.items():
             assert classification[key] == "browser", key
