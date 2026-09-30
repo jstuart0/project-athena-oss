@@ -42,18 +42,30 @@ RUN pip install --no-cache-dir --no-deps --no-build-isolation -e /app/shared
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Bake the memory embedding model into the image, pinned to one Hugging Face
-# snapshot revision and verified against checked-in sha256 hashes; the
-# runtime never downloads a model (HF_HUB_OFFLINE=1, and the embedder passes
-# local_files_only=True). An upstream change fails this build on purpose.
+# Bake the memory embedding model into the image: the Hugging Face repo
+# fastembed resolves for the model, downloaded at EMBEDDING_MODEL_REVISION
+# (never upstream HEAD, so an upstream push can't change or break the build)
+# and verified against checked-in sha256 hashes. fastembed ignores a
+# revision argument, so the download goes through huggingface_hub, and
+# refs/main is written by hand so fastembed's offline load resolves the
+# pinned snapshot. The bake then loads and embeds offline; the runtime
+# never downloads a model (HF_HUB_OFFLINE=1, and the embedder passes
+# local_files_only=True). A fastembed bump must keep that offline load
+# passing. To re-pin, change EMBEDDING_MODEL_REVISION and
+# embedding-model.sha256 together.
 COPY embedding-model.sha256 /opt/embedding-model.sha256
-ENV FASTEMBED_CACHE_PATH=/opt/fastembed_cache
+ENV FASTEMBED_CACHE_PATH=/opt/fastembed_cache \
+    EMBEDDING_MODEL_REVISION=d13954661f83248295ba75c1ed411eef3b7b936e
 RUN set -eu; \
-    python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2', lazy_load=True)"; \
-    set -- /opt/fastembed_cache/models--qdrant--all-MiniLM-L6-v2-onnx/snapshots/*/; \
+    python -c "import os; from fastembed import TextEmbedding; from huggingface_hub import snapshot_download; [d] = [m for m in TextEmbedding.list_supported_models() if m['model'] == 'sentence-transformers/all-MiniLM-L6-v2']; snapshot_download(repo_id=d['sources']['hf'], revision=os.environ['EMBEDDING_MODEL_REVISION'], cache_dir=os.environ['FASTEMBED_CACHE_PATH'], allow_patterns=['config.json', 'model.onnx', 'special_tokens_map.json', 'tokenizer.json', 'tokenizer_config.json'])"; \
+    model_dir=/opt/fastembed_cache/models--qdrant--all-MiniLM-L6-v2-onnx; \
+    set -- "$model_dir"/snapshots/*/; \
     [ "$#" -eq 1 ]; \
-    [ "$(basename "$1")" = "8f518e882455312b086101e60691f5e6e2f05c3c" ]; \
-    cd "$1"; sha256sum -c /opt/embedding-model.sha256; \
+    [ "$(basename "$1")" = "$EMBEDDING_MODEL_REVISION" ]; \
+    (cd "$1" && sha256sum -c /opt/embedding-model.sha256); \
+    mkdir -p "$model_dir/refs"; \
+    printf '%s' "$EMBEDDING_MODEL_REVISION" > "$model_dir/refs/main"; \
+    HF_HUB_OFFLINE=1 python -c "from fastembed import TextEmbedding; [v] = TextEmbedding('sentence-transformers/all-MiniLM-L6-v2', local_files_only=True, threads=1).embed(['offline load check']); assert len(v) == 384, len(v)"; \
     chmod -R a+rX /opt/fastembed_cache
 ENV HF_HUB_OFFLINE=1
 

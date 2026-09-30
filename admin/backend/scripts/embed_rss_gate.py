@@ -3,11 +3,15 @@ image (it bakes the model and runs offline):
 
     docker run --rm --network none --memory 1g <image> python scripts/embed_rss_gate.py
 
-With the app's modules imported, it embeds 32 maximum-length texts (8192
-characters, truncated to EMBED_MAX_CHARS and then to the model's 256
-tokens) in EMBED_BATCH chunks while 8 threads each embed one more, and
-fails when peak RSS exceeds the budget. The gating run is CI's native
-x86_64 runner; an emulated run (QEMU) is informational only.
+With the app's modules imported, it embeds 32 texts in EMBED_BATCH chunks
+while 8 threads each embed one maximum-length text (8192 characters,
+truncated to EMBED_MAX_CHARS and then to the model's 256 tokens), and fails
+when peak RSS exceeds the budget. The batch mixes lengths so every chunk
+holds a maximum-length text, a mid-length one over 130 tokens and a short
+one: a tokenizer that pads to a fixed length shorter than it truncates
+(the model's revision before d139546) raises on such a batch, and that
+fails the gate too. The gating run is CI's native x86_64 runner; an
+emulated run (QEMU) is informational only.
 """
 from __future__ import annotations
 
@@ -27,6 +31,9 @@ PEAK_RSS_BUDGET_MIB = 700
 TEXT_CHARS = 8192
 BATCH_TEXTS = 32
 CONCURRENT_SINGLES = 8
+MID_WORDS = 180
+LONG_BATCH_TOKENS = 130
+SHORT_BATCH_TOKENS = 32
 
 
 def _peak_rss_mib() -> float:
@@ -40,11 +47,24 @@ def _text(seed: int) -> str:
     return words[:TEXT_CHARS]
 
 
+def _batch_text(index: int) -> str:
+    kind = index % 3
+    if kind == 0:
+        return _text(index)
+    if kind == 1:
+        return " ".join(["word"] * MID_WORDS)
+    return f"short memory {index}"
+
+
+def _tokens(tokenizer, text: str) -> int:
+    return sum(tokenizer.encode(text).attention_mask)
+
+
 def main() -> int:
     import app.routes.memories  # noqa: F401  (measure with the app's modules loaded)
     from app.services import memory_vectors as mv
 
-    batch_texts = [_text(i) for i in range(BATCH_TEXTS)]
+    batch_texts = [_batch_text(i) for i in range(BATCH_TEXTS)]
     single_texts = [_text(1000 + i) for i in range(CONCURRENT_SINGLES)]
     singles: dict = {}
     errors: list = []
@@ -58,21 +78,33 @@ def main() -> int:
     threads = [threading.Thread(target=_single, args=(i,)) for i in range(CONCURRENT_SINGLES)]
     for thread in threads:
         thread.start()
-    batch = mv.embed(batch_texts)
+    try:
+        batch = mv.embed(batch_texts)
+    except Exception as exc:  # reported, and fails the gate
+        batch = []
+        errors.append(repr(exc))
     for thread in threads:
         thread.join()
 
     tokenizer = mv._get_embedder().model.tokenizer
-    tokens = len(tokenizer.encode(batch_texts[0][: mv.EMBED_MAX_CHARS]).ids)
+    tokens = _tokens(tokenizer, batch_texts[0][: mv.EMBED_MAX_CHARS])
+    chunk_tokens = []
+    for start in range(0, BATCH_TEXTS, mv.EMBED_BATCH):
+        counts = [_tokens(tokenizer, t[: mv.EMBED_MAX_CHARS]) for t in batch_texts[start:start + mv.EMBED_BATCH]]
+        chunk_tokens.append([min(counts), max(counts)])
+    mixed_ok = all(low <= SHORT_BATCH_TOKENS and high > LONG_BATCH_TOKENS for low, high in chunk_tokens)
     vectors = list(batch) + list(singles.values())
     dims_ok = len(vectors) == BATCH_TEXTS + CONCURRENT_SINGLES and all(len(v) == mv.EMBEDDING_DIM for v in vectors)
     peak = round(_peak_rss_mib(), 1)
-    ok = dims_ok and not errors and peak <= PEAK_RSS_BUDGET_MIB
+    ok = dims_ok and mixed_ok and not errors and peak <= PEAK_RSS_BUDGET_MIB
     print(json.dumps({
         "peak_rss_mib": peak,
         "budget_mib": PEAK_RSS_BUDGET_MIB,
         "machine": platform.machine(),
+        "model_revision": os.environ.get("EMBEDDING_MODEL_REVISION"),
         "truncated_tokens": tokens,
+        "chunk_min_max_tokens": chunk_tokens,
+        "mixed_ok": mixed_ok,
         "embed_batch": mv.EMBED_BATCH,
         "vectors": len(vectors),
         "dims_ok": dims_ok,
