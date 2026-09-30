@@ -1,0 +1,72 @@
+{
+  "event": "first_boot",
+  "features": {
+    "flags_enabled": [],
+    "modules_enabled": []
+  },
+  "guest_mode": {
+    "calendar_source_types": [],
+    "enabled": false,
+    "legacy_ical_configured": false
+  },
+  "home_assistant": {
+    "configured": false
+  },
+  "install": {
+    "arch": "other",
+    "deployment": "bare",
+    "install_class": "self_hosted_real",
+    "platform": "other",
+    "provenance": "new",
+    "release_channel": "stable",
+    "version": "0.5.0"
+  },
+  "installation_id": "0b7d3c1a-2e4f-4a6b-8c9d-1e2f3a4b5c6d",
+  "llm": {
+    "cloud_providers_enabled": [],
+    "components": [
+      {
+        "assignment": "builtin_default",
+        "backend": "ollama",
+        "component": "intent_classifier",
+        "family": "qwen3",
+        "locality": "local",
+        "quantized": true,
+        "size_bucket": "4-9b",
+        "source": "ollama-library"
+      }
+    ],
+    "custom_components": "0"
+  },
+  "memory": {
+    "memories": "0",
+    "vector_store": "unavailable"
+  },
+  "platform_config": {
+    "auth_modes": [],
+    "control_agent_enabled": false,
+    "oidc_configured": false,
+    "service_control_k8s_enabled": false
+  },
+  "schema_version": "1",
+  "services": {
+    "core_enabled": "0",
+    "core_healthy": "0",
+    "infrastructure_healthy": [],
+    "rag_custom": "0",
+    "rag_enabled": [],
+    "rag_healthy": []
+  },
+  "usage": {
+    "intent_mix_30d": null,
+    "queries_per_day_30d": "0"
+  },
+  "voice": {
+    "jarvis_web_enabled": false,
+    "jetson_devices": "0",
+    "livekit_enabled": false,
+    "stt_engines": [],
+    "tts_engines": [],
+    "wyoming_devices": "0"
+  }
+}

@@ -1,0 +1,638 @@
+{
+  "$defs": {
+    "Features": {
+      "additionalProperties": false,
+      "properties": {
+        "flags_enabled": {
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Flags Enabled",
+          "type": "array"
+        },
+        "modules_enabled": {
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Modules Enabled",
+          "type": "array"
+        }
+      },
+      "required": [
+        "modules_enabled",
+        "flags_enabled"
+      ],
+      "title": "Features",
+      "type": "object"
+    },
+    "GuestMode": {
+      "additionalProperties": false,
+      "properties": {
+        "calendar_source_types": {
+          "items": {
+            "enum": [
+              "airbnb",
+              "vrbo",
+              "lodgify",
+              "generic_ical"
+            ],
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Calendar Source Types",
+          "type": "array"
+        },
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "legacy_ical_configured": {
+          "title": "Legacy Ical Configured",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled",
+        "calendar_source_types",
+        "legacy_ical_configured"
+      ],
+      "title": "GuestMode",
+      "type": "object"
+    },
+    "HomeAssistant": {
+      "additionalProperties": false,
+      "properties": {
+        "configured": {
+          "title": "Configured",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "configured"
+      ],
+      "title": "HomeAssistant",
+      "type": "object"
+    },
+    "Install": {
+      "additionalProperties": false,
+      "properties": {
+        "arch": {
+          "enum": [
+            "x86_64",
+            "aarch64",
+            "other"
+          ],
+          "title": "Arch",
+          "type": "string"
+        },
+        "deployment": {
+          "enum": [
+            "kubernetes",
+            "container",
+            "bare"
+          ],
+          "title": "Deployment",
+          "type": "string"
+        },
+        "install_class": {
+          "enum": [
+            "production",
+            "self_hosted_real",
+            "dev",
+            "test",
+            "ci"
+          ],
+          "title": "Install Class",
+          "type": "string"
+        },
+        "platform": {
+          "enum": [
+            "linux",
+            "darwin",
+            "windows",
+            "other"
+          ],
+          "title": "Platform",
+          "type": "string"
+        },
+        "provenance": {
+          "enum": [
+            "new",
+            "upgraded"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "release_channel": {
+          "enum": [
+            "stable",
+            "prerelease",
+            "dev"
+          ],
+          "title": "Release Channel",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 64,
+          "pattern": "^\\d+\\.\\d+\\.\\d+((rc|a|b|dev|post)\\d*)?$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "release_channel",
+        "install_class",
+        "provenance",
+        "platform",
+        "arch",
+        "deployment"
+      ],
+      "title": "Install",
+      "type": "object"
+    },
+    "LLM": {
+      "additionalProperties": false,
+      "properties": {
+        "cloud_providers_enabled": {
+          "items": {
+            "enum": [
+              "openai",
+              "anthropic",
+              "google"
+            ],
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Cloud Providers Enabled",
+          "type": "array"
+        },
+        "components": {
+          "items": {
+            "$ref": "#/$defs/LLMComponent"
+          },
+          "maxItems": 16,
+          "title": "Components",
+          "type": "array"
+        },
+        "custom_components": {
+          "enum": [
+            "0",
+            "1",
+            "2-5",
+            "6-20",
+            "21-50",
+            "51-200",
+            "201-1000",
+            "1001+"
+          ],
+          "title": "Custom Components",
+          "type": "string"
+        }
+      },
+      "required": [
+        "components",
+        "custom_components",
+        "cloud_providers_enabled"
+      ],
+      "title": "LLM",
+      "type": "object"
+    },
+    "LLMComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "assignment": {
+          "enum": [
+            "configured",
+            "builtin_default"
+          ],
+          "title": "Assignment",
+          "type": "string"
+        },
+        "backend": {
+          "enum": [
+            "ollama",
+            "mlx",
+            "auto",
+            "openai",
+            "anthropic",
+            "google",
+            "openai_compatible"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "component": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$",
+          "title": "Component",
+          "type": "string"
+        },
+        "family": {
+          "pattern": "^[a-z0-9.\\-]{1,24}$",
+          "title": "Family",
+          "type": "string"
+        },
+        "locality": {
+          "enum": [
+            "local",
+            "cloud",
+            "remote",
+            "unknown"
+          ],
+          "title": "Locality",
+          "type": "string"
+        },
+        "quantized": {
+          "title": "Quantized",
+          "type": "boolean"
+        },
+        "size_bucket": {
+          "enum": [
+            "le3b",
+            "4-9b",
+            "10-20b",
+            "21-40b",
+            "41-80b",
+            "gt80b",
+            "unknown"
+          ],
+          "title": "Size Bucket",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "ollama-library",
+            "hf-public-publisher",
+            "vendor-api",
+            "custom-registry",
+            "custom"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "assignment",
+        "family",
+        "size_bucket",
+        "quantized",
+        "source",
+        "backend",
+        "locality"
+      ],
+      "title": "LLMComponent",
+      "type": "object"
+    },
+    "MemoryInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "memories": {
+          "enum": [
+            "0",
+            "1",
+            "2-5",
+            "6-20",
+            "21-50",
+            "51-200",
+            "201-1000",
+            "1001+"
+          ],
+          "title": "Memories",
+          "type": "string"
+        },
+        "vector_store": {
+          "enum": [
+            "ready",
+            "unavailable",
+            "embedder_unavailable",
+            "shape_mismatch",
+            "other"
+          ],
+          "title": "Vector Store",
+          "type": "string"
+        }
+      },
+      "required": [
+        "memories",
+        "vector_store"
+      ],
+      "title": "MemoryInfo",
+      "type": "object"
+    },
+    "PlatformConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "auth_modes": {
+          "items": {
+            "enum": [
+              "oidc",
+              "local"
+            ],
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Auth Modes",
+          "type": "array"
+        },
+        "control_agent_enabled": {
+          "title": "Control Agent Enabled",
+          "type": "boolean"
+        },
+        "oidc_configured": {
+          "title": "Oidc Configured",
+          "type": "boolean"
+        },
+        "service_control_k8s_enabled": {
+          "title": "Service Control K8S Enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "auth_modes",
+        "oidc_configured",
+        "control_agent_enabled",
+        "service_control_k8s_enabled"
+      ],
+      "title": "PlatformConfig",
+      "type": "object"
+    },
+    "Services": {
+      "additionalProperties": false,
+      "properties": {
+        "core_enabled": {
+          "enum": [
+            "0",
+            "1",
+            "2-5",
+            "6-20",
+            "21-50",
+            "51-200",
+            "201-1000",
+            "1001+"
+          ],
+          "title": "Core Enabled",
+          "type": "string"
+        },
+        "core_healthy": {
+          "enum": [
+            "0",
+            "1",
+            "2-5",
+            "6-20",
+            "21-50",
+            "51-200",
+            "201-1000",
+            "1001+"
+          ],
+          "title": "Core Healthy",
+          "type": "string"
+        },
+        "infrastructure_healthy": {
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Infrastructure Healthy",
+          "type": "array"
+        },
+        "rag_custom": {
+          "enum": [
+            "0",
+            "1",
+            "2-5",
+            "6-20",
+            "21-50",
+            "51-200",
+            "201-1000",
+            "1001+"
+          ],
+          "title": "Rag Custom",
+          "type": "string"
+        },
+        "rag_enabled": {
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Rag Enabled",
+          "type": "array"
+        },
+        "rag_healthy": {
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Rag Healthy",
+          "type": "array"
+        }
+      },
+      "required": [
+        "core_enabled",
+        "core_healthy",
+        "rag_enabled",
+        "rag_healthy",
+        "rag_custom",
+        "infrastructure_healthy"
+      ],
+      "title": "Services",
+      "type": "object"
+    },
+    "Usage": {
+      "additionalProperties": false,
+      "properties": {
+        "intent_mix_30d": {
+          "anyOf": [
+            {
+              "maxProperties": 64,
+              "patternProperties": {
+                "^[a-z0-9][a-z0-9_-]{0,47}$": {
+                  "enum": [
+                    10,
+                    20,
+                    30,
+                    40,
+                    50,
+                    60,
+                    70,
+                    80,
+                    90,
+                    100
+                  ],
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Intent Mix 30D"
+        },
+        "queries_per_day_30d": {
+          "enum": [
+            "0",
+            "<1",
+            "1-9",
+            "10-49",
+            "50-199",
+            "200+"
+          ],
+          "title": "Queries Per Day 30D",
+          "type": "string"
+        }
+      },
+      "required": [
+        "queries_per_day_30d",
+        "intent_mix_30d"
+      ],
+      "title": "Usage",
+      "type": "object"
+    },
+    "Voice": {
+      "additionalProperties": false,
+      "properties": {
+        "jarvis_web_enabled": {
+          "title": "Jarvis Web Enabled",
+          "type": "boolean"
+        },
+        "jetson_devices": {
+          "enum": [
+            "0",
+            "1",
+            "2-5",
+            "6-20",
+            "21-50",
+            "51-200",
+            "201-1000",
+            "1001+"
+          ],
+          "title": "Jetson Devices",
+          "type": "string"
+        },
+        "livekit_enabled": {
+          "title": "Livekit Enabled",
+          "type": "boolean"
+        },
+        "stt_engines": {
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Stt Engines",
+          "type": "array"
+        },
+        "tts_engines": {
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Tts Engines",
+          "type": "array"
+        },
+        "wyoming_devices": {
+          "enum": [
+            "0",
+            "1",
+            "2-5",
+            "6-20",
+            "21-50",
+            "51-200",
+            "201-1000",
+            "1001+"
+          ],
+          "title": "Wyoming Devices",
+          "type": "string"
+        }
+      },
+      "required": [
+        "wyoming_devices",
+        "jetson_devices",
+        "livekit_enabled",
+        "jarvis_web_enabled",
+        "stt_engines",
+        "tts_engines"
+      ],
+      "title": "Voice",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "event": {
+      "enum": [
+        "first_boot",
+        "heartbeat"
+      ],
+      "title": "Event",
+      "type": "string"
+    },
+    "features": {
+      "$ref": "#/$defs/Features"
+    },
+    "guest_mode": {
+      "$ref": "#/$defs/GuestMode"
+    },
+    "home_assistant": {
+      "$ref": "#/$defs/HomeAssistant"
+    },
+    "install": {
+      "$ref": "#/$defs/Install"
+    },
+    "installation_id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "title": "Installation Id",
+      "type": "string"
+    },
+    "llm": {
+      "$ref": "#/$defs/LLM"
+    },
+    "memory": {
+      "$ref": "#/$defs/MemoryInfo"
+    },
+    "platform_config": {
+      "$ref": "#/$defs/PlatformConfig"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "services": {
+      "$ref": "#/$defs/Services"
+    },
+    "usage": {
+      "$ref": "#/$defs/Usage"
+    },
+    "voice": {
+      "$ref": "#/$defs/Voice"
+    }
+  },
+  "required": [
+    "schema_version",
+    "installation_id",
+    "event",
+    "install",
+    "services",
+    "llm",
+    "features",
+    "home_assistant",
+    "voice",
+    "guest_mode",
+    "memory",
+    "usage",
+    "platform_config"
+  ],
+  "title": "Payload",
+  "type": "object"
+}
