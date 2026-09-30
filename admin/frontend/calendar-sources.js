@@ -432,20 +432,21 @@ async function editCalendarSource(sourceId) {
         return;
     }
 
-    // Fetch full source with URL
+    // The list only carries a masked URL, so the form needs the full source.
+    // Opening it with list data would put the masked URL in the field.
+    let fullSource;
     try {
         const response = await fetch(`${CALENDAR_SOURCES_API}/${sourceId}`, {
             headers: { 'Authorization': `Bearer ${getToken()}` }
         });
-        if (response.ok) {
-            const fullSource = await response.json();
-            showEditCalendarSourceModal(fullSource);
-        } else {
-            showEditCalendarSourceModal(source);
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        fullSource = await response.json();
     } catch (error) {
-        showEditCalendarSourceModal(source);
+        console.error('Error loading calendar source for editing:', error);
+        showToast('Could not load this source for editing', 'error');
+        return;
     }
+    showEditCalendarSourceModal(fullSource);
 }
 
 async function updateCalendarSource() {
@@ -635,10 +636,13 @@ async function syncCalendarSource(sourceId) {
         const result = await response.json();
 
         if (result.success) {
-            showToast(`Sync complete: ${result.events_added} added, ${result.events_updated} updated`, 'success');
+            const matched = Number(result.events_matched_deleted) || 0;
+            const matchedText = matched > 0 ? `, ${matched} matched entries you deleted or cancelled` : '';
+            showToast(`Sync complete: ${result.events_added} added, ${result.events_updated} updated${matchedText}`, 'success');
             loadCalendarSources();
         } else {
-            showToast(`Sync failed: ${result.message}`, 'error');
+            const reason = result.message || (typeof result.detail === 'string' ? result.detail : '') || `HTTP ${response.status}`;
+            showToast(`Sync failed: ${reason}`, 'error');
             loadCalendarSources();
         }
     } catch (error) {

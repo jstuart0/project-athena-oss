@@ -187,6 +187,10 @@ class GuestModeConfigResponse(BaseModel):
     owner_pin_configured: bool = False
     owner_pin_needs_reset: bool = False
     config_source: str = "admin"
+    # The legacy calendar_url points at the Lodgify iCal export while a
+    # Lodgify API key is enabled: that export's turnover-day slices, which
+    # the API doesn't list, would add guest time the admin UI warns about.
+    calendar_url_shadows_lodgify_api: bool = False
 
     class Config:
         from_attributes = True
@@ -331,7 +335,14 @@ def create_audit_log(
     logger.info("audit_log_created", action=action, resource_type=resource_type, resource_id=resource_id)
 
 
-def _config_response(config: GuestModeConfig, config_source: str = "admin") -> GuestModeConfigResponse:
+def _calendar_url_shadows_lodgify_api(db: Session, calendar_url: Optional[str]) -> bool:
+    from app.routes.calendar_sources import is_lodgify_host, lodgify_key_enabled
+
+    return bool(calendar_url) and is_lodgify_host(calendar_url) and lodgify_key_enabled(db)
+
+
+def _config_response(config: GuestModeConfig, config_source: str = "admin",
+                     db: Optional[Session] = None) -> GuestModeConfigResponse:
     """Build the API response for a real, DB-backed GuestModeConfig row.
 
     Constructed explicitly (not `return config` + FastAPI's ORM
@@ -371,6 +382,9 @@ def _config_response(config: GuestModeConfig, config_source: str = "admin") -> G
         owner_pin_configured=config.owner_pin is not None and not owner_pin_needs_reset,
         owner_pin_needs_reset=owner_pin_needs_reset,
         config_source=config_source,
+        calendar_url_shadows_lodgify_api=(
+            _calendar_url_shadows_lodgify_api(db, config.calendar_url) if db is not None else False
+        ),
     )
 
 
@@ -452,7 +466,7 @@ async def get_guest_mode_config(
     if not is_service_call and not auth_user.has_permission('read'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    return _config_response(config, config_source="admin")
+    return _config_response(config, config_source="admin", db=db)
 
 
 @router.post("/config", response_model=GuestModeConfigResponse)
@@ -514,7 +528,7 @@ async def create_guest_mode_config(
 
     logger.info("guest_mode_config_created", config_id=config.id, user=current_user.username)
 
-    return _config_response(config, config_source="admin")
+    return _config_response(config, config_source="admin", db=db)
 
 
 @router.patch("/config", response_model=GuestModeConfigResponse)
@@ -597,7 +611,7 @@ async def update_guest_mode_config(
 
     logger.info("guest_mode_config_updated", config_id=config.id, user=current_user.username)
 
-    return _config_response(config, config_source="admin")
+    return _config_response(config, config_source="admin", db=db)
 
 
 @router.get("/events", response_model=List[CalendarEventResponse])

@@ -137,7 +137,7 @@ def is_lodgify_host(url: Optional[str]) -> bool:
     return host == 'lodgify.com' or host.endswith('.lodgify.com')
 
 
-def _lodgify_key_enabled(db: Session) -> bool:
+def lodgify_key_enabled(db: Session) -> bool:
     return db.query(ExternalAPIKey.id).filter(
         ExternalAPIKey.service_name == 'lodgify',
         ExternalAPIKey.enabled == True,  # noqa: E712
@@ -168,7 +168,7 @@ def _enforce_lodgify_type_lock(db: Session, *, current_type: Optional[str], new_
     into another type, and a lodgify.com feed can't be filed under one: the
     sync treats both as API-authoritative, and a type change would silently
     switch it back to writing from the iCal export."""
-    if not _lodgify_key_enabled(db):
+    if not lodgify_key_enabled(db):
         return
     moving_off = current_type == 'lodgify' and new_type != 'lodgify'
     mispaired = new_type != 'lodgify' and is_lodgify_host(url)
