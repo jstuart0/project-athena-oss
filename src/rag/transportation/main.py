@@ -40,6 +40,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
 from shared.cache import CacheClient
 from shared.config import get_config
+from shared.local_time import local_now
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
 from shared.url_safety import safe_get, SsrfBlockedError
@@ -592,7 +593,7 @@ async def get_departures(
     # Check if a non-GTFS static service
     if "service_info" in stop:
         service = stop["service_info"]
-        now = datetime.now()
+        now = local_now()
         is_weekend = now.weekday() >= 5
 
         hours = (service.get("hours") or {}).get("weekend" if is_weekend else "weekday")
@@ -645,7 +646,7 @@ async def get_departures(
         }
 
     # Get current time
-    now = datetime.now()
+    now = local_now()
     current_time = now.strftime("%H:%M:%S")
 
     # Filter to upcoming departures
@@ -718,7 +719,7 @@ async def search_transit(
 async def get_water_transit():
     """Get non-GTFS static transit services (e.g. ferries) for the configured region."""
     services = []
-    now = datetime.now()
+    now = local_now()
     is_weekend = now.weekday() >= 5
     for service_id, service in transit_config.static_services.items():
         hours = (service.get("hours") or {}).get("weekend" if is_weekend else "weekday")

@@ -31,7 +31,6 @@ DURATION = "duration / cache age / TTL: elapsed-time arithmetic between values f
 RECORD = "record timestamp: stored or reported as an instant, not a local wall-clock decision"
 LOGFILES = "log files: date in a log-file name, or an mtime age filter with both sides in the process zone"
 ONECALL = "onecall forecast time: the right zone is the forecast location's (ticketed follow-up), not DEFAULT_TIMEZONE"
-RAG_PENDING = "RAG date site switched to shared.local_time in the next phase of this change"
 ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("apps/jarvis-web/backend/main.py", "chat"): (2, DURATION),
     ("apps/jarvis-web/backend/main.py", "get_or_create_identity"): (1, DURATION),
@@ -72,23 +71,14 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("src/orchestrator/session_manager.py", "is_expired"): (1, DURATION),
     ("src/rag/base_rag_service.py", "load_configuration"): (1, DURATION),
     ("src/rag/community_events/main.py", "cache_events"): (2, DURATION),
-    ("src/rag/community_events/main.py", "extract_date_from_text"): (3, RAG_PENDING),
     ("src/rag/community_events/main.py", "scrape_event_cards_source"): (1, RECORD),
     ("src/rag/community_events/main.py", "scrape_link_scan_source"): (1, RECORD),
-    ("src/rag/community_events/main.py", "scrape_squarespace_eventlist_source"): (3, RAG_PENDING),
+    ("src/rag/community_events/main.py", "scrape_squarespace_eventlist_source"): (1, RECORD),
     ("src/rag/community_events/main.py", "scrape_tribe_events_api_source"): (1, RECORD),
-    ("src/rag/community_events/main.py", "search_events"): (1, RAG_PENDING),
-    ("src/rag/community_events/main.py", "timestamp_to_date"): (1, RAG_PENDING),
     ("src/rag/media/main.py", "get_requests"): (1, RECORD),
     ("src/rag/media/main.py", "health"): (1, RECORD),
     ("src/rag/onecall/main.py", "format_daily_forecast"): (1, ONECALL),
     ("src/rag/onecall/main.py", "format_hourly_forecast"): (1, ONECALL),
-    ("src/rag/seatgeek_events/main.py", "get_date_range"): (1, RAG_PENDING),
-    ("src/rag/sports/main.py", "get_active_leagues"): (1, RAG_PENDING),
-    ("src/rag/sports/main.py", "get_next_events_api"): (2, RAG_PENDING),
-    ("src/rag/tesla/main.py", "parse_timeframe_from_query"): (1, RAG_PENDING),
-    ("src/rag/transportation/main.py", "get_departures"): (2, RAG_PENDING),
-    ("src/rag/transportation/main.py", "get_water_transit"): (1, RAG_PENDING),
     ("src/rag/transportation/main.py", "load_gtfs_data"): (1, RECORD),
     ("src/shared/errors.py", "athena_exception_handler"): (1, RECORD),
     ("src/shared/errors.py", "create_error_response"): (1, RECORD),
