@@ -497,7 +497,7 @@ async function updateCalendarSource() {
 }
 
 async function deleteCalendarSource(sourceId, sourceName) {
-    if (!confirm(`Are you sure you want to delete "${sourceName}"?\n\nThis will NOT delete events that were already synced from this source.`)) {
+    if (!confirm(`Are you sure you want to delete "${sourceName}"?\n\nThis will NOT delete events that were already synced from this source.\nCurrent and upcoming guest sessions from this source will be cancelled.`)) {
         return;
     }
 

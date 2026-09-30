@@ -522,6 +522,39 @@ async def _fetch_events(db, source: CalendarSource, cs) -> tuple[str, list]:
 FenceResult = Literal["held", "lost", "error"]
 
 
+async def _sync_guest_sessions(db, cs, source_id: int) -> Optional[str]:
+    """Run the guest-session passes after a committed sync. Returns the
+    first failure's `describe_error` text, or None. The bookings are
+    already committed either way."""
+    first_error: Optional[str] = None
+    for step in (cs.sync_lodgify_to_guest_sessions, cs.update_guest_session_statuses):
+        try:
+            result = await step(db)
+        except Exception as exc:
+            db.rollback()
+            logger.error("calendar_sync_guest_sessions_failed", source_id=source_id, **cs.safe_error(exc))
+            result = {"error": cs.describe_error(exc)}
+        if isinstance(result, dict) and result.get("error") and first_error is None:
+            first_error = result["error"]
+    return first_error
+
+
+def _record_warning(db, source_id: int, warning: str, lease: settings_lease.Lease, cs) -> None:
+    """Show a post-commit warning on the source card (fenced like every
+    other status write)."""
+    try:
+        db.rollback()
+        if _fence(lease, source_id) != "held":
+            return
+        source = db.query(CalendarSource).filter(CalendarSource.id == source_id).first()
+        if source is not None:
+            source.last_sync_error = warning
+            db.commit()
+    except Exception as exc:
+        logger.error("calendar_sync_status_write_failed", source_id=source_id, **cs.safe_error(exc))
+        db.rollback()
+
+
 def _fence(lease: settings_lease.Lease, source_id: int) -> FenceResult:
     """Compare-and-swap renew of our lease, immediately before a commit.
     Anything but "held" means another holder may be writing this source."""
@@ -666,8 +699,11 @@ async def _sync_under_lease(source_id: int, db, trigger: Trigger, run_stamp: dat
         )
 
         if source.source_type == 'lodgify':
-            await cs.sync_lodgify_to_guest_sessions(db)
-            await cs.update_guest_session_statuses(db)
+            guest_error = await _sync_guest_sessions(db, cs, source_id)
+            if guest_error:
+                note = f"Guest sessions could not be updated ({guest_error}); bookings were saved"
+                warning = f"{warning}; {note}" if warning else note
+                _record_warning(db, source_id, warning, lease, cs)
 
         return SyncOutcome(
             status="success",

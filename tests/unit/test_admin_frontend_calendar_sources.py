@@ -126,3 +126,16 @@ def test_test_url_sends_the_url_in_a_json_body_not_the_query():
     assert init["headers"]["Content-Type"] == "application/json"
     assert json.loads(init["body"]) == {"url": token_url, "source_type": "airbnb"}
 
+
+
+def test_delete_confirm_mentions_cancelled_guest_sessions():
+    out = _run(
+        """
+        let asked = '';
+        global.confirm = (msg) => { asked = msg; return false; };
+        await deleteCalendarSource(1, 'Lodgify');
+        toasts.push([asked, 'confirm']);
+        """
+    )
+    asked = next(t[0] for t in out["toasts"] if t[1] == "confirm")
+    assert "Current and upcoming guest sessions from this source will be cancelled." in asked

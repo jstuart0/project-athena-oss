@@ -141,3 +141,127 @@ def test_route_runs_the_same_pass(owner_client, db):
     db.commit()
     assert owner_client.post("/api/calendar-sources/sync-guest-sessions").status_code == 200
     assert _session(db, "lodgify_8").status == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# r3.2: a UID migration keeps one session; guest-session failures surface;
+# deleting a source cancels its live sessions
+# ---------------------------------------------------------------------------
+
+def _derived(source_id, uid):
+    import hashlib
+
+    return f"src:{source_id}:" + hashlib.sha256(uid.encode()).hexdigest()[:32]
+
+
+def _feed(uid, start, end, summary="J*** D**"):
+    return (
+        "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\n"
+        f"UID:{uid}\nDTSTART;VALUE=DATE:{start:%Y%m%d}\nDTEND;VALUE=DATE:{end:%Y%m%d}\n"
+        f"SUMMARY:{summary}\nEND:VEVENT\nEND:VCALENDAR\n"
+    )
+
+
+@pytest.fixture
+def _ny(monkeypatch):
+    from shared import config as config_module
+
+    monkeypatch.setenv("DEFAULT_TIMEZONE", "America/New_York")
+    config_module._clear_cache_for_tests()
+    yield
+    config_module._clear_cache_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_legacy_uid_migration_keeps_exactly_one_session(db, _ny):
+    from unittest.mock import AsyncMock, patch
+    from app.services import calendar_sync
+
+    source = _source(db)
+    event = _event(db, source, "lodgify_101", -1, 3, created_by="ical_sync", title="J*** D**")
+    await _sync(db)
+    session = _session(db, "lodgify_101")
+    assert session is not None and session.calendar_event_id == event.id
+
+    start = TODAY - timedelta(days=1)
+    with patch("app.routes.calendar_sources.fetch_ical_data",
+               new=AsyncMock(return_value=_feed("lodgify_101", start, start + timedelta(days=3)))):
+        outcome = await calendar_sync.run_source_sync(source.id, db, trigger="manual")
+    assert outcome.status == "success", outcome
+
+    db.expire_all()
+    sessions = db.query(GuestSession).all()
+    assert len(sessions) == 1
+    assert sessions[0].id == session.id
+    assert sessions[0].lodgify_booking_id == _derived(source.id, "lodgify_101")
+    assert sessions[0].calendar_event_id == event.id
+    assert sessions[0].status == "active"
+
+
+@pytest.mark.asyncio
+async def test_guest_session_failure_surfaces_as_a_warning(db, _ny, monkeypatch):
+    from unittest.mock import AsyncMock, patch
+    from app.services import calendar_sync
+
+    def boom(_db):
+        raise RuntimeError("guest pass exploded")
+
+    monkeypatch.setattr("app.routes.calendar_sources._cancel_sessions_for_gone_events", boom)
+    source = _source(db)
+    start = TODAY + timedelta(days=5)
+    with patch("app.routes.calendar_sources.fetch_ical_data",
+               new=AsyncMock(return_value=_feed("gs-fail@x", start, start + timedelta(days=2)))):
+        outcome = await calendar_sync.run_source_sync(source.id, db, trigger="manual")
+
+    assert outcome.status == "success"
+    assert outcome.warning == "Guest sessions could not be updated (RuntimeError); bookings were saved"
+    db.expire_all()
+    assert db.query(CalendarEvent).filter(CalendarEvent.source_id == source.id).count() == 1
+    db.refresh(source)
+    assert source.last_sync_status == "success"
+    assert source.last_sync_error == outcome.warning
+    assert "exploded" not in (source.last_sync_error or "")
+
+
+def test_guest_session_failure_shows_in_the_sync_message(owner_client, db, _ny, monkeypatch):
+    from unittest.mock import AsyncMock, patch
+
+    monkeypatch.setattr("app.routes.calendar_sources.update_guest_session_statuses",
+                        AsyncMock(return_value={"error": "OperationalError"}))
+    source = _source(db)
+    start = TODAY + timedelta(days=5)
+    with patch("app.routes.calendar_sources.fetch_ical_data",
+               new=AsyncMock(return_value=_feed("gs-fail2@x", start, start + timedelta(days=2)))):
+        resp = owner_client.post(f"/api/calendar-sources/{source.id}/sync")
+    body = resp.json()
+    assert body["success"] is True
+    assert body["message"] == (
+        "Synced via ical. Guest sessions could not be updated (OperationalError); bookings were saved"
+    )
+
+
+def test_deleting_a_source_cancels_its_live_sessions(owner_client, db):
+    source = _source(db)
+    other = _source(db, source_type="lodgify")
+    active_ev = _event(db, source, "lodgify_d1", -1, 3)
+    upcoming_ev = _event(db, source, "lodgify_d2", 5, 2)
+    done_ev = _event(db, source, "lodgify_d3", -10, 2)
+    other_ev = _event(db, other, "lodgify_d4", 5, 2)
+    import asyncio
+    asyncio.run(_sync(db))
+    manual = GuestSession(calendar_event_id=None, lodgify_booking_id=None, guest_name="Walk-in",
+                          check_in_date=TODAY, check_out_date=TODAY + timedelta(days=1), status="active")
+    db.add(manual)
+    db.commit()
+    assert _session(db, "lodgify_d1").status == "active"
+
+    resp = owner_client.delete(f"/api/calendar-sources/{source.id}")
+    assert resp.status_code == 204
+
+    assert _session(db, "lodgify_d1").status == "cancelled"
+    assert _session(db, "lodgify_d2").status == "cancelled"
+    assert _session(db, "lodgify_d3").status == "completed"
+    assert _session(db, "lodgify_d4").status == "upcoming"
+    db.expire_all()
+    assert db.get(GuestSession, manual.id).status == "active"
+    assert {active_ev.id, upcoming_ev.id, done_ev.id, other_ev.id}

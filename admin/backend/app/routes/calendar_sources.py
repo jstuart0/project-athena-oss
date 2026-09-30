@@ -774,8 +774,11 @@ async def delete_calendar_source(
 
         _audit(db, current_user, request, 'calendar_source_deleted', source.id,
                source.to_dict_safe(), None)
+        cancelled = _cancel_sessions_for_source(db, source.id)
         db.delete(source)
         db.commit()
+        if cancelled:
+            logger.info("calendar_source_delete_cancelled_sessions", source_id=source_id, count=cancelled)
 
         return None
 
@@ -1062,10 +1065,27 @@ async def sync_lodgify_to_guest_sessions(db: Session):
             if not event.external_id:
                 continue
 
-            # Check if guest session already exists
+            # The event's own session first: a sync can re-key an event
+            # (a legacy reserved UID migrated to its source-scoped ID), and
+            # matching only on the booking ID would then mint a second
+            # session for the same stay.
             existing = db.query(GuestSession).filter(
-                GuestSession.lodgify_booking_id == event.external_id
-            ).first()
+                GuestSession.calendar_event_id == event.id
+            ).order_by(GuestSession.id).first()
+            if existing is None:
+                existing = db.query(GuestSession).filter(
+                    GuestSession.lodgify_booking_id == event.external_id
+                ).first()
+            if existing is not None and existing.lodgify_booking_id != event.external_id:
+                holder = db.query(GuestSession.id).filter(
+                    GuestSession.lodgify_booking_id == event.external_id,
+                    GuestSession.id != existing.id,
+                ).first()
+                if holder is None:
+                    existing.lodgify_booking_id = event.external_id
+                else:
+                    logger.warning("guest_session_booking_id_conflict",
+                                   session_id=existing.id, other_session_id=holder.id)
 
             # Get check-in/check-out dates
             check_in = event.checkin.date() if hasattr(event.checkin, 'date') else event.checkin
@@ -1112,6 +1132,27 @@ async def sync_lodgify_to_guest_sessions(db: Session):
         db.rollback()
         logger.error("guest_session_sync_failed", **safe_error(e))
         return {"synced": 0, "error": describe_error(e)}
+
+
+def _cancel_sessions_for_source(db: Session, source_id: int) -> int:
+    """Cancel the upcoming/active sessions of a source that is being
+    deleted. Its events lose their source (ON DELETE SET NULL), after which
+    no sync pass would ever reach those sessions again. Staged in the
+    caller's transaction."""
+    from app.models import GuestSession
+
+    sessions = (
+        db.query(GuestSession)
+        .join(CalendarEvent, GuestSession.calendar_event_id == CalendarEvent.id)
+        .filter(
+            CalendarEvent.source_id == source_id,
+            GuestSession.status.in_(('upcoming', 'active')),
+        )
+        .all()
+    )
+    for session in sessions:
+        session.status = 'cancelled'
+    return len(sessions)
 
 
 def _cancel_sessions_for_gone_events(db: Session) -> int:
@@ -1166,10 +1207,12 @@ async def update_guest_session_statuses(db: Session):
 
         db.commit()
         logger.info("guest_session_statuses_updated")
+        return {}
 
     except Exception as e:
         db.rollback()
         logger.error("guest_session_status_update_failed", **safe_error(e))
+        return {"error": describe_error(e)}
 
 
 @router.post("/sync-guest-sessions")
