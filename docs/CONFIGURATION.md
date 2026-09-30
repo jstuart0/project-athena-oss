@@ -874,12 +874,25 @@ directly.
   can be flush with no owner gap). Date-only and floating (no `Z`/no
   `TZID`) booking times are localised in `DEFAULT_TIMEZONE` at write time
   (admin sync) and read time (the mode service's own legacy-iCal parsing)
-  using PEP 495 `fold=0` semantics — no pytz. Feed blocks (`Blocked`,
-  `Closed Period`, `Not available`, `Airbnb (Not available)`, case-
-  insensitive substring match) are classified `status='blocked'` and
-  never count as a stay; an owner-set `cancelled`/`pending` status is
-  never overwritten by a re-sync. RRULE recurrence is **not** expanded in
-  the mode service's legacy-iCal path.
+  using PEP 495 `fold=0` semantics — no pytz. A feed entry is a block
+  (`status='blocked'`, never a stay) only when its whole summary —
+  trimmed, lowercased, runs of whitespace collapsed — is one of its
+  source type's labels:
+  - `airbnb`: `Not available`, `Airbnb (Not available)`
+  - `vrbo`: `Blocked`
+  - `lodgify`: `Closed Period`, `Blocked`, `Closed`, `Closed Block`,
+    `Owner Block` (Lodgify's export masks guest names with `*`, so none of
+    these can be a masked name)
+  - `generic_ical`, and the mode service's legacy `calendar_url`: all of
+    the above plus `Unavailable`
+
+  It's a whole-string match, so a guest called "Tom Blocked" is a stay,
+  and `Reserved` is never a block. A label not in the list reads as a
+  stay: the safe direction, since the house goes to guest mode rather than
+  owner. If a platform starts exporting a new block label, it shows up as
+  a booking until it's added to the list. An owner-set
+  `cancelled`/`pending` status is never overwritten by a re-sync. RRULE
+  recurrence is **not** expanded in the mode service's legacy-iCal path.
 - **Dedupe and suppression.** The same `(source, key)` collapses exactly;
   the same local `(checkin date, checkout date)` pair collapses via a
   union window (never shrinks guest time), which is how a Lodgify-synced
@@ -890,6 +903,79 @@ directly.
   rebooking of the same days that exists **only** in the legacy iCal feed
   (not in any admin source) after a soft-delete/cancel is suppressed too
   — visible on the Guest Mode page's source list if it matters to you.
+- **Calendar sync** (admin-backend, `calendar_events`). One code path
+  writes feed-derived bookings, for the background loop, the per-source
+  Sync button and Sync all alike.
+  - *Lodgify API authority.* A source whose type is `lodgify`, or whose
+    feed host is `lodgify.com`/`*.lodgify.com`, syncs from the Lodgify
+    API whenever an enabled Lodgify API key exists (External API Keys,
+    service `lodgify`). If the API call fails, or a key is configured but
+    can't be decrypted or is blank, the sync is marked failed, writes
+    nothing and keeps the existing bookings. It never falls back to the
+    iCal export, whose turnover-day slices and fresh-per-fetch UIDs aren't
+    bookings the API knows about. With no enabled key, the iCal export is
+    used.
+  - *iCal natural key.* Feeds can mint a new UID on every fetch (Lodgify's
+    export does), so an event whose UID isn't already stored matches this
+    source's own row on the same local (check-in date, check-out date) in
+    `DEFAULT_TIMEZONE`. A re-fetch with fresh UIDs updates the existing
+    rows instead of adding a new set. A block and a booking on the same
+    dates become one confirmed row.
+  - *Source-scoped keys.* A sync never moves, blocks or hides another
+    source's row. When an event's UID (or a Lodgify reservation key) is
+    already used by another source's row, or by an orphan, it's stored
+    under a source-specific ID instead (`src:<source id>:<hash>`), and the
+    source shows "N events stored under a source-specific ID because their
+    IDs are used elsewhere" until a sync without them. Nothing is dropped.
+    An event with no UID gets an `ical-nouid:` ID and is matched by its
+    dates afterwards.
+  - *Deleted and cancelled entries stay that way.* A synced row you
+    delete or cancel isn't brought back by a re-sync. A new-UID event on
+    the same dates matches it (and is left as you set it) only when the
+    title is the same **and** that row was listed by the source's previous
+    successful sync; the source card and the Sync toast count these as
+    "matched entries you deleted or cancelled". Otherwise the event is
+    added as a new booking, since a rebooking must not be lost. The one
+    residual: a cancellation and a same-title rebooking of the same dates
+    with no successful sync in between match the cancelled row, so that
+    stay reads as owner until you restore or re-add it.
+  - *Sync interval.* `sync_interval_minutes` must be at least 5. The
+    scheduler also treats any smaller stored value as 5.
+  - *One writer per source.* Every sync takes a per-source lease
+    (`system_settings` key `calendar_sync.lock.<source id>`, 10 minutes;
+    the fetch itself is capped at 8), so two admin-backend replicas, or a
+    manual sync during a scheduled one, never write the same source at
+    once. A second click while a sync runs reports "A sync for this source
+    is already running". The key `calendar_sync.last_stamp.<source id>`
+    records the previous successful sync for the rule above.
+  - *Lodgify API outage.* Existing bookings are kept, but a stay created
+    during the outage isn't seen until the API answers again: the house
+    reads owner for it while the Calendar Sources card shows the failed
+    sync. The mode service still reports the admin source as `fresh`,
+    because admin-backend itself is reachable.
+  - *Deleted sources.* Deleting a calendar source leaves its synced rows
+    in place with no source (`source_id` becomes empty), and they keep
+    counting as bookings until you delete them on the Guest Mode page. A
+    re-added source gets its own rows; an orphaned Lodgify API row is
+    taken back by the next API sync.
+  - *Errors.* Sync errors and logs name only the error type and HTTP
+    status (`iCal fetch failed (ConnectError); no changes written`), never
+    the feed URL or response text.
+- **Don't point the legacy `calendar_url` at the Lodgify export when a
+  Lodgify API key is set.** The mode service reads that URL directly, so
+  the Lodgify export's turnover-day slices would add guest time the API
+  doesn't list. The Guest Mode page warns about this combination; clear
+  the legacy URL and let Calendar Sources provide the bookings.
+- **Calendar Sources API.** Every route except `GET
+  /api/calendar-sources/types` needs a signed-in user (Bearer session or
+  `X-API-Key`): listing needs `read`; creating, editing, deleting, syncing
+  and `POST /api/calendar-sources/sync-guest-sessions` need `write`. An
+  `X-Service-Key` header is refused with 401 on these routes. The list,
+  create and edit responses carry only `ical_url_masked`
+  (`https://host/…`); the full feed URL, which embeds its access token, is
+  returned only by `GET /api/calendar-sources/{id}`. Feed URLs must be
+  `https://`. Source changes are recorded in the audit log with the masked
+  URL.
 - **Manual entries** are still entered and stored in the browser's local
   timezone (unchanged) — the Guest Mode page's manual-entry modal shows
   the property timezone alongside the input for reference.
@@ -911,7 +997,11 @@ directly.
   and the mode service (both read it via `envFrom` at pod start), then a
   re-sync — per-source (`POST /api/calendar-sources/{id}/sync`) or the
   Calendar Sources page's "Sync all" button (now actually enqueues a sync
-  per enabled source, rather than being a no-op).
+  per enabled source, rather than being a no-op). Either needs an owner or
+  operator session, or an owner/operator `X-API-Key`. For a feed that
+  changes UIDs, a zone change that moves a stay's local dates makes its
+  existing row miss the date match once, so that sync adds a second row for the stay; delete the old
+  one on the Guest Mode page.
 
 **`GET /api/guest-mode/config`'s dual auth path.** This route now accepts
 either the existing OIDC/Bearer session (unchanged behavior, full

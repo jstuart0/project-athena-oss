@@ -218,6 +218,25 @@ and runs uvicorn from `/app`, so anything else fails at container boot,
 not at test time. See `docs/CONFIGURATION.md` "Guest-mode booking source"
 for the full model.
 
+**Calendar sync invariants.** `run_source_sync` in
+`admin/backend/app/services/calendar_sync.py` is the only code that writes
+feed-derived `calendar_events`; the scheduler, sync-all and
+`POST /api/calendar-sources/{id}/sync` all call it, and it holds the
+`system_settings` lease `calendar_sync.lock.<source id>` for the whole run
+(core in `app/services/settings_lease.py`, shared with service control),
+with a compare-and-swap renew immediately before commit. Don't add another
+insert site (`CalendarEvent(` appears once across `calendar_sync.py` and
+`calendar_sources.py`). A source that is `lodgify` by type or feed host and
+has an enabled Lodgify API key never writes from iCal: an API failure or
+an unreadable key writes nothing. Keys are source-scoped: a sync never
+updates or re-parents another source's row; a colliding UID is stored as
+`src:<source id>:<sha256[:32]>`, a missing one as
+`ical-nouid:<source id>:<uuid>`, and only an orphaned `lodgify_api_sync`
+row may be adopted (`source_id` set). `CalendarSource.to_dict_safe()`
+never carries `ical_url`; only `GET /api/calendar-sources/{id}` returns
+it. Calendar logs and status strings carry `safe_error(exc)` (class and
+HTTP status) only, never exception text.
+
 ---
 
 ### Control Agent
