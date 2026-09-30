@@ -36,11 +36,13 @@ def upgrade() -> None:
         print("WARNING: memories table not found — skipping vector_status (migration 062).")
         return
 
+    if bind.dialect.name == "postgresql":
+        # Don't queue behind open transactions on memories (and make every
+        # later memory query queue behind this one): give up after 5 s. Set
+        # before the column reflection below, which waits on the same lock.
+        op.execute("SET LOCAL lock_timeout = '5s'")
+
     if "vector_status" not in _columns(bind):
-        if bind.dialect.name == "postgresql":
-            # Don't queue behind open transactions on memories (and make every
-            # later memory query queue behind this ALTER): give up after 5 s.
-            op.execute("SET LOCAL lock_timeout = '5s'")
         op.add_column(
             "memories",
             sa.Column("vector_status", sa.String(16), nullable=False, server_default="pending"),
