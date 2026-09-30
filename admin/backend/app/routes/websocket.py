@@ -2,7 +2,7 @@
 WebSocket endpoint for Admin Jarvis real-time events.
 
 Handles:
-- JWT authentication on connection (ticket or legacy session JWT)
+- Authentication on connection with a single-use ws-ticket only
 - Event subscription
 - Heartbeat/ping-pong
 - Rate limiting
@@ -23,7 +23,7 @@ router = APIRouter(tags=["websocket"])
 # JWT secret and algorithm come exclusively from oidc.py (xander M-3, ATHENA-55 Phase 3).
 # Do NOT re-read JWT_SECRET / JWT_ALGORITHM from os.getenv here.
 # Import the module-level primitives so there is exactly one signing-secret source.
-from app.auth.oidc import decode_access_token, decode_ws_ticket
+from app.auth.oidc import decode_ws_ticket
 
 # Module-level redis client — wired by main.py during startup (same pattern as
 # start_health_polling).  None in DEV_MODE; in that case the in-memory fallback is used.
@@ -139,12 +139,13 @@ async def admin_jarvis_websocket(
     """
     WebSocket endpoint for Admin Jarvis real-time events.
 
-    Authentication (ATHENA-55 Phase 3 dual-mode):
-    1. Ticket path: token is a ws-ticket (aud="ws", ws_ticket=True) —
-       validated via decode_ws_ticket, single-use jti check, identity check.
-    2. Legacy path (deprecation window): token is a plain session JWT —
-       validated via decode_access_token, accepted with a deprecation warning.
-    3. DEV_MODE: unauthenticated connection allowed.
+    Authentication:
+    1. The token must be a ws-ticket (aud="ws", ws_ticket=True) minted by
+       POST /api/auth/ws-ticket — validated via decode_ws_ticket, single-use
+       jti check, identity check. Anything else (a session JWT included) is
+       closed with 4001 "Ticket required": a session JWT in a URL would sit
+       in logs for its whole lifetime.
+    2. DEV_MODE: a connection with no token is allowed.
 
     Origin check: production rejects non-CORS_ORIGINS origins with close 4003.
 
@@ -209,61 +210,32 @@ async def admin_jarvis_websocket(
     else:
         user_id = None
 
-        # --- Ticket path (ATHENA-55 Phase 3) ---
         try:
             payload = decode_ws_ticket(token)
         except JWTClaimsError:
-            # Wrong/missing audience — fall through to legacy decode.
-            # NOTE: this branch is entered on ANY decode failure that raises
-            # JWTClaimsError, not only on aud mismatch.  It is also entered for
-            # tokens that carry no aud claim at all (python-jose raises
-            # InvalidAudienceError when audience= is specified but the token has
-            # no aud field on some versions).  The legacy path below re-validates
-            # the token independently via decode_access_token, which rejects
-            # aud="ws" tokens, so the fallthrough is safe regardless of the
-            # exact reason decode_ws_ticket raised.
+            # Wrong or missing audience: not a ws-ticket (a session JWT).
             payload = None
 
-        if payload is not None and payload.get("ws_ticket") is True:
-            # Ticket path: aud="ws" validated positively + ws_ticket identity check.
-            jti = payload.get("jti")
-            if not jti:
-                logger.warning("websocket_ticket_missing_jti")
-                await websocket.close(code=4001, reason="Invalid token")
-                return
+        if payload is None or payload.get("ws_ticket") is not True:
+            logger.warning("admin_jarvis_ws_rejected", reason="not_a_ticket")
+            await websocket.close(code=4001, reason="Ticket required")
+            return
 
-            # Single-use claim — ttl must be >= ticket exp (45s); use 90s for safety
-            claimed = await _claim_jti(jti, ttl=90)
-            if not claimed:
-                logger.warning("websocket_ticket_replayed", jti=jti)
-                await websocket.close(code=4001, reason="Invalid token")
-                return
+        jti = payload.get("jti")
+        if not jti:
+            logger.warning("websocket_ticket_missing_jti")
+            await websocket.close(code=4001, reason="Invalid token")
+            return
 
-            user_id = payload.get("sub") or payload.get("user_id") or "unknown"
-            logger.info("websocket_ticket_validated", user_id=user_id)
+        # Single-use claim — ttl must be >= ticket exp (45s); use 90s for safety
+        claimed = await _claim_jti(jti, ttl=90)
+        if not claimed:
+            logger.warning("websocket_ticket_replayed", jti=jti)
+            await websocket.close(code=4001, reason="Invalid token")
+            return
 
-        else:
-            # --- Legacy path: plain session JWT (no aud / no ws_ticket flag) ---
-            # decode_access_token accepts any valid signed JWT without aud="ws".
-            # A legacy session JWT carries neither, so it passes the REST guard.
-            try:
-                from fastapi import HTTPException
-                legacy_payload = decode_access_token(token)
-            except Exception:
-                logger.warning("websocket_invalid_token", message="Token validation failed")
-                await websocket.close(code=4001, reason="Invalid token")
-                return
-
-            logger.warning(
-                "websocket_legacy_token_auth_deprecated",
-                message=(
-                    "WebSocket authenticated via legacy session JWT in ?token=. "
-                    "This path will be removed in the next release. "
-                    "Clients should use POST /api/auth/ws-ticket instead."
-                ),
-            )
-            user_id = legacy_payload.get("sub") or legacy_payload.get("user_id") or "unknown"
-            logger.info("websocket_token_validated", user_id=user_id)
+        user_id = payload.get("sub") or payload.get("user_id") or "unknown"
+        logger.info("websocket_ticket_validated", user_id=user_id)
 
     # Accept connection
     await ws_manager.connect(websocket, str(user_id))

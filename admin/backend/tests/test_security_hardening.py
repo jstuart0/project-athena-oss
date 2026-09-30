@@ -3961,10 +3961,11 @@ class TestWsAudMismatchVariableRemoved:
             f"found {len(matches)} reference(s): {matches!r}"
         )
 
-    def test_legacy_fallthrough_comment_present(self):
+    def test_no_legacy_session_jwt_path(self):
         """
-        Static: websocket.py must have a comment on the legacy fallthrough condition
-        explaining it is entered on decode-failure OR non-ticket payloads.
+        Static: the legacy session-JWT path is gone. Anything that isn't a
+        ws-ticket is closed 4001 "Ticket required"; decode_access_token is
+        never reached from the WebSocket handler.
         """
         ws_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
@@ -3972,12 +3973,10 @@ class TestWsAudMismatchVariableRemoved:
         with open(ws_path) as f:
             src = f.read()
 
-        # A comment near the JWTClaimsError except block should explain the broad scope.
-        assert "decode failure" in src or "decode_ws_ticket raised" in src or "ANY decode failure" in src.upper() or "any decode failure" in src.lower(), (
-            "websocket.py must have a comment near the legacy fallthrough explaining "
-            "it is entered on decode-failure OR non-ticket payloads, not only aud mismatch "
-            "(xander M-2)"
-        )
+        assert "decode_access_token" not in src
+        assert "websocket_legacy_token_auth_deprecated" not in src
+        assert 'reason="Ticket required"' in src
+        assert '"admin_jarvis_ws_rejected", reason="not_a_ticket"' in src
 
 
 class TestWsReplayGuardL1:
@@ -4019,15 +4018,8 @@ class TestWsReplayGuardL1:
             "websocket.py must close with 4001 on replay (xander L-1)"
         )
 
-        # The replay check must come BEFORE the legacy path in source order.
-        # This proves a replayed ticket cannot sneak through to the legacy decoder.
-        idx_replay = src.find("websocket_ticket_replayed")
-        idx_legacy = src.find("websocket_legacy_token_auth_deprecated")
-        assert idx_replay < idx_legacy, (
-            "websocket_ticket_replayed guard must appear before the legacy fallthrough "
-            "in websocket.py — a replayed ticket must never reach decode_access_token "
-            "(xander L-1 replay-then-legacy-sneak guard)"
-        )
+        # There is no legacy decoder left to sneak through to.
+        assert "decode_access_token" not in src
 
     def test_claim_jti_false_triggers_close_not_legacy(self):
         """
@@ -4055,13 +4047,10 @@ class TestWsReplayGuardL1:
             "(xander L-1 — replayed ticket must return, not fall through)"
         )
 
-        # The return must be before the legacy fallthrough section
-        idx_not_claimed = src.find("if not claimed")
-        idx_legacy = src.find("websocket_legacy_token_auth_deprecated")
-        assert 0 < idx_not_claimed < idx_legacy, (
-            "The 'if not claimed: return' block must appear before the legacy deprecation "
-            "warning in source order (xander L-1)"
-        )
+        # ...and it returns (no fallthrough to any other token path).
+        tail = src[src.find("if not claimed"):]
+        assert tail.find("return") < tail.find("websocket_ticket_validated")
+        assert "websocket_legacy_token_auth_deprecated" not in src
 
     def test_claim_jti_replay_unit(self):
         """
