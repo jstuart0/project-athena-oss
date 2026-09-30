@@ -41,6 +41,13 @@ jobs:
           cat leaks.txt >> "${GITHUB_STEP_SUMMARY}"
           exit "$RC"
 
+      - name: Install test dependencies (hash-locked)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --require-hashes -r .github/ci-requirements/unit-min/requirements.txt
+
       - name: Run the gate script's own test suite
         if: always()
         shell: bash

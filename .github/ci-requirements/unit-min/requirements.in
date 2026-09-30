@@ -1,0 +1,6 @@
+# The minimum to run tests/unit modules that need nothing but pytest and
+# tests/unit/conftest.py (which imports structlog): the Maintainer Leak Gate
+# and Admin Frontend Escaping workflows. Pinned to the versions
+# admin/backend/requirements-test.txt locks. Compiled by `make lock`.
+pytest==9.1.1
+structlog==23.2.0

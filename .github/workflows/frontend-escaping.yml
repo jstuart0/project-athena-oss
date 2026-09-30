@@ -20,6 +20,8 @@ on:
       - "scripts/check-frontend-wiring.py"
       - "scripts/check-no-new-test-skips.py"
       - ".github/workflows/frontend-escaping.yml"
+      - "tests/unit/conftest.py"
+      - ".github/ci-requirements/unit-min/**"
   push:
     branches: [main]
     paths:
@@ -36,6 +38,8 @@ on:
       - "scripts/check-frontend-wiring.py"
       - "scripts/check-no-new-test-skips.py"
       - ".github/workflows/frontend-escaping.yml"
+      - "tests/unit/conftest.py"
+      - ".github/ci-requirements/unit-min/**"
 
 permissions:
   contents: read
@@ -75,12 +79,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install pytest
+      - name: Install test dependencies (hash-locked)
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pytest
+          # pytest, plus structlog for tests/unit/conftest.py.
+          python3 -m pip install --require-hashes -r .github/ci-requirements/unit-min/requirements.txt
 
       - name: Run escaping behavioral tests (zero skips permitted — ATHENA_REQUIRE_NODE=1)
         shell: bash
