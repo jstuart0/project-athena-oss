@@ -20,7 +20,7 @@ API Endpoints:
 import os
 import sys
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import asyncpg

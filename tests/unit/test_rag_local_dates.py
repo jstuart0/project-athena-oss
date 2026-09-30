@@ -123,3 +123,12 @@ def test_sports_window_keeps_tonights_event(at):
     sports = at(_load("sports"))
     events = [{"strEvent": "Tonight", "dateEvent": "2026-09-29"}, {"strEvent": "Past", "dateEvent": "2026-09-28"}]
     assert [e["strEvent"] for e in sports._filter_events_window(events)] == ["Tonight"]
+
+
+def test_tesla_holiday_uses_the_local_date(at):
+    """Christmas Eve 22:00 local is already Christmas Day in UTC: locally
+    this year's Christmas hasn't happened, so "on christmas" is last
+    year's."""
+    tesla = at(_load("tesla"), datetime(2026, 12, 25, 3, 0, tzinfo=timezone.utc))
+    result = tesla.parse_timeframe_from_query("how much did I drive on christmas")
+    assert str(result["start_date"]) == "2025-12-25"
