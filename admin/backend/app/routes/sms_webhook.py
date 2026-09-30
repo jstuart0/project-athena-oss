@@ -627,4 +627,3 @@ async def handle_opt_in(calendar_event_id: int, db: Session):
 
     db.commit()
     logger.info("guest_opted_in", event_id=calendar_event_id)
-

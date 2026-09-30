@@ -60,4 +60,3 @@ def test_misuse_detector_self_test():
     assert session_token_misuses(good) == []
     for bad in ("x = sessionToken;", "const u = `${base}?token=${sessionToken}`;", "wsTicket = sessionToken"):
         assert session_token_misuses(good + "\n" + bad) == [5], bad
-

@@ -309,4 +309,3 @@ def test_memory_writes_skip_an_off_stay_sms():
     assert len(writers) == 2, writers
     for test in writers:
         assert "is_public_audience(permissions)" in test and "is_stay_read_only(permissions)" in test, test
-

@@ -52,4 +52,3 @@ def test_error_log_parser_self_test():
     assert _error_log_levels("error_log /dev/stderr crit;") == ["crit"]
     assert _error_log_levels("x;\n  error_log /dev/stderr error;") == ["error"]
     assert _error_log_levels("access_log off;") == []
-

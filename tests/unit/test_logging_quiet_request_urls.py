@@ -150,4 +150,3 @@ def test_request_url_loggers_is_public():
     logging_config.quiet_request_url_loggers()
     for name in logging_config.REQUEST_URL_LOGGERS:
         assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING
-

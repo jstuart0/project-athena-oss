@@ -71,4 +71,3 @@ def test_golden_vector_alphanumeric_sender(key):
     doesn't raise."""
     expected = hmac.new(b"sms-session-test-key-one", _DOMAIN + b"", hashlib.sha256).hexdigest()[:24]
     assert _session_id("ATHENA") == "sms_" + expected
-

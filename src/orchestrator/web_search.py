@@ -67,7 +67,7 @@ class WebSearchClient:
                     })
             
             logger.info("web_search_completed", 
-                       query_len=len(query), 
+                       query_len=len(query),
                        results_count=len(results))
             
             return results[:max_results]

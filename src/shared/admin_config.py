@@ -1767,7 +1767,7 @@ class AdminConfigClient:
                 logger.info(
                     "voice_automation_created",
                     id=data.get("id"),
-                    name=data.get("name"),
+                    name_len=len(data.get("name") or ""),
                     owner_type=data.get("owner_type")
                 )
                 return data

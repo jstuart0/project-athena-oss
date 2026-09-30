@@ -575,4 +575,3 @@ def test_a_new_bare_user_route_is_not_permissioned():
     toy = FastAPI()
     toy.include_router(router)
     assert _permissionless(toy) == {("GET", "/api/zz-bare-user"), ("GET", "/api/zz-bare-dual")}
-

@@ -533,4 +533,3 @@ def test_owner_type_is_owner_or_guest(client, db, owner_type):
     body = {"name": "n", "owner_type": owner_type, "trigger_config": {"type": "time"}, "actions_config": []}
     assert client.post(VA, json=body, headers=_svc("owner")).status_code == 422
     assert db.query(VoiceAutomation).count() == 0
-

@@ -529,9 +529,39 @@ def _identifiers(node: ast.AST):
                 yield from _identifiers(child)
 
 
-def _call_hits(call: ast.Call, *, filename: str = "", inspected: list | None = None) -> list[str]:
+def _name_lookups(node: ast.AST):
+    """Every ``x.get("name")`` / ``x["name"]`` in a logged value, not
+    entering exempt sub-expressions (len(), bool(), ...)."""
+    if node is None or (isinstance(node, ast.expr) and _exempt(node)):
+        return
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get"
+            and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "name"):
+        yield node
+    elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value == "name":
+        yield node
+    for child in ast.iter_child_nodes(node):
+        yield from _name_lookups(child)
+
+
+def _person_context(call: ast.Call, func: str):
+    """The person-ish subject of a log call (its event string, else its
+    enclosing function), or None."""
+    event = call.args[0].value if call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str) else ""
+    for text in (event, func):
+        for receiver in _PERSON_RECEIVERS:
+            if receiver in text.lower():
+                return receiver
+    return None
+
+
+def _call_hits(call: ast.Call, *, filename: str = "", inspected: list | None = None, func: str = "") -> list[str]:
     inspected = [] if inspected is None else inspected
     hits = []
+    context = _person_context(call, func)
+    if context:
+        for value in [kw.value for kw in call.keywords] + list(call.args[1:]):
+            if any(True for _ in _name_lookups(value)):
+                hits.append(f"person_name:{context}")
     values = [kw.value for kw in call.keywords] + list(call.args)
     for kw in call.keywords:
         if kw.arg and _matches(kw.arg) and not _exempt(kw.value):
@@ -568,7 +598,8 @@ class _Finder(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if _is_logger_call(node):
             self.calls += 1
-            hits = _call_hits(node, filename=self.filename, inspected=self.inspected)
+            hits = _call_hits(node, filename=self.filename, inspected=self.inspected,
+                              func=self.stack[-1] if self.stack else "")
             if hits:
                 self.found.append((self.stack[-1] if self.stack else "<module>", node.lineno, sorted(set(hits))))
         self.generic_visit(node)
@@ -849,3 +880,29 @@ def not_flagged(query, response, message, to_number, automation):
     assert by_line[9] == ["to_number"]
     assert "phone_e164" in by_line[10]
 
+
+def test_name_lookup_in_a_person_context_self_test():
+    """``data.get("name")`` / ``row["name"]`` is a person's or an
+    automation's name when the log event or the enclosing function is about
+    an automation, guest, booking, member or participant."""
+    source = '''
+def create_voice_automation(data):
+    logger.info("voice_automation_created", id=data.get("id"), name=data.get("name"))
+
+def f(row):
+    logger.info("guest_checked_in", who=row["name"])
+
+def g(data):
+    logger.info("automation_saved", label=str(data.get("name")))
+
+def not_flagged(data, tool):
+    logger.info("tool_registered", name=tool.get("name"))
+    logger.info("voice_automation_created", id=data.get("id"), name_len=len(data.get("name") or ""))
+    logger.info("guest_checked_in", has_name=bool(data.get("name")))
+'''
+    found, calls, _inspected = _find(source)
+    assert calls == 6
+    by_line = by_line_keys(found)
+    assert sorted(by_line) == [3, 6, 9]
+    assert by_line[3] == ["person_name:automation"]
+    assert by_line[6] == ["person_name:guest"]
