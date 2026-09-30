@@ -647,7 +647,7 @@ def test_S2_rendered_prompt_context_has_exactly_one_default_location_line(owner_
     assert len(rows) == 1
     entries = [row.to_dict() for row in rows]
 
-    context = build_knowledge_context(entries, "guest")
+    context = build_knowledge_context(entries, "guest", degraded=False)
     assert context.count("Default Location:") == 1
     assert "Denver, CO" in context
 

@@ -110,9 +110,12 @@ EDGE_STRIPPED_HEADERS = (
 
 # Headers jarvis-web reads for its own evidence: an identity, groups or name
 # header configured to one of these would let one value be read as another.
+# Request plumbing headers (credentials, routing, client address) are
+# reserved too: an edge that sets one of them would be read as identity.
 _RESERVED_EDGE_HEADER_NAMES = frozenset(
     n.lower() for n in (_EDGE_CLASS_HEADER, _EDGE_ATTESTATION_HEADER, "X-Service-Key", "X-Jarvis-Relay-Key",
-                        "X-Jarvis-Relay-Client")
+                        "X-Jarvis-Relay-Client", "Authorization", "Cookie", "Host", "X-Forwarded-For",
+                        "CF-Connecting-IP")
 )
 
 
@@ -144,7 +147,8 @@ def _refuse_reserved_header_names(names: Dict[str, str]) -> None:
         )
         raise SystemExit(
             "jarvis-web edge header names must differ from each other and from X-Jarvis-Edge-Class, "
-            "X-Jarvis-Edge-Attestation, X-Service-Key, X-Jarvis-Relay-Key and X-Jarvis-Relay-Client"
+            "X-Jarvis-Edge-Attestation, X-Service-Key, X-Jarvis-Relay-Key, X-Jarvis-Relay-Client, "
+            "Authorization, Cookie, Host, X-Forwarded-For and CF-Connecting-IP"
         )
 
 

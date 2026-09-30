@@ -371,7 +371,10 @@ def test_default_header_names_match_template():
 # The member's name header (JARVIS_EDGE_NAME_HEADER)
 # ---------------------------------------------------------------------------
 
-RESERVED = ["X-Jarvis-Edge-Class", "X-Jarvis-Edge-Attestation", "X-Service-Key", "X-Jarvis-Relay-Key", "X-Jarvis-Relay-Client"]
+RESERVED = [
+    "X-Jarvis-Edge-Class", "X-Jarvis-Edge-Attestation", "X-Service-Key", "X-Jarvis-Relay-Key", "X-Jarvis-Relay-Client",
+    "Authorization", "Cookie", "Host", "X-Forwarded-For", "CF-Connecting-IP",
+]
 
 
 @pytest.mark.parametrize("reserved", RESERVED)

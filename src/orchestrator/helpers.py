@@ -66,7 +66,7 @@ from orchestrator.urls import (
 )
 from shared.admin_config import get_admin_client
 from shared.local_time import local_now, local_today
-from shared.assistant_profile import get_assistant_profile
+from shared.assistant_profile import clean_guest_name, get_assistant_profile
 from shared.service_registry import get_service_url as registry_get_service_url
 from orchestrator.config_loader import ADMIN_API_URL
 from orchestrator.utils.constants import DEFAULT_LOCATION
@@ -870,7 +870,8 @@ async def resolve_addressee(state: Any, admin_client: Any) -> Addressee:
     if kind == "household":
         return Addressee("household", clean_speaker_first_name(context.get("speaker_first_name")))
     if kind == "guest":
-        return Addressee("guest", context.get("guest_name"))
+        name = clean_guest_name(context.get("guest_name"))
+        return Addressee("guest", name) if name else NO_ADDRESSEE
     return NO_ADDRESSEE
 
 

@@ -100,6 +100,20 @@ def test_named_audience_neither_reads_nor_writes(client, monkeypatch, row):
     set_spy.assert_not_called()
 
 
+def test_degraded_mode_neither_reads_nor_writes(client, monkeypatch):
+    """Row 23: a degraded mode service resolves to owner; its answers are
+    never cached, and a cached owner answer is never served."""
+    h.install_mode_client(degraded=True)
+    get_spy = mock.AsyncMock(return_value=None)
+    set_spy = mock.AsyncMock()
+    monkeypatch.setattr(h.main, "get_cached_response", get_spy)
+    monkeypatch.setattr(h.main, "cache_response", set_spy)
+    _ask(client, monkeypatch, ROW_2, "DEGRADED ANSWER")
+    time.sleep(0.05)
+    get_spy.assert_not_awaited()
+    set_spy.assert_not_called()
+
+
 def test_unnamed_household_still_uses_the_cache(client, monkeypatch):
     """Positive control: the same query from row 2 reads and writes."""
     get_spy = mock.AsyncMock(return_value=None)

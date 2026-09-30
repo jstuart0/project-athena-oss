@@ -4789,7 +4789,9 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             if not is_public_audience(state.permissions):
                 admin_client = get_admin_client()
                 user_mode = _tool_user_mode
-                knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
+                knowledge_context = await get_knowledge_context_for_user(
+                    admin_client, user_mode, degraded=state.mode_degraded,
+                )
                 if knowledge_context:
                     system_content += f"\n{knowledge_context}"
                     state.base_knowledge_populated = True
@@ -6596,8 +6598,10 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             # The public audience never reads the cache.
             # Answers addressed to a named caller (the guest by name, a
             # signed-in member) are never read from or written to the cache.
+            # A degraded mode service resolves to owner, whose answers can
+            # carry owner facts: never cached either.
             named_addressee = addressee_kind(query_context, current_mode, authz.degraded) in NAMED_ADDRESSEE_KINDS
-            if request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee:
+            if request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee or authz.degraded:
                 cached_response = None
             else:
                 cached_response = await get_cached_response(
@@ -7092,6 +7096,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             not request.skip_semantic_cache
             and not is_public_caller(request.caller_trust)
             and addressee_kind(query_context, current_mode, authz.degraded) not in NAMED_ADDRESSEE_KINDS
+            and not authz.degraded
             and response.answer
             and not final_state.get("is_fallback", False)
             and not _looks_like_fallback(response.answer)
@@ -8061,7 +8066,9 @@ Response:"""
         if not is_public_audience(state.permissions):
             admin_client = get_admin_client()
             user_mode = state.mode if state.mode else "guest"
-            knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
+            knowledge_context = await get_knowledge_context_for_user(
+                admin_client, user_mode, degraded=state.mode_degraded,
+            )
             if knowledge_context:
                 system_context += knowledge_context
                 state.base_knowledge_populated = True

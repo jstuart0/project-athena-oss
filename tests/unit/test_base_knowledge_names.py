@@ -13,6 +13,9 @@ ROWS = [
     {"id": 52, "category": "owner", "key": "owner_name", "value": "Olive Owner", "applies_to": "both"},
     {"id": 53, "category": "user", "key": "name", "value": "Nora Name", "applies_to": "both"},
     {"id": 54, "category": "property", "key": "wifi", "value": "Wi-Fi: Example-Net", "applies_to": "both"},
+    {"id": 55, "category": "user", "key": "first_name", "value": "Fay First", "applies_to": "both"},
+    {"id": 56, "category": "owner", "key": "favorite_color", "value": "Owner Blue", "applies_to": "both"},
+    {"id": 57, "category": "user", "key": "diet", "value": "Vegetarian household", "applies_to": "both"},
 ]
 
 
@@ -30,10 +33,10 @@ def _reset():
     h.reset_runtime()
 
 
-def _build(user_mode):
+def _build(user_mode, degraded=False):
     from shared.base_knowledge_utils import build_knowledge_context
 
-    return build_knowledge_context(ROWS, user_mode)
+    return build_knowledge_context(ROWS, user_mode, degraded=degraded)
 
 
 def test_guest_name_row_is_never_rendered(captured_logs):
@@ -56,6 +59,27 @@ def test_owner_name_only_in_owner_prompts():
     guest = _build("guest")
     assert "Olive Owner" not in guest
     assert "Nora Name" not in guest
+
+
+def test_every_name_key_and_owner_row_is_owner_mode_only():
+    guest = _build("guest")
+    assert "Fay First" not in guest
+    assert "Owner Blue" not in guest
+    assert "Vegetarian household" in guest
+    owner = _build("owner")
+    assert "Fay First" in owner
+    assert "Owner Blue" in owner
+
+
+def test_degraded_owner_prompt_has_no_names_or_owner_rows():
+    """A degraded mode service resolves to owner, but nobody is named or
+    framed as the owner while the mode can't be trusted."""
+    text = _build("owner", degraded=True)
+    for value in ("Olive Owner", "Nora Name", "Fay First", "Owner Blue", "Zed Former"):
+        assert value not in text
+    assert "Property owner" not in text
+    assert "Example-Net" in text
+    assert "Vegetarian household" in text
 
 
 def test_public_prompt_builds_no_base_knowledge(monkeypatch):

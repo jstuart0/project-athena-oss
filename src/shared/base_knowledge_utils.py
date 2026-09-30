@@ -66,19 +66,23 @@ def _warn_guest_name_row(entry: Dict[str, Any]) -> None:
     logger.warning("base_knowledge_static_guest_name_ignored", row_id=row_id)
 
 
-def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], user_mode: str) -> str:
+def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], user_mode: str, *, degraded: bool) -> str:
     """
     Build formatted context string from base knowledge entries.
 
     Entries should already be filtered by applies_to and sorted by priority.
 
-    Name rows: a static ``guest_name`` is never rendered (the addressed
-    guest comes from the live stay, per caller); ``owner_name``/``name``
-    render as the property owner's name only for ``user_mode == "owner"``.
+    Names and owner facts: a static ``guest_name`` is never rendered (the
+    addressed guest comes from the live stay, per caller). Every other
+    user/owner key containing "name" (``owner_name``/``name`` render as the
+    property owner's name), and every ``owner``-category row, render only
+    in owner mode with a trustworthy mode service: when the mode service is
+    degraded, nobody is named or framed as the owner.
 
     Args:
         knowledge_entries: List of knowledge entries from Admin API
         user_mode: The request's effective mode ('owner' or 'guest')
+        degraded: The mode service was degraded for this request
 
     Returns:
         Formatted context string ready for injection into system prompt
@@ -122,11 +126,13 @@ def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], user_mode: 
                     context_lines.append(f"• Location: {resolved_value}")
             elif category in ("user", "owner"):
                 key = entry.get("key", "")
+                owner_facts = user_mode == "owner" and not degraded
                 if key == "guest_name":
                     _warn_guest_name_row(entry)
+                elif (category == "owner" or "name" in key) and not owner_facts:
+                    continue
                 elif key in ("owner_name", "name"):
-                    if user_mode == "owner":
-                        context_lines.append(f"• Property owner's name: {resolved_value}")
+                    context_lines.append(f"• Property owner's name: {resolved_value}")
                 else:
                     context_lines.append(f"• User Context: {resolved_value}")
             elif category == "temporal":
@@ -241,13 +247,14 @@ async def get_home_address_for_user(admin_client, user_mode: str = "guest") -> s
         return _DEFAULT_LOCATION
 
 
-async def get_knowledge_context_for_user(admin_client, user_mode: str = "guest") -> str:
+async def get_knowledge_context_for_user(admin_client, user_mode: str = "guest", *, degraded: bool) -> str:
     """
     Fetch and format base knowledge context for a specific user mode.
 
     Args:
         admin_client: AdminConfigClient instance
         user_mode: User mode ('guest', 'owner', 'both')
+        degraded: The mode service was degraded (no names, no owner rows)
 
     Returns:
         Formatted context string ready for system prompt injection
@@ -264,7 +271,7 @@ async def get_knowledge_context_for_user(admin_client, user_mode: str = "guest")
             return ""
 
         # Build formatted context
-        context = build_knowledge_context(knowledge_entries, user_mode)
+        context = build_knowledge_context(knowledge_entries, user_mode, degraded=degraded)
 
         logger.info(
             "knowledge_context_generated",
@@ -329,5 +336,5 @@ if __name__ == "__main__":
     ]
 
     print("\nTesting context building:")
-    context = build_knowledge_context(test_knowledge, "owner")
+    context = build_knowledge_context(test_knowledge, "owner", degraded=False)
     print(context)

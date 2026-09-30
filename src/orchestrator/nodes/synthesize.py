@@ -196,7 +196,9 @@ Response:"""
             if not is_public_audience(state.permissions):
                 admin_client = get_admin_client()
                 user_mode = state.mode if state.mode else "guest"
-                knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
+                knowledge_context = await get_knowledge_context_for_user(
+                    admin_client, user_mode, degraded=state.mode_degraded,
+                )
                 if knowledge_context:
                     system_context += knowledge_context
                     state.base_knowledge_populated = True

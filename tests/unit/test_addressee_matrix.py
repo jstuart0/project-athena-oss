@@ -202,11 +202,15 @@ def test_prompt_text(rig, row):
             if not (row.kind == "guest" and row.name == live):
                 assert live not in text, where
         if row.kind == "guest":
-            assert f"You are speaking with {row.name}, a guest" in text, where
+            assert f'guest_name: "{row.name}"' in text, where
+            assert f"You are speaking with {row.name}" not in text, where
         owner_line = f"You are speaking with {OWNER}"
         assert (owner_line in text) == (row.kind == "owner"), where
         if OWNER in text:
             assert authz.mode == "owner", where
+        if row.server == "degraded":
+            assert OWNER not in text, where
+            assert "Property owner" not in text, where
         household_field = f'first_name: "{PAT}"'
         assert (household_field in text) == (row.kind == "household"), where
         assert "You are speaking with Pat" not in text, where
@@ -230,4 +234,5 @@ def test_streaming_has_no_second_guest_line(rig):
     core prompt; the core prompt is now the only place it's rendered."""
     row = next(r for r in ROWS if r.n == 8)
     text = _prompts(row)["streaming"]
-    assert text.count(f"You are speaking with {GINA}") == 1
+    assert text.count(f'guest_name: "{GINA}"') == 1
+    assert f"You are speaking with {GINA}" not in text
