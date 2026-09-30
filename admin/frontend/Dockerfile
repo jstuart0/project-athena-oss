@@ -62,6 +62,7 @@ COPY follow-me.js /usr/share/nginx/html/
 COPY admin-jarvis.js /usr/share/nginx/html/
 COPY site-scraper.js /usr/share/nginx/html/
 COPY system-config.js /usr/share/nginx/html/
+COPY telemetry.js /usr/share/nginx/html/
 COPY presets.js /usr/share/nginx/html/
 COPY voice-automations.js /usr/share/nginx/html/
 COPY alerts.js /usr/share/nginx/html/

@@ -30,6 +30,8 @@ Project Athena is designed for any deployment, not just the maintainer's setup. 
 
 **Start from `.env.example`.** Copy it, fill in the REQUIRED section, and review the RECOMMENDED section before your first deployment. The file is the canonical reference for deployers.
 
+**Install telemetry is on by default.** admin-backend sends a pseudonymous daily heartbeat (version, install shape, model families, local vs cloud, coarse usage buckets; no names, hosts, keys or queries) to the maintainers. Turn it off with `ATHENA_TELEMETRY=off` or `DO_NOT_TRACK=1`. See [Telemetry](#telemetry).
+
 **One action required for upgraders:** if you had a previous deployment that used the Jetson edge module, revoke the Home Assistant long-lived access token that was hardcoded in `src/jetson/` — it appears in git history at commit `794096b`. See `CHANGELOG.md` for details.
 
 ---
@@ -529,6 +531,19 @@ The optional admin backend provides a web UI for runtime configuration without c
 - 10GbE network for low-latency inter-service communication
 - Wyoming-compatible voice devices for hands-free operation
 - Mix local and cloud models per pipeline stage to optimize cost vs. latency
+
+## Telemetry
+
+admin-backend sends a small, pseudonymous heartbeat to the Athena maintainers about once a day: the version, install class and deployment shape, each LLM component's model family and size bucket and whether it runs locally or in the cloud, and coarse counts of enabled features and usage. It's pseudonymous, not anonymous: a random installation ID links an install's heartbeats. It never includes hostnames, URLs, keys, names, queries, guest data or anything from Home Assistant beyond whether it's configured.
+
+To turn it off, set either of these for admin-backend (the process environment or `.env`):
+
+```bash
+ATHENA_TELEMETRY=off
+DO_NOT_TRACK=1
+```
+
+or use the **Install telemetry** card under **System Configuration** in the Admin UI, which also shows the exact last payload sent. The first heartbeat is sent no sooner than 5 minutes after admin-backend starts. Full details, including every field sent and how long it's kept, are in [docs/CONFIGURATION.md](docs/CONFIGURATION.md#telemetry).
 
 ## Contributing
 

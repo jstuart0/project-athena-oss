@@ -5,4 +5,4 @@ OpenAI-compatible API gateway that routes requests to local Ollama models.
 Provides unified interface for LLM interactions across all Athena services.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.6.0"

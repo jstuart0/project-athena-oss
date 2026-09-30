@@ -11,10 +11,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrading
 
-- **Rollout order.** Upgrade the orchestrator before jarvis-web: jarvis-web now sends `caller_trust: "web_guest_net"` for the guest network, which an older orchestrator rejects. Until jarvis-web is upgraded, no jarvis-web caller is addressed by the guest's name. To roll back, roll jarvis-web back first, then the orchestrator.
-- **Semantic cache.** Flush `athena_semantic:*` once after the orchestrator upgrade, so answers cached with a guest's name or a UTC date aren't served again.
-- **SMS conversations** start afresh once: their session ids change (see Security).
-- **Base knowledge.** A `guest_name` entry is now ignored, and `owner_name` is used only in owner mode. Nothing to migrate; delete a stale `guest_name` entry at your convenience.
 - **Admin API credentials.** 45 admin-backend routes that answered anonymously now need `X-Service-Key` or a signed-in user (see "Admin API authentication" in `docs/CONFIGURATION.md`). Every in-repo caller sends one. An external script or integration calling `/api/guests`, `/api/user-sessions`, `/api/room-groups`, `/api/voice-automations`, `/api/pipeline-events`, `/api/debug-logs`, `/api/sms/internal/*` or the settings routes needs one too, and a service call to `/api/voice-automations` must also send `X-Athena-Caller-Mode`.
 - **Rollout order.** The orchestrator, gateway, jarvis-web and admin-frontend before admin-backend. An older orchestrator against the new admin-backend loses guest recognition by device, room groups, the house layout, emerging-intent discovery and voice-automation records; the older admin frontend loses the guest, room, debug-log and pipeline-event panels and falls back to a session JWT on the Admin Jarvis WebSocket, which the new admin-backend refuses. Between the orchestrator and admin-backend upgrades, every SMS is answer-only. Roll back admin-backend first.
 - **Twilio.** Set `TWILIO_AUTH_TOKEN` (and `TWILIO_WEBHOOK_BASE_URL`) wherever SMS is used: without the token, admin-backend now answers the SMS webhooks with 503 outside `DEV_MODE`. `TWILIO_ALLOW_UNSIGNED=true` restores unsigned acceptance, at the cost that anyone who knows a guest's number can text as that guest.
@@ -22,43 +18,75 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Admin API docs.** `/docs`, `/redoc` and `/openapi.json` on admin-backend are served only with `DEV_MODE=true`.
 - **Log-based checks.** admin-backend no longer writes access lines, and admin-frontend's nginx no longer logs `/api`; a check that looked for a request in either log needs another signal.
 
-### Fixed
+### Added
 
-- A household member using jarvis-web during a guest stay (at home or signed in) is no longer addressed by the staying guest's name. Only the guest network and SMS guests are addressed as the guest; a signed-in member is addressed by their own first name, and the owner by `owner_name` in owner mode.
-- The assistant's time and date, "today"/"tomorrow", spoken-date years, event, sports and transit day windows, and scheduled "at 7:00" waits follow `DEFAULT_TIMEZONE` instead of the pod's process timezone. SeatGeek, sports and community-event windows cover whole local days, including across daylight-saving changes. Impossible dates like "February 30" no longer raise an error.
-- The admin-backend image builds again. It downloads the embedding model at its pinned revision instead of the latest upstream commit, so a new upstream commit no longer fails every build, and the build checks the model loads and embeds offline. The pin moves to a revision whose tokenizer pads each batch to its longest text: with the previous one, a batch mixing a memory over about 126 tokens with shorter ones failed to embed, so rebuilding vectors or indexing several memories at once could mark the memory store unavailable.
-- The orchestrator can list and remove voice automations again (the admin API refused its calls). A guest turn is scoped to that guest's own automations; with no guest identity, automation requests are refused instead of reaching every stay's automations.
-- An SMS matches a booking only on the exact phone number and only for a confirmed, not-deleted stay, so a number that merely contains the guest's digits, or a blocked or cancelled booking, no longer matches.
-- Itineraries and other structured answers are no longer cut off at their second `---` divider or repeated `Label: value` line, and sections under different headings (Day 1, Day 2, ...) are never treated as repeats; thinking-mode repetition loops are still trimmed.
+- `SMS_DEFAULT_COUNTRY_CODE` and `TWILIO_ALLOW_UNSIGNED` (see Upgrading).
+- CI: an admin-backend route that carries no permission-bearing credential check, and isn't on a reviewed list, fails the build.
 
 ### Changed
 
-- jarvis-web's guest network sends its own `caller_trust` value, `web_guest_net` (never allowed to use the owner PIN).
-- A degraded mode service addresses nobody by name, never frames the caller as the owner, and leaves names and owner facts out of the prompt; its answers aren't cached.
-- The staying guest's name is given to the model as a quoted data field after a length and character check, not inside an instruction sentence. Outside owner mode, no name-like or owner-only base-knowledge entry is used.
-- Answers addressed to a named caller are no longer served from or stored in the semantic cache.
-- A scheduled "at 1:45" during the repeated hour of a daylight-saving change waits for the next 1:45, and a time inside the spring-forward gap runs at the first moment after it.
-- The orchestrator, gateway and the community-events, SeatGeek, transportation, Tesla and sports images ship the IANA zone database.
 - An SMS from a stay that ended in the last 24 hours, or starts within 48, is answer-only: travel and checkout questions are answered, but nothing in the house is changed or read, and no automation, notification setting or text is created.
 - Asking to delete an automation by voice archives it (it can be restored); the permanent delete is an admin UI action. The assistant sees stored automation names only as quoted data.
 - The Admin Jarvis WebSocket accepts only a single-use ticket; a session JWT is refused.
 - A Twilio retry of an answered SMS gets the same reply without asking the assistant again; a retry of one still being answered waits for the reply, then answers 503 with `Retry-After`.
 
-### Added
+### Fixed
 
-- `JARVIS_EDGE_NAME_HEADER` (default `X-authentik-name`): the signed-in household member's display name from the auth proxy; only the first word is used. jarvis-web refuses to start if an edge identity, groups or name header is one of its own reserved headers or a request header like `Authorization`, `Cookie`, `Host`, `X-Forwarded-For` or `CF-Connecting-IP`, or if two of them are the same.
-- CI: source guards that fail on a new process-timezone clock read, a newly logged name/address/location/phone number, or a `caller_trust` value the orchestrator doesn't accept.
-- `SMS_DEFAULT_COUNTRY_CODE` and `TWILIO_ALLOW_UNSIGNED` (see Upgrading).
-- CI: an admin-backend route that carries no permission-bearing credential check, and isn't on a reviewed list, fails the build.
+- The orchestrator can list and remove voice automations again (the admin API refused its calls). A guest turn is scoped to that guest's own automations; with no guest identity, automation requests are refused instead of reaching every stay's automations.
+- An SMS matches a booking only on the exact phone number and only for a confirmed, not-deleted stay, so a number that merely contains the guest's digits, or a blocked or cancelled booking, no longer matches.
 
 ### Security
 
-- Guest, owner and member names, addresses, locations and full phone numbers are no longer written to logs (presence flags, ids and last-four digits instead), and admin audit rows for SMS settings and sends keep only a number's last four digits. Tool calls log their argument names, not their values (which can include API keys). Request URLs (query strings included) are no longer logged at INFO by uvicorn's access log or the HTTP client. LiveKit logs the participant's session id, not its client-supplied identity.
-- SMS session ids no longer contain the guest's phone number: they're an HMAC keyed on `SERVICE_API_KEY`. Rotating that key starts every SMS conversation afresh.
 - Guest records, the current stay's guests, device-to-guest sessions, voice automations, pipeline transcripts, proxied debug logs and the voice-pipeline mode are no longer readable or writable without a credential. Note that `SERVICE_API_KEY` can read guest data: keep it in a Secret.
 - A guest-scoped service call sees and changes only that guest's own voice automations, never another stay's or the owner's.
 - No log line carries the start of a query, transcript, answer, response body, exception message or cache key; lengths are logged instead.
 - admin-backend's log carries no request URL or WebSocket ticket, and admin-frontend's nginx no longer logs `/api` requests.
+
+---
+
+## [0.6.0] - 2026-09-30 — Addressed as themselves, local-time clock, install telemetry
+
+The assistant addresses each caller as themselves: a household member using jarvis-web during a guest stay is no longer called by the guest's name. Its clock and date windows follow `DEFAULT_TIMEZONE` instead of the pod's timezone, structured answers are no longer truncated, and names, addresses, locations and phone numbers stay out of logs. admin-backend builds again at a pinned embedding-model revision, and it now sends a pseudonymous daily install heartbeat, on by default, with a documented opt-out.
+
+### Upgrading
+
+- **Install telemetry is on by default.** After this upgrade admin-backend sends a `first_boot` event, then a heartbeat about once a day, no sooner than 5 minutes after it starts. It's pseudonymous, not anonymous: a random installation ID links an install's heartbeats. It carries the version, install class and deployment shape; each LLM component's model family, size bucket and local-vs-cloud placement; and coarse feature and usage buckets. It never includes hostnames, URLs, keys, names, queries or guest data. To keep it off, set `ATHENA_TELEMETRY=off` or `DO_NOT_TRACK=1` in admin-backend's environment or `.env` **before** the new version starts (for Kubernetes, the `athena-config` ConfigMap or your private overlay). An opt-out in either source wins, and a `.env` line naming either variable that isn't a plain `NAME=value` also means off. You can also turn it off afterwards on the **Install telemetry** card under System Configuration. See `docs/CONFIGURATION.md` "Telemetry" for every field sent and how long it's kept.
+- **Rollout order: orchestrator before jarvis-web.** jarvis-web now sends `caller_trust: "web_guest_net"` for the guest network, and a 0.5.0 orchestrator rejects that value. Until jarvis-web is upgraded, no jarvis-web caller is addressed by the guest's name. To roll back, roll jarvis-web back first, then the orchestrator.
+- **Flush the semantic cache once after the orchestrator upgrade**, so answers cached with a guest's name or a UTC date aren't served again. For example, run `redis-cli --scan --pattern 'athena_semantic:*' | xargs -r redis-cli del` against the orchestrator's Redis.
+- **Set `DEFAULT_TIMEZONE` to the property's IANA zone** (for example `America/New_York`) before upgrading. The assistant's time and date, "today"/"tomorrow", event, sports and transit day windows, and scheduled "at 7:00" waits now read it instead of the process `TZ`. With the default `UTC`, a deployment that relied on the pod's `TZ` now answers in UTC. The orchestrator, gateway and the community-events, SeatGeek, transportation, Tesla and sports images ship the zone database (`tzdata`). An empty or unknown value falls back to UTC and logs `local_timezone_invalid`.
+- **SMS conversations start afresh once**, when admin-backend is upgraded: SMS session ids are now an HMAC of the number keyed on `SERVICE_API_KEY` (see Security). Rotating `SERVICE_API_KEY` later resets them again.
+- **Embedding model revision.** Building admin-backend downloads the embedding model at the revision pinned in its Dockerfile (`EMBEDDING_MODEL_REVISION`), never the latest upstream commit, and still needs Hugging Face access once. The model weights and name are unchanged (only its tokenizer file differs), so existing memory vectors stay valid. Memories that a failed batch left not searchable are embedded by the automatic background pass, or by **Rebuild vectors** on the Memories page. To re-pin, change `EMBEDDING_MODEL_REVISION` and `admin/backend/embedding-model.sha256` together.
+- **jarvis-web edge headers.** jarvis-web refuses to start if `JARVIS_EDGE_IDENTITY_HEADER`, `JARVIS_EDGE_GROUPS_HEADER` or the new `JARVIS_EDGE_NAME_HEADER` names one of its reserved headers (`X-Jarvis-Edge-Class`, `X-Jarvis-Edge-Attestation`, `X-Service-Key`, `X-Jarvis-Relay-Key`, `X-Jarvis-Relay-Client`, `Authorization`, `Cookie`, `Host`, `X-Forwarded-For`, `CF-Connecting-IP`), or if two of them name the same header. The default `X-authentik-name` is already in the template's strip list. A custom name must be added to the edge's strip Middleware and listed in `JARVIS_EDGE_HEADERS_ACK_STRIPPED`.
+- **Quieter access logs.** The orchestrator, gateway, mode service, RAG services and jarvis-web log `uvicorn.access`, `httpx` and `httpcore` at WARNING and up, so request lines (and their query strings) no longer appear at INFO. Use your ingress or proxy logs for per-request traffic.
+- **Base knowledge.** A `guest_name` entry is now ignored, and `owner_name` is used only in owner mode. There's nothing to migrate; delete a stale `guest_name` entry whenever convenient.
+- **New environment variables:** `ATHENA_TELEMETRY`, `DO_NOT_TRACK`, `ATHENA_TELEMETRY_ENDPOINT` (where heartbeats go; an empty value turns telemetry off) and `ATHENA_TELEMETRY_MODE` (overrides the detected install class) on admin-backend; `JARVIS_EDGE_NAME_HEADER` on jarvis-web. No database migrations.
+
+### Added
+
+- **Pseudonymous install telemetry.** admin-backend sends a `first_boot` event, then a daily heartbeat: version, install class, deployment shape, each LLM component's model family, size bucket and local-vs-cloud placement, and coarse feature and usage buckets. Model names are never sent, only a family from a public list, or `custom`. The **Install telemetry** card under System Configuration shows why it's on or off and the exact last payload sent, and lets an owner turn it off, send once (at most once per 10 minutes across replicas) or reset the installation ID. The payload schema is published in `docs/telemetry/payload-v1.schema.json`.
+- `JARVIS_EDGE_NAME_HEADER` (default `X-authentik-name`): the signed-in household member's display name from the auth proxy. Only its first word is used, and it's never logged.
+- CI: a version-consistency lane (every version site must equal the latest CHANGELOG release); a telemetry lane (unit tier with the admin route walk, and an integration tier on a digest-pinned Postgres 16); and source guards that fail on a new process-timezone clock read, a newly logged name, address, location or phone number, or a `caller_trust` value the orchestrator doesn't accept. The sports date-window test runs under the sports image's own lock.
+
+### Changed
+
+- jarvis-web's guest network sends its own `caller_trust` value, `web_guest_net`, which can never use the owner PIN.
+- A degraded mode service addresses nobody by name, never frames the caller as the owner, and leaves names and owner facts out of the prompt. Its answers aren't cached.
+- The staying guest's name is given to the model as a quoted data field after a length and character check, not inside an instruction sentence. Outside owner mode, no name-like or owner-only base-knowledge entry is used.
+- Answers addressed to a named caller are no longer served from or stored in the semantic cache.
+- A scheduled "at 1:45" during the repeated hour of a daylight-saving change waits for the next 1:45, and a time inside the spring-forward gap runs at the first moment after it.
+
+### Fixed
+
+- A household member using jarvis-web during a guest stay (at home or signed in) is no longer addressed by the staying guest's name. Only the guest network and SMS guests are addressed as the guest. A signed-in member is addressed by their own first name, and the owner by `owner_name` in owner mode.
+- The assistant's time and date, "today"/"tomorrow", spoken-date years, event, sports and transit day windows, and scheduled "at 7:00" waits follow `DEFAULT_TIMEZONE` instead of the pod's process timezone. SeatGeek, sports and community-event windows cover whole local days, including across daylight-saving changes. Impossible dates like "February 30" no longer raise an error.
+- The admin-backend image builds again. It downloads the embedding model at its pinned revision instead of the latest upstream commit, so a new upstream commit no longer fails every build, and the build checks that the model loads and embeds offline. The pin moves to a revision whose tokenizer pads each batch to its longest text. With the previous one, a batch that mixed a memory over about 126 tokens with shorter ones failed to embed, so rebuilding vectors or indexing several memories at once could mark the memory store unavailable.
+- Itineraries and other structured answers are no longer cut off at their second `---` divider or repeated `Label: value` line, and sections under different headings (Day 1, Day 2, ...) are never treated as repeats. Thinking-mode repetition loops are still trimmed.
+- The 0.5.0 release left `src/shared`, the gateway, jetson and the control agent at `0.4.0`, and admin-backend's API reported `2.0.0`. Every version site now reports the release version, and admin-backend reads it from `src/shared`.
+
+### Security
+
+- Guest, owner and member names, addresses, locations and full phone numbers are no longer written to logs. Presence flags, ids and last-four digits are logged instead, and admin audit rows for SMS settings and sends keep only a number's last four digits. Tool calls log their argument names, not their values, which can include API keys. Request URLs, query strings included, are no longer logged at INFO by uvicorn's access log or the HTTP client. LiveKit logs the participant's session id, not its client-supplied identity.
+- SMS session ids no longer contain the guest's phone number. They're an HMAC keyed on `SERVICE_API_KEY`.
 
 ---
 
@@ -1102,7 +1130,8 @@ The following variables were added to `.env.example` and are required or recomme
 
 ---
 
-[Unreleased]: https://github.com/jstuart0/project-athena-oss/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jstuart0/project-athena-oss/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jstuart0/project-athena-oss/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jstuart0/project-athena-oss/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jstuart0/project-athena-oss/compare/979812f...v0.4.0
 [0.3.0]: https://github.com/jstuart0/project-athena-oss/compare/5830a71...979812f
