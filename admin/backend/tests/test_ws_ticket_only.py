@@ -12,7 +12,6 @@ the served app, never by a fresh import.
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from shared.route_walk import iter_routes

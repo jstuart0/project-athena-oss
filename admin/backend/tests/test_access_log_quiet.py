@@ -19,7 +19,6 @@ import uuid
 from pathlib import Path
 
 import httpx
-import pytest
 
 BACKEND = Path(__file__).resolve().parents[1]
 READY_TIMEOUT = 60.0

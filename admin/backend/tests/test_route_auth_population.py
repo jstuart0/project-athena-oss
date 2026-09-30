@@ -34,7 +34,7 @@ from app.auth.oidc import get_current_user
 from app.routes import guest_mode, internal, memories, sms_webhook
 from app.utils import service_auth
 from main import app
-from shared.route_walk import dependency_calls, iter_api_routes, iter_routes
+from shared.route_walk import dependency_calls, iter_api_routes
 
 BACKEND = Path(__file__).resolve().parents[1]
 

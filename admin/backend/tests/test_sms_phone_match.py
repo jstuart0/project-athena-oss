@@ -74,21 +74,38 @@ def test_to_e164_strict_requires_a_plus():
 # SMS_DEFAULT_COUNTRY_CODE
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def config_errors(monkeypatch):
+    """ERROR records from the shared.config logger, captured on the logger
+    itself: another test may have run a logging dictConfig that disabled it
+    or stopped it propagating to caplog's root handler."""
+    records = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    config_logger = logging.getLogger("shared.config")
+    monkeypatch.setattr(config_logger, "disabled", False)
+    handler = _Keep(level=logging.ERROR)
+    config_logger.addHandler(handler)
+    yield records
+    config_logger.removeHandler(handler)
+
+
 @pytest.mark.parametrize("value", ["+1", "abcd", "1234", ""])
-def test_country_code_falls_back_with_one_error(monkeypatch, caplog, value):
+def test_country_code_falls_back_with_one_error(monkeypatch, config_errors, value):
     monkeypatch.setenv("SMS_DEFAULT_COUNTRY_CODE", value)
-    with caplog.at_level(logging.ERROR, logger="shared.config"):
-        cfg = AthenaConfig()
+    cfg = AthenaConfig()
     assert cfg.sms_default_country_code == "1"
-    assert sum("sms_default_country_code_invalid" in r.getMessage() for r in caplog.records) == 1
+    assert sum("sms_default_country_code_invalid" in m for m in config_errors) == 1
 
 
-def test_country_code_accepts_digits(monkeypatch, caplog):
+def test_country_code_accepts_digits(monkeypatch, config_errors):
     monkeypatch.setenv("SMS_DEFAULT_COUNTRY_CODE", "44")
-    with caplog.at_level(logging.ERROR, logger="shared.config"):
-        cfg = AthenaConfig()
+    cfg = AthenaConfig()
     assert cfg.sms_default_country_code == "44"
-    assert not any("sms_default_country_code_invalid" in r.getMessage() for r in caplog.records)
+    assert not any("sms_default_country_code_invalid" in m for m in config_errors)
 
 
 def test_country_code_default(monkeypatch):
