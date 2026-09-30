@@ -939,8 +939,8 @@ directly.
     residual: a cancellation and a same-title rebooking of the same dates
     with no successful sync in between match the cancelled row, so that
     stay reads as owner until you restore or re-add it.
-  - *Sync interval.* `sync_interval_minutes` must be at least 5. The
-    scheduler also treats any smaller stored value as 5.
+  - *Sync interval.* `sync_interval_minutes` must be between 5 and 1440.
+    The scheduler also treats any smaller stored value as 5.
   - *One writer per source.* Every sync takes a per-source lease
     (`system_settings` key `calendar_sync.lock.<source id>`, 10 minutes;
     the fetch itself is capped at 8), so two admin-backend replicas, or a
@@ -953,11 +953,17 @@ directly.
     reads owner for it while the Calendar Sources card shows the failed
     sync. The mode service still reports the admin source as `fresh`,
     because admin-backend itself is reachable.
-  - *Deleted sources.* Deleting a calendar source leaves its synced rows
-    in place with no source (`source_id` becomes empty), and they keep
-    counting as bookings until you delete them on the Guest Mode page. A
-    re-added source gets its own rows; an orphaned Lodgify API row is
-    taken back by the next API sync.
+  - *Deleted sources.* Deleting a calendar source cancels its current
+    and upcoming guest sessions, but leaves its synced rows in place with
+    no source (`source_id` becomes empty), and they keep counting as
+    bookings until you delete them on the Guest Mode page. A re-added
+    source gets its own rows; an orphaned Lodgify API row is taken back by
+    the next API sync.
+  - *Guest sessions.* After a Lodgify source syncs, its guest sessions
+    are updated in a second step. If that step fails, the bookings are
+    still saved and the source shows "Guest sessions could not be updated
+    (…); bookings were saved"; the next sync, or `POST
+    /api/calendar-sources/sync-guest-sessions`, retries it.
   - *Errors.* Sync errors and logs name only the error type and HTTP
     status (`iCal fetch failed (ConnectError); no changes written`), never
     the feed URL or response text.
@@ -968,14 +974,19 @@ directly.
   the legacy URL and let Calendar Sources provide the bookings.
 - **Calendar Sources API.** Every route except `GET
   /api/calendar-sources/types` needs a signed-in user (Bearer session or
-  `X-API-Key`): listing needs `read`; creating, editing, deleting, syncing
-  and `POST /api/calendar-sources/sync-guest-sessions` need `write`. An
-  `X-Service-Key` header is refused with 401 on these routes. The list,
-  create and edit responses carry only `ical_url_masked`
-  (`https://host/…`); the full feed URL, which embeds its access token, is
-  returned only by `GET /api/calendar-sources/{id}`. Feed URLs must be
-  `https://`. Source changes are recorded in the audit log with the masked
-  URL.
+  `X-API-Key`). Listing, `GET /{id}`, `POST /{id}/test` and `POST
+  /test-url` need `read`; creating, editing, deleting, syncing, Sync all
+  and `POST /sync-guest-sessions` need `write`. An `X-Service-Key` header
+  is refused with 401 on every one of them, even alongside a valid user
+  credential. The list, create and edit responses carry only
+  `ical_url_masked` (`https://host/…`); the full feed URL, which embeds its
+  access token, is returned only by `GET /api/calendar-sources/{id}`, and
+  each of those reads is recorded in the audit log
+  (`calendar_source_url_revealed`, without the URL). `POST /test-url`
+  takes the URL in a JSON body (`{"url": …, "source_type": …}`); a `url`
+  query parameter is refused with 422, so the URL never lands in access
+  logs. Feed URLs must be `https://`. Source changes are recorded in the
+  audit log with the masked URL.
 - **Manual entries** are still entered and stored in the browser's local
   timezone (unchanged) — the Guest Mode page's manual-entry modal shows
   the property timezone alongside the input for reference.

@@ -232,9 +232,11 @@ an unreadable key writes nothing. Keys are source-scoped: a sync never
 updates or re-parents another source's row; a colliding UID is stored as
 `src:<source id>:<sha256[:32]>`, a missing one as
 `ical-nouid:<source id>:<uuid>`, and only an orphaned `lodgify_api_sync`
-row may be adopted (`source_id` set). `CalendarSource.to_dict_safe()`
-never carries `ical_url`; only `GET /api/calendar-sources/{id}` returns
-it. Calendar logs and status strings carry `safe_error(exc)` (class and
+row may be adopted (`source_id` set). Every calendar-sources route except
+`GET /types` depends on `require_user_permission` (a drift test walks the
+app's routes). `CalendarSource.to_dict_safe()` never carries `ical_url`;
+only `GET /api/calendar-sources/{id}` returns it (audited), and
+`/test-url` takes the URL in the body, never the query string. Calendar logs and status strings carry `safe_error(exc)` (class and
 HTTP status) only, never exception text.
 
 ---
