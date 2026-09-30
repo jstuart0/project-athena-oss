@@ -66,15 +66,16 @@ def client(ms):
 
 class TestEveryModeRouteRequiresKey:
     def test_every_mode_route_requires_key(self, ms, client):
-        mode_paths = sorted({r.path for r in ms.app.routes if r.path.startswith("/mode")})
+        from shared.route_walk import iter_api_routes
+
+        mode_routes = [w for w in iter_api_routes(ms.app) if w.path.startswith("/mode")]
+        mode_paths = sorted({w.path for w in mode_routes})
         assert mode_paths == ["/mode", "/mode/events", "/mode/override", "/mode/permissions"]
 
-        for route in ms.app.routes:
-            if route.path not in mode_paths:
-                continue
-            method = next(iter(route.methods - {"HEAD"}))
-            resp = client.request(method, route.path, json={} if method == "POST" else None)
-            assert resp.status_code == 401, f"{method} {route.path} did not require the key"
+        for walked in mode_routes:
+            method = next(iter(walked.methods - {"HEAD"}))
+            resp = client.request(method, walked.path, json={} if method == "POST" else None)
+            assert resp.status_code == 401, f"{method} {walked.path} did not require the key"
 
     def test_named_member_mode_override_requires_key(self, ms, client):
         resp = client.post("/mode/override", json={"mode": "owner"})

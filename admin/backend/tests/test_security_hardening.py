@@ -3197,11 +3197,11 @@ class TestWsTicketMintEndpoint:
         from main import app
         from app.auth.oidc import get_current_user
 
-        ws_ticket_route = None
-        for route in app.routes:
-            if getattr(route, "path", None) == "/api/auth/ws-ticket":
-                ws_ticket_route = route
-                break
+        from shared.route_walk import iter_api_routes
+
+        ws_ticket_route = next(
+            (w.route for w in iter_api_routes(app) if w.path == "/api/auth/ws-ticket"), None
+        )
 
         assert ws_ticket_route is not None, "Route /api/auth/ws-ticket not found"
 
@@ -3261,14 +3261,14 @@ class TestWsTicketMintEndpoint:
         from app.utils.rate_limit import login_rate_limit_dep
         from fastapi import Depends
 
-        ws_ticket_route = None
-        for route in app.routes:
-            if getattr(route, "path", None) == "/api/auth/ws-ticket":
-                ws_ticket_route = route
-                break
+        from shared.route_walk import iter_api_routes
+
+        ws_ticket_route = next(
+            (w.route for w in iter_api_routes(app) if w.path == "/api/auth/ws-ticket"), None
+        )
 
         assert ws_ticket_route is not None, (
-            "Route /api/auth/ws-ticket not found in app.routes"
+            "Route /api/auth/ws-ticket not found in the app's routes"
         )
 
         # FastAPI stores route-level dependencies in route.dependencies

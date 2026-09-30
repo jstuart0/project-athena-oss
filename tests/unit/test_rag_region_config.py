@@ -139,15 +139,13 @@ def test_R1_unconfigured_health_and_9_routes_503(monkeypatch):
     # of the 10 must actually be gated -- a future route that forgets the
     # Depends() (or the reverse) fails loudly here instead of shipping an
     # ungated data route.
-    from fastapi.routing import APIRoute
+    from shared.route_walk import dependency_calls, iter_api_routes
 
-    gated_paths = set()
-    for route in module.app.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        deps = getattr(route.dependant, "dependencies", [])
-        if any(dep.call is module.require_transit_configured for dep in deps):
-            gated_paths.add(route.path)
+    gated_paths = {
+        walked.path
+        for walked in iter_api_routes(module.app)
+        if module.require_transit_configured in dependency_calls(walked)
+    }
 
     expected_paths = {
         "/transit/nearby", "/transit/routes", "/transit/departures",
