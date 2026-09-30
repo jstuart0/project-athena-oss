@@ -18,6 +18,7 @@ from orchestrator.helpers import (
     _component_system_prompt,
     _synthesis_messages,
     store_conversation_context,
+    resolve_addressee,
 )
 from orchestrator.utils.constants import DEFAULT_CITY
 from shared.admin_config import get_admin_client
@@ -181,26 +182,12 @@ Respond honestly about your limitations.
 
 Response:"""
 
-        guest_name = state.context.get("guest_name") if state.context else None
-
-        # Resolve owner_name from base knowledge for owner-mode requests
-        owner_name = None
-        if state.mode == "owner":
-            try:
-                _admin_client = get_admin_client()
-                _bk_entries = await _admin_client.get_base_knowledge(applies_to="owner", enabled_only=True)
-                for _entry in (_bk_entries or []):
-                    if _entry.get("category") in ("owner", "user") and _entry.get("key") in ("owner_name", "name"):
-                        owner_name = _entry.get("value", "").strip() or None
-                        break
-            except Exception as e:
-                logger.warning("synthesize_node_owner_name_failed", error=str(e))
+        addressee = await resolve_addressee(state, get_admin_client())
 
         system_context = await build_core_assistant_prompt(
             include_voice_formatting=state.interface_type != "chat",
-            guest_name=guest_name,
-            owner_name=owner_name,
             interface_type=state.interface_type,
+            **addressee.prompt_kwargs(),
         ) + "\n"
 
         # Inject base knowledge context from Admin API (never for the public
@@ -218,8 +205,7 @@ Response:"""
             logger.warning(f"Failed to fetch base knowledge context: {e}")
             # Continue without base knowledge - not critical
 
-        if guest_name:
-            logger.info(f"Guest context injected for personalization: {guest_name}")
+        logger.info("addressee_resolved", kind=addressee.kind)
 
         # Inject relevant memories for context augmentation
         if state.memory_context:

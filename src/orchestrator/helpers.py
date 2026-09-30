@@ -39,6 +39,7 @@ import os
 import re
 import secrets
 import time
+import unicodedata
 from datetime import datetime
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
@@ -708,26 +709,169 @@ def detect_insufficient_response(response: str, config: Dict[str, Any]) -> Optio
 PUBLIC_CONTEXT_KEYS = frozenset({"location_override"})
 
 
-def build_query_context(request: Any, guest_info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+# Who may be addressed by the staying guest's name. Both legs are
+# allowlists, decided separately before anything is merged: the request leg
+# (a guest name in the request's own context) and the device leg (a guest
+# session matched by device fingerprint). None and any unknown caller_trust
+# are outside both. A new caller_trust value must be classified in
+# tests/unit/test_trust_classification.py.
+REQUEST_GUEST_NAME_TRUST = frozenset({"web_guest_net", "sms"})
+DEVICE_GUEST_NAME_TRUST: frozenset = frozenset()  # voice/device naming: a follow-up
+SPEAKER_NAME_TRUST = "web_authenticated"
+NAMED_ADDRESSEE_KINDS = frozenset({"guest", "household"})
+_SPEAKER_NAME_MAX_LENGTH = 32
+_SPEAKER_NAME_PUNCTUATION = frozenset(".-'")
+
+
+def clean_speaker_first_name(value: Any) -> Optional[str]:
+    """The first word of a signed-in member's display name, or None.
+
+    Same rule as jarvis-web's caller_auth._speaker_first_name (pinned by
+    tests/fixtures/speaker_first_name_vectors.json): NFC; first
+    whitespace-separated word; only letters/marks and . - '; 1-32
+    characters; a trailing . dropped.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    words = unicodedata.normalize("NFC", value).split()
+    if not words:
+        return None
+    first = words[0]
+    if not 1 <= len(first) <= _SPEAKER_NAME_MAX_LENGTH:
+        return None
+    if not all(unicodedata.category(ch)[0] in "LM" or ch in _SPEAKER_NAME_PUNCTUATION for ch in first):
+        return None
+    return first.rstrip(".") or None
+
+
+def build_query_context(
+    request: Any,
+    guest_info: Optional[Dict[str, Any]],
+    *,
+    server_mode: str,
+    degraded: bool,
+) -> Dict[str, Any]:
     """The ``state.context`` for one query-family request.
 
     A public caller keeps only ``PUBLIC_CONTEXT_KEYS`` from the request's
-    context and never receives guest identity: a name the model is never
-    told can't reach any node that reads ``state.context``. Everyone else
-    gets the request's context plus the device-identified guest's id,
-    name, device type and preferences.
+    context and never receives guest identity. For everyone else, the
+    identity fields are decided here and nowhere else:
+
+    - ``guest_name``/``guest_id`` only while the house's own mode is guest
+      and the mode service isn't degraded, and only for a caller_trust in
+      ``REQUEST_GUEST_NAME_TRUST`` (from the request) or
+      ``DEVICE_GUEST_NAME_TRUST`` (from the device-matched guest session).
+      Each leg's values are recorded before anything is merged, so neither
+      can re-add or overwrite what the other's rule dropped.
+    - ``speaker_first_name`` only for ``web_authenticated``, re-cleaned,
+      and never while degraded.
+
+    The device session's device type and preferences are merged as before;
+    its guest-scoped session, cache partition and permissions come from
+    ``guest_info`` directly, not from this context.
     """
     raw = getattr(request, "context", None)
     raw = dict(raw) if isinstance(raw, dict) else {}
-    if is_public_caller(getattr(request, "caller_trust", None)):
+    caller_trust = getattr(request, "caller_trust", None)
+    if is_public_caller(caller_trust):
         return {key: value for key, value in raw.items() if key in PUBLIC_CONTEXT_KEYS}
+
     context = raw
+    request_guest_name = context.pop("guest_name", None)
+    request_guest_id = context.pop("guest_id", None)
+    request_first_name = context.pop("speaker_first_name", None)
+    device_guest_name = guest_info.get("guest_name") if guest_info else None
+    device_guest_id = guest_info.get("guest_id") if guest_info else None
+
+    named_house = server_mode == "guest" and not degraded
+    if named_house and caller_trust in REQUEST_GUEST_NAME_TRUST and request_guest_name:
+        context["guest_name"] = request_guest_name
+        if request_guest_id is not None:
+            context["guest_id"] = request_guest_id
+    elif named_house and caller_trust in DEVICE_GUEST_NAME_TRUST and device_guest_name:
+        context["guest_name"] = device_guest_name
+        if device_guest_id is not None:
+            context["guest_id"] = device_guest_id
+
+    if caller_trust == SPEAKER_NAME_TRUST and not degraded:
+        first_name = clean_speaker_first_name(request_first_name)
+        if first_name:
+            context["speaker_first_name"] = first_name
+
     if guest_info:
-        context["guest_id"] = guest_info.get("guest_id")
-        context["guest_name"] = guest_info.get("guest_name")
         context["device_type"] = guest_info.get("device_type", "web")
         context["guest_preferences"] = guest_info.get("preferences", {})
     return context
+
+
+def addressee_kind(context: Optional[Dict[str, Any]], mode: Optional[str], degraded: bool) -> Optional[str]:
+    """Who the prompt addresses: "owner", "guest", "household" or None.
+
+    Pure. None whenever the mode service is degraded (never "owner"). The
+    semantic cache and resolve_addressee both ask this, so they can't
+    disagree about which answers carry a caller's name.
+    """
+    if degraded:
+        return None
+    if mode == "owner":
+        return "owner"
+    if mode != "guest":
+        return None
+    context = context or {}
+    if context.get("speaker_first_name"):
+        return "household"
+    if context.get("guest_name"):
+        return "guest"
+    return None
+
+
+class Addressee(NamedTuple):
+    kind: Optional[str]
+    name: Optional[str]
+
+    def prompt_kwargs(self) -> Dict[str, Optional[str]]:
+        """At most one name for build_core_assistant_prompt."""
+        return {
+            "owner_name": self.name if self.kind == "owner" else None,
+            "guest_name": self.name if self.kind == "guest" else None,
+            "household_first_name": self.name if self.kind == "household" else None,
+        }
+
+
+NO_ADDRESSEE = Addressee(None, None)
+
+
+async def _owner_name(admin_client: Any) -> Optional[str]:
+    try:
+        entries = await admin_client.get_base_knowledge(applies_to="owner", enabled_only=True)
+        for entry in (entries or []):
+            if entry.get("category") in ("owner", "user") and entry.get("key") in ("owner_name", "name"):
+                return (entry.get("value") or "").strip() or None
+    except Exception as e:
+        logger.warning("addressee_owner_name_failed", error=str(e))
+    return None
+
+
+async def resolve_addressee(state: Any, admin_client: Any) -> Addressee:
+    """The addressee and its name for one request's prompts.
+
+    The owner's name comes from owner-authored base knowledge
+    (``owner_name``), never from a display name; the guest's from the
+    context build_query_context decided; a signed-in member's first name
+    likewise. The public audience and a degraded mode service address
+    nobody.
+    """
+    if is_public_audience(getattr(state, "permissions", None)):
+        return NO_ADDRESSEE
+    context = getattr(state, "context", None) or {}
+    kind = addressee_kind(context, getattr(state, "mode", None), bool(getattr(state, "mode_degraded", False)))
+    if kind == "owner":
+        return Addressee("owner", await _owner_name(admin_client))
+    if kind == "household":
+        return Addressee("household", clean_speaker_first_name(context.get("speaker_first_name")))
+    if kind == "guest":
+        return Addressee("guest", context.get("guest_name"))
+    return NO_ADDRESSEE
 
 
 def web_search_allowed(state: Any) -> bool:

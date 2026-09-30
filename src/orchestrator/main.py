@@ -189,6 +189,9 @@ from orchestrator.helpers import (
     is_transit_query,
     build_query_context,
     web_search_allowed,
+    addressee_kind,
+    resolve_addressee,
+    NAMED_ADDRESSEE_KINDS,
 )
 
 # Event system imports for real-time pipeline monitoring
@@ -4751,24 +4754,12 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
         logger.info(f"Tool calling with {len(tools)} available tools (guest_mode={guest_mode})")
 
         # Build system content with centralized assistant profile and base knowledge context
-        guest_name = state.context.get("guest_name") if state.context else None
-
-        # Resolve owner_name from base knowledge for owner-mode requests
-        _tool_owner_name = None
         _tool_user_mode = state.mode if state.mode else "guest"
-        if _tool_user_mode == "owner":
-            try:
-                _ow_admin = get_admin_client()
-                _ow_entries = await _ow_admin.get_base_knowledge(applies_to="owner", enabled_only=True)
-                for _ow_entry in (_ow_entries or []):
-                    if _ow_entry.get("category") in ("owner", "user") and _ow_entry.get("key") in ("owner_name", "name"):
-                        _tool_owner_name = _ow_entry.get("value", "").strip() or None
-                        break
-            except Exception as e:
-                logger.warning("tool_call_node_owner_name_failed", error=str(e))
+        addressee = await resolve_addressee(state, get_admin_client())
 
-        # Owner identity fast-path: answer "what is my name" deterministically
-        if _tool_owner_name and _tool_user_mode == "owner":
+        # Identity fast-path: answer "what is my name" deterministically for
+        # the owner (owner_name) or a signed-in household member (first name)
+        if addressee.kind in ("owner", "household") and addressee.name:
             _ql = state.query.lower().strip("?. ")
             _identity_patterns = [
                 "what is my name", "what's my name", "whats my name",
@@ -4776,16 +4767,15 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                 "what do you call me", "what do people call me",
             ]
             if any(_ql == p or _ql.startswith(p) for p in _identity_patterns):
-                state.answer = f"Your name is {_tool_owner_name}."
+                state.answer = f"Your name is {addressee.name}."
                 state.skip_synthesis = True
                 state.node_timings["tool_call"] = time.time() - start
-                logger.info("owner_identity_fast_path", name=_tool_owner_name)
+                logger.info("identity_fast_path", kind=addressee.kind)
                 return state
 
         system_content = await build_core_assistant_prompt(
             include_voice_formatting=True,
-            guest_name=guest_name,
-            owner_name=_tool_owner_name,
+            **addressee.prompt_kwargs(),
         ) + "\n"
         home_address = DEFAULT_LOCATION  # Permanent home address (for "directions from home")
         search_location = DEFAULT_LOCATION  # Current location for searches (may differ from home)
@@ -4844,8 +4834,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             logger.warning(f"Failed to fetch base knowledge context in tool_call: {e}")
             # Continue without base knowledge - not critical
 
-        if guest_name:
-            logger.info(f"Guest context injected for tool_call: {guest_name}")
+        logger.info("addressee_resolved", kind=addressee.kind)
 
         # Inject memory context for tool selection (e.g., "user's car is a Tesla")
         if state.memory_context:
@@ -6245,14 +6234,16 @@ class QueryRequest(BaseModel):
             "never claim owner."
         ),
     )
-    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_local", "web_public"]] = Field(
+    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_local", "web_guest_net", "web_public"]] = Field(
         None,
         description=(
             "Set by the calling service in server code, never by an end "
             "user (ATHENA-69 D24). Gates the owner-PIN override utterance "
-            "(only PIN_TRUSTED_TIERS may use it; absent, 'web_local' and "
-            "'web_public' are refused before any throttle or mode-service "
-            "call). 'web_public' also selects the public audience: a "
+            "(only PIN_TRUSTED_TIERS may use it; absent, 'web_local', "
+            "'web_guest_net' and 'web_public' are refused before any "
+            "throttle or mode-service call). 'web_guest_net' is jarvis-web's "
+            "guest network, the only browser caller addressed by the staying "
+            "guest's name. 'web_public' also selects the public audience: a "
             "hard-coded narrow allowlist, no guest identity, no base "
             "knowledge, memories, cache or web search."
         ),
@@ -6543,7 +6534,9 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     logger.warning("memory_retrieval_skipped", error=str(e), error_type=type(e).__name__)
 
         # Build context with guest info (if identified via device fingerprint)
-        query_context = build_query_context(request, guest_info)
+        query_context = build_query_context(
+            request, guest_info, server_mode=authz.server_mode, degraded=authz.degraded,
+        )
 
         # Create initial state with conversation history, mode, and permissions
         # Initialize entities with location if provided in request
@@ -6561,6 +6554,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             conversation_history=conversation_history,
             history_summary=history_summary,  # Summarized context for summarized mode
             permissions=permissions,  # Phase 2: Include permissions for entity checks
+            mode_degraded=authz.degraded,
             interface_type=request.interface_type,  # SMS Integration: Pass interface type for response formatting
             context=query_context,  # SMS Integration + Multi-guest: Pass context (phone_number, calendar_event_id, guest_name, etc.)
             memory_context=memory_context,  # Memory augmentation: Relevant memories for LLM context
@@ -6598,7 +6592,10 @@ async def process_query(request: QueryRequest) -> QueryResponse:
 
             # Benchmark flag: skip semantic cache entirely (prevents poisoning N≥20 repeats).
             # The public audience never reads the cache.
-            if request.skip_semantic_cache or is_public_caller(request.caller_trust):
+            # Answers addressed to a named caller (the guest by name, a
+            # signed-in member) are never read from or written to the cache.
+            named_addressee = addressee_kind(query_context, current_mode, authz.degraded) in NAMED_ADDRESSEE_KINDS
+            if request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee:
                 cached_response = None
             else:
                 cached_response = await get_cached_response(
@@ -7092,6 +7089,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         should_cache = (
             not request.skip_semantic_cache
             and not is_public_caller(request.caller_trust)
+            and addressee_kind(query_context, current_mode, authz.degraded) not in NAMED_ADDRESSEE_KINDS
             and response.answer
             and not final_state.get("is_fallback", False)
             and not _looks_like_fallback(response.answer)
@@ -7306,7 +7304,9 @@ async def process_query_stream(request: QueryRequest):
                 logger.info(f"chat_history_injected", turns=len(conversation_history), source="persistent_sessions")
 
             # Build context with guest info (if identified via device fingerprint)
-            query_context = build_query_context(request, guest_info)
+            query_context = build_query_context(
+                request, guest_info, server_mode=authz.server_mode, degraded=authz.degraded,
+            )
 
             # Initialize state with skip_synthesis flag to get RAG data without LLM call
             request_id = hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8]
@@ -7315,6 +7315,7 @@ async def process_query_stream(request: QueryRequest):
                 mode=current_mode,
                 room=request.room,
                 permissions=authz.permissions,
+                mode_degraded=authz.degraded,
                 conversation_history=conversation_history,
                 history_summary=history_summary,
                 session_id=session.session_id,
@@ -7572,8 +7573,11 @@ async def process_query_stream_v2(request: QueryRequest):
                 conversation_history=[],
                 history_summary="",
                 permissions=authz.permissions,
+                mode_degraded=authz.degraded,
                 interface_type=request.interface_type,
-                context=build_query_context(request, guest_info),
+                context=build_query_context(
+                    request, guest_info, server_mode=authz.server_mode, degraded=authz.degraded,
+                ),
                 memory_context="",
                 timing_tracker=timing_tracker,
                 supports_followup=request.supports_followup,
@@ -8042,26 +8046,12 @@ Respond honestly about your limitations.
 
 Response:"""
 
-    guest_name = state.context.get("guest_name") if state.context else None
-
-    # Resolve owner_name from base knowledge for owner-mode requests
-    _stream_owner_name = None
-    if state.mode == "owner":
-        try:
-            _s_admin = get_admin_client()
-            _s_entries = await _s_admin.get_base_knowledge(applies_to="owner", enabled_only=True)
-            for _s_entry in (_s_entries or []):
-                if _s_entry.get("category") in ("owner", "user") and _s_entry.get("key") in ("owner_name", "name"):
-                    _stream_owner_name = _s_entry.get("value", "").strip() or None
-                    break
-        except Exception as e:
-            logger.warning("build_synthesis_prompt_for_streaming_owner_name_failed", error=str(e))
+    addressee = await resolve_addressee(state, get_admin_client())
 
     system_context = await build_core_assistant_prompt(
         include_voice_formatting=state.interface_type != "chat",
-        guest_name=guest_name,
-        owner_name=_stream_owner_name,
         interface_type=state.interface_type,
+        **addressee.prompt_kwargs(),
     ) + "\n"
 
     # Inject base knowledge context from Admin API (never for the public audience)
@@ -8075,12 +8065,6 @@ Response:"""
                 state.base_knowledge_populated = True
     except Exception as e:
         logger.warning(f"Failed to fetch base knowledge context for streaming: {e}")
-
-    # Inject guest name for personalization (owner_name already handled by build_core_assistant_prompt)
-    if not _stream_owner_name and state.context and state.context.get("guest_name"):
-        guest_name = state.context["guest_name"]
-        system_context += f"\nYou are speaking with {guest_name}, a guest at this property. "
-        system_context += f"Address them by name when appropriate to provide a personalized experience.\n"
 
     # Inject relevant memories
     if state.memory_context:
@@ -8343,6 +8327,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     mode=authz.mode,
                     room=room,
                     permissions=authz.permissions,
+                    mode_degraded=authz.degraded,
                     conversation_history=conversation_history,
                     history_summary=history_summary,
                     session_id=session.session_id,

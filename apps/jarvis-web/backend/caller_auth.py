@@ -6,12 +6,18 @@ Every request resolves to one caller class, from server-side evidence
 only (nothing in the body counts):
 
   web_authenticated  a signed-in owner/operator (Bearer checked against
-                     admin-backend's /api/auth/me)
+                     admin-backend's /api/auth/me), or a household member
+                     signed in at the edge (the edge's name header gives
+                     speaker_first_name: first word only, letters/marks and
+                     . - ' only, never logged)
   web_local          the household network (D8: the hop the trusted proxy
                      appended, or the TCP peer in direct-client mode, is in
                      JARVIS_LOCAL_NETWORKS and the Host is allowlisted)
   web_guest_net      the rental guest network (JARVIS_GUEST_NETWORKS):
-                     UI and chat, mode always "guest", guest reads only
+                     UI and chat, mode always "guest", guest reads only;
+                     the only browser class addressed by the staying
+                     guest's name (sent upstream as caller_trust
+                     "web_guest_net")
   service            a valid X-Service-Key, household-read routes only
   web_public_relay   the embed relay (chat-embed) on the chat routes: a
                      valid X-Jarvis-Relay-Key, always the public audience,
@@ -48,6 +54,7 @@ import os
 import socket
 import sys
 import time
+import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
@@ -76,6 +83,9 @@ _EDGE_CLASS_HEADER = "X-Jarvis-Edge-Class"
 _EDGE_ATTESTATION_HEADER = "X-Jarvis-Edge-Attestation"
 _DEFAULT_IDENTITY_HEADER = "X-authentik-username"
 _DEFAULT_GROUPS_HEADER = "X-authentik-groups"
+_DEFAULT_NAME_HEADER = "X-authentik-name"
+_SPEAKER_NAME_MAX_LENGTH = 32
+_SPEAKER_NAME_PUNCTUATION = frozenset(".-'")
 _EDGE_CLASSES = frozenset({"home", "guest", "authenticated"})
 _MIN_RELAY_KEY_LENGTH = 32
 _MAX_RELAY_CLIENT_LENGTH = 64
@@ -98,6 +108,13 @@ EDGE_STRIPPED_HEADERS = (
     "X-Jarvis-Relay-Client",
 )
 
+# Headers jarvis-web reads for its own evidence: an identity, groups or name
+# header configured to one of these would let one value be read as another.
+_RESERVED_EDGE_HEADER_NAMES = frozenset(
+    n.lower() for n in (_EDGE_CLASS_HEADER, _EDGE_ATTESTATION_HEADER, "X-Service-Key", "X-Jarvis-Relay-Key",
+                        "X-Jarvis-Relay-Client")
+)
+
 
 
 def _with_names(names: Tuple[str, ...], extra: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -112,18 +129,90 @@ def _with_names(names: Tuple[str, ...], extra: Tuple[str, ...]) -> Tuple[str, ..
     return tuple(out)
 
 
-def _edge_header_names(env: Mapping[str, str]) -> Tuple[str, str]:
-    """(identity, groups) header names. In edge mode a name outside the
-    documented strip list is fatal unless JARVIS_EDGE_HEADERS_ACK_STRIPPED
-    names exactly those custom headers (comma-separated, any case), which
-    the operator sets after adding them to the edge's strip Middleware: a
-    header the edge doesn't strip is one any client can set. The ack is
-    bound to the names, so an ack left over from another configuration
-    doesn't pass."""
+def _refuse_reserved_header_names(names: Dict[str, str]) -> None:
+    """A configured identity, groups or name header must not be one of
+    jarvis-web's own evidence headers, nor the same header as another of
+    the three: either would let one value be read as another."""
+    lowered = [n.lower() for n in names.values()]
+    reserved = sorted(setting for setting, n in names.items() if n.lower() in _RESERVED_EDGE_HEADER_NAMES)
+    duplicated = len(set(lowered)) != len(lowered)
+    if reserved or duplicated:
+        logger.error(
+            "jarvis_edge_header_name_reserved",
+            settings=reserved or sorted(names),
+            reason="reserved" if reserved else "duplicate",
+        )
+        raise SystemExit(
+            "jarvis-web edge header names must differ from each other and from X-Jarvis-Edge-Class, "
+            "X-Jarvis-Edge-Attestation, X-Service-Key, X-Jarvis-Relay-Key and X-Jarvis-Relay-Client"
+        )
+
+
+def _edge_header_names(env: Mapping[str, str]) -> Tuple[str, str, str]:
+    """(identity, groups, name) header names. None may be a reserved
+    header or equal another (startup refusal). In edge mode a name outside
+    the documented strip list is fatal unless
+    JARVIS_EDGE_HEADERS_ACK_STRIPPED names exactly those custom headers
+    (comma-separated, any case), which the operator sets after adding them
+    to the edge's strip Middleware: a header the edge doesn't strip is one
+    any client can set. The ack is bound to the names, so an ack left over
+    from another configuration doesn't pass."""
     identity = env.get("JARVIS_EDGE_IDENTITY_HEADER", "").strip() or _DEFAULT_IDENTITY_HEADER
     groups = env.get("JARVIS_EDGE_GROUPS_HEADER", "").strip() or _DEFAULT_GROUPS_HEADER
+    name = env.get("JARVIS_EDGE_NAME_HEADER", "").strip() or _DEFAULT_NAME_HEADER
+    _refuse_reserved_header_names({
+        "JARVIS_EDGE_IDENTITY_HEADER": identity,
+        "JARVIS_EDGE_GROUPS_HEADER": groups,
+        "JARVIS_EDGE_NAME_HEADER": name,
+    })
     if not env.get("JARVIS_EDGE_ATTESTATION_SECRET"):
-        return identity, groups
+        return identity, groups, name
+    documented = {n.lower() for n in EDGE_STRIPPED_HEADERS}
+    custom = [n for n in (identity, groups, name) if n.lower() not in documented]
+    acked = {n.lower() for n in _csv(env.get("JARVIS_EDGE_HEADERS_ACK_STRIPPED"))}
+    if custom and acked != {n.lower() for n in custom}:
+        logger.error(
+            "jarvis_edge_header_not_in_strip_list",
+            headers=custom,
+            hint="add them to the edge's strip Middleware, then set JARVIS_EDGE_HEADERS_ACK_STRIPPED to exactly "
+                 + ",".join(custom),
+        )
+        raise SystemExit(f"jarvis-web edge header names not in the documented strip list: {', '.join(custom)}")
+    logger.info("jarvis_edge_strip_headers", headers=list(_with_names(EDGE_STRIPPED_HEADERS, (identity, groups, name))))
+    return identity, groups, name
+
+
+def _speaker_first_name(value: Optional[str]) -> Optional[str]:
+    """The first word of a display name, or None.
+
+    NFC-normalised; the first whitespace-separated word; every character a
+    letter or mark (Unicode L*/M*) or one of . - '; 1-32 characters; a
+    trailing . dropped. Anything else gives None. The orchestrator
+    re-applies the same rule (tests/fixtures/speaker_first_name_vectors.json
+    pins both)."""
+    if not value:
+        return None
+    words = unicodedata.normalize("NFC", value).split()
+    if not words:
+        return None
+    first = words[0]
+    if not 1 <= len(first) <= _SPEAKER_NAME_MAX_LENGTH:
+        return None
+    if not all(unicodedata.category(ch)[0] in "LM" or ch in _SPEAKER_NAME_PUNCTUATION for ch in first):
+        return None
+    return first.rstrip(".") or None
+
+
+def _header_text(raw: Optional[str]) -> Optional[str]:
+    """A header value as the UTF-8 the edge sent. Starlette decodes header
+    bytes as latin-1, so re-encode and decode; bytes that aren't UTF-8 give
+    None."""
+    if raw is None:
+        return None
+    try:
+        return raw.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return None
     documented = {n.lower() for n in EDGE_STRIPPED_HEADERS}
     custom = [n for n in (identity, groups) if n.lower() not in documented]
     acked = {n.lower() for n in _csv(env.get("JARVIS_EDGE_HEADERS_ACK_STRIPPED"))}
@@ -150,11 +239,12 @@ CLASS_RELAY = "web_public_relay"
 BROWSER_CLASSES = frozenset({CLASS_AUTHENTICATED, CLASS_LOCAL, CLASS_GUEST_NET})
 
 # The caller_trust value each class sends to the orchestrator. The guest
-# network is a home-network browser that is never PIN-trusted.
+# network has its own value: it's the only browser class the orchestrator
+# may address by the staying guest's name, and it's never PIN-trusted.
 UPSTREAM_TRUST = {
     CLASS_AUTHENTICATED: "web_authenticated",
     CLASS_LOCAL: "web_local",
-    CLASS_GUEST_NET: "web_local",
+    CLASS_GUEST_NET: "web_guest_net",
     CLASS_PUBLIC: "web_public",
     CLASS_RELAY: "web_public",
 }
@@ -189,6 +279,7 @@ class AuthSettings:
     edge_previous: str = field(default="", repr=False)
     identity_header: str = _DEFAULT_IDENTITY_HEADER
     groups_header: str = _DEFAULT_GROUPS_HEADER
+    name_header: str = _DEFAULT_NAME_HEADER
     groups_separator: str = "|"
     household_groups: frozenset = frozenset()
     relay_key: str = field(default="", repr=False)
@@ -203,9 +294,9 @@ class AuthSettings:
     @property
     def edge_strip_headers(self) -> Tuple[str, ...]:
         """Every header the edge must strip before it sets its own: the
-        documented list plus the configured identity and groups header
-        names, whatever they are."""
-        return _with_names(EDGE_STRIPPED_HEADERS, (self.identity_header, self.groups_header))
+        documented list plus the configured identity, groups and name
+        header names, whatever they are."""
+        return _with_names(EDGE_STRIPPED_HEADERS, (self.identity_header, self.groups_header, self.name_header))
 
     @property
     def any_browser_access(self) -> bool:
@@ -439,7 +530,7 @@ def load_settings(
 
     service_key = env.get("SERVICE_API_KEY", "")
     edge_current, edge_previous = _edge_settings(env, service_key)
-    identity_header, groups_header = _edge_header_names(env)
+    identity_header, groups_header, name_header = _edge_header_names(env)
     relay_key = _relay_key(env, service_key, (edge_current, edge_previous))
     trusted = _networks(env, "TRUSTED_PROXY_CIDRS")
     local = _networks(env, "JARVIS_LOCAL_NETWORKS")
@@ -530,6 +621,7 @@ def load_settings(
         edge_previous=edge_previous,
         identity_header=identity_header,
         groups_header=groups_header,
+        name_header=name_header,
         groups_separator=env.get("JARVIS_EDGE_GROUPS_SEPARATOR", "") or "|",
         household_groups=household_groups,
         relay_key=relay_key,
@@ -591,6 +683,8 @@ class Caller:
     identity: Optional[str] = None
     edge_attestation: str = "none"  # current | previous | none
     relay_visitor: Optional[str] = None  # the relayed visitor's rate key (relay only)
+    # An edge-attested household member's first name (never logged).
+    speaker_first_name: Optional[str] = field(default=None, repr=False)
 
     @property
     def trust(self) -> str:
@@ -606,9 +700,16 @@ class Caller:
         return self.caller_class in {CLASS_AUTHENTICATED, CLASS_LOCAL, CLASS_SERVICE}
 
     @property
-    def gets_guest_context(self) -> bool:
-        """Chat context may carry the current guest's identity."""
+    def may_know_guest(self) -> bool:
+        """The UI may show the current guest (household and guest-network
+        browsers)."""
         return self.caller_class in {CLASS_AUTHENTICATED, CLASS_LOCAL, CLASS_GUEST_NET}
+
+    @property
+    def addressed_as_guest(self) -> bool:
+        """The model may address this caller by the current guest's name:
+        the guest network only. A household browser is the household."""
+        return self.caller_class == CLASS_GUEST_NET
 
     @property
     def owner_permitted(self) -> bool:
@@ -860,38 +961,42 @@ def _household_member(groups_value: Optional[str], s: AuthSettings) -> bool:
     return bool(groups & s.household_groups)
 
 
-def edge_verdict(peer: Optional[str], headers, s: AuthSettings) -> Tuple[Optional[str], str, Optional[str], Optional[str]]:
-    """(caller class or None, attestation, identity, matched CIDR).
+def edge_verdict(
+    peer: Optional[str], headers, s: AuthSettings,
+) -> Tuple[Optional[str], str, Optional[str], Optional[str], Optional[str]]:
+    """(caller class or None, attestation, identity, matched CIDR, speaker
+    first name).
 
     The class header counts only when the attestation matches and the TCP
     peer is a trusted proxy. home/guest must also be corroborated by the D8
     candidate and the Host; identity headers are read only for an
-    authenticated verdict.
+    authenticated verdict, and the name header only for a household member.
     """
     if not s.edge_mode:
-        return None, "none", None, None
+        return None, "none", None, None, None
     attestation = _attestation(headers, s)
     if attestation == "none":
-        return None, "none", None, None
+        return None, "none", None, None, None
     peer_addr = throttle.parse_ip(peer)
     if not throttle.in_networks(peer_addr, s.trusted_proxies):
         logger.warning("jarvis_edge_attestation_from_untrusted_peer", edge_attestation=attestation)
-        return None, attestation, None, None
+        return None, attestation, None, None, None
     edge_class = _single(headers, _EDGE_CLASS_HEADER)
     if edge_class not in _EDGE_CLASSES:
-        return None, attestation, None, None
+        return None, attestation, None, None, None
     if edge_class == "authenticated":
         identity = _single(headers, s.identity_header)
         identity = identity.strip() if identity else None
         if identity and _household_member(_single(headers, s.groups_header), s):
-            return CLASS_AUTHENTICATED, attestation, identity, None
-        return CLASS_NOT_HOUSEHOLD, attestation, None, None
+            speaker = _speaker_first_name(_header_text(_single(headers, s.name_header)))
+            return CLASS_AUTHENTICATED, attestation, identity, None, speaker
+        return CLASS_NOT_HOUSEHOLD, attestation, None, None, None
     network_class, matched = classify_network(peer, headers, s)
     wanted = CLASS_LOCAL if edge_class == "home" else CLASS_GUEST_NET
     if network_class == wanted:
-        return wanted, attestation, None, matched
+        return wanted, attestation, None, matched, None
     logger.warning("jarvis_edge_class_not_corroborated", edge_class=edge_class, edge_attestation=attestation)
-    return None, attestation, None, None
+    return None, attestation, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -917,13 +1022,13 @@ async def _resolve(
     s = SETTINGS
     rate_key = rate_client(peer, headers, s)
 
-    edge_class, attestation, identity, edge_matched = edge_verdict(peer, headers, s)
+    edge_class, attestation, identity, edge_matched, speaker = edge_verdict(peer, headers, s)
     caller: Optional[Caller] = None
     if edge_class is not None:
         mode = await _mode_for(edge_class, resolver)
         caller = Caller(
             edge_class, mode, edge_class == CLASS_AUTHENTICATED, None, "edge", "edge",
-            edge_matched, identity, attestation,
+            edge_matched, identity, attestation, speaker_first_name=speaker,
         )
     if caller is None or caller.caller_class == CLASS_NOT_HOUSEHOLD:
         decision = await _resolve_auth_decision(_extract_bearer_token(headers), rate_key)
@@ -953,6 +1058,7 @@ async def _resolve(
         reason=caller.reason,
         matched_local_network=caller.matched_network,
         edge_attestation=caller.edge_attestation,
+        has_speaker_name=bool(caller.speaker_first_name),
         key_hash=_digest(rate_key)[:12],
     )
     return caller

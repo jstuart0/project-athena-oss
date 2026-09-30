@@ -114,11 +114,14 @@ def test_public_prompts_carry_no_private_data(rig, path, stream_mode):
 
 
 def test_household_control_run_sees_private_data(rig):
-    """Positive control: the same rig for a household caller does put base
-    knowledge and the guest's name into the prompt, so the public
-    assertions above aren't vacuous."""
+    """Positive control: the same rig for a caller who may be addressed by
+    the guest's name (the guest network, while the house is in guest mode)
+    does put base knowledge and the guest's name into the prompt, so the
+    public assertions above aren't vacuous. (A household caller is never
+    addressed as the guest.)"""
     rig["monkeypatch"].setattr(h.main, "should_use_tool_calling", mock.AsyncMock(return_value=True))
-    _post(rig, "/query/stream/v2", "household")
+    h.install_mode_client(server_mode="guest")
+    _post(rig, "/query/stream/v2", "web_guest_net")
     captured = rig["llm"].text()
     assert h.SECRET_WIFI in captured
     assert "Alice" in captured

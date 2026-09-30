@@ -193,7 +193,9 @@ def test_home_network_is_household(monkeypatch):
     assert resp.status_code == 200
     body = out.orchestrator_bodies()[-1]
     assert body["caller_trust"] == "web_local"
-    assert body["context"]["guest_name"] == "Alice Renter"
+    # The home LAN is the household during a stay: the UI shows the guest,
+    # but the model never addresses a home-LAN caller as the guest.
+    assert "guest_name" not in body["context"]
 
 
 def test_pod_cidr_forged_xff_not_local(out):
@@ -410,7 +412,7 @@ def test_guest_network_vacant_is_guest_not_owner(monkeypatch):
     c = h.client()
     c.post("/api/chat", json={"message": "hi"}, headers=_home_headers(h.GUEST_WIFI))
     assert out.orchestrator_bodies()[-1]["mode"] == "guest"
-    assert out.orchestrator_bodies()[-1]["caller_trust"] == "web_local"
+    assert out.orchestrator_bodies()[-1]["caller_trust"] == "web_guest_net"
     resp = c.post("/api/climate/mode/heat", headers=_home_headers(h.GUEST_WIFI))
     assert resp.status_code == 403 and resp.json() == {"detail": "guest_stay_active"}
     caps = c.get("/api/welcome", headers=h.via_proxy(h.GUEST_WIFI)).json()["capabilities"]

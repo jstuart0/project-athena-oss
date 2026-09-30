@@ -50,14 +50,35 @@ def resolve_dynamic_value(value: str) -> str:
     return value
 
 
-def build_knowledge_context(knowledge_entries: List[Dict[str, Any]]) -> str:
+_ignored_guest_name_rows: set = set()
+
+
+def _reset_for_tests() -> None:
+    """Clear the guest_name-row log latch. Tests only."""
+    _ignored_guest_name_rows.clear()
+
+
+def _warn_guest_name_row(entry: Dict[str, Any]) -> None:
+    row_id = entry.get("id")
+    if row_id in _ignored_guest_name_rows:
+        return
+    _ignored_guest_name_rows.add(row_id)
+    logger.warning("base_knowledge_static_guest_name_ignored", row_id=row_id)
+
+
+def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], user_mode: str) -> str:
     """
     Build formatted context string from base knowledge entries.
 
     Entries should already be filtered by applies_to and sorted by priority.
 
+    Name rows: a static ``guest_name`` is never rendered (the addressed
+    guest comes from the live stay, per caller); ``owner_name``/``name``
+    render as the property owner's name only for ``user_mode == "owner"``.
+
     Args:
         knowledge_entries: List of knowledge entries from Admin API
+        user_mode: The request's effective mode ('owner' or 'guest')
 
     Returns:
         Formatted context string ready for injection into system prompt
@@ -100,10 +121,12 @@ def build_knowledge_context(knowledge_entries: List[Dict[str, Any]]) -> str:
                 else:
                     context_lines.append(f"• Location: {resolved_value}")
             elif category in ("user", "owner"):
-                # User/owner context is crucial - make it prominent
                 key = entry.get("key", "")
-                if key in ("owner_name", "guest_name", "name"):
-                    context_lines.append(f"• The user's name is: {resolved_value}")
+                if key == "guest_name":
+                    _warn_guest_name_row(entry)
+                elif key in ("owner_name", "name"):
+                    if user_mode == "owner":
+                        context_lines.append(f"• Property owner's name: {resolved_value}")
                 else:
                     context_lines.append(f"• User Context: {resolved_value}")
             elif category == "temporal":
@@ -244,7 +267,7 @@ async def get_knowledge_context_for_user(admin_client, user_mode: str = "guest")
             return ""
 
         # Build formatted context
-        context = build_knowledge_context(knowledge_entries)
+        context = build_knowledge_context(knowledge_entries, user_mode)
 
         logger.info(
             "knowledge_context_generated",
@@ -309,5 +332,5 @@ if __name__ == "__main__":
     ]
 
     print("\nTesting context building:")
-    context = build_knowledge_context(test_knowledge)
+    context = build_knowledge_context(test_knowledge, "owner")
     print(context)

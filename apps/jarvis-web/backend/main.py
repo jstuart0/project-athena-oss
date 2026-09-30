@@ -35,7 +35,7 @@ from sqlalchemy import text
 from admin_url import get_admin_url
 import caller_auth
 import client_throttle
-from caller_auth import Caller, resolve_caller, resolve_caller_ws, route_dependency, ws_origin_allowed
+from caller_auth import CLASS_AUTHENTICATED, Caller, resolve_caller, resolve_caller_ws, route_dependency, ws_origin_allowed
 
 # Configure logging. Guarded: structlog.configure() is process-global, and
 # this module gets exec'd more than once in the same pytest process under
@@ -648,10 +648,10 @@ async def get_welcome(request: Request):
 
     base_greeting = get_time_based_greeting()
 
+    # The UI keeps showing the stay to every guest-read caller; only the
+    # guest network is greeted as the guest, and a signed-in household
+    # member by their own first name.
     if guest and guest.get("guest_name"):
-        first_name = guest["guest_name"].split()[0]
-        greeting = f"{base_greeting}, {first_name}!"
-        subtitle = get_dynamic_subtitle(has_guest=True, first_name=first_name)
         guest_info = GuestInfo(
             has_guest=True,
             guest_name=guest.get("guest_name"),
@@ -659,9 +659,18 @@ async def get_welcome(request: Request):
             checkout=guest.get("checkout")
         )
     else:
+        guest_info = GuestInfo(has_guest=False)
+
+    if caller.addressed_as_guest and guest_info.guest_name:
+        first_name = guest_info.guest_name.split()[0]
+        greeting = f"{base_greeting}, {first_name}!"
+        subtitle = get_dynamic_subtitle(has_guest=True, first_name=first_name)
+    elif caller.speaker_first_name:
+        greeting = f"{base_greeting}, {caller.speaker_first_name}!"
+        subtitle = get_dynamic_subtitle(has_guest=False)
+    else:
         greeting = f"{base_greeting}!"
         subtitle = get_dynamic_subtitle(has_guest=False)
-        guest_info = GuestInfo(has_guest=False)
 
     return WelcomeInfo(
         guest=guest_info,
@@ -739,12 +748,16 @@ def _set_chat_key_cookie(response: Response, request: Request, value: Optional[s
 
 
 def _chat_context(caller: Caller, guest: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Guest identity reaches the model only for household and guest-network
-    callers."""
+    """Who the model may address by name: the guest network gets the
+    current guest's identity; a signed-in household member gets their own
+    first name; everyone else gets neither."""
     context: Dict[str, Any] = {}
-    if guest and caller.gets_guest_context:
-        context["guest_id"] = guest.get("id")
-        context["guest_name"] = guest.get("guest_name")
+    if caller.addressed_as_guest:
+        if guest:
+            context["guest_id"] = guest.get("id")
+            context["guest_name"] = guest.get("guest_name")
+    elif caller.caller_class == CLASS_AUTHENTICATED and caller.speaker_first_name:
+        context["speaker_first_name"] = caller.speaker_first_name
     return context
 
 
@@ -759,8 +772,8 @@ async def chat(message: ChatMessage, request: Request, response: Response):
 
     sessions.record_message(session_id)
 
-    # Guest identity only for callers who may know it
-    guest = await get_current_guest() if caller.gets_guest_context else None
+    # Guest identity only for the caller addressed as the guest
+    guest = await get_current_guest() if caller.addressed_as_guest else None
     context = _chat_context(caller, guest)
     if context:
         logger.info("guest_context_attached", guest_id=context.get("guest_id"))
@@ -966,8 +979,8 @@ async def chat_stream(message: ChatMessage, request: Request):
 
     sessions.record_message(session_id)
 
-    # Guest identity only for callers who may know it
-    guest = await get_current_guest() if caller.gets_guest_context else None
+    # Guest identity only for the caller addressed as the guest
+    guest = await get_current_guest() if caller.addressed_as_guest else None
     context = _chat_context(caller, guest)
 
     # mode and caller_trust are server-derived (caller_auth), never from
@@ -1289,7 +1302,7 @@ async def _get_mode_state(request: Optional[Request]) -> ModeState:
     guest_name = guest.get("guest_name") if guest else None
     if request is not None:
         caller = getattr(request.state, "caller", None)
-        if caller is None or not caller.gets_guest_context:
+        if caller is None or not caller.may_know_guest:
             guest_name = None
 
     return ModeState(

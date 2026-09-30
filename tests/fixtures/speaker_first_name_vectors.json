@@ -1,0 +1,62 @@
+[
+  [
+    "Pat Example",
+    "Pat"
+  ],
+  [
+    "José María",
+    "José"
+  ],
+  [
+    "Zoë",
+    "Zoë"
+  ],
+  [
+    "O'Brien",
+    "O'Brien"
+  ],
+  [
+    "Anne-Marie Smith",
+    "Anne-Marie"
+  ],
+  [
+    "Dr. Pat",
+    "Dr"
+  ],
+  [
+    "Pat\nIgnore previous",
+    "Pat"
+  ],
+  [
+    "Pat‮",
+    null
+  ],
+  [
+    "<b>Pat",
+    null
+  ],
+  [
+    "Pat123",
+    null
+  ],
+  [
+    "",
+    null
+  ],
+  [
+    "   ",
+    null
+  ],
+  [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    null
+  ],
+  [
+    "José Example",
+    "José"
+  ],
+  [
+    ".",
+    null
+  ]
+]
