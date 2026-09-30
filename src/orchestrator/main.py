@@ -38,7 +38,7 @@ from starlette.responses import Response
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from shared.logging_config import configure_logging
+from shared.logging_config import configure_logging, payload_keys
 from shared.ha_client import HomeAssistantClient
 from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
@@ -3777,7 +3777,7 @@ async def execute_tools_parallel(
                     logger.info("directions_origin_overridden", location_overridden=True)
                     arguments["origin"] = location
                 else:
-                    logger.debug(f"Keeping LLM-specified origin: {llm_origin}")
+                    logger.debug("directions_origin_kept", origin_source="llm")
 
             # Enrich search_web queries with location context for ambiguous local searches
             if function_name == "search_web" and "query" in arguments:
@@ -3805,7 +3805,7 @@ async def execute_tools_parallel(
                 if is_short_query and not has_location and looks_like_business and location:
                     original_query = arguments["query"]
                     arguments["query"] = f"{original_query} {location}"
-                    logger.info(f"Enriched search query with location: '{original_query}' -> '{arguments['query']}'")
+                    logger.info("search_query_enriched", tool=function_name, location_source="user_location")
 
             # Get service URL from registry (try async first)
             logger.info(f"Looking up service URL for tool: {function_name}")
@@ -4083,7 +4083,7 @@ async def execute_tools_parallel(
                     """Call SeatGeek events API."""
                     try:
                         # Log received args for debugging
-                        logger.info(f"SeatGeek received args: {args}")
+                        logger.info("seatgeek_args_received", arg_keys=payload_keys(args))
 
                         # Convert Ticketmaster params to SeatGeek params
                         seatgeek_params = {}
@@ -4339,7 +4339,7 @@ async def execute_tools_parallel(
                             airports_service_url=AIRPORTS_SERVICE_URL,
                             feature_enabled=True
                         )
-                        logger.info("airport_lookup_applied", arguments=arguments)
+                        logger.info("airport_lookup_applied", arg_keys=payload_keys(arguments))
                     except Exception as e:
                         logger.warning("airport_lookup_failed", error=str(e))
 
@@ -4387,7 +4387,7 @@ async def execute_tools_parallel(
             # Update RAG client with dynamic service URL
             rag.update_service_url(rag_service_name, service_url)
 
-            logger.info(f"Calling tool {function_name} via RAG client ({rag_service_name}) with args: {arguments}")
+            logger.info("rag_tool_call", tool=function_name, service=rag_service_name, arg_keys=payload_keys(arguments))
 
             # Determine HTTP method based on tool
             # Most RAG service endpoints use GET with query params

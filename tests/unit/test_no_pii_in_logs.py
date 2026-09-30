@@ -1,13 +1,20 @@
-"""Guard: names, addresses, locations and phone numbers never reach a log call.
+"""Guard: names, addresses, locations, phone numbers and whole request
+payloads never reach a log call or an audit row.
 
-Scans every logger call in src/, apps/ and admin/backend/app/ for a
-house-derived or caller-identity value: a keyword whose name is one of the
-keys below, or an identifier anywhere inside a keyword value or positional
-argument (f-strings, %/+ formatting, ``or``/``if`` expressions, tuples,
-lists, dicts including ``extra={...}`` keys, ``str()``/``repr()``,
-``.format()`` and the receivers of method calls). Log presence or ids
-instead: ``has_guest_name=bool(x)``, ``guest_id=``, ``phone_last4=x[-4:]``,
-``location_set=True``.
+Scans every logger call, and every ``AuditLog(...)`` constructor, in src/,
+apps/ and admin/backend/app/ for a house-derived or caller-identity value:
+a keyword whose name is one of the keys below, or an identifier anywhere
+inside a keyword value or positional argument (f-strings, %/+ formatting,
+``or``/``if`` expressions, tuples, lists, dicts including ``extra={...}``
+keys, ``str()``/``repr()``, ``.format()`` and the receivers of method
+calls). Also flagged: a whole payload (``update_data``, tool ``arguments``/
+``args``, ``changes``, ``payload``, a ``.model_dump()``/``.dict()``), which
+can carry any of those values, and ``.name`` on a guest/booking/member/
+participant. Log presence, ids or key names instead:
+``has_guest_name=bool(x)``, ``guest_id=``, ``phone_last4=x[-4:]``,
+``location_set=True``, ``changed_fields=sorted(update_data.keys())``,
+``arg_keys=payload_keys(arguments)``; audit rows go through
+``redact_phone_fields(...)``.
 
 A finding is one logger call. The comparison is by count per
 (path, enclosing function) against ALLOWLIST, so a new site anywhere,
@@ -38,9 +45,15 @@ CALLER_KEYS = ("email", "identity", "username", "display_name")
 _KEY_TOKENS = tuple(tuple(k.split("_")) for k in HOUSE_KEYS + CALLER_KEYS)
 
 _LOG_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical", "msg", "log", "bind"})
-_EXEMPT_CALLS = frozenset({"bool", "len"})
+_AUDIT_SINKS = frozenset({"AuditLog"})
+_EXEMPT_CALLS = frozenset({"bool", "len", "redact_phone_fields", "payload_keys"})
+_MAX_TAIL_SLICE = 4
+# Whole payloads: any of these can carry every key above.
+PAYLOAD_NAMES = frozenset({"update_data", "arguments", "args", "tool_args", "changes", "payload"})
+_PAYLOAD_METHODS = frozenset({"model_dump", "dict"})
+_PERSON_RECEIVERS = ("guest", "booking", "member", "participant")
 
-OPERATOR_AUDIT = "operator-audit: the signed-in operator's own identity, logged as the audit actor"
+OPERATOR_AUDIT = "operator-audit: the signed-in operator's own identity (and client IP), logged as the audit actor"
 DEFERRED = "deferred-ticketed: search location logged by a RAG image this change doesn't rebuild (follow-up)"
 
 # (path, enclosing function) -> (count, reason)
@@ -51,12 +64,13 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/alerts.py", "delete_alert"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/alerts.py", "update_alert"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/audit.py", "list_audit_logs"): (1, OPERATOR_AUDIT),
-    ("admin/backend/app/routes/audit.py", "undo_audit_action"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/audit.py", "undo_audit_action"): (3, OPERATOR_AUDIT),
     ("admin/backend/app/routes/base_knowledge.py", "bulk_create_base_knowledge"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/base_knowledge.py", "create_base_knowledge"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/base_knowledge.py", "delete_base_knowledge"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/base_knowledge.py", "get_base_knowledge"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/base_knowledge.py", "update_base_knowledge"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/calendar_sources.py", "_audit"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/calendar_sources.py", "create_calendar_source"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/calendar_sources.py", "delete_calendar_source"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/calendar_sources.py", "get_calendar_source"): (1, OPERATOR_AUDIT),
@@ -69,6 +83,7 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/cloud_providers.py", "setup_provider"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/component_models.py", "toggle_component_model"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/component_models.py", "update_component_model"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/conversation.py", "create_audit_log"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/conversation.py", "create_sports_team"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/conversation.py", "delete_sports_team"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/conversation.py", "update_clarification_settings"): (1, OPERATOR_AUDIT),
@@ -78,6 +93,7 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/conversation.py", "update_sports_team"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/conversations.py", "evaluate_turn"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/dashboard.py", "get_dashboard_data"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/devices.py", "create_audit_log"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/devices.py", "create_device"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/devices.py", "delete_device"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/devices.py", "update_device"): (1, OPERATOR_AUDIT),
@@ -107,6 +123,7 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/features.py", "update_feature_config"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/gateway_config.py", "reset_gateway_config"): (2, OPERATOR_AUDIT),
     ("admin/backend/app/routes/gateway_config.py", "update_gateway_config"): (2, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/guest_mode.py", "create_audit_log"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/guest_mode.py", "create_guest_mode_config"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/guest_mode.py", "get_guest_mode_config"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/guest_mode.py", "update_guest_mode_config"): (1, OPERATOR_AUDIT),
@@ -170,10 +187,12 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/performance_presets.py", "delete_preset"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/performance_presets.py", "duplicate_preset"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/performance_presets.py", "update_preset"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/policies.py", "create_audit_log"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/policies.py", "create_policy"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/policies.py", "delete_policy"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/policies.py", "rollback_policy"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/policies.py", "update_policy"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/rag_connectors.py", "create_audit_log"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/rag_connectors.py", "create_connector"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/rag_connectors.py", "delete_connector"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/rag_connectors.py", "test_connector"): (1, OPERATOR_AUDIT),
@@ -189,6 +208,7 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/room_groups.py", "remove_alias"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/room_groups.py", "remove_member"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/room_groups.py", "update_room_group"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/secrets.py", "create_audit_log"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/secrets.py", "create_secret"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/secrets.py", "delete_secret"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/secrets.py", "reveal_secret"): (1, OPERATOR_AUDIT),
@@ -199,6 +219,7 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/service_control.py", "start_service_by_port"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/service_control.py", "stop_service_by_port"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/service_control.py", "unload_ollama_model"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/services.py", "create_audit_log"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/services.py", "delete_service"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/services.py", "register_service"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/services.py", "update_service"): (1, OPERATOR_AUDIT),
@@ -241,9 +262,11 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/tool_proposals.py", "approve_tool_proposal"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/tool_proposals.py", "delete_tool_proposal"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/tool_proposals.py", "reject_tool_proposal"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/user_api_keys.py", "create_audit_log"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/user_api_keys.py", "revoke_api_key"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/user_sessions.py", "delete_session"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/users.py", "change_my_password"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/users.py", "create_audit_log"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/users.py", "create_user"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/users.py", "deactivate_user"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/users.py", "reactivate_user"): (1, OPERATOR_AUDIT),
@@ -282,7 +305,7 @@ def _matched_keys(identifier: str) -> set[str]:
 
 
 def _matches(identifier: str) -> bool:
-    return bool(_matched_keys(identifier))
+    return bool(_matched_keys(identifier)) or identifier in PAYLOAD_NAMES or identifier.startswith(("person_name:", "payload:"))
 
 
 # Which keys each allowlist reason may cover: an operator-audit entry may
@@ -291,6 +314,12 @@ def _matches(identifier: str) -> bool:
 REASON_KEYS = {
     OPERATOR_AUDIT: frozenset(CALLER_KEYS),
     DEFERRED: frozenset({"location"}),
+}
+# Exact identifiers a reason also covers: AuditLog's ip_address column holds
+# the operator's own client address.
+REASON_IDENTIFIERS = {
+    OPERATOR_AUDIT: frozenset({"ip_address"}),
+    DEFERRED: frozenset(),
 }
 
 
@@ -306,6 +335,8 @@ def _final_name(node: ast.expr) -> str:
 
 def _is_logger_call(call: ast.Call) -> bool:
     func = call.func
+    if isinstance(func, ast.Name) and func.id in _AUDIT_SINKS:
+        return True
     return (
         isinstance(func, ast.Attribute)
         and func.attr in _LOG_METHODS
@@ -313,20 +344,27 @@ def _is_logger_call(call: ast.Call) -> bool:
     )
 
 
-def _is_negative_tail_slice(node: ast.Subscript) -> bool:
+def _is_short_tail_slice(node: ast.Subscript) -> bool:
+    """``x[-N:]`` with a literal N of at most 4 (a phone's last four)."""
     sl = node.slice
     return (
         isinstance(sl, ast.Slice)
         and sl.upper is None
+        and sl.step is None
         and isinstance(sl.lower, ast.UnaryOp)
         and isinstance(sl.lower.op, ast.USub)
+        and isinstance(sl.lower.operand, ast.Constant)
+        and isinstance(sl.lower.operand.value, int)
+        and 1 <= sl.lower.operand.value <= _MAX_TAIL_SLICE
     )
 
 
 def _exempt(node: ast.expr) -> bool:
     if isinstance(node, ast.Compare):
         return True
-    if isinstance(node, ast.Subscript) and _is_negative_tail_slice(node):
+    if isinstance(node, ast.Subscript) and _is_short_tail_slice(node):
+        return True
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "keys":
         return True
     return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _EXEMPT_CALLS
 
@@ -338,6 +376,9 @@ def _identifiers(node: ast.AST):
     if isinstance(node, ast.Name):
         yield node.id
     elif isinstance(node, ast.Attribute):
+        receiver = _final_name(node.value).lower()
+        if node.attr == "name" and any(p in receiver for p in _PERSON_RECEIVERS):
+            yield f"person_name:{receiver}"
         yield node.attr
     elif isinstance(node, ast.Subscript):
         key = node.slice
@@ -346,6 +387,8 @@ def _identifiers(node: ast.AST):
         yield from _identifiers(node.value)
     elif isinstance(node, ast.Call):
         func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in _PAYLOAD_METHODS:
+            yield f"payload:{func.attr}"
         if isinstance(func, ast.Attribute):
             if func.attr == "get" and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
                 yield node.args[0].value
@@ -442,16 +485,23 @@ def _scan():
         calls += n
         for func, lineno, keys in hits:
             found[(rel, func)] += 1
-            keys_by_pair.setdefault((rel, func), set()).update(k for i in keys for k in _matched_keys(i))
+            keys_by_pair.setdefault((rel, func), set()).update(keys)
             lines.append(f"{rel}:{lineno} ({func}) {','.join(keys)}")
     return found, parsed, calls, lines, keys_by_pair
 
 
-def reason_violations(keys_by_pair, allowlist) -> dict:
-    """Allowlisted pairs that log a key their reason doesn't cover."""
+def _covered(identifier: str, reason: str) -> bool:
+    if identifier in REASON_IDENTIFIERS[reason]:
+        return True
+    keys = _matched_keys(identifier)
+    return bool(keys) and keys <= REASON_KEYS[reason] and identifier not in PAYLOAD_NAMES
+
+
+def reason_violations(identifiers_by_pair, allowlist) -> dict:
+    """Allowlisted pairs that log something their reason doesn't cover."""
     out = {}
     for pair, (_count, reason) in allowlist.items():
-        extra = keys_by_pair.get(pair, set()) - REASON_KEYS[reason]
+        extra = {i for i in identifiers_by_pair.get(pair, set()) if not _covered(i, reason)}
         if extra:
             out[pair] = sorted(extra)
     return out
@@ -459,8 +509,11 @@ def reason_violations(keys_by_pair, allowlist) -> dict:
 
 def test_reason_violations_self_test():
     allowlist = {("a.py", "f"): (1, OPERATOR_AUDIT), ("b.py", "g"): (1, DEFERRED)}
-    assert reason_violations({("a.py", "f"): {"username"}, ("b.py", "g"): {"location"}}, allowlist) == {}
+    ok = {("a.py", "f"): {"username", "current_user_email", "ip_address"}, ("b.py", "g"): {"location"}}
+    assert reason_violations(ok, allowlist) == {}
     assert reason_violations({("a.py", "f"): {"username", "guest_name"}}, allowlist) == {("a.py", "f"): ["guest_name"]}
+    assert reason_violations({("a.py", "f"): {"home_address"}}, allowlist) == {("a.py", "f"): ["home_address"]}
+    assert reason_violations({("a.py", "f"): {"update_data"}}, allowlist) == {("a.py", "f"): ["update_data"]}
     assert reason_violations({("b.py", "g"): {"phone_number"}}, allowlist) == {("b.py", "g"): ["phone_number"]}
 
 
@@ -478,6 +531,9 @@ def test_log_calls_match_the_allowlist():
         f"Gone (drop from ALLOWLIST): {dict(gone)}\n" + "\n".join(lines)
     )
     assert ("src/orchestrator/main.py", "tool_call_node") not in found
+    assert ("src/orchestrator/main.py", "execute_single_tool") not in found
+    assert keys_by_pair[("admin/backend/app/routes/sms.py", "update_sms_settings")] == {"username"}
+    assert ("admin/backend/app/routes/guests.py", "get_guest") not in found
     assert not reason_violations(keys_by_pair, ALLOWLIST)
 
 
@@ -509,18 +565,37 @@ def flagged(g, a, o, n, user, booking, request, location, current_user, ip_addre
     logger.info("x", location_override=o)
     logger.info("x", ip=ip_address)
     logger.info(f"{request.location.lower()}")
+    db.add(AuditLog(action="x", new_value=update_data))
+    AuditLog(new_value={"phone_number": p})
+    logger.info("x", changes=update_data)
+    logger.info(f"Calling tool with args: {arguments}")
+    logger.info("x", name=guest.name)
+    logger.info("x", body=request_model.model_dump())
+    logger.info("x", tail=phone_number[-5:])
 
 def not_flagged(p, g, guest_name, location):
     logger.info("x", phone_last4=p[-4:])
     logger.info("x", has_guest_name=bool(g))
     logger.info("x", n=len(guest_name))
     logger.info("x", location_set=location is not None)
+    logger.info("x", changed_fields=sorted(update_data.keys()))
+    logger.info("x", arg_keys=sorted(arguments.keys()))
+    logger.info("x", arg_keys=payload_keys(tool_args))
+    AuditLog(action="x", user_id=current_user_id, new_value=redact_phone_fields(update_data))
+    logger.info("x", automation=automation.name)
+    logger.info("x", phone_last2=phone_number[-2:])
 '''
     found, calls = find_pii_logs(source)
-    assert [line for _func, line, _keys in found] == list(range(5, 21))
+    assert [line for _func, line, _keys in found] == list(range(5, 28))
     assert all(func == "flagged" for func, _line, _keys in found)
-    assert calls == 20
-    assert by_line_keys(found)[20] == ["location"]
+    assert calls == 33
+    by_line = by_line_keys(found)
+    assert by_line[20] == ["location"]
+    assert by_line[21] == ["update_data"]
+    assert by_line[22] == ["phone_number"]
+    assert by_line[25] == ["person_name:guest"]
+    assert by_line[26] == ["payload:model_dump"]
+    assert by_line[27] == ["phone_number"]
     by_line = by_line_keys(found)
     assert by_line[18] == ["location_override"]
     assert by_line[19] == ["ip_address"]

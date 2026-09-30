@@ -15,6 +15,15 @@ _debug_file_handler = None
 _debug_log_path = None
 
 
+def payload_keys(value) -> list:
+    """The sorted key names of a payload, for logging in place of its
+    values (tool arguments can carry addresses, locations or API keys).
+    Anything that isn't a dict gives []."""
+    if not isinstance(value, dict):
+        return []
+    return sorted(str(key) for key in value)
+
+
 def get_debug_log_path() -> Optional[str]:
     """Get the current debug log file path"""
     return _debug_log_path
