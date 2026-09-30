@@ -120,6 +120,9 @@ def test_transportation_friday_night_is_a_weekday(at, monkeypatch):
 
 
 def test_sports_window_keeps_tonights_event(at):
+    # Only the sports image's lock carries feedparser; the orchestrator and
+    # admin test venvs skip this case, the sports venv runs it.
+    pytest.importorskip("feedparser", reason="sports image dependency (feedparser) not installed")
     sports = at(_load("sports"))
     events = [{"strEvent": "Tonight", "dateEvent": "2026-09-29"}, {"strEvent": "Past", "dateEvent": "2026-09-28"}]
     assert [e["strEvent"] for e in sports._filter_events_window(events)] == ["Tonight"]
