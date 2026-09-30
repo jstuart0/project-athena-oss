@@ -526,3 +526,29 @@ def test_synthesis_messages_missing_config_falls_back_to_single_prompt():
     prompt, system_prompt = _synthesis_messages("STATIC CONTEXT", "Question: hi", None)
     assert prompt == "STATIC CONTEXTQuestion: hi"
     assert system_prompt is None
+
+
+def test_strip_keeps_sections_with_identical_field_bodies():
+    """Blocks under different headings are never repeats, even when their
+    bodies are identical field lines."""
+    days = [f"## Day {n}\n\nTime: Morning\n\nLocation: Beach" for n in (1, 2, 3)]
+    text = "\n\n".join(days)
+    assert _strip_hallucinated_continuation(text) == text
+
+
+def test_strip_keeps_sections_with_identical_long_bodies():
+    body = "Spend the morning on the beach at Exampletown, then lunch at Sample Bistro."
+    text = "\n\n".join(f"### Day {n}\n\n{body}" for n in (1, 2, 3))
+    assert _strip_hallucinated_continuation(text) == text
+
+
+def test_strip_still_cuts_a_loop_under_one_heading():
+    loop = "Let me think about the best route through Exampletown for this afternoon."
+    text = f"## Plan\n\n{loop}\n\n{loop}\n\n{loop}"
+    assert _strip_hallucinated_continuation(text) == f"## Plan\n\n{loop}"
+
+
+def test_strip_still_cuts_a_repeated_heading_block():
+    block = "### Thinking\n\nOkay, let me think.\n\nThe answer is 4."
+    text = "\n\n".join([block] * 3)
+    assert _strip_hallucinated_continuation(text) == block

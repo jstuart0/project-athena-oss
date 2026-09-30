@@ -1680,18 +1680,34 @@ def _is_field_paragraph(para: str) -> bool:
     return "\n" not in para and bool(_FIELD_LINE_PATTERN.match(para))
 
 
+def _heading_line(para: str) -> Optional[str]:
+    first = para.split("\n", 1)[0]
+    return " ".join(first.split()) if _STRUCTURAL_HEADING_PATTERN.match(first) else None
+
+
 def _repetition_cut_index(paragraphs: List[str]) -> Optional[int]:
-    """Index of the paragraph to cut before, or None when no loop is found."""
+    """Index of the paragraph to cut before, or None when no loop is found.
+
+    Each paragraph's identity is its own text plus the most recent heading
+    above it, so blocks under different headings are never repeats.
+    Dividers carry no identity (every divider is the same text).
+    """
     positions: List[int] = []
-    keys: List[str] = []
+    keys: List[Tuple[str, str]] = []
     substantive: List[bool] = []
+    section = ""
     for i, para in enumerate(paragraphs):
+        heading = _heading_line(para)
         if _is_structural_paragraph(para):
+            if heading is not None:
+                section = heading
             continue
-        key = " ".join(para.split())[:_REPEAT_KEY_CHARS]
+        text = " ".join(para.split())[:_REPEAT_KEY_CHARS]
         positions.append(i)
-        keys.append(key)
-        substantive.append(not _is_field_paragraph(para) and len(key) >= _MIN_REPEAT_CHARS)
+        keys.append((section, text))
+        substantive.append(not _is_field_paragraph(para) and len(text) >= _MIN_REPEAT_CHARS)
+        if heading is not None:
+            section = heading
 
     cuts: List[int] = []
 
@@ -1733,7 +1749,10 @@ def _strip_hallucinated_continuation(text: str) -> str:
     - substantive: neither, with a whitespace-normalised key (first 120
       characters) of at least 40 characters.
 
-    Two rules, over the keys of the non-structural paragraphs in order:
+    Two rules, over the keys of the non-structural paragraphs in order. A
+    key is the paragraph's normalised text plus the most recent heading
+    above it, so blocks under different headings (Day 1, Day 2, ...) are
+    never repeats, however alike their bodies; dividers don't change it.
 
     - R1: a substantive paragraph whose key already appeared as a
       substantive paragraph is cut, with everything after it.
