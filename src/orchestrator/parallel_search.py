@@ -70,7 +70,7 @@ class ParallelSearchEngine:
         Both providers run simultaneously, wait up to timeout seconds,
         then aggregate and deduplicate all results that returned.
         """
-        logger.info("primary_parallel_search_start", query=query)
+        logger.info("primary_parallel_search_start", query_len=len(query))
 
         # Race Brave (via websearch RAG) and SearXNG
         tasks = [
@@ -93,7 +93,7 @@ class ParallelSearchEngine:
             return result
 
         # Primary failed, try fallback
-        logger.warning("primary_search_failed_trying_fallback", query=query)
+        logger.warning("primary_search_failed_trying_fallback", query_len=len(query))
         return await self.search_with_fallback(query, max_results)
 
     async def _aggregate_results(
@@ -172,7 +172,7 @@ class ParallelSearchEngine:
         Returns first successful result from any provider.
         Cancels remaining searches once one succeeds.
         """
-        logger.info("fallback_search_start", query=query)
+        logger.info("fallback_search_start", query_len=len(query))
 
         # Create tasks for all fallback providers
         tasks = [
@@ -193,7 +193,7 @@ class ParallelSearchEngine:
             logger.info("parallel_search_success", source=result.get("source"))
             return result
 
-        logger.warning("parallel_search_all_failed", query=query)
+        logger.warning("parallel_search_all_failed", query_len=len(query))
         return {"error": "All search providers failed", "results": []}
 
     async def _first_success(

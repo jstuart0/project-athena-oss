@@ -172,11 +172,11 @@ class IntentClassifier:
             max_score = max(scores.values())
             if max_score > 0:
                 best_intent = max(scores.items(), key=lambda x: x[1])[0]
-                logger.info(f"Classified intent: {best_intent} (score: {max_score:.1f}) for query: '{query}'")
+                logger.info(f"Classified intent: {best_intent} (score: {max_score:.1f}) for query: query_len={len(query)}")
                 return best_intent
 
         # Default to general
-        logger.info(f"Classified intent: general (no matches) for query: '{query}'")
+        logger.info(f"Classified intent: general (no matches) for query: query_len={len(query)}")
         return "general"
 
     def classify_with_confidence(self, query: str) -> Tuple[str, float]:
@@ -220,11 +220,11 @@ class IntentClassifier:
                 # Normalize confidence (assume 3+ matches = high confidence)
                 confidence = min(1.0, max_score / 3.0)
 
-                logger.info(f"Classified intent: {best_intent} (score: {max_score:.1f}, confidence: {confidence:.2f}) for query: '{query}'")
+                logger.info(f"Classified intent: {best_intent} (score: {max_score:.1f}, confidence: {confidence:.2f}) for query: query_len={len(query)}")
                 return (best_intent, confidence)
 
         # Default to general with low confidence
-        logger.info(f"Classified intent: general (no matches) for query: '{query}'")
+        logger.info(f"Classified intent: general (no matches) for query: query_len={len(query)}")
         return ("general", 0.5)
 
     def extract_keywords(self, query: str) -> List[str]:

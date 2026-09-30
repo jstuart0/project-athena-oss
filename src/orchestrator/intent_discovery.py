@@ -218,7 +218,7 @@ async def generate_novel_intent(
 
         # Validate required fields
         if not intent_data.get("canonical_name"):
-            logger.warning("novel_intent_missing_name", query=query)
+            logger.warning("novel_intent_missing_name", query_len=len(query))
             return None
 
         # Normalize canonical_name

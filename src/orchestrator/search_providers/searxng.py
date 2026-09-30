@@ -69,7 +69,7 @@ class SearXNGProvider(SearchProvider):
             List of SearchResult objects
         """
         try:
-            self.logger.info(f"SearXNG search started: {query}")
+            self.logger.info(f"SearXNG search started: query_len={len(query)}")
 
             # SearXNG JSON API
             url = f"{self.base_url}/search?q={quote_plus(query)}&format=json&pageno=1"

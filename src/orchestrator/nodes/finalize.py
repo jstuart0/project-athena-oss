@@ -70,7 +70,7 @@ async def finalize_node(state: OrchestratorState) -> OrchestratorState:
             state.data_source = None
             state.validation_passed = True
             state.validation_reason = None
-            logger.info(f"Preparing next intent ({state.current_intent_index + 1}/{len(state.intent_parts)}): '{state.query}'")
+            logger.info(f"Preparing next intent ({state.current_intent_index + 1}/{len(state.intent_parts)}): query_len={len(state.query)}")
             finalize_duration = time.time() - start
             state.node_timings["finalize"] = finalize_duration
             if state.timing_tracker:

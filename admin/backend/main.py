@@ -814,7 +814,7 @@ async def ensure_default_model():
                     logger.warning("default_model_pull_failed",
                                  model=OSS_DEFAULT_MODEL,
                                  status=response.status_code,
-                                 response=response.text[:200])
+                                 response_len=len(response.text))
 
     except Exception as e:
         logger.warning("ensure_default_model_error", error=str(e), model=OSS_DEFAULT_MODEL)

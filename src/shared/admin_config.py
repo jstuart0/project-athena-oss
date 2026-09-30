@@ -1775,7 +1775,7 @@ class AdminConfigClient:
                 logger.warning(
                     "voice_automation_create_failed",
                     status_code=response.status_code,
-                    error=response.text
+                    response_len=len(response.text)
                 )
                 return None
 

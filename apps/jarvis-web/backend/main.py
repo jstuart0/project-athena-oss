@@ -836,7 +836,7 @@ async def chat(message: ChatMessage, request: Request, response: Response):
             )
 
             if orch_response.status_code != 200:
-                logger.error("orchestrator_error", status=orch_response.status_code, body=orch_response.text)
+                logger.error("orchestrator_error", status=orch_response.status_code, body_len=len(orch_response.text))
                 raise HTTPException(
                     status_code=502,
                     detail="Unable to process your request. Please try again."
@@ -3139,7 +3139,7 @@ async def music_search(request: MusicSearchRequest):
     It calls the Gateway's MA search API.
     """
     try:
-        logger.info("music_search_request", query=request.query, types=request.media_types)
+        logger.info("music_search_request", query_len=len(request.query), types=request.media_types)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(

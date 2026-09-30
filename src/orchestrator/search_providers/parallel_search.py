@@ -74,7 +74,7 @@ class ParallelSearchEngine:
         """
         # Step 1: Classify query intent
         intent, confidence = self.intent_classifier.classify_with_confidence(query)
-        logger.info(f"Classified query intent: '{intent}' (confidence: {confidence:.2f}) for query: '{query}'")
+        logger.info(f"Classified query intent: '{intent}' (confidence: {confidence:.2f}) for query: query_len={len(query)}")
 
         # Step 2: Check if this intent should use RAG instead of web search
         # UNLESS we're in force_search mode (fallback from failed RAG)
@@ -89,7 +89,7 @@ class ParallelSearchEngine:
             logger.error(f"No providers available for intent '{intent}'")
             return (intent, [])
 
-        logger.info(f"Starting parallel search: query='{query}', intent='{intent}', providers={[p.name for p in providers]}")
+        logger.info(f"Starting parallel search: query_len={len(query)}, intent='{intent}', providers={[p.name for p in providers]}")
 
         # Step 4: Launch all provider searches in parallel
         tasks = []

@@ -322,7 +322,7 @@ async def create_automation(
     logger.info(
         "voice_automation_created",
         automation_id=db_automation.id,
-        name=automation.name,
+        name_len=len(automation.name),
         owner_type=automation.owner_type,
         has_guest_name=bool(automation.guest_name)
     )

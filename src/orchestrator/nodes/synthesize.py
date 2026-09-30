@@ -129,7 +129,7 @@ INSTRUCTIONS:
 5. Be helpful and continue the task they originally requested
 
 Your response:"""
-            logger.info(f"Using continuation prompt for '{state.query}' with {len(state.conversation_history)} history messages")
+            logger.info(f"Using continuation prompt for query_len={len(state.query)} with {len(state.conversation_history)} history messages")
         elif state.intent == IntentCategory.GENERAL_INFO:
             synthesis_prompt = f"""Question: {state.query}
 

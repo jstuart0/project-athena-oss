@@ -194,7 +194,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
 
                     if is_far_future:
                         # Return a limitation acknowledgment instead of inaccurate forecast
-                        logger.info(f"Far future weather request detected: '{state.query}'")
+                        logger.info(f"Far future weather request detected: query_len={len(state.query)}")
                         state.retrieved_data = {
                             "limitation": True,
                             "message": "Weather forecasts are only reliable up to about 7-10 days out. "

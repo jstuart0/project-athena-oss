@@ -2036,7 +2036,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         if wrong in query_lower:
             # Apply correction while preserving case where possible
             state.query = state.query.lower().replace(wrong, correct)
-            logger.info("stt_correction_applied", original=original_query, corrected=state.query)
+            logger.info("stt_correction_applied", original_len=len(original_query), corrected_len=len(state.query))
             break  # Apply only the first matching correction
 
     # Round 17: Typo correction for common misspellings (text input, not STT)
@@ -2082,7 +2082,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     if corrected:
         original_for_log = state.query
         state.query = query_lower
-        logger.info("typo_correction_applied", original=original_for_log, corrected=state.query)
+        logger.info("typo_correction_applied", original_len=len(original_for_log), corrected_len=len(state.query))
 
     # Round 21-30: FALSE MEMORY CLAIM DETECTION
     # Prevent LLM hallucination when user claims we said something in a "previous session"
@@ -2185,7 +2185,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
             state.current_intent_index = 0
             # Process first intent part - subsequent parts handled in finalize_node
             state.query = intent_parts[0]
-            logger.info(f"Processing first intent: '{state.query}'")
+            logger.info(f"Processing first intent: query_len={len(state.query)}")
 
     # COMPREHENSIVE CONTEXT DETECTION
     # Detect if this query references previous conversation context
@@ -2255,7 +2255,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
             # This prevents "restaurant recommendations" from routing to weather
             # just because the previous query was about weather
             strong_intent = detect_strong_intent(state.query, prev_context.intent)
-            logger.info(f"DEBUG strong_intent check: query='{state.query}', prev_intent={prev_context.intent}, result={strong_intent}")
+            logger.info(f"DEBUG strong_intent check: query_len={len(state.query)}, prev_intent={prev_context.intent}, result={strong_intent}")
             if strong_intent["should_override_context"]:
                 detected_intent_str = strong_intent["detected_intent"]
 
@@ -2302,7 +2302,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                     }
                 else:
                     logger.info(
-                        f"Strong intent detected: '{state.query}' has {detected_intent_str} "
+                        f"Strong intent detected: query_len={len(state.query)} has {detected_intent_str} "
                         f"indicators {strong_intent['matching_keywords']} - NOT continuing {prev_context.intent} context"
                     )
                     # Map detected intent string to IntentCategory and use it directly
@@ -2339,7 +2339,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 # Meta-inquiries about system state/errors should NOT continue previous context
                 # "What happened?", "What was the error?" are asking about the system, not the topic
                 logger.info(
-                    f"Meta-inquiry detected: '{state.query}' is asking about system/error state "
+                    f"Meta-inquiry detected: query_len={len(state.query)} is asking about system/error state "
                     f"- NOT continuing {prev_context.intent} context"
                 )
                 # Store the previous context info so the response can reference what happened
@@ -2351,7 +2351,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 # Conversation breakers like "forget it", "I'm sorry", "thanks for your patience"
                 # should NOT continue the previous intent - they break the task context
                 logger.info(
-                    f"Conversation breaker detected: '{state.query}' breaks {prev_context.intent} context "
+                    f"Conversation breaker detected: query_len={len(state.query)} breaks {prev_context.intent} context "
                     f"- routing to fresh classification"
                 )
                 state.context_ref_info = context_ref_view(ref_info, "declined")
@@ -2385,7 +2385,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                     # Fall through to normal (cache/LLM) classification below.
                 else:
                     if decision_reason == "low_confidence_short":
-                        logger.info(f"Short query with context available: '{state.query}' - prev intent: {prev_context.intent}")
+                        logger.info(f"Short query with context available: query_len={len(state.query)} - prev intent: {prev_context.intent}")
                         # Mark as implicit context reference for short queries
                         # with no classifiable intent of their own.
                         ref_info["has_context_ref"] = True
@@ -2417,16 +2417,16 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                         # Set flag for pronoun-based follow-ups that need LLM to resolve from history
                         if merged.get("needs_history_context"):
                             state.needs_history_context = True
-                            logger.info(f"Pronoun follow-up detected: '{state.query}' needs conversation history for resolution")
+                            logger.info(f"Pronoun follow-up detected: query_len={len(state.query)} needs conversation history for resolution")
 
                         # Log what we merged
                         if ref_info["has_temporal_ref"]:
-                            logger.info(f"Temporal context: '{state.query}' - time_ref={merged['entities'].get('time_ref')}")
+                            logger.info(f"Temporal context: query_len={len(state.query)} - time_ref={merged['entities'].get('time_ref')}")
 
                         state.context_ref_info = context_ref_view(ref_info, "continued")
                         state.continuation_decision = {"decision": "continued", "reason": decision_reason}
                         state.node_timings["classify"] = time.time() - start
-                        logger.info(f"Context continuation for '{state.query}' - routing to {state.intent}, entities={state.entities}")
+                        logger.info(f"Context continuation for query_len={len(state.query)} - routing to {state.intent}, entities={state.entities}")
                         return state
                     except ValueError:
                         # Unknown intent in context, fall through to normal classification
@@ -2466,7 +2466,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 if preserved_location:
                     state.entities["location"] = preserved_location
                 state.node_timings["classify"] = time.time() - start
-                logger.info(f"Intent cache HIT for '{state.query}': {state.intent}")
+                logger.info(f"Intent cache HIT for query_len={len(state.query)}: {state.intent}")
                 return state
         else:
             if state.timing_tracker:
@@ -2493,7 +2493,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Intent classification cached for '{state.query}'")
+            logger.info(f"Intent classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -2544,7 +2544,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Intent classification cached for '{state.query}'")
+            logger.info(f"Intent classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -2602,7 +2602,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Fast path scene classification cached for '{state.query}'")
+            logger.info(f"Fast path scene classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -2638,7 +2638,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Fast path control classification cached for '{state.query}'")
+            logger.info(f"Fast path control classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -2673,7 +2673,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Fast path sensor classification cached for '{state.query}'")
+            logger.info(f"Fast path sensor classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -2719,7 +2719,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Fast path music control classification cached for '{state.query}'")
+            logger.info(f"Fast path music control classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -3198,7 +3198,7 @@ Respond in JSON format:
                 "complexity": state.complexity,  # NEW: Cache complexity
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Intent classification cached for '{state.query}'")
+            logger.info(f"Intent classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 

@@ -28,7 +28,7 @@ from starlette.responses import Response
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from shared.logging_config import configure_logging
+from shared.logging_config import configure_logging, payload_keys
 from shared.config import get_config as _get_athena_config  # local async get_config() route below shadows this name
 from shared.ollama_client import OllamaClient
 from shared.admin_config import get_admin_client
@@ -607,7 +607,7 @@ async def send_satellite_announcement(room: str, message: str) -> bool:
             )
 
             if resp.status_code == 200:
-                logger.info(f"Satellite announcement sent to {satellite_entity}: {message}")
+                logger.info(f"Satellite announcement sent to {satellite_entity}: message_len={len(message)}")
                 return True
             else:
                 logger.warning(f"Satellite announcement failed: {resp.status_code}")
@@ -986,7 +986,7 @@ Respond with ONLY the category name (athena or general)."""
             classification = result.get("response", "").strip().lower()
 
             is_athena = "athena" in classification
-            logger.info(f"LLM classified '{query}' as {'athena' if is_athena else 'general'} (model={intent_model})")
+            logger.info(f"LLM classified query_len={len(query)} as {'athena' if is_athena else 'general'} (model={intent_model})")
             return is_athena
 
     except Exception as e:
@@ -2692,7 +2692,7 @@ async def ha_conversation(request: HAConversationRequest):
 
         logger.info(
             f"HA conversation request from device: {device_id}, "
-            f"detected room: {room}, query: {request.text}"
+            f"detected room: {room}, query: text_len={len(request.text)}"
         )
 
         if existing_session_id:
@@ -2967,7 +2967,7 @@ async def music_search(request: MusicSearchRequest):
     ma_token = await _fetch_ma_auth_token()
 
     try:
-        logger.info("music_search_start", query=request.query)
+        logger.info("music_search_start", query_len=len(request.query))
 
         async with websockets.connect(ma_ws_url, open_timeout=10) as ws:
             # Receive server info
@@ -3475,7 +3475,7 @@ if WEBSOCKET_AVAILABLE:
                             await ma_websocket.send(message["text"])
                         else:
                             # Disconnected
-                            logger.info(f"Sendspin Client->MA: non-text/bytes message, disconnecting: {message}")
+                            logger.info(f"Sendspin Client->MA: non-text/bytes message, disconnecting (keys: {payload_keys(message)})")
                             break
                 except WebSocketDisconnect:
                     logger.info("Sendspin proxy: Client disconnected")

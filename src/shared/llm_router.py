@@ -2476,7 +2476,7 @@ class LLMRouter:
                     logger.warning(
                         "failed_to_persist_metric",
                         status_code=response.status_code,
-                        error=response.text
+                        response_len=len(response.text)
                     )
         except Exception as e:
             logger.error("metric_persistence_error", error=str(e))
