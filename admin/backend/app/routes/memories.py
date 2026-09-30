@@ -20,6 +20,7 @@ from datetime import datetime, date, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import false, func as sql_func, or_
 from pydantic import BaseModel, Field
@@ -175,18 +176,33 @@ async def require_memory_reader(
     role: memories of every scope are household data.
     """
     await verify_service_or_oidc(request, db, x_service_key)
-    if x_service_key:
-        return
-    from app.auth.oidc import get_optional_user, optional_security
-
-    user = await get_optional_user(
-        credentials=await optional_security(request),
-        x_api_key=request.headers.get("X-API-Key"),
-        db=db,
-        request=request,
+    _memory_caller_kind(
+        request, lambda user: user.has_permission("read") and user.role in MEMORY_READER_ROLES,
     )
-    if user is None or not user.has_permission("read") or user.role not in MEMORY_READER_ROLES:
+
+
+async def require_memory_maintainer(
+    request: Request,
+    db: Session = Depends(get_db),
+    x_service_key: Optional[str] = Header(default=None, alias="X-Service-Key"),
+) -> str:
+    """Who may rebuild vectors: the service key (returns "service"; the
+    route limits it to mode=missing without prune) or a signed-in user with
+    manage_infrastructure (returns "user"). Any other user gets 403."""
+    await verify_service_or_oidc(request, db, x_service_key)
+    return _memory_caller_kind(request, lambda user: user.has_permission("manage_infrastructure"))
+
+
+def _memory_caller_kind(request: Request, allow) -> str:
+    """After verify_service_or_oidc: "service" for the service-key branch,
+    "user" for a user ``allow`` accepts, else 403. Uses the user that
+    verify_service_or_oidc authenticated (never a second resolution)."""
+    if getattr(request.state, "auth_kind", None) == "service":
+        return "service"
+    user = getattr(request.state, "auth_user", None)
+    if user is None or not allow(user):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    return "user"
 
 
 def _row_in_scopes(memory: Memory, scope_names: Tuple[str, ...], guest_session_id: Optional[int]) -> bool:
@@ -1022,6 +1038,60 @@ async def internal_forget_memory(
 async def qdrant_health():
     """Vector store connection and collection status."""
     return await run_in_threadpool(memory_vectors.describe)
+
+
+# =============================================================================
+# Vector store maintenance (before /{memory_id})
+# =============================================================================
+
+@router.post("/vector-store/reindex")
+async def reindex_memory_vectors(
+    request: Request,
+    mode: str = Query("missing", pattern="^(missing|all)$"),
+    dry_run: bool = False,
+    caller_kind: str = Depends(require_memory_maintainer),
+    db: Session = Depends(get_db),
+):
+    """Rebuild memory vectors from Postgres.
+
+    An owner (manage_infrastructure) may run either mode and prunes orphan
+    points. The service key may run mode=missing only and never prunes.
+    One rebuild at a time across replicas, with a cooldown after a real
+    run; 409 reindex_busy carries retry_after_seconds.
+    """
+    if caller_kind == "service" and mode != "missing":
+        raise HTTPException(status_code=403, detail="service_key_limited_to_missing")
+    if caller_kind == "service":
+        logger.info("memory_vector_reindex_requested", caller="service", mode=mode, dry_run=dry_run)
+
+    outcome: Dict[str, Any]
+    status_code = 200
+    try:
+        report = await run_in_threadpool(functools.partial(
+            memory_vectors.reindex, mode, dry_run=dry_run, prune=caller_kind == "user", caller=caller_kind,
+        ))
+    except memory_vectors.ReindexBusy as busy:
+        status_code = 409
+        outcome = {"error": "reindex_busy", "retry_after_seconds": busy.retry_after_seconds}
+    else:
+        outcome = report.to_dict()
+        if report.refused:
+            status_code, outcome = 409, {"error": "reindex_refused", **outcome}
+        elif report.aborted:
+            status_code, outcome = 409, {"error": "reindex_aborted", **outcome}
+
+    if caller_kind == "user":
+        from app.routes.services import create_audit_log
+
+        create_audit_log(
+            db, request.state.auth_user, "memory_vector_reindex",
+            new_value={"mode": mode, "dry_run": dry_run, **outcome},
+            request=request, success=status_code == 200,
+            error_message=outcome.get("error"),
+        )
+    if status_code != 200:
+        return JSONResponse(status_code=status_code, content=outcome)
+    return outcome
 
 
 # =============================================================================

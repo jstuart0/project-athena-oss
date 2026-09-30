@@ -187,6 +187,7 @@ async def verify_service_or_oidc(
         # a second time.  Raises 401 on invalid key; returns True on match;
         # returns False only when x_service_key is absent (guarded by the if above).
         if _check_service_key_raw(x_service_key, configured_key=configured_key):
+            request.state.auth_kind = "service"
             return True
 
     # 2. User-auth path (admin UI: Bearer JWT or X-API-Key).
@@ -204,6 +205,11 @@ async def verify_service_or_oidc(
         request=request,
     )
     if user is not None:
+        # Which branch authenticated, for dependencies that authorize by
+        # caller kind (memories' require_memory_maintainer). Additive:
+        # nothing else reads these.
+        request.state.auth_kind = "user"
+        request.state.auth_user = user
         return True
 
     logger.warning("dual_auth_failed",

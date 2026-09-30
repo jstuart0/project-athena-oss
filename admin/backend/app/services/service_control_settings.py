@@ -80,7 +80,12 @@ def recall_replicas(db: Session, deployment: str) -> int:
 class LeaseBusy(Exception):
     """Raised when a lease is held (unexpired) by another holder, or a
     takeover race is lost. The caller (service_control.py) maps this to
-    409 `action_in_progress`."""
+    409 `action_in_progress`. ``expires_at`` is the holder's expiry when it
+    was read (None when unknown, e.g. a lost race)."""
+
+    def __init__(self, msg: str = "", expires_at: Optional[datetime] = None):
+        super().__init__(msg)
+        self.expires_at = expires_at
 
 
 @dataclass
@@ -97,12 +102,15 @@ def acquire_lease(
     target_replicas: int,
     ttl: int = LEASE_TTL_SECONDS,
     now: Callable[[], datetime] = _utcnow,
+    *,
+    key: Optional[str] = None,
 ) -> Lease:
     """INSERT-based acquire; conditional-UPDATE takeover when the existing
     lease has expired. Uses its OWN session (via `session_factory`), so the
     write is visible to another replica immediately and independent of the
-    caller's own request transaction (D11)."""
-    key = _lease_key(deployment)
+    caller's own request transaction (D11). ``key`` overrides the
+    service-control key for other lease users (the memory vector reindex)."""
+    key = key or _lease_key(deployment)
     holder = f"{os.getenv('HOSTNAME', 'local')}/{uuid.uuid4()}"
     expires_at = now() + timedelta(seconds=ttl)
     value = json.dumps(
@@ -140,6 +148,7 @@ def acquire_lease(
 
         observed_value = existing.value
         expired = True
+        existing_expiry = None
         try:
             observed = json.loads(observed_value)
             expires_at_str = observed.get("expires_at")
@@ -150,7 +159,10 @@ def acquire_lease(
             expired = True
 
         if not expired:
-            raise LeaseBusy(f"a service-control action is already in progress for '{deployment}'")
+            raise LeaseBusy(
+                f"a service-control action is already in progress for '{deployment}'",
+                expires_at=existing_expiry,
+            )
 
         rowcount = (
             session.query(SystemSetting)
@@ -179,10 +191,10 @@ def release_lease(session_factory: Callable[[], Session], lease: Lease) -> None:
         session.close()
 
 
-def read_lease(db: Session, deployment: str) -> Optional[dict]:
+def read_lease(db: Session, deployment: str, *, key: Optional[str] = None) -> Optional[dict]:
     """Used by the envelope builder to detect `restart_interrupted` (an
     expired restart lease whose Deployment is stuck at 0 replicas)."""
-    key = _lease_key(deployment)
+    key = key or _lease_key(deployment)
     row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
     if row is None:
         return None

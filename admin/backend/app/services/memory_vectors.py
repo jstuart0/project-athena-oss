@@ -23,9 +23,14 @@ qdrant-client type crosses this interface.
 from __future__ import annotations
 
 import asyncio
+import functools
+import json
+import math
 import os
+import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -119,6 +124,7 @@ _checked_at: Optional[float] = None
 _probe_inflight = False
 _adoption_logged = False
 _prev_status: Optional[str] = None
+_last_pending_pass: Optional[float] = None
 
 
 def _redact(text: str) -> str:
@@ -562,6 +568,369 @@ def store_vector(memory) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Rebuild from Postgres
+# ---------------------------------------------------------------------------
+
+_SCROLL_PAGE = 256
+_LEASE_DEPLOYMENT = "memory_vectors"
+
+
+class ReindexBusy(Exception):
+    """Another rebuild holds the lease, or the cooldown after one is running."""
+
+    def __init__(self, retry_after_seconds: int):
+        super().__init__(f"memory vector reindex busy; retry after {retry_after_seconds}s")
+        self.retry_after_seconds = retry_after_seconds
+
+
+@dataclass
+class ReindexReport:
+    mode: str
+    dry_run: bool = False
+    pending_only: bool = False
+    live_rows: int = 0
+    selected: int = 0
+    already_present: int = 0
+    embedded: int = 0
+    failed: int = 0
+    content_changed_retry: int = 0
+    orphans_pruned: int = 0
+    foreign_orphans_pruned: int = 0
+    prune_deferred_recent: int = 0
+    prune_skipped: bool = False
+    would_prune: int = 0
+    would_recreate: bool = False
+    points_after: Optional[int] = None
+    foreign_point_ids_sample: Tuple[str, ...] = ()
+    refused: Optional[str] = None
+    aborted: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out = dict(self.__dict__)
+        out["foreign_point_ids_sample"] = list(self.foreign_point_ids_sample)
+        return out
+
+
+def _parse_ts(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _is_old(payload: Dict[str, Any], now: datetime) -> bool:
+    """Old enough to prune: written at least PRUNE_MIN_AGE_SECONDS ago. An
+    unparseable timestamp, or one more than FUTURE_SKEW_SECONDS ahead,
+    counts as old (it can't be vouched for as recent)."""
+    written = _parse_ts(payload.get("vector_written_at")) or _parse_ts(payload.get("created_at"))
+    if written is None:
+        return True
+    age = (now - written).total_seconds()
+    if age < -FUTURE_SKEW_SECONDS:
+        return True
+    return age >= PRUNE_MIN_AGE_SECONDS
+
+
+def _retry_after(expires_at: Optional[datetime]) -> int:
+    if expires_at is None:
+        return COOLDOWN_SECONDS
+    return max(1, math.ceil((expires_at - _clock.utcnow()).total_seconds()))
+
+
+def _acquire(mode: str):
+    from app.services import service_control_settings as scs
+
+    try:
+        return scs.acquire_lease(_get_session_factory(), _LEASE_DEPLOYMENT, mode, 0,
+                                 ttl=LEASE_TTL_SECONDS, now=_clock.utcnow, key=LEASE_KEY)
+    except scs.LeaseBusy as busy:
+        raise ReindexBusy(_retry_after(busy.expires_at)) from busy
+
+
+def _live_count(session) -> int:
+    from app.models import Memory
+
+    return session.query(Memory).filter(Memory.is_deleted == False).count()  # noqa: E712
+
+
+def pending_count() -> int:
+    from app.models import Memory
+
+    session = _get_session_factory()()
+    try:
+        return session.query(Memory).filter(
+            Memory.is_deleted == False, Memory.vector_status == "pending",  # noqa: E712
+        ).count()
+    finally:
+        session.close()
+
+
+def _batches(session, pending_only: bool, max_rows: Optional[int]):
+    """Row batches in id order: all live rows, or (pending_only) the first
+    ``max_rows`` live pending rows."""
+    from app.models import Memory
+
+    live = session.query(Memory).filter(Memory.is_deleted == False)  # noqa: E712
+    if pending_only:
+        rows = live.filter(Memory.vector_status == "pending").order_by(Memory.id).limit(max_rows).all()
+        for start in range(0, len(rows), ROW_BATCH):
+            yield rows[start:start + ROW_BATCH]
+        return
+    last_id = 0
+    while True:
+        rows = live.filter(Memory.id > last_id).order_by(Memory.id).limit(ROW_BATCH).all()
+        if not rows:
+            return
+        last_id = rows[-1].id
+        yield rows
+
+
+def _present_ids(vector_ids: List[str]) -> set:
+    points = _get_client().retrieve(COLLECTION_NAME, ids=vector_ids, with_payload=False, with_vectors=False)
+    return {str(p.id) for p in points}
+
+
+def _write_batch(session, rows, report: ReindexReport) -> None:
+    """Embed and upsert ``rows`` under their existing ids, re-check their
+    content against Postgres, and mark stored only rows whose content is
+    what was embedded."""
+    from app.models import Memory
+
+    embedded_content = {row.id: row.content for row in rows}
+    vectors = embed([row.content for row in rows])
+    for row, vector in zip(rows, vectors):
+        _upsert(row.vector_id, vector, build_payload(row))
+    fresh = dict(session.query(Memory.id, Memory.content).filter(Memory.id.in_(list(embedded_content))).all())
+    changed = [row for row in rows if row.id in fresh and fresh[row.id] != embedded_content[row.id]]
+    if changed:
+        for row in changed:
+            session.expire(row)
+        changed_vectors = embed([fresh[row.id] for row in changed])
+        for row, vector in zip(changed, changed_vectors):
+            _upsert(row.vector_id, vector, build_payload(row))
+            embedded_content[row.id] = fresh[row.id]
+    for row_id, content in embedded_content.items():
+        updated = session.query(Memory).filter(Memory.id == row_id, Memory.content == content).update(
+            {"vector_status": "stored"}, synchronize_session=False)
+        if updated:
+            report.embedded += 1
+        else:
+            report.content_changed_retry += 1
+
+
+def _prune_orphans(report: ReindexReport, dry_run: bool) -> None:
+    """Delete points no live row owns. Scroll first, check each page against
+    a fresh Postgres read, spare anything written in the last
+    PRUNE_MIN_AGE_SECONDS (unless it's stamped with another model), and
+    refuse to delete anything if Postgres reports no live rows at all."""
+    from app.models import Memory
+
+    client = _get_client()
+    factory = _get_session_factory()
+    now = _clock.utcnow()
+    candidates: List[str] = []
+    foreign: set = set()
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            COLLECTION_NAME, limit=_SCROLL_PAGE, offset=offset, with_vectors=False,
+            with_payload=["vector_written_at", "created_at", "embedding_model"],
+        )
+        ids = [str(p.id) for p in points]
+        session = factory()
+        try:
+            live = {vid for (vid,) in session.query(Memory.vector_id).filter(
+                Memory.vector_id.in_(ids), Memory.is_deleted == False).all()}  # noqa: E712
+        finally:
+            session.close()
+        for point in points:
+            point_id = str(point.id)
+            if point_id in live:
+                continue
+            payload = point.payload or {}
+            model = payload.get("embedding_model")
+            if model and model != EMBEDDING_MODEL:
+                candidates.append(point_id)
+                foreign.add(point_id)
+            elif _is_old(payload, now):
+                candidates.append(point_id)
+            else:
+                report.prune_deferred_recent += 1
+        if offset is None:
+            break
+
+    session = factory()
+    try:
+        if candidates and _live_count(session) == 0:
+            report.prune_skipped = True
+            logger.warning("memory_vector_prune_skipped", reason="no_live_rows", candidates=len(candidates))
+            return
+        if dry_run:
+            report.would_prune = len(candidates)
+            return
+        for start in range(0, len(candidates), _SCROLL_PAGE):
+            chunk = candidates[start:start + _SCROLL_PAGE]
+            still_live = {vid for (vid,) in session.query(Memory.vector_id).filter(
+                Memory.vector_id.in_(chunk), Memory.is_deleted == False).all()}  # noqa: E712
+            doomed = [pid for pid in chunk if pid not in still_live]
+            if not doomed:
+                continue
+            from qdrant_client.models import PointIdsList
+
+            client.delete(collection_name=COLLECTION_NAME, points_selector=PointIdsList(points=doomed))
+            report.orphans_pruned += len(doomed)
+            report.foreign_orphans_pruned += len([pid for pid in doomed if pid in foreign])
+    finally:
+        session.close()
+
+
+def _preconditions(mode: str, recreate: bool, pending_only: bool) -> Optional[str]:
+    status = _collection_state().status
+    if status == READY:
+        return None
+    if pending_only:
+        return status
+    if status == MODEL_MISMATCH and mode == "all":
+        return None
+    if status == SHAPE_MISMATCH and recreate:
+        return None
+    return status
+
+
+def reindex(
+    mode: str,
+    *,
+    dry_run: bool = False,
+    prune: bool = False,
+    recreate: bool = False,
+    pending_only: bool = False,
+    max_rows: Optional[int] = None,
+    caller: str = "cli",
+) -> ReindexReport:
+    """Rebuild vectors from Postgres under the cross-replica lease.
+
+    ``missing`` embeds every pending row plus stored rows whose point is
+    gone; ``all`` re-embeds every live row (and, with no failures, records
+    the model on the collection). Ids are always the rows' own vector_ids.
+    ``prune`` removes orphan points (owner and CLI only). ``recreate``
+    drops and re-creates the collection first (CLI only; implies ``all``).
+    ``pending_only`` is the automatic pass: at most ``max_rows`` pending
+    rows, no presence check, no prune. Raises ReindexBusy when the lease is
+    held or cooling down."""
+    if recreate:
+        mode = "all"
+    if mode not in ("missing", "all"):
+        raise ValueError(f"unknown reindex mode {mode!r}")
+    report = ReindexReport(mode=mode, dry_run=dry_run, pending_only=pending_only)
+    refused = _preconditions(mode, recreate, pending_only)
+    if refused is not None:
+        report.refused = refused
+        logger.warning("memory_vector_reindex_refused", mode=mode, state=refused, caller=caller)
+        return report
+
+    from app.services import service_control_settings as scs
+
+    factory = _get_session_factory()
+    lease = _acquire(mode)
+    arm_cooldown = False
+    try:
+        logger.info("memory_vector_reindex_started", mode=mode, dry_run=dry_run, prune=prune,
+                    recreate=recreate, pending_only=pending_only, caller=caller)
+        if recreate:
+            client = _get_client()
+            if dry_run:
+                report.would_recreate = True
+            else:
+                before = collection_info().get("points_count")
+                logger.warning("memory_vector_collection_recreating", collection=COLLECTION_NAME,
+                               points_before=before)
+                client.delete_collection(COLLECTION_NAME)
+                _invalidate()
+                state = refresh_state()
+                if state.status != READY:
+                    report.aborted = f"recreate_failed:{state.status}"
+                    return report
+
+        session = factory()
+        try:
+            report.live_rows = _live_count(session)
+            for rows in _batches(session, pending_only, max_rows or PENDING_PASS_MAX_ROWS):
+                report.selected += len(rows)
+                try:
+                    for row in rows:
+                        if not row.vector_id:
+                            row.vector_id = str(uuid.uuid4())
+                    if pending_only:
+                        chosen = list(rows)
+                    else:
+                        present = _present_ids([row.vector_id for row in rows])
+                        report.already_present += len(present)
+                        if mode == "all":
+                            chosen = list(rows)
+                        else:
+                            chosen = [row for row in rows
+                                      if row.vector_status == "pending" or row.vector_id not in present]
+                    if chosen and not dry_run:
+                        _write_batch(session, chosen, report)
+                    if not dry_run:
+                        session.commit()
+                except Exception as exc:
+                    session.rollback()
+                    report.failed += len(rows) if not dry_run else 0
+                    logger.error("memory_vector_reindex_batch_failed", error=_error_text(exc), rows=len(rows))
+                    if not dry_run:
+                        _mark_rows_pending([row.id for row in rows])
+                if not scs.renew_lease(factory, lease, ttl=LEASE_TTL_SECONDS, now=_clock.utcnow):
+                    report.aborted = "lease_lost"
+                    logger.error("memory_vector_reindex_lease_lost", mode=mode)
+                    return report
+        finally:
+            session.close()
+
+        if prune and not pending_only:
+            _prune_orphans(report, dry_run)
+
+        if mode == "all" and report.failed == 0 and not dry_run:
+            try:
+                _get_client().update_collection(COLLECTION_NAME, metadata=collection_metadata())
+            except Exception as exc:
+                logger.info("memory_vector_metadata_update_rejected", error=_error_text(exc))
+            refresh_state()
+
+        try:
+            report.points_after = _get_client().count(COLLECTION_NAME, exact=True).count
+        except Exception:
+            report.points_after = None
+        report.foreign_point_ids_sample = get_state().foreign_point_ids_sample
+        arm_cooldown = not dry_run and not pending_only
+        logger.info("memory_vector_reindex_finished", caller=caller, **{
+            k: v for k, v in report.to_dict().items() if k not in ("foreign_point_ids_sample",)})
+        return report
+    finally:
+        if arm_cooldown and scs.renew_lease(factory, lease, ttl=COOLDOWN_SECONDS, now=_clock.utcnow):
+            pass
+        else:
+            scs.release_lease(factory, lease)
+
+
+def _mark_rows_pending(ids: List[int]) -> None:
+    from app.models import Memory
+
+    session = _get_session_factory()()
+    try:
+        session.query(Memory).filter(Memory.id.in_(ids)).update(
+            {"vector_status": "pending"}, synchronize_session=False)
+        session.commit()
+    except Exception as exc:
+        logger.error("memory_vector_mark_pending_failed", error=_error_text(exc))
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
 # Background maintenance
 # ---------------------------------------------------------------------------
 
@@ -577,11 +946,34 @@ def _revalidation_due() -> bool:
 
 
 async def tick() -> None:
-    global _prev_status
+    """Revalidate when due, then run the automatic pending-only pass: on the
+    transition to ready (the first tick after start counts), and while
+    ready whenever rows are pending and PENDING_PASS_INTERVAL_SECONDS have
+    passed since the last pass. The pass never prunes."""
+    global _prev_status, _last_pending_pass
     if _revalidation_due():
         await asyncio.to_thread(refresh_state)
-    state = get_state()
-    _prev_status = state.status
+    state = _collection_state()
+    previous, _prev_status = _prev_status, state.status
+    if state.status != READY:
+        return
+    if previous == READY:
+        if (_last_pending_pass is not None
+                and _clock.monotonic() - _last_pending_pass < PENDING_PASS_INTERVAL_SECONDS):
+            return
+        if await asyncio.to_thread(pending_count) == 0:
+            return
+    try:
+        report = await asyncio.to_thread(functools.partial(
+            reindex, "missing", pending_only=True, max_rows=PENDING_PASS_MAX_ROWS, caller="auto",
+        ))
+    except ReindexBusy:
+        logger.debug("memory_vector_pending_pass_skipped", reason="lease_busy")
+        return
+    _last_pending_pass = _clock.monotonic()
+    if report.selected:
+        logger.info("memory_vector_pending_pass", selected=report.selected, embedded=report.embedded,
+                    failed=report.failed, refused=report.refused)
 
 
 async def _maintenance_loop() -> None:
@@ -654,13 +1046,14 @@ def set_background_enabled(enabled: bool) -> None:
 
 
 def reset_state_for_tests() -> None:
-    global _state, _checked_at, _probe_inflight, _prev_status, _adoption_logged
+    global _state, _checked_at, _probe_inflight, _prev_status, _adoption_logged, _last_pending_pass
     with _state_lock:
         _state = None
         _checked_at = None
         _probe_inflight = False
     _prev_status = None
     _adoption_logged = False
+    _last_pending_pass = None
 
 
 def reset_for_tests() -> None:
@@ -671,3 +1064,75 @@ def reset_for_tests() -> None:
     set_clock_for_tests(None)
     set_session_factory_for_tests(None)
     reset_state_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _batch_size(value: str) -> int:
+    import argparse
+
+    n = int(value)
+    if not 1 <= n <= 64:
+        raise argparse.ArgumentTypeError("--batch-size must be between 1 and 64")
+    return n
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Rebuild memory vectors from Postgres.
+
+    Run it as a one-off Pod with its own memory limits (it loads the
+    embedding model), never as an exec into a serving admin-backend pod:
+    a second model in that container can OOM-kill the server. For routine
+    recovery prefer the in-process route (POST
+    /api/memories/vector-store/reindex). The CLI prunes orphan points and
+    is the only way to --recreate the collection, which requires typing the
+    collection name.
+
+    Prints one JSON line. Exit 0 on success, 1 when rows failed or the run
+    was aborted, 2 when refused, busy or the confirmation is wrong.
+    """
+    import argparse
+
+    global ROW_BATCH
+    parser = argparse.ArgumentParser(prog="python -m app.services.memory_vectors",
+                                     description="Memory vector store maintenance.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    rebuild = commands.add_parser("reindex", help="rebuild vectors from Postgres (prunes orphan points)")
+    rebuild.add_argument("--mode", choices=["missing", "all"], default="missing")
+    rebuild.add_argument("--dry-run", action="store_true", help="report what would change; change nothing")
+    rebuild.add_argument("--batch-size", type=_batch_size, default=None, help="rows per batch (1-64)")
+    rebuild.add_argument("--recreate", action="store_true",
+                         help="drop and re-create the collection first (implies --mode all)")
+    rebuild.add_argument("--confirm-collection", default=None,
+                         help=f"required with --recreate: the collection name ({COLLECTION_NAME})")
+    args = parser.parse_args(argv)
+
+    if args.recreate and args.confirm_collection != COLLECTION_NAME:
+        print(json.dumps({"error": "confirmation_required",
+                          "detail": f"--recreate requires --confirm-collection {COLLECTION_NAME}"}))
+        return 2
+
+    previous_batch = ROW_BATCH
+    if args.batch_size:
+        ROW_BATCH = args.batch_size
+    try:
+        report = reindex(args.mode, dry_run=args.dry_run, prune=True, recreate=args.recreate, caller="cli")
+    except ReindexBusy as busy:
+        print(json.dumps({"error": "reindex_busy", "retry_after_seconds": busy.retry_after_seconds}))
+        return 2
+    finally:
+        ROW_BATCH = previous_batch
+    print(json.dumps(report.to_dict()))
+    if report.refused:
+        return 2
+    if report.failed or report.aborted:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    # Logs go to stderr so stdout stays the one JSON report line.
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))
+    sys.exit(main())
