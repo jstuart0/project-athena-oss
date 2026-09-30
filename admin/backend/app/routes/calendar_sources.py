@@ -11,7 +11,7 @@ Lodgify API Integration:
 - API returns type: "Booking" for real guests, "ClosedPeriod" for manual blocks
 """
 from typing import List, Literal, Optional
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, Request
@@ -1015,10 +1015,14 @@ async def sync_all_calendar_sources(
 # Guest Session Sync
 # ============================================================================
 
+def _today() -> date:
+    """The house's calendar date for session status. A seam for tests."""
+    return date.today()
+
+
 def determine_session_status(check_in_date, check_out_date) -> str:
     """Determine guest session status based on dates."""
-    from datetime import date
-    today = date.today()
+    today = _today()
 
     if isinstance(check_in_date, datetime):
         check_in_date = check_in_date.date()
@@ -1047,10 +1051,11 @@ async def sync_lodgify_to_guest_sessions(db: Session):
         return {"synced": 0, "error": "GuestSession model not imported"}
 
     try:
-        # Get all Lodgify booking events
+        # Live Lodgify bookings only: a deleted event never gets a session.
         events = db.query(CalendarEvent).join(CalendarSource).filter(
             CalendarSource.source_type == 'lodgify',
-            CalendarEvent.status == 'confirmed'
+            CalendarEvent.status == 'confirmed',
+            CalendarEvent.deleted_at.is_(None),
         ).all()
 
         synced = 0
@@ -1089,14 +1094,20 @@ async def sync_lodgify_to_guest_sessions(db: Session):
                 existing.guest_email = event.guest_email or existing.guest_email
                 existing.check_in_date = check_in
                 existing.check_out_date = check_out
+                # Load-bearing: re-deriving the status here is what restores a
+                # session the cancel pass below cancelled once its event is
+                # live again. It also revives a session someone cancelled
+                # directly while its event stays live (pre-existing).
                 existing.status = determine_session_status(check_in, check_out)
                 existing.calendar_event_id = event.id
                 synced += 1
 
-        db.commit()
-        logger.info("lodgify_guest_sessions_synced", count=synced)
+        cancelled = _cancel_sessions_for_gone_events(db)
 
-        return {"synced": synced}
+        db.commit()
+        logger.info("lodgify_guest_sessions_synced", count=synced, cancelled=cancelled)
+
+        return {"synced": synced, "cancelled": cancelled}
 
     except Exception as e:
         db.rollback()
@@ -1104,13 +1115,37 @@ async def sync_lodgify_to_guest_sessions(db: Session):
         return {"synced": 0, "error": describe_error(e)}
 
 
+def _cancel_sessions_for_gone_events(db: Session) -> int:
+    """Cancel upcoming/active sessions whose Lodgify event is gone (deleted,
+    or no longer confirmed). Only sessions linked to an event are touched:
+    manual sessions have no event, and completed sessions stay completed.
+    Memories are left alone. Staged in the caller's transaction."""
+    from sqlalchemy import or_
+    from app.models import GuestSession
+
+    sessions = (
+        db.query(GuestSession)
+        .join(CalendarEvent, GuestSession.calendar_event_id == CalendarEvent.id)
+        .join(CalendarSource, CalendarEvent.source_id == CalendarSource.id)
+        .filter(
+            CalendarSource.source_type == 'lodgify',
+            GuestSession.status.in_(('upcoming', 'active')),
+            or_(CalendarEvent.deleted_at.isnot(None), CalendarEvent.status != 'confirmed'),
+        )
+        .all()
+    )
+    for session in sessions:
+        session.status = 'cancelled'
+        logger.info("guest_session_cancelled_event_gone", session_id=session.id, event_id=session.calendar_event_id)
+    return len(sessions)
+
+
 async def update_guest_session_statuses(db: Session):
     """Update guest session statuses based on current date."""
     try:
         from app.models import GuestSession
-        from datetime import date
 
-        today = date.today()
+        today = _today()
 
         # Upcoming -> Active (check-in day reached)
         db.query(GuestSession).filter(
