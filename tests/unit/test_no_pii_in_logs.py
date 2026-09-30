@@ -235,6 +235,7 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/site_scraper.py", "update_config"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/sms.py", "send_sms_manually"): (2, OPERATOR_AUDIT),
     ("admin/backend/app/routes/sms.py", "update_sms_settings"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/telemetry.py", "create_audit_log"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/tool_calling.py", "add_tool_api_key_requirement"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/tool_calling.py", "create_tool"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/tool_calling.py", "delete_tool"): (1, OPERATOR_AUDIT),
