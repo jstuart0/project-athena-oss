@@ -509,6 +509,7 @@ entry yet. This is a diagnostic log line only; it never blocks startup.
 | `QDRANT_PORT` | `6333` | Qdrant port |
 | `QDRANT_URL` | `http://localhost:6333` | Full URL (overrides host/port) |
 | `FASTEMBED_CACHE_PATH` | `/opt/fastembed_cache` in the image | fastembed's own model cache directory. The admin-backend image bakes the embedding model here at build time. |
+| `EMBEDDING_MODEL_REVISION` | set in the image | The Hugging Face commit of the embedding model the image baked (`Qdrant/all-MiniLM-L6-v2-onnx`). It's a build-time pin, not a runtime setting: to change it, edit it in `admin/backend/Dockerfile` together with `admin/backend/embedding-model.sha256` and rebuild. |
 | `HF_HUB_OFFLINE` | `1` in the image | Hugging Face's own offline switch. The embedder also always passes `local_files_only=True`, so it never downloads a model at runtime. |
 
 #### Memory vectors
@@ -584,8 +585,12 @@ through `admin/backend/app/services/memory_vectors.py`.
   1Gi. Memory text and search queries are capped at 8192 characters and
   summaries at 255.
 - **Development.** Outside the image, fetch the model once into a cache
-  directory and point `FASTEMBED_CACHE_PATH` at it:
-  `FASTEMBED_CACHE_PATH=$HOME/.cache/fastembed python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2', lazy_load=True)"`.
+  directory at the image's `EMBEDDING_MODEL_REVISION` and point
+  `FASTEMBED_CACHE_PATH` at it. fastembed's own download takes the latest
+  upstream commit and ignores a revision, so follow the Dockerfile's bake
+  step: `huggingface_hub.snapshot_download` with `revision=`, then write the
+  revision to `models--qdrant--all-MiniLM-L6-v2-onnx/refs/main` in the cache
+  so the offline load finds it.
 
 ### SearXNG (Web Search)
 
