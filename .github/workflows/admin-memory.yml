@@ -1,0 +1,185 @@
+name: Admin memory vector store
+
+# Memory storage: Postgres is the source of truth, the Qdrant collection is
+# rebuilt from it. Unit tier (all memory tests in one process, plus the
+# drift guard), real-server tier (Qdrant 1.19 and 1.12, Postgres 16), and
+# the image's embedder memory gate on a native x86_64 runner.
+
+on:
+  pull_request:
+    paths:
+      - "admin/backend/app/routes/memories.py"
+      - "admin/backend/app/services/memory_vectors.py"
+      - "admin/backend/app/services/service_control_settings.py"
+      - "admin/backend/app/utils/service_auth.py"
+      - "admin/backend/app/utils/url_validators.py"
+      - "admin/backend/app/models.py"
+      - "admin/backend/app/database.py"
+      - "admin/backend/alembic/versions/062_*"
+      - "admin/backend/tests/conftest.py"
+      - "admin/backend/tests/test_memor*"
+      - "admin/backend/tests/test_migration_062*"
+      - "admin/backend/tests/test_database_memories_compat.py"
+      - "admin/backend/tests/test_service_control_settings.py"
+      - "admin/backend/tests/test_url_redaction_text.py"
+      - "admin/backend/tests/integration/**"
+      - "admin/backend/scripts/embed_rss_gate.py"
+      - "admin/backend/Dockerfile"
+      - "admin/backend/embedding-model.sha256"
+      - "admin/backend/requirements*.txt"
+      - "src/orchestrator/memory_manager.py"
+      - "tests/unit/test_memory_client_contract.py"
+      - "scripts/init-qdrant-collection.py"
+      - "manifests/athena-prod/qdrant.yaml"
+      - "manifests/athena-prod/admin-backend.yaml"
+      - ".github/workflows/admin-memory.yml"
+  push:
+    branches: [main]
+    paths:
+      - "admin/backend/app/routes/memories.py"
+      - "admin/backend/app/services/memory_vectors.py"
+      - "admin/backend/app/services/service_control_settings.py"
+      - "admin/backend/app/utils/service_auth.py"
+      - "admin/backend/app/utils/url_validators.py"
+      - "admin/backend/app/models.py"
+      - "admin/backend/app/database.py"
+      - "admin/backend/alembic/versions/062_*"
+      - "admin/backend/tests/conftest.py"
+      - "admin/backend/tests/test_memor*"
+      - "admin/backend/tests/test_migration_062*"
+      - "admin/backend/tests/test_database_memories_compat.py"
+      - "admin/backend/tests/test_service_control_settings.py"
+      - "admin/backend/tests/test_url_redaction_text.py"
+      - "admin/backend/tests/integration/**"
+      - "admin/backend/scripts/embed_rss_gate.py"
+      - "admin/backend/Dockerfile"
+      - "admin/backend/embedding-model.sha256"
+      - "admin/backend/requirements*.txt"
+      - "src/orchestrator/memory_manager.py"
+      - "tests/unit/test_memory_client_contract.py"
+      - "scripts/init-qdrant-collection.py"
+      - "manifests/athena-prod/qdrant.yaml"
+      - "manifests/athena-prod/admin-backend.yaml"
+      - ".github/workflows/admin-memory.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: memory unit tier
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install (hash-locked)
+        run: |
+          python -m pip install --require-hashes -r admin/backend/requirements-test.txt
+          python -m pip install --no-deps -e src/shared
+
+      - name: All memory tests in one process (V1, 180 s kill)
+        working-directory: admin/backend
+        run: >
+          python -c "import subprocess,sys,glob;
+          fs=sorted(glob.glob('tests/test_memor*.py')+glob.glob('tests/test_migration_062*.py')+glob.glob('tests/test_database_memories_compat.py')+glob.glob('tests/test_url_redaction_text.py'));
+          assert len(fs)>=3, fs; assert 'tests/test_memory_internal_scope.py' in fs;
+          sys.exit(subprocess.run([sys.executable,'-m','pytest',*fs,'-q','-p','no:cacheprovider'],timeout=180).returncode)"
+
+      - name: Service control lease unchanged (V7)
+        working-directory: admin/backend
+        run: |
+          python -m pytest tests/test_service_control_settings.py -q
+          python -m pytest tests/test_service_control_actions.py -q
+
+      - name: Orchestrator memory client contract (V10)
+        run: python -m pytest tests/unit/test_memory_client_contract.py -q
+
+      - name: Image, manifest and init-script contracts (V11)
+        run: >
+          python -m pytest
+          tests/unit/test_admin_backend_embedding_model_baked.py
+          tests/unit/test_athena_prod_manifest_memory_and_strategy.py
+          tests/unit/test_init_qdrant_script_parity.py -q
+
+      - name: Module-scoped TestClient starts no maintenance
+        working-directory: admin/backend
+        run: python -m pytest tests/test_security_hardening.py -q
+
+  integration:
+    name: real Qdrant ${{ matrix.expected }} + Postgres 16
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - qdrant: qdrant/qdrant:v1.19.1
+            expected: "1.19.1"
+          - qdrant: qdrant/qdrant:v1.12.1
+            expected: "1.12.1"
+    services:
+      qdrant:
+        image: ${{ matrix.qdrant }}
+        ports:
+          - 6333:6333
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: t
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install (hash-locked)
+        run: |
+          python -m pip install --require-hashes -r admin/backend/requirements-test.txt
+          python -m pip install --no-deps -e src/shared
+
+      - name: Wait for Qdrant and check its version
+        run: |
+          set -euo pipefail
+          for _ in $(seq 30); do
+            curl -sf http://localhost:6333/readyz >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:6333/readyz >/dev/null
+          test "$(curl -s http://localhost:6333/ | jq -r .version)" = "${{ matrix.expected }}"
+
+      - name: Wait for Postgres
+        run: pg_isready -h localhost -p 5432 -t 30
+
+      - name: Real-server tier
+        working-directory: admin/backend
+        env:
+          QDRANT_TEST_URL: http://localhost:6333
+          QDRANT_EXPECTED_VERSION: ${{ matrix.expected }}
+          POSTGRES_TEST_URL: postgresql://postgres:t@localhost:5432/postgres
+        run: python -m pytest -m integration tests/integration -q
+
+  image-rss:
+    name: embedder peak memory in the image (native x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build admin-backend image
+        run: |
+          cp -r src/shared admin/backend/shared
+          docker build -t athena-admin-backend:ci admin/backend
+
+      - name: Peak RSS gate (<= 700 MiB, offline)
+        run: docker run --rm --network none --memory 1g athena-admin-backend:ci python scripts/embed_rss_gate.py
+
+      - name: CLI entry point imports offline
+        run: docker run --rm --network none athena-admin-backend:ci python -m app.services.memory_vectors --help

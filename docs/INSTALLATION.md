@@ -625,7 +625,7 @@ kubectl get storageclass
 # Common values: standard, gp2, local-path, longhorn, ceph-block
 ```
 
-**Migrating from emptyDir** (existing deployments): conversation memory and embeddings stored on emptyDir are lost when Qdrant pods restart. Migrating to PVC starts fresh — this is a one-time data loss for previously-running deployments. To preserve current memory: snapshot Qdrant collections via the API before applying, then restore after the new PVC mounts.
+**After a storage change** (for example migrating from emptyDir to the PVC): memories themselves live in PostgreSQL, so nothing is lost. admin-backend re-creates the `athena_memories` collection on the new volume and re-embeds every memory automatically within a minute of starting; the Memories page shows the counts until they're back in sync, and an owner can press "Rebuild vectors" to run it immediately. `scripts/init-qdrant-collection.py` is optional — use it only to pre-create the collection with non-default options such as `--quantize`.
 
 #### Deploy Core Services
 

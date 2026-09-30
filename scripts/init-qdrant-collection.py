@@ -2,21 +2,23 @@
 """
 Idempotent initializer for the ``athena_memories`` Qdrant collection.
 
-WHY THIS SCRIPT EXISTS
-----------------------
-The production collection ``athena_memories`` is created out-of-band — nothing
-in the application code creates it on startup.  ``admin/backend/app/routes/memories.py``
-wraps every Qdrant operation in a try/except and falls back gracefully:
+YOU USUALLY DON'T NEED THIS
+---------------------------
+admin-backend creates and validates the collection itself
+(``admin/backend/app/services/memory_vectors.py``): on startup and on
+every revalidation it creates the collection when it's absent, records the
+embedding model in the collection's metadata, and refuses to use a
+collection with the wrong shape or embedding model. PostgreSQL is the
+source of truth for memories. A memory saved while the vector store is
+down is kept and marked pending, and admin-backend embeds pending memories
+automatically once the store is back — including after the collection
+itself was lost (for example a Qdrant storage change).
 
-* On *write* (POST /api/memories): the exception is caught, a warning is logged,
-  and the memory is stored in PostgreSQL only (Qdrant vector storage is silently
-  skipped).  No 500 error, but semantic search returns empty results.
-* On *search* (POST /api/memories/search): returns
-  ``{"results": [], "qdrant_available": True, "error": "..."}``.
-
-**Run this script before serving production traffic** or after any Qdrant
-pod restart that wiped collection state (e.g. the PVC was deleted).  It is
-safe to run any number of times — it never mutates an existing collection.
+Use this script only to pre-create the collection with non-default options
+(``--quantize``) before admin-backend first starts. It never mutates an
+existing collection, and it creates the collection exactly as admin-backend
+would: same name, size, distance and model metadata (a parity test,
+``tests/unit/test_init_qdrant_script_parity.py``, keeps the two in step).
 
 USAGE
 -----
@@ -33,10 +35,12 @@ USAGE
 
 COLLECTION PARAMETERS
 ---------------------
-* size=384    : all-MiniLM-L6-v2 embedding dimension (fastembed in memories.py)
-* COSINE      : conventional metric for MiniLM-L6-v2 sentence embeddings.
-                An existing production collection's metric takes precedence —
-                this script never overwrites a collection that already exists.
+* size=384    : sentence-transformers/all-MiniLM-L6-v2 embedding dimension
+* COSINE      : the metric admin-backend validates
+* metadata    : {embedding_model, embedding_dim, distance, payload_schema}.
+                Qdrant servers older than 1.16 accept and silently drop
+                collection metadata; admin-backend then checks the
+                per-point model stamp instead.
 """
 from __future__ import annotations
 
@@ -45,8 +49,20 @@ import os
 import sys
 
 COLLECTION_NAME = "athena_memories"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 VECTOR_SIZE = 384  # all-MiniLM-L6-v2 output dimension
+DISTANCE = "Cosine"
+PAYLOAD_SCHEMA = 1
 DEFAULT_QDRANT_URL = "http://localhost:6333"
+
+
+def collection_metadata() -> dict:
+    return {
+        "embedding_model": EMBEDDING_MODEL,
+        "embedding_dim": VECTOR_SIZE,
+        "distance": DISTANCE,
+        "payload_schema": PAYLOAD_SCHEMA,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,9 +95,9 @@ def main() -> int:
         print("ERROR: qdrant-client is not installed. Run: pip install qdrant-client", file=sys.stderr)
         return 1
 
-    print(f"Connecting to Qdrant at {qdrant_url} ...")
+    print("Connecting to Qdrant (QDRANT_URL) ...")
     try:
-        client = QdrantClient(url=qdrant_url, timeout=10)
+        client = QdrantClient(url=qdrant_url, timeout=10, check_compatibility=False)
     except Exception as exc:
         print(f"ERROR: Could not create Qdrant client: {exc}", file=sys.stderr)
         return 1
@@ -128,6 +144,7 @@ def main() -> int:
                 distance=Distance.COSINE,
             ),
             quantization_config=quantization_config,
+            metadata=collection_metadata(),
         )
     except Exception as exc:
         print(f"ERROR: Failed to create collection: {exc}", file=sys.stderr)

@@ -42,9 +42,25 @@ RUN pip install --no-cache-dir --no-deps --no-build-isolation -e /app/shared
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Bake the memory embedding model into the image, pinned to one Hugging Face
+# snapshot revision and verified against checked-in sha256 hashes; the
+# runtime never downloads a model (HF_HUB_OFFLINE=1, and the embedder passes
+# local_files_only=True). An upstream change fails this build on purpose.
+COPY embedding-model.sha256 /opt/embedding-model.sha256
+ENV FASTEMBED_CACHE_PATH=/opt/fastembed_cache
+RUN set -eu; \
+    python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2', lazy_load=True)"; \
+    set -- /opt/fastembed_cache/models--qdrant--all-MiniLM-L6-v2-onnx/snapshots/*/; \
+    [ "$#" -eq 1 ]; \
+    [ "$(basename "$1")" = "8f518e882455312b086101e60691f5e6e2f05c3c" ]; \
+    cd "$1"; sha256sum -c /opt/embedding-model.sha256; \
+    chmod -R a+rX /opt/fastembed_cache
+ENV HF_HUB_OFFLINE=1
+
 # Copy application code
 COPY main.py .
 COPY app/ ./app/
+COPY scripts/ ./scripts/
 COPY alembic/ ./alembic/
 COPY alembic.ini .
 
