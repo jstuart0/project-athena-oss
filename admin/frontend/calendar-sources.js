@@ -557,9 +557,15 @@ async function testUrlFromModal() {
     showToast('Testing URL...', 'info');
 
     try {
-        const response = await fetch(`${CALENDAR_SOURCES_API}/test-url?url=${encodeURIComponent(url)}&source_type=${sourceType}`, {
+        // In the body, not the query string: feed URLs carry their access
+        // token, and request lines end up in access and proxy logs.
+        const response = await fetch(`${CALENDAR_SOURCES_API}/test-url`, {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${getToken()}` }
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${getToken()}`
+            },
+            body: JSON.stringify({ url, source_type: sourceType })
         });
 
         const result = await response.json();

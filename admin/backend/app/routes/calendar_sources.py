@@ -21,7 +21,6 @@ import structlog
 import httpx
 
 from app.database import get_db
-from app.auth.oidc import get_current_user
 from app.models import AuditLog, User, CalendarSource, CalendarEvent, ExternalAPIKey, mask_feed_url
 from app.utils.service_auth import require_user_permission
 from shared.config import get_config
@@ -44,6 +43,7 @@ LODGIFY_API_BASE = "https://api.lodgify.com"
 # A sync interval below this can't give the deleted/cancelled-entry match
 # rule a real "previous sync" to compare against (see calendar_sync).
 MIN_SYNC_INTERVAL_MINUTES = 5
+MAX_SYNC_INTERVAL_MINUTES = 1440
 
 VALID_SOURCE_TYPES = ('airbnb', 'vrbo', 'lodgify', 'generic_ical')
 
@@ -58,7 +58,7 @@ class CalendarSourceCreate(BaseModel):
     source_type: str  # 'airbnb', 'vrbo', 'lodgify', 'generic_ical'
     ical_url: str
     enabled: bool = True
-    sync_interval_minutes: int = Field(default=30, ge=MIN_SYNC_INTERVAL_MINUTES)
+    sync_interval_minutes: int = Field(default=30, ge=MIN_SYNC_INTERVAL_MINUTES, le=MAX_SYNC_INTERVAL_MINUTES)
     priority: int = 1
     default_checkin_time: str = '16:00'  # 4:00 PM
     default_checkout_time: str = '11:00'  # 11:00 AM
@@ -71,7 +71,7 @@ class CalendarSourceUpdate(BaseModel):
     source_type: Optional[str] = None
     ical_url: Optional[str] = None
     enabled: Optional[bool] = None
-    sync_interval_minutes: Optional[int] = Field(default=None, ge=MIN_SYNC_INTERVAL_MINUTES)
+    sync_interval_minutes: Optional[int] = Field(default=None, ge=MIN_SYNC_INTERVAL_MINUTES, le=MAX_SYNC_INTERVAL_MINUTES)
     priority: Optional[int] = None
     default_checkin_time: Optional[str] = None
     default_checkout_time: Optional[str] = None
@@ -129,9 +129,10 @@ class SyncResponse(BaseModel):
 # ============================================================================
 
 def is_lodgify_host(url: Optional[str]) -> bool:
-    """True when the URL's host is lodgify.com or a subdomain of it."""
+    """True when the URL's host is lodgify.com or a subdomain of it (a
+    trailing dot, the fully qualified form, is the same host)."""
     try:
-        host = (urlsplit(url or '').hostname or '').lower()
+        host = (urlsplit(url or '').hostname or '').lower().rstrip('.')
     except ValueError:
         return False
     return host == 'lodgify.com' or host.endswith('.lodgify.com')
@@ -587,13 +588,12 @@ async def get_source_types():
 @router.get("/{source_id}", response_model=CalendarSourceResponse)
 async def get_calendar_source(
     source_id: int,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_user_permission('read')),
 ):
-    """Get a specific calendar source by ID."""
-    if not current_user.has_permission('read'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
+    """Get a specific calendar source by ID, including the full feed URL.
+    The only route that returns it; every call is audited (without it)."""
     try:
         source = db.query(CalendarSource).filter(CalendarSource.id == source_id).first()
 
@@ -604,7 +604,9 @@ async def get_calendar_source(
                    user=current_user.username,
                    source_id=source_id)
 
-        # Return full URL for authenticated users
+        _audit(db, current_user, request, 'calendar_source_url_revealed', source.id,
+               None, {'name': source.name, 'source_type': source.source_type})
+        db.commit()
         return source.to_dict()
 
     except HTTPException:
@@ -619,12 +621,9 @@ async def create_calendar_source(
     source_data: CalendarSourceCreate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_user_permission('write')),
 ):
     """Create a new calendar source."""
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
     try:
         if source_data.source_type not in VALID_SOURCE_TYPES:
             raise HTTPException(
@@ -759,12 +758,9 @@ async def delete_calendar_source(
     source_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_user_permission('write')),
 ):
     """Delete a calendar source."""
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
     try:
         source = db.query(CalendarSource).filter(CalendarSource.id == source_id).first()
 
@@ -799,7 +795,7 @@ async def delete_calendar_source(
 async def test_calendar_source(
     source_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_user_permission('read')),
 ):
     """
     Test connectivity and parsing for a calendar source.
@@ -807,8 +803,6 @@ async def test_calendar_source(
     Fetches the iCal URL and attempts to parse events without saving.
     Returns sample events for verification.
     """
-    if not current_user.has_permission('read'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     source = db.query(CalendarSource).filter(CalendarSource.id == source_id).first()
     if not source:
@@ -869,26 +863,33 @@ async def test_calendar_source(
         )
 
 
+class TestUrlRequest(BaseModel):
+    url: str
+    source_type: str = "generic_ical"
+
+
 @router.post("/test-url", response_model=TestConnectionResponse)
 async def test_ical_url(
-    url: str = Query(..., description="iCal URL to test"),
-    source_type: str = Query("generic_ical", description="Source type for parsing"),
-    current_user: User = Depends(get_current_user)
+    body: TestUrlRequest,
+    request: Request,
+    current_user: User = Depends(require_user_permission('read')),
 ):
     """
     Test an iCal URL before creating a source.
 
-    Does not require saving the source first.
+    The URL comes in the JSON body. A `url` query parameter is refused
+    (422): request lines end up in access and proxy logs, and feed URLs
+    carry their access token.
     """
-    if not current_user.has_permission('read'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if 'url' in request.query_params:
+        raise HTTPException(
+            status_code=422,
+            detail="Send the iCal URL in the JSON body ({\"url\": ..., \"source_type\": ...}), not the query string",
+        )
 
     try:
-        # Fetch iCal data
-        ical_data = await fetch_ical_data(url)
-
-        # Parse events
-        events = parse_ical_events(ical_data, source_type)
+        ical_data = await fetch_ical_data(body.url)
+        events = parse_ical_events(ical_data, body.source_type)
 
         # Get sample events
         now = datetime.now(timezone.utc)
@@ -980,7 +981,7 @@ def _sync_message(outcome) -> str:
 async def sync_all_calendar_sources(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_user_permission('write')),
 ):
     """
     Trigger a sync for all enabled calendar sources.
@@ -989,8 +990,6 @@ async def sync_all_calendar_sources(
     synced in its own fresh DB session (ATHENA-127 bob H3d): the request
     session in `db` above is gone by the time these background tasks run.
     """
-    if not current_user.has_permission('write'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     from app.services.calendar_sync import sync_source_in_new_session
 

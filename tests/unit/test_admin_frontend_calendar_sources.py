@@ -105,3 +105,24 @@ def test_sync_success_mentions_matched_deleted_entries():
 def test_sync_success_without_matched_deleted_has_no_suffix():
     toasts = _sync({"success": True, "events_added": 1, "events_updated": 2, "events_matched_deleted": 0})
     assert toasts == [["Sync complete: 1 added, 2 updated", "success"]]
+
+
+def test_test_url_sends_the_url_in_a_json_body_not_the_query():
+    token_url = "https://feed.example.com/cal.ics?token=SECRETTOKEN42"
+    out = _run(
+        f"""
+        global.document.getElementById = (id) => ({{ value: id === 'source-ical-url' ? {json.dumps(token_url)} : 'airbnb' }});
+        const calls = [];
+        setFetch(async (url, init) => {{ calls.push([url, init]); return {{ ok: true, status: 200, json: async () => ({{ success: false, message: 'x' }}) }}; }});
+        await testUrlFromModal();
+        toasts.push([JSON.stringify(calls), 'calls']);
+        """
+    )
+    calls = json.loads(next(t[0] for t in out["toasts"] if t[1] == "calls"))
+    assert len(calls) == 1
+    url, init = calls[0]
+    assert url == "/api/calendar-sources/test-url"
+    assert init["method"] == "POST"
+    assert init["headers"]["Content-Type"] == "application/json"
+    assert json.loads(init["body"]) == {"url": token_url, "source_type": "airbnb"}
+

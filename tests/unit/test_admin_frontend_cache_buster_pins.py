@@ -28,7 +28,7 @@ INDEX_HTML = FRONTEND / "index.html"
 PINS = {
     "memory-management.js": ("089676669483a791", "20260929a"),
     "guest-mode.js": ("b1fa51811cf6ba80", "20260929-cal"),
-    "calendar-sources.js": ("311120f7a03fb022", "20260929-cal"),
+    "calendar-sources.js": ("84a51ed58de8ea2a", "20260929-cal2"),
 }
 
 

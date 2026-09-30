@@ -95,7 +95,7 @@ def _anon_request(client, method, path, source_id):
     if method == "PUT":
         return client.put(url, json={})
     if path.endswith("/test-url"):
-        return client.post(url, params={"url": "https://x.example/a.ics"})
+        return client.post(url, json={"url": "https://x.example/a.ics", "source_type": "generic_ical"})
     return client.request(method, url)
 
 
@@ -111,20 +111,55 @@ def test_types_stays_public(client, db):
 
 
 # ---------------------------------------------------------------------------
-# (b) credential matrix on the four adopting routes
+# (b) credential matrix on every protected route
 # ---------------------------------------------------------------------------
 
-FOUR_ROUTES = ["list", "put", "sync", "sync_guest_sessions"]
+PROTECTED_ROUTES = sorted(EXPECTED_ROUTES - {("GET", f"{BASE}/types")})
 
 
 def _call(client, route, source_id, headers):
-    if route == "list":
-        return client.get(BASE, headers=headers)
-    if route == "put":
-        return client.put(f"{BASE}/{source_id}", json={}, headers=headers)
-    if route == "sync":
-        return client.post(f"{BASE}/{source_id}/sync", headers=headers)
-    return client.post(f"{BASE}/sync-guest-sessions", headers=headers)
+    method, path = route
+    url = path.replace("{source_id}", str(source_id))
+    if (method, path) == ("POST", BASE):
+        body = {"name": "New", "source_type": "generic_ical", "ical_url": "https://new.example.com/n.ics"}
+        return client.post(url, json=body, headers=headers)
+    if method == "PUT":
+        return client.put(url, json={}, headers=headers)
+    if path.endswith("/test-url"):
+        return client.post(url, json={"url": "https://x.example/a.ics", "source_type": "generic_ical"},
+                           headers=headers)
+    return client.request(method, url, headers=headers)
+
+
+_SUCCESS = {("POST", BASE): 201, ("DELETE", f"{BASE}/{{source_id}}"): 204}
+
+
+def _route_dependency_names(route):
+    names = set()
+    stack = [route.dependant]
+    while stack:
+        dep = stack.pop()
+        if dep.call is not None:
+            names.add(getattr(dep.call, "__qualname__", ""))
+        stack.extend(dep.dependencies)
+    return names
+
+
+def test_every_protected_route_uses_require_user_permission():
+    seen = set()
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        if not (path == BASE or path.startswith(BASE + "/")):
+            continue
+        for method in getattr(route, "methods", set()) - {"HEAD", "OPTIONS"}:
+            key = (method, path)
+            if key == ("GET", f"{BASE}/types"):
+                continue
+            seen.add(key)
+            names = _route_dependency_names(route)
+            assert any(n.startswith("require_user_permission.") for n in names), (key, names)
+    assert seen == set(PROTECTED_ROUTES)
+    assert len(seen) == 10
 
 
 def _creds(case, *, owner, viewer, operator, api_key, monkeypatch):
@@ -173,15 +208,21 @@ MATRIX = [
 ]
 
 
-@pytest.mark.parametrize("route", FOUR_ROUTES)
+@pytest.mark.parametrize("route", PROTECTED_ROUTES)
 @pytest.mark.parametrize("case,expected", MATRIX)
 def test_credential_matrix(client, db, test_user, viewer_user, operator_user, test_api_key,
                            monkeypatch, route, case, expected):
+    from app.services import calendar_sync
+    from tests.conftest import TestingSessionLocal
+
+    monkeypatch.setattr(calendar_sync, "SessionLocal", TestingSessionLocal)
     assert get_config().service_api_key, "conftest sets SERVICE_API_KEY"
     source = _source(db)
     headers = _creds(case, owner=test_user, viewer=viewer_user, operator=operator_user,
                      api_key=test_api_key[1], monkeypatch=monkeypatch)
     resp = _call(client, route, source.id, headers)
+    if expected == 200:
+        expected = _SUCCESS.get(route, 200)
     assert resp.status_code == expected, (route, case, resp.status_code, resp.text)
 
 
@@ -353,3 +394,99 @@ def test_interval_floor(client, db, test_user):
     sid = ok.json()["id"]
     assert client.put(f"{BASE}/{sid}", json={"sync_interval_minutes": 4}, headers=h).status_code == 422
     assert client.put(f"{BASE}/{sid}", json={"sync_interval_minutes": 5}, headers=h).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# r3.2: raw-URL reveal audit, interval cap, trailing-dot host, /test-url body
+# ---------------------------------------------------------------------------
+
+def test_get_by_id_audits_the_reveal_without_the_url(client, db, test_user):
+    source = _source(db, ical_url=SECRET_URL)
+    resp = client.get(f"{BASE}/{source.id}", headers=_bearer(test_user))
+    assert resp.status_code == 200
+    rows = db.query(AuditLog).filter(AuditLog.action == "calendar_source_url_revealed").all()
+    assert len(rows) == 1
+    assert rows[0].resource_id == source.id and rows[0].user_id == test_user.id
+    assert rows[0].resource_type == "calendar_source"
+    dumped = json.dumps([rows[0].old_value, rows[0].new_value])
+    assert "SECRET" not in dumped and "feed.example.com" not in dumped
+
+
+def test_interval_cap(client, db, test_user):
+    h = _bearer(test_user)
+    body = {"name": "S", "source_type": "generic_ical", "ical_url": "https://feed.example.com/cap.ics"}
+    assert client.post(BASE, json={**body, "sync_interval_minutes": 1441}, headers=h).status_code == 422
+    ok = client.post(BASE, json={**body, "sync_interval_minutes": 1440}, headers=h)
+    assert ok.status_code == 201, ok.text
+    sid = ok.json()["id"]
+    assert client.put(f"{BASE}/{sid}", json={"sync_interval_minutes": 1441}, headers=h).status_code == 422
+    assert client.put(f"{BASE}/{sid}", json={"sync_interval_minutes": 1440}, headers=h).status_code == 200
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://www.lodgify.com./x.ics", True),
+    ("https://lodgify.com./x.ics", True),
+    ("https://WWW.LODGIFY.COM/x.ics", True),
+    ("https://lodgify.com.evil.example/x.ics", False),
+    ("https://notlodgify.com./x.ics", False),
+])
+def test_is_lodgify_host_trailing_dot(url, expected):
+    from app.routes.calendar_sources import is_lodgify_host
+
+    assert is_lodgify_host(url) is expected
+
+
+def test_type_lock_catches_a_trailing_dot_host(client, db, test_user):
+    _lodgify_key(db, test_user, enabled=True)
+    create = client.post(
+        BASE, json={"name": "G", "source_type": "generic_ical", "ical_url": "https://www.lodgify.com./b.ics"},
+        headers=_bearer(test_user),
+    )
+    assert create.status_code == 409, create.text
+
+
+TOKEN_URL = "https://feed.example.com/cal.ics?token=SECRETTOKEN42"
+_ONE_EVENT = (
+    "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:t@x\nDTSTART;VALUE=DATE:20991001\n"
+    "DTEND;VALUE=DATE:20991003\nSUMMARY:Reserved\nEND:VEVENT\nEND:VCALENDAR\n"
+)
+
+
+def test_test_url_rejects_a_query_param(client, db, test_user):
+    h = _bearer(test_user)
+    resp = client.post(f"{BASE}/test-url", params={"url": TOKEN_URL, "source_type": "generic_ical"}, headers=h)
+    assert resp.status_code == 422
+    both = client.post(f"{BASE}/test-url", params={"url": TOKEN_URL},
+                       json={"url": TOKEN_URL, "source_type": "generic_ical"}, headers=h)
+    assert both.status_code == 422
+    assert "SECRETTOKEN42" not in resp.text + both.text
+
+
+def test_test_url_body_success_never_echoes_the_token(client, db, test_user):
+    import structlog
+
+    with structlog.testing.capture_logs() as logs, \
+            patch("app.routes.calendar_sources.fetch_ical_data", new=AsyncMock(return_value=_ONE_EVENT)) as fetch:
+        resp = client.post(f"{BASE}/test-url", json={"url": TOKEN_URL, "source_type": "generic_ical"},
+                           headers=_bearer(test_user))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True and resp.json()["event_count"] == 1
+    assert fetch.await_args.args[0] == TOKEN_URL
+    assert "SECRETTOKEN42" not in resp.text
+    assert "SECRETTOKEN42" not in repr(logs)
+
+
+def test_test_url_body_failure_never_echoes_the_token(client, db, test_user):
+    import httpx
+    import structlog
+
+    exc = httpx.ConnectError(f"connect failed for {TOKEN_URL}")
+    with structlog.testing.capture_logs() as logs, \
+            patch("app.routes.calendar_sources.fetch_ical_data", new=AsyncMock(side_effect=exc)):
+        resp = client.post(f"{BASE}/test-url", json={"url": TOKEN_URL, "source_type": "generic_ical"},
+                           headers=_bearer(test_user))
+    assert resp.status_code == 200
+    assert resp.json()["success"] is False
+    assert "ConnectError" in resp.json()["message"]
+    assert "SECRETTOKEN42" not in resp.text
+    assert "SECRETTOKEN42" not in repr(logs)
