@@ -6,9 +6,10 @@ name: Source Guards
 #   logged name/address/location/phone number, or an unaccepted
 #   caller_trust value appears anywhere in the tree (not just in files a
 #   paths: filter would guess at, so there is none).
-# - orchestrator-behaviour / jarvis-web-behaviour: the tests for the local
-#   clock, the repetition detector, the addressee rules and the caller
-#   classes, each under its own image's hash-locked requirements.
+# - orchestrator-behaviour / jarvis-web-behaviour / sports-behaviour: the
+#   tests for the local clock, the repetition detector, the addressee rules,
+#   the caller classes and the sports date windows, each under its own
+#   image's hash-locked requirements.
 #
 # Every job reads pytest's own exit status (no pipes).
 on:
@@ -67,9 +68,10 @@ jobs:
       - name: Run the behaviour tests
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_helpers.py tests/unit/test_finalize.py tests/unit/test_local_time.py tests/unit/test_base_knowledge_clock.py tests/unit/test_date_extraction_local.py tests/unit/test_planning_prompt_local_date.py tests/unit/test_gateway_simple_commands_clock.py tests/unit/test_sequence_wait_local.py tests/unit/test_prompt_clock_sites.py tests/unit/test_addressee_matrix.py tests/unit/test_trust_classification.py tests/unit/test_assistant_profile_household.py tests/unit/test_semantic_cache_addressee.py tests/unit/test_base_knowledge_names.py tests/unit/test_public_caller_orchestrator.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_helpers.py tests/unit/test_finalize.py tests/unit/test_local_time.py tests/unit/test_base_knowledge_clock.py tests/unit/test_date_extraction_local.py tests/unit/test_planning_prompt_local_date.py tests/unit/test_gateway_simple_commands_clock.py tests/unit/test_sequence_wait_local.py tests/unit/test_prompt_clock_sites.py tests/unit/test_addressee_matrix.py tests/unit/test_trust_classification.py tests/unit/test_assistant_profile_household.py tests/unit/test_semantic_cache_addressee.py tests/unit/test_base_knowledge_names.py tests/unit/test_public_caller_orchestrator.py tests/unit/test_logging_quiet_request_urls.py
 
-      # The sports case needs feedparser, which only the sports image carries.
+      # The sports case needs feedparser, which only the sports image
+      # carries; the sports-behaviour job runs it.
       - name: Run the RAG date tests (without sports)
         shell: bash
         run: |
@@ -98,3 +100,34 @@ jobs:
         shell: bash
         run: |
           python3 -m pytest -q -p no:cacheprovider tests/unit/test_jarvis_web_speaker_name.py tests/unit/test_jarvis_web_addressee_matrix.py tests/unit/test_jarvis_web_edge_mode.py tests/unit/test_jarvis_web_caller_classes.py tests/unit/test_jarvis_web_caller_mode.py tests/unit/test_jarvis_web_relay.py tests/unit/test_edge_template_contract.py
+
+  sports-behaviour:
+    name: Sports RAG date-window test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the sports image's locked requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --require-hashes -r src/rag/sports/requirements.txt -r src/rag/sports/requirements-test.txt
+          python3 -m pip install --no-deps -e src/shared
+
+      # The test skips without feedparser; prove it can't skip here.
+      - name: Check the sports dependency is importable
+        shell: bash
+        run: |
+          python3 -c "import feedparser"
+
+      - name: Run the sports date test
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider "tests/unit/test_rag_local_dates.py::test_sports_window_keeps_tonights_event"
