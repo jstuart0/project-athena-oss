@@ -175,6 +175,30 @@ class TestClassifySummary:
         assert bw.classify_summary("Tom Blocked", source_type=unknown) == "confirmed"
 
 
+class TestDayPair:
+    def test_naive_db_value_is_utc_then_localized(self):
+        # 04:30 UTC is 00:30 EDT the same day, but 03:30 on the 2nd UTC is
+        # 23:30 EDT on the 1st: a naive DB value must be read as UTC first.
+        start = datetime(2026, 7, 2, 3, 30)
+        end = datetime(2026, 7, 5, 15, 0)
+        assert bw.day_pair(start, end, NY) == (date(2026, 7, 1), date(2026, 7, 5))
+
+    def test_naive_0430_utc_in_new_york_is_the_previous_date(self):
+        start = datetime(2026, 1, 10, 4, 30)
+        assert bw.day_pair(start, start + timedelta(days=2), NY)[0] == date(2026, 1, 9)
+
+    def test_aware_matches_naive_utc(self):
+        naive = datetime(2026, 7, 1, 20, 0)
+        aware = naive.replace(tzinfo=timezone.utc)
+        assert bw.day_pair(naive, naive, NY) == bw.day_pair(aware, aware, NY)
+
+    def test_stay_day_pair_delegates(self):
+        b = bw.Booking(id=1, key="k", source="s", label="l",
+                       start=datetime(2026, 7, 1, 20, tzinfo=timezone.utc),
+                       end=datetime(2026, 7, 5, 15, tzinfo=timezone.utc))
+        assert bw.stay_day_pair(b, NY) == bw.day_pair(b.start, b.end, NY) == (date(2026, 7, 1), date(2026, 7, 5))
+
+
 class TestBufferClamp:
     def test_within_range_unchanged(self):
         assert bw.clamp_buffer_hours(2) == 2.0

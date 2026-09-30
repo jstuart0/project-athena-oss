@@ -206,10 +206,17 @@ def active_booking(
     return min(candidates, key=lambda b: (b.end, b.key))
 
 
+def day_pair(start: datetime, end: datetime, tz: TZInfo) -> tuple[date, date]:
+    """The (check-in, check-out) local-date pair in the property zone. Each
+    value goes through `db_value_to_utc` first, so a naive value read back
+    from the DB is treated as UTC -- never as process-local time."""
+    return (db_value_to_utc(start).astimezone(tz).date(), db_value_to_utc(end).astimezone(tz).date())
+
+
 def stay_day_pair(b: Booking, tz: TZInfo) -> tuple[date, date]:
     """The (checkin, checkout) local-date pair in the property zone, used
     for the fallback dedupe/suppression key (D13)."""
-    return (b.start.astimezone(tz).date(), b.end.astimezone(tz).date())
+    return day_pair(b.start, b.end, tz)
 
 
 def _merge_two(a: Booking, b: Booking) -> Booking:

@@ -20,14 +20,24 @@ Rules it enforces:
 """
 import asyncio
 import hashlib
+import re
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
-from typing import Literal, Optional
+from datetime import date, datetime, timezone, timedelta
+from typing import Callable, Literal, Optional
 import structlog
 
 from app.database import SessionLocal, DEV_MODE
-from app.models import CalendarEvent, CalendarSource
-from shared.booking_window import DEFAULT_CHECKIN_TIME, DEFAULT_CHECKOUT_TIME
+from app.models import CalendarEvent, CalendarSource, SystemSetting
+from shared.booking_window import (
+    DEFAULT_CHECKIN_TIME,
+    DEFAULT_CHECKOUT_TIME,
+    day_pair,
+    db_value_to_utc,
+    normalize_summary,
+    resolve_property_tz,
+)
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -47,6 +57,16 @@ Trigger = Literal["scheduled", "manual"]
 API_CREATED_BY = 'lodgify_api_sync'
 ICAL_CREATED_BY = 'ical_sync'
 
+SETTINGS_CATEGORY = 'calendar_sync'
+# Before a source's first successful sync under this code there is no
+# last_stamp; the previous sync is then recognised by per-row synced_at
+# stamps, which the old code wrote one by one within a single run.
+LEGACY_CONTINUITY_TOLERANCE = timedelta(seconds=60)
+
+_RESERVED_UID = re.compile(r"lodgify_\d+")
+
+DayPair = tuple[date, date]
+
 
 def _now() -> datetime:
     """The sync clock. One value per run (`run_stamp`); patched in tests."""
@@ -61,6 +81,41 @@ def derived_key(source_id: int, uid: str) -> str:
 def uid_sha10(uid: str) -> str:
     """A log-safe fingerprint of a UID (UIDs can embed guest emails)."""
     return hashlib.sha256(uid.encode()).hexdigest()[:10]
+
+
+def is_reserved_uid(uid: str) -> bool:
+    """UIDs in a key space this code mints itself: Lodgify API keys and the
+    two derived forms. A feed UID of this shape is always stored derived."""
+    return bool(_RESERVED_UID.fullmatch(uid)) or uid.startswith(("ical-nouid:", "src:"))
+
+
+def _nouid_key(source_id: int) -> str:
+    return f"ical-nouid:{source_id}:{uuid.uuid4().hex}"
+
+
+def last_stamp_key(source_id: int) -> str:
+    return f"calendar_sync.last_stamp.{source_id}"
+
+
+def _read_last_stamp(db, source_id: int) -> Optional[datetime]:
+    row = db.query(SystemSetting).filter(SystemSetting.key == last_stamp_key(source_id)).first()
+    if row is None:
+        return None
+    try:
+        return db_value_to_utc(datetime.fromisoformat(row.value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _stage_last_stamp(db, source_id: int, run_stamp: datetime) -> None:
+    """Stage `calendar_sync.last_stamp.<S>` in the caller's transaction, so
+    it commits exactly when the run's rows do."""
+    key = last_stamp_key(source_id)
+    row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+    if row is None:
+        db.add(SystemSetting(key=key, value=run_stamp.isoformat(), category=SETTINGS_CATEGORY))
+    else:
+        row.value = run_stamp.isoformat()
 
 
 @dataclass(frozen=True)
@@ -89,6 +144,7 @@ class _Counts:
     rekeyed: int = 0
     adopted: int = 0
     claimed_ids: set = field(default_factory=set)
+    inserted: list = field(default_factory=list)
 
 
 class _SyncFailed(Exception):
@@ -113,7 +169,8 @@ def _warning(counts: _Counts) -> Optional[str]:
     return "; ".join(parts) or None
 
 
-def _apply_event_fields(row: CalendarEvent, event: dict, run_stamp: datetime, *, status: Optional[str] = None) -> None:
+def _apply_event_fields(row: CalendarEvent, event: dict, run_stamp: datetime, *,
+                        status: Optional[str] = None, update_status: bool = True) -> None:
     """Copy feed fields onto a matched row. Reclassifies confirmed<->blocked,
     but never overwrites an owner-set cancelled/pending status; never
     touches `deleted_at`, `external_id` or `source_id`."""
@@ -126,7 +183,7 @@ def _apply_event_fields(row: CalendarEvent, event: dict, run_stamp: datetime, *,
     row.notes = event['notes']
     row.source = event['source']
     new_status = status or event.get('status')
-    if row.status in ('confirmed', 'blocked') and new_status:
+    if update_status and row.status in ('confirmed', 'blocked') and new_status:
         row.status = new_status
     row.synced_at = run_stamp
 
@@ -217,19 +274,194 @@ def _upsert_api_events(db, source: CalendarSource, events: list, run_stamp: date
     return counts
 
 
-def _upsert_ical_events(db, source: CalendarSource, events: list, run_stamp: datetime) -> _Counts:
-    """iCal branch: update by UID, else insert."""
-    counts = _Counts()
+@dataclass
+class _Group:
+    pair: DayPair
+    members: list  # [(uid, event)] in feed order
+    status: str
+    rep: dict
+
+
+def _group_events(events: list, tz) -> list:
+    """Group feed events by local day pair, in pair order. A group is
+    confirmed if any member is; its representative is the first confirmed
+    member in feed order, else the first member."""
+    by_pair: dict = {}
     for event in events:
-        existing = db.query(CalendarEvent).filter(
-            CalendarEvent.external_id == event['external_id']
-        ).first()
-        if existing is not None:
-            _apply_event_fields(existing, event, run_stamp)
+        uid = (event.get('external_id') or '').strip()
+        pair = day_pair(event['checkin'], event['checkout'], tz)
+        by_pair.setdefault(pair, []).append((uid, event))
+    groups = []
+    for pair in sorted(by_pair):
+        members = by_pair[pair]
+        confirmed = [e for _, e in members if e.get('status', 'confirmed') == 'confirmed']
+        groups.append(_Group(
+            pair=pair,
+            members=members,
+            status='confirmed' if confirmed else 'blocked',
+            rep=confirmed[0] if confirmed else members[0][1],
+        ))
+    return groups
+
+
+def _continuity_check(db, source_id: int, ical_rows: list) -> Callable[[CalendarEvent], bool]:
+    """Was this row listed in the source's previous successful sync?
+
+    Exact mode (the normal case): its synced_at equals the stored
+    last_stamp. Legacy mode (no last_stamp yet): its synced_at is within
+    60 s of the newest synced_at among the source's iCal rows."""
+    last_stamp = _read_last_stamp(db, source_id)
+    if last_stamp is not None:
+        return lambda row: row.synced_at is not None and db_value_to_utc(row.synced_at) == last_stamp
+    stamps = [db_value_to_utc(r.synced_at) for r in ical_rows if r.synced_at is not None]
+    if not stamps:
+        return lambda row: False
+    floor = max(stamps) - LEGACY_CONTINUITY_TOLERANCE
+    return lambda row: row.synced_at is not None and db_value_to_utc(row.synced_at) >= floor
+
+
+def _upsert_ical_events(db, source: CalendarSource, events: list, tz, run_stamp: datetime) -> _Counts:
+    """iCal branch. Deterministic and independent of feed order.
+
+    Feeds (Lodgify's export in particular) can mint a fresh UID on every
+    fetch, so a UID miss falls back to the natural key: this source's own
+    `ical_sync` row on the same local (check-in, check-out) day pair. Every
+    ambiguity inserts rather than skips -- an extra row adds guest time for
+    dates the feed really lists; a skipped one could leave a guest in owner
+    mode.
+
+    1. Group events by day pair (sorted).
+    2. Pass A: a UID hit on this source's own `ical_sync` row (stored raw
+       or derived). A UID that occurs in several groups (RRULE overrides)
+       hits only a row already on that group's pair.
+    3. Pass B, for groups without a hit: a live row on the pair; else a
+       deleted/cancelled/pending row with the same title that was listed in
+       the previous successful sync (left as the owner set it); else a
+       row of this source from another writer that /bookings serves (no-op);
+       else insert.
+    No row is claimed twice in a run.
+    """
+    counts = _Counts()
+    sid = source.id
+    groups = _group_events(events, tz)
+
+    uid_pairs: dict = {}
+    for g in groups:
+        for uid, _ in g.members:
+            if uid:
+                uid_pairs.setdefault(uid, set()).add(g.pair)
+    multi_group = {uid for uid, pairs in uid_pairs.items() if len(pairs) > 1}
+    first_pair = {uid: min(pairs) for uid, pairs in uid_pairs.items()}
+
+    own_rows = db.query(CalendarEvent).filter(CalendarEvent.source_id == sid).order_by(CalendarEvent.id).all()
+    ical_rows = [r for r in own_rows if r.created_by == ICAL_CREATED_BY]
+    other_rows = [r for r in own_rows if r.created_by != ICAL_CREATED_BY]
+    by_key = {r.external_id: r for r in ical_rows}
+    pair_of = {r.id: day_pair(r.checkin, r.checkout, tz) for r in own_rows}
+    ical_by_pair: dict = {}
+    for r in ical_rows:
+        ical_by_pair.setdefault(pair_of[r.id], []).append(r)
+    other_by_pair: dict = {}
+    for r in other_rows:
+        other_by_pair.setdefault(pair_of[r.id], []).append(r)
+    listed_last_sync = _continuity_check(db, sid, ical_rows)
+    inserted_keys: dict = {}
+
+    def claim(row: CalendarEvent) -> None:
+        counts.claimed_ids.add(row.id)
+
+    # Pass A: UID hits.
+    hit_pairs = set()
+    for g in groups:
+        candidates = []
+        for uid, _ in g.members:
+            if not uid:
+                continue
+            for key in (uid, derived_key(sid, uid)):
+                row = by_key.get(key)
+                if row is None or row.id in counts.claimed_ids:
+                    continue
+                if uid in multi_group and pair_of[row.id] != g.pair:
+                    continue
+                candidates.append((row, uid))
+        if not candidates:
+            continue
+        row, uid = min(candidates, key=lambda c: c[0].id)
+        claim(row)
+        if row.external_id == uid and is_reserved_uid(uid):
+            migrated = derived_key(sid, uid)
+            if migrated not in by_key:
+                row.external_id = migrated
+                by_key[migrated] = row
+                logger.info("calendar_sync_legacy_reserved_uid_migrated",
+                            source_id=sid, event_id=row.id, uid_sha10=uid_sha10(uid))
+        _apply_event_fields(row, g.rep, run_stamp, status=g.status)
+        counts.updated += 1
+        hit_pairs.add(g.pair)
+
+    def taken(key: str) -> Optional[CalendarEvent]:
+        """The row using `key`, if any (a staged insert counts as taken)."""
+        if key in inserted_keys:
+            return inserted_keys[key]
+        return db.query(CalendarEvent).filter(CalendarEvent.external_id == key).first()
+
+    def insert_key(uid: str, pair: DayPair) -> str:
+        if not uid:
+            return _nouid_key(sid)
+        if uid in multi_group and first_pair[uid] != pair:
+            counts.rekeyed += 1
+            _log_rekeyed("ical", source, uid, None)
+            return _nouid_key(sid)
+        derived = derived_key(sid, uid)
+        if is_reserved_uid(uid):
+            return derived if taken(derived) is None else _nouid_key(sid)
+        owner = taken(uid)
+        if owner is None:
+            return uid
+        counts.rekeyed += 1
+        _log_rekeyed("ical", source, uid, owner)
+        return derived if taken(derived) is None else _nouid_key(sid)
+
+    # Pass B: natural key, then insert.
+    for g in groups:
+        if g.pair in hit_pairs:
+            continue
+        candidates = [r for r in ical_by_pair.get(g.pair, []) if r.id not in counts.claimed_ids]
+        live = [r for r in candidates if r.deleted_at is None and r.status in ('confirmed', 'blocked')]
+        if live:
+            row = live[0]
+            claim(row)
+            _apply_event_fields(row, g.rep, run_stamp, status=g.status)
             counts.updated += 1
-        else:
-            db.add(_new_event(source, event, event['external_id'], ICAL_CREATED_BY, run_stamp))
-            counts.added += 1
+            counts.matched_natural_key += 1
+            continue
+
+        title = normalize_summary(g.rep.get('title'))
+        resolved = [
+            r for r in candidates
+            if (r.deleted_at is not None or r.status in ('cancelled', 'pending'))
+            and normalize_summary(r.title) == title
+            and listed_last_sync(r)
+        ]
+        if resolved:
+            row = resolved[0]
+            claim(row)
+            _apply_event_fields(row, g.rep, run_stamp, update_status=False)
+            counts.matched_deleted += 1
+            continue
+
+        served = [r for r in other_by_pair.get(g.pair, []) if r.deleted_at is None and r.status == 'confirmed']
+        if served:
+            counts.matched_non_ical += 1
+            continue
+
+        rep_uid = next((uid for uid, e in g.members if e is g.rep), '')
+        key = insert_key(rep_uid, g.pair)
+        row = _new_event(source, g.rep, key, ICAL_CREATED_BY, run_stamp, status=g.status)
+        db.add(row)
+        inserted_keys[key] = row
+        counts.inserted.append(row)
+        counts.added += 1
     return counts
 
 
@@ -311,8 +543,10 @@ async def run_source_sync(source_id: int, db, *, trigger: Trigger) -> SyncOutcom
         if method == 'lodgify_api':
             counts = _upsert_api_events(db, source, events, run_stamp)
         else:
-            counts = _upsert_ical_events(db, source, events, run_stamp)
+            tz, _ = resolve_property_tz(get_config().default_timezone)
+            counts = _upsert_ical_events(db, source, events, tz, run_stamp)
 
+        _stage_last_stamp(db, source.id, run_stamp)
         warning = _warning(counts)
         source.last_sync_at = run_stamp
         source.last_sync_status = 'success'
