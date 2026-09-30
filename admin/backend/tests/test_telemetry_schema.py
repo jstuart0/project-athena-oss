@@ -108,3 +108,20 @@ def test_extra_keys_forbidden_at_every_object_node():
     assert len(injected) >= 10
     assert "llm.components[0].x_extra" in injected
     assert injected == rejected
+
+
+def test_family_is_the_shipped_list_on_the_wire():
+    """D46: the wire family is MODEL_FAMILIES or `custom`, nothing else. The
+    committed schema carries the list, and the collector coerces any other
+    value to `custom` before storing it."""
+    from app.services.telemetry.schema import MODEL_FAMILIES
+
+    schema = Payload.model_json_schema()
+    family = schema["$defs"]["LLMComponent"]["properties"]["family"]
+    assert sorted(family["enum"]) == sorted(MODEL_FAMILIES | {"custom"})
+    for forged in ("10.0.0.1", "nas.local", "future-fam", "jays-house"):
+        payload = load_fixture("valid-v1-full.json")
+        payload["llm"]["components"][0]["family"] = forged
+        with pytest.raises(ValidationError) as info:
+            Payload.model_validate(payload)
+        assert error_paths(info.value) == {"llm.components[0].family"}

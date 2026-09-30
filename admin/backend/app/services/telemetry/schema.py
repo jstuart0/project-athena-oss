@@ -130,7 +130,10 @@ MODEL_FAMILIES = frozenset({
 })
 
 OpenName = Annotated[str, StringConstraints(pattern=OPEN_NAME_RE)]
-Family = Annotated[str, StringConstraints(pattern=FAMILY_RE)]
+# D46: the wire family is a closed list. The collector stores only its own
+# shipped list, coercing anything else to `custom`, so a family added here is
+# reported as `custom` until the collector ships the same list.
+Family = Literal[tuple(sorted(MODEL_FAMILIES | {"custom"}))]  # type: ignore[valid-type]
 NameList = Annotated[List[OpenName], Field(max_length=MAX_NAMES)]
 CountBucket = Literal["0", "1", "2-5", "6-20", "21-50", "51-200", "201-1000", "1001+"]
 RateBucket = Literal["0", "<1", "1-9", "10-49", "50-199", "200+"]
