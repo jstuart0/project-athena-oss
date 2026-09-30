@@ -15,6 +15,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Semantic cache.** Flush `athena_semantic:*` once after the orchestrator upgrade, so answers cached with a guest's name or a UTC date aren't served again.
 - **SMS conversations** start afresh once: their session ids change (see Security).
 - **Base knowledge.** A `guest_name` entry is now ignored, and `owner_name` is used only in owner mode. Nothing to migrate; delete a stale `guest_name` entry at your convenience.
+- **Install telemetry turns on after this upgrade.** admin-backend starts sending a pseudonymous daily heartbeat (see Added). To keep it off, set `ATHENA_TELEMETRY=off` (or `DO_NOT_TRACK=1`) in admin-backend's environment or `.env` before upgrading. The first heartbeat is sent no sooner than 5 minutes after admin-backend starts.
+
+### Added
+
+- `JARVIS_EDGE_NAME_HEADER` (default `X-authentik-name`): the signed-in household member's display name from the auth proxy; only the first word is used. jarvis-web refuses to start if an edge identity, groups or name header is one of its own reserved headers or a request header like `Authorization`, `Cookie`, `Host`, `X-Forwarded-For` or `CF-Connecting-IP`, or if two of them are the same.
+- CI: source guards that fail on a new process-timezone clock read, a newly logged name/address/location/phone number, or a `caller_trust` value the orchestrator doesn't accept.
+- **Pseudonymous install telemetry.** admin-backend sends a `first_boot` event, then a heartbeat about once a day: version, install class, deployment shape, each LLM component's model family, size bucket and local-vs-cloud placement, and coarse feature and usage buckets. No hostnames, URLs, keys, names, queries or guest data, and model names are never sent (only a family from a public list, or `custom`). Off with `ATHENA_TELEMETRY=off`, `DO_NOT_TRACK=1`, or the new **Install telemetry** card under System Configuration, which also shows the exact last payload. The payload schema is published in `docs/telemetry/payload-v1.schema.json`; see `docs/CONFIGURATION.md` "Telemetry".
 
 ### Fixed
 
@@ -22,6 +29,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The assistant's time and date, "today"/"tomorrow", spoken-date years, event, sports and transit day windows, and scheduled "at 7:00" waits follow `DEFAULT_TIMEZONE` instead of the pod's process timezone. SeatGeek, sports and community-event windows cover whole local days, including across daylight-saving changes. Impossible dates like "February 30" no longer raise an error.
 - The admin-backend image builds again. It downloads the embedding model at its pinned revision instead of the latest upstream commit, so a new upstream commit no longer fails every build, and the build checks the model loads and embeds offline. The pin moves to a revision whose tokenizer pads each batch to its longest text: with the previous one, a batch mixing a memory over about 126 tokens with shorter ones failed to embed, so rebuilding vectors or indexing several memories at once could mark the memory store unavailable.
 - Itineraries and other structured answers are no longer cut off at their second `---` divider or repeated `Label: value` line, and sections under different headings (Day 1, Day 2, ...) are never treated as repeats; thinking-mode repetition loops are still trimmed.
+- The 0.5.0 release left `src/shared`, the gateway, jetson and the control agent at `0.4.0`, and admin-backend's API reported `2.0.0`. All of them now report `0.5.0`.
 
 ### Changed
 
@@ -31,11 +39,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Answers addressed to a named caller are no longer served from or stored in the semantic cache.
 - A scheduled "at 1:45" during the repeated hour of a daylight-saving change waits for the next 1:45, and a time inside the spring-forward gap runs at the first moment after it.
 - The orchestrator, gateway and the community-events, SeatGeek, transportation, Tesla and sports images ship the IANA zone database.
-
-### Added
-
-- `JARVIS_EDGE_NAME_HEADER` (default `X-authentik-name`): the signed-in household member's display name from the auth proxy; only the first word is used. jarvis-web refuses to start if an edge identity, groups or name header is one of its own reserved headers or a request header like `Authorization`, `Cookie`, `Host`, `X-Forwarded-For` or `CF-Connecting-IP`, or if two of them are the same.
-- CI: source guards that fail on a new process-timezone clock read, a newly logged name/address/location/phone number, or a `caller_trust` value the orchestrator doesn't accept.
 
 ### Security
 

@@ -304,22 +304,23 @@ def cmd_app3309(args) -> tuple[int, dict]:
     # ATHENA-112 shifted it again (enabled/disabled dashboard-grouping
     # rewrite of loadStatus, +41 lines above this point) to :3374; ATHENA-112
     # P3 shifted it again (summarizeServices() extraction, +20 lines) to
-    # :3394.
+    # :3394; the install-telemetry panel init in the system-config tab case
+    # (+3 lines) moved it to :3397.
     path = args.dir / "app.js"
     if not path.is_file():
         return 2, {"error": f"{path} not found"}
     text = path.read_text(encoding="utf-8", errors="ignore")
-    spans = [s for s in scan.find_handler_spans(text) if s.line == 3394]
+    spans = [s for s in scan.find_handler_spans(text) if s.line == 3397]
     if not spans:
-        return 1, {"error": "no handler span at app.js:3394"}
+        return 1, {"error": "no handler span at app.js:3397"}
     span = spans[0]
     if span.quote != '"':
-        return 1, {"error": f"expected double-quoted outer attribute (Phase 6 switches app.js:3394's delimiter for consistency), got {span.quote!r}"}
+        return 1, {"error": f"expected double-quoted outer attribute (Phase 6 switches app.js:3397's delimiter for consistency), got {span.quote!r}"}
     has_escape_html_call = bool(re.search(r"escapeHtml\s*\(\s*JSON\.stringify", span.raw_value))
     has_replace = ".replace(" in span.raw_value and "escapeHtml" in span.raw_value
     if not has_escape_html_call or has_replace:
         return 1, {
-            "error": "app.js:3394 does not use escapeHtml(JSON.stringify(config)) with no .replace",
+            "error": "app.js:3397 does not use escapeHtml(JSON.stringify(config)) with no .replace",
             "raw_value": span.raw_value,
         }
     return 0, {"raw_value": span.raw_value}

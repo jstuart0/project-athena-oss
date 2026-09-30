@@ -1,0 +1,205 @@
+{
+  "event": "heartbeat",
+  "features": {
+    "flags_enabled": [
+      "conversation_context",
+      "intent_classification"
+    ],
+    "modules_enabled": [
+      "guest_mode",
+      "home_assistant",
+      "jarvis_web"
+    ]
+  },
+  "guest_mode": {
+    "calendar_source_types": [
+      "airbnb",
+      "lodgify"
+    ],
+    "enabled": true,
+    "legacy_ical_configured": false
+  },
+  "home_assistant": {
+    "configured": true
+  },
+  "install": {
+    "arch": "x86_64",
+    "deployment": "kubernetes",
+    "install_class": "self_hosted_real",
+    "platform": "linux",
+    "provenance": "upgraded",
+    "release_channel": "stable",
+    "version": "0.5.0"
+  },
+  "installation_id": "3f1c9b2e-7d4a-4c1e-9a6b-2f8e5d7c1a90",
+  "llm": {
+    "cloud_providers_enabled": [
+      "openai"
+    ],
+    "components": [
+      {
+        "assignment": "configured",
+        "backend": "openai_compatible",
+        "component": "conversation_summarizer",
+        "family": "custom",
+        "locality": "local",
+        "quantized": false,
+        "size_bucket": "unknown",
+        "source": "custom"
+      },
+      {
+        "assignment": "builtin_default",
+        "backend": "ollama",
+        "component": "fact_check_validation",
+        "family": "qwen3",
+        "locality": "local",
+        "quantized": true,
+        "size_bucket": "4-9b",
+        "source": "ollama-library"
+      },
+      {
+        "assignment": "configured",
+        "backend": "ollama",
+        "component": "intent_classifier",
+        "family": "qwen3",
+        "locality": "local",
+        "quantized": true,
+        "size_bucket": "4-9b",
+        "source": "ollama-library"
+      },
+      {
+        "assignment": "configured",
+        "backend": "ollama",
+        "component": "intent_discovery",
+        "family": "llama3.1",
+        "locality": "local",
+        "quantized": false,
+        "size_bucket": "4-9b",
+        "source": "ollama-library"
+      },
+      {
+        "assignment": "configured",
+        "backend": "openai",
+        "component": "response_synthesis",
+        "family": "gpt-4o",
+        "locality": "cloud",
+        "quantized": false,
+        "size_bucket": "unknown",
+        "source": "vendor-api"
+      },
+      {
+        "assignment": "configured",
+        "backend": "anthropic",
+        "component": "response_validator_primary",
+        "family": "claude-sonnet",
+        "locality": "cloud",
+        "quantized": false,
+        "size_bucket": "unknown",
+        "source": "vendor-api"
+      },
+      {
+        "assignment": "configured",
+        "backend": "mlx",
+        "component": "response_validator_secondary",
+        "family": "mixtral",
+        "locality": "local",
+        "quantized": false,
+        "size_bucket": "41-80b",
+        "source": "ollama-library"
+      },
+      {
+        "assignment": "configured",
+        "backend": "ollama",
+        "component": "smart_home_control",
+        "family": "gpt-oss",
+        "locality": "cloud",
+        "quantized": false,
+        "size_bucket": "gt80b",
+        "source": "ollama-library"
+      },
+      {
+        "assignment": "configured",
+        "backend": "openai",
+        "component": "tool_calling_complex",
+        "family": "qwen3",
+        "locality": "local",
+        "quantized": false,
+        "size_bucket": "4-9b",
+        "source": "ollama-library"
+      },
+      {
+        "assignment": "configured",
+        "backend": "openai",
+        "component": "tool_calling_simple",
+        "family": "qwen3",
+        "locality": "local",
+        "quantized": false,
+        "size_bucket": "4-9b",
+        "source": "ollama-library"
+      },
+      {
+        "assignment": "configured",
+        "backend": "ollama",
+        "component": "tool_calling_super_complex",
+        "family": "qwen2.5",
+        "locality": "local",
+        "quantized": true,
+        "size_bucket": "4-9b",
+        "source": "hf-public-publisher"
+      }
+    ],
+    "custom_components": "0"
+  },
+  "memory": {
+    "memories": "21-50",
+    "vector_store": "ready"
+  },
+  "platform_config": {
+    "auth_modes": [
+      "local",
+      "oidc"
+    ],
+    "control_agent_enabled": false,
+    "oidc_configured": true,
+    "service_control_k8s_enabled": true
+  },
+  "schema_version": 1,
+  "services": {
+    "core_enabled": "2-5",
+    "core_healthy": "1",
+    "infrastructure_healthy": [
+      "redis"
+    ],
+    "rag_custom": "1",
+    "rag_enabled": [
+      "sports",
+      "weather"
+    ],
+    "rag_healthy": [
+      "weather"
+    ]
+  },
+  "usage": {
+    "intent_mix_30d": {
+      "control": 40,
+      "general_info": 20,
+      "other": 10,
+      "weather": 30
+    },
+    "queries_per_day_30d": "1-9"
+  },
+  "voice": {
+    "jarvis_web_enabled": true,
+    "jetson_devices": "1",
+    "livekit_enabled": true,
+    "stt_engines": [
+      "faster-whisper",
+      "other"
+    ],
+    "tts_engines": [
+      "kokoro",
+      "piper"
+    ],
+    "wyoming_devices": "2-5"
+  }
+}

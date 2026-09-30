@@ -20,6 +20,10 @@ data:
   # silently clobber a deployment-specific value with an absent key. Set the
   # ones you need by uncommenting; leave the rest commented to keep the
   # AthenaConfig default.
+  # Install telemetry is on by default (a pseudonymous daily heartbeat from
+  # admin-backend; see docs/CONFIGURATION.md "Telemetry"). To turn it off:
+  # ATHENA_TELEMETRY: "off"
+  # DO_NOT_TRACK: "1"
   # COMMUNITY_EVENTS_SOURCES: ""
   # CONTENT_FETCHER_ALLOW_BROWSER_FETCH: ""
   # CONTROL_AGENT_ENABLED: ""

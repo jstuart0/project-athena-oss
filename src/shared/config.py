@@ -54,6 +54,12 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
+import re
+from dataclasses import dataclass
+from typing import Callable, Dict, Mapping, Optional
+
+from dotenv import dotenv_values
 
 from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -649,3 +655,93 @@ def _clear_cache_for_tests() -> None:
     See the equivalent note in ``src/shared/admin_url.py::_clear_cache_for_tests``.
     """
     get_config.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Install telemetry (admin-backend). These four variables are deliberately not
+# AthenaConfig fields: get_config() is cached, and an opt-out must take effect
+# on the next decision, so they're re-read from the process env and `.env` on
+# every call. The opt-outs are a fail-closed union of the two sources.
+# ---------------------------------------------------------------------------
+
+TELEMETRY_DEFAULT_ENDPOINT = "https://telemetry-athena.xmojo.net/v1/ping"
+TELEMETRY_ENV_KEYS = ("ATHENA_TELEMETRY", "DO_NOT_TRACK", "ATHENA_TELEMETRY_ENDPOINT", "ATHENA_TELEMETRY_MODE")
+
+
+# A line in `.env` that names a telemetry variable must be a plain
+# `NAME=value` (optionally `export NAME=value`). python-dotenv silently skips
+# a line it can't parse (`ATHENA_TELEMETRY: off`, `DO_NOT_TRACK 1`), which
+# would lose an opt-out, so such a line makes the whole reading fail closed.
+_TELEMETRY_LINE = {
+    key: re.compile(rf"^\s*(?:export\s+)?{key}(?![A-Za-z0-9_])") for key in TELEMETRY_ENV_KEYS
+}
+_TELEMETRY_ASSIGNMENT = {
+    key: re.compile(rf"^\s*(?:export\s+)?{key}\s*=") for key in TELEMETRY_ENV_KEYS
+}
+
+
+class ParseError(ValueError):
+    """A telemetry variable's line in `.env` isn't a `NAME=value` assignment."""
+
+
+def _check_telemetry_lines(dotenv_path: str) -> None:
+    with open(dotenv_path, encoding="utf-8") as handle:
+        for line in handle.read().splitlines():
+            for key in TELEMETRY_ENV_KEYS:
+                if _TELEMETRY_LINE[key].match(line) and not _TELEMETRY_ASSIGNMENT[key].match(line):
+                    raise ParseError(key)
+
+
+@dataclass(frozen=True)
+class TelemetryEnvReading:
+    """The four telemetry variables as found in each source, kept apart so an
+    empty process value can never mask a `.env` opt-out. ``dotenv_error`` is
+    the exception class name when `.env` exists but can't be read."""
+
+    process: Dict[str, str]
+    dotenv: Dict[str, str]
+    dotenv_error: Optional[str] = None
+
+
+def read_telemetry_env(
+    environ: Optional[Mapping[str, str]] = None,
+    dotenv_path: str = ".env",
+    reader: Optional[Callable[[str], Mapping[str, Optional[str]]]] = None,
+) -> TelemetryEnvReading:
+    """Read the telemetry variables from the process env and `.env` (resolved
+    against the working directory, as pydantic-settings resolves it for
+    AthenaConfig). Uncached, and never raises: an absent `.env` is empty; an
+    unreadable one, or one with a telemetry line that isn't a `NAME=value`
+    assignment, is reported in ``dotenv_error`` (which means off)."""
+    environ = os.environ if environ is None else environ
+    process = {k: str(environ[k]) for k in TELEMETRY_ENV_KEYS if k in environ}
+    dotenv: Dict[str, str] = {}
+    error: Optional[str] = None
+    try:
+        if os.path.lexists(dotenv_path):
+            values = (reader or dotenv_values)(dotenv_path)
+            _check_telemetry_lines(dotenv_path)
+            dotenv = {k: ("" if values[k] is None else str(values[k])) for k in TELEMETRY_ENV_KEYS if k in values}
+    except Exception as exc:  # noqa: BLE001 - any read failure means "off"
+        error = type(exc).__name__
+    return TelemetryEnvReading(process=process, dotenv=dotenv, dotenv_error=error)
+
+
+def _first_non_empty(reading: TelemetryEnvReading, key: str) -> Optional[str]:
+    for source in (reading.process, reading.dotenv):
+        value = (source.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def resolve_endpoint(reading: TelemetryEnvReading, default: str = TELEMETRY_DEFAULT_ENDPOINT) -> str:
+    """A non-empty process value, else `.env`, else the default. (An
+    explicitly empty value disables telemetry; that's the enablement rule's
+    job, not this resolver's.)"""
+    return _first_non_empty(reading, "ATHENA_TELEMETRY_ENDPOINT") or default
+
+
+def resolve_mode(reading: TelemetryEnvReading) -> str:
+    """ATHENA_TELEMETRY_MODE, lowercased: process, else `.env`, else ""."""
+    return (_first_non_empty(reading, "ATHENA_TELEMETRY_MODE") or "").lower()

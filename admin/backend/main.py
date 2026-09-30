@@ -24,9 +24,10 @@ from sqlalchemy.orm import Session
 import structlog
 
 from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_dev_data, seed_oss_defaults, seed_oss_features, seed_oss_conversation_settings, seed_oss_service_registry, seed_oss_base_knowledge, OSS_DEFAULT_MODEL, OSS_OLLAMA_URL, OSS_AUTO_PULL_MODELS, OSS_SEED_DEFAULTS
+from shared import __version__ as ATHENA_VERSION
 from shared.config import get_config
 from app.services.calendar_sync import start_background_sync, stop_background_sync
-from app.services import memory_vectors
+from app.services import memory_vectors, telemetry
 from app.services.health_poller import start_health_polling, stop_health_polling
 from app.auth.oidc import (
     oauth,
@@ -56,6 +57,7 @@ from app.routes import (
     dashboard, integrations, escalation, debug_logs, modules, local_auth, oss_profiles,
     conversations
 )
+from app.routes import telemetry as telemetry_routes
 
 logger = structlog.get_logger()
 
@@ -65,7 +67,7 @@ if DEV_MODE:
 app = FastAPI(
     title="Project Athena Admin API",
     description="Admin interface for monitoring and managing Athena services",
-    version="2.0.0",  # Version 2 with authentication
+    version=ATHENA_VERSION,
     redirect_slashes=False  # Disable automatic trailing slash redirects
 )
 
@@ -122,6 +124,7 @@ app.include_router(validation_models.router)
 app.include_router(conversation.router)
 app.include_router(llm_backends.router)
 app.include_router(settings.router)
+app.include_router(telemetry_routes.router)
 app.include_router(intent_routing.router)
 app.include_router(features.router)
 app.include_router(external_api_keys.router)
@@ -400,7 +403,7 @@ async def _warn_if_ollama_url_ssrf_blocked() -> None:
 @app.on_event("startup")
 async def startup_event():
     """Initialize database and verify connections on startup."""
-    logger.info("athena_admin_startup", version="2.0.0", dev_mode=DEV_MODE)
+    logger.info("athena_admin_startup", version=ATHENA_VERSION, dev_mode=DEV_MODE)
 
     # Campaign 3 / ATHENA-14 — Phase 4 will add atomic UPDATE...RETURNING for lockout
     # (failed_login_count increment). Pre-placed at startup so the SQLite version
@@ -732,6 +735,10 @@ async def startup_event():
     if not DEV_MODE:
         websocket.configure_redis(redis_client)
 
+    # Pseudonymous install telemetry: logs its disclosure (or why it's off)
+    # and starts the daily loop. Never raises.
+    telemetry.start_telemetry()
+
 
 async def ensure_default_model():
     """
@@ -801,6 +808,7 @@ async def shutdown_event():
     await stop_background_sync()
     await stop_health_polling()
     await memory_vectors.stop_vector_store_maintenance()
+    await telemetry.stop_telemetry()
 
 
 # Authentication routes

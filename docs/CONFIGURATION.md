@@ -15,6 +15,7 @@ Complete reference for all configuration options in Project Athena.
 9. [Voice Services](#voice-services)
 10. [Security Settings](#security-settings)
 11. [Advanced Settings](#advanced-settings)
+12. [Telemetry](#telemetry)
 
 ---
 
@@ -55,6 +56,7 @@ every addition.
 | `OIDC_CLIENT_ID` | `oidc_client_id` | `""` |
 | `DEMO_MODE` | `demo_mode` | `false` |
 | `DEV_MODE` | `dev_mode` | `false` |
+| `ATHENA_TELEMETRY`, `DO_NOT_TRACK`, `ATHENA_TELEMETRY_ENDPOINT`, `ATHENA_TELEMETRY_MODE` | not fields: read per call by `read_telemetry_env()` from the process env and `.env` | see [Telemetry](#telemetry) |
 
 There is also a `llm_endpoint` computed property that returns `LLM_SERVICE_URL or OLLAMA_URL` — the dominant precedence used by the orchestrator and gateway.
 
@@ -1618,6 +1620,120 @@ worked Denver example, including a feed with an optional `bounds` box.
 - **`bounds` is exclusive.** A GTFS feed's optional `bounds` box (`min_lat`/`max_lat`/`min_lon`/`max_lon`) filters stops with a strict `<` comparison on every edge — a stop exactly on a boundary value is excluded, not included.
 - **`allow_private` residual.** Both feed and event-source fetches go through the shared SSRF guard (`shared.url_safety.safe_get`) with, by default, no private hosts allowed on any hop. Setting `allow_private: true` on one feed/source exempts only that entry's own hostname — on every hop, not just the first. That means the named host resolving to a different private address later (DNS rebinding) or redirecting to itself at a private address are both accepted as operator trust for that one host; a redirect to any *other* private host is still blocked. This is stricter than the CONTRIBUTING.md Class 3 exemption, deliberately — these fetch third-party content, and a hijacked upstream redirect shouldn't reach cluster-internal addresses.
 - **The maintainer-leak CI gate has documented non-goals** — it deliberately doesn't catch a team/place name that doesn't contain the configured home city, a bare latitude with no longitude, or a Linux `/home/<user>` path (only `/Users/…` is ruled). Run `python3 scripts/check-maintainer-leaks.py --help` for the full list before assuming an example value is automatically safe.
+
+---
+
+## Telemetry
+
+admin-backend sends a small **pseudonymous** heartbeat to the Athena maintainers: a `first_boot` event once, then a `heartbeat` about once a day. It's pseudonymous, not anonymous: every install has a random installation ID, so its heartbeats can be linked to each other. Nothing in it identifies you, your household, your guests or your network.
+
+It's **on by default**. It's separate from the Privacy **analytics mode** in the Admin UI, which records conversation turns in your own database and never leaves the install.
+
+### Turning it off
+
+Any one of these switches it off:
+
+- `ATHENA_TELEMETRY=off` (also `false`, `0` or `no`; any value other than `on`, `true`, `1` or `yes` counts as off)
+- `DO_NOT_TRACK=1` (any value other than `0`, `false` or `no`)
+- the **Install telemetry** card under **System Configuration** in the Admin UI (owner only)
+
+The two variables are read on every decision from **both** the process environment and the `.env` file in admin-backend's working directory, and an opt-out in either one wins: an empty value in the process environment never overrides `ATHENA_TELEMETRY=off` in `.env`. If `.env` exists but can't be read, or a line naming one of these variables isn't a plain `NAME=value` assignment (for example `ATHENA_TELEMETRY: off`), telemetry is off. An environment opt-out can't be overridden from the Admin UI.
+
+To turn it off before upgrading, set `ATHENA_TELEMETRY=off` in admin-backend's environment (for Kubernetes, the `athena-config` ConfigMap or your private overlay) before the new version starts. The first send is never earlier than 5 minutes after admin-backend starts.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ATHENA_TELEMETRY` | on | `off` disables telemetry |
+| `DO_NOT_TRACK` | unset | `1` disables telemetry |
+| `ATHENA_TELEMETRY_ENDPOINT` | the maintainers' collector (`TELEMETRY_DEFAULT_ENDPOINT` in `src/shared/config.py`) | Where heartbeats go. Must be `https://` (or `http://` to `localhost`/a loopback address), with no credentials, query or fragment, at most 200 characters; anything else turns telemetry off. An explicitly empty value turns it off. |
+| `ATHENA_TELEMETRY_MODE` | detected | Overrides the install class: `self_hosted_real`, `dev`, `test`, `ci` or `production` (`production` is reserved for the maintainers' own deployments) |
+
+These four variables aren't `AthenaConfig` fields: they're read at call time by `read_telemetry_env()` in `src/shared/config.py`, so a change to `.env` takes effect without a restart.
+
+### When it doesn't send
+
+It stays silent, whatever the settings, when:
+
+- the install class is `ci` (`CI=true`) or `test` (running under pytest) and `ATHENA_TELEMETRY_MODE` isn't set
+- the database is in-memory SQLite, which includes every `DEV_MODE` instance (an identity there couldn't outlive the process)
+- the endpoint is invalid or explicitly empty
+
+The install class is otherwise `dev` for development and pre-release versions and `self_hosted_real` for a stable release.
+
+### What's sent
+
+The exact bytes of the last payload are shown in the Admin UI card (**Show the last payload sent**), and the full schema is in `docs/telemetry/payload-v1.schema.json`. Counts are buckets (`0`, `1`, `2-5`, `6-20`, `21-50`, `51-200`, `201-1000`, `1001+`), usage is a 30-day average in buckets, and there are no timestamps. Module and Home Assistant signals describe admin-backend's own environment, which matches the other services' when they share one ConfigMap.
+
+| Path | Values | Meaning |
+|---|---|---|
+| `schema_version` | `1` | Payload version |
+| `installation_id` | random UUID | The pseudonymous installation ID |
+| `event` | `first_boot`, `heartbeat` | Which event this is |
+| `install.version` | e.g. `0.5.0` | Athena version |
+| `install.release_channel` | `stable`, `prerelease`, `dev` | From the version |
+| `install.install_class` | `production`, `self_hosted_real`, `dev`, `test`, `ci` | See above |
+| `install.provenance` | `new`, `upgraded` | `upgraded` when the database already had users or queries more than a day before the ID was created |
+| `install.platform` | `linux`, `darwin`, `windows`, `other` | Operating system |
+| `install.arch` | `x86_64`, `aarch64`, `other` | CPU architecture |
+| `install.deployment` | `kubernetes`, `container`, `bare` | How admin-backend runs |
+| `services.core_enabled` | count bucket | Enabled core services in the service registry |
+| `services.core_healthy` | count bucket | Of those, healthy |
+| `services.rag_enabled` | names of built-in RAG services | Enabled RAG services (built-in names only) |
+| `services.rag_healthy` | names of built-in RAG services | Healthy RAG services (built-in names only) |
+| `services.rag_custom` | count bucket | RAG services you added (never named) |
+| `services.infrastructure_healthy` | `redis`, `qdrant`, `postgres`, `searxng`, `control-agent` | Healthy infrastructure services |
+| `llm.components[].component` | a built-in LLM component name | e.g. `intent_classifier` |
+| `llm.components[].assignment` | `configured`, `builtin_default` | Whether you assigned a model or the default is used |
+| `llm.components[].family` | a public model family, or `custom` | e.g. `qwen3`, `llama3.1`, `gpt-4o`, `claude-sonnet` |
+| `llm.components[].size_bucket` | `le3b`, `4-9b`, `10-20b`, `21-40b`, `41-80b`, `gt80b`, `unknown` | Parameter-count bucket |
+| `llm.components[].quantized` | `true`, `false` | Whether the model is a quantized build |
+| `llm.components[].source` | `ollama-library`, `hf-public-publisher`, `vendor-api`, `custom-registry`, `custom` | Where the model comes from |
+| `llm.components[].backend` | `ollama`, `mlx`, `auto`, `openai`, `anthropic`, `google`, `openai_compatible` | Which backend serves it |
+| `llm.components[].locality` | `local`, `cloud`, `remote`, `unknown` | Whether inference runs on your network |
+| `llm.custom_components` | count bucket | Components you added (never named) |
+| `llm.cloud_providers_enabled` | `openai`, `anthropic`, `google` | Enabled cloud LLM providers |
+| `features.modules_enabled` | module IDs | Enabled modules (`home_assistant`, `guest_mode`, `notifications`, `monitoring`, `jarvis_web`) |
+| `features.flags_enabled` | built-in feature flag names | Enabled feature flags (built-in names only) |
+| `home_assistant.configured` | `true`, `false` | Whether `HA_URL` and `HA_TOKEN` are both set. Home Assistant is never contacted. |
+| `voice.wyoming_devices` | count bucket | Registered Wyoming devices |
+| `voice.jetson_devices` | count bucket | Registered Jetson devices |
+| `voice.livekit_enabled` | `true`, `false` | LiveKit enabled |
+| `voice.jarvis_web_enabled` | `true`, `false` | The Jarvis web module enabled |
+| `voice.stt_engines` | built-in engine names, or `other` | Speech-to-text engines in enabled voice interfaces |
+| `voice.tts_engines` | built-in engine names, or `other` | Text-to-speech engines in enabled voice interfaces |
+| `guest_mode.enabled` | `true`, `false` | Guest mode enabled |
+| `guest_mode.calendar_source_types` | `airbnb`, `vrbo`, `lodgify`, `generic_ical` | Types of enabled calendar sources |
+| `guest_mode.legacy_ical_configured` | `true`, `false` | Whether the legacy single iCal URL is set (the URL is never sent) |
+| `memory.memories` | count bucket | Stored memories |
+| `memory.vector_store` | `ready`, `unavailable`, `embedder_unavailable`, `shape_mismatch`, `other` | Memory vector store state |
+| `usage.queries_per_day_30d` | `0`, `<1`, `1-9`, `10-49`, `50-199`, `200+` | Average queries per day over 30 days |
+| `usage.intent_mix_30d` | intent → percent in tens, or `null` | Share of queries per intent; omitted below 100 queries |
+| `platform_config.auth_modes` | `oidc`, `local` | Sign-in methods in use |
+| `platform_config.oidc_configured` | `true`, `false` | Whether an OIDC issuer is set |
+| `platform_config.control_agent_enabled` | `true`, `false` | `CONTROL_AGENT_ENABLED` |
+| `platform_config.service_control_k8s_enabled` | `true`, `false` | `SERVICE_CONTROL_K8S_ENABLED` |
+
+**Models.** A model is described only by its family, size bucket, a quantized flag and its source; the model name, tag, repository and publisher are never sent. The family comes from a fixed list of public model families; anything else, including a model you named yourself, is reported as `custom`. `source` is `ollama-library` only for a recognized family followed by nothing but size, quantization and version tokens; `llama-my-house` is reported as family `llama` with source `custom`. The combination of these fields across components can make one install distinguishable in the maintainers' dashboard, which is why this is called pseudonymous.
+
+**Never sent:** hostnames, URLs, IP addresses or ports; keys, tokens or passwords; usernames, email addresses, guest or household names; rooms, zones or Home Assistant entities (not even counts); calendar URLs, events or stay dates; queries or conversation text; memory content; SMS data; timezone, city or coordinates; exact counts; timestamps; error messages.
+
+### Where it goes and what's kept
+
+Heartbeats go to the endpoint above, a collector the Athena maintainers run on Cloudflare. Only the maintainers can see the stored data, through a private dashboard; there are no public statistics. Cloudflare sees the source IP address in order to serve the request, and a short-lived edge rate-limit counter is keyed on it; the collector stores no IP address, header or user agent.
+
+- Per-installation daily snapshots are kept **35 days**.
+- An installation's current state (its last payload) is deleted **400 days** after its last heartbeat.
+- Aggregate daily counts, which carry no installation IDs, are kept 400 days.
+
+The collector accepts at most 2,000 new installations per UTC day, so a burst of forged pings could make new installs fail for the rest of that day. Existing installations are unaffected.
+
+### The install key
+
+Each installation also has a random install key, stored only in its own database. It is never sent: each request carries an HMAC of it bound to the collector's address (`X-Athena-Install-Key`), and the collector stores only a hash of that. It stops someone who learns your installation ID from sending heartbeats in its name. A database copied onto a second install shares the identity, and deleting the key's settings row makes the collector reject heartbeats until the identity is reset.
+
+### Resetting the identity
+
+**Reset telemetry identity** in the Admin UI card deletes the installation ID, the key and all send state; the next heartbeat starts a new ID with a `first_boot` event. This isn't unlinkability: the collector keeps the old ID's rows until retention removes them, and the old and new IDs can be correlated by timing and by what they report.
 
 ---
 

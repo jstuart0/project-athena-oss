@@ -786,6 +786,7 @@ function destroySystemConfigPage() {
     if (typeof RefreshManager !== 'undefined') {
         RefreshManager.clearInterval('system-config-refresh');
     }
+    if (typeof destroyTelemetryPanel === 'function') destroyTelemetryPanel();
 }
 
 // Export for external use
