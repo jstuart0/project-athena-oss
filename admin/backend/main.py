@@ -27,7 +27,7 @@ from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_de
 from shared import __version__ as ATHENA_VERSION
 from shared.config import get_config
 from app.services.calendar_sync import start_background_sync, stop_background_sync
-from app.services import memory_vectors
+from app.services import memory_vectors, telemetry
 from app.services.health_poller import start_health_polling, stop_health_polling
 from app.auth.oidc import (
     oauth,
@@ -733,6 +733,10 @@ async def startup_event():
     if not DEV_MODE:
         websocket.configure_redis(redis_client)
 
+    # Pseudonymous install telemetry: logs its disclosure (or why it's off)
+    # and starts the daily loop. Never raises.
+    telemetry.start_telemetry()
+
 
 async def ensure_default_model():
     """
@@ -802,6 +806,7 @@ async def shutdown_event():
     await stop_background_sync()
     await stop_health_polling()
     await memory_vectors.stop_vector_store_maintenance()
+    await telemetry.stop_telemetry()
 
 
 # Authentication routes

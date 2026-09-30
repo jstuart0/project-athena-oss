@@ -35,6 +35,7 @@ from app.database import Base, get_db
 from app.models import User, UserAPIKey
 from app.auth.oidc import get_current_user
 from app.services import memory_vectors
+from app.services.telemetry import sender as telemetry_sender
 from main import app
 
 memory_vectors.set_background_enabled(False)
@@ -161,6 +162,37 @@ def _calendar_sync_lease_on_test_db(monkeypatch):
     from app.services import calendar_sync
 
     monkeypatch.setattr(calendar_sync, "LEASE_SESSION_FACTORY", TestingSessionLocal)
+
+
+@pytest.fixture(autouse=True)
+def _telemetry_off_and_on_the_test_db(monkeypatch):
+    """Telemetry is opted out for every test (effective: the switches are
+    read at call time), its lease and state use the test database, and a
+    stray `.env` in the working directory can't reach it. The module is the
+    one imported at collection (several suites evict `app.*` from
+    sys.modules mid-run; a call-time import would patch a fresh copy)."""
+    monkeypatch.setenv("ATHENA_TELEMETRY", "off")
+    monkeypatch.setattr(telemetry_sender, "LEASE_SESSION_FACTORY", TestingSessionLocal)
+    monkeypatch.setattr(telemetry_sender, "DOTENV_PATH", "/nonexistent-athena-telemetry-test/.env")
+    telemetry_sender._reset_for_tests()
+    yield
+    telemetry_sender._reset_for_tests()
+
+
+@pytest.fixture
+def telemetry_env(monkeypatch):
+    """Opt a test back in: an explicit install class (pytest would otherwise
+    classify as `test`), a persistent-looking database, a fresh config."""
+    from shared.config import get_config
+
+    get_config.cache_clear()
+    monkeypatch.setenv("ATHENA_TELEMETRY_MODE", "self_hosted_real")
+    monkeypatch.setenv("ATHENA_TELEMETRY", "")
+    for name in ("DO_NOT_TRACK", "ATHENA_TELEMETRY_ENDPOINT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(telemetry_sender, "EPHEMERAL_DB_CHECK", lambda: False)
+    yield
+    get_config.cache_clear()
 
 
 @pytest.fixture(scope="function")

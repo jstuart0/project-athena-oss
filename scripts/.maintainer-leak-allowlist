@@ -20,6 +20,7 @@ src/rag/amtrak/main.py	maintainer-city	"baltimore penn": "BAL",	national station
 scripts/setup-mac-studio.sh	maintainer-host	#   ./setup-mac-studio.sh [ollama|mlx|both]	script filename in its own usage comment (Apple Silicon host setup)
 LICENSE	maintainer-domain	For commercial licensing inquiries, contact: jay@xmojo.net	licensing contact
 README.md	maintainer-domain	For commercial licensing inquiries, contact: jay@xmojo.net	licensing contact
+src/shared/config.py	maintainer-domain	TELEMETRY_DEFAULT_ENDPOINT = "https://telemetry-athena.xmojo.net/v1/ping"	the default install-telemetry collector; the one site that holds it
 docs/INSTALLATION.md	*	still contains rows with `http://192.168.10.167:*` (the maintainer's homelab IPs	explains the 053/058 scrubbers
 docs/INSTALLATION.md	*	in the `secrets` table that were seeded with the maintainer's xmojo.net values	explains the 053/058 scrubbers
 admin/backend/tests/test_migration_058.py	maintainer-domain	LEGACY_REDIRECT = "https://athena-admin.xmojo.net/api/auth/callback"	scrubber test

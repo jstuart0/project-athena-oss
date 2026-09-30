@@ -248,3 +248,60 @@ def seed_canonical(db, now):
     for j in range(20):
         db.add(IntentMetric(intent="control", confidence=0.9, created_at=now - timedelta(days=45)))
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Sender harness
+# ---------------------------------------------------------------------------
+
+class FakeClock:
+    def __init__(self, start=None):
+        from datetime import datetime, timezone
+
+        self.now = start or datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, **delta):
+        from datetime import timedelta
+
+        self.now = self.now + timedelta(**delta)
+
+
+class Recorder:
+    """An httpx MockTransport that records every request. ``status`` and
+    ``body`` set the next responses; ``handler`` overrides both."""
+
+    def __init__(self, status=200, body=b'{"status":"ok"}'):
+        import httpx
+
+        self.requests = []
+        self.status = status
+        self.body = body
+        self.handler = None
+        self.transport = httpx.MockTransport(self._handle)
+
+    def _handle(self, request):
+        import httpx
+
+        request.read()
+        self.requests.append(request)
+        if self.handler is not None:
+            return self.handler(request)
+        return httpx.Response(self.status, content=self.body)
+
+    def payloads(self):
+        return [json.loads(r.content) for r in self.requests]
+
+
+def settings(db_or_factory, prefix="telemetry."):
+    from app.models import SystemSetting
+
+    session = db_or_factory() if callable(db_or_factory) else db_or_factory
+    try:
+        session.expire_all()
+        return {r.key: r.value for r in session.query(SystemSetting).filter(SystemSetting.key.like(prefix + "%"))}
+    finally:
+        if callable(db_or_factory):
+            session.close()

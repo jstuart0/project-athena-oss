@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 
 import structlog
 
+from shared.config import resolve_endpoint, resolve_mode
+
 from app.services.telemetry.schema import (
     KNOWN_CLOUD_LLM_HOSTS,
     LOCAL_HOST_NAMES,
@@ -402,18 +404,8 @@ def parse_telemetry_env(reading, default_endpoint: str) -> EnvDecision:
     ``dotenv``, ``dotenv_error``). Opt-outs are a fail-closed union of the
     two sources; endpoint and mode prefer a non-empty process value."""
     warnings: List[str] = []
-
-    def pick(key: str) -> Optional[str]:
-        process = reading.process.get(key)
-        if process is not None and str(process).strip():
-            return str(process).strip()
-        dotenv = reading.dotenv.get(key)
-        if dotenv is not None and str(dotenv).strip():
-            return str(dotenv).strip()
-        return None
-
-    endpoint = pick("ATHENA_TELEMETRY_ENDPOINT") or default_endpoint
-    mode_raw = (pick("ATHENA_TELEMETRY_MODE") or "").lower()
+    endpoint = resolve_endpoint(reading, default_endpoint)
+    mode_raw = resolve_mode(reading)
     mode = mode_raw if mode_raw in MODES else None
     if mode_raw and mode is None:
         warnings.append("ATHENA_TELEMETRY_MODE is not a known install class; it is ignored")
