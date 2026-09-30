@@ -14,6 +14,11 @@ from pathlib import Path
 _debug_file_handler = None
 _debug_log_path = None
 
+# Loggers whose INFO lines are full request URLs, query string included
+# (uvicorn's access log; httpx/httpcore client request lines). A query
+# string can carry a location or an API key, so they log WARNING and up.
+_REQUEST_URL_LOGGERS = ("uvicorn.access", "httpx", "httpcore")
+
 
 def payload_keys(value) -> list:
     """The sorted key names of a payload, for logging in place of its
@@ -122,6 +127,11 @@ def configure_logging(service_name: str, level: Optional[str] = None):
 
     # Add service name to all logs
     structlog.contextvars.bind_contextvars(service=service_name)
+
+    # uvicorn configures its own loggers before it imports the app, and the
+    # app's import runs this, so these levels stick for the process.
+    for name in _REQUEST_URL_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     return structlog.get_logger()
 
