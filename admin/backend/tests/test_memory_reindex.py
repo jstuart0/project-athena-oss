@@ -16,7 +16,7 @@ import app.routes.memories as memories_module
 from app.auth.oidc import create_access_token
 from app.models import AuditLog, GuestSession, Memory, SystemSetting
 from app.services import memory_vectors as mv
-from app.services import service_control_settings as scs
+from app.services import settings_lease
 from shared.config import get_config
 from tests.conftest import TestingSessionLocal, fake_embed
 
@@ -360,8 +360,7 @@ def test_recreate_dry_run_changes_nothing(db, wide_world, capsys):
 
 
 def test_recreate_while_lease_held_exits_2(db, wide_world):
-    scs.acquire_lease(TestingSessionLocal, "memory_vectors", "all", 0, ttl=300, now=mv._clock.utcnow,
-                      key=mv.LEASE_KEY)
+    _hold_rebuild_lease(ttl=300)
     assert mv.main(["reindex", "--recreate", "--confirm-collection", "athena_memories"]) == 2
     assert _size() == 768
 
@@ -410,7 +409,7 @@ def test_lease_lost_aborts(client, db, test_user, no_dev_auth, monkeypatch, caps
     mv.refresh_state()
     monkeypatch.setattr(mv, "ROW_BATCH", 1)
     rows = [_row(db, f"row {i}", status="pending") for i in range(3)]
-    monkeypatch.setattr(scs, "renew_lease", lambda *args, **kwargs: False)
+    monkeypatch.setattr(settings_lease, "renew", lambda *args, **kwargs: False)
 
     resp = client.post(REINDEX, params={"mode": "missing"}, headers=_bearer(test_user))
     assert resp.status_code == 409 and resp.json()["error"] == "reindex_aborted"
@@ -434,8 +433,7 @@ def test_cooldown_blocks_then_expires(client, db, test_user, no_dev_auth):
 def test_live_run_retry_after_bounds(client, db, test_user, no_dev_auth, memory_vector_test_env):
     clock = memory_vector_test_env
     mv.refresh_state()
-    scs.acquire_lease(TestingSessionLocal, "memory_vectors", "all", 0, ttl=300, now=mv._clock.utcnow,
-                      key=mv.LEASE_KEY)
+    _hold_rebuild_lease(ttl=300)
     resp = client.post(REINDEX, headers=_bearer(test_user))
     assert resp.status_code == 409
     assert 1 <= resp.json()["retry_after_seconds"] <= 300
@@ -510,11 +508,10 @@ def test_no_pass_without_pending_rows_after_first(db, memory_vector_test_env, mo
 def test_busy_lease_skips_then_retries(db, memory_vector_test_env):
     clock = memory_vector_test_env
     row = _row(db, "waiting", status="pending")
-    lease = scs.acquire_lease(TestingSessionLocal, "memory_vectors", "all", 0, ttl=300, now=clock.utcnow,
-                              key=mv.LEASE_KEY)
+    lease = _hold_rebuild_lease(ttl=300)
     asyncio.run(mv.tick())
     assert _statuses(db, row) == ["pending"]
-    scs.release_lease(TestingSessionLocal, lease)
+    settings_lease.release(TestingSessionLocal, lease)
     asyncio.run(mv.tick())
     assert _statuses(db, row) == ["stored"]
 
@@ -634,25 +631,29 @@ def test_vector_store_route_population():
 
 
 # ---------------------------------------------------------------------------
-# Lease helper extensions (service control unchanged by default)
+# The rebuild lease lives on the shared settings_lease core
 # ---------------------------------------------------------------------------
 
-def test_lease_busy_carries_expiry(db, memory_vector_test_env):
-    clock = memory_vector_test_env
-    scs.acquire_lease(TestingSessionLocal, "memory_vectors", "all", 0, ttl=120, now=clock.utcnow, key=mv.LEASE_KEY)
-    with pytest.raises(scs.LeaseBusy) as busy:
-        scs.acquire_lease(TestingSessionLocal, "memory_vectors", "all", 0, ttl=120, now=clock.utcnow,
-                          key=mv.LEASE_KEY)
-    assert busy.value.expires_at == clock.utcnow() + timedelta(seconds=120)
-    assert scs.LeaseBusy("plain").expires_at is None
+def _hold_rebuild_lease(ttl):
+    """Another replica's rebuild holding the main lease."""
+    return settings_lease.acquire(TestingSessionLocal, mv.LEASE_KEY, category="memory_vectors", ttl=ttl,
+                                  busy_message="busy", fields={"action": "all"}, now=mv._clock.utcnow)
 
 
-def test_read_lease_by_key(db, memory_vector_test_env):
-    clock = memory_vector_test_env
-    scs.acquire_lease(TestingSessionLocal, "memory_vectors", "missing", 0, ttl=60, now=clock.utcnow,
-                      key=mv.LEASE_KEY)
-    assert scs.read_lease(db, "memory_vectors", key=mv.LEASE_KEY)["action"] == "missing"
-    assert scs.read_lease(db, "memory_vectors") is None
+def test_rebuild_lease_row_is_the_core_format(db):
+    mv.refresh_state()
+    mv.reindex("missing")
+    info = settings_lease.read(db, mv.LEASE_KEY)
+    assert info["action"] == "missing" and info["holder"] and info["expires_at"]
+    db.expire_all()
+    assert db.query(SystemSetting).filter(SystemSetting.key == mv.LEASE_KEY).one().category == "memory_vectors"
+
+
+def test_memory_vectors_uses_no_service_control_lease_wrappers():
+    import inspect
+
+    source = inspect.getsource(mv)
+    assert "service_control_settings" not in source and "settings_lease" in source
 
 
 # ---------------------------------------------------------------------------

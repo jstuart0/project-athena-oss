@@ -10,7 +10,7 @@ on:
     paths:
       - "admin/backend/app/routes/memories.py"
       - "admin/backend/app/services/memory_vectors.py"
-      - "admin/backend/app/services/service_control_settings.py"
+      - "admin/backend/app/services/settings_lease.py"
       - "admin/backend/app/utils/service_auth.py"
       - "admin/backend/app/utils/url_validators.py"
       - "admin/backend/app/models.py"
@@ -21,6 +21,7 @@ on:
       - "admin/backend/tests/test_migration_062*"
       - "admin/backend/tests/test_database_memories_compat.py"
       - "admin/backend/tests/test_service_control_settings.py"
+      - "admin/backend/tests/test_settings_lease.py"
       - "admin/backend/tests/test_url_redaction_text.py"
       - "admin/backend/tests/integration/**"
       - "admin/backend/scripts/embed_rss_gate.py"
@@ -38,7 +39,7 @@ on:
     paths:
       - "admin/backend/app/routes/memories.py"
       - "admin/backend/app/services/memory_vectors.py"
-      - "admin/backend/app/services/service_control_settings.py"
+      - "admin/backend/app/services/settings_lease.py"
       - "admin/backend/app/utils/service_auth.py"
       - "admin/backend/app/utils/url_validators.py"
       - "admin/backend/app/models.py"
@@ -49,6 +50,7 @@ on:
       - "admin/backend/tests/test_migration_062*"
       - "admin/backend/tests/test_database_memories_compat.py"
       - "admin/backend/tests/test_service_control_settings.py"
+      - "admin/backend/tests/test_settings_lease.py"
       - "admin/backend/tests/test_url_redaction_text.py"
       - "admin/backend/tests/integration/**"
       - "admin/backend/scripts/embed_rss_gate.py"
@@ -95,6 +97,7 @@ jobs:
         run: |
           python -m pytest tests/test_service_control_settings.py -q
           python -m pytest tests/test_service_control_actions.py -q
+          python -m pytest tests/test_settings_lease.py -q
 
       - name: Orchestrator memory client contract (V10)
         run: python -m pytest tests/unit/test_memory_client_contract.py -q

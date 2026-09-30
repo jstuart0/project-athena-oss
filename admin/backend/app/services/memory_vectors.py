@@ -645,7 +645,7 @@ _SCROLL_PAGE = 256
 # row id; beyond this many pages (x _SCROLL_PAGE ids) it reports a partial
 # scan (in_sync null) instead of a guess.
 SYNC_SCAN_MAX_PAGES = 40
-_LEASE_DEPLOYMENT = "memory_vectors"
+_LEASE_CATEGORY = "memory_vectors"
 
 
 class ReindexBusy(Exception):
@@ -714,12 +714,15 @@ def _retry_after(expires_at: Optional[datetime]) -> int:
 
 
 def _acquire(mode: str, key: str = LEASE_KEY):
-    from app.services import service_control_settings as scs
+    from app.services import settings_lease
 
     try:
-        return scs.acquire_lease(_get_session_factory(), _LEASE_DEPLOYMENT, mode, 0,
-                                 ttl=LEASE_TTL_SECONDS, now=_clock.utcnow, key=key)
-    except scs.LeaseBusy as busy:
+        return settings_lease.acquire(
+            _get_session_factory(), key, category=_LEASE_CATEGORY, ttl=LEASE_TTL_SECONDS,
+            busy_message="a memory vector rebuild is already running", fields={"action": mode},
+            now=_clock.utcnow,
+        )
+    except settings_lease.LeaseBusy as busy:
         raise ReindexBusy(_retry_after(busy.expires_at)) from busy
 
 
@@ -966,7 +969,7 @@ def reindex(
         logger.warning("memory_vector_reindex_refused", mode=mode, state=refused, caller=caller)
         return report
 
-    from app.services import service_control_settings as scs
+    from app.services import settings_lease
 
     factory = _get_session_factory()
     lease = _acquire(mode, LEASE_KEY_DRYRUN if dry_run else LEASE_KEY)
@@ -1018,7 +1021,7 @@ def reindex(
                     logger.error("memory_vector_reindex_batch_failed", error=_error_text(exc), rows=len(rows))
                     if not dry_run:
                         _mark_rows_pending([row.id for row in rows])
-                if not scs.renew_lease(factory, lease, ttl=LEASE_TTL_SECONDS, now=_clock.utcnow):
+                if not settings_lease.renew(factory, lease, ttl=LEASE_TTL_SECONDS, now=_clock.utcnow):
                     report.aborted = "lease_lost"
                     logger.error("memory_vector_reindex_lease_lost", mode=mode)
                     return report
@@ -1046,10 +1049,10 @@ def reindex(
             k: v for k, v in report.to_dict().items() if k not in ("foreign_point_ids_sample",)})
         return report
     finally:
-        if arm_cooldown and scs.renew_lease(factory, lease, ttl=COOLDOWN_SECONDS, now=_clock.utcnow):
+        if arm_cooldown and settings_lease.renew(factory, lease, ttl=COOLDOWN_SECONDS, now=_clock.utcnow):
             pass
         else:
-            scs.release_lease(factory, lease)
+            settings_lease.release(factory, lease)
 
 
 def _mark_rows_pending(ids: List[int]) -> None:

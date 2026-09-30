@@ -21,16 +21,14 @@ key-value read/write on the caller's own request session -- it doesn't need
 lease-grade atomicity, just "don't ever remember a 0".
 """
 import json
-import os
-import uuid
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.models import SystemSetting
+from app.services import settings_lease
+from app.services.settings_lease import Lease, LeaseBusy  # noqa: F401  (re-exported for service_control.py)
 
 _CATEGORY = "service_control"
 LEASE_TTL_SECONDS = 90
@@ -77,22 +75,8 @@ def recall_replicas(db: Session, deployment: str) -> int:
     return max(_REPLICA_CLAMP_MIN, min(_REPLICA_CLAMP_MAX, n))
 
 
-class LeaseBusy(Exception):
-    """Raised when a lease is held (unexpired) by another holder, or a
-    takeover race is lost. The caller (service_control.py) maps this to
-    409 `action_in_progress`. ``expires_at`` is the holder's expiry when it
-    was read (None when unknown, e.g. a lost race)."""
-
-    def __init__(self, msg: str = "", expires_at: Optional[datetime] = None):
-        super().__init__(msg)
-        self.expires_at = expires_at
-
-
-@dataclass
-class Lease:
-    key: str
-    holder: str
-    value: str  # the exact JSON string written -- release matches on this
+def _busy_message(deployment: str) -> str:
+    return f"a service-control action is already in progress for '{deployment}'"
 
 
 def acquire_lease(
@@ -102,99 +86,33 @@ def acquire_lease(
     target_replicas: int,
     ttl: int = LEASE_TTL_SECONDS,
     now: Callable[[], datetime] = _utcnow,
-    *,
-    key: Optional[str] = None,
 ) -> Lease:
-    """INSERT-based acquire; conditional-UPDATE takeover when the existing
-    lease has expired. Uses its OWN session (via `session_factory`), so the
-    write is visible to another replica immediately and independent of the
-    caller's own request transaction (D11). ``key`` overrides the
-    service-control key for other lease users (the memory vector reindex)."""
-    key = key or _lease_key(deployment)
-    holder = f"{os.getenv('HOSTNAME', 'local')}/{uuid.uuid4()}"
-    expires_at = now() + timedelta(seconds=ttl)
-    value = json.dumps(
-        {"holder": holder, "action": action, "target_replicas": target_replicas, "expires_at": expires_at.isoformat()},
-        sort_keys=True,
+    """Acquire `service_control.lock.<deployment>` on its OWN session (via
+    `session_factory`), so the write is visible to another replica
+    immediately and independent of the caller's request transaction (D11).
+    Raises LeaseBusy, which service_control.py maps to 409
+    `action_in_progress`."""
+    return settings_lease.acquire(
+        session_factory,
+        _lease_key(deployment),
+        category=_CATEGORY,
+        ttl=ttl,
+        busy_message=_busy_message(deployment),
+        fields={"action": action, "target_replicas": target_replicas},
+        now=now,
     )
-
-    session = session_factory()
-    try:
-        session.add(SystemSetting(key=key, value=value, category=_CATEGORY))
-        try:
-            session.commit()
-            return Lease(key=key, holder=holder, value=value)
-        except (IntegrityError, OperationalError):
-            # SQLite serializes writers: a genuine unique-key collision
-            # raises IntegrityError, but two connections racing the same
-            # INSERT at the same instant can instead surface as
-            # OperationalError ("database is locked") -- both mean
-            # "someone else is contending for this lease right now"
-            # (xander P2 Low #3), not a crash.
-            session.rollback()
-
-        existing = session.query(SystemSetting).filter(SystemSetting.key == key).first()
-        if existing is None:
-            # Raced with a concurrent release between the failed INSERT and
-            # this read -- retry the INSERT once. A second writer landing
-            # in this exact window is itself a losing race, not a crash.
-            try:
-                session.add(SystemSetting(key=key, value=value, category=_CATEGORY))
-                session.commit()
-                return Lease(key=key, holder=holder, value=value)
-            except (IntegrityError, OperationalError):
-                session.rollback()
-                raise LeaseBusy(f"a service-control action is already in progress for '{deployment}'")
-
-        observed_value = existing.value
-        expired = True
-        existing_expiry = None
-        try:
-            observed = json.loads(observed_value)
-            expires_at_str = observed.get("expires_at")
-            if expires_at_str:
-                existing_expiry = datetime.fromisoformat(expires_at_str)
-                expired = existing_expiry <= now()
-        except (TypeError, ValueError):
-            expired = True
-
-        if not expired:
-            raise LeaseBusy(
-                f"a service-control action is already in progress for '{deployment}'",
-                expires_at=existing_expiry,
-            )
-
-        rowcount = (
-            session.query(SystemSetting)
-            .filter(SystemSetting.key == key, SystemSetting.value == observed_value)
-            .update({"value": value}, synchronize_session=False)
-        )
-        session.commit()
-        if rowcount != 1:
-            raise LeaseBusy(f"a service-control action is already in progress for '{deployment}'")
-        return Lease(key=key, holder=holder, value=value)
-    finally:
-        session.close()
 
 
 def release_lease(session_factory: Callable[[], Session], lease: Lease) -> None:
-    """Owner-only release: matches on the exact value this holder wrote, so
-    a lease another holder took over after this one expired is never
-    deleted out from under them."""
-    session = session_factory()
-    try:
-        session.query(SystemSetting).filter(
-            SystemSetting.key == lease.key, SystemSetting.value == lease.value
-        ).delete(synchronize_session=False)
-        session.commit()
-    finally:
-        session.close()
+    """Owner-only release: a lease another holder took over after this one
+    expired is never deleted out from under them."""
+    settings_lease.release(session_factory, lease)
 
 
-def read_lease(db: Session, deployment: str, *, key: Optional[str] = None) -> Optional[dict]:
+def read_lease(db: Session, deployment: str) -> Optional[dict]:
     """Used by the envelope builder to detect `restart_interrupted` (an
     expired restart lease whose Deployment is stuck at 0 replicas)."""
-    key = key or _lease_key(deployment)
+    key = _lease_key(deployment)
     row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
     if row is None:
         return None
@@ -221,42 +139,11 @@ def renew_lease(
     now: Callable[[], datetime] = _utcnow,
 ) -> bool:
     """Atomic compare-and-swap renewal (codex diff review r2 High #2,
-    replacing the read-then-act `still_holds_lease`): conditionally UPDATEs
-    the lease row to a fresh `expires_at` ONLY if its value still exactly
-    matches `lease.value` -- the same primitive acquire_lease's own
-    takeover uses, so a second replica racing this renewal can't also
-    succeed. Returns True (and mutates `lease.value` to the renewed value,
-    so a subsequent release_lease matches it) iff the row was still ours;
-    False means another replica has already taken over.
-
-    A plain read (does the stored value still equal mine?) has a TOCTOU
-    gap: replica A could observe itself as owner right at the TTL edge,
-    replica B could take over and act on the Deployment in the window
-    between that read and A's own subsequent PATCH, and A would then act
-    on stale authority regardless. The UPDATE...WHERE here closes that
-    window -- it is the check and the extension in one atomic statement."""
-    key = lease.key
-    old_value = lease.value
-    try:
-        observed = json.loads(old_value)
-    except (TypeError, ValueError):
-        observed = {}
-    expires_at = now() + timedelta(seconds=ttl)
-    new_value = json.dumps({**observed, "expires_at": expires_at.isoformat()}, sort_keys=True)
-
-    session = session_factory()
-    try:
-        rowcount = (
-            session.query(SystemSetting)
-            .filter(SystemSetting.key == key, SystemSetting.value == old_value)
-            .update({"value": new_value}, synchronize_session=False)
-        )
-        session.commit()
-        if rowcount == 1:
-            lease.value = new_value
-        return rowcount == 1
-    finally:
-        session.close()
+    replacing the read-then-act `still_holds_lease`). True iff the lease was
+    still ours; False means another replica has already taken over. The
+    UPDATE...WHERE in settings_lease.renew is the check and the extension in
+    one statement, so there's no TOCTOU window between them."""
+    return settings_lease.renew(session_factory, lease, ttl=ttl, now=now)
 
 
 def _interrupted_key(deployment: str) -> str:

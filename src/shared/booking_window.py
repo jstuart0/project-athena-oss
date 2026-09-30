@@ -27,9 +27,24 @@ logger = structlog.get_logger()
 DEFAULT_CHECKIN_TIME = "16:00"
 DEFAULT_CHECKOUT_TIME = "11:00"
 
-# D11: markers recognised as a feed block rather than a real stay, drawn
-# from the guest-name heuristics already in calendar_sources.py.
-BLOCK_SUMMARY_MARKERS = ("blocked", "closed period", "not available", "unavailable")
+# Whole-string block labels per platform, matched against a normalized
+# summary (trimmed, lowercased, whitespace collapsed). Whole-string, not
+# substring, so a guest name like "Tom Blocked" is never read as a block.
+# An unlisted label reads as a stay -- the safe direction (guest mode on).
+# Lodgify's iCal export masks guest names with "*", so none of its labels
+# can be a masked guest name.
+_AIRBNB_BLOCK_LABELS = frozenset({"not available", "airbnb (not available)"})
+_VRBO_BLOCK_LABELS = frozenset({"blocked"})
+_LODGIFY_BLOCK_LABELS = frozenset({"closed period", "blocked", "closed", "closed block", "owner block"})
+_GENERIC_BLOCK_LABELS = (
+    _AIRBNB_BLOCK_LABELS | _VRBO_BLOCK_LABELS | _LODGIFY_BLOCK_LABELS | frozenset({"unavailable"})
+)
+BLOCK_LABELS_BY_SOURCE_TYPE: dict[str, frozenset[str]] = {
+    "airbnb": _AIRBNB_BLOCK_LABELS,
+    "vrbo": _VRBO_BLOCK_LABELS,
+    "lodgify": _LODGIFY_BLOCK_LABELS,
+    "generic_ical": _GENERIC_BLOCK_LABELS,
+}
 
 MIN_BUFFER_HOURS = 0
 MAX_BUFFER_HOURS = 168
@@ -128,14 +143,20 @@ def db_value_to_utc(v: datetime) -> datetime:
     return v.astimezone(timezone.utc)
 
 
-def classify_summary(summary: str) -> Literal["blocked", "confirmed"]:
-    """D11: case-insensitive, trimmed, substring match against
-    BLOCK_SUMMARY_MARKERS."""
-    normalized = (summary or "").strip().lower()
-    for marker in BLOCK_SUMMARY_MARKERS:
-        if marker in normalized:
-            return "blocked"
-    return "confirmed"
+def normalize_summary(summary: Optional[str]) -> str:
+    """Trimmed, lowercased, internal whitespace collapsed to one space."""
+    return " ".join((summary or "").split()).lower()
+
+
+def classify_summary(
+    summary: Optional[str], source_type: Optional[str] = "generic_ical"
+) -> Literal["blocked", "confirmed"]:
+    """A feed summary is a block iff its normalized form is exactly one of
+    the source type's block labels. An unknown or missing source type (the
+    mode service's legacy calendar_url path passes none) uses the generic
+    set, the union of every platform's labels plus "unavailable"."""
+    labels = BLOCK_LABELS_BY_SOURCE_TYPE.get(source_type or "", _GENERIC_BLOCK_LABELS)
+    return "blocked" if normalize_summary(summary) in labels else "confirmed"
 
 
 def clamp_buffer_hours(hours) -> float:
@@ -185,10 +206,17 @@ def active_booking(
     return min(candidates, key=lambda b: (b.end, b.key))
 
 
+def day_pair(start: datetime, end: datetime, tz: TZInfo) -> tuple[date, date]:
+    """The (check-in, check-out) local-date pair in the property zone. Each
+    value goes through `db_value_to_utc` first, so a naive value read back
+    from the DB is treated as UTC -- never as process-local time."""
+    return (db_value_to_utc(start).astimezone(tz).date(), db_value_to_utc(end).astimezone(tz).date())
+
+
 def stay_day_pair(b: Booking, tz: TZInfo) -> tuple[date, date]:
     """The (checkin, checkout) local-date pair in the property zone, used
     for the fallback dedupe/suppression key (D13)."""
-    return (b.start.astimezone(tz).date(), b.end.astimezone(tz).date())
+    return day_pair(b.start, b.end, tz)
 
 
 def _merge_two(a: Booking, b: Booking) -> Booking:

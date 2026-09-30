@@ -188,7 +188,7 @@ Every Home Assistant write is authorized against the request's server-derived pe
 
 One narrow, deliberate exception to invariant 1: `music_handler.py` holds a private `self._ha_raw` (the unwrapped client) used only for one bulk `/api/states` read (`get_playing_rooms_from_ha`/`check_music_assistant_players`) — reads are out of the guard's scope entirely (D10), and `tests/unit/test_ha_permission_guard.py` asserts `self._ha_raw` never calls `.call_service(` anywhere in `src/` and that its only attribute accesses are `.url`/`.headers` at that one site.
 
-**Memory vector store**: all `athena_memories` Qdrant and embedding access goes through `admin/backend/app/services/memory_vectors.py` (one process-wide embed lock; routes call it via `run_in_threadpool`). Postgres is the truth: rows carry `vector_status` (`pending` until `store_vector` confirms the point) and semantic results are built from live `stored` rows, never from Qdrant payloads. Enforced in CI by `.github/workflows/admin-memory.yml` (drift guard, one-process memory suite, real Qdrant 1.19/1.12 and Postgres tier, image RSS gate).
+**Memory vector store**: all `athena_memories` Qdrant and embedding access goes through `admin/backend/app/services/memory_vectors.py` (one process-wide embed lock; routes call it via `run_in_threadpool`). Postgres is the truth: rows carry `vector_status` (`pending` until `store_vector` confirms the point) and semantic results are built from live `stored` rows, never from Qdrant payloads. Rebuilds hold the `settings_lease` key `memory_vectors.reindex.lock` (dry runs `memory_vectors.reindex.dryrun`). Enforced in CI by `.github/workflows/admin-memory.yml` (drift guard, one-process memory suite, real Qdrant 1.19/1.12 and Postgres tier, image RSS gate).
 
 **Guest-mode booking source (ATHENA-127)**
 
@@ -219,6 +219,28 @@ relative import — the image copies the package to `/app/mode_service/`
 and runs uvicorn from `/app`, so anything else fails at container boot,
 not at test time. See `docs/CONFIGURATION.md` "Guest-mode booking source"
 for the full model.
+
+**Calendar sync invariants.** `run_source_sync` in
+`admin/backend/app/services/calendar_sync.py` is the only code that writes
+feed-derived `calendar_events`; the scheduler, sync-all and
+`POST /api/calendar-sources/{id}/sync` all call it, and it holds the
+`system_settings` lease `calendar_sync.lock.<source id>` for the whole run
+(core in `app/services/settings_lease.py`, shared with service control
+and the memory vector rebuild),
+with a compare-and-swap renew immediately before commit. Don't add another
+insert site (`CalendarEvent(` appears once across `calendar_sync.py` and
+`calendar_sources.py`). A source that is `lodgify` by type or feed host and
+has an enabled Lodgify API key never writes from iCal: an API failure or
+an unreadable key writes nothing. Keys are source-scoped: a sync never
+updates or re-parents another source's row; a colliding UID is stored as
+`src:<source id>:<sha256[:32]>`, a missing one as
+`ical-nouid:<source id>:<uuid>`, and only an orphaned `lodgify_api_sync`
+row may be adopted (`source_id` set). Every calendar-sources route except
+`GET /types` depends on `require_user_permission` (a drift test walks the
+app's routes). `CalendarSource.to_dict_safe()` never carries `ical_url`;
+only `GET /api/calendar-sources/{id}` returns it (audited), and
+`/test-url` takes the URL in the body, never the query string. Calendar logs and status strings carry `safe_error(exc)` (class and
+HTTP status) only, never exception text.
 
 ---
 

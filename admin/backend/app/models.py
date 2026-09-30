@@ -15,6 +15,7 @@ import os
 import secrets
 from datetime import datetime
 from typing import Dict, Any, Optional
+from urllib.parse import urlsplit
 
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, Date, Text, ForeignKey, Index, UniqueConstraint, Float, Numeric, text, JSON
@@ -1750,6 +1751,24 @@ class GuestModeConfigHistory(Base):
         }
 
 
+def mask_feed_url(url: Optional[str]) -> str:
+    """``scheme://host[:port]/…`` for display. Built from the parsed hostname
+    and port, never ``netloc``, so userinfo, path and query (where feed
+    tokens live) are all dropped. Empty or unparsable input gives ``""``."""
+    if not url:
+        return ''
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError:
+        return ''
+    if not parts.scheme or not hostname:
+        return ''
+    port_part = f':{port}' if port else ''
+    return f'{parts.scheme}://{hostname}{port_part}/…'
+
+
 class CalendarSource(Base):
     """
     Calendar source configuration for iCal feed sync.
@@ -1816,13 +1835,11 @@ class CalendarSource(Base):
         }
 
     def to_dict_safe(self) -> Dict[str, Any]:
-        """Convert to dictionary with URL masked for display."""
+        """The dict every list/create/update response and audit row uses.
+        Never carries ``ical_url``: feed URLs embed an access token, so only
+        ``GET /api/calendar-sources/{id}`` (behind ``read``) returns it."""
         data = self.to_dict()
-        # Mask URL for security - only show first 30 chars
-        if data['ical_url'] and len(data['ical_url']) > 30:
-            data['ical_url_masked'] = data['ical_url'][:30] + '...'
-        else:
-            data['ical_url_masked'] = data['ical_url']
+        data['ical_url_masked'] = mask_feed_url(data.pop('ical_url'))
         return data
 
 
