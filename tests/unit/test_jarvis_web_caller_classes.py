@@ -630,3 +630,20 @@ def test_guest_network_welcome_capabilities(monkeypatch):
     caps = h.client().get("/api/welcome", headers=h.via_proxy(h.GUEST_WIFI)).json()["capabilities"]
     assert caps == {"household_read": False, "control": False, "voice": True, "control_reason": "guest_network",
                     "signed_in": False}
+
+
+def test_access_log_omits_request_urls():
+    """uvicorn's access log records the full request line, and jarvis-web's
+    geocode routes carry an address or coordinates in the query string. It
+    logs WARNING and up once main.py is imported (after uvicorn's own
+    logging config, as in the container)."""
+    import logging
+    import logging.config
+
+    import uvicorn.config
+
+    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+    h.load_main("_jw_access_log_main")
+    for name in ("uvicorn.access", "httpx", "httpcore"):
+        assert not logging.getLogger(name).isEnabledFor(logging.INFO), name
+    assert logging.getLogger("uvicorn.error").isEnabledFor(logging.INFO)

@@ -28,6 +28,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+import logging
+
 import structlog
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
@@ -55,6 +57,13 @@ if not structlog.is_configured():
         ]
     )
 logger = structlog.get_logger()
+
+# uvicorn's access log and the HTTP client's request lines are full URLs,
+# query string included, and the geocode routes carry an address or
+# coordinates there. uvicorn configures these loggers before importing this
+# module, so the levels set here stick.
+for _url_logger in ("uvicorn.access", "httpx", "httpcore"):
+    logging.getLogger(_url_logger).setLevel(logging.WARNING)
 
 # Configuration from environment
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
