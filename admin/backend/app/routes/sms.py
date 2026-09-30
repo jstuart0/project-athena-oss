@@ -13,6 +13,7 @@ from datetime import datetime, date
 import structlog
 
 from app.database import get_db
+from app.utils.service_auth import require_service_or_user_permission, verify_service_api_key
 from app.auth.oidc import get_current_user
 from app.models import (
     User, SMSSettings, GuestSMSPreference, SMSHistory,
@@ -644,14 +645,14 @@ async def get_sms_costs_by_stay(
 # =============================================================================
 
 
-@router.get("/internal/current-preferences")
+@router.get("/internal/current-preferences", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_current_guest_preferences(
     db: Session = Depends(get_db)
 ):
     """
     Get SMS preferences for current active guest.
 
-    Used internally by orchestrator - no auth required.
+    Requires the service key, or a signed-in user with read permission.
     """
     now = datetime.utcnow()
 
@@ -687,7 +688,7 @@ async def get_current_guest_preferences(
     }
 
 
-@router.post("/internal/log-send")
+@router.post("/internal/log-send", dependencies=[Depends(verify_service_api_key)])
 async def log_sms_send(
     phone_number: str,
     content: str,
@@ -703,7 +704,7 @@ async def log_sms_send(
     """
     Log an SMS send from orchestrator.
 
-    Used internally - no auth required.
+    Service key only (X-Service-Key): no user can write to the send log.
     """
     history = SMSHistory(
         calendar_event_id=calendar_event_id,

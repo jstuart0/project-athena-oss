@@ -165,7 +165,11 @@ _HEADER_LITERAL = "X-Service-Key"
 # -- the literal header string lives inside that helper, not in the call
 # site's own text. Treated as an equivalent marker everywhere
 # _HEADER_LITERAL is checked below.
-_HEADER_MARKERS = (_HEADER_LITERAL, "control_agent_headers(")
+# Guest-data hardening: AdminConfigClient's scoped voice-automation calls
+# build their headers with shared.admin_config.voice_automation_headers(),
+# which always sets X-Service-Key (and the caller scope) -- same kind of
+# helper as control_agent_headers().
+_HEADER_MARKERS = (_HEADER_LITERAL, "control_agent_headers(", "voice_automation_headers(")
 
 
 def _has_header_marker(text: str) -> bool:

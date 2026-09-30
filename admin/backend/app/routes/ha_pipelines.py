@@ -18,6 +18,7 @@ import structlog
 import websockets
 
 from app.auth.oidc import get_current_user
+from app.utils.service_auth import require_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/ha-pipelines", tags=["ha-pipelines"])
@@ -325,7 +326,7 @@ async def set_preferred_pipeline(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/mode/set")
+@router.post("/mode/set", dependencies=[Depends(require_user_permission("write"))])
 async def set_voice_mode(
     request: SetModeRequest
 ) -> Dict[str, Any]:
@@ -339,7 +340,7 @@ async def set_voice_mode(
     - "full": Uses Extended OpenAI Conversation (Gateway → Orchestrator, no streaming)
     - "simple": Uses Ollama Conversation (direct to Ollama, no RAG)
 
-    No authentication required for voice mode switching.
+    Requires a signed-in user with write permission.
     """
     if request.mode not in PIPELINE_MODES:
         raise HTTPException(

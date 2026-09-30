@@ -13,6 +13,7 @@ from pydantic import BaseModel
 import structlog
 
 from app.database import get_db
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 from app.auth.oidc import get_current_user
 from app.models import User, UserSession, Guest
 
@@ -56,7 +57,7 @@ class UserSessionResponse(BaseModel):
 # Session Endpoints
 # ============================================================================
 
-@router.post("", response_model=UserSessionResponse)
+@router.post("", response_model=UserSessionResponse, dependencies=[Depends(require_user_permission("write"))])
 async def create_or_update_session(
     session_data: UserSessionCreate,
     db: Session = Depends(get_db)
@@ -67,7 +68,7 @@ async def create_or_update_session(
     If a session with the same session_id exists, it will be updated.
     Otherwise, a new session is created.
 
-    NOTE: This endpoint is public to allow web app guest self-identification.
+    Requires a signed-in user with write permission.
     """
     try:
         # Check if session exists
@@ -126,7 +127,7 @@ async def create_or_update_session(
         raise HTTPException(status_code=500, detail="Failed to create session")
 
 
-@router.get("/device/{device_id}", response_model=UserSessionResponse)
+@router.get("/device/{device_id}", response_model=UserSessionResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_session_by_device(
     device_id: str,
     db: Session = Depends(get_db)
@@ -135,11 +136,11 @@ async def get_session_by_device(
     Get the most recent session for a device.
 
     This is the primary endpoint used by the orchestrator to identify users
-    by their device fingerprint.
+    by their device fingerprint (it sends the service key).
 
     Updates last_seen timestamp on access.
 
-    NOTE: This endpoint is public for orchestrator access.
+    Requires the service key, or a signed-in user with read permission.
     """
     try:
         session = db.query(UserSession).filter(
@@ -171,7 +172,7 @@ async def get_session_by_device(
         raise HTTPException(status_code=500, detail="Failed to retrieve session")
 
 
-@router.get("/{session_id}", response_model=UserSessionResponse)
+@router.get("/{session_id}", response_model=UserSessionResponse, dependencies=[Depends(require_user_permission("read"))])
 async def get_session(
     session_id: str,
     db: Session = Depends(get_db)
@@ -179,7 +180,7 @@ async def get_session(
     """
     Get a specific session by ID.
 
-    NOTE: This endpoint is public for orchestrator access.
+    Requires a signed-in user with read permission.
     """
     try:
         session = db.query(UserSession).filter(
@@ -202,7 +203,7 @@ async def get_session(
         raise HTTPException(status_code=500, detail="Failed to retrieve session")
 
 
-@router.patch("/{session_id}/last-seen")
+@router.patch("/{session_id}/last-seen", dependencies=[Depends(require_user_permission("write"))])
 async def update_last_seen(
     session_id: str,
     db: Session = Depends(get_db)
@@ -212,7 +213,7 @@ async def update_last_seen(
 
     Call this periodically to keep session active.
 
-    NOTE: This endpoint is public.
+    Requires a signed-in user with write permission.
     """
     try:
         session = db.query(UserSession).filter(
@@ -234,7 +235,7 @@ async def update_last_seen(
         raise HTTPException(status_code=500, detail="Failed to update session")
 
 
-@router.delete("/device/{device_id}")
+@router.delete("/device/{device_id}", dependencies=[Depends(require_user_permission("write"))])
 async def clear_device_sessions(
     device_id: str,
     db: Session = Depends(get_db)
@@ -242,7 +243,7 @@ async def clear_device_sessions(
     """
     Clear all sessions for a device (logout).
 
-    NOTE: This endpoint is public to allow users to clear their own sessions.
+    Requires a signed-in user with write permission.
     """
     try:
         sessions = db.query(UserSession).filter(

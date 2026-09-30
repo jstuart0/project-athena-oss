@@ -13,6 +13,7 @@ import structlog
 import json
 
 from app.database import get_db
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 from app.auth.oidc import get_current_user
 from app.models import User, Secret, SystemSetting
 from app.utils.encryption import encrypt_value, decrypt_value
@@ -307,14 +308,14 @@ class LLMMemorySettingsResponse(BaseModel):
     keep_alive_description: str
 
 
-@router.get("/llm-memory", response_model=LLMMemorySettingsResponse)
+@router.get("/llm-memory", response_model=LLMMemorySettingsResponse, dependencies=[Depends(require_user_permission("read"))])
 async def get_llm_memory_settings(
     db: Session = Depends(get_db)
 ):
     """
     Get LLM memory management settings.
 
-    This endpoint is public (no auth) to allow services to fetch settings.
+    Requires a signed-in user with read permission.
 
     Returns:
         - keep_models_loaded: Whether to keep models in memory
@@ -455,14 +456,14 @@ class HouseLayoutSettingsResponse(BaseModel):
     has_layout: bool
 
 
-@router.get("/house-layout", response_model=HouseLayoutSettingsResponse)
+@router.get("/house-layout", response_model=HouseLayoutSettingsResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_house_layout_settings(
     db: Session = Depends(get_db)
 ):
     """
     Get house layout description for occupancy estimation.
 
-    This endpoint is public (no auth) to allow orchestrator to fetch the layout.
+    The orchestrator reads it with the service key. Requires the service key, or a signed-in user with read permission.
 
     Returns:
         - layout_description: Text description of house layout
@@ -578,14 +579,14 @@ class ToolProposalSettingsResponse(BaseModel):
     description: str
 
 
-@router.get("/tool-proposals", response_model=ToolProposalSettingsResponse)
+@router.get("/tool-proposals", response_model=ToolProposalSettingsResponse, dependencies=[Depends(require_user_permission("read"))])
 async def get_tool_proposal_settings(
     db: Session = Depends(get_db)
 ):
     """
     Get tool proposal settings.
 
-    This endpoint is public (no auth) to allow services to fetch settings.
+    Requires a signed-in user with read permission.
 
     Returns:
         - auto_approve_enabled: Whether new proposals are auto-approved
@@ -680,14 +681,14 @@ class DirectionsOriginPlaceholderSettingsResponse(BaseModel):
     description: str
 
 
-@router.get("/directions-origin-placeholders", response_model=DirectionsOriginPlaceholderSettingsResponse)
+@router.get("/directions-origin-placeholders", response_model=DirectionsOriginPlaceholderSettingsResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_directions_origin_placeholders(
     db: Session = Depends(get_db)
 ):
     """
     Get directions origin placeholder patterns.
 
-    This endpoint is public (no auth) to allow orchestrator to fetch settings.
+    The orchestrator reads it with the service key. Requires the service key, or a signed-in user with read permission.
 
     These are placeholder values that LLMs commonly use instead of real addresses.
     When detected as the origin in a get_directions call, they are replaced with
@@ -840,7 +841,7 @@ def _validate_ollama_url_write(url: str) -> None:
         raise HTTPException(status_code=422, detail=str(e))
 
 
-@router.get("/ollama-url", response_model=OllamaUrlResponse)
+@router.get("/ollama-url", response_model=OllamaUrlResponse, dependencies=[Depends(require_user_permission("read"))])
 async def get_ollama_url(
     db: Session = Depends(get_db)
 ):
@@ -848,7 +849,7 @@ async def get_ollama_url(
     Get the centralized Ollama URL.
 
     This is the single source of truth for all LLM services.
-    Public endpoint (no auth) to allow services to fetch the URL.
+    Requires a signed-in user with read permission.
 
     Returns:
         - ollama_url: The configured Ollama API URL
@@ -1003,15 +1004,14 @@ async def save_ollama_url(
         raise HTTPException(status_code=500, detail=f"Failed to save Ollama URL: {str(e)}")
 
 
-@router.get("/ollama-url/internal")
+@router.get("/ollama-url/internal", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_ollama_url_internal(
     db: Session = Depends(get_db)
 ):
     """
     Internal endpoint for services to fetch Ollama URL.
 
-    No authentication required. Returns just the URL string for easy consumption.
-    Used by orchestrator, gateway, and other services.
+    Returns just the URL string for easy consumption. Requires the service key, or a signed-in user with read permission.
     """
     import os
 

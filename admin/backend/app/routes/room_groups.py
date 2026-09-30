@@ -12,6 +12,7 @@ from pydantic import BaseModel
 import structlog
 
 from app.database import get_db
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 from app.auth.oidc import get_current_user
 from app.models import User, RoomGroup, RoomGroupAlias, RoomGroupMember
 
@@ -95,7 +96,7 @@ class ResolveResponse(BaseModel):
 # Room Group CRUD Endpoints
 # ============================================================================
 
-@router.get("", response_model=List[RoomGroupResponse])
+@router.get("", response_model=List[RoomGroupResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_room_groups(
     enabled: Optional[bool] = Query(None, description="Filter by enabled status"),
     db: Session = Depends(get_db)
@@ -103,8 +104,7 @@ async def list_room_groups(
     """
     List all room groups with their aliases and members.
 
-    NOTE: This endpoint is public (no authentication required) to allow
-    internal service-to-service calls from orchestrator.
+    Called by the orchestrator with the service key. Requires the service key, or a signed-in user with read permission.
     """
     try:
         query = db.query(RoomGroup).options(
@@ -127,7 +127,7 @@ async def list_room_groups(
         raise HTTPException(status_code=500, detail="Failed to retrieve room groups")
 
 
-@router.get("/resolve/{query_term}", response_model=ResolveResponse)
+@router.get("/resolve/{query_term}", response_model=ResolveResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def resolve_room_group(
     query_term: str,
     db: Session = Depends(get_db)
@@ -141,7 +141,7 @@ async def resolve_room_group(
     This is the primary endpoint used by the orchestrator to expand
     commands like "first floor" into individual rooms.
 
-    NOTE: This endpoint is public for orchestrator access.
+    Requires the service key, or a signed-in user with read permission.
     """
     try:
         query_lower = query_term.lower().strip()
@@ -199,7 +199,7 @@ async def resolve_room_group(
         raise HTTPException(status_code=500, detail="Failed to resolve room group")
 
 
-@router.get("/available-rooms", response_model=List[str])
+@router.get("/available-rooms", response_model=List[str], dependencies=[Depends(require_user_permission("read"))])
 async def get_available_rooms(
     db: Session = Depends(get_db)
 ):
@@ -209,7 +209,7 @@ async def get_available_rooms(
     Returns the commonly used room names from the orchestrator's known list
     plus any custom rooms already defined in groups.
 
-    NOTE: This endpoint is public.
+    Requires a signed-in user with read permission.
     """
     # Standard rooms from orchestrator
     standard_rooms = [

@@ -141,13 +141,39 @@ def _seed_ollama_url(db, url: str) -> None:
     db.commit()
 
 
-def test_get_ollama_url_reports_ssrf_blocked_for_stored_private_host_zero_requests(client, db, monkeypatch):
+def _production_auth(monkeypatch):
+    """Turn DEV_MODE's auth bypass off in the oidc module the served app
+    uses (conftest's get_current_user) and in the live one: another test
+    file evicts and re-imports app.* mid-suite, so they can differ."""
+    from tests.conftest import get_current_user as served_get_current_user
+
+    monkeypatch.setitem(served_get_current_user.__globals__, "DEV_MODE", False)
+    monkeypatch.setattr("app.auth.oidc.DEV_MODE", False)
+
+
+def _operator(monkeypatch, user):
+    """GET /api/settings/ollama-url needs a signed-in user with read
+    permission: production auth (no DEV_MODE bypass) and an operator token."""
+    from app.auth.oidc import create_access_token
+
+    _production_auth(monkeypatch)
+    token = create_access_token({"user_id": user.id, "username": user.username, "role": user.role})
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_get_ollama_url_requires_a_user(client, db, monkeypatch):
+    _production_auth(monkeypatch)
+    assert client.get("/api/settings/ollama-url").status_code == 401
+
+
+def test_get_ollama_url_reports_ssrf_blocked_for_stored_private_host_zero_requests(client, db, monkeypatch, operator_user):
+    headers = _operator(monkeypatch, operator_user)
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
     _seed_ollama_url(db, "http://192.0.2.10:11434")
     transport = _RecordingTransport()
     _patch_async_client(monkeypatch, transport)
 
-    response = client.get("/api/settings/ollama-url")
+    response = client.get("/api/settings/ollama-url", headers=headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -157,7 +183,8 @@ def test_get_ollama_url_reports_ssrf_blocked_for_stored_private_host_zero_reques
     assert transport.requests == []
 
 
-def test_get_ollama_url_probes_when_host_is_allowed(client, db, monkeypatch):
+def test_get_ollama_url_probes_when_host_is_allowed(client, db, monkeypatch, operator_user):
+    headers = _operator(monkeypatch, operator_user)
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
     monkeypatch.setenv("HEALTH_POLL_ALLOWED_PRIVATE_HOSTS", "192.0.2.10")
     _clear_all_config_caches()
@@ -165,7 +192,7 @@ def test_get_ollama_url_probes_when_host_is_allowed(client, db, monkeypatch):
     transport = _RecordingTransport()
     _patch_async_client(monkeypatch, transport)
 
-    response = client.get("/api/settings/ollama-url")
+    response = client.get("/api/settings/ollama-url", headers=headers)
 
     assert response.status_code == 200
     data = response.json()

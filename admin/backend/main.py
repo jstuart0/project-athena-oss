@@ -62,11 +62,18 @@ logger = structlog.get_logger()
 if DEV_MODE:
     logger.info("dev_mode_active", message="Running in development mode with SQLite in-memory database")
 
+# The interactive docs and the OpenAPI schema list every route, including the
+# internal ones; they're served only in DEV_MODE.
+DOCS_ENABLED = get_config().dev_mode
+
 app = FastAPI(
     title="Project Athena Admin API",
     description="Admin interface for monitoring and managing Athena services",
     version="2.0.0",  # Version 2 with authentication
-    redirect_slashes=False  # Disable automatic trailing slash redirects
+    redirect_slashes=False,  # Disable automatic trailing slash redirects
+    docs_url="/docs" if DOCS_ENABLED else None,
+    redoc_url="/redoc" if DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
 
 # Session middleware (Redis in production, in-memory in DEV_MODE)

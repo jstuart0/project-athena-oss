@@ -395,15 +395,26 @@ def test_public_privacy_keys(client, _auth_on):
     assert set(resp.json()) == {"analytics_mode_enabled"}
 
 
+def _served_endpoint(method, path):
+    """The endpoint main.app actually serves. Resolved through the app, not
+    by importing a module: test_rate_limit_active.py evicts and re-imports
+    every app./main/shared. module mid-suite, so a fresh import can be a
+    different module object from the one the app's routes use."""
+    for walked in iter_api_routes(app):
+        if walked.path == path and method in walked.methods:
+            return walked.route.endpoint
+    raise AssertionError((method, path))
+
+
 def test_login_mints_no_token_outside_demo_mode(client, _auth_on, monkeypatch):
     from starlette.responses import RedirectResponse
 
-    import main as main_module
-    from shared.config import _clear_cache_for_tests
+    login_globals = _served_endpoint("GET", "/api/auth/login").__globals__
+    clear = login_globals["get_config"].cache_clear
 
     monkeypatch.setenv("DEMO_MODE", "false")
     monkeypatch.setenv("OIDC_CLIENT_ID", "real-client")
-    _clear_cache_for_tests()
+    clear()
     minted = []
 
     def _no_token(*args, **kwargs):
@@ -417,8 +428,8 @@ def test_login_mints_no_token_outside_demo_mode(client, _auth_on, monkeypatch):
     class _OAuth:
         authentik = _Provider()
 
-    monkeypatch.setattr(main_module, "create_access_token", _no_token)
-    monkeypatch.setattr(main_module, "oauth", _OAuth())
+    monkeypatch.setitem(login_globals, "create_access_token", _no_token)
+    monkeypatch.setitem(login_globals, "oauth", _OAuth())
     try:
         resp = client.get("/api/auth/login", follow_redirects=False)
         assert resp.status_code == 302, resp.text
@@ -427,7 +438,7 @@ def test_login_mints_no_token_outside_demo_mode(client, _auth_on, monkeypatch):
         session = client.get("/api/auth/session-token")
         assert "access_token" not in session.text
     finally:
-        _clear_cache_for_tests()
+        clear()
 
 
 # (i) --------------------------------------------------------------------
@@ -452,9 +463,9 @@ def test_a_local_function_named_get_current_user_is_not_auth():
 # (j) --------------------------------------------------------------------
 
 def test_voice_automation_routes_carry_the_caller_scope():
-    from app.routes import voice_automations
-
-    scope_dep = getattr(voice_automations, "automation_caller_scope", None)
+    # The module the served route was defined in (see _served_endpoint).
+    va_globals = _served_endpoint("POST", f"{VA}/{{automation_id}}/archive").__globals__
+    scope_dep = va_globals.get("automation_caller_scope")
     assert scope_dep is not None, "voice_automations.automation_caller_scope is missing"
     scoped = {
         (m, p)

@@ -12,12 +12,25 @@ from pydantic import BaseModel
 import structlog
 
 from app.database import get_db
+from app.utils.service_auth import require_user_permission
 from app.auth.oidc import get_current_user
 from app.models import User, Guest, CalendarEvent
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/guests", tags=["guests"])
+
+
+def _active_event(db: Session, now: datetime) -> Optional[CalendarEvent]:
+    """The current stay: confirmed, not deleted, covering ``now``. On a
+    changeover day two stays can cover the same instant; the one checking
+    out first (the departing guest's) is current until it checks out."""
+    return db.query(CalendarEvent).filter(
+        CalendarEvent.deleted_at.is_(None),
+        CalendarEvent.status == 'confirmed',
+        CalendarEvent.checkin <= now,
+        CalendarEvent.checkout >= now,
+    ).order_by(CalendarEvent.checkout.asc()).first()
 
 
 # ============================================================================
@@ -70,7 +83,7 @@ class AddGuestToCurrentRequest(BaseModel):
 # Guest CRUD Endpoints
 # ============================================================================
 
-@router.get("", response_model=List[GuestResponse])
+@router.get("", response_model=List[GuestResponse], dependencies=[Depends(require_user_permission("read"))])
 async def list_guests(
     calendar_event_id: Optional[int] = Query(None, description="Filter by calendar event"),
     db: Session = Depends(get_db)
@@ -78,7 +91,7 @@ async def list_guests(
     """
     List all guests, optionally filtered by calendar event.
 
-    NOTE: This endpoint is public for orchestrator access.
+    Requires a signed-in user with read permission.
     """
     try:
         query = db.query(Guest)
@@ -97,25 +110,21 @@ async def list_guests(
         raise HTTPException(status_code=500, detail="Failed to retrieve guests")
 
 
-@router.get("/current", response_model=List[GuestResponse])
+@router.get("/current", response_model=List[GuestResponse], dependencies=[Depends(require_user_permission("read"))])
 async def get_current_guests(db: Session = Depends(get_db)):
     """
     Get guests for the currently active reservation.
 
-    Finds the reservation where checkin <= now <= checkout.
-    Returns guests ordered by is_primary (primary first), then by created_at.
+    The current stay is the confirmed, non-deleted reservation covering now
+    (the departing one on a changeover day; see _active_event). Returns
+    guests ordered by is_primary (primary first), then by created_at.
 
-    NOTE: This endpoint is public for orchestrator access.
+    Requires a signed-in user with read permission.
     """
     try:
         now = datetime.now(timezone.utc)
 
-        # Find active calendar event
-        event = db.query(CalendarEvent).filter(
-            CalendarEvent.checkin <= now,
-            CalendarEvent.checkout >= now,
-            CalendarEvent.deleted_at.is_(None)
-        ).first()
+        event = _active_event(db, now)
 
         if not event:
             logger.debug("no_active_reservation_for_guests")
@@ -136,7 +145,7 @@ async def get_current_guests(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Failed to retrieve current guests")
 
 
-@router.get("/by-events")
+@router.get("/by-events", dependencies=[Depends(require_user_permission("read"))])
 async def get_guests_by_events(
     event_ids: str = Query(..., description="Comma-separated event IDs"),
     db: Session = Depends(get_db)
@@ -147,7 +156,7 @@ async def get_guests_by_events(
     Used by admin UI to efficiently load guests for multiple reservations.
     Returns a dictionary mapping event_id to list of guests.
 
-    NOTE: This endpoint is public for orchestrator access.
+    Requires a signed-in user with read permission.
     """
     try:
         # Parse comma-separated IDs
@@ -182,7 +191,7 @@ async def get_guests_by_events(
         raise HTTPException(status_code=500, detail="Failed to retrieve guests")
 
 
-@router.get("/{guest_id}", response_model=GuestResponse)
+@router.get("/{guest_id}", response_model=GuestResponse, dependencies=[Depends(require_user_permission("read"))])
 async def get_guest(
     guest_id: int,
     db: Session = Depends(get_db)
@@ -190,7 +199,7 @@ async def get_guest(
     """
     Get a specific guest by ID.
 
-    NOTE: This endpoint is public for orchestrator access.
+    Requires a signed-in user with read permission.
     """
     try:
         guest = db.query(Guest).filter(Guest.id == guest_id).first()
@@ -272,7 +281,7 @@ async def create_guest(
         raise HTTPException(status_code=500, detail="Failed to create guest")
 
 
-@router.post("/current/add", response_model=dict)
+@router.post("/current/add", response_model=dict, dependencies=[Depends(require_user_permission("write"))])
 async def add_guest_to_current_reservation(
     guest_data: AddGuestToCurrentRequest,
     db: Session = Depends(get_db)
@@ -280,18 +289,13 @@ async def add_guest_to_current_reservation(
     """
     Add a guest to the currently active reservation.
 
-    This endpoint is public to allow web app users to self-identify.
-    Creates a new guest record linked to the active calendar event.
+    Creates a new guest record linked to the current stay (see
+    _active_event). Requires a signed-in user with write permission.
     """
     try:
         now = datetime.now(timezone.utc)
 
-        # Find active calendar event
-        event = db.query(CalendarEvent).filter(
-            CalendarEvent.checkin <= now,
-            CalendarEvent.checkout >= now,
-            CalendarEvent.deleted_at.is_(None)
-        ).first()
+        event = _active_event(db, now)
 
         if not event:
             raise HTTPException(status_code=404, detail="No active reservation found")
