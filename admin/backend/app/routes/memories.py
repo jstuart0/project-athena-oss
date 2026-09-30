@@ -1035,9 +1035,32 @@ async def internal_forget_memory(
 # =============================================================================
 
 @router.get("/qdrant/health", dependencies=[Depends(require_memory_reader)])
-async def qdrant_health():
-    """Vector store connection and collection status."""
-    return await run_in_threadpool(memory_vectors.describe)
+async def qdrant_health(db: Session = Depends(get_db)):
+    """Vector store status against Postgres, the source of truth.
+
+    status: healthy (ready and every live memory has its vector, nothing
+    pending), degraded (ready but out of sync), unavailable (store or
+    embedder down), error (shape or model mismatch, or unreadable). The
+    Postgres counts are always present."""
+    report = await run_in_threadpool(memory_vectors.describe)
+    live = db.query(Memory).filter(Memory.is_deleted == False)
+    pg_live_count = live.count()
+    pending_count = live.filter(Memory.vector_status == "pending").count()
+    state = report["state"]
+    in_sync = (
+        state == memory_vectors.READY
+        and report.get("error") is None
+        and report.get("points_count") == pg_live_count
+        and pending_count == 0
+    )
+    if state in (memory_vectors.UNAVAILABLE, memory_vectors.EMBEDDER_UNAVAILABLE):
+        status = "unavailable"
+    elif state != memory_vectors.READY or report.get("error") is not None:
+        status = "error"
+    else:
+        status = "healthy" if in_sync else "degraded"
+    return {**report, "status": status, "pg_live_count": pg_live_count, "pending_count": pending_count,
+            "in_sync": in_sync}
 
 
 # =============================================================================

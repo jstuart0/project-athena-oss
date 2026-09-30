@@ -37,7 +37,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 import structlog
 
-from app.utils.url_validators import redact_url_userinfo
+from app.utils.url_validators import redact_url_userinfo, redact_urls_in_text
 
 logger = structlog.get_logger()
 
@@ -128,10 +128,7 @@ _last_pending_pass: Optional[float] = None
 
 
 def _redact(text: str) -> str:
-    text = str(text)
-    if QDRANT_URL and QDRANT_URL in text:
-        text = text.replace(QDRANT_URL, redact_url_userinfo(QDRANT_URL))
-    return text[:_DETAIL_MAX_CHARS]
+    return redact_urls_in_text(text)[:_DETAIL_MAX_CHARS]
 
 
 def _error_text(exc: BaseException) -> str:
@@ -360,32 +357,38 @@ def _is_not_found(exc: BaseException) -> bool:
 
 def collection_info() -> Dict[str, Any]:
     """Point counts of the collection. Raises when it can't be read."""
-    info = _get_client().get_collection(COLLECTION_NAME)
+    client = _get_client()
+    info = client.get_collection(COLLECTION_NAME)
     vectors_count = getattr(info, "vectors_count", None)
     if vectors_count is None:
         vectors_count = getattr(info, "indexed_vectors_count", 0)
-    return {"collection": COLLECTION_NAME, "points_count": getattr(info, "points_count", 0),
-            "vectors_count": vectors_count}
+    return {"points_count": client.count(COLLECTION_NAME, exact=True).count, "vectors_count": vectors_count}
 
 
 def describe() -> Dict[str, Any]:
-    """The vector store's side of the status report (URL redacted)."""
+    """The vector store's side of the status report: state, recorded model,
+    foreign points and (when the collection can be read) exact counts.
+    The URL, detail and error are redacted."""
     state = get_state()
     report: Dict[str, Any] = {
         "url": redact_url_userinfo(QDRANT_URL),
         "collection": COLLECTION_NAME,
         "state": state.status,
         "detail": state.detail,
+        "embedding_model": EMBEDDING_MODEL,
+        "collection_embedding_model": state.collection_model,
+        "model_recorded": state.model_recorded,
+        "foreign_points": state.foreign_points,
+        "foreign_point_ids_sample": list(state.foreign_point_ids_sample),
+        "points_count": None,
+        "vectors_count": None,
     }
     if state.status in (UNAVAILABLE, EMBEDDER_UNAVAILABLE):
-        report["status"] = "unavailable"
         return report
     try:
         report.update(collection_info())
     except Exception as exc:
-        report.update(status="error", error=_error_text(exc))
-        return report
-    report["status"] = "healthy" if state.status == READY else "error"
+        report["error"] = _error_text(exc)
     return report
 
 
