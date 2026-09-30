@@ -784,6 +784,9 @@ function showTab(tabName) {
             if (typeof initSystemConfigPage === 'function') {
                 initSystemConfigPage();
             }
+            if (typeof initTelemetryPanel === 'function') {
+                initTelemetryPanel();
+            }
             break;
         case 'oss-profiles':
             if (typeof initOSSProfilesPage === 'function') {

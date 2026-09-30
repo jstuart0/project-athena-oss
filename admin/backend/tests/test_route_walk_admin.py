@@ -25,7 +25,13 @@ def _walked_operations():
 def test_walk_is_not_vacuous():
     ops = _walked_operations()
     assert len(ops) > 100
-    for named in (("post", "/api/calendar-sources/{source_id}/sync"), ("post", "/api/auth/ws-ticket")):
+    for named in (
+        ("post", "/api/calendar-sources/{source_id}/sync"),
+        ("post", "/api/auth/ws-ticket"),
+        ("get", "/api/telemetry/status"),
+        ("put", "/api/telemetry/settings"),
+        ("post", "/api/telemetry/send"),
+    ):
         assert named in ops
 
 

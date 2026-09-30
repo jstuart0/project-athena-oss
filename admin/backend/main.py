@@ -57,6 +57,7 @@ from app.routes import (
     dashboard, integrations, escalation, debug_logs, modules, local_auth, oss_profiles,
     conversations
 )
+from app.routes import telemetry as telemetry_routes
 
 logger = structlog.get_logger()
 
@@ -123,6 +124,7 @@ app.include_router(validation_models.router)
 app.include_router(conversation.router)
 app.include_router(llm_backends.router)
 app.include_router(settings.router)
+app.include_router(telemetry_routes.router)
 app.include_router(intent_routing.router)
 app.include_router(features.router)
 app.include_router(external_api_keys.router)
