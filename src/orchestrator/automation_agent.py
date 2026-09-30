@@ -358,16 +358,35 @@ def _stay_read_only_refusal() -> Optional[str]:
     return STAY_READ_ONLY_REFUSAL if is_stay_read_only(_scope_permissions()) else None
 
 
+# Until a Home Assistant disable route exists, voice "delete" only archives
+# Athena's record: the Home Assistant automation keeps running.
+ARCHIVED_REPLY = (
+    "I've archived that automation in Athena. The Home Assistant automation "
+    "is still active, so ask the host to turn it off there."
+)
+# Names the calendar feeds give every booking of a kind; they can't tell
+# stays apart (admin-backend refuses them too).
+_PLACEHOLDER_GUEST_NAMES = frozenset({"airbnb guest", "vrbo guest", "guest"})
+
+
 def _caller(context: Dict[str, Any]) -> Optional[tuple]:
-    """The caller's voice-automation scope: ("owner", None), ("guest", name)
-    for a named guest, or None when it can't be told (a guest turn with no
-    guest identity, or any other mode). None means refuse before any call."""
+    """The caller's voice-automation scope: ("owner", None, None), or
+    ("guest", name, stay_id) for a named guest of a known stay (the stay's
+    calendar event id). None when it can't be told: a guest turn with no
+    name, no stay id, or a feed placeholder name, or any other mode. None
+    means refuse before any call."""
     mode = context.get("mode")
     if mode == "owner":
-        return ("owner", None)
+        return ("owner", None, None)
     guest_name = context.get("guest_name")
-    if mode == "guest" and isinstance(guest_name, str) and guest_name.strip():
-        return ("guest", guest_name)
+    stay_id = context.get("guest_stay_id")
+    if (
+        mode == "guest"
+        and isinstance(guest_name, str) and guest_name.strip()
+        and guest_name.strip().casefold() not in _PLACEHOLDER_GUEST_NAMES
+        and isinstance(stay_id, int) and not isinstance(stay_id, bool) and stay_id > 0
+    ):
+        return ("guest", guest_name, stay_id)
     return None
 
 
@@ -1173,20 +1192,21 @@ class AutomationAgent:
                 else:
                     actions = [action]
 
-            caller_mode, caller_guest_name = _caller(context)
+            caller_mode, caller_guest_name, caller_guest_stay = _caller(context)
             await self.admin.create_voice_automation({
                 "name": args.get("name", "Voice Automation"),
                 "ha_automation_id": automation_id,
                 "owner_type": caller_mode,
                 "guest_session_id": context.get("session_id") if caller_mode == "guest" else None,
                 "guest_name": caller_guest_name,
+                "calendar_event_id": caller_guest_stay,
                 "created_by_room": context.get("room"),
                 "trigger_config": trigger_config,
                 "conditions_config": args.get("conditions", []),
                 "actions_config": actions,
                 "is_one_time": args.get("one_time", False),
                 "status": "active"
-            }, caller_mode=caller_mode, caller_guest_name=caller_guest_name)
+            }, caller_mode=caller_mode, caller_guest_name=caller_guest_name, caller_guest_stay=caller_guest_stay)
             logger.info(
                 "voice_automation_stored",
                 automation_id=automation_id,
@@ -1209,14 +1229,14 @@ class AutomationAgent:
 
         try:
             include_archived = args.get("include_archived", False)
-            caller_mode, caller_guest_name = caller
+            caller_mode, caller_guest_name, caller_guest_stay = caller
 
             automations = await self.admin.get_voice_automations(
                 owner_type=caller_mode,
-                guest_name=caller_guest_name,
                 include_archived=include_archived,
                 caller_mode=caller_mode,
                 caller_guest_name=caller_guest_name,
+                caller_guest_stay=caller_guest_stay,
             )
 
             rows = []
@@ -1239,9 +1259,10 @@ class AutomationAgent:
     async def _delete_automation(self, args: Dict, context: Dict) -> str:
         """Archive an automation, in both modes.
 
-        The hard delete is user-only on admin-backend (it would leave the
-        Home Assistant automation running), so voice "delete" archives. A
-        guest can archive only their own rows; admin-backend enforces that.
+        The hard delete is user-only on admin-backend, so voice "delete"
+        archives Athena's record. That doesn't disable the Home Assistant
+        automation, and the reply says so. A guest can archive only their
+        own stay's rows; admin-backend enforces that.
         """
         read_only = _stay_read_only_refusal()
         if read_only:
@@ -1265,14 +1286,14 @@ class AutomationAgent:
             if not automation_id:
                 return "Please specify an automation to delete."
 
-            caller_mode, caller_guest_name = caller
+            caller_mode, caller_guest_name, caller_guest_stay = caller
             archived = await self.admin.archive_voice_automation(
                 automation_id, "user_deleted",
-                caller_mode=caller_mode, caller_guest_name=caller_guest_name,
+                caller_mode=caller_mode, caller_guest_name=caller_guest_name, caller_guest_stay=caller_guest_stay,
             )
             if not archived:
                 return "I couldn't find that automation."
-            return "I've archived that automation."
+            return ARCHIVED_REPLY
 
         except Exception as e:
             logger.error(f"Failed to delete automation: {e}")

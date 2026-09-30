@@ -191,7 +191,7 @@ def test_scoped_voice_calls_send_the_caller_mode():
         for (rel, name), calls in _all_results().items()
         if name in SCOPED
         for lineno, text in calls
-        if "X-Athena-Caller-Mode" not in text
+        if "X-Athena-Caller-Mode" not in text or "X-Athena-Guest-Stay" not in text
     )
     assert not missing, f"{len(missing)} scoped call(s) without X-Athena-Caller-Mode: {missing}"
 
@@ -213,7 +213,7 @@ async def via_variable(self, u):
     return await self.client.get(url, headers=headers)
 
 def _voice_headers(self, mode, name):
-    return {"X-Service-Key": self.api_key, "X-Athena-Caller-Mode": mode}
+    return {"X-Service-Key": self.api_key, "X-Athena-Caller-Mode": mode, "X-Athena-Guest-Stay": "1"}
 
 async def ungated(client, u):
     return await client.get(f"{u}/api/features/public")

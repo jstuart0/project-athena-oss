@@ -115,7 +115,9 @@ def test_guest_network_is_addressed_as_the_guest(monkeypatch, captured_logs):
     _chat(headers)
     body = out.orchestrator_bodies()[-1]
     assert body["caller_trust"] == "web_guest_net"
-    assert body["context"] == {"guest_id": 7, "guest_name": "Gina Guest"}
+    # guest_id is the current stay's calendar event id; guest_stay_id names
+    # it as the stay for voice-automation scoping.
+    assert body["context"] == {"guest_id": 7, "guest_name": "Gina Guest", "guest_stay_id": 7}
     welcome = _welcome(headers)
     assert _greeting_name(welcome) == "Gina"
     assert welcome["guest"]["guest_name"] == "Gina Guest"

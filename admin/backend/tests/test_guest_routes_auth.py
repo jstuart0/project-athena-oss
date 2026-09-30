@@ -335,27 +335,34 @@ def test_pipeline_events_need_a_user(client, db, operator_user):
 
 
 # ---------------------------------------------------------------------------
-# Voice-automation caller scope
+# Voice-automation caller scope: keyed on the stay, not the guest's name
 # ---------------------------------------------------------------------------
+
+STAY_A, STAY_B, STAY_OLD = 101, 102, 103
+
 
 @pytest.fixture
 def scoped(db):
-    """Owner row O, another stay's guest row G_B, then this stay's G_A
-    (wrong answers first)."""
+    """Wrong answers first: an owner row, another stay's row carrying the
+    SAME guest name, a legacy row of this name with no stay id, then this
+    stay's row."""
     rows = {
         "O": _automation(db, name="Owner", owner_type="owner"),
-        "G_B": _automation(db, name="Bo's", owner_type="guest", guest_name="Bo", guest_session_id="s-bo"),
-        "G_A": _automation(db, name="Ana's", owner_type="guest", guest_name="Ana", guest_session_id="s-ana"),
+        "G_B": _automation(db, name="Sam at B", owner_type="guest", guest_name="Sam", calendar_event_id=STAY_B),
+        "LEGACY": _automation(db, name="Sam legacy", owner_type="guest", guest_name="Sam", calendar_event_id=None),
+        "G_A": _automation(db, name="Sam at A", owner_type="guest", guest_name="Sam", calendar_event_id=STAY_A),
     }
     return {k: v.id for k, v in rows.items()}
 
 
-def _svc(mode=None, name=None):
+def _svc(mode=None, name=None, stay=None):
     headers = {"X-Service-Key": get_config().service_api_key}
     if mode:
         headers["X-Athena-Caller-Mode"] = mode
     if name is not None:
         headers["X-Athena-Guest-Name"] = quote(name, safe="")
+    if stay is not None:
+        headers["X-Athena-Guest-Stay"] = str(stay)
     return headers
 
 
@@ -364,11 +371,28 @@ def _ids(resp):
     return sorted(r["id"] for r in resp.json())
 
 
-def test_guest_scope_lists_only_its_own_rows(client, scoped):
-    guest = _svc("guest", "Ana")
+def test_guest_scope_lists_only_its_own_stay(client, scoped):
+    guest = _svc("guest", "Sam", STAY_A)
     assert _ids(client.get(VA, headers=guest)) == [scoped["G_A"]]
-    conflicting = client.get(VA, params={"owner_type": "owner", "guest_name": "Bo"}, headers=guest)
+    conflicting = client.get(VA, params={"owner_type": "owner", "guest_name": "Sam"}, headers=guest)
     assert _ids(conflicting) == [scoped["G_A"]]
+
+
+def test_two_stays_sharing_a_name_see_only_their_own_rows(client, scoped):
+    assert _ids(client.get(VA, headers=_svc("guest", "Sam", STAY_B))) == [scoped["G_B"]]
+    assert _ids(client.get(VA, headers=_svc("guest", "Sam", STAY_OLD))) == []
+
+
+def test_legacy_rows_without_a_stay_are_never_visible_to_a_guest(client, db, scoped):
+    for stay in (STAY_A, STAY_B, STAY_OLD):
+        guest = _svc("guest", "Sam", stay)
+        assert scoped["LEGACY"] not in _ids(client.get(VA, params={"include_archived": "true"}, headers=guest))
+        for action in ("archive", "restore", "triggered"):
+            assert client.post(f"{VA}/{scoped['LEGACY']}/{action}", headers=guest).status_code == 404
+        by_name = client.get(f"{VA}/internal/by-guest-name/Sam", params={"include_archived": "true"}, headers=guest)
+        assert scoped["LEGACY"] not in _ids(by_name)
+    db.expire_all()
+    assert db.query(VoiceAutomation).get(scoped["LEGACY"]).status == "active"
 
 
 def test_owner_scope_lists_every_row(client, scoped):
@@ -376,49 +400,71 @@ def test_owner_scope_lists_every_row(client, scoped):
 
 
 @pytest.mark.parametrize("action", ["archive", "triggered"])
-def test_guest_scope_by_id_actions_reach_only_its_own_rows(client, db, scoped, action):
-    guest = _svc("guest", "Ana")
-    assert client.post(f"{VA}/{scoped['O']}/{action}", headers=guest).status_code == 404
-    assert client.post(f"{VA}/{scoped['G_B']}/{action}", headers=guest).status_code == 404
+def test_guest_scope_by_id_actions_reach_only_its_own_stay(client, db, scoped, action):
+    guest = _svc("guest", "Sam", STAY_A)
+    for other in ("O", "G_B", "LEGACY"):
+        assert client.post(f"{VA}/{scoped[other]}/{action}", headers=guest).status_code == 404
     assert client.post(f"{VA}/{scoped['G_A']}/{action}", headers=guest).status_code == 200
     db.expire_all()
     if action == "archive":
-        assert db.query(VoiceAutomation).get(scoped["G_B"]).status == "active"
-        assert db.query(VoiceAutomation).get(scoped["O"]).status == "active"
+        for other in ("O", "G_B", "LEGACY"):
+            assert db.query(VoiceAutomation).get(scoped[other]).status == "active"
 
 
-def test_guest_scope_restore_reaches_only_its_own_rows(client, db, scoped):
-    for key in ("O", "G_B", "G_A"):
-        row = db.query(VoiceAutomation).get(scoped[key])
-        row.status = "archived"
+def test_guest_scope_restore_reaches_only_its_own_stay(client, db, scoped):
+    for key in scoped:
+        db.query(VoiceAutomation).get(scoped[key]).status = "archived"
     db.commit()
-    guest = _svc("guest", "Ana")
-    assert client.post(f"{VA}/{scoped['O']}/restore", headers=guest).status_code == 404
-    assert client.post(f"{VA}/{scoped['G_B']}/restore", headers=guest).status_code == 404
+    guest = _svc("guest", "Sam", STAY_A)
+    for other in ("O", "G_B", "LEGACY"):
+        assert client.post(f"{VA}/{scoped[other]}/restore", headers=guest).status_code == 404
     assert client.post(f"{VA}/{scoped['G_A']}/restore", headers=guest).status_code == 200
 
 
-def test_guest_scope_name_keyed_routes(client, db, scoped):
-    guest = _svc("guest", "Ana")
+def test_guest_scope_name_keyed_reads_are_stay_scoped(client, db, scoped):
+    guest = _svc("guest", "Sam", STAY_A)
     assert client.get(f"{VA}/internal/by-guest-name/Bo", headers=guest).status_code == 404
     assert client.get(f"{VA}/guest/Bo/archived", headers=guest).status_code == 404
-    assert client.post(f"{VA}/archive-guest", json={"guest_name": "Bo"}, headers=guest).status_code == 404
-    assert client.post(f"{VA}/restore-guest", json={"guest_name": "Bo"}, headers=guest).status_code == 404
+    assert _ids(client.get(f"{VA}/internal/by-guest-name/Sam", headers=guest)) == [scoped["G_A"]]
     assert client.post(f"{VA}/guest-departure/s-ana", headers=guest).status_code == 404
+
+
+@pytest.mark.parametrize("route", ["archive-guest", "restore-guest"])
+def test_name_based_bulk_changes_are_owner_only(client, db, scoped, route):
+    guest = _svc("guest", "Sam", STAY_A)
+    assert client.post(f"{VA}/{route}", json={"guest_name": "Sam"}, headers=guest).status_code == 403
     db.expire_all()
-    assert db.query(VoiceAutomation).get(scoped["G_B"]).status == "active"
-    by_name = client.get(f"{VA}/internal/by-guest-name/Ana", headers=guest)
-    assert _ids(by_name) == [scoped["G_A"]]
+    assert {r.status for r in db.query(VoiceAutomation).all()} == {"active"}
+    owner = client.post(f"{VA}/{route}", json={"guest_name": "Sam"}, headers=_svc("owner"))
+    assert owner.status_code == 200, owner.text
 
 
-def test_guest_scope_create_must_be_its_own_guest_row(client, db):
-    guest = _svc("guest", "Ana")
+def test_guest_scope_create_is_bound_to_its_stay(client, db):
+    guest = _svc("guest", "Sam", STAY_A)
     base = {"name": "n", "trigger_config": {"type": "time"}, "actions_config": []}
     assert client.post(VA, json={**base, "owner_type": "owner"}, headers=guest).status_code == 400
     assert client.post(VA, json={**base, "owner_type": "guest", "guest_name": "Bo"}, headers=guest).status_code == 400
+    wrong_stay = {**base, "owner_type": "guest", "guest_name": "Sam", "calendar_event_id": STAY_B}
+    assert client.post(VA, json=wrong_stay, headers=guest).status_code == 400
     assert db.query(VoiceAutomation).count() == 0
-    ok = client.post(VA, json={**base, "owner_type": "guest", "guest_name": "Ana"}, headers=guest)
+    ok = client.post(VA, json={**base, "owner_type": "guest", "guest_name": "Sam"}, headers=guest)
     assert ok.status_code == 200, ok.text
+    assert ok.json()["calendar_event_id"] == STAY_A
+    db.expire_all()
+    assert db.query(VoiceAutomation).one().calendar_event_id == STAY_A
+
+
+@pytest.mark.parametrize("name", ["Airbnb Guest", "VRBO Guest", "Guest", " airbnb guest "])
+def test_feed_placeholder_names_are_refused(client, db, name):
+    """Defence in depth: every Airbnb booking is 'Airbnb Guest', so two
+    stays sharing that name must never reach each other's rows. A guest scope
+    with a placeholder name is refused outright."""
+    a = _automation(db, name="a", owner_type="guest", guest_name=name.strip(), calendar_event_id=STAY_A)
+    guest = _svc("guest", name, STAY_A)
+    assert client.get(VA, headers=guest).status_code == 403
+    assert client.post(f"{VA}/{a.id}/archive", headers=guest).status_code == 403
+    db.expire_all()
+    assert db.query(VoiceAutomation).get(a.id).status == "active"
 
 
 @pytest.mark.parametrize("headers", [
@@ -426,21 +472,29 @@ def test_guest_scope_create_must_be_its_own_guest_row(client, db):
     {"X-Athena-Caller-Mode": "admin"},
     {"X-Athena-Caller-Mode": "guest"},
     {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": ""},
-    {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "%FF%FE"},
-    {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "a" * 256},
-], ids=["missing", "unknown-mode", "guest-no-name", "guest-empty-name", "bad-utf8", "too-long"])
+    {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "%FF%FE", "X-Athena-Guest-Stay": "101"},
+    {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "a" * 256, "X-Athena-Guest-Stay": "101"},
+    {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "Sam"},
+    {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "Sam", "X-Athena-Guest-Stay": ""},
+    {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "Sam", "X-Athena-Guest-Stay": "abc"},
+    {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "Sam", "X-Athena-Guest-Stay": "0"},
+    {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "Sam", "X-Athena-Guest-Stay": "-5"},
+    {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "Sam", "X-Athena-Guest-Stay": "99999999999"},
+], ids=["missing", "unknown-mode", "guest-no-name", "guest-empty-name", "bad-utf8", "too-long",
+        "no-stay", "empty-stay", "non-numeric-stay", "zero-stay", "negative-stay", "huge-stay"])
 def test_service_calls_must_declare_a_valid_scope(client, scoped, headers):
     resp = client.get(VA, headers={"X-Service-Key": get_config().service_api_key, **headers})
     assert resp.status_code == 400, resp.text
 
 
 def test_percent_encoded_non_ascii_guest_name_round_trips(client, db, scoped):
-    row = _automation(db, name="Zoë's", owner_type="guest", guest_name="Zoë")
-    assert _ids(client.get(VA, headers=_svc("guest", "Zoë"))) == [row.id]
+    row = _automation(db, name="Zoë's", owner_type="guest", guest_name="Zoë", calendar_event_id=104)
+    assert _ids(client.get(VA, headers=_svc("guest", "Zoë", 104))) == [row.id]
 
 
 def test_a_user_is_the_owner_whatever_the_headers_say(client, scoped, test_user):
-    headers = {**_bearer(test_user), "X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "Ana"}
+    headers = {**_bearer(test_user), "X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "Sam",
+               "X-Athena-Guest-Stay": str(STAY_A)}
     assert _ids(client.get(VA, headers=headers)) == sorted(scoped.values())
 
 

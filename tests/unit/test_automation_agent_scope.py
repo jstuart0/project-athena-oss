@@ -101,9 +101,17 @@ CREATE_ARGS = {
 
 @pytest.mark.parametrize("context", [
     {"mode": "guest", "room": "office"},
-    {"mode": "guest", "room": "office", "guest_name": ""},
-    {"mode": "guest", "room": "office", "guest_name": None},
-])
+    {"mode": "guest", "room": "office", "guest_name": "", "guest_stay_id": 7},
+    {"mode": "guest", "room": "office", "guest_name": None, "guest_stay_id": 7},
+    {"mode": "guest", "room": "office", "guest_name": "Ana"},
+    {"mode": "guest", "room": "office", "guest_name": "Ana", "guest_stay_id": None},
+    {"mode": "guest", "room": "office", "guest_name": "Ana", "guest_stay_id": "7"},
+    {"mode": "guest", "room": "office", "guest_name": "Ana", "guest_stay_id": 0},
+    {"mode": "guest", "room": "office", "guest_name": "Airbnb Guest", "guest_stay_id": 7},
+    {"mode": "guest", "room": "office", "guest_name": "vrbo guest", "guest_stay_id": 7},
+    {"mode": "guest", "room": "office", "guest_name": "Guest", "guest_stay_id": 7},
+], ids=["no-identity", "empty-name", "null-name", "no-stay", "null-stay", "string-stay", "zero-stay",
+        "airbnb-placeholder", "vrbo-placeholder", "bare-placeholder"])
 def test_guest_without_identity_is_refused_before_any_call(context):
     admin = RecordingAdmin()
     agent = _agent(admin)
@@ -122,12 +130,13 @@ def test_guest_without_identity_is_refused_before_any_call(context):
 def test_guest_list_is_scoped_to_the_named_guest():
     admin = RecordingAdmin([{"id": 4, "name": "Porch", "status": "active"}])
     agent = _agent(admin)
-    _run(agent._list_automations({}, {"mode": "guest", "guest_name": "Ana"}))
+    _run(agent._list_automations({}, {"mode": "guest", "guest_name": "Ana", "guest_stay_id": 7}))
     _record_seen(admin)
     (name, _args, kwargs), = admin.calls
     assert name == "get_voice_automations"
     assert kwargs["caller_mode"] == "guest"
     assert kwargs["caller_guest_name"] == "Ana"
+    assert kwargs["caller_guest_stay"] == 7
     assert kwargs.get("owner_type") == "guest"
 
 
@@ -138,13 +147,14 @@ def test_owner_list_is_scoped_to_the_owner():
     (name, _args, kwargs), = admin.calls
     assert kwargs["caller_mode"] == "owner"
     assert kwargs["caller_guest_name"] is None
+    assert kwargs["caller_guest_stay"] is None
     assert kwargs.get("owner_type") == "owner"
 
 
 def test_guest_create_stores_a_scoped_guest_row():
     admin = RecordingAdmin()
     agent = _agent(admin)
-    out = _run(agent._create_automation(dict(CREATE_ARGS), {"mode": "guest", "guest_name": "Ana", "room": "office"}))
+    out = _run(agent._create_automation(dict(CREATE_ARGS), {"mode": "guest", "guest_name": "Ana", "guest_stay_id": 7, "room": "office"}))
     _record_seen(admin)
     assert out.startswith("Created automation"), out
     (name, args, kwargs), = admin.calls
@@ -152,26 +162,38 @@ def test_guest_create_stores_a_scoped_guest_row():
     body = args[0] if args else kwargs["automation"]
     assert body["owner_type"] == "guest"
     assert body["guest_name"] == "Ana"
+    assert body["calendar_event_id"] == 7
     assert kwargs["caller_mode"] == "guest"
     assert kwargs["caller_guest_name"] == "Ana"
+    assert kwargs["caller_guest_stay"] == 7
 
 
-@pytest.mark.parametrize("context,mode,name", [
-    ({"mode": "owner"}, "owner", None),
-    ({"mode": "guest", "guest_name": "Ana"}, "guest", "Ana"),
+@pytest.mark.parametrize("context,mode,name,stay", [
+    ({"mode": "owner"}, "owner", None, None),
+    ({"mode": "guest", "guest_name": "Ana", "guest_stay_id": 7}, "guest", "Ana", 7),
 ])
-def test_delete_archives_in_both_modes(context, mode, name):
+def test_delete_archives_in_both_modes(context, mode, name, stay):
     admin = RecordingAdmin()
     agent = _agent(admin)
     out = _run(agent._delete_automation({"automation_id": 7}, context))
     _record_seen(admin)
-    assert out == "I've archived that automation."
+    assert out == aa.ARCHIVED_REPLY
     assert admin.names() == ["archive_voice_automation"]
     (_n, args, kwargs), = admin.calls
     assert 7 in args or kwargs.get("automation_id") == 7
     assert kwargs["caller_mode"] == mode
     assert kwargs["caller_guest_name"] == name
+    assert kwargs["caller_guest_stay"] == stay
     assert "delete_voice_automation" not in admin.names()
+
+
+def test_the_delete_reply_says_home_assistant_still_runs_it():
+    """The archive only changes Athena's record; the Home Assistant
+    automation keeps running until a disable route exists (follow-up)."""
+    reply = aa.ARCHIVED_REPLY.lower()
+    assert "archived" in reply and "athena" in reply
+    assert "home assistant" in reply and "still" in reply and "active" in reply
+    assert "deleted" not in reply
 
 
 def test_delete_tool_takes_only_an_id():
@@ -246,7 +268,7 @@ def test_route_control_passes_the_guest_identity_from_state_context():
 
     h.agent.execute = _capture
     state = _state54("turn off the porch light at 6pm", mode="guest")
-    state.context = {"guest_name": "Ana", "guest_id": 7}
+    state.context = {"guest_name": "Ana", "guest_id": 7, "guest_stay_id": 7}
     # A guest profile that allows control, so the turn reaches the agent.
     state.permissions = {"mode": "guest", "allowed_intents": ["control"]}
 
@@ -261,4 +283,37 @@ def test_route_control_passes_the_guest_identity_from_state_context():
     assert captured, "the turn never reached the automation agent"
     assert captured.get("guest_name") == "Ana"
     assert captured.get("guest_id") == 7
+    assert captured.get("guest_stay_id") == 7
     assert "guest_session_id" not in captured
+
+
+# ---------------------------------------------------------------------------
+# The stay id travels with the guest identity (and only with it)
+# ---------------------------------------------------------------------------
+
+def _query_context(trust, context, *, server_mode="guest", degraded=False):
+    from types import SimpleNamespace
+
+    from orchestrator.helpers import build_query_context
+
+    return build_query_context(SimpleNamespace(caller_trust=trust, context=dict(context)), None,
+                               server_mode=server_mode, degraded=degraded)
+
+
+@pytest.mark.parametrize("trust", ["sms", "web_guest_net"])
+def test_the_stay_id_travels_with_the_guest_identity(trust):
+    ctx = _query_context(trust, {"guest_name": "Ana", "guest_id": 7, "guest_stay_id": 42})
+    assert ctx["guest_name"] == "Ana" and ctx["guest_stay_id"] == 42
+
+
+@pytest.mark.parametrize("trust,kw", [
+    ("household", {}),
+    ("web_authenticated", {}),
+    ("sms", {"server_mode": "owner"}),
+    ("sms", {"degraded": True}),
+    ("web_guest_net", {"server_mode": "owner"}),
+])
+def test_the_stay_id_is_dropped_wherever_the_name_is(trust, kw):
+    ctx = _query_context(trust, {"guest_name": "Ana", "guest_id": 7, "guest_stay_id": 42}, **kw)
+    assert "guest_name" not in ctx
+    assert "guest_stay_id" not in ctx

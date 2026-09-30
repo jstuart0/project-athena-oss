@@ -82,19 +82,23 @@ def seeded(client, db):
     db.commit()
     db.add(RoomGroupAlias(room_group_id=group.id, alias="downstairs"))
     rows = {}
-    for key, kw in (("ana", dict(owner_type="guest", guest_name="Ana")),
-                    ("bo", dict(owner_type="guest", guest_name="Bo"))):
+    for key, kw in (("ana", dict(owner_type="guest", guest_name="Ana", calendar_event_id=ev.id)),
+                    ("ana_other_stay", dict(owner_type="guest", guest_name="Ana", calendar_event_id=ev.id + 1000)),
+                    ("bo", dict(owner_type="guest", guest_name="Bo", calendar_event_id=ev.id + 2000))):
         row = VoiceAutomation(name=f"{key} auto", trigger_config={"type": "time"}, actions_config=[],
                               status="active", **kw)
         db.add(row)
         db.commit()
         rows[key] = row.id
     db.commit()
-    return {"guest": guest.id, **rows}
+    return {"guest": guest.id, "stay": ev.id, **rows}
 
 
-OWNER = dict(caller_mode="owner", caller_guest_name=None)
-ANA = dict(caller_mode="guest", caller_guest_name="Ana")
+OWNER = dict(caller_mode="owner", caller_guest_name=None, caller_guest_stay=None)
+
+
+def _ana(seeded):
+    return dict(caller_mode="guest", caller_guest_name="Ana", caller_guest_stay=seeded["stay"])
 NEW_OWNER_ROW = {"name": "Seam owner", "owner_type": "owner", "trigger_config": {"type": "time", "time": "07:00"},
                  "actions_config": [{"service": "light.turn_on", "entity_id": "light.porch"}]}
 
@@ -118,11 +122,17 @@ def test_owner_scope_create_list_archive(seeded):
 
 def test_guest_scope_sees_and_changes_only_its_own_rows(seeded, db):
     admin, _ = _admin(get_config().service_api_key)
-    listed = _run(admin.get_voice_automations(owner_type="guest", **ANA))
+    listed = _run(admin.get_voice_automations(owner_type="guest", **_ana(seeded)))
     assert [r["id"] for r in listed] == [seeded["ana"]]
-    assert _run(admin.archive_voice_automation(seeded["bo"], "x", **ANA)) is False
+    assert _run(admin.archive_voice_automation(seeded["bo"], "x", **_ana(seeded))) is False
+    assert _run(admin.archive_voice_automation(seeded["ana_other_stay"], "x", **_ana(seeded))) is False
+    assert _run(admin.archive_voice_automation(seeded["ana"], "guest_asked", **_ana(seeded))) is True
     db.expire_all()
     assert db.query(VoiceAutomation).get(seeded["bo"]).status == "active"
+    assert db.query(VoiceAutomation).get(seeded["ana_other_stay"]).status == "active"
+    archived = db.query(VoiceAutomation).get(seeded["ana"])
+    assert archived.status == "archived"
+    assert archived.archive_reason == "guest_asked"
 
 
 def test_hard_delete_is_refused_to_the_service(seeded, db):
@@ -132,10 +142,11 @@ def test_hard_delete_is_refused_to_the_service(seeded, db):
     assert db.query(VoiceAutomation).get(seeded["ana"]) is not None
 
 
-def test_a_nameless_guest_scope_never_sends(seeded):
+@pytest.mark.parametrize("name,stay", [("", 5), ("Ana", None), ("Ana", 0), ("Ana", "5")])
+def test_an_unscoped_guest_call_never_sends(seeded, name, stay):
     admin, transport = _admin(get_config().service_api_key)
     with pytest.raises(ValueError):
-        _run(admin.get_voice_automations(caller_mode="guest", caller_guest_name=""))
+        _run(admin.get_voice_automations(caller_mode="guest", caller_guest_name=name, caller_guest_stay=stay))
     assert transport.requests == []
 
 

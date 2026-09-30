@@ -303,7 +303,7 @@ def test_alphanumeric_sender_gets_the_unknown_sender_reply(db, signed, monkeypat
 
 def test_recent_stay_reaches_the_orchestrator_as_recent(db, signed, monkeypatch):
     now = datetime.now(timezone.utc)
-    _stay(db, phone=P_A, checkin=now - timedelta(days=3), checkout=now - timedelta(hours=2))
+    stay = _stay(db, phone=P_A, checkin=now - timedelta(days=3), checkout=now - timedelta(hours=2))
     seen = []
 
     def handler(request):
@@ -321,6 +321,7 @@ def test_recent_stay_reaches_the_orchestrator_as_recent(db, signed, monkeypatch)
     assert "checkout was at 11" in resp.text
     (payload,) = seen
     assert payload["context"]["stay_phase"] == "recent"
+    assert payload["context"]["guest_stay_id"] == stay.id
     assert payload["caller_trust"] == "sms"
 
 
@@ -345,7 +346,35 @@ def test_replay_is_bound_to_the_sender(db, signed, monkeypatch):
     assert other.status_code == 200
     assert "private reply" not in other.text
     assert "I don't recognize this number" in other.text
-    assert len(_rows(db)) == 2
+    rows = _rows(db)
+    assert len(rows) == 2
+    # twilio_sid is unique: the other sender's row is stored without it.
+    assert [r.twilio_sid for r in rows] == [SID, None]
+
+
+def test_an_insert_race_on_the_same_sid_is_answered_as_a_replay(db, signed, monkeypatch):
+    """Two deliveries of one SID that both miss the replay lookup: the unique
+    twilio_sid makes the second insert fail, and it's answered as a replay
+    (one orchestrator call, one row), never a 500."""
+    _stay(db, phone=P_A, checkin=datetime.now(timezone.utc) - timedelta(days=1),
+          checkout=datetime.now(timezone.utc) + timedelta(days=1))
+    calls = _recording_orchestrator(monkeypatch, reply="first reply")
+    assert "first reply" in _send(_params()).text
+    real_find = sw._find_replay
+    misses = []
+
+    def _miss_once(db_, sid, sender):
+        if not misses:
+            misses.append(1)
+            return None
+        return real_find(db_, sid, sender)
+
+    monkeypatch.setattr(sw, "_find_replay", _miss_once)
+    second = _send(_params())
+    assert second.status_code == 200, second.text
+    assert "first reply" in second.text
+    assert len(calls) == 1
+    assert len(_rows(db)) == 1
 
 
 def test_unsigned_mode_replay_never_echoes(db, signed, monkeypatch):

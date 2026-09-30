@@ -11,6 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrading
 
+- **Database migration.** Run `alembic upgrade head` on admin-backend. `063` adds `voice_automations.calendar_event_id` (the stay a guest automation belongs to) and a unique index on `sms_incoming.twilio_sid`; duplicate SIDs from earlier Twilio retries keep the SID on their first row only. Existing guest automations have no stay, so guests no longer see them (the owner still does).
 - **Admin API credentials.** 45 admin-backend routes that answered anonymously now need `X-Service-Key` or a signed-in user (see "Admin API authentication" in `docs/CONFIGURATION.md`). Every in-repo caller sends one. An external script or integration calling `/api/guests`, `/api/user-sessions`, `/api/room-groups`, `/api/voice-automations`, `/api/pipeline-events`, `/api/debug-logs`, `/api/sms/internal/*` or the settings routes needs one too, and a service call to `/api/voice-automations` must also send `X-Athena-Caller-Mode`.
 - **Rollout order.** The orchestrator, gateway, jarvis-web and admin-frontend before admin-backend. An older orchestrator against the new admin-backend loses guest recognition by device, room groups, the house layout, emerging-intent discovery and voice-automation records; the older admin frontend loses the guest, room, debug-log and pipeline-event panels and falls back to a session JWT on the Admin Jarvis WebSocket, which the new admin-backend refuses. Between the orchestrator and admin-backend upgrades, every SMS is answer-only. Roll back admin-backend first.
 - **Twilio.** Set `TWILIO_AUTH_TOKEN` (and `TWILIO_WEBHOOK_BASE_URL`) wherever SMS is used: without the token, admin-backend now answers the SMS webhooks with 503 outside `DEV_MODE`. `TWILIO_ALLOW_UNSIGNED=true` restores unsigned acceptance, at the cost that anyone who knows a guest's number can text as that guest.
@@ -26,7 +27,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - An SMS from a stay that ended in the last 24 hours, or starts within 48, is answer-only: travel and checkout questions are answered, but nothing in the house is changed or read, and no automation, notification setting or text is created.
-- Asking to delete an automation by voice archives it (it can be restored); the permanent delete is an admin UI action. The assistant sees stored automation names only as quoted data.
+- Asking to delete an automation by voice archives it in Athena (it can be restored) and says the Home Assistant automation is still active; the permanent delete is an admin UI action. The assistant sees stored automation names only as quoted data.
 - The Admin Jarvis WebSocket accepts only a single-use ticket; a session JWT is refused.
 - A Twilio retry of an answered SMS gets the same reply without asking the assistant again; a retry of one still being answered waits for the reply, then answers 503 with `Retry-After`.
 
@@ -38,7 +39,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 
 - Guest records, the current stay's guests, device-to-guest sessions, voice automations, pipeline transcripts, proxied debug logs and the voice-pipeline mode are no longer readable or writable without a credential. Note that `SERVICE_API_KEY` can read guest data: keep it in a Secret.
-- A guest-scoped service call sees and changes only that guest's own voice automations, never another stay's or the owner's.
+- A guest-scoped service call sees and changes only its own stay's voice automations, never another stay's (even one with the same guest name, like every "Airbnb Guest") or the owner's. Name-based bulk archive and restore are owner-only.
 - No log line carries the start of a query, transcript, answer, response body, exception message or cache key; lengths are logged instead.
 - admin-backend's log carries no request URL or WebSocket ticket, and admin-frontend's nginx no longer logs `/api` requests.
 

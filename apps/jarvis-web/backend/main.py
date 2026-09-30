@@ -765,6 +765,10 @@ def _chat_context(caller: Caller, guest: Optional[Dict[str, Any]]) -> Dict[str, 
         if guest:
             context["guest_id"] = guest.get("id")
             context["guest_name"] = guest.get("guest_name")
+            # guest["id"] is the current stay's calendar event id
+            # (/api/guest-mode/internal/current-guest); it scopes the
+            # guest's voice automations.
+            context["guest_stay_id"] = guest.get("id")
     elif caller.caller_class == CLASS_AUTHENTICATED and caller.speaker_first_name:
         context["speaker_first_name"] = caller.speaker_first_name
     return context

@@ -1591,13 +1591,29 @@ numbers, device-to-guest sessions, SMS preferences and voice automations are
 all readable with `SERVICE_API_KEY`. Treat it as a guest-data secret: keep it
 in a Secret, never in a ConfigMap or an image, and rotate it if it leaks.
 
-**Voice automations are scoped to the caller.** A service call to a
+**Voice automations are scoped to the caller's stay.** A service call to a
 voice-automation route must say whose automations it's acting for:
 `X-Athena-Caller-Mode: owner`, or `X-Athena-Caller-Mode: guest` plus
-`X-Athena-Guest-Name` (the guest's name, percent-encoded UTF-8). Anything
-else is 400. A guest scope lists, archives, restores, creates and reads only
-guest automations carrying its own name; any other row is reported as not
-found. Signed-in users (the admin UI) always act as the owner.
+`X-Athena-Guest-Name` (the guest's name, percent-encoded UTF-8) and
+`X-Athena-Guest-Stay` (the stay's calendar event id). Anything else is 400.
+Guest names aren't unique (every Airbnb booking is "Airbnb Guest"), so a guest
+scope lists, archives, restores, creates and reads only the guest automations
+of its own stay; any other row is reported as not found. An automation created
+before stays were recorded has no stay and is never visible to a guest. A
+guest scope named after a calendar-feed placeholder (`Airbnb Guest`, `VRBO
+Guest`, `Guest`) is refused with 403, and the name-based bulk routes
+(`/archive-guest`, `/restore-guest`) are owner-only. Signed-in users (the
+admin UI) always act as the owner.
+
+Where the stay id comes from: the SMS webhook sends the matched booking's id;
+jarvis-web's guest network sends the current stay's id (the one
+`/api/guest-mode/internal/current-guest` returns); the orchestrator keeps it
+only in a named guest house, alongside the guest's name, and drops it
+wherever it drops the name.
+
+**Voice "delete"** archives the automation in Athena; the Home Assistant
+automation keeps running until the host turns it off there, and the assistant
+says so.
 
 **Public routes** and their preconditions: `GET /health` (liveness only); the
 sign-in routes (`/api/auth/login`, `/callback`, `/logout`, `/methods`,

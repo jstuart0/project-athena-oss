@@ -181,7 +181,7 @@ def _agent():
 @pytest.mark.parametrize("phase,refused", [("recent", True), ("upcoming", True), (None, True), ("current", False)])
 def test_automation_agent_writes(guest_house, phase, refused):
     perms = _perms(phase)
-    context = {"mode": "guest", "guest_name": "Ana", "room": "office"}
+    context = {"mode": "guest", "guest_name": "Ana", "guest_stay_id": 7, "room": "office"}
     for method, args in (("_create_automation", dict(CREATE_ARGS)), ("_delete_automation", {"automation_id": 3})):
         agent, admin, ha = _agent()
         with mp.ha_permission_scope(perms, mode="guest"):

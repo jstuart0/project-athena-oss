@@ -2974,7 +2974,7 @@ class SMSIncoming(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     phone_number = Column(String(50), nullable=False)
     message = Column(Text, nullable=False)
-    twilio_sid = Column(String(100), nullable=True)
+    twilio_sid = Column(String(100), nullable=True, unique=True)  # one row per Twilio message (migration 063)
     calendar_event_id = Column(Integer, ForeignKey('calendar_events.id', ondelete='SET NULL'), nullable=True)
     matched_guest = Column(Boolean, default=False, nullable=False)
     response_sent = Column(Boolean, default=False, nullable=False)
@@ -4480,6 +4480,9 @@ class VoiceAutomation(Base):
     owner_type = Column(String(20), nullable=False)  # 'owner' or 'guest'
     guest_session_id = Column(String(255), nullable=True, index=True)
     guest_name = Column(String(255), nullable=True, index=True)
+    # The stay a guest automation belongs to (migration 063). A guest caller
+    # sees only its own stay's rows; a row with no stay is never a guest's.
+    calendar_event_id = Column(Integer, ForeignKey('calendar_events.id', ondelete='SET NULL'), nullable=True, index=True)
     created_by_room = Column(String(100), nullable=True)
 
     # Automation definition (stored as JSONB for flexibility)
@@ -4513,6 +4516,7 @@ class VoiceAutomation(Base):
             'owner_type': self.owner_type,
             'guest_session_id': self.guest_session_id,
             'guest_name': self.guest_name,
+            'calendar_event_id': self.calendar_event_id,
             'created_by_room': self.created_by_room,
             'trigger_config': self.trigger_config,
             'conditions_config': self.conditions_config,

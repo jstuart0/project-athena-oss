@@ -17,6 +17,7 @@ import httpx
 import os
 import structlog
 from fastapi import APIRouter, Form, HTTPException, Response, Depends, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
@@ -196,6 +197,12 @@ def _find_replay(db: Session, message_sid: str, sender: str) -> Optional[SMSInco
     return None
 
 
+def _sid_held_by_another_sender(db: Session, message_sid: str, sender: str) -> bool:
+    return db.query(SMSIncoming.id).filter(
+        SMSIncoming.twilio_sid == message_sid, SMSIncoming.phone_number != sender,
+    ).first() is not None
+
+
 def _replay_response(content: Optional[str], signed: bool) -> Response:
     """The stored reply, only to a verified sender. Unsigned, the sender is
     unauthenticated, so a stored reply is never echoed."""
@@ -278,11 +285,12 @@ async def handle_incoming_sms(
     if earlier is not None:
         return await _answer_replay(earlier, signed)
 
-    # Create incoming SMS record
+    # Create incoming SMS record. twilio_sid is unique: a SID another sender
+    # already used (a forged request) is stored without it.
     incoming = SMSIncoming(
         phone_number=From,
         message=Body,
-        twilio_sid=MessageSid,
+        twilio_sid=None if _sid_held_by_another_sender(db, MessageSid, From) else MessageSid,
         received_at=datetime.now(timezone.utc),
         matched_guest=False,
         response_sent=False,
@@ -302,7 +310,17 @@ async def handle_incoming_sms(
         )
 
     db.add(incoming)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Another delivery of this SID was stored between the replay lookup
+        # and this insert: answer it as that delivery's replay.
+        db.rollback()
+        logger.info("sms_replay_insert_race", message_sid=MessageSid)
+        earlier = _find_replay(db, MessageSid, From)
+        if earlier is None:
+            raise
+        return await _answer_replay(earlier, signed)
 
     def _answered(text: str) -> Response:
         incoming.response_sent = True
@@ -545,6 +563,8 @@ async def route_to_orchestrator(
                     "guest_name": guest_name,
                     "channel": "sms",
                     "stay_phase": stay_phase,
+                    # The stay a guest's voice automations are scoped to.
+                    "guest_stay_id": calendar_event_id,
                 },
             },
             headers={"X-Service-Key": get_config().service_api_key},
