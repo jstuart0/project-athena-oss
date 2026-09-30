@@ -642,3 +642,31 @@ def test_manual_reservation_is_atomic(harness, db, monkeypatch):
 
     monkeypatch.setattr(sender, "_BEFORE_SEND_RESERVE", competing)
     assert sender.reserve_manual_send(db, clock.now) is False
+
+
+# ---------------------------------------------------------------------------
+# A telemetry line in `.env` that python-dotenv can't parse means off (D46 /
+# xander L1): dotenv silently drops such lines, which would lose the opt-out.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("line", ["ATHENA_TELEMETRY: off", "DO_NOT_TRACK 1", "ATHENA_TELEMETRY", "  DO_NOT_TRACK:1"])
+def test_unparseable_telemetry_line_in_dotenv_is_off(harness, monkeypatch, tmp_path, db, line):
+    from shared.config import read_telemetry_env
+
+    path = tmp_path / ".env"
+    path.write_text(f"OTHER=1\n{line}\n")
+    monkeypatch.setattr(sender, "DOTENV_PATH", str(path))
+    assert read_telemetry_env(environ={}, dotenv_path=str(path)).dotenv_error == "ParseError"
+    _assert_unreadable(harness, db)
+
+
+@pytest.mark.parametrize("body,reason", [
+    ("export ATHENA_TELEMETRY=off\n", "env_athena_telemetry"),
+    ("ATHENA_TELEMETRY = off\n", "env_athena_telemetry"),
+    ("# ATHENA_TELEMETRY: off\nATHENA_TELEMETRY_MODE=self_hosted_real\nOTHER: junk\n", "enabled"),
+])
+def test_well_formed_or_unrelated_dotenv_lines_parse(harness, monkeypatch, tmp_path, db, body, reason):
+    path = tmp_path / ".env"
+    path.write_text(body)
+    monkeypatch.setattr(sender, "DOTENV_PATH", str(path))
+    assert sender.get_status(db, None)["reason"] == reason

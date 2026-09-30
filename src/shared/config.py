@@ -55,6 +55,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Callable, Dict, Mapping, Optional
 
@@ -667,6 +668,30 @@ TELEMETRY_DEFAULT_ENDPOINT = "https://telemetry-athena.xmojo.net/v1/ping"
 TELEMETRY_ENV_KEYS = ("ATHENA_TELEMETRY", "DO_NOT_TRACK", "ATHENA_TELEMETRY_ENDPOINT", "ATHENA_TELEMETRY_MODE")
 
 
+# A line in `.env` that names a telemetry variable must be a plain
+# `NAME=value` (optionally `export NAME=value`). python-dotenv silently skips
+# a line it can't parse (`ATHENA_TELEMETRY: off`, `DO_NOT_TRACK 1`), which
+# would lose an opt-out, so such a line makes the whole reading fail closed.
+_TELEMETRY_LINE = {
+    key: re.compile(rf"^\s*(?:export\s+)?{key}(?![A-Za-z0-9_])") for key in TELEMETRY_ENV_KEYS
+}
+_TELEMETRY_ASSIGNMENT = {
+    key: re.compile(rf"^\s*(?:export\s+)?{key}\s*=") for key in TELEMETRY_ENV_KEYS
+}
+
+
+class ParseError(ValueError):
+    """A telemetry variable's line in `.env` isn't a `NAME=value` assignment."""
+
+
+def _check_telemetry_lines(dotenv_path: str) -> None:
+    with open(dotenv_path, encoding="utf-8") as handle:
+        for line in handle.read().splitlines():
+            for key in TELEMETRY_ENV_KEYS:
+                if _TELEMETRY_LINE[key].match(line) and not _TELEMETRY_ASSIGNMENT[key].match(line):
+                    raise ParseError(key)
+
+
 @dataclass(frozen=True)
 class TelemetryEnvReading:
     """The four telemetry variables as found in each source, kept apart so an
@@ -685,8 +710,9 @@ def read_telemetry_env(
 ) -> TelemetryEnvReading:
     """Read the telemetry variables from the process env and `.env` (resolved
     against the working directory, as pydantic-settings resolves it for
-    AthenaConfig). Uncached, and never raises: an absent `.env` is empty, an
-    unreadable one is reported in ``dotenv_error``."""
+    AthenaConfig). Uncached, and never raises: an absent `.env` is empty; an
+    unreadable one, or one with a telemetry line that isn't a `NAME=value`
+    assignment, is reported in ``dotenv_error`` (which means off)."""
     environ = os.environ if environ is None else environ
     process = {k: str(environ[k]) for k in TELEMETRY_ENV_KEYS if k in environ}
     dotenv: Dict[str, str] = {}
@@ -694,6 +720,7 @@ def read_telemetry_env(
     try:
         if os.path.lexists(dotenv_path):
             values = (reader or dotenv_values)(dotenv_path)
+            _check_telemetry_lines(dotenv_path)
             dotenv = {k: ("" if values[k] is None else str(values[k])) for k in TELEMETRY_ENV_KEYS if k in values}
     except Exception as exc:  # noqa: BLE001 - any read failure means "off"
         error = type(exc).__name__

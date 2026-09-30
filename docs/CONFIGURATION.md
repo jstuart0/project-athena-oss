@@ -1575,7 +1575,7 @@ Any one of these switches it off:
 - `DO_NOT_TRACK=1` (any value other than `0`, `false` or `no`)
 - the **Install telemetry** card under **System Configuration** in the Admin UI (owner only)
 
-The two variables are read on every decision from **both** the process environment and the `.env` file in admin-backend's working directory, and an opt-out in either one wins: an empty value in the process environment never overrides `ATHENA_TELEMETRY=off` in `.env`. If `.env` exists but can't be read, telemetry is off. An environment opt-out can't be overridden from the Admin UI.
+The two variables are read on every decision from **both** the process environment and the `.env` file in admin-backend's working directory, and an opt-out in either one wins: an empty value in the process environment never overrides `ATHENA_TELEMETRY=off` in `.env`. If `.env` exists but can't be read, or a line naming one of these variables isn't a plain `NAME=value` assignment (for example `ATHENA_TELEMETRY: off`), telemetry is off. An environment opt-out can't be overridden from the Admin UI.
 
 To turn it off before upgrading, set `ATHENA_TELEMETRY=off` in admin-backend's environment (for Kubernetes, the `athena-config` ConfigMap or your private overlay) before the new version starts. The first send is never earlier than 5 minutes after admin-backend starts.
 
