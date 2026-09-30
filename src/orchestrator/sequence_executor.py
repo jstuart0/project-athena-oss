@@ -140,6 +140,27 @@ def has_sequence_timing(query_lower: str, *, require_action_for_bare_temporal: b
     return True
 
 
+def _next_local_occurrence(now: datetime, wall: time, tz) -> datetime:
+    """The first UTC instant after ``now`` at which the property's clock reads
+    ``wall``: today if that's still ahead, otherwise tomorrow.
+
+    DST is resolved explicitly. An ambiguous time (the fall-back repeated
+    hour) is its first occurrence (fold=0) unless that has already passed
+    and the second (fold=1) hasn't, so at 01:30 standard time "01:45" is 15
+    minutes away, not a day. A nonexistent time (inside the spring-forward
+    gap) moves forward: 02:30 becomes 03:30 daylight time.
+    """
+    now_utc = now.astimezone(timezone.utc)
+    local_date = now.astimezone(tz).date()
+    for day_offset in range(3):
+        day = local_date + timedelta(days=day_offset)
+        for fold in (0, 1):
+            candidate = datetime.combine(day, wall, tzinfo=tz).replace(fold=fold).astimezone(timezone.utc)
+            if candidate > now_utc:
+                return candidate
+    raise AssertionError("no local occurrence within three days")  # unreachable: a day always has one
+
+
 class SequenceExecutor:
     """Executes sequences of smart home actions with delays and scheduling."""
 
@@ -379,10 +400,9 @@ class SequenceExecutor:
             time_str: Time in HH:MM or HH:MM:SS format
 
         The target is a wall-clock time in the property zone (DEFAULT_TIMEZONE):
-        today if it's still ahead, otherwise tomorrow. The wait is real elapsed
-        time, computed between UTC instants, so it's right across a DST change.
-        A target that doesn't exist (inside the spring-forward gap) resolves
-        with fold=0, e.g. 02:30 becomes 03:30 daylight time.
+        its next occurrence after now, found by comparing UTC instants (see
+        _next_local_occurrence), so the wait is real elapsed time across a
+        DST change and is never negative.
 
         Returns:
             Seconds to wait (0 if the time can't be parsed)
@@ -414,11 +434,9 @@ class SequenceExecutor:
             return 0
 
         tz = local_tz()
-        target = datetime.combine(now.date(), time(hour, minute, second), tzinfo=tz)
-        if target <= now:
-            target = datetime.combine(now.date() + timedelta(days=1), time(hour, minute, second), tzinfo=tz)
-
-        wait_seconds = (target.astimezone(timezone.utc) - now.astimezone(timezone.utc)).total_seconds()
+        target = _next_local_occurrence(now, time(hour, minute, second), tz)
+        wait_seconds = max(0.0, (target - now.astimezone(timezone.utc)).total_seconds())
+        target = target.astimezone(tz)
         logger.info(f"Calculated wait for {time_str}: {wait_seconds:.1f}s (until {target})")
 
         return wait_seconds
