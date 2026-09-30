@@ -1761,20 +1761,3 @@ def _strip_hallucinated_continuation(text: str) -> str:
             text = "\n\n".join(kept).rstrip()
 
     return text
-    match = _CONTINUATION_PATTERN.search(text)
-    if match:
-        text = text[:match.start()].rstrip()
-
-    # Paragraph-level repetition detector: if the same paragraph (first 120 chars)
-    # appears more than once, truncate before the second occurrence.
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    if len(paragraphs) >= 3:
-        seen: Dict[str, int] = {}
-        for i, para in enumerate(paragraphs):
-            key = para[:120]
-            if key in seen:
-                text = "\n\n".join(paragraphs[:i]).rstrip()
-                break
-            seen[key] = i
-
-    return text

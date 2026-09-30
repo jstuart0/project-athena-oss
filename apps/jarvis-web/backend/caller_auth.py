@@ -213,19 +213,6 @@ def _header_text(raw: Optional[str]) -> Optional[str]:
         return raw.encode("latin-1").decode("utf-8")
     except (UnicodeEncodeError, UnicodeDecodeError):
         return None
-    documented = {n.lower() for n in EDGE_STRIPPED_HEADERS}
-    custom = [n for n in (identity, groups) if n.lower() not in documented]
-    acked = {n.lower() for n in _csv(env.get("JARVIS_EDGE_HEADERS_ACK_STRIPPED"))}
-    if custom and acked != {n.lower() for n in custom}:
-        logger.error(
-            "jarvis_edge_header_not_in_strip_list",
-            headers=custom,
-            hint="add them to the edge's strip Middleware, then set JARVIS_EDGE_HEADERS_ACK_STRIPPED to exactly "
-                 + ",".join(custom),
-        )
-        raise SystemExit(f"jarvis-web edge header names not in the documented strip list: {', '.join(custom)}")
-    logger.info("jarvis_edge_strip_headers", headers=list(_with_names(EDGE_STRIPPED_HEADERS, (identity, groups))))
-    return identity, groups
 
 
 CLASS_AUTHENTICATED = "web_authenticated"
