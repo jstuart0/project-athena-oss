@@ -6,4 +6,4 @@ on a host alongside Ollama (e.g., an Apple Silicon Mac or bare-metal node).
 Provides HTTP endpoints for secure service control.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
