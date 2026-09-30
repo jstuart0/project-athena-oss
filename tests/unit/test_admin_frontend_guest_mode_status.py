@@ -85,3 +85,20 @@ def test_no_advisory_warning_without_a_calendar_url_or_when_fresh():
     assert _warnings(_SOURCES, calendar_url_set=False) == []
     fresh = {**_SOURCES, "ical": {"status": "stale", "required": False}}
     assert _warnings(fresh, calendar_url_set=True) == []
+
+
+_SHADOW_WARNING = (
+    "The legacy iCal URL points at the Lodgify export while a Lodgify API key is set. "
+    "Its turnover-day slices add guest time. Clear it; bookings come from Calendar Sources."
+)
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_lodgify_shadow_warning_follows_the_flag(flag):
+    status = {"reachable": True, "mode": "owner", "bookings_status": "fresh", "bookings_sources": _SOURCES}
+    options = {"guestModeEnabled": True, "hasCurrentGuests": False, "calendarUrlSet": True,
+               "calendarUrlShadowsLodgifyApi": flag}
+    warnings = _eval(f"_modeStatusWarnings({json.dumps(status)}, {json.dumps(options)})")
+    assert (_SHADOW_WARNING in warnings) is flag
+    if flag:
+        assert warnings.count(_SHADOW_WARNING) == 1

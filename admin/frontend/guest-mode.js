@@ -391,7 +391,7 @@ function _gmUnreachableMessage(modeStatus) {
     return 'The mode service couldn\'t be reached. Check that its pod is running and look at its logs.';
 }
 
-function _modeStatusWarnings(modeStatus, { guestModeEnabled, hasCurrentGuests, calendarUrlSet }) {
+function _modeStatusWarnings(modeStatus, { guestModeEnabled, hasCurrentGuests, calendarUrlSet, calendarUrlShadowsLodgifyApi }) {
     // Unreachable is the banner's own headline; repeating it here adds nothing.
     if (!modeStatus.reachable) return [];
     const warnings = [];
@@ -408,6 +408,9 @@ function _modeStatusWarnings(modeStatus, { guestModeEnabled, hasCurrentGuests, c
         .some(src => src && src.required === false && ['never_loaded', 'expired'].includes(src.status));
     if (calendarUrlSet && advisoryUnusable) {
         warnings.push('The legacy iCal URL on this page isn\'t being read, so its bookings are ignored. It must be an https:// URL the mode service can reach; a private host needs SITESCRAPER_ALLOWED_PRIVATE_HOSTS.');
+    }
+    if (calendarUrlShadowsLodgifyApi === true) {
+        warnings.push('The legacy iCal URL points at the Lodgify export while a Lodgify API key is set. Its turnover-day slices add guest time. Clear it; bookings come from Calendar Sources.');
     }
     if (modeStatus.property_timezone_valid === false) {
         warnings.push('The property timezone is invalid, so booking times are read as UTC. Set DEFAULT_TIMEZONE to an IANA zone (for example America/New_York) on admin-backend and the mode service.');
@@ -511,6 +514,7 @@ async function updateGuestModeStatus() {
         guestModeEnabled: config ? config.enabled : undefined,
         hasCurrentGuests,
         calendarUrlSet: !!(config && config.calendar_url),
+        calendarUrlShadowsLodgifyApi: !!(config && config.calendar_url_shadows_lodgify_api),
     });
     const warningBanner = warnings.length ? `
         <div class="p-3 bg-yellow-900/20 border border-yellow-700/50 rounded-lg text-yellow-200 text-sm mt-3 space-y-1">

@@ -54,6 +54,15 @@ def db():
         Base.metadata.drop_all(bind=engine)
 
 
+@pytest.fixture(autouse=True)
+def _calendar_sync_lease_on_test_db(monkeypatch):
+    """calendar_sync takes its per-source lease on its own session; point
+    that at the test database instead of the app's SessionLocal."""
+    from app.services import calendar_sync
+
+    monkeypatch.setattr(calendar_sync, "LEASE_SESSION_FACTORY", TestingSessionLocal)
+
+
 @pytest.fixture(scope="function")
 def client(db):
     """Create test client with database override."""

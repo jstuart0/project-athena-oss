@@ -432,20 +432,21 @@ async function editCalendarSource(sourceId) {
         return;
     }
 
-    // Fetch full source with URL
+    // The list only carries a masked URL, so the form needs the full source.
+    // Opening it with list data would put the masked URL in the field.
+    let fullSource;
     try {
         const response = await fetch(`${CALENDAR_SOURCES_API}/${sourceId}`, {
             headers: { 'Authorization': `Bearer ${getToken()}` }
         });
-        if (response.ok) {
-            const fullSource = await response.json();
-            showEditCalendarSourceModal(fullSource);
-        } else {
-            showEditCalendarSourceModal(source);
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        fullSource = await response.json();
     } catch (error) {
-        showEditCalendarSourceModal(source);
+        console.error('Error loading calendar source for editing:', error);
+        showToast('Could not load this source for editing', 'error');
+        return;
     }
+    showEditCalendarSourceModal(fullSource);
 }
 
 async function updateCalendarSource() {
@@ -496,7 +497,7 @@ async function updateCalendarSource() {
 }
 
 async function deleteCalendarSource(sourceId, sourceName) {
-    if (!confirm(`Are you sure you want to delete "${sourceName}"?\n\nThis will NOT delete events that were already synced from this source.`)) {
+    if (!confirm(`Are you sure you want to delete "${sourceName}"?\n\nThis will NOT delete events that were already synced from this source.\nCurrent and upcoming guest sessions from this source will be cancelled.`)) {
         return;
     }
 
@@ -556,9 +557,15 @@ async function testUrlFromModal() {
     showToast('Testing URL...', 'info');
 
     try {
-        const response = await fetch(`${CALENDAR_SOURCES_API}/test-url?url=${encodeURIComponent(url)}&source_type=${sourceType}`, {
+        // In the body, not the query string: feed URLs carry their access
+        // token, and request lines end up in access and proxy logs.
+        const response = await fetch(`${CALENDAR_SOURCES_API}/test-url`, {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${getToken()}` }
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${getToken()}`
+            },
+            body: JSON.stringify({ url, source_type: sourceType })
         });
 
         const result = await response.json();
@@ -635,10 +642,13 @@ async function syncCalendarSource(sourceId) {
         const result = await response.json();
 
         if (result.success) {
-            showToast(`Sync complete: ${result.events_added} added, ${result.events_updated} updated`, 'success');
+            const matched = Number(result.events_matched_deleted) || 0;
+            const matchedText = matched > 0 ? `, ${matched} matched entries you deleted or cancelled` : '';
+            showToast(`Sync complete: ${result.events_added} added, ${result.events_updated} updated${matchedText}`, 'success');
             loadCalendarSources();
         } else {
-            showToast(`Sync failed: ${result.message}`, 'error');
+            const reason = result.message || (typeof result.detail === 'string' ? result.detail : '') || `HTTP ${response.status}`;
+            showToast(`Sync failed: ${reason}`, 'error');
             loadCalendarSources();
         }
     } catch (error) {

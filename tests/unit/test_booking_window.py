@@ -104,14 +104,99 @@ class TestDbValueToUtc:
         assert bw.db_value_to_utc(aware) == aware.astimezone(timezone.utc)
 
 
-class TestClassifySummary:
-    def test_blocked_markers(self):
-        for summary in ("Blocked", "Closed Period", "Airbnb (Not available)", "Not available", "unavailable"):
-            assert bw.classify_summary(summary) == "blocked", summary
+_EXPECTED_BLOCK_LABELS = {
+    "airbnb": {"not available", "airbnb (not available)"},
+    "vrbo": {"blocked"},
+    "lodgify": {"closed period", "blocked", "closed", "closed block", "owner block"},
+}
+_EXPECTED_BLOCK_LABELS["generic_ical"] = set().union(*_EXPECTED_BLOCK_LABELS.values()) | {"unavailable"}
+_TYPES = ("airbnb", "vrbo", "lodgify", "generic_ical")
 
-    def test_confirmed(self):
-        for summary in ("Reserved", "Jane Doe"):
-            assert bw.classify_summary(summary) == "confirmed", summary
+
+def _classify(summary, source_type):
+    # generic_ical goes through the default argument -- the mode service's
+    # legacy-calendar_url call (bookings.py) passes no source_type.
+    if source_type == "generic_ical":
+        return bw.classify_summary(summary)
+    return bw.classify_summary(summary, source_type=source_type)
+
+
+_BLOCKED_CASES = [
+    ("Airbnb (Not available)", "airbnb"),
+    ("  not   AVAILABLE ", "airbnb"),
+    ("Blocked", "vrbo"),
+    ("Closed Block", "lodgify"),
+    ("  CLOSED  ", "lodgify"),
+    ("Owner Block", "lodgify"),
+    ("Closed   Period", "lodgify"),
+    ("unavailable", "generic_ical"),
+    ("BLOCKED", "generic_ical"),
+    ("Not Available", "generic_ical"),
+]
+
+_CONFIRMED_EVERY_TYPE = [
+    "Tom Blocked", "Unavailable Smith", "Notavailable", "John Block", "Blockley",
+    "Closed Cooper", "Owner", "Reserved", "J*** D**", "Closedo", "Blocked - owner",
+    "Not available until May",
+]
+_CONFIRMED_CASES = [("Blocked", "airbnb"), ("Closed", "vrbo"), ("Unavailable", "lodgify")] + [
+    (summary, t) for summary in _CONFIRMED_EVERY_TYPE for t in _TYPES
+]
+
+
+class TestClassifySummary:
+    def test_label_tables_match_the_plan(self):
+        for source_type, expected in _EXPECTED_BLOCK_LABELS.items():
+            assert set(bw.BLOCK_LABELS_BY_SOURCE_TYPE[source_type]) == expected, source_type
+        assert set(bw.BLOCK_LABELS_BY_SOURCE_TYPE) == set(_EXPECTED_BLOCK_LABELS)
+        assert not hasattr(bw, "BLOCK_SUMMARY_MARKERS")
+
+    @pytest.mark.parametrize("summary,source_type", _BLOCKED_CASES)
+    def test_blocked(self, summary, source_type):
+        assert _classify(summary, source_type) == "blocked"
+
+    @pytest.mark.parametrize("summary,source_type", _CONFIRMED_CASES)
+    def test_confirmed(self, summary, source_type):
+        assert _classify(summary, source_type) == "confirmed"
+
+    def test_confirmed_population_floor_and_named_members(self):
+        assert len(_CONFIRMED_CASES) >= 16
+        for named in (("Tom Blocked", "generic_ical"), ("Unavailable Smith", "generic_ical"),
+                      ("Notavailable", "generic_ical"), ("Blocked", "airbnb")):
+            assert named in _CONFIRMED_CASES
+
+    @pytest.mark.parametrize("summary", ["Blocked", "Tom Blocked", "unavailable", "Reserved", "", None])
+    def test_default_is_generic(self, summary):
+        assert bw.classify_summary(summary) == bw.classify_summary(summary, source_type="generic_ical")
+
+    @pytest.mark.parametrize("unknown", [None, "", "hostaway"])
+    def test_unknown_type_uses_generic_set(self, unknown):
+        assert bw.classify_summary("unavailable", source_type=unknown) == "blocked"
+        assert bw.classify_summary("Tom Blocked", source_type=unknown) == "confirmed"
+
+
+class TestDayPair:
+    def test_naive_db_value_is_utc_then_localized(self):
+        # 04:30 UTC is 00:30 EDT the same day, but 03:30 on the 2nd UTC is
+        # 23:30 EDT on the 1st: a naive DB value must be read as UTC first.
+        start = datetime(2026, 7, 2, 3, 30)
+        end = datetime(2026, 7, 5, 15, 0)
+        assert bw.day_pair(start, end, NY) == (date(2026, 7, 1), date(2026, 7, 5))
+
+    def test_naive_0430_utc_in_new_york_is_the_previous_date(self):
+        start = datetime(2026, 1, 10, 4, 30)
+        assert bw.day_pair(start, start + timedelta(days=2), NY)[0] == date(2026, 1, 9)
+
+    def test_aware_matches_naive_utc(self):
+        naive = datetime(2026, 7, 1, 20, 0)
+        aware = naive.replace(tzinfo=timezone.utc)
+        assert bw.day_pair(naive, naive, NY) == bw.day_pair(aware, aware, NY)
+
+    def test_stay_day_pair_delegates(self):
+        b = bw.Booking(id=1, key="k", source="s", label="l",
+                       start=datetime(2026, 7, 1, 20, tzinfo=timezone.utc),
+                       end=datetime(2026, 7, 5, 15, tzinfo=timezone.utc))
+        assert bw.stay_day_pair(b, NY) == bw.day_pair(b.start, b.end, NY) == (date(2026, 7, 1), date(2026, 7, 5))
 
 
 class TestBufferClamp:
