@@ -253,7 +253,7 @@ admin-backend sends a pseudonymous `first_boot` event and then a daily heartbeat
 3. `EXPECTED_PATHS` (`tests/test_telemetry_privacy.py`), the golden fixture (`tests/fixtures/telemetry/valid-v1-full.json`, regenerated with `UPDATE_GOLDEN=1`), `docs/telemetry/payload-v1.schema.json` and the "What's sent" table in `docs/CONFIGURATION.md` change together, and the fixtures are copied to the collector.
 4. The default endpoint literal lives only in `TELEMETRY_DEFAULT_ENDPOINT` (`src/shared/config.py`), its one allowlisted line.
 5. The opt-outs (`ATHENA_TELEMETRY`, `DO_NOT_TRACK`) are a fail-closed union of the process env and `.env`, read at call time; an unreadable `.env`, or a telemetry line in it that isn't a `NAME=value` assignment, means off. Nothing (no installation ID, no install key) is created while telemetry is off, including by `GET /api/telemetry/status`.
-6. There is no free-text model field. A model leaves only as `family` (from `MODEL_FAMILIES`, else `custom`), `size_bucket`, `quantized` and `source`; `MODEL_FAMILIES` and the other client allowlists are the privacy gate.
+6. There is no free-text model field. A model leaves only as `family` (from `MODEL_FAMILIES`, else `custom`), `size_bucket`, `quantized` and `source`; `MODEL_FAMILIES` and the other client allowlists are the privacy gate. The wire `family` is a closed enum of that list; the collector stores only its own shipped copy and records anything else as `custom`, so a new family reads as `custom` until the collector ships it.
 7. The local install key is never sent, logged, stored in the payload or returned by the API; the wire carries only its HMAC bound to the endpoint's origin.
 
 ### Control Agent
