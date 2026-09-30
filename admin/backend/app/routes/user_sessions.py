@@ -114,7 +114,6 @@ async def create_or_update_session(
         logger.info("user_session_created",
                    session_id=session_data.session_id,
                    guest_id=session_data.guest_id,
-                   guest_name=guest.name,
                    device_id=session_data.device_id[:16] + "...")
 
         return new_session.to_dict()
@@ -159,8 +158,7 @@ async def get_session_by_device(
 
         logger.info("user_session_retrieved_by_device",
                    device_id=device_id[:16] + "...",
-                   guest_id=session.guest_id,
-                   guest_name=session.guest.name if session.guest else None)
+                   guest_id=session.guest_id)
 
         return session.to_dict()
 

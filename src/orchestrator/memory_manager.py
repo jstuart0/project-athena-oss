@@ -230,7 +230,7 @@ class MemoryManager:
                 if session:
                     logger.debug(
                         "active_guest_session",
-                        guest_name=session.get("guest_name"),
+                        has_guest_name=bool(session.get("guest_name")),
                         session_id=session.get("id")
                     )
                 return session

@@ -75,7 +75,7 @@ class EventbriteProvider(SearchProvider):
             List of SearchResult objects with event details
         """
         try:
-            self.logger.info(f"Eventbrite search started: {query} in {location or 'unspecified location'}")
+            self.logger.info("Eventbrite search started (location_set=%s)", bool(location))
 
             # Build request parameters. location is omitted entirely when
             # not provided, never sent as a hardcoded default (3.10).

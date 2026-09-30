@@ -516,7 +516,7 @@ async def send_sms_manually(
 
         logger.info(
             "SMS sent (test mode)",
-            phone=request.phone_number,
+            phone_last4=request.phone_number[-4:],
             content_length=len(request.content),
             user=current_user.username
         )
@@ -525,7 +525,7 @@ async def send_sms_manually(
         # For now, mark as queued - actual sending will be handled by SMS service
         logger.info(
             "SMS queued for sending",
-            phone=request.phone_number,
+            phone_last4=request.phone_number[-4:],
             content_length=len(request.content),
             user=current_user.username
         )

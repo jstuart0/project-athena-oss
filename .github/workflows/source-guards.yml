@@ -1,0 +1,100 @@
+name: Source Guards
+
+# Source-level drift guards plus the behaviour tests behind them:
+#
+# - guards: stdlib-only scans that fail when a process-TZ clock read, a
+#   logged name/address/location/phone number, or an unaccepted
+#   caller_trust value appears anywhere in the tree (not just in files a
+#   paths: filter would guess at, so there is none).
+# - orchestrator-behaviour / jarvis-web-behaviour: the tests for the local
+#   clock, the repetition detector, the addressee rules and the caller
+#   classes, each under its own image's hash-locked requirements.
+#
+# Every job reads pytest's own exit status (no pipes).
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  guards:
+    name: Clock, PII and trust-value guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies (hash-locked)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --require-hashes -r .github/ci-requirements/unit-min/requirements.txt
+
+      - name: Run the guards
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_local_clock_drift.py tests/unit/test_no_pii_in_logs.py tests/unit/test_trust_literal_contract.py
+
+  orchestrator-behaviour:
+    name: Orchestrator behaviour tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the orchestrator's locked requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --require-hashes -r src/orchestrator/requirements.txt -r src/orchestrator/requirements-test.txt
+          python3 -m pip install --no-deps -e src/shared
+
+      - name: Run the behaviour tests
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_helpers.py tests/unit/test_finalize.py tests/unit/test_local_time.py tests/unit/test_base_knowledge_clock.py tests/unit/test_date_extraction_local.py tests/unit/test_planning_prompt_local_date.py tests/unit/test_gateway_simple_commands_clock.py tests/unit/test_sequence_wait_local.py tests/unit/test_prompt_clock_sites.py tests/unit/test_addressee_matrix.py tests/unit/test_trust_classification.py tests/unit/test_assistant_profile_household.py tests/unit/test_semantic_cache_addressee.py tests/unit/test_base_knowledge_names.py tests/unit/test_public_caller_orchestrator.py
+
+      # The sports case needs feedparser, which only the sports image carries.
+      - name: Run the RAG date tests (without sports)
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_rag_local_dates.py -k "not sports"
+
+  jarvis-web-behaviour:
+    name: jarvis-web behaviour tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install jarvis-web's locked requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --require-hashes -r apps/jarvis-web/backend/requirements.txt -r apps/jarvis-web/backend/requirements-test.txt
+
+      - name: Run the behaviour tests
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_jarvis_web_speaker_name.py tests/unit/test_jarvis_web_addressee_matrix.py tests/unit/test_jarvis_web_edge_mode.py tests/unit/test_jarvis_web_caller_classes.py tests/unit/test_jarvis_web_caller_mode.py tests/unit/test_jarvis_web_relay.py tests/unit/test_edge_template_contract.py

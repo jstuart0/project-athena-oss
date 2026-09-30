@@ -102,7 +102,7 @@ async def get_current_mode() -> str:
     # Auto-detect based on guest booking
     guest = await get_current_guest()
     if guest and guest.get("has_guest"):
-        logger.debug("mode_auto_guest", guest_name=guest.get("guest_name"))
+        logger.debug("mode_auto_guest", guest_id=guest.get("id"))
         return "guest"
     else:
         logger.debug("mode_auto_owner", reason="no_guest_booked")
@@ -557,7 +557,7 @@ async def get_current_guest() -> Optional[Dict[str, Any]]:
                 if data.get("has_guest"):
                     logger.info(
                         "current_guest_fetched",
-                        guest_name=data.get("guest_name"),
+                        has_guest_name=bool(data.get("guest_name")),
                         guest_id=data.get("id")
                     )
                     return data
@@ -810,9 +810,8 @@ async def chat(message: ChatMessage, request: Request, response: Response):
                 }
                 logger.info(
                     "location_override_set",
-                    address=message.location.address,
-                    lat=message.location.latitude,
-                    lon=message.location.longitude
+                    address_set=bool(message.location.address),
+                    coordinates_set=message.location.latitude is not None and message.location.longitude is not None,
                 )
 
             logger.info("chat_request", mode=current_mode, query_preview=message.message[:50])
@@ -1175,7 +1174,7 @@ async def reverse_geocode(lat: float, lon: float):
             if response.status_code == 200:
                 data = response.json()
                 addr = data.get("address", {})
-                logger.info("reverse_geocode_response", lat=lat, lon=lon, address=addr)
+                logger.info("reverse_geocode_response", address_fields=len(addr))
 
                 # Build precise address with street-level detail
                 location_part = None

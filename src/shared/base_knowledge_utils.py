@@ -187,10 +187,7 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
         value = entry.get("value", "")
 
         if category == "property" and key == "address" and value:
-            logger.info(
-                "home_address_extracted",
-                address=value
-            )
+            logger.info("home_address_extracted", address_set=True)
             return value
 
     # Fallback to default location entries
@@ -202,7 +199,7 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
         if category == "location" and "default" in key and value:
             logger.info(
                 "default_location_extracted",
-                location=value
+                location_set=True
             )
             return value
 

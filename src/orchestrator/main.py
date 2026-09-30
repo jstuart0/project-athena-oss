@@ -2203,8 +2203,10 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     location_correction = detect_location_correction(state.query)
     if location_correction["is_correction"]:
         logger.info(
-            f"Location correction detected: type={location_correction['correction_type']}, "
-            f"location={location_correction['extracted_location']}, use_current={location_correction['use_current_location']}"
+            "location_correction_detected",
+            correction_type=location_correction["correction_type"],
+            location_set=bool(location_correction["extracted_location"]),
+            use_current=bool(location_correction["use_current_location"]),
         )
         # Update state.context with the location override
         if state.context is None:
@@ -2221,7 +2223,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
             if state.entities is None:
                 state.entities = {}
             state.entities["location"] = location_correction["extracted_location"]
-            logger.info(f"Location override set to: {location_correction['extracted_location']}")
+            logger.info("location_override_set", location_source="correction")
         elif location_correction["use_current_location"]:
             # User wants their current/actual location - mark it for device lookup
             state.context["location_override"] = {
@@ -3741,10 +3743,10 @@ async def execute_tools_parallel(
             if function_name in location_sensitive_tools and location:
                 llm_location = arguments.get("location", "not specified")
                 if llm_location != location:
-                    logger.info(f"Location override: LLM suggested '{llm_location}', using user location '{location}'")
+                    logger.info("tool_location_overridden", tool=function_name, location_overridden=True)
                     arguments["location"] = location
                 else:
-                    logger.debug(f"Location already matches user location: {location}")
+                    logger.debug("tool_location_matches_user_location", tool=function_name)
 
             # DIRECTIONS ORIGIN OVERRIDE: For get_directions, set origin to user's current location
             # when no explicit origin is provided or when LLM uses a placeholder value
@@ -3772,7 +3774,7 @@ async def execute_tools_parallel(
                 )
 
                 if should_override_origin:
-                    logger.info(f"Directions origin override: LLM suggested '{llm_origin}', using current location '{location}'")
+                    logger.info("directions_origin_overridden", location_overridden=True)
                     arguments["origin"] = location
                 else:
                     logger.debug(f"Keeping LLM-specified origin: {llm_origin}")
@@ -4796,7 +4798,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                 # Get permanent home address (for "directions from home" type queries)
                 home_address = await get_home_address_for_user(admin_client, user_mode)
                 search_location = home_address  # Default search location to home
-                logger.info(f"Home address: {home_address}")
+                logger.info("home_address_resolved", address_set=bool(home_address))
 
             # Check for location from request entities (browser geolocation)
             # This is set when location is passed in the QueryRequest
@@ -4804,7 +4806,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                 entity_location = state.entities["location"]
                 # Override SEARCH location but keep home_address unchanged
                 search_location = entity_location
-                logger.info(f"Search location from entities: {entity_location} (home remains: {home_address})")
+                logger.info("search_location_from_entities", location_source="request_entities")
 
             # Check for location override from context (user is somewhere else temporarily)
             # IMPORTANT: This changes the SEARCH location, not the HOME address
@@ -4828,7 +4830,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
                 if location_override:
                     # Override SEARCH location, but keep home_address unchanged
-                    logger.info(f"Search location override: {location_override} (home remains: {home_address})")
+                    logger.info("search_location_overridden", location_source="location_override")
                     search_location = location_override
         except Exception as e:
             logger.warning(f"Failed to fetch base knowledge context in tool_call: {e}")
@@ -5186,7 +5188,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
                 loc = state.context["location_override"]
                 if loc.get("address"):
                     origin = loc["address"]
-                    logger.info(f"Forced directions: using location_override address as origin: {origin}")
+                    logger.info("forced_directions_origin", origin_source="location_override")
                 elif loc.get("latitude") and loc.get("longitude"):
                     origin = f"{loc['latitude']:.6f},{loc['longitude']:.6f}"
                     logger.info(f"Forced directions: using location_override coords as origin: {origin}")
@@ -5420,7 +5422,7 @@ Provide a helpful answer:"""
                     # User wants device/GPS location
                     if loc.get("latitude") and loc.get("longitude"):
                         user_location = f"{loc['latitude']:.4f}, {loc['longitude']:.4f}"
-                        logger.info(f"Using device GPS location: {user_location}")
+                        logger.info("user_location_resolved", location_source="device_gps")
                     else:
                         # No GPS available yet - use address if provided, else keep checking
                         user_location = loc.get("address")
@@ -5431,10 +5433,10 @@ Provide a helpful answer:"""
                             user_location = DEFAULT_LOCATION
                 elif loc.get("address"):
                     user_location = loc["address"]
-                    logger.info(f"Using location override (address): {user_location}")
+                    logger.info("user_location_resolved", location_source="location_override_address")
                 elif loc.get("latitude") and loc.get("longitude"):
                     user_location = f"{loc['latitude']:.4f}, {loc['longitude']:.4f}"
-                    logger.info(f"Using location override (coordinates): {user_location}")
+                    logger.info("user_location_resolved", location_source="location_override_coordinates")
             if not user_location:
                 user_location = DEFAULT_LOCATION
 
@@ -6352,7 +6354,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     logger.info(
                         "multi_guest_identified",
                         guest_id=guest_info.get("guest_id"),
-                        guest_name=guest_info.get("guest_name"),
+                        has_guest_name=bool(guest_info.get("guest_name")),
                         device_id=request.device_id[:16] + "..." if len(request.device_id) > 16 else request.device_id
                     )
 
@@ -6543,7 +6545,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         initial_entities = {}
         if request.location:
             initial_entities["location"] = request.location
-            logger.info(f"Using location from request: {request.location}")
+            logger.info("request_location_used", location_set=True)
 
         initial_state = OrchestratorState(
             query=request.query,
@@ -7214,7 +7216,7 @@ async def process_query_stream(request: QueryRequest):
                     logger.info(
                         "multi_guest_identified_stream",
                         guest_id=guest_info.get("guest_id"),
-                        guest_name=guest_info.get("guest_name")
+                        has_guest_name=bool(guest_info.get("guest_name"))
                     )
 
             # Session management
@@ -7530,7 +7532,7 @@ async def process_query_stream_v2(request: QueryRequest):
                     logger.info(
                         "multi_guest_identified_stream_v2",
                         guest_id=guest_info.get("guest_id"),
-                        guest_name=guest_info.get("guest_name")
+                        has_guest_name=bool(guest_info.get("guest_name"))
                     )
 
             # Session management

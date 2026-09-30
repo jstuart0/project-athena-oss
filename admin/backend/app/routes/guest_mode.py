@@ -684,7 +684,7 @@ async def get_current_guest_internal(
     ).order_by(CalendarEvent.checkout.asc()).first()
 
     if entry:
-        logger.info("internal_current_guest_found", guest_name=entry.guest_name, guest_id=entry.id)
+        logger.info("internal_current_guest_found", guest_id=entry.id)
         return {
             "has_guest": True,
             "id": entry.id,
@@ -933,7 +933,7 @@ async def create_manual_guest_entry(
         request=request
     )
 
-    logger.info("manual_guest_entry_created", entry_id=db_entry.id, guest_name=entry.guest_name, is_test=entry.is_test)
+    logger.info("manual_guest_entry_created", entry_id=db_entry.id, is_test=entry.is_test)
 
     return GuestEntryResponse.from_orm_event(db_entry, guest_count=1)
 

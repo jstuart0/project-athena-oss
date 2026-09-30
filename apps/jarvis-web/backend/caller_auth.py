@@ -157,18 +157,19 @@ def _edge_header_names(env: Mapping[str, str]) -> Tuple[str, str, str]:
     to the edge's strip Middleware: a header the edge doesn't strip is one
     any client can set. The ack is bound to the names, so an ack left over
     from another configuration doesn't pass."""
-    identity = env.get("JARVIS_EDGE_IDENTITY_HEADER", "").strip() or _DEFAULT_IDENTITY_HEADER
-    groups = env.get("JARVIS_EDGE_GROUPS_HEADER", "").strip() or _DEFAULT_GROUPS_HEADER
-    name = env.get("JARVIS_EDGE_NAME_HEADER", "").strip() or _DEFAULT_NAME_HEADER
+    identity_header = env.get("JARVIS_EDGE_IDENTITY_HEADER", "").strip() or _DEFAULT_IDENTITY_HEADER
+    groups_header = env.get("JARVIS_EDGE_GROUPS_HEADER", "").strip() or _DEFAULT_GROUPS_HEADER
+    name_header = env.get("JARVIS_EDGE_NAME_HEADER", "").strip() or _DEFAULT_NAME_HEADER
+    configured = (identity_header, groups_header, name_header)
     _refuse_reserved_header_names({
-        "JARVIS_EDGE_IDENTITY_HEADER": identity,
-        "JARVIS_EDGE_GROUPS_HEADER": groups,
-        "JARVIS_EDGE_NAME_HEADER": name,
+        "JARVIS_EDGE_IDENTITY_HEADER": identity_header,
+        "JARVIS_EDGE_GROUPS_HEADER": groups_header,
+        "JARVIS_EDGE_NAME_HEADER": name_header,
     })
     if not env.get("JARVIS_EDGE_ATTESTATION_SECRET"):
-        return identity, groups, name
+        return configured
     documented = {n.lower() for n in EDGE_STRIPPED_HEADERS}
-    custom = [n for n in (identity, groups, name) if n.lower() not in documented]
+    custom = [n for n in configured if n.lower() not in documented]
     acked = {n.lower() for n in _csv(env.get("JARVIS_EDGE_HEADERS_ACK_STRIPPED"))}
     if custom and acked != {n.lower() for n in custom}:
         logger.error(
@@ -178,8 +179,8 @@ def _edge_header_names(env: Mapping[str, str]) -> Tuple[str, str, str]:
                  + ",".join(custom),
         )
         raise SystemExit(f"jarvis-web edge header names not in the documented strip list: {', '.join(custom)}")
-    logger.info("jarvis_edge_strip_headers", headers=list(_with_names(EDGE_STRIPPED_HEADERS, (identity, groups, name))))
-    return identity, groups, name
+    logger.info("jarvis_edge_strip_headers", headers=list(_with_names(EDGE_STRIPPED_HEADERS, configured)))
+    return configured
 
 
 def _speaker_first_name(value: Optional[str]) -> Optional[str]:

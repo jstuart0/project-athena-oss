@@ -194,7 +194,7 @@ async def search_seatgeek_events(
     logger.info(
         "seatgeek_events.search",
         query=query,
-        location=location,
+        location_set=bool(location),
         date_filter=date_filter
     )
 
@@ -342,7 +342,7 @@ async def search_events_endpoint(
         logger.info(
             "seatgeek_events.search.request",
             query=query,
-            location=location,
+            location_set=bool(location),
             date=date,
             start_date=start_date,
             effective_date=effective_date
@@ -359,7 +359,7 @@ async def search_events_endpoint(
             "seatgeek_events.search.success",
             events_count=len(result["events"]),
             query=query,
-            location=location
+            location_set=bool(location)
         )
 
         return result
@@ -411,7 +411,7 @@ async def local_events_endpoint(
         logger.info(
             "seatgeek_events.local.success",
             events_count=len(result["events"]),
-            location=location,
+            location_set=bool(location),
             event_type=type
         )
 

@@ -1106,7 +1106,7 @@ async def sync_lodgify_to_guest_sessions(db: Session):
                 synced += 1
                 logger.info("guest_session_created",
                            booking_id=event.external_id,
-                           guest_name=new_session.guest_name)
+                           has_guest_name=bool(new_session.guest_name))
             else:
                 # Update existing session
                 existing.guest_name = event.guest_name or event.title or existing.guest_name
