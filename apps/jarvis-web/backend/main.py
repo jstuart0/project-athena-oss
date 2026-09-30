@@ -823,7 +823,7 @@ async def chat(message: ChatMessage, request: Request, response: Response):
                     coordinates_set=message.location.latitude is not None and message.location.longitude is not None,
                 )
 
-            logger.info("chat_request", mode=current_mode, query_preview=message.message[:50])
+            logger.info("chat_request", mode=current_mode, query_len=len(message.message))
 
             orch_response = await client.post(
                 f"{ORCHESTRATOR_URL}/query",
@@ -1059,7 +1059,7 @@ async def chat_stream(message: ChatMessage, request: Request):
                 }
 
             logger.info("chat_stream_request", mode=current_mode,
-                       query_preview=message.message[:50],
+                       query_len=len(message.message),
                        inject_history=inject_history,
                        history_turns=len(chat_history_msgs) // 2)
 
@@ -2765,7 +2765,7 @@ async def transcribe_audio(request: Request):
             )
             if convert_result.returncode != 0:
                 logger.error("ffmpeg_conversion_failed",
-                           stderr=convert_result.stderr.decode()[:200])
+                           stderr_len=len(convert_result.stderr.decode()))
                 # Fall back to original webm
                 wav_path = webm_path
                 audio_type = "audio/webm"
@@ -3285,8 +3285,7 @@ if MUSIC_WS_AVAILABLE:
                             await websocket.send_bytes(message)
                         else:
                             # Log JSON messages for debugging
-                            msg_preview = message[:150] if len(message) > 150 else message
-                            logger.info(f"Sendspin Gateway->Browser: {msg_preview}")
+                            logger.info(f"Sendspin Gateway->Browser: text message ({len(message)} chars)")
                             await websocket.send_text(message)
                 except Exception as e:
                     logger.debug(f"Sendspin Gateway->Client forward ended: {e}")
@@ -3301,8 +3300,7 @@ if MUSIC_WS_AVAILABLE:
                             await gateway_ws.send(message["bytes"])
                         elif "text" in message:
                             # Log JSON messages for debugging
-                            msg_preview = message["text"][:150] if len(message["text"]) > 150 else message["text"]
-                            logger.info(f"Sendspin Browser->Gateway: {msg_preview}")
+                            logger.info(f"Sendspin Browser->Gateway: text message ({len(message['text'])} chars)")
                             await gateway_ws.send(message["text"])
                         else:
                             logger.info("Sendspin: Received non-text/bytes message, breaking")

@@ -147,7 +147,7 @@ class SMSService:
         if self.test_mode:
             logger.info(
                 f"[TEST MODE] Would send {segment_count} segment(s) to {to_number}\n"
-                f"Content preview: {content[:100]}..."
+                f"Content length: {len(content)}"
             )
             return True, "test_mode", segment_count
 

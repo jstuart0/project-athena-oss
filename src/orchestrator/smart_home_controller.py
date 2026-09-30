@@ -603,7 +603,7 @@ class SmartHomeController:
             is_status_query = '?' in query_lower or any(p in query_lower for p in status_query_patterns)
 
             if is_status_query:
-                logger.info(f"Bed warmer STATUS QUERY detected: '{query[:50]}...'")
+                logger.info(f"Bed warmer STATUS QUERY detected: query_len={len(query)}")
                 return {
                     "device_type": "bed_warmer",
                     "room": "master_bedroom",
@@ -882,7 +882,7 @@ class SmartHomeController:
                     extracted_room = room
                     break
             final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-            logger.info(f"Fast path implicit brightness INCREASE: room={final_room} for query='{query[:50]}...'")
+            logger.info(f"Fast path implicit brightness INCREASE: room={final_room} for query_len={len(query)}")
             return {
                 "device_type": "light",
                 "room": final_room,
@@ -905,7 +905,7 @@ class SmartHomeController:
                     extracted_room = room
                     break
             final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-            logger.info(f"Fast path implicit brightness DECREASE: room={final_room} for query='{query[:50]}...'")
+            logger.info(f"Fast path implicit brightness DECREASE: room={final_room} for query_len={len(query)}")
             return {
                 "device_type": "light",
                 "room": final_room,
@@ -1002,7 +1002,7 @@ class SmartHomeController:
                     r'excluding\s+(the\s+)?(\w+\s*\w*)',
                     r'(?:everything|all\s+(?:the\s+)?lights?)\s+but\s+(the\s+)?(\w+\s*\w*)'  # "everything but X" or "all lights but X"
                 ]
-                logger.info(f"Exclusion detection: query='{query_lower[:60]}...', has_exclusion={has_exclusion}, has_all={has_all}")
+                logger.info(f"Exclusion detection: query_lower_len={len(query_lower)}, has_exclusion={has_exclusion}, has_all={has_all}")
                 for pattern in exclusion_patterns:
                     match = re.search(pattern, query_lower)
                     if match:
@@ -1041,7 +1041,7 @@ class SmartHomeController:
             final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
 
             action = "turn_on" if is_turn_on else "turn_off"
-            logger.info(f"Fast path extract_intent: action={action}, room={final_room} for query='{query[:50]}...'")
+            logger.info(f"Fast path extract_intent: action={action}, room={final_room} for query_len={len(query)}")
 
             return {
                 "device_type": "light",
@@ -1580,7 +1580,7 @@ Return ONLY the JSON, no other text."""
                 logger.info(
                     "state_question_llm_action_coerced",
                     original_action=intent.get("action"),
-                    query=query[:80],
+                    query_len=len(query),
                 )
                 intent["action"] = "get_status"
                 # The label is the classifier's noun-map device type, never
@@ -3543,7 +3543,7 @@ Do NOT mention rooms that have no current or recent motion."""
             )
 
             response_text = llm_response.get("response", "").strip()
-            logger.info(f"Occupancy estimation: {response_text[:100]}...")
+            logger.info(f"Occupancy estimation: response_text_len={len(response_text)}")
 
             # Validate response is a complete sentence, not just a number like "1."
             # LLM sometimes returns just the count instead of a full response

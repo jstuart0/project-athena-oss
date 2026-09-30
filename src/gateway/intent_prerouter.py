@@ -88,16 +88,16 @@ async def classify_intent(query: str, ollama_url: Optional[str] = None) -> Inten
                 # Extract just the intent word
                 for intent in ["SIMPLE", "HOME", "COMPLEX"]:
                     if intent in result:
-                        logger.debug("intent_classified", query=query[:50], intent=intent)
+                        logger.debug("intent_classified", query_len=len(query), intent=intent)
                         return intent
 
         # Default to COMPLEX if unclear (safest option)
-        logger.warning("intent_classification_unclear", query=query[:50])
+        logger.warning("intent_classification_unclear", query_len=len(query))
         return "COMPLEX"
 
     except Exception as e:
         # On error, default to full orchestrator (safest)
-        logger.warning("intent_classification_error", error=str(e), query=query[:50])
+        logger.warning("intent_classification_error", error=str(e), query_len=len(query))
         return "COMPLEX"
 
 
@@ -140,11 +140,11 @@ async def handle_simple_intent(
             if response.status_code == 200:
                 answer = response.json().get("response", "").strip()
                 if answer:
-                    logger.info("simple_intent_handled", query=query[:50], response_length=len(answer))
+                    logger.info("simple_intent_handled", query_len=len(query), response_length=len(answer))
                     return answer
 
         return "I'm not sure how to respond to that."
 
     except Exception as e:
-        logger.warning("simple_intent_error", error=str(e), query=query[:50])
+        logger.warning("simple_intent_error", error=str(e), query_len=len(query))
         return "I'm having trouble responding right now."

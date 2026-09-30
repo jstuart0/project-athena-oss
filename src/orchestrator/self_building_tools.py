@@ -469,7 +469,7 @@ class SelfBuildingToolsManager:
                 if response.status_code not in (200, 201):
                     logger.warning("proposal_save_warning",
                                   status=response.status_code,
-                                  response_text=response.text[:200])
+                                  response_text_len=len(response.text))
                 else:
                     logger.info("proposal_saved_to_backend",
                                proposal_id=proposal.id,
@@ -739,8 +739,7 @@ async def generate_tool_from_request(
         logger.info("tool_generation_llm_response",
                    model=model,
                    response_keys=list(response.keys()),
-                   content_length=len(content) if content else 0,
-                   content_preview=content[:200] if content else "empty")
+                   content_length=len(content) if content else 0)
 
         # Try to extract JSON from the response
         # LLM might include markdown code blocks
@@ -764,7 +763,7 @@ async def generate_tool_from_request(
         }
 
     except json.JSONDecodeError as e:
-        logger.error("tool_generation_json_error", error=str(e), content=content[:200] if content else "empty")
+        logger.error("tool_generation_json_error", error=str(e), content_len=len(content or ""))
         return {'success': False, 'error': f'Invalid JSON from LLM: {str(e)}'}
     except Exception as e:
         logger.error("tool_generation_error", error=str(e))

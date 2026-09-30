@@ -565,7 +565,7 @@ def is_cacheable(category: str, query: str) -> bool:
     query_lower = query.lower()
     for pattern in UNCACHEABLE_PATTERNS:
         if re.search(pattern, query_lower):
-            logger.info("cache_skip_pattern", pattern=pattern, query_preview=query[:50])
+            logger.info("cache_skip_pattern", pattern=pattern, query_len=len(query))
             return False
 
     return True
@@ -658,13 +658,12 @@ async def get_cached_response(
             logger.info(
                 "semantic_cache_hit",
                 category=category,
-                cache_key=cache_key[:50],
-                query_preview=query[:30],
+                query_len=len(query),
                 has_location=bool(location_override)
             )
             return cached
 
-        logger.debug("semantic_cache_miss", cache_key=cache_key[:50], has_location=bool(location_override))
+        logger.debug("semantic_cache_miss", has_location=bool(location_override))
         return None
 
     except Exception as e:
@@ -722,9 +721,8 @@ async def cache_response(
         logger.info(
             "semantic_cache_stored",
             category=category,
-            cache_key=cache_key[:50],
             ttl_seconds=ttl,
-            query_preview=query[:30]
+            query_len=len(query)
         )
         return True
 

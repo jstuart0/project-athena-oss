@@ -563,7 +563,7 @@ async def route_to_orchestrator(
             logger.error(
                 "orchestrator_request_failed",
                 status=response.status_code,
-                body=response.text[:200],
+                body_len=len(response.text),
             )
             raise Exception(f"Orchestrator returned {response.status_code}")
 

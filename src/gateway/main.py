@@ -906,7 +906,7 @@ async def _log_metric_to_db(
             logger.warning(
                 "failed_to_log_metric",
                 status_code=response.status_code,
-                error=response.text[:200]
+                error_len=len(response.text)
             )
     except Exception as e:
         logger.error(f"Metric logging error: {e}", exc_info=False)
@@ -2745,7 +2745,7 @@ async def ha_conversation(request: HAConversationRequest):
 
                 if response_text:
                     request_counter.labels(endpoint="ha_conversation", status="prerouted_simple").inc()
-                    logger.info(f"Pre-routed SIMPLE response: {response_text[:50]}...")
+                    logger.info(f"Pre-routed SIMPLE response: response_text_len={len(response_text)}")
 
                     return HAConversationResponse(
                         response=_ha_response_payload(response_text, request.language),
@@ -3410,7 +3410,7 @@ if WEBSOCKET_AVAILABLE:
                 server_hello_data = json.loads(server_hello_msg)
                 if server_hello_data.get("type") == "server/hello":
                     server_hello_received = True
-                    logger.info(f"Sendspin proxy: Received server/hello: {str(server_hello_data)[:100]}")
+                    logger.info(f"Sendspin proxy: Received server/hello ({len(str(server_hello_data))} chars)")
                     # Forward server/hello to browser
                     await websocket.send_text(server_hello_msg)
                 else:
@@ -3455,8 +3455,7 @@ if WEBSOCKET_AVAILABLE:
                             await websocket.send_bytes(message)
                         else:
                             # Log JSON messages (truncated)
-                            msg_preview = message[:200] if len(message) > 200 else message
-                            logger.info(f"Sendspin MA->Client: {msg_preview}")
+                            logger.info(f"Sendspin MA->Client: text message ({len(message)} chars)")
                             await websocket.send_text(message)
                 except Exception as e:
                     logger.info(f"Sendspin MA->Client forward ended: {e}")
@@ -3472,8 +3471,7 @@ if WEBSOCKET_AVAILABLE:
                             await ma_websocket.send(message["bytes"])
                         elif "text" in message:
                             # Log JSON messages (truncated)
-                            msg_preview = message["text"][:200] if len(message["text"]) > 200 else message["text"]
-                            logger.info(f"Sendspin Client->MA: {msg_preview}")
+                            logger.info(f"Sendspin Client->MA: text message ({len(message['text'])} chars)")
                             await ma_websocket.send(message["text"])
                         else:
                             # Disconnected

@@ -121,7 +121,7 @@ class ResponseValidator:
 
             if not is_valid:
                 logger.warning(
-                    f"Layer 1 validation failed for query: {query[:50]}... "
+                    f"Layer 1 validation failed for query: query_len={len(query)} "
                     f"Checks failed: {[c['name'] for c in layer1_checks if not c['passed']]}"
                 )
 
@@ -156,7 +156,7 @@ class ResponseValidator:
                 # Regular validation
                 if confidence < 0.5:
                     logger.warning(
-                        f"Layer 2 low confidence: {confidence:.2f} for query: {query[:50]}..."
+                        f"Layer 2 low confidence: {confidence:.2f} for query: query_len={len(query)}"
                     )
                     return (False, final, metadata)
 

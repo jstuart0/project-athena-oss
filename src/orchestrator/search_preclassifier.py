@@ -325,11 +325,11 @@ class SearchPreClassifier:
 
                 logger.info(
                     "search_preclassified",
-                    query=query[:50],
+                    query_len=len(query),
                     intent=best_intent,
                     confidence=round(best_similarity, 3),
                     skip_llm=skip_llm,
-                    matched_template=best_template[:30]
+                    matched_template_index=int(best_idx)
                 )
 
                 return result
@@ -337,7 +337,7 @@ class SearchPreClassifier:
             return None
 
         except Exception as e:
-            logger.warning("search_preclassify_error", error=str(e), query=query[:50])
+            logger.warning("search_preclassify_error", error=str(e), query_len=len(query))
             return self._keyword_classify(query)
 
     def update_threshold(self, threshold: float):

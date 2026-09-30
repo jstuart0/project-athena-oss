@@ -328,21 +328,21 @@ class EnhancedIntentClassifier:
         has_themed_colors = any(pattern in query for pattern in themed_color_patterns)
 
         # DEBUG: Log room+color detection
-        logger.info(f"Room+color check: query='{query[:50]}', has_room={has_room}, has_color={has_color}, has_light={has_light_device}, has_themed={has_themed_colors}")
+        logger.info(f"Room+color check: query_len={len(query)}, has_room={has_room}, has_color={has_color}, has_light={has_light_device}, has_themed={has_themed_colors}")
 
         if has_room and has_color:
             # Room + color = almost certainly a light control command
-            logger.info(f"Detected room+color pattern in query: '{query[:50]}...'")
+            logger.info(f"Detected room+color pattern in query: query_len={len(query)}")
             control_score += 2  # Strong boost for room+color combination
 
         # Room + lights = light control command
         if has_room and has_light_device:
-            logger.info(f"Detected room+lights pattern in query: '{query[:50]}...'")
+            logger.info(f"Detected room+lights pattern in query: query_len={len(query)}")
             control_score += 2  # Strong boost for room+lights
 
         # Themed color request with room or lights = light control
         if has_themed_colors and (has_room or has_light_device):
-            logger.info(f"Detected themed color request in query: '{query[:50]}...'")
+            logger.info(f"Detected themed color request in query: query_len={len(query)}")
             control_score += 2  # Strong boost for themed colors
 
         if control_score > 0:
@@ -398,7 +398,7 @@ class EnhancedIntentClassifier:
                 if is_how_to:
                     # This is a "how to" or "what is" question, not a weather query
                     # Reclassify as general_info with moderate confidence
-                    logger.debug(f"Reclassifying '{query[:50]}...' from weather to general_info (how-to pattern detected)")
+                    logger.debug(f"Reclassifying query_len={len(query)} from weather to general_info (how-to pattern detected)")
                     return (IntentCategory.GENERAL_INFO, 0.6)
 
             # Calculate confidence based on match density

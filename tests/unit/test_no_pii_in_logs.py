@@ -23,11 +23,20 @@ the admin audit actor (the signed-in operator's own username/email) and a
 small set of ticketed RAG location logs in images this change doesn't
 rebuild.
 
+User and assistant text: a head slice ``x[:N]`` / ``x[0:N]`` (literal
+N > 4, no step) anywhere in a logged value is a finding, whatever it's
+called, unless the sliced value's own name is an id, sid, hash or digest
+(``session_id[:8]``). A ``*_preview`` name is a finding too, and so is any
+logger call in the semantic cache that mentions ``cache_key`` (the key is
+built from the query). Log a length instead: ``query_len=len(query)``,
+``error_type=type(e).__name__``. Text findings take no allowlist reason.
+
 Stdlib only: this runs on the unit-min CI requirements.
 """
 from __future__ import annotations
 
 import ast
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -42,7 +51,8 @@ HOUSE_KEYS = (
     "guest_email", "guest_phone", "speaker_first_name", "location", "location_override",
 )
 CALLER_KEYS = ("email", "identity", "username", "display_name")
-_KEY_TOKENS = tuple(tuple(k.split("_")) for k in HOUSE_KEYS + CALLER_KEYS)
+TEXT_KEYS = ("preview",)
+_KEY_TOKENS = tuple(tuple(k.split("_")) for k in HOUSE_KEYS + CALLER_KEYS + TEXT_KEYS)
 
 _LOG_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical", "msg", "log", "bind"})
 _AUDIT_SINKS = frozenset({"AuditLog"})
@@ -52,6 +62,12 @@ _MAX_TAIL_SLICE = 4
 PAYLOAD_NAMES = frozenset({"update_data", "arguments", "args", "tool_args", "changes", "payload"})
 _PAYLOAD_METHODS = frozenset({"model_dump", "dict"})
 _PERSON_RECEIVERS = ("guest", "booking", "member", "participant")
+# A head slice of more than this many characters is text, unless the sliced
+# value is named as an identifier.
+_MAX_HEAD_SLICE = 4
+_ID_NAME = re.compile(r"(^|_)(id|sid|hash|digest|hexdigest|sha|sha256)$")
+# The semantic cache builds cache_key from the query text.
+CACHE_KEY_FILE = "src/orchestrator/semantic_cache.py"
 
 OPERATOR_AUDIT = "operator-audit: the signed-in operator's own identity (and client IP), logged as the audit actor"
 DEFERRED = "deferred-ticketed: search location logged by a RAG image this change doesn't rebuild (follow-up)"
@@ -299,13 +315,24 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
 }
 
 
+# Head-slice text logs deferred to a follow-up (ATHENA-169). Empty: every
+# site in an image this change rebuilds was fixed, and the text rule takes
+# no allowlist reason. An entry is allowed only outside those images (see
+# test_frozen_text_sites_are_outside_rebuilt_images), with its count and
+# the reason it can't be fixed yet.
+# (path, enclosing function) -> (count, reason)
+FROZEN_TEXT_SITES: dict[tuple[str, str], tuple[int, str]] = {}
+REBUILT_IMAGE_ROOTS = ("src/orchestrator", "src/gateway", "src/shared", "src/sms", "apps/jarvis-web", "admin/backend/app")
+
+
 def _matched_keys(identifier: str) -> set[str]:
     tokens = tuple(t for t in identifier.lower().split("_") if t)
     return {"_".join(key) for key in _KEY_TOKENS if len(tokens) >= len(key) and tokens[-len(key):] == key}
 
 
 def _matches(identifier: str) -> bool:
-    return bool(_matched_keys(identifier)) or identifier in PAYLOAD_NAMES or identifier.startswith(("person_name:", "payload:"))
+    return bool(_matched_keys(identifier)) or identifier in PAYLOAD_NAMES or identifier.startswith(
+        ("person_name:", "payload:", "text_slice:"))
 
 
 # Which keys each allowlist reason may cover: an operator-audit entry may
@@ -357,6 +384,36 @@ def _is_short_tail_slice(node: ast.Subscript) -> bool:
         and isinstance(sl.lower.operand.value, int)
         and 1 <= sl.lower.operand.value <= _MAX_TAIL_SLICE
     )
+
+
+def _head_slice_upper(node: ast.Subscript):
+    """N for ``x[:N]`` / ``x[0:N]`` with a literal int N and no step, else None."""
+    sl = node.slice
+    if not isinstance(sl, ast.Slice) or sl.step is not None:
+        return None
+    if sl.lower is not None and not (isinstance(sl.lower, ast.Constant) and sl.lower.value == 0):
+        return None
+    if isinstance(sl.upper, ast.Constant) and isinstance(sl.upper.value, int) and not isinstance(sl.upper.value, bool):
+        return sl.upper.value
+    return None
+
+
+def _text_slices(node: ast.AST, inspected: list):
+    """``text_slice:<name>`` for every head slice of more than four
+    characters in a logged value, unless the sliced value is named as an id.
+    Exempt sub-expressions (len(), bool(), comparisons...) aren't entered.
+    ``inspected`` counts every head slice seen, exempt ones included."""
+    if node is None or (isinstance(node, ast.expr) and _exempt(node)):
+        return
+    if isinstance(node, ast.Subscript):
+        upper = _head_slice_upper(node)
+        if upper is not None:
+            inspected.append(1)
+            name = _final_name(node.value)
+            if upper > _MAX_HEAD_SLICE and not _ID_NAME.search(name.lower()):
+                yield f"text_slice:{name or '?'}"
+    for child in ast.iter_child_nodes(node):
+        yield from _text_slices(child, inspected)
 
 
 def _exempt(node: ast.expr) -> bool:
@@ -412,21 +469,32 @@ def _identifiers(node: ast.AST):
                 yield from _identifiers(child)
 
 
-def _call_hits(call: ast.Call) -> list[str]:
+def _call_hits(call: ast.Call, *, filename: str = "", inspected: list | None = None) -> list[str]:
+    inspected = [] if inspected is None else inspected
     hits = []
+    values = [kw.value for kw in call.keywords] + list(call.args)
     for kw in call.keywords:
         if kw.arg and _matches(kw.arg) and not _exempt(kw.value):
             hits.append(kw.arg)
         hits.extend(i for i in _identifiers(kw.value) if _matches(i))
     for arg in call.args:
         hits.extend(i for i in _identifiers(arg) if _matches(i))
+    for value in values:
+        hits.extend(_text_slices(value, inspected))
+    if filename.endswith(CACHE_KEY_FILE) and any(
+        (isinstance(n, ast.Name) and n.id == "cache_key") or (isinstance(n, ast.keyword) and n.arg == "cache_key")
+        for n in ast.walk(call)
+    ):
+        hits.append("text_slice:cache_key")
     return hits
 
 
 class _Finder(ast.NodeVisitor):
-    def __init__(self) -> None:
+    def __init__(self, filename: str = "") -> None:
+        self.filename = filename
         self.stack: list[str] = []
         self.calls = 0
+        self.inspected: list = []
         self.found: list[tuple[str, int, list[str]]] = []
 
     def _visit_function(self, node) -> None:
@@ -440,16 +508,21 @@ class _Finder(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if _is_logger_call(node):
             self.calls += 1
-            hits = _call_hits(node)
+            hits = _call_hits(node, filename=self.filename, inspected=self.inspected)
             if hits:
                 self.found.append((self.stack[-1] if self.stack else "<module>", node.lineno, sorted(set(hits))))
         self.generic_visit(node)
 
 
 def find_pii_logs(source: str, filename: str = "<string>") -> tuple[list[tuple[str, int, list[str]]], int]:
-    finder = _Finder()
+    found, calls, _inspected = _find(source, filename)
+    return found, calls
+
+
+def _find(source: str, filename: str = "<string>"):
+    finder = _Finder(filename)
     finder.visit(ast.parse(source, filename=filename))
-    return finder.found, finder.calls
+    return finder.found, finder.calls, len(finder.inspected)
 
 
 def _scan_files() -> list[Path]:
@@ -468,25 +541,30 @@ def scan() -> tuple[Counter, int, int, list[str]]:
     return found, parsed, calls, lines
 
 
+_INSPECTED: list = []
+
+
 def _scan():
     found: Counter = Counter()
     keys_by_pair: dict[tuple[str, str], set[str]] = {}
-    parsed = calls = 0
+    parsed = calls = inspected = 0
     lines: list[str] = []
     for path in _scan_files():
         rel = path.relative_to(REPO_ROOT).as_posix()
         if rel in SKIP:
             continue
         try:
-            hits, n = find_pii_logs(path.read_text(encoding="utf-8"), rel)
+            hits, n, k = _find(path.read_text(encoding="utf-8"), rel)
         except SyntaxError as exc:
             raise AssertionError(f"{rel} doesn't parse ({exc}); fix it or add it to SKIP with a reason") from exc
         parsed += 1
         calls += n
+        inspected += k
         for func, lineno, keys in hits:
             found[(rel, func)] += 1
             keys_by_pair.setdefault((rel, func), set()).update(keys)
             lines.append(f"{rel}:{lineno} ({func}) {','.join(keys)}")
+    _INSPECTED[:] = [inspected]
     return found, parsed, calls, lines, keys_by_pair
 
 
@@ -521,7 +599,9 @@ def test_log_calls_match_the_allowlist():
     found, parsed, calls, lines, keys_by_pair = _scan()
     assert parsed >= 230, f"only {parsed} files parsed; the scan roots moved"
     assert calls >= 2900, f"only {calls} logger calls found; the logger-call detector broke"
+    assert _INSPECTED[0] >= 30, f"only {_INSPECTED[0]} head slices inspected; the slice rule is dead"
     expected = Counter({key: count for key, (count, _reason) in ALLOWLIST.items()})
+    expected.update({key: count for key, (count, _reason) in FROZEN_TEXT_SITES.items()})
     assert sum(expected.values()) >= 200
     new = found - expected
     gone = expected - found
@@ -534,7 +614,58 @@ def test_log_calls_match_the_allowlist():
     assert ("src/orchestrator/main.py", "execute_single_tool") not in found
     assert keys_by_pair[("admin/backend/app/routes/sms.py", "update_sms_settings")] == {"username"}
     assert ("admin/backend/app/routes/guests.py", "get_guest") not in found
+    assert ("src/orchestrator/helpers.py", "maybe_post_synthesis_fallback") not in found
+    assert ("src/orchestrator/nodes/route_control.py", "_resolve_pending_write_confirmation") not in found
     assert not reason_violations(keys_by_pair, ALLOWLIST)
+
+
+def test_frozen_text_sites_are_outside_rebuilt_images():
+    for (path, _func), (count, reason) in FROZEN_TEXT_SITES.items():
+        assert count >= 1 and reason.strip(), path
+        assert not path.startswith(REBUILT_IMAGE_ROOTS), path
+
+
+def test_text_slice_detector_self_test():
+    source = '''
+def flagged(query, s, answer, a, msg_preview, e, cache_key, body):
+    logger.info("x", q=query[:50])
+    logger.info("x", t=s.text[0:80])
+    logger.info(f"{answer[:100]}")
+    logger.info("x", extra={"answer_preview": a[:100]})
+    logger.info(f"{msg_preview}")
+    logger.info("x", e=str(e)[:200])
+    logger.info("x", k=cache_key[:50])
+    logger.info("%s", body[:10])
+
+def not_flagged(session_id, device_id, request_hash, phone, query, digest):
+    logger.info("x", sid=session_id[:8])
+    logger.info("x", d=device_id[:16])
+    logger.info("x", h=request_hash[:12])
+    logger.info("x", last4=phone[-4:])
+    logger.info("x", n=len(query))
+    logger.info("x", short=query[:4])
+    logger.info("x", key=hashlib.sha256(query.encode()).hexdigest()[:16])
+'''
+    found, calls, inspected = _find(source)
+    assert calls == 15
+    assert [(func, line) for func, line, _keys in found] == [("flagged", n) for n in range(3, 11)]
+    assert inspected == 12  # the 7 flagged head slices + session_id, device_id, request_hash, query[:4], hexdigest
+    by_line = by_line_keys(found)
+    assert by_line[3] == ["text_slice:query"]
+    assert by_line[6] == ["answer_preview", "text_slice:a"]
+    assert by_line[7] == ["msg_preview"]
+    assert by_line[8] == ["text_slice:str"]
+
+
+def test_cache_key_rule_is_scoped_to_the_semantic_cache():
+    source = '''
+def f(cache_key, category):
+    logger.info("cache_hit", key=cache_key, category=category)
+    logger.info("cache_hit", category=category)
+'''
+    found, _calls, _inspected = _find(source, CACHE_KEY_FILE)
+    assert [(line, keys) for _func, line, keys in found] == [(3, ["text_slice:cache_key"])]
+    assert _find(source, "src/orchestrator/other.py")[0] == []
 
 
 def test_every_allowlist_entry_has_a_reason():

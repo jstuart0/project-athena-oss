@@ -445,7 +445,7 @@ class AutomationAgent:
         iteration = 0
         start_time = time.time()
 
-        logger.info(f"AutomationAgent starting: query='{query[:50]}...', mode={mode}, room={room}")
+        logger.info(f"AutomationAgent starting: query_len={len(query)}, mode={mode}, room={room}")
 
         while iteration < max_iterations:
             iteration += 1
@@ -460,7 +460,7 @@ class AutomationAgent:
                 if not tool_calls:
                     # LLM wants to respond directly (unusual but allowed)
                     content = response.get("content", "I'm not sure how to help with that.")
-                    logger.info(f"AutomationAgent completed without tools: {content[:50]}...")
+                    logger.info(f"AutomationAgent completed without tools: content_len={len(content)}")
                     return content
 
                 # Execute each tool call
@@ -483,7 +483,7 @@ class AutomationAgent:
                     # Check if this is the done tool
                     if tool_name == "done":
                         elapsed = time.time() - start_time
-                        logger.info(f"AutomationAgent completed in {elapsed:.2f}s after {iteration} iterations: {result[:50]}...")
+                        logger.info(f"AutomationAgent completed in {elapsed:.2f}s after {iteration} iterations: result_len={len(result)}")
                         return result
 
                     # Add tool result to conversation for next iteration

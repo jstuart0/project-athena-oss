@@ -303,7 +303,7 @@ async def optimize_status_query(
     if not query_type:
         return None
 
-    logger.info("status_query_optimizing", query_type=query_type, query=query[:50])
+    logger.info("status_query_optimizing", query_type=query_type, query_len=len(query))
 
     # Get relevant domains
     domains = get_domains_for_query_type(query_type)

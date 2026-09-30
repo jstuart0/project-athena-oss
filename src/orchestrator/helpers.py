@@ -283,7 +283,7 @@ def log_continuation_decision(state: Any, session_id: str) -> None:
             "continuation_decision",
             decision=decision_dict.get("decision"),
             reason=decision_dict.get("reason"),
-            session_prefix=(session_id or "")[:12],
+            session_prefix=session_id[:12] if session_id else "",
         )
     except Exception:
         logger.warning("continuation_decision_log_failed", exc_info=True)
@@ -933,9 +933,9 @@ async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
     logger.info(
         "post_synthesis_fallback_triggered",
         matched_pattern=matched_pattern,
-        original_response_preview=state.answer[:100] if state.answer else None,
+        original_response_len=len(state.answer or ""),
         intent=state.intent.value if state.intent and hasattr(state.intent, 'value') else str(state.intent),
-        query_preview=state.query[:50] if state.query else None
+        query_len=len(state.query or "")
     )
 
     # Execute web search fallback
@@ -1040,8 +1040,8 @@ Based on these search results, provide a helpful, accurate answer to the user's 
                 if config.get("log_triggers", True):
                     logger.info(
                         "post_synthesis_fallback_succeeded",
-                        new_response_preview=new_response[:100],
-                        original_response_preview=original_response[:100] if original_response else None,
+                        new_response_len=len(new_response),
+                        original_response_len=len(original_response or ""),
                         results_count=len(search_results),
                         latency_ms=elapsed_ms
                     )

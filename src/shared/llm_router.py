@@ -13,6 +13,7 @@ import time
 from typing import Dict, Any, Optional, List
 from enum import Enum
 from collections import deque
+from urllib.parse import urlparse
 import structlog
 from shared.admin_url import get_admin_url
 from shared.config import get_config
@@ -152,7 +153,6 @@ async def prewarm_ollama_models(model_names: List[str]) -> Dict[str, bool]:
                     model=model,
                     elapsed_s=elapsed,
                     error_type=type(e).__name__,
-                    error=str(e)[:200],
                 )
     return results
 
@@ -726,7 +726,7 @@ class LLMRouter:
                         logger.info("mlx_synthesis_request", endpoint=endpoint_url, msg_count=len(clean_messages), model=model)
                         resp = await client.post("/v1/chat/completions", json=payload)
                         if resp.status_code != 200:
-                            logger.error("mlx_synthesis_error", status=resp.status_code, body=resp.text[:500], url=str(resp.url))
+                            logger.error("mlx_synthesis_error", status=resp.status_code, body_len=len(resp.text), url=str(resp.url))
                         resp.raise_for_status()
                         data = resp.json()
                     choice = data.get("choices", [{}])[0]
@@ -1358,7 +1358,7 @@ class LLMRouter:
                             break
 
                     except json_lib.JSONDecodeError:
-                        logger.warning("ollama_stream_json_error", line=line[:100])
+                        logger.warning("ollama_stream_json_error", line_len=len(line))
                         continue
 
     async def generate_stream(
@@ -1402,7 +1402,7 @@ class LLMRouter:
             "llm_stream_starting",
             model=model,
             backend=backend_type.value if hasattr(backend_type, 'value') else str(backend_type),
-            endpoint=endpoint_url[:50] if endpoint_url else "cloud"
+            endpoint_host=urlparse(endpoint_url).hostname if endpoint_url else "cloud"
         )
 
         # Route to appropriate streaming backend
@@ -2122,7 +2122,7 @@ class LLMRouter:
                     logger.warning(
                         "failed_to_track_cloud_usage",
                         status=response.status_code,
-                        error=response.text[:100]
+                        error_len=len(response.text)
                     )
         except Exception as e:
             logger.error("cloud_usage_tracking_error", error=str(e))

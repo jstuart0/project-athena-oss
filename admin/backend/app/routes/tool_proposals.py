@@ -349,7 +349,7 @@ async def deploy_workflow_to_n8n(
             if response.status_code not in (200, 201):
                 logger.error("n8n_workflow_creation_failed",
                            status=response.status_code,
-                           response=response.text[:500])
+                           response_len=len(response.text))
                 return None
 
             data = response.json()

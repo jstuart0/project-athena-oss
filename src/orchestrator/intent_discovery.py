@@ -231,15 +231,15 @@ async def generate_novel_intent(
 
         logger.info("novel_intent_generated",
                    canonical_name=intent_data["canonical_name"],
-                   query=query[:50])
+                   query_len=len(query))
 
         return intent_data
 
     except json.JSONDecodeError as e:
-        logger.error("novel_intent_json_parse_failed", error=str(e), query=query[:50])
+        logger.error("novel_intent_json_parse_failed", error=str(e), query_len=len(query))
         return None
     except Exception as e:
-        logger.error("novel_intent_generation_failed", error=str(e), query=query[:50])
+        logger.error("novel_intent_generation_failed", error=str(e), query_len=len(query))
         return None
 
 
@@ -342,7 +342,7 @@ async def create_emerging_intent(
             else:
                 logger.error("emerging_intent_create_failed",
                            status=response.status_code,
-                           detail=response.text[:200])
+                           detail_len=len(response.text))
                 return None
 
     except Exception as e:
@@ -487,7 +487,7 @@ async def discover_intent(
     novel_intent = await generate_novel_intent(query, llm_router)
 
     if not novel_intent:
-        logger.warning("intent_discovery_failed_to_generate", query=query[:50])
+        logger.warning("intent_discovery_failed_to_generate", query_len=len(query))
         return IntentDiscoveryResult(
             is_novel=False,
             canonical_name=None,

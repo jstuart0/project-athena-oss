@@ -556,7 +556,7 @@ async def _authenticate_api_key(
     """
     # Validate format
     if not is_valid_key_format(api_key):
-        logger.warning("api_key_invalid_format", key_prefix=api_key[:8] if api_key else "empty")
+        logger.warning("api_key_invalid_format", api_key_len=len(api_key or ""))
         return None  # Let caller decide to fall through or reject
 
     # Extract prefix for efficient index lookup (multiple keys may share same prefix

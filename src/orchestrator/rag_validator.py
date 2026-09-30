@@ -73,7 +73,7 @@ class RAGValidator:
         # Check for unhelpful patterns
         for pattern in self.UNHELPFUL_PATTERNS:
             if pattern in content_lower:
-                logger.warning(f"Content contains unhelpful pattern '{pattern}': {content[:100]}")
+                logger.warning(f"Content contains unhelpful pattern '{pattern}': content_len={len(content)}")
                 return (False, f"Contains unhelpful pattern: '{pattern}'")
 
         # Check for very short responses (< 20 chars) unless it's a simple fact
@@ -107,7 +107,7 @@ class RAGValidator:
             is_helpful, reason = self._check_content_quality(answer, query)
 
             if not is_helpful:
-                logger.warning(f"Answer quality validation failed: {reason}. Answer: {answer[:200]}")
+                logger.warning(f"Answer quality validation failed: {reason}. Answer: answer_len={len(answer)}")
                 return (
                     ValidationResult.INVALID,
                     f"Answer is unhelpful: {reason}",

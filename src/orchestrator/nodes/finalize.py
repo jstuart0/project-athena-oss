@@ -54,7 +54,7 @@ async def finalize_node(state: OrchestratorState) -> OrchestratorState:
         state.intent_results.append(current_result)
         logger.info(
             f"Multi-intent result {state.current_intent_index + 1}/{len(state.intent_parts)}: {state.intent}",
-            extra={"answer_preview": state.answer[:100] if state.answer else None}
+            extra={"answer_len": len(state.answer or "")}
         )
 
         # Check if there are more intents to process

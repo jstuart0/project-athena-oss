@@ -192,7 +192,7 @@ class ResultFusion:
                 unique_sources = {r.source for r in group}
                 confidence_boost = min(0.2 * (len(unique_sources) - 1), 0.3)
 
-                logger.info(f"Cross-validation: '{title[:50]}' confirmed by {len(unique_sources)} sources, boost={confidence_boost:.2f}")
+                logger.info(f"Cross-validation: title_len={len(title)} confirmed by {len(unique_sources)} sources, boost={confidence_boost:.2f}")
 
                 # Apply boost to all results in group
                 for result in group:

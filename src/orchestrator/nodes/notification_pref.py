@@ -200,7 +200,7 @@ async def notification_pref_node(state: OrchestratorState) -> OrchestratorState:
                 "notification_pref_complete",
                 action=action,
                 results=results,
-                answer=state.answer[:100]
+                answer_len=len(state.answer)
             )
 
     except httpx.ConnectError:

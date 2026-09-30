@@ -295,7 +295,7 @@ class IntentClassifier:
                                 # Also check if there's a light/on/off keyword indicating this is a light command
                                 light_keywords = ['light', 'lights', 'on', 'off', 'turn', 'switch', 'dim', 'bright']
                                 if any(kw in query_lower for kw in light_keywords):
-                                    logger.info(f"Multi-room command detected, NOT splitting: '{query[:50]}...'")
+                                    logger.info(f"Multi-room command detected, NOT splitting: query_len={len(query)}")
                                     return [query]  # Don't split - it's a multi-room command
 
         # Compound query indicators

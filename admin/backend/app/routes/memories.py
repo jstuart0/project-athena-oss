@@ -841,8 +841,8 @@ async def internal_memory_search(
 
             logger.info(
                 "hybrid_search_starting",
-                query_preview=query[:50],
-                keywords=keywords,
+                query_len=len(query),
+                keyword_count=len(keywords),
                 mode=mode
             )
 
@@ -1013,7 +1013,7 @@ async def internal_forget_memory(
         logger.info(
             "memories_forgotten",
             count=len(deleted_memories),
-            search_query=search_query[:50]
+            search_query_len=len(search_query)
         )
 
         return {

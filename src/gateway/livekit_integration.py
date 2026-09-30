@@ -103,7 +103,7 @@ class LiveKitIntegration:
         try:
             logger.info("livekit_query_received",
                        session_id=session_id,
-                       query=transcript[:50],
+                       query_len=len(transcript),
                        has_interruption_context=interruption_context is not None)
 
             # Emit event for Admin Jarvis
@@ -135,7 +135,7 @@ class LiveKitIntegration:
                 request_data["interruption_context"] = interruption_context
                 logger.info("livekit_interruption_context_forwarded",
                            session_id=session_id,
-                           previous_query=interruption_context.get("previous_query", "")[:30])
+                           previous_query_len=len(interruption_context.get("previous_query", "")))
 
             # Call orchestrator
             response = await self._http_client.post(
@@ -149,7 +149,7 @@ class LiveKitIntegration:
 
             logger.info("livekit_query_response",
                        session_id=session_id,
-                       response=answer[:50])
+                       response_len=len(answer))
 
             # Emit response event
             await self._emit_event("response_generated", session_id, {
@@ -275,7 +275,7 @@ class STTClient:
                 if result.returncode != 0 or not result.stdout:
                     logger.error("stt_curl_failed",
                                returncode=result.returncode,
-                               stderr=result.stderr[:200] if result.stderr else "")
+                               stderr_len=len(result.stderr or ""))
                     return ""
 
                 response_data = json.loads(result.stdout)
@@ -351,7 +351,7 @@ class TTSClient:
             if result.returncode != 0:
                 logger.error("tts_curl_failed",
                            returncode=result.returncode,
-                           stderr=result.stderr[:200] if result.stderr else "")
+                           stderr_len=len(result.stderr or ""))
                 return b""
 
             # Read the audio file
