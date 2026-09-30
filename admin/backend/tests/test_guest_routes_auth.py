@@ -527,3 +527,10 @@ def test_factory_refuses_a_user_without_the_permission(db, viewer_user, operator
         assert c.get("/api/auth/zz-probe", headers=_bearer(viewer_user)).status_code == 403
         assert c.get("/api/auth/zz-probe", headers=_bearer(operator_user)).status_code == 200
 
+
+@pytest.mark.parametrize("owner_type", ["admin", "", "<b>x</b>"])
+def test_owner_type_is_owner_or_guest(client, db, owner_type):
+    body = {"name": "n", "owner_type": owner_type, "trigger_config": {"type": "time"}, "actions_config": []}
+    assert client.post(VA, json=body, headers=_svc("owner")).status_code == 422
+    assert db.query(VoiceAutomation).count() == 0
+

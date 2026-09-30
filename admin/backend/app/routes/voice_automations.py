@@ -6,7 +6,7 @@ Supports owner and guest-scoped automations with archival/restoration.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Literal, Optional
 from datetime import datetime
 from urllib.parse import unquote
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -150,7 +150,7 @@ class ActionConfig(BaseModel):
 class VoiceAutomationCreate(BaseModel):
     name: str = Field(..., description="Human-readable name")
     ha_automation_id: Optional[str] = None
-    owner_type: str = Field("owner", description="owner or guest")
+    owner_type: Literal["owner", "guest"] = Field("owner", description="owner or guest")
     guest_session_id: Optional[str] = None
     guest_name: Optional[str] = None
     calendar_event_id: Optional[int] = Field(None, description="The stay a guest automation belongs to")
