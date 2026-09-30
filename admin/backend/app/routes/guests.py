@@ -198,7 +198,7 @@ async def get_guest(
         if not guest:
             raise HTTPException(status_code=404, detail="Guest not found")
 
-        logger.info("guest_retrieved", guest_id=guest_id, name=guest.name)
+        logger.info("guest_retrieved", guest_id=guest_id)
 
         return guest.to_dict()
 
@@ -260,7 +260,6 @@ async def create_guest(
         logger.info("guest_created",
                    user=current_user.username,
                    guest_id=new_guest.id,
-                   name=new_guest.name,
                    event_id=guest_data.calendar_event_id)
 
         return new_guest.to_dict()
@@ -323,7 +322,6 @@ async def add_guest_to_current_reservation(
 
         logger.info("guest_added_to_current_reservation",
                    guest_id=new_guest.id,
-                   name=new_guest.name,
                    event_id=event.id)
 
         return {"success": True, "guest": new_guest.to_dict()}
@@ -380,8 +378,7 @@ async def update_guest(
 
         logger.info("guest_updated",
                    user=current_user.username,
-                   guest_id=guest_id,
-                   name=guest.name)
+                   guest_id=guest_id)
 
         return guest.to_dict()
 
@@ -411,8 +408,7 @@ async def delete_guest(
 
         logger.info("guest_deleted",
                    user=current_user.username,
-                   guest_id=guest_id,
-                   name=guest.name)
+                   guest_id=guest_id)
 
         db.delete(guest)  # Cascades to sessions
         db.commit()

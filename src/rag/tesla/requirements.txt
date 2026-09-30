@@ -949,6 +949,10 @@ typing-inspection==0.4.4 \
     #   fastapi
     #   pydantic
     #   pydantic-settings
+tzdata==2026.4 \
+    --hash=sha256:c2169a8b0a7a5e9674da5a135ccdfb2b3e671b333ed9fed17b41f73c34476e81 \
+    --hash=sha256:f1b8bd365d8d210c55353f4d7f8d6d8561c0ba50d704b700d195a9424bba0d79
+    # via -r src/rag/tesla/requirements.in
 urllib3-future==2.24.908 \
     --hash=sha256:6415493c7222a8fe353d27fa8921958c373401121dd58038dfd8e17301e004ae \
     --hash=sha256:85081f32840cb4ed1b90c44e50f316b7dd6f47abe6dabbbd3f591921e9c724f2

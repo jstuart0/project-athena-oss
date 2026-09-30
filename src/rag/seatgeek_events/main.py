@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from shared.cache import cached
+from shared.local_time import local_day_bounds_utc, local_today
 from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
@@ -103,44 +104,42 @@ app = FastAPI(
 setup_metrics_endpoint(app, SERVICE_NAME, SERVICE_PORT)
 
 
+# (days from the property's today to the window start, window length in days)
+_RELATIVE_WINDOWS = {
+    "today": (0, 1),
+    "tomorrow": (1, 1),
+    "this week": (0, 7),
+    "week": (0, 7),
+    "next week": (7, 7),
+    "this month": (0, 30),
+    "month": (0, 30),
+    "next month": (30, 30),
+}
+_SEATGEEK_UTC_FORMAT = "%Y-%m-%dT%H:%M:%S"
+
+
 def get_date_range(date_filter: Optional[str]) -> tuple:
-    """Convert date filter to start/end datetime strings for SeatGeek."""
+    """Convert a date filter to SeatGeek's ``datetime_utc`` bounds.
+
+    Each window is whole local days in DEFAULT_TIMEZONE, from local midnight
+    to local midnight, sent as the UTC instants of those midnights (a DST
+    day is 23 or 25 hours). A ``YYYY-MM-DD`` filter is that local day.
+    """
     if not date_filter:
         return None, None
 
-    now = datetime.now()
     date_lower = date_filter.lower()
-
-    if date_lower == "today":
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
-    elif date_lower == "tomorrow":
-        start = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
-    elif date_lower in ["this week", "week"]:
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=7)
-    elif date_lower == "next week":
-        start = now + timedelta(days=7)
-        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=7)
-    elif date_lower in ["this month", "month"]:
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=30)
-    elif date_lower == "next month":
-        start = now + timedelta(days=30)
-        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=30)
+    if date_lower in _RELATIVE_WINDOWS:
+        offset, days = _RELATIVE_WINDOWS[date_lower]
+        start, end = local_day_bounds_utc(local_today() + timedelta(days=offset), days=days)
     else:
-        # Try to parse as date YYYY-MM-DD
         try:
-            start = datetime.strptime(date_filter, "%Y-%m-%d")
-            end = start + timedelta(days=1)
+            day = datetime.strptime(date_filter, "%Y-%m-%d").date()
         except ValueError:
             return None, None
+        start, end = local_day_bounds_utc(day)
 
-    # SeatGeek uses ISO format
-    return start.strftime("%Y-%m-%dT%H:%M:%S"), end.strftime("%Y-%m-%dT%H:%M:%S")
+    return start.strftime(_SEATGEEK_UTC_FORMAT), end.strftime(_SEATGEEK_UTC_FORMAT)
 
 
 @cached(ttl=1800)  # Cache for 30 minutes
@@ -195,7 +194,7 @@ async def search_seatgeek_events(
     logger.info(
         "seatgeek_events.search",
         query=query,
-        location=location,
+        location_set=bool(location),
         date_filter=date_filter
     )
 
@@ -343,7 +342,7 @@ async def search_events_endpoint(
         logger.info(
             "seatgeek_events.search.request",
             query=query,
-            location=location,
+            location_set=bool(location),
             date=date,
             start_date=start_date,
             effective_date=effective_date
@@ -360,7 +359,7 @@ async def search_events_endpoint(
             "seatgeek_events.search.success",
             events_count=len(result["events"]),
             query=query,
-            location=location
+            location_set=bool(location)
         )
 
         return result
@@ -412,7 +411,7 @@ async def local_events_endpoint(
         logger.info(
             "seatgeek_events.local.success",
             events_count=len(result["events"]),
-            location=location,
+            location_set=bool(location),
             event_type=type
         )
 

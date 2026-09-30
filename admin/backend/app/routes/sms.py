@@ -4,7 +4,7 @@ SMS Notifications API routes.
 Provides configuration and management for SMS notifications to guests.
 Includes settings management, history viewing, and manual send capabilities.
 """
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
@@ -292,6 +292,22 @@ class SMSIncomingResponse(BaseModel):
 # =============================================================================
 
 
+_PHONE_FIELD_SUFFIXES = ("phone", "phone_number", "from_number", "to_number")
+
+
+def redact_phone_fields(values: Dict[str, Any]) -> Dict[str, Any]:
+    """A copy of ``values`` safe for an audit row: every phone field is
+    replaced by ``<field>_last4`` (its last four digits, or None)."""
+    redacted: Dict[str, Any] = {}
+    for key, value in values.items():
+        if key.endswith(_PHONE_FIELD_SUFFIXES):
+            digits = "".join(c for c in str(value) if c.isdigit()) if value is not None else ""
+            redacted[f"{key}_last4"] = digits[-4:] if digits else None
+        else:
+            redacted[key] = value
+    return redacted
+
+
 @router.get("/settings", response_model=SMSSettingsResponse)
 async def get_sms_settings(
     db: Session = Depends(get_db),
@@ -343,12 +359,12 @@ async def update_sms_settings(
         resource_type="sms_settings",
         resource_id=settings.id,
         user_id=current_user.id,
-        new_value=update_data,
+        new_value=redact_phone_fields(update_data),
         success=True,
     ))
     db.commit()
 
-    logger.info("SMS settings updated", user=current_user.username, changes=update_data)
+    logger.info("SMS settings updated", user=current_user.username, changed_fields=sorted(update_data.keys()))
 
     return settings.to_dict()
 
@@ -412,7 +428,7 @@ async def update_guest_preferences(
     db.commit()
     db.refresh(pref)
 
-    logger.info("Guest SMS preferences updated", event_id=event_id, changes=update_data)
+    logger.info("Guest SMS preferences updated", event_id=event_id, changed_fields=sorted(update_data.keys()))
 
     return pref.to_dict()
 
@@ -516,7 +532,7 @@ async def send_sms_manually(
 
         logger.info(
             "SMS sent (test mode)",
-            phone=request.phone_number,
+            phone_last4=request.phone_number[-4:],
             content_length=len(request.content),
             user=current_user.username
         )
@@ -525,7 +541,7 @@ async def send_sms_manually(
         # For now, mark as queued - actual sending will be handled by SMS service
         logger.info(
             "SMS queued for sending",
-            phone=request.phone_number,
+            phone_last4=request.phone_number[-4:],
             content_length=len(request.content),
             user=current_user.username
         )
@@ -537,7 +553,7 @@ async def send_sms_manually(
         resource_id=history.id,
         user_id=current_user.id,
         new_value={
-            "phone_number": request.phone_number,
+            "phone_last4": request.phone_number[-4:],
             "content_length": len(request.content),
             "test_mode": settings.test_mode,
         },
@@ -890,12 +906,12 @@ async def update_sms_template(
         resource_type="sms_template",
         resource_id=template.id,
         user_id=current_user.id,
-        new_value=update_data,
+        new_value=redact_phone_fields(update_data),
         success=True,
     ))
     db.commit()
 
-    logger.info("SMS template updated", template_id=template.id, changes=update_data)
+    logger.info("SMS template updated", template_id=template.id, changed_fields=sorted(update_data.keys()))
 
     return template.to_dict()
 
@@ -1035,7 +1051,7 @@ async def update_scheduled_sms(
     db.commit()
     db.refresh(scheduled)
 
-    logger.info("Scheduled SMS updated", scheduled_id=scheduled.id, changes=update_data)
+    logger.info("Scheduled SMS updated", scheduled_id=scheduled.id, changed_fields=sorted(update_data.keys()))
 
     return scheduled.to_dict()
 
@@ -1204,12 +1220,12 @@ async def update_tip(
         resource_type="tip_prompt",
         resource_id=tip.id,
         user_id=current_user.id,
-        new_value=update_data,
+        new_value=redact_phone_fields(update_data),
         success=True,
     ))
     db.commit()
 
-    logger.info("Tip updated", tip_id=tip.id, changes=update_data)
+    logger.info("Tip updated", tip_id=tip.id, changed_fields=sorted(update_data.keys()))
 
     return tip.to_dict()
 

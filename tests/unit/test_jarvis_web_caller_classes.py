@@ -193,7 +193,9 @@ def test_home_network_is_household(monkeypatch):
     assert resp.status_code == 200
     body = out.orchestrator_bodies()[-1]
     assert body["caller_trust"] == "web_local"
-    assert body["context"]["guest_name"] == "Alice Renter"
+    # The home LAN is the household during a stay: the UI shows the guest,
+    # but the model never addresses a home-LAN caller as the guest.
+    assert "guest_name" not in body["context"]
 
 
 def test_pod_cidr_forged_xff_not_local(out):
@@ -410,7 +412,7 @@ def test_guest_network_vacant_is_guest_not_owner(monkeypatch):
     c = h.client()
     c.post("/api/chat", json={"message": "hi"}, headers=_home_headers(h.GUEST_WIFI))
     assert out.orchestrator_bodies()[-1]["mode"] == "guest"
-    assert out.orchestrator_bodies()[-1]["caller_trust"] == "web_local"
+    assert out.orchestrator_bodies()[-1]["caller_trust"] == "web_guest_net"
     resp = c.post("/api/climate/mode/heat", headers=_home_headers(h.GUEST_WIFI))
     assert resp.status_code == 403 and resp.json() == {"detail": "guest_stay_active"}
     caps = c.get("/api/welcome", headers=h.via_proxy(h.GUEST_WIFI)).json()["capabilities"]
@@ -628,3 +630,20 @@ def test_guest_network_welcome_capabilities(monkeypatch):
     caps = h.client().get("/api/welcome", headers=h.via_proxy(h.GUEST_WIFI)).json()["capabilities"]
     assert caps == {"household_read": False, "control": False, "voice": True, "control_reason": "guest_network",
                     "signed_in": False}
+
+
+def test_access_log_omits_request_urls():
+    """uvicorn's access log records the full request line, and jarvis-web's
+    geocode routes carry an address or coordinates in the query string. It
+    logs WARNING and up once main.py is imported (after uvicorn's own
+    logging config, as in the container)."""
+    import logging
+    import logging.config
+
+    import uvicorn.config
+
+    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+    h.load_main("_jw_access_log_main")
+    for name in ("uvicorn.access", "httpx", "httpcore"):
+        assert not logging.getLogger(name).isEnabledFor(logging.INFO), name
+    assert logging.getLogger("uvicorn.error").isEnabledFor(logging.INFO)

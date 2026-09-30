@@ -450,7 +450,7 @@ class LiveKitService:
             def on_track_subscribed(track, publication, participant):
                 if isinstance(track, rtc.AudioTrack):
                     logger.info("audio_track_subscribed",
-                               participant=participant.identity,
+                               participant_sid=participant.sid,
                                room=room_name)
                     # Start processing audio in background task
                     asyncio.create_task(
@@ -459,7 +459,7 @@ class LiveKitService:
 
             def on_participant_left(participant):
                 logger.info("participant_left",
-                           participant=participant.identity,
+                           participant_sid=participant.sid,
                            room=room_name)
                 asyncio.create_task(self._cleanup_session(room_name))
 

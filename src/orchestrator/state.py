@@ -92,6 +92,9 @@ class OrchestratorState(BaseModel):
 
     # Phase 2: Guest Mode permissions
     permissions: Dict[str, Any] = Field(default_factory=dict, description="User permissions from mode service")
+    # The mode service couldn't be trusted for this request (authz.degraded):
+    # nobody is addressed by name or framed as the owner.
+    mode_degraded: bool = Field(False, description="Server-set: the mode service was degraded when this request was authorized")
 
     # ATHENA-128 (D13/D14): pending write-confirmation carriage. Both are
     # set server-side at each construction site, never copied from stored

@@ -19,4 +19,4 @@ def test_every_browser_class_maps_to_a_trust_value():
     ca = jh.caller_auth
     for cls in ca.BROWSER_CLASSES | {ca.CLASS_PUBLIC}:
         assert cls in ca.UPSTREAM_TRUST
-    assert ca.UPSTREAM_TRUST[ca.CLASS_GUEST_NET] == "web_local"
+    assert ca.UPSTREAM_TRUST[ca.CLASS_GUEST_NET] == "web_guest_net"

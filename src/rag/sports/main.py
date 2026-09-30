@@ -15,7 +15,7 @@ import sys
 import asyncio
 import json
 from typing import Dict, Any, Optional, List, Tuple
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, Query, Path
 from fastapi.responses import JSONResponse
@@ -28,6 +28,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
 from shared.cache import CacheClient, cached
 from shared.config import get_config
+from shared.local_time import local_day_bounds_utc, local_today
 from shared.service_registry import startup_service, unregister_service
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
@@ -240,7 +241,7 @@ def _normalize_api_football_team(team_payload: Dict[str, Any]) -> Dict[str, Any]
 
 def _sort_events_by_date(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Sort events by date, prioritize upcoming; fallback to recent past if no future."""
-    now = datetime.now(timezone.utc).date()
+    now = local_day_bounds_utc()[0].date()
     parsed: List[Tuple[datetime.date, Dict[str, Any]]] = []
     for ev in events:
         date_str = ev.get("dateEvent") or ev.get("date") or ""
@@ -264,9 +265,14 @@ def _sort_events_by_date(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [ev for _, ev in ordered]
 
 def _filter_events_window(events: List[Dict[str, Any]], days_ahead: int = 7) -> List[Dict[str, Any]]:
-    """Filter events to today through today+days_ahead."""
-    now = datetime.now(timezone.utc).date()
-    window_end = now + timedelta(days=days_ahead)
+    """Filter events to today through today+days_ahead.
+
+    Event dates are UTC dates, so the window is the UTC dates covering the
+    property's local days: an event tonight in the property zone can carry
+    tomorrow's UTC date, and one late last night can carry today's.
+    """
+    now = local_day_bounds_utc()[0].date()
+    window_end = local_day_bounds_utc(days=days_ahead + 1)[1].date()
     filtered: List[Dict[str, Any]] = []
     for ev in events:
         date_str = ev.get("dateEvent") or ev.get("date")
@@ -612,7 +618,7 @@ TEAM_ALIASES = {
 
 def get_active_leagues() -> List[str]:
     """Return list of leagues that are currently in season."""
-    current_month = datetime.now().month
+    current_month = local_today().month
     active = []
     for league, months in LEAGUE_SEASONS.items():
         if current_month in months:
@@ -1055,8 +1061,8 @@ async def get_next_events_api(team_id: str) -> List[Dict[str, Any]]:
             headers={"x-apisports-key": cfg["api_key"]},
             params={
                 "team": raw_id,
-                "from": datetime.utcnow().date().isoformat(),
-                "to": (datetime.utcnow().date() + timedelta(days=7)).isoformat(),
+                "from": local_day_bounds_utc()[0].date().isoformat(),
+                "to": local_day_bounds_utc(days=8)[1].date().isoformat(),
             },
             timeout=5.0
         )

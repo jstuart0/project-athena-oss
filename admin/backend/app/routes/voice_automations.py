@@ -199,7 +199,7 @@ async def create_automation(
         automation_id=db_automation.id,
         name=automation.name,
         owner_type=automation.owner_type,
-        guest_name=automation.guest_name
+        has_guest_name=bool(automation.guest_name)
     )
 
     return VoiceAutomationResponse(**db_automation.to_dict())
@@ -447,7 +447,7 @@ async def archive_guest_automations(
 
     logger.info(
         "guest_automations_archived",
-        guest_name=request.guest_name,
+        has_guest_name=bool(request.guest_name),
         guest_session_id=request.guest_session_id,
         count=count
     )
@@ -483,7 +483,7 @@ async def restore_guest_automations(
 
     logger.info(
         "guest_automations_restored",
-        guest_name=request.guest_name,
+        has_guest_name=bool(request.guest_name),
         count=count
     )
 

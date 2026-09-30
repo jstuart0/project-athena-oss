@@ -70,7 +70,7 @@ class TicketmasterProvider(SearchProvider):
             List of SearchResult objects with event details
         """
         try:
-            self.logger.info(f"Ticketmaster search started: {query} in {location or 'unspecified location'}")
+            self.logger.info("Ticketmaster search started (location_set=%s)", bool(location))
 
             # Build request parameters
             params = {

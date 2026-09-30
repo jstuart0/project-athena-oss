@@ -5,10 +5,10 @@ Provides functions to format and inject base knowledge context into LLM prompts.
 Handles dynamic placeholders like {dynamic:current_date} and {dynamic:current_time}.
 """
 import os
-from datetime import datetime
 from typing import List, Dict, Any
 import structlog
 from shared.config import get_config
+from shared.local_time import local_now
 
 logger = structlog.get_logger()
 
@@ -35,7 +35,7 @@ def resolve_dynamic_value(value: str) -> str:
     if "{dynamic:" not in value:
         return value
 
-    now = datetime.now()
+    now = local_now()
 
     # Replace dynamic placeholders
     value = value.replace(
@@ -50,14 +50,39 @@ def resolve_dynamic_value(value: str) -> str:
     return value
 
 
-def build_knowledge_context(knowledge_entries: List[Dict[str, Any]]) -> str:
+_ignored_guest_name_rows: set = set()
+
+
+def _reset_for_tests() -> None:
+    """Clear the guest_name-row log latch. Tests only."""
+    _ignored_guest_name_rows.clear()
+
+
+def _warn_guest_name_row(entry: Dict[str, Any]) -> None:
+    row_id = entry.get("id")
+    if row_id in _ignored_guest_name_rows:
+        return
+    _ignored_guest_name_rows.add(row_id)
+    logger.warning("base_knowledge_static_guest_name_ignored", row_id=row_id)
+
+
+def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], user_mode: str, *, degraded: bool) -> str:
     """
     Build formatted context string from base knowledge entries.
 
     Entries should already be filtered by applies_to and sorted by priority.
 
+    Names and owner facts: a static ``guest_name`` is never rendered (the
+    addressed guest comes from the live stay, per caller). Every other
+    user/owner key containing "name" (``owner_name``/``name`` render as the
+    property owner's name), and every ``owner``-category row, render only
+    in owner mode with a trustworthy mode service: when the mode service is
+    degraded, nobody is named or framed as the owner.
+
     Args:
         knowledge_entries: List of knowledge entries from Admin API
+        user_mode: The request's effective mode ('owner' or 'guest')
+        degraded: The mode service was degraded for this request
 
     Returns:
         Formatted context string ready for injection into system prompt
@@ -100,10 +125,14 @@ def build_knowledge_context(knowledge_entries: List[Dict[str, Any]]) -> str:
                 else:
                     context_lines.append(f"• Location: {resolved_value}")
             elif category in ("user", "owner"):
-                # User/owner context is crucial - make it prominent
                 key = entry.get("key", "")
-                if key in ("owner_name", "guest_name", "name"):
-                    context_lines.append(f"• The user's name is: {resolved_value}")
+                owner_facts = user_mode == "owner" and not degraded
+                if key == "guest_name":
+                    _warn_guest_name_row(entry)
+                elif (category == "owner" or "name" in key) and not owner_facts:
+                    continue
+                elif key in ("owner_name", "name"):
+                    context_lines.append(f"• Property owner's name: {resolved_value}")
                 else:
                     context_lines.append(f"• User Context: {resolved_value}")
             elif category == "temporal":
@@ -164,10 +193,7 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
         value = entry.get("value", "")
 
         if category == "property" and key == "address" and value:
-            logger.info(
-                "home_address_extracted",
-                address=value
-            )
+            logger.info("home_address_extracted", address_set=True)
             return value
 
     # Fallback to default location entries
@@ -179,7 +205,7 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
         if category == "location" and "default" in key and value:
             logger.info(
                 "default_location_extracted",
-                location=value
+                location_set=True
             )
             return value
 
@@ -221,13 +247,14 @@ async def get_home_address_for_user(admin_client, user_mode: str = "guest") -> s
         return _DEFAULT_LOCATION
 
 
-async def get_knowledge_context_for_user(admin_client, user_mode: str = "guest") -> str:
+async def get_knowledge_context_for_user(admin_client, user_mode: str = "guest", *, degraded: bool) -> str:
     """
     Fetch and format base knowledge context for a specific user mode.
 
     Args:
         admin_client: AdminConfigClient instance
         user_mode: User mode ('guest', 'owner', 'both')
+        degraded: The mode service was degraded (no names, no owner rows)
 
     Returns:
         Formatted context string ready for system prompt injection
@@ -244,7 +271,7 @@ async def get_knowledge_context_for_user(admin_client, user_mode: str = "guest")
             return ""
 
         # Build formatted context
-        context = build_knowledge_context(knowledge_entries)
+        context = build_knowledge_context(knowledge_entries, user_mode, degraded=degraded)
 
         logger.info(
             "knowledge_context_generated",
@@ -309,5 +336,5 @@ if __name__ == "__main__":
     ]
 
     print("\nTesting context building:")
-    context = build_knowledge_context(test_knowledge)
+    context = build_knowledge_context(test_knowledge, "owner", degraded=False)
     print(context)

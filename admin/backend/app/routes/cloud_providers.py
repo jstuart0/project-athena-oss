@@ -253,7 +253,7 @@ async def patch_provider(
     db.commit()
     db.refresh(config)
 
-    logger.info("cloud_provider_patched", provider=provider, updates=data.model_dump(exclude_none=True))
+    logger.info("cloud_provider_patched", provider=provider, changed_fields=sorted(data.model_dump(exclude_none=True).keys()))
     return config.to_dict()
 
 

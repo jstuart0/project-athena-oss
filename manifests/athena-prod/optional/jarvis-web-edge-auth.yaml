@@ -90,10 +90,17 @@
 # Removes, by exact name, every header jarvis-web reads from the edge
 # (caller_auth.EDGE_STRIPPED_HEADERS) plus every other X-authentik-* header
 # Authentik's outpost can return, so nothing a client sends survives. If you
-# set JARVIS_EDGE_IDENTITY_HEADER or JARVIS_EDGE_GROUPS_HEADER to another
-# name, add that name here too (jarvis-web logs its full strip set at
-# startup as jarvis_edge_strip_headers, and refuses to start with a custom
-# name until JARVIS_EDGE_HEADERS_ACK_STRIPPED=true says you did).
+# set JARVIS_EDGE_IDENTITY_HEADER, JARVIS_EDGE_GROUPS_HEADER or
+# JARVIS_EDGE_NAME_HEADER (the signed-in member's display name; only its
+# first word is used) to another name, add that name here too. jarvis-web
+# logs its full strip set at startup as jarvis_edge_strip_headers, and
+# refuses to start with a custom name until
+# JARVIS_EDGE_HEADERS_ACK_STRIPPED=<exactly the custom names, comma-separated>
+# says you did (a boolean like "true" is never accepted). It also refuses to
+# start if any of the three names is X-Jarvis-Edge-Class,
+# X-Jarvis-Edge-Attestation, X-Service-Key, X-Jarvis-Relay-Key,
+# X-Jarvis-Relay-Client, Authorization, Cookie, Host, X-Forwarded-For or
+# CF-Connecting-IP, or if two of them are the same header.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:

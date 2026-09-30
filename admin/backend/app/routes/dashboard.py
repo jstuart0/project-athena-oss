@@ -96,11 +96,11 @@ async def get_dashboard_data(
 
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            for service_key, display_name in _CORE_SERVICE_NAMES.items():
+            for service_key, service_label in _CORE_SERVICE_NAMES.items():
                 row = core_rows.get(service_key)
                 if row is not None:
                     service_entries.append({
-                        "name": display_name,
+                        "name": service_label,
                         "status": _registry_row_status(row),
                         "error": row.last_error,
                     })
@@ -115,15 +115,15 @@ async def get_dashboard_data(
                 # poller uses, not an unvalidated direct request.
                 allowed, reason = await check_ssrf_safe(url)
                 if not allowed:
-                    logger.warning("dashboard_voice_health_ssrf_blocked", service=display_name, reason=reason)
-                    service_entries.append({"name": display_name, "status": "ssrf_blocked", "error": reason})
+                    logger.warning("dashboard_voice_health_ssrf_blocked", service=service_label, reason=reason)
+                    service_entries.append({"name": service_label, "status": "ssrf_blocked", "error": reason})
                     continue
                 try:
                     response = await client.get(url)
                     status_str = "healthy" if response.status_code == 200 else "unhealthy"
-                    service_entries.append({"name": display_name, "status": status_str, "error": None})
+                    service_entries.append({"name": service_label, "status": status_str, "error": None})
                 except Exception:
-                    service_entries.append({"name": display_name, "status": "unreachable", "error": None})
+                    service_entries.append({"name": service_label, "status": "unreachable", "error": None})
 
         for svc in rag_rows:
             service_entries.append({

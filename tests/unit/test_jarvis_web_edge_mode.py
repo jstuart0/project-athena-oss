@@ -365,3 +365,67 @@ def test_default_header_names_match_template():
     for name in (s.identity_header, s.groups_header, "X-Authentik-Groups"):
         assert pattern.search(name), name
     assert s.groups_separator == "|"
+
+
+# ---------------------------------------------------------------------------
+# The member's name header (JARVIS_EDGE_NAME_HEADER)
+# ---------------------------------------------------------------------------
+
+RESERVED = [
+    "X-Jarvis-Edge-Class", "X-Jarvis-Edge-Attestation", "X-Service-Key", "X-Jarvis-Relay-Key", "X-Jarvis-Relay-Client",
+    "Authorization", "Cookie", "Host", "X-Forwarded-For", "CF-Connecting-IP",
+]
+
+
+@pytest.mark.parametrize("reserved", RESERVED)
+@pytest.mark.parametrize("setting", ["JARVIS_EDGE_NAME_HEADER", "JARVIS_EDGE_IDENTITY_HEADER", "JARVIS_EDGE_GROUPS_HEADER"])
+def test_reserved_edge_header_name_is_refused(setting, reserved, captured_logs):
+    env = {**EDGE_ENV, setting: reserved.lower(), "JARVIS_EDGE_HEADERS_ACK_STRIPPED": reserved}
+    with pytest.raises(SystemExit):
+        caller_auth.load_settings(env, own_ips=())
+    assert any(e["event"] == "jarvis_edge_header_name_reserved" and e["log_level"] == "error" for e in captured_logs)
+
+
+def test_name_header_equal_to_identity_header_is_refused(captured_logs):
+    env = {**EDGE_ENV, "JARVIS_EDGE_NAME_HEADER": "x-authentik-USERNAME"}
+    with pytest.raises(SystemExit):
+        caller_auth.load_settings(env, own_ips=())
+    assert any(e["event"] == "jarvis_edge_header_name_reserved" for e in captured_logs)
+
+
+def test_custom_name_header_needs_the_strip_ack():
+    custom = {**EDGE_ENV, "JARVIS_EDGE_NAME_HEADER": "X-Remote-Name"}
+    with pytest.raises(SystemExit) as excinfo:
+        caller_auth.load_settings(custom, own_ips=())
+    assert "X-Remote-Name" in str(excinfo.value)
+    s = caller_auth.load_settings({**custom, "JARVIS_EDGE_HEADERS_ACK_STRIPPED": "X-Remote-Name"}, own_ips=())
+    assert s.name_header == "X-Remote-Name"
+    assert "X-Remote-Name" in s.edge_strip_headers
+
+
+def test_unattested_name_header_is_ignored(out):
+    """Pin: without the attestation nothing from the edge counts."""
+    headers = {"X-Forwarded-For": h.INTERNET, "X-authentik-username": "pat", "X-authentik-groups": "household",
+               "X-authentik-name": "Pat Example", **h.CSRF}
+    resp = h.client().post("/api/chat", json={"message": "hi"}, headers=headers)
+    assert resp.status_code == 401
+    assert out.orchestrator_bodies() == []
+
+
+def test_not_household_upgraded_by_bearer_gets_no_name(out):
+    h.install_role("owner")
+    headers = _signed_in(groups="visitors", **{"X-authentik-name": "Pat Example", "Authorization": "Bearer t"}, **h.CSRF)
+    resp = h.client().post("/api/chat", json={"message": "hi"}, headers=headers)
+    assert resp.status_code == 200
+    body = out.orchestrator_bodies()[-1]
+    assert body["caller_trust"] == "web_authenticated"
+    assert "speaker_first_name" not in body["context"]
+
+
+def test_household_member_name_reaches_the_chat_context(out):
+    """Positive control for the refusal above: the same name header on a
+    household member's attested request is sent."""
+    headers = _signed_in(**{"X-authentik-name": "Pat Example"}, **h.CSRF)
+    resp = h.client().post("/api/chat", json={"message": "hi"}, headers=headers)
+    assert resp.status_code == 200
+    assert out.orchestrator_bodies()[-1]["context"]["speaker_first_name"] == "Pat"

@@ -147,7 +147,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                     raw_lower = raw_location.lower().strip().strip(" ?!.,") if raw_location else ""
                     # Use default location if extracted location is actually a temporal word/phrase
                     if raw_lower and (raw_lower in TEMPORAL_WORDS or raw_lower in TEMPORAL_PHRASES):
-                        logger.info(f"Filtering temporal expression '{raw_location}' from location, using default: {DEFAULT_LOCATION}")
+                        logger.info("temporal_location_filtered", location_source="default")
                         location = DEFAULT_LOCATION
                     else:
                         location = raw_location or DEFAULT_LOCATION
@@ -560,7 +560,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
 
             if any(kw in query_lower for kw in location_keywords):
                 search_query = f"{enhance_query_with_year(state.query)} {user_location}"
-                logger.info(f"Location-sensitive query detected, adding location: {user_location}")
+                logger.info("location_sensitive_query", location_set=bool(user_location))
             else:
                 search_query = enhance_query_with_year(state.query)
 

@@ -110,13 +110,15 @@ def test_non_public_resolution_unchanged():
         assert not is_public_audience(authz.permissions)
 
 
-def test_web_local_accepted_by_query_model():
-    request = h.main.QueryRequest(query="hi", caller_trust="web_local")
-    assert request.caller_trust == "web_local"
+@pytest.mark.parametrize("trust", ["web_local", "web_guest_net"])
+def test_browser_trust_accepted_by_query_model(trust):
+    request = h.main.QueryRequest(query="hi", caller_trust=trust)
+    assert request.caller_trust == trust
 
 
-def test_web_local_is_not_pin_trusted():
-    assert "web_local" not in h.mode_permission.PIN_TRUSTED_TIERS
+@pytest.mark.parametrize("trust", ["web_local", "web_guest_net"])
+def test_browser_trust_is_not_pin_trusted(trust):
+    assert trust not in h.mode_permission.PIN_TRUSTED_TIERS
 
 
 def test_build_query_context_state_level_scrub():
@@ -129,15 +131,16 @@ def test_build_query_context_state_level_scrub():
         caller_trust="web_public",
         context={"guest_id": 7, "guest_name": h.GUEST_NAME, "location_override": h.LOCATION_OVERRIDE, "phone_number": "+1555"},
     )
-    context = build_query_context(request, {"guest_id": 9, "guest_name": "Bob"})
+    context = build_query_context(request, {"guest_id": 9, "guest_name": "Bob"}, server_mode="guest", degraded=False)
     assert context == {"location_override": h.LOCATION_OVERRIDE}
 
+    # The device leg names nobody (a device-fingerprinted guest keeps its
+    # guest-scoped session and permissions from guest_info, not context).
     household = h.main.QueryRequest(query="hi", caller_trust="household", context={"phone_number": "+1555"})
-    context = build_query_context(household, {"guest_id": 9, "guest_name": "Bob", "preferences": {"a": 1}})
-    assert context == {
-        "phone_number": "+1555", "guest_id": 9, "guest_name": "Bob",
-        "device_type": "web", "guest_preferences": {"a": 1},
-    }
+    context = build_query_context(
+        household, {"guest_id": 9, "guest_name": "Bob", "preferences": {"a": 1}}, server_mode="guest", degraded=False,
+    )
+    assert context == {"phone_number": "+1555", "device_type": "web", "guest_preferences": {"a": 1}}
 
 
 @pytest.mark.parametrize("path", ["/query", "/query/stream", "/query/stream/v2"])

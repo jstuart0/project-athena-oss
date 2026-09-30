@@ -39,6 +39,7 @@ import os
 import re
 import secrets
 import time
+import unicodedata
 from datetime import datetime
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
@@ -64,10 +65,11 @@ from orchestrator.urls import (
     WEBSEARCH_SERVICE_URL,
 )
 from shared.admin_config import get_admin_client
-from shared.assistant_profile import get_assistant_profile
+from shared.local_time import local_now, local_today
+from shared.assistant_profile import clean_guest_name, get_assistant_profile
 from shared.service_registry import get_service_url as registry_get_service_url
 from orchestrator.config_loader import ADMIN_API_URL
-from orchestrator.utils.constants import DEFAULT_LOCATION, DEFAULT_TIMEZONE
+from orchestrator.utils.constants import DEFAULT_LOCATION
 
 logger = configure_logging("orchestrator.helpers")
 
@@ -107,6 +109,15 @@ _CONTINUATION_PATTERN = re.compile(
     r'\n\s*(User|Human|Jarvis|Assistant)\s*:',
     re.IGNORECASE,
 )
+
+# Paragraph classes for the repetition detector in
+# _strip_hallucinated_continuation (see its docstring).
+_STRUCTURAL_RULE_PATTERN = re.compile(r'^\s*([-*_])(\s*\1){2,}\s*$')
+_STRUCTURAL_HEADING_PATTERN = re.compile(r'^\s*#{1,6}\s')
+_FIELD_LINE_PATTERN = re.compile(r'^\s*(?:[-*•]\s*)?\**[A-Za-z][A-Za-z /&]{0,30}\**\s*:\**\s*\S')
+_REPEAT_KEY_CHARS = 120
+_MIN_REPEAT_CHARS = 40
+_MAX_LOOP_BLOCK = 4
 
 
 # =============================================================================
@@ -614,9 +625,8 @@ def enhance_query_with_year(query: str) -> str:
         Enhanced query with year appended if applicable
     """
     import re
-    from datetime import datetime
 
-    current_year = datetime.now().year
+    current_year = local_today().year
     query_lower = query.lower()
 
     # Skip if query already contains a recent year (2020-2030)
@@ -699,26 +709,170 @@ def detect_insufficient_response(response: str, config: Dict[str, Any]) -> Optio
 PUBLIC_CONTEXT_KEYS = frozenset({"location_override"})
 
 
-def build_query_context(request: Any, guest_info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+# Who may be addressed by the staying guest's name. Both legs are
+# allowlists, decided separately before anything is merged: the request leg
+# (a guest name in the request's own context) and the device leg (a guest
+# session matched by device fingerprint). None and any unknown caller_trust
+# are outside both. A new caller_trust value must be classified in
+# tests/unit/test_trust_classification.py.
+REQUEST_GUEST_NAME_TRUST = frozenset({"web_guest_net", "sms"})
+DEVICE_GUEST_NAME_TRUST: frozenset = frozenset()  # voice/device naming: a follow-up
+SPEAKER_NAME_TRUST = "web_authenticated"
+NAMED_ADDRESSEE_KINDS = frozenset({"guest", "household"})
+_SPEAKER_NAME_MAX_LENGTH = 32
+_SPEAKER_NAME_PUNCTUATION = frozenset(".-'")
+
+
+def clean_speaker_first_name(value: Any) -> Optional[str]:
+    """The first word of a signed-in member's display name, or None.
+
+    Same rule as jarvis-web's caller_auth._speaker_first_name (pinned by
+    tests/fixtures/speaker_first_name_vectors.json): NFC; first
+    whitespace-separated word; only letters/marks and . - '; 1-32
+    characters; a trailing . dropped.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    words = unicodedata.normalize("NFC", value).split()
+    if not words:
+        return None
+    first = words[0]
+    if not 1 <= len(first) <= _SPEAKER_NAME_MAX_LENGTH:
+        return None
+    if not all(unicodedata.category(ch)[0] in "LM" or ch in _SPEAKER_NAME_PUNCTUATION for ch in first):
+        return None
+    return first.rstrip(".") or None
+
+
+def build_query_context(
+    request: Any,
+    guest_info: Optional[Dict[str, Any]],
+    *,
+    server_mode: str,
+    degraded: bool,
+) -> Dict[str, Any]:
     """The ``state.context`` for one query-family request.
 
     A public caller keeps only ``PUBLIC_CONTEXT_KEYS`` from the request's
-    context and never receives guest identity: a name the model is never
-    told can't reach any node that reads ``state.context``. Everyone else
-    gets the request's context plus the device-identified guest's id,
-    name, device type and preferences.
+    context and never receives guest identity. For everyone else, the
+    identity fields are decided here and nowhere else:
+
+    - ``guest_name``/``guest_id`` only while the house's own mode is guest
+      and the mode service isn't degraded, and only for a caller_trust in
+      ``REQUEST_GUEST_NAME_TRUST`` (from the request) or
+      ``DEVICE_GUEST_NAME_TRUST`` (from the device-matched guest session).
+      Each leg's values are recorded before anything is merged, so neither
+      can re-add or overwrite what the other's rule dropped.
+    - ``speaker_first_name`` only for ``web_authenticated``, re-cleaned,
+      and never while degraded.
+
+    The device session's device type and preferences are merged as before;
+    its guest-scoped session, cache partition and permissions come from
+    ``guest_info`` directly, not from this context.
     """
     raw = getattr(request, "context", None)
     raw = dict(raw) if isinstance(raw, dict) else {}
-    if is_public_caller(getattr(request, "caller_trust", None)):
+    caller_trust = getattr(request, "caller_trust", None)
+    if is_public_caller(caller_trust):
         return {key: value for key, value in raw.items() if key in PUBLIC_CONTEXT_KEYS}
+
     context = raw
+    request_guest_name = context.pop("guest_name", None)
+    request_guest_id = context.pop("guest_id", None)
+    request_first_name = context.pop("speaker_first_name", None)
+    device_guest_name = guest_info.get("guest_name") if guest_info else None
+    device_guest_id = guest_info.get("guest_id") if guest_info else None
+
+    named_house = server_mode == "guest" and not degraded
+    if named_house and caller_trust in REQUEST_GUEST_NAME_TRUST and request_guest_name:
+        context["guest_name"] = request_guest_name
+        if request_guest_id is not None:
+            context["guest_id"] = request_guest_id
+    elif named_house and caller_trust in DEVICE_GUEST_NAME_TRUST and device_guest_name:
+        context["guest_name"] = device_guest_name
+        if device_guest_id is not None:
+            context["guest_id"] = device_guest_id
+
+    if caller_trust == SPEAKER_NAME_TRUST and not degraded:
+        first_name = clean_speaker_first_name(request_first_name)
+        if first_name:
+            context["speaker_first_name"] = first_name
+
     if guest_info:
-        context["guest_id"] = guest_info.get("guest_id")
-        context["guest_name"] = guest_info.get("guest_name")
         context["device_type"] = guest_info.get("device_type", "web")
         context["guest_preferences"] = guest_info.get("preferences", {})
     return context
+
+
+def addressee_kind(context: Optional[Dict[str, Any]], mode: Optional[str], degraded: bool) -> Optional[str]:
+    """Who the prompt addresses: "owner", "guest", "household" or None.
+
+    Pure. None whenever the mode service is degraded (never "owner"). The
+    semantic cache and resolve_addressee both ask this, so they can't
+    disagree about which answers carry a caller's name.
+    """
+    if degraded:
+        return None
+    if mode == "owner":
+        return "owner"
+    if mode != "guest":
+        return None
+    context = context or {}
+    if context.get("speaker_first_name"):
+        return "household"
+    if context.get("guest_name"):
+        return "guest"
+    return None
+
+
+class Addressee(NamedTuple):
+    kind: Optional[str]
+    name: Optional[str]
+
+    def prompt_kwargs(self) -> Dict[str, Optional[str]]:
+        """At most one name for build_core_assistant_prompt."""
+        return {
+            "owner_name": self.name if self.kind == "owner" else None,
+            "guest_name": self.name if self.kind == "guest" else None,
+            "household_first_name": self.name if self.kind == "household" else None,
+        }
+
+
+NO_ADDRESSEE = Addressee(None, None)
+
+
+async def _owner_name(admin_client: Any) -> Optional[str]:
+    try:
+        entries = await admin_client.get_base_knowledge(applies_to="owner", enabled_only=True)
+        for entry in (entries or []):
+            if entry.get("category") in ("owner", "user") and entry.get("key") in ("owner_name", "name"):
+                return (entry.get("value") or "").strip() or None
+    except Exception as e:
+        logger.warning("addressee_owner_name_failed", error=str(e))
+    return None
+
+
+async def resolve_addressee(state: Any, admin_client: Any) -> Addressee:
+    """The addressee and its name for one request's prompts.
+
+    The owner's name comes from owner-authored base knowledge
+    (``owner_name``), never from a display name; the guest's from the
+    context build_query_context decided; a signed-in member's first name
+    likewise. The public audience and a degraded mode service address
+    nobody.
+    """
+    if is_public_audience(getattr(state, "permissions", None)):
+        return NO_ADDRESSEE
+    context = getattr(state, "context", None) or {}
+    kind = addressee_kind(context, getattr(state, "mode", None), bool(getattr(state, "mode_degraded", False)))
+    if kind == "owner":
+        return Addressee("owner", await _owner_name(admin_client))
+    if kind == "household":
+        return Addressee("household", clean_speaker_first_name(context.get("speaker_first_name")))
+    if kind == "guest":
+        name = clean_guest_name(context.get("guest_name"))
+        return Addressee("guest", name) if name else NO_ADDRESSEE
+    return NO_ADDRESSEE
 
 
 def web_search_allowed(state: Any) -> bool:
@@ -1502,14 +1656,7 @@ def _direct_general_info_response(query: str) -> Optional[str]:
         "current time",
         "tell me the time",
     }:
-        try:
-            from zoneinfo import ZoneInfo
-            from datetime import datetime, timezone as tz
-            local_now = datetime.now(tz.utc).astimezone(ZoneInfo(DEFAULT_TIMEZONE))
-            return f"It's {local_now.strftime('%-I:%M %p')}."
-        except Exception as e:
-            logger.warning("direct_time_response_failed", error=str(e))
-            return None
+        return f"It's {local_now().strftime('%-I:%M %p')}."
 
     if normalized in {
         "what date is it",
@@ -1519,29 +1666,104 @@ def _direct_general_info_response(query: str) -> Optional[str]:
         "current date",
         "what day is it",
     }:
-        try:
-            from zoneinfo import ZoneInfo
-            from datetime import datetime, timezone as tz
-            local_now = datetime.now(tz.utc).astimezone(ZoneInfo(DEFAULT_TIMEZONE))
-            return f"Today is {local_now.strftime('%A, %B %-d, %Y')}."
-        except Exception as e:
-            logger.warning("direct_date_response_failed", error=str(e))
-            return None
+        return f"Today is {local_now().strftime('%A, %B %-d, %Y')}."
 
     return None
 
 
+def _is_structural_paragraph(para: str) -> bool:
+    if "\n" in para:
+        return False
+    return bool(_STRUCTURAL_RULE_PATTERN.match(para) or _STRUCTURAL_HEADING_PATTERN.match(para))
+
+
+def _is_field_paragraph(para: str) -> bool:
+    return "\n" not in para and bool(_FIELD_LINE_PATTERN.match(para))
+
+
+def _heading_line(para: str) -> Optional[str]:
+    first = para.split("\n", 1)[0]
+    return " ".join(first.split()) if _STRUCTURAL_HEADING_PATTERN.match(first) else None
+
+
+def _repetition_cut_index(paragraphs: List[str]) -> Optional[int]:
+    """Index of the paragraph to cut before, or None when no loop is found.
+
+    Each paragraph's identity is its own text plus the most recent heading
+    above it, so blocks under different headings are never repeats.
+    Dividers carry no identity (every divider is the same text).
+    """
+    positions: List[int] = []
+    keys: List[Tuple[str, str]] = []
+    substantive: List[bool] = []
+    section = ""
+    for i, para in enumerate(paragraphs):
+        heading = _heading_line(para)
+        if _is_structural_paragraph(para):
+            if heading is not None:
+                section = heading
+            continue
+        text = " ".join(para.split())[:_REPEAT_KEY_CHARS]
+        positions.append(i)
+        keys.append((section, text))
+        substantive.append(not _is_field_paragraph(para) and len(text) >= _MIN_REPEAT_CHARS)
+        if heading is not None:
+            section = heading
+
+    cuts: List[int] = []
+
+    seen_substantive = set()
+    for j, key in enumerate(keys):
+        if not substantive[j]:
+            continue
+        if key in seen_substantive:
+            cuts.append(positions[j])
+            break
+        seen_substantive.add(key)
+
+    for start in range(len(keys)):
+        for k in range(1, _MAX_LOOP_BLOCK + 1):
+            if start + 3 * k > len(keys):
+                break
+            first, second, third = (keys[start + n * k:start + (n + 1) * k] for n in range(3))
+            if first == second == third:
+                cuts.append(positions[start + k])
+                break
+
+    return min(cuts) if cuts else None
+
+
 def _strip_hallucinated_continuation(text: str) -> str:
     """
-    Strip LLM-hallucinated role-continuation text from a response.
+    Strip LLM-hallucinated role-continuation text and thinking-mode loops.
 
     Truncates at the first line that looks like a new role turn (e.g. "\\nUser:",
     "\\nHuman:", "\\nAssistant:", "\\nJarvis:"). These occur when the LLM starts
     generating the next conversation turn instead of stopping after its response.
 
-    Also detects paragraph-level repetition (e.g. thinking-mode leak that causes
-    the model to repeat the same block multiple times) and truncates before the
-    first repeated paragraph.
+    Then, when the answer has at least 3 paragraphs (split on blank lines,
+    all paragraphs counted), it cuts a repetition loop. Each paragraph is:
+
+    - structural: a single-line horizontal rule (``---``, ``***``, ``___``)
+      or a single-line markdown heading. Never keyed, never compared.
+    - field: a single ``Label: value`` line (optionally bulleted/bold).
+    - substantive: neither, with a whitespace-normalised key (first 120
+      characters) of at least 40 characters.
+
+    Two rules, over the keys of the non-structural paragraphs in order. A
+    key is the paragraph's normalised text plus the most recent heading
+    above it, so blocks under different headings (Day 1, Day 2, ...) are
+    never repeats, however alike their bodies; dividers don't change it.
+
+    - R1: a substantive paragraph whose key already appeared as a
+      substantive paragraph is cut, with everything after it.
+    - R2 (block loop): a block of 1-4 keys repeated three times back to back
+      is cut after its first copy.
+
+    The earliest cut wins, and trailing structural paragraphs are dropped so
+    a cut never ends on a divider or heading. Accepted limits: two adjacent
+    short repeats aren't cut; a loop made only of structural paragraphs
+    isn't cut; a loop of field lines is cut only by R2.
     """
     if not text:
         return text
@@ -1549,16 +1771,13 @@ def _strip_hallucinated_continuation(text: str) -> str:
     if match:
         text = text[:match.start()].rstrip()
 
-    # Paragraph-level repetition detector: if the same paragraph (first 120 chars)
-    # appears more than once, truncate before the second occurrence.
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     if len(paragraphs) >= 3:
-        seen: Dict[str, int] = {}
-        for i, para in enumerate(paragraphs):
-            key = para[:120]
-            if key in seen:
-                text = "\n\n".join(paragraphs[:i]).rstrip()
-                break
-            seen[key] = i
+        cut = _repetition_cut_index(paragraphs)
+        if cut is not None:
+            kept = paragraphs[:cut]
+            while kept and _is_structural_paragraph(kept[-1]):
+                kept.pop()
+            text = "\n\n".join(kept).rstrip()
 
     return text

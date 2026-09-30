@@ -12,9 +12,11 @@ import asyncio
 import contextlib
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Dict, List, Optional, Any
 import json
+
+from shared.local_time import local_now, local_tz
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +138,27 @@ def has_sequence_timing(query_lower: str, *, require_action_for_bare_temporal: b
     if require_action_for_bare_temporal:
         return _LEADING_ACTION_VERB_RE.match(query_lower) is not None
     return True
+
+
+def _next_local_occurrence(now: datetime, wall: time, tz) -> datetime:
+    """The first UTC instant after ``now`` at which the property's clock reads
+    ``wall``: today if that's still ahead, otherwise tomorrow.
+
+    DST is resolved explicitly. An ambiguous time (the fall-back repeated
+    hour) is its first occurrence (fold=0) unless that has already passed
+    and the second (fold=1) hasn't, so at 01:30 standard time "01:45" is 15
+    minutes away, not a day. A nonexistent time (inside the spring-forward
+    gap) moves forward: 02:30 becomes 03:30 daylight time.
+    """
+    now_utc = now.astimezone(timezone.utc)
+    local_date = now.astimezone(tz).date()
+    for day_offset in range(3):
+        day = local_date + timedelta(days=day_offset)
+        for fold in (0, 1):
+            candidate = datetime.combine(day, wall, tzinfo=tz).replace(fold=fold).astimezone(timezone.utc)
+            if candidate > now_utc:
+                return candidate
+    raise AssertionError("no local occurrence within three days")  # unreachable: a day always has one
 
 
 class SequenceExecutor:
@@ -376,10 +399,15 @@ class SequenceExecutor:
         Args:
             time_str: Time in HH:MM or HH:MM:SS format
 
+        The target is a wall-clock time in the property zone (DEFAULT_TIMEZONE):
+        its next occurrence after now, found by comparing UTC instants (see
+        _next_local_occurrence), so the wait is real elapsed time across a
+        DST change and is never negative.
+
         Returns:
-            Seconds to wait (0 if time has passed today, schedules for tomorrow)
+            Seconds to wait (0 if the time can't be parsed)
         """
-        now = datetime.now()
+        now = local_now()
 
         # Parse time
         try:
@@ -405,14 +433,10 @@ class SequenceExecutor:
             logger.warning(f"Could not parse time: {time_str}, executing immediately")
             return 0
 
-        # Create target datetime
-        target = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
-
-        # If time has passed today, schedule for tomorrow
-        if target <= now:
-            target += timedelta(days=1)
-
-        wait_seconds = (target - now).total_seconds()
+        tz = local_tz()
+        target = _next_local_occurrence(now, time(hour, minute, second), tz)
+        wait_seconds = max(0.0, (target - now.astimezone(timezone.utc)).total_seconds())
+        target = target.astimezone(tz)
         logger.info(f"Calculated wait for {time_str}: {wait_seconds:.1f}s (until {target})")
 
         return wait_seconds

@@ -6,6 +6,8 @@ orchestrator for processing. Enables bidirectional SMS conversations
 with guests.
 """
 
+import hashlib
+import hmac
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlsplit
@@ -175,7 +177,6 @@ async def handle_incoming_sms(
         incoming.matched_guest = True
         logger.info(
             "incoming_sms_matched",
-            guest_name=guest.guest_name,
             event_id=guest.id,
         )
 
@@ -313,6 +314,27 @@ async def handle_status_callback(
     return {"status": "ok"}
 
 
+_SMS_SESSION_ID_DOMAIN = b"athena-sms-session-v1|"
+
+
+def _normalize_phone(phone_number: str) -> str:
+    """Digits and '+' only (formatting removed)."""
+    return "".join(c for c in phone_number if c.isdigit() or c == "+")
+
+
+def sms_session_id(phone_number: str) -> str:
+    """The orchestrator session id for one SMS number: ``sms_`` + 24 hex of
+    HMAC-SHA256(SERVICE_API_KEY, domain prefix + normalised number).
+
+    The number itself never appears (the orchestrator logs session ids). The
+    id is stable per number while the key is; rotating SERVICE_API_KEY
+    starts every SMS conversation afresh (old sessions expire at their TTL).
+    """
+    message = _SMS_SESSION_ID_DOMAIN + _normalize_phone(phone_number).encode("utf-8")
+    digest = hmac.new(get_config().service_api_key.encode("utf-8"), message, hashlib.sha256).hexdigest()
+    return "sms_" + digest[:24]
+
+
 def find_guest_by_phone(phone_number: str, db: Session) -> Optional[CalendarEvent]:
     """
     Find a current or recent guest by phone number.
@@ -324,8 +346,7 @@ def find_guest_by_phone(phone_number: str, db: Session) -> Optional[CalendarEven
     Returns:
         CalendarEvent if found, None otherwise
     """
-    # Normalize phone number (remove formatting)
-    normalized = "".join(c for c in phone_number if c.isdigit() or c == "+")
+    normalized = _normalize_phone(phone_number)
 
     # Also check without country code
     without_country = normalized.lstrip("+1")
@@ -398,9 +419,10 @@ async def route_to_orchestrator(
                 "query": query,
                 "mode": "guest",
                 "caller_trust": "sms",
-                "supports_followup": True,  # ATHENA-128 D14: the sms_<phone> session persists
+                # ATHENA-128 D14: the per-number SMS session persists
+                "supports_followup": True,
                 "interface_type": "text",  # Full details for SMS
-                "session_id": f"sms_{phone_number}",
+                "session_id": sms_session_id(phone_number),
                 "room": "sms",
                 "context": {
                     "calendar_event_id": calendar_event_id,

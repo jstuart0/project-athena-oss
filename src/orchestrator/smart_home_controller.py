@@ -12,6 +12,7 @@ from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from shared.local_time import local_now
 from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance
 
 
@@ -1756,10 +1757,9 @@ Return ONLY the JSON, no other text."""
             Sequence definition dict with steps
         """
         import logging
-        from datetime import datetime
         logger = logging.getLogger(__name__)
 
-        current_time = datetime.now().strftime("%H:%M")
+        current_time = local_now().strftime("%H:%M")
         room = device_room or "unknown"
 
         sequence_prompt = f"""You are a smart home assistant that creates action sequences.

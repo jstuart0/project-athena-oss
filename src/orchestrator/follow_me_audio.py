@@ -17,10 +17,11 @@ import contextlib
 import time
 from typing import Optional, Dict, Any, List, Set
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 
 import structlog
+
+from shared.local_time import local_now
 
 logger = structlog.get_logger()
 
@@ -379,7 +380,7 @@ class FollowMeAudioService:
         if self.config.quiet_hours_start is None or self.config.quiet_hours_end is None:
             return False
 
-        current_hour = datetime.now().hour
+        current_hour = local_now().hour
         start = self.config.quiet_hours_start
         end = self.config.quiet_hours_end
 

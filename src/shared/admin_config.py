@@ -1390,7 +1390,7 @@ class AdminConfigClient:
                 "user_session_found",
                 device_id=device_id[:16] + "..." if len(device_id) > 16 else device_id,
                 guest_id=data.get("guest_id"),
-                guest_name=data.get("guest_name")
+                has_guest_name=bool(data.get("guest_name"))
             )
             return data
 
@@ -1942,14 +1942,16 @@ class AdminConfigClient:
                 count = data.get("archived_count", 0)
                 logger.info(
                     "guest_automations_archived",
-                    guest_name=guest_name,
+                    guest_session_id=guest_session_id,
+                    has_guest_name=bool(guest_name),
                     count=count
                 )
                 return count
             else:
                 logger.warning(
                     "guest_automations_archive_failed",
-                    guest_name=guest_name,
+                    guest_session_id=guest_session_id,
+                    has_guest_name=bool(guest_name),
                     status_code=response.status_code
                 )
                 return 0
@@ -1957,7 +1959,8 @@ class AdminConfigClient:
         except Exception as e:
             logger.error(
                 "guest_automations_archive_error",
-                guest_name=guest_name,
+                guest_session_id=guest_session_id,
+                has_guest_name=bool(guest_name),
                 error=str(e)
             )
             return 0
@@ -1981,14 +1984,14 @@ class AdminConfigClient:
                 count = data.get("restored_count", 0)
                 logger.info(
                     "guest_automations_restored",
-                    guest_name=guest_name,
+                    has_guest_name=bool(guest_name),
                     count=count
                 )
                 return count
             else:
                 logger.warning(
                     "guest_automations_restore_failed",
-                    guest_name=guest_name,
+                    has_guest_name=bool(guest_name),
                     status_code=response.status_code
                 )
                 return 0
@@ -1996,7 +1999,7 @@ class AdminConfigClient:
         except Exception as e:
             logger.error(
                 "guest_automations_restore_error",
-                guest_name=guest_name,
+                has_guest_name=bool(guest_name),
                 error=str(e)
             )
             return 0

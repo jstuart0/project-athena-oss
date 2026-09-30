@@ -39,6 +39,7 @@ from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 
 from shared.config import get_config
+from shared.local_time import local_now, local_today, local_tz
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
 from shared.url_safety import safe_get, SsrfBlockedError
@@ -240,7 +241,7 @@ def timestamp_to_date(ts: int) -> Optional[str]:
     """Convert Unix timestamp back to date string."""
     if ts >= NO_DATE_TIMESTAMP:
         return None
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(ts, tz=local_tz()).strftime("%Y-%m-%d")
 
 
 def extract_date_from_text(text: str) -> Optional[Dict[str, Any]]:
@@ -263,8 +264,9 @@ def extract_date_from_text(text: str) -> Optional[Dict[str, Any]]:
         end_day = range_match.group(4)
 
         # Assume current year if not specified
-        year = datetime.now().year
-        if datetime.now().month > 6 and start_month.lower() in ['jan', 'feb', 'mar', 'january', 'february', 'march']:
+        today = local_today()
+        year = today.year
+        if today.month > 6 and start_month.lower() in ['jan', 'feb', 'mar', 'january', 'february', 'march']:
             year += 1
 
         return {
@@ -278,7 +280,7 @@ def extract_date_from_text(text: str) -> Optional[Dict[str, Any]]:
     if single_match:
         month = single_match.group(1)
         day = single_match.group(2)
-        year = single_match.group(3) or str(datetime.now().year)
+        year = single_match.group(3) or str(local_today().year)
 
         return {
             "start_date": f"{month} {day}, {year}",
@@ -658,8 +660,9 @@ async def scrape_squarespace_eventlist_source(src: EventSource) -> List[Dict[str
                     if month_elem and day_elem:
                         month = month_elem.get_text(strip=True)
                         day = day_elem.get_text(strip=True)
-                        year = datetime.now().year
-                        if datetime.now().month > 9 and month.lower() in ['jan', 'feb', 'mar', 'apr', 'may', 'jun']:
+                        today = local_today()
+                        year = today.year
+                        if today.month > 9 and month.lower() in ['jan', 'feb', 'mar', 'apr', 'may', 'jun']:
                             year += 1
                         date_text = f"{month} {day}, {year}"
                         start_date = date_text
@@ -998,7 +1001,8 @@ async def search_events(
 
     # Filter out past events unless include_past=True
     if not include_past:
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        # Naive local midnight: parse_date_string returns naive local dates.
+        today = local_now().replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
 
         def is_future_event(event: Dict) -> bool:
             """Check if event is today or in the future. Events without dates are included."""

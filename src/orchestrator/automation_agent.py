@@ -15,11 +15,12 @@ import asyncio
 import json
 import time
 import uuid
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 import structlog
 
 from shared.assistant_profile import build_automation_system_prompt
+from shared.local_time import local_now
+from shared.logging_config import payload_keys
 from orchestrator.utils.constants import DEFAULT_CITY
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # AutomationAgent.__init__ (not at module scope) -- see the identical note
@@ -425,7 +426,7 @@ class AutomationAgent:
                         except json.JSONDecodeError:
                             tool_args = {}
 
-                    logger.info(f"AutomationAgent executing tool: {tool_name}, args={tool_args}")
+                    logger.info("automation_agent_executing_tool", tool=tool_name, arg_keys=payload_keys(tool_args))
 
                     # Execute the tool
                     result = await self._execute_tool(tool_name, tool_args, context)
@@ -458,8 +459,9 @@ class AutomationAgent:
 
     async def _build_system_prompt(self, mode: str, room: str, guest_name: Optional[str]) -> str:
         """Build system prompt with context."""
-        current_time = datetime.now().strftime("%H:%M")
-        current_date = datetime.now().strftime("%A, %B %d")
+        now = local_now()
+        current_time = now.strftime("%H:%M")
+        current_date = now.strftime("%A, %B %d")
         prompt = await build_automation_system_prompt(mode, room, guest_name)
         return f"{prompt}\nCurrent Time:\n- Time: {current_time}\n- Date: {current_date}"
 
@@ -555,7 +557,7 @@ class AutomationAgent:
                             }))
                             logger.info("automation_agent_parsed_tool_call",
                                        tool=parsed["tool"],
-                                       args=parsed.get("arguments", {}),
+                                       arg_keys=payload_keys(parsed.get("arguments")),
                                        position=i)
                     except json.JSONDecodeError:
                         pass
@@ -590,7 +592,7 @@ class AutomationAgent:
             }))
             logger.info("automation_agent_parsed_shorthand",
                        tool=func_name,
-                       args=args,
+                       arg_keys=payload_keys(args),
                        position=pos)
 
         # Sort by position to maintain order
@@ -1133,7 +1135,6 @@ class AutomationAgent:
             logger.info(
                 "voice_automation_stored",
                 automation_id=automation_id,
-                name=args.get("name")
             )
         except Exception as e:
             logger.warning(f"Could not store automation record: {e}")

@@ -216,15 +216,15 @@ async def update_policy(
     old_value = {'mode': policy.mode, 'config': policy.config, 'active': policy.active}
 
     # Track what changed
-    changes = []
+    changed_fields = []
     if policy_data.mode is not None and policy_data.mode != policy.mode:
         policy.mode = policy_data.mode
-        changes.append('mode')
+        changed_fields.append('mode')
 
     if policy_data.config is not None and policy_data.config != policy.config:
         policy.config = policy_data.config
         policy.version += 1
-        changes.append('config')
+        changed_fields.append('config')
 
         # Create new version
         version = PolicyVersion(
@@ -232,7 +232,7 @@ async def update_policy(
             version=policy.version,
             config=policy.config,
             created_by_id=current_user.id,
-            change_description=f"Updated: {', '.join(changes)}"
+            change_description=f"Updated: {', '.join(changed_fields)}"
         )
         db.add(version)
 
@@ -241,7 +241,7 @@ async def update_policy(
 
     if policy_data.active is not None and policy_data.active != policy.active:
         policy.active = policy_data.active
-        changes.append('active')
+        changed_fields.append('active')
 
     db.commit()
     db.refresh(policy)
@@ -250,7 +250,7 @@ async def update_policy(
     new_value = {'mode': policy.mode, 'config': policy.config, 'active': policy.active}
     create_audit_log(db, current_user, 'update', policy, old_value=old_value, new_value=new_value, request=request)
 
-    logger.info("policy_updated", policy_id=policy.id, changes=changes, user=current_user.username)
+    logger.info("policy_updated", policy_id=policy.id, changed_fields=changed_fields, user=current_user.username)
 
     return PolicyResponse(
         id=policy.id,

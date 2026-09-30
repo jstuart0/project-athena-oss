@@ -28,6 +28,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+import logging
+
 import structlog
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
@@ -35,7 +37,7 @@ from sqlalchemy import text
 from admin_url import get_admin_url
 import caller_auth
 import client_throttle
-from caller_auth import Caller, resolve_caller, resolve_caller_ws, route_dependency, ws_origin_allowed
+from caller_auth import CLASS_AUTHENTICATED, Caller, resolve_caller, resolve_caller_ws, route_dependency, ws_origin_allowed
 
 # Configure logging. Guarded: structlog.configure() is process-global, and
 # this module gets exec'd more than once in the same pytest process under
@@ -55,6 +57,13 @@ if not structlog.is_configured():
         ]
     )
 logger = structlog.get_logger()
+
+# uvicorn's access log and the HTTP client's request lines are full URLs,
+# query string included, and the geocode routes carry an address or
+# coordinates there. uvicorn configures these loggers before importing this
+# module, so the levels set here stick.
+for _url_logger in ("uvicorn.access", "httpx", "httpcore"):
+    logging.getLogger(_url_logger).setLevel(logging.WARNING)
 
 # Configuration from environment
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
@@ -102,7 +111,7 @@ async def get_current_mode() -> str:
     # Auto-detect based on guest booking
     guest = await get_current_guest()
     if guest and guest.get("has_guest"):
-        logger.debug("mode_auto_guest", guest_name=guest.get("guest_name"))
+        logger.debug("mode_auto_guest", guest_id=guest.get("id"))
         return "guest"
     else:
         logger.debug("mode_auto_owner", reason="no_guest_booked")
@@ -557,7 +566,7 @@ async def get_current_guest() -> Optional[Dict[str, Any]]:
                 if data.get("has_guest"):
                     logger.info(
                         "current_guest_fetched",
-                        guest_name=data.get("guest_name"),
+                        has_guest_name=bool(data.get("guest_name")),
                         guest_id=data.get("id")
                     )
                     return data
@@ -648,10 +657,10 @@ async def get_welcome(request: Request):
 
     base_greeting = get_time_based_greeting()
 
+    # The UI keeps showing the stay to every guest-read caller; only the
+    # guest network is greeted as the guest, and a signed-in household
+    # member by their own first name.
     if guest and guest.get("guest_name"):
-        first_name = guest["guest_name"].split()[0]
-        greeting = f"{base_greeting}, {first_name}!"
-        subtitle = get_dynamic_subtitle(has_guest=True, first_name=first_name)
         guest_info = GuestInfo(
             has_guest=True,
             guest_name=guest.get("guest_name"),
@@ -659,9 +668,18 @@ async def get_welcome(request: Request):
             checkout=guest.get("checkout")
         )
     else:
+        guest_info = GuestInfo(has_guest=False)
+
+    if caller.addressed_as_guest and guest_info.guest_name:
+        first_name = guest_info.guest_name.split()[0]
+        greeting = f"{base_greeting}, {first_name}!"
+        subtitle = get_dynamic_subtitle(has_guest=True, first_name=first_name)
+    elif caller.speaker_first_name:
+        greeting = f"{base_greeting}, {caller.speaker_first_name}!"
+        subtitle = get_dynamic_subtitle(has_guest=False)
+    else:
         greeting = f"{base_greeting}!"
         subtitle = get_dynamic_subtitle(has_guest=False)
-        guest_info = GuestInfo(has_guest=False)
 
     return WelcomeInfo(
         guest=guest_info,
@@ -739,12 +757,16 @@ def _set_chat_key_cookie(response: Response, request: Request, value: Optional[s
 
 
 def _chat_context(caller: Caller, guest: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Guest identity reaches the model only for household and guest-network
-    callers."""
+    """Who the model may address by name: the guest network gets the
+    current guest's identity; a signed-in household member gets their own
+    first name; everyone else gets neither."""
     context: Dict[str, Any] = {}
-    if guest and caller.gets_guest_context:
-        context["guest_id"] = guest.get("id")
-        context["guest_name"] = guest.get("guest_name")
+    if caller.addressed_as_guest:
+        if guest:
+            context["guest_id"] = guest.get("id")
+            context["guest_name"] = guest.get("guest_name")
+    elif caller.caller_class == CLASS_AUTHENTICATED and caller.speaker_first_name:
+        context["speaker_first_name"] = caller.speaker_first_name
     return context
 
 
@@ -759,11 +781,11 @@ async def chat(message: ChatMessage, request: Request, response: Response):
 
     sessions.record_message(session_id)
 
-    # Guest identity only for callers who may know it
-    guest = await get_current_guest() if caller.gets_guest_context else None
+    # Guest identity only for the caller addressed as the guest
+    guest = await get_current_guest() if caller.addressed_as_guest else None
     context = _chat_context(caller, guest)
     if context:
-        logger.info("guest_context_attached", guest_id=context.get("guest_id"))
+        logger.info("chat_context_attached", context_keys=sorted(context))
 
     try:
         # mode and caller_trust are server-derived (caller_auth), never from
@@ -797,9 +819,8 @@ async def chat(message: ChatMessage, request: Request, response: Response):
                 }
                 logger.info(
                     "location_override_set",
-                    address=message.location.address,
-                    lat=message.location.latitude,
-                    lon=message.location.longitude
+                    address_set=bool(message.location.address),
+                    coordinates_set=message.location.latitude is not None and message.location.longitude is not None,
                 )
 
             logger.info("chat_request", mode=current_mode, query_preview=message.message[:50])
@@ -966,8 +987,8 @@ async def chat_stream(message: ChatMessage, request: Request):
 
     sessions.record_message(session_id)
 
-    # Guest identity only for callers who may know it
-    guest = await get_current_guest() if caller.gets_guest_context else None
+    # Guest identity only for the caller addressed as the guest
+    guest = await get_current_guest() if caller.addressed_as_guest else None
     context = _chat_context(caller, guest)
 
     # mode and caller_trust are server-derived (caller_auth), never from
@@ -1162,7 +1183,7 @@ async def reverse_geocode(lat: float, lon: float):
             if response.status_code == 200:
                 data = response.json()
                 addr = data.get("address", {})
-                logger.info("reverse_geocode_response", lat=lat, lon=lon, address=addr)
+                logger.info("reverse_geocode_response", address_fields=len(addr))
 
                 # Build precise address with street-level detail
                 location_part = None
@@ -1289,7 +1310,7 @@ async def _get_mode_state(request: Optional[Request]) -> ModeState:
     guest_name = guest.get("guest_name") if guest else None
     if request is not None:
         caller = getattr(request.state, "caller", None)
-        if caller is None or not caller.gets_guest_context:
+        if caller is None or not caller.may_know_guest:
             guest_name = None
 
     return ModeState(

@@ -38,7 +38,7 @@ from starlette.responses import Response
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from shared.logging_config import configure_logging
+from shared.logging_config import configure_logging, payload_keys
 from shared.ha_client import HomeAssistantClient
 from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
@@ -189,6 +189,9 @@ from orchestrator.helpers import (
     is_transit_query,
     build_query_context,
     web_search_allowed,
+    addressee_kind,
+    resolve_addressee,
+    NAMED_ADDRESSEE_KINDS,
 )
 
 # Event system imports for real-time pipeline monitoring
@@ -719,10 +722,12 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
     - date_str_api: API format like "2025-12-06"
     """
     import re
-    from datetime import datetime, timedelta
+    from datetime import date
+
+    from shared.local_time import local_today
 
     query_lower = query.lower()
-    today = datetime.now()
+    today = local_today()
     current_year = today.year
 
     # Month name mapping
@@ -750,9 +755,12 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
         month = months.get(month_name)
         if month and 1 <= day <= 31:
             # Determine year - if the date is in the past, use next year
-            target_date = datetime(current_year, month, day)
-            if target_date < today:
-                target_date = datetime(current_year + 1, month, day)
+            try:
+                target_date = date(current_year, month, day)
+                if target_date < today:
+                    target_date = date(current_year + 1, month, day)
+            except ValueError:
+                return None
 
             display_str = target_date.strftime("%A, %B %d, %Y")
             api_str = target_date.strftime("%Y-%m-%d")
@@ -766,9 +774,12 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
         month_name = match.group(2)
         month = months.get(month_name)
         if month and 1 <= day <= 31:
-            target_date = datetime(current_year, month, day)
-            if target_date < today:
-                target_date = datetime(current_year + 1, month, day)
+            try:
+                target_date = date(current_year, month, day)
+                if target_date < today:
+                    target_date = date(current_year + 1, month, day)
+            except ValueError:
+                return None
 
             display_str = target_date.strftime("%A, %B %d, %Y")
             api_str = target_date.strftime("%Y-%m-%d")
@@ -781,9 +792,12 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
         month = int(match.group(1))
         day = int(match.group(2))
         if 1 <= month <= 12 and 1 <= day <= 31:
-            target_date = datetime(current_year, month, day)
-            if target_date < today:
-                target_date = datetime(current_year + 1, month, day)
+            try:
+                target_date = date(current_year, month, day)
+                if target_date < today:
+                    target_date = date(current_year + 1, month, day)
+            except ValueError:
+                return None
 
             display_str = target_date.strftime("%A, %B %d, %Y")
             api_str = target_date.strftime("%Y-%m-%d")
@@ -2189,8 +2203,10 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     location_correction = detect_location_correction(state.query)
     if location_correction["is_correction"]:
         logger.info(
-            f"Location correction detected: type={location_correction['correction_type']}, "
-            f"location={location_correction['extracted_location']}, use_current={location_correction['use_current_location']}"
+            "location_correction_detected",
+            correction_type=location_correction["correction_type"],
+            location_set=bool(location_correction["extracted_location"]),
+            use_current=bool(location_correction["use_current_location"]),
         )
         # Update state.context with the location override
         if state.context is None:
@@ -2207,7 +2223,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
             if state.entities is None:
                 state.entities = {}
             state.entities["location"] = location_correction["extracted_location"]
-            logger.info(f"Location override set to: {location_correction['extracted_location']}")
+            logger.info("location_override_set", location_source="correction")
         elif location_correction["use_current_location"]:
             # User wants their current/actual location - mark it for device lookup
             state.context["location_override"] = {
@@ -3727,10 +3743,10 @@ async def execute_tools_parallel(
             if function_name in location_sensitive_tools and location:
                 llm_location = arguments.get("location", "not specified")
                 if llm_location != location:
-                    logger.info(f"Location override: LLM suggested '{llm_location}', using user location '{location}'")
+                    logger.info("tool_location_overridden", tool=function_name, location_overridden=True)
                     arguments["location"] = location
                 else:
-                    logger.debug(f"Location already matches user location: {location}")
+                    logger.debug("tool_location_matches_user_location", tool=function_name)
 
             # DIRECTIONS ORIGIN OVERRIDE: For get_directions, set origin to user's current location
             # when no explicit origin is provided or when LLM uses a placeholder value
@@ -3758,10 +3774,10 @@ async def execute_tools_parallel(
                 )
 
                 if should_override_origin:
-                    logger.info(f"Directions origin override: LLM suggested '{llm_origin}', using current location '{location}'")
+                    logger.info("directions_origin_overridden", location_overridden=True)
                     arguments["origin"] = location
                 else:
-                    logger.debug(f"Keeping LLM-specified origin: {llm_origin}")
+                    logger.debug("directions_origin_kept", origin_source="llm")
 
             # Enrich search_web queries with location context for ambiguous local searches
             if function_name == "search_web" and "query" in arguments:
@@ -3789,7 +3805,7 @@ async def execute_tools_parallel(
                 if is_short_query and not has_location and looks_like_business and location:
                     original_query = arguments["query"]
                     arguments["query"] = f"{original_query} {location}"
-                    logger.info(f"Enriched search query with location: '{original_query}' -> '{arguments['query']}'")
+                    logger.info("search_query_enriched", tool=function_name, location_source="user_location")
 
             # Get service URL from registry (try async first)
             logger.info(f"Looking up service URL for tool: {function_name}")
@@ -4067,7 +4083,7 @@ async def execute_tools_parallel(
                     """Call SeatGeek events API."""
                     try:
                         # Log received args for debugging
-                        logger.info(f"SeatGeek received args: {args}")
+                        logger.info("seatgeek_args_received", arg_keys=payload_keys(args))
 
                         # Convert Ticketmaster params to SeatGeek params
                         seatgeek_params = {}
@@ -4323,7 +4339,7 @@ async def execute_tools_parallel(
                             airports_service_url=AIRPORTS_SERVICE_URL,
                             feature_enabled=True
                         )
-                        logger.info("airport_lookup_applied", arguments=arguments)
+                        logger.info("airport_lookup_applied", arg_keys=payload_keys(arguments))
                     except Exception as e:
                         logger.warning("airport_lookup_failed", error=str(e))
 
@@ -4371,7 +4387,7 @@ async def execute_tools_parallel(
             # Update RAG client with dynamic service URL
             rag.update_service_url(rag_service_name, service_url)
 
-            logger.info(f"Calling tool {function_name} via RAG client ({rag_service_name}) with args: {arguments}")
+            logger.info("rag_tool_call", tool=function_name, service=rag_service_name, arg_keys=payload_keys(arguments))
 
             # Determine HTTP method based on tool
             # Most RAG service endpoints use GET with query params
@@ -4740,24 +4756,12 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
         logger.info(f"Tool calling with {len(tools)} available tools (guest_mode={guest_mode})")
 
         # Build system content with centralized assistant profile and base knowledge context
-        guest_name = state.context.get("guest_name") if state.context else None
-
-        # Resolve owner_name from base knowledge for owner-mode requests
-        _tool_owner_name = None
         _tool_user_mode = state.mode if state.mode else "guest"
-        if _tool_user_mode == "owner":
-            try:
-                _ow_admin = get_admin_client()
-                _ow_entries = await _ow_admin.get_base_knowledge(applies_to="owner", enabled_only=True)
-                for _ow_entry in (_ow_entries or []):
-                    if _ow_entry.get("category") in ("owner", "user") and _ow_entry.get("key") in ("owner_name", "name"):
-                        _tool_owner_name = _ow_entry.get("value", "").strip() or None
-                        break
-            except Exception as e:
-                logger.warning("tool_call_node_owner_name_failed", error=str(e))
+        addressee = await resolve_addressee(state, get_admin_client())
 
-        # Owner identity fast-path: answer "what is my name" deterministically
-        if _tool_owner_name and _tool_user_mode == "owner":
+        # Identity fast-path: answer "what is my name" deterministically for
+        # the owner (owner_name) or a signed-in household member (first name)
+        if addressee.kind in ("owner", "household") and addressee.name:
             _ql = state.query.lower().strip("?. ")
             _identity_patterns = [
                 "what is my name", "what's my name", "whats my name",
@@ -4765,16 +4769,15 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                 "what do you call me", "what do people call me",
             ]
             if any(_ql == p or _ql.startswith(p) for p in _identity_patterns):
-                state.answer = f"Your name is {_tool_owner_name}."
+                state.answer = f"Your name is {addressee.name}."
                 state.skip_synthesis = True
                 state.node_timings["tool_call"] = time.time() - start
-                logger.info("owner_identity_fast_path", name=_tool_owner_name)
+                logger.info("identity_fast_path", kind=addressee.kind)
                 return state
 
         system_content = await build_core_assistant_prompt(
             include_voice_formatting=True,
-            guest_name=guest_name,
-            owner_name=_tool_owner_name,
+            **addressee.prompt_kwargs(),
         ) + "\n"
         home_address = DEFAULT_LOCATION  # Permanent home address (for "directions from home")
         search_location = DEFAULT_LOCATION  # Current location for searches (may differ from home)
@@ -4786,7 +4789,9 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             if not is_public_audience(state.permissions):
                 admin_client = get_admin_client()
                 user_mode = _tool_user_mode
-                knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
+                knowledge_context = await get_knowledge_context_for_user(
+                    admin_client, user_mode, degraded=state.mode_degraded,
+                )
                 if knowledge_context:
                     system_content += f"\n{knowledge_context}"
                     state.base_knowledge_populated = True
@@ -4795,7 +4800,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                 # Get permanent home address (for "directions from home" type queries)
                 home_address = await get_home_address_for_user(admin_client, user_mode)
                 search_location = home_address  # Default search location to home
-                logger.info(f"Home address: {home_address}")
+                logger.info("home_address_resolved", address_set=bool(home_address))
 
             # Check for location from request entities (browser geolocation)
             # This is set when location is passed in the QueryRequest
@@ -4803,7 +4808,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                 entity_location = state.entities["location"]
                 # Override SEARCH location but keep home_address unchanged
                 search_location = entity_location
-                logger.info(f"Search location from entities: {entity_location} (home remains: {home_address})")
+                logger.info("search_location_from_entities", location_source="request_entities")
 
             # Check for location override from context (user is somewhere else temporarily)
             # IMPORTANT: This changes the SEARCH location, not the HOME address
@@ -4827,14 +4832,13 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
                 if location_override:
                     # Override SEARCH location, but keep home_address unchanged
-                    logger.info(f"Search location override: {location_override} (home remains: {home_address})")
+                    logger.info("search_location_overridden", location_source="location_override")
                     search_location = location_override
         except Exception as e:
             logger.warning(f"Failed to fetch base knowledge context in tool_call: {e}")
             # Continue without base knowledge - not critical
 
-        if guest_name:
-            logger.info(f"Guest context injected for tool_call: {guest_name}")
+        logger.info("addressee_resolved", kind=addressee.kind)
 
         # Inject memory context for tool selection (e.g., "user's car is a Tesla")
         if state.memory_context:
@@ -4846,8 +4850,10 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
         # Add special instructions for planning/itinerary queries
         if is_planning_query:
-            from datetime import datetime, timedelta
-            today = datetime.now()
+            from datetime import timedelta
+
+            from shared.local_time import local_now
+            today = local_now()
             today_str = today.strftime("%A, %B %d, %Y")  # e.g., "Sunday, November 30, 2025"
             today_api = today.strftime("%Y-%m-%d")
             # Calculate next Saturday
@@ -5184,7 +5190,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
                 loc = state.context["location_override"]
                 if loc.get("address"):
                     origin = loc["address"]
-                    logger.info(f"Forced directions: using location_override address as origin: {origin}")
+                    logger.info("forced_directions_origin", origin_source="location_override")
                 elif loc.get("latitude") and loc.get("longitude"):
                     origin = f"{loc['latitude']:.6f},{loc['longitude']:.6f}"
                     logger.info(f"Forced directions: using location_override coords as origin: {origin}")
@@ -5418,7 +5424,7 @@ Provide a helpful answer:"""
                     # User wants device/GPS location
                     if loc.get("latitude") and loc.get("longitude"):
                         user_location = f"{loc['latitude']:.4f}, {loc['longitude']:.4f}"
-                        logger.info(f"Using device GPS location: {user_location}")
+                        logger.info("user_location_resolved", location_source="device_gps")
                     else:
                         # No GPS available yet - use address if provided, else keep checking
                         user_location = loc.get("address")
@@ -5429,10 +5435,10 @@ Provide a helpful answer:"""
                             user_location = DEFAULT_LOCATION
                 elif loc.get("address"):
                     user_location = loc["address"]
-                    logger.info(f"Using location override (address): {user_location}")
+                    logger.info("user_location_resolved", location_source="location_override_address")
                 elif loc.get("latitude") and loc.get("longitude"):
                     user_location = f"{loc['latitude']:.4f}, {loc['longitude']:.4f}"
-                    logger.info(f"Using location override (coordinates): {user_location}")
+                    logger.info("user_location_resolved", location_source="location_override_coordinates")
             if not user_location:
                 user_location = DEFAULT_LOCATION
 
@@ -6232,14 +6238,16 @@ class QueryRequest(BaseModel):
             "never claim owner."
         ),
     )
-    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_local", "web_public"]] = Field(
+    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_local", "web_guest_net", "web_public"]] = Field(
         None,
         description=(
             "Set by the calling service in server code, never by an end "
             "user (ATHENA-69 D24). Gates the owner-PIN override utterance "
-            "(only PIN_TRUSTED_TIERS may use it; absent, 'web_local' and "
-            "'web_public' are refused before any throttle or mode-service "
-            "call). 'web_public' also selects the public audience: a "
+            "(only PIN_TRUSTED_TIERS may use it; absent, 'web_local', "
+            "'web_guest_net' and 'web_public' are refused before any "
+            "throttle or mode-service call). 'web_guest_net' is jarvis-web's "
+            "guest network, the only browser caller addressed by the staying "
+            "guest's name. 'web_public' also selects the public audience: a "
             "hard-coded narrow allowlist, no guest identity, no base "
             "knowledge, memories, cache or web search."
         ),
@@ -6348,7 +6356,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     logger.info(
                         "multi_guest_identified",
                         guest_id=guest_info.get("guest_id"),
-                        guest_name=guest_info.get("guest_name"),
+                        has_guest_name=bool(guest_info.get("guest_name")),
                         device_id=request.device_id[:16] + "..." if len(request.device_id) > 16 else request.device_id
                     )
 
@@ -6530,14 +6538,16 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     logger.warning("memory_retrieval_skipped", error=str(e), error_type=type(e).__name__)
 
         # Build context with guest info (if identified via device fingerprint)
-        query_context = build_query_context(request, guest_info)
+        query_context = build_query_context(
+            request, guest_info, server_mode=authz.server_mode, degraded=authz.degraded,
+        )
 
         # Create initial state with conversation history, mode, and permissions
         # Initialize entities with location if provided in request
         initial_entities = {}
         if request.location:
             initial_entities["location"] = request.location
-            logger.info(f"Using location from request: {request.location}")
+            logger.info("request_location_used", location_set=True)
 
         initial_state = OrchestratorState(
             query=request.query,
@@ -6548,6 +6558,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             conversation_history=conversation_history,
             history_summary=history_summary,  # Summarized context for summarized mode
             permissions=permissions,  # Phase 2: Include permissions for entity checks
+            mode_degraded=authz.degraded,
             interface_type=request.interface_type,  # SMS Integration: Pass interface type for response formatting
             context=query_context,  # SMS Integration + Multi-guest: Pass context (phone_number, calendar_event_id, guest_name, etc.)
             memory_context=memory_context,  # Memory augmentation: Relevant memories for LLM context
@@ -6585,7 +6596,12 @@ async def process_query(request: QueryRequest) -> QueryResponse:
 
             # Benchmark flag: skip semantic cache entirely (prevents poisoning N≥20 repeats).
             # The public audience never reads the cache.
-            if request.skip_semantic_cache or is_public_caller(request.caller_trust):
+            # Answers addressed to a named caller (the guest by name, a
+            # signed-in member) are never read from or written to the cache.
+            # A degraded mode service resolves to owner, whose answers can
+            # carry owner facts: never cached either.
+            named_addressee = addressee_kind(query_context, current_mode, authz.degraded) in NAMED_ADDRESSEE_KINDS
+            if request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee or authz.degraded:
                 cached_response = None
             else:
                 cached_response = await get_cached_response(
@@ -7079,6 +7095,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         should_cache = (
             not request.skip_semantic_cache
             and not is_public_caller(request.caller_trust)
+            and addressee_kind(query_context, current_mode, authz.degraded) not in NAMED_ADDRESSEE_KINDS
+            and not authz.degraded
             and response.answer
             and not final_state.get("is_fallback", False)
             and not _looks_like_fallback(response.answer)
@@ -7203,7 +7221,7 @@ async def process_query_stream(request: QueryRequest):
                     logger.info(
                         "multi_guest_identified_stream",
                         guest_id=guest_info.get("guest_id"),
-                        guest_name=guest_info.get("guest_name")
+                        has_guest_name=bool(guest_info.get("guest_name"))
                     )
 
             # Session management
@@ -7293,7 +7311,9 @@ async def process_query_stream(request: QueryRequest):
                 logger.info(f"chat_history_injected", turns=len(conversation_history), source="persistent_sessions")
 
             # Build context with guest info (if identified via device fingerprint)
-            query_context = build_query_context(request, guest_info)
+            query_context = build_query_context(
+                request, guest_info, server_mode=authz.server_mode, degraded=authz.degraded,
+            )
 
             # Initialize state with skip_synthesis flag to get RAG data without LLM call
             request_id = hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8]
@@ -7302,6 +7322,7 @@ async def process_query_stream(request: QueryRequest):
                 mode=current_mode,
                 room=request.room,
                 permissions=authz.permissions,
+                mode_degraded=authz.degraded,
                 conversation_history=conversation_history,
                 history_summary=history_summary,
                 session_id=session.session_id,
@@ -7516,7 +7537,7 @@ async def process_query_stream_v2(request: QueryRequest):
                     logger.info(
                         "multi_guest_identified_stream_v2",
                         guest_id=guest_info.get("guest_id"),
-                        guest_name=guest_info.get("guest_name")
+                        has_guest_name=bool(guest_info.get("guest_name"))
                     )
 
             # Session management
@@ -7559,8 +7580,11 @@ async def process_query_stream_v2(request: QueryRequest):
                 conversation_history=[],
                 history_summary="",
                 permissions=authz.permissions,
+                mode_degraded=authz.degraded,
                 interface_type=request.interface_type,
-                context=build_query_context(request, guest_info),
+                context=build_query_context(
+                    request, guest_info, server_mode=authz.server_mode, degraded=authz.degraded,
+                ),
                 memory_context="",
                 timing_tracker=timing_tracker,
                 supports_followup=request.supports_followup,
@@ -8029,26 +8053,12 @@ Respond honestly about your limitations.
 
 Response:"""
 
-    guest_name = state.context.get("guest_name") if state.context else None
-
-    # Resolve owner_name from base knowledge for owner-mode requests
-    _stream_owner_name = None
-    if state.mode == "owner":
-        try:
-            _s_admin = get_admin_client()
-            _s_entries = await _s_admin.get_base_knowledge(applies_to="owner", enabled_only=True)
-            for _s_entry in (_s_entries or []):
-                if _s_entry.get("category") in ("owner", "user") and _s_entry.get("key") in ("owner_name", "name"):
-                    _stream_owner_name = _s_entry.get("value", "").strip() or None
-                    break
-        except Exception as e:
-            logger.warning("build_synthesis_prompt_for_streaming_owner_name_failed", error=str(e))
+    addressee = await resolve_addressee(state, get_admin_client())
 
     system_context = await build_core_assistant_prompt(
         include_voice_formatting=state.interface_type != "chat",
-        guest_name=guest_name,
-        owner_name=_stream_owner_name,
         interface_type=state.interface_type,
+        **addressee.prompt_kwargs(),
     ) + "\n"
 
     # Inject base knowledge context from Admin API (never for the public audience)
@@ -8056,18 +8066,14 @@ Response:"""
         if not is_public_audience(state.permissions):
             admin_client = get_admin_client()
             user_mode = state.mode if state.mode else "guest"
-            knowledge_context = await get_knowledge_context_for_user(admin_client, user_mode)
+            knowledge_context = await get_knowledge_context_for_user(
+                admin_client, user_mode, degraded=state.mode_degraded,
+            )
             if knowledge_context:
                 system_context += knowledge_context
                 state.base_knowledge_populated = True
     except Exception as e:
         logger.warning(f"Failed to fetch base knowledge context for streaming: {e}")
-
-    # Inject guest name for personalization (owner_name already handled by build_core_assistant_prompt)
-    if not _stream_owner_name and state.context and state.context.get("guest_name"):
-        guest_name = state.context["guest_name"]
-        system_context += f"\nYou are speaking with {guest_name}, a guest at this property. "
-        system_context += f"Address them by name when appropriate to provide a personalized experience.\n"
 
     # Inject relevant memories
     if state.memory_context:
@@ -8330,6 +8336,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     mode=authz.mode,
                     room=room,
                     permissions=authz.permissions,
+                    mode_degraded=authz.degraded,
                     conversation_history=conversation_history,
                     history_summary=history_summary,
                     session_id=session.session_id,

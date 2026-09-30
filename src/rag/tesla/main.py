@@ -20,7 +20,7 @@ API Endpoints:
 import os
 import sys
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import asyncpg
@@ -33,6 +33,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from shared.service_registry import startup_service, unregister_service
+from shared.local_time import local_today
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
 
@@ -90,12 +91,11 @@ def parse_timeframe_from_query(query: str) -> Dict[str, Any]:
     - "on Christmas" → {'start_date': date, 'end_date': date, 'description': 'on Christmas'}
     """
     import re
-    from datetime import date
     from dateutil import parser as date_parser
     from dateutil.relativedelta import relativedelta
 
     query_lower = query.lower()
-    today = date.today()
+    today = local_today()
 
     # Helper to format timeframe description
     def days_to_description(d: int) -> str:
