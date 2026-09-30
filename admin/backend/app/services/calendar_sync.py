@@ -29,6 +29,7 @@ import structlog
 
 from app.database import SessionLocal, DEV_MODE
 from app.models import CalendarEvent, CalendarSource, SystemSetting
+from app.services import settings_lease
 from shared.booking_window import (
     DEFAULT_CHECKIN_TIME,
     DEFAULT_CHECKOUT_TIME,
@@ -50,6 +51,14 @@ MIN_CHECK_INTERVAL_SECONDS = 60
 # The scheduler never syncs a source more often than this, whatever its
 # stored interval (create/update already reject smaller values).
 MIN_SYNC_INTERVAL_MINUTES = 5
+
+# One writer per source, across replicas and triggers: the lease
+# `calendar_sync.lock.<S>` is held for the whole run. Its TTL outlives the
+# bounded fetch, and a compare-and-swap renew immediately before commit
+# fences out a holder whose lease expired and was taken over mid-run.
+LEASE_SESSION_FACTORY = SessionLocal
+SYNC_LEASE_TTL_SECONDS = 600
+SYNC_FETCH_TIMEOUT_SECONDS = 480
 
 SyncStatus = Literal["success", "failed", "busy", "not_found", "not_due"]
 Trigger = Literal["scheduled", "manual"]
@@ -91,6 +100,10 @@ def is_reserved_uid(uid: str) -> bool:
 
 def _nouid_key(source_id: int) -> str:
     return f"ical-nouid:{source_id}:{uuid.uuid4().hex}"
+
+
+def sync_lock_key(source_id: int) -> str:
+    return f"calendar_sync.lock.{source_id}"
 
 
 def last_stamp_key(source_id: int) -> str:
@@ -506,12 +519,35 @@ async def _fetch_events(db, source: CalendarSource, cs) -> tuple[str, list]:
     return 'ical', events
 
 
-def _record_failure(db, source_id: int, message: str) -> None:
-    """Roll back anything staged, then stamp the failure on the source."""
+FenceResult = Literal["held", "lost", "error"]
+
+
+def _fence(lease: settings_lease.Lease, source_id: int) -> FenceResult:
+    """Compare-and-swap renew of our lease, immediately before a commit.
+    Anything but "held" means another holder may be writing this source."""
+    from app.routes.calendar_sources import safe_error
+
+    try:
+        held = settings_lease.renew(LEASE_SESSION_FACTORY, lease, ttl=SYNC_LEASE_TTL_SECONDS)
+    except Exception as exc:
+        logger.error("calendar_sync_lease_renew_failed", source_id=source_id, **safe_error(exc))
+        return "error"
+    if not held:
+        logger.warning("calendar_sync_lease_lost", source_id=source_id)
+        return "lost"
+    return "held"
+
+
+def _record_failure(db, source_id: int, message: str, lease: settings_lease.Lease) -> None:
+    """Roll back anything staged, then stamp the failure on the source --
+    unless the lease was lost, in which case the new holder owns the
+    source's status."""
     from app.routes.calendar_sources import safe_error
 
     try:
         db.rollback()
+        if _fence(lease, source_id) != "held":
+            return
         source = db.query(CalendarSource).filter(CalendarSource.id == source_id).first()
         if source is not None:
             source.last_sync_at = _now()
@@ -524,22 +560,72 @@ def _record_failure(db, source_id: int, message: str) -> None:
 
 
 async def run_source_sync(source_id: int, db, *, trigger: Trigger) -> SyncOutcome:
-    """Sync one source. Never raises except `asyncio.CancelledError`.
+    """Sync one source under its lease. Never raises except
+    `asyncio.CancelledError`.
 
-    `trigger="scheduled"` is the background loop; everything else (the
-    route, sync-all, `sync_single_source`) is `"manual"`.
+    `trigger="scheduled"` is the background loop, which re-checks due-ness
+    once it holds the lease (another replica may have just synced);
+    everything else (the route, sync-all, `sync_single_source`) is
+    `"manual"` and always syncs.
     """
     from app.routes import calendar_sources as cs
 
     run_stamp = _now()
+    try:
+        lease = settings_lease.acquire(
+            LEASE_SESSION_FACTORY,
+            sync_lock_key(source_id),
+            category=SETTINGS_CATEGORY,
+            ttl=SYNC_LEASE_TTL_SECONDS,
+            busy_message=f"a calendar sync is already running for source {source_id}",
+            fields={"trigger": trigger},
+        )
+    except settings_lease.LeaseBusy:
+        logger.info("calendar_sync_busy", source_id=source_id, trigger=trigger)
+        return SyncOutcome(status="busy")
+    except Exception as exc:
+        logger.error("calendar_sync_lease_acquire_failed", source_id=source_id, **cs.safe_error(exc))
+        return SyncOutcome(
+            status="failed",
+            error=f"Calendar sync could not start ({cs.describe_error(exc)}); no changes written",
+        )
+
+    try:
+        return await _sync_under_lease(source_id, db, trigger, run_stamp, lease, cs)
+    finally:
+        try:
+            settings_lease.release(LEASE_SESSION_FACTORY, lease)
+        except Exception as exc:
+            logger.error("calendar_sync_lease_release_failed", source_id=source_id, **cs.safe_error(exc))
+
+
+async def _sync_under_lease(source_id: int, db, trigger: Trigger, run_stamp: datetime,
+                            lease: settings_lease.Lease, cs) -> SyncOutcome:
     method: Optional[str] = None
     try:
-        source = db.query(CalendarSource).filter(CalendarSource.id == source_id).first()
+        # Loaded after the lease, and refreshed: a caller's session may hold
+        # a copy from before another holder's sync.
+        source = (
+            db.query(CalendarSource)
+            .populate_existing()
+            .filter(CalendarSource.id == source_id)
+            .first()
+        )
         if source is None:
             logger.warning("calendar_source_not_found", source_id=source_id)
             return SyncOutcome(status="not_found")
+        if trigger == "scheduled" and not _is_due(source, run_stamp):
+            return SyncOutcome(status="not_due")
 
-        method, events = await _fetch_events(db, source, cs)
+        try:
+            method, events = await asyncio.wait_for(
+                _fetch_events(db, source, cs), SYNC_FETCH_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as exc:
+            logger.warning("calendar_sync_fetch_timeout", source_id=source_id,
+                           timeout_seconds=SYNC_FETCH_TIMEOUT_SECONDS)
+            raise _SyncFailed(None, f"Calendar fetch timed out ({type(exc).__name__}); no changes written")
+
         if method == 'lodgify_api':
             counts = _upsert_api_events(db, source, events, run_stamp)
         else:
@@ -552,6 +638,16 @@ async def run_source_sync(source_id: int, db, *, trigger: Trigger) -> SyncOutcom
         source.last_sync_status = 'success'
         source.last_sync_error = warning
         source.last_event_count = len(events)
+
+        fence = _fence(lease, source_id)
+        if fence != "held":
+            db.rollback()
+            if fence == "lost":
+                return SyncOutcome(status="busy", method=method)
+            return SyncOutcome(
+                status="failed", method=method,
+                error="Calendar sync could not confirm it was the only writer; no changes written",
+            )
         db.commit()
 
         logger.info(
@@ -587,13 +683,16 @@ async def run_source_sync(source_id: int, db, *, trigger: Trigger) -> SyncOutcom
             warning=warning,
         )
 
+    except asyncio.CancelledError:
+        db.rollback()
+        raise
     except _SyncFailed as failure:
-        _record_failure(db, source_id, failure.message)
+        _record_failure(db, source_id, failure.message, lease)
         return SyncOutcome(status="failed", method=failure.method, error=failure.message)
     except Exception as exc:
         logger.error("calendar_sync_failed", source_id=source_id, **cs.safe_error(exc))
         message = f"Calendar sync failed ({cs.describe_error(exc)}); no changes written"
-        _record_failure(db, source_id, message)
+        _record_failure(db, source_id, message, lease)
         return SyncOutcome(status="failed", method=method, error=message)
 
 
