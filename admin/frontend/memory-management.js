@@ -121,13 +121,13 @@ function renderQdrantStatus(health, canRebuild) {
         `<span class="px-2 py-1 text-xs rounded-full ${classes}">${escapeHtml(label)}</span>`;
     const note = (text) => `<span class="text-xs text-gray-400 ml-2">${text}</span>`;
 
-    if (h.status === 'healthy') {
+    if (h.status === 'healthy' && h.in_sync === true) {
         return pill('bg-green-900/30 text-green-400', 'Vectors in sync')
             + note(`${points} of ${live} memories searchable`)
             + `<span class="sr-only">${escapeHtml(h.url || '')}</span>`;
     }
 
-    if (h.status === 'degraded') {
+    if (h.status === 'degraded' || h.status === 'healthy') {
         const button = canRebuild
             ? `<button type="button" onclick="rebuildMemoryVectors()"
                        class="ml-2 px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs font-medium transition-colors"
@@ -135,9 +135,16 @@ function renderQdrantStatus(health, canRebuild) {
             : `<button type="button" disabled title="Owner only"
                        class="ml-2 px-3 py-1 bg-gray-700 text-gray-400 rounded text-xs font-medium cursor-not-allowed">Rebuild vectors</button>`;
         const detail = h.detail ? note(escapeHtml(h.detail)) : '';
+        const ids = (list) => (Array.isArray(list) ? list.map((id) => escapeHtml(id)).join(', ') : '');
+        const missing = count(h.missing_count)
+            ? note(`${count(h.missing_count)} missing (e.g. ${ids(h.missing_vector_ids_sample)})`) : '';
+        const orphans = count(h.orphan_count)
+            ? note(`${count(h.orphan_count)} orphan vectors (e.g. ${ids(h.orphan_point_ids_sample)})`) : '';
+        const partial = h.in_sync === null || h.sync_scan === 'partial'
+            ? note('Sync check incomplete: too many memories to compare in one pass.') : '';
         return pill('bg-amber-900/30 text-amber-400', 'Vectors out of sync')
             + note(`${points} vectors for ${live} memories, ${pending} not searchable`)
-            + detail + button;
+            + missing + orphans + partial + detail + button;
     }
 
     if (h.status === 'error') {
@@ -155,6 +162,19 @@ function renderQdrantStatus(health, canRebuild) {
     return pill('bg-red-900/30 text-red-400', 'Vector store Unavailable')
         + note(`${escapeHtml(h.error || h.detail || 'Connection failed')}. Recall uses keyword search; `
             + `${live} memories are saved and will be embedded when it recovers.`);
+}
+
+// Pure: HTTP status + parsed body of the reindex call -> the report
+// renderReindexResult understands. 200 and 409 bodies already carry the
+// report or an `error`; anything else becomes an explicit error.
+function reindexOutcome(status, body) {
+    if (status === 200 || status === 409) {
+        return body || {};
+    }
+    if (status === 403) {
+        return { error: 'forbidden' };
+    }
+    return { error: `the server answered HTTP ${Number(status) || 0}` };
 }
 
 // Pure: reindex response (or {error: 'forbidden'} for a 403) -> HTML.
@@ -192,7 +212,7 @@ async function rebuildMemoryVectors() {
             headers: { 'Authorization': `Bearer ${getToken()}` }
         });
         const body = await response.json().catch(() => ({}));
-        report = response.status === 403 ? { error: 'forbidden' } : body;
+        report = reindexOutcome(response.status, body);
         showToast(response.ok ? 'Vector rebuild finished' : 'Vector rebuild did not run', response.ok ? 'success' : 'error');
     } catch (error) {
         report = { error: 'could not reach the server' };

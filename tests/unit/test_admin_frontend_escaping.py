@@ -1142,3 +1142,46 @@ def test_qdrant_status_wiring_uses_manage_infrastructure():
     body = _extract_block(MEMORY_JS, "function updateQdrantStatus(")
     assert "renderQdrantStatus(" in body and "hasPermission('manage_infrastructure')" in body
     assert "/vector-store/reindex?mode=missing" in source
+
+
+# --- Review round 1: Rebuild whenever not in sync; rebuild HTTP errors -------
+
+def test_qdrant_status_partial_scan_offers_rebuild():
+    html = _qdrant_status(_health("degraded", in_sync=None, sync_scan="partial"), True)
+    assert "rebuildMemoryVectors()" in html
+    assert "partial" in html.lower() or "incomplete" in html.lower()
+
+
+def test_qdrant_status_green_only_when_in_sync_is_true():
+    html = _qdrant_status(_health("healthy", in_sync=None), True)
+    assert "Vectors in sync" not in html and "rebuildMemoryVectors()" in html
+
+
+def test_qdrant_status_escapes_missing_and_orphan_samples():
+    html = _qdrant_status(_health("degraded", missing_count=1, missing_vector_ids_sample=[HOSTILE],
+                                  orphan_count=1, orphan_point_ids_sample=[HOSTILE]), True)
+    _assert_neutralised(html)
+    assert "1 missing" in html and "1 orphan" in html
+
+
+def _reindex_outcome(status, body):
+    fn = _extract_block(MEMORY_JS, "function reindexOutcome(")
+    return _run_node_with_source(fn, f"reindexOutcome({json.dumps(status)}, {json.dumps(body)})")
+
+
+@pytest.mark.parametrize("status, body", [
+    (401, {"detail": "Authentication required"}),
+    (422, {"detail": [{"msg": "bad mode"}]}),
+    (500, {}),
+], ids=["401", "422", "500"])
+def test_rebuild_http_errors_are_reported_as_errors(status, body):
+    outcome = _reindex_outcome(status, body)
+    assert outcome["error"]
+    html = _reindex_result(outcome)
+    assert "Rebuilt" not in html and "failed" in html.lower()
+
+
+def test_rebuild_outcome_passes_through_success_and_conflicts():
+    assert _reindex_outcome(200, {"embedded": 3})["embedded"] == 3
+    assert _reindex_outcome(409, {"error": "reindex_busy", "retry_after_seconds": 5})["error"] == "reindex_busy"
+    assert _reindex_outcome(403, {"detail": "Insufficient permissions"}) == {"error": "forbidden"}
