@@ -15,7 +15,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The Guest Mode page's Delete button now works on calendar-synced bookings too, not just manually-entered ones — useful for hiding a phantom or cancelled booking without waiting for the next sync.
 - "Sync all" on the Calendar Sources page now actually triggers a sync for every enabled source (it previously reported a count but did nothing).
 - The memory vector collection is created and validated automatically: admin-backend creates it when it's missing, records the embedding model on it, and refuses to mix embedding models or use a collection of the wrong shape.
-- The Memories page compares Postgres with the vector store (memories, vectors, memories not yet searchable) and shows whether they're in sync.
+- The Memories page compares Postgres with the vector store by id (memories without a vector, vectors without a memory, memories not yet searchable) and shows whether they're in sync.
 - An owner-only "Rebuild vectors" action on the Memories page embeds every memory that isn't searchable yet.
 - `python -m app.services.memory_vectors reindex` rebuilds memory vectors from Postgres (run it as a one-off Pod; `--recreate` requires typing the collection name).
 
@@ -24,7 +24,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A vector-store failure no longer discards a new memory. It's saved, marked not searchable, and made searchable again automatically when the store recovers, including after the vector collection itself is lost. Memories that failed to save while the vector collection was missing were never written anywhere and can't be recovered.
 - Admin-created, edited and promoted memories never point at vectors that don't match their saved text.
 - Semantic memory search returns only live memories, using their current saved text.
-- When semantic search is unavailable, memory recall falls back to keyword matching.
+- When semantic search is unavailable, memory recall falls back to keyword matching, which keeps numbers and codes (a door code, a Wi-Fi password) whole.
 - Forgetting a memory removes it from search and recall; the stored record is kept, marked deleted.
 - Date-only and floating (no explicit timezone) booking times from a calendar feed are now localised to the configured property timezone instead of being silently treated as UTC — a real check-in/check-out time could previously be off by several hours depending on the deployment's timezone.
 - A feed entry marked as a block (`Blocked`, `Closed Period`, `Not available`, etc. — an owner blocking dates for personal use) is no longer counted as a guest stay.
@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - The admin-backend image bundles a hash- and revision-verified embedding model and never downloads one at runtime (the build needs Hugging Face access once).
-- Memory text is limited to 8192 characters and summaries to 255.
+- Memory text and memory search queries are limited to 8192 characters and summaries to 255.
 - The admin-backend memory request/limit is 512Mi/1Gi, to hold the embedding model.
 - The Qdrant manifest uses the `Recreate` update strategy (one pod on a ReadWriteOnce volume).
 

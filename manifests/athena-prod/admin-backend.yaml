@@ -134,9 +134,8 @@ spec:
               fieldPath: metadata.namespace
         # Memory covers the baked embedding model: every memory embed runs
         # under one lock, batches of 16, text truncated to 4000 chars, and
-        # CI gates the image's peak at <= 700 MiB (D16 in the memory vector
-        # store design). A live deployment needs this raised before it runs
-        # an image with the baked model.
+        # CI gates the image's peak at <= 700 MiB. A live deployment needs
+        # this raised before it runs an image with the baked model.
         resources:
           requests:
             memory: "512Mi"

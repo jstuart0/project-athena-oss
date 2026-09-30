@@ -37,6 +37,10 @@ def upgrade() -> None:
         return
 
     if "vector_status" not in _columns(bind):
+        if bind.dialect.name == "postgresql":
+            # Don't queue behind open transactions on memories (and make every
+            # later memory query queue behind this ALTER): give up after 5 s.
+            op.execute("SET LOCAL lock_timeout = '5s'")
         op.add_column(
             "memories",
             sa.Column("vector_status", sa.String(16), nullable=False, server_default="pending"),

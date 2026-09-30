@@ -544,22 +544,31 @@ through `admin/backend/app/services/memory_vectors.py`.
   matching: `qdrant_available` means "these results are usable",
   `semantic_available` says whether semantic search contributed, and
   `search_type` is `keyword_fallback`. This holds whether or not the
-  `hybrid_memory_search` feature is enabled.
+  `hybrid_memory_search` feature is enabled. Keyword matching keeps numbers
+  and codes whole (`4417`, `b7x9`), so a door code or Wi-Fi password is
+  still found during an outage.
 - **Status.** The Memories page shows `GET /api/memories/qdrant/health`:
-  `pg_live_count`, `points_count`, `pending_count`, `in_sync`, the store
-  state (`ready`, `unavailable`, `embedder_unavailable`, `shape_mismatch`,
+  `pg_live_count`, `points_count`, `pending_count`, the store state
+  (`ready`, `unavailable`, `embedder_unavailable`, `shape_mismatch`,
   `model_mismatch`), the expected and recorded embedding model, and up to
-  10 ids of vectors from another model. `status` is `healthy`, `degraded`
-  (reachable but out of sync), `unavailable`, or `error` (a mismatch). URLs
-  in the payload have credentials removed.
+  10 ids of vectors from another model. Postgres and the collection are
+  compared by id: `missing_count` (stored memories without a vector),
+  `orphan_count` (vectors without a live memory), each with up to 10 sample
+  ids. `in_sync` is `true` only when nothing is missing, orphaned or
+  pending; it's `null` with `sync_scan: "partial"` when there are too many
+  memories to compare in one pass (more than 10,240), never a guessed
+  `true`. `status` is `healthy`, `degraded` (reachable but not in sync),
+  `unavailable`, or `error` (a mismatch). URLs in the payload have
+  credentials removed.
 - **Manual rebuild.** `POST /api/memories/vector-store/reindex?mode=missing|all&dry_run=`:
   an owner (the `manage_infrastructure` permission) may run either mode and
   also removes orphan vectors; the `X-Service-Key` caller may run
   `mode=missing` only and never removes anything. One rebuild runs at a
   time across replicas, with a 60 s cooldown after a real run
-  (`409 reindex_busy` carries `retry_after_seconds`); dry runs don't start
-  a cooldown. The Memories page's "Rebuild vectors" button runs
-  `mode=missing` for an owner. The CLI,
+  (`409 reindex_busy` carries `retry_after_seconds`). Dry runs don't take
+  the rebuild lease at all: they have their own lease and 60 s cooldown,
+  so repeated dry runs can't hold up a real rebuild or the automatic pass. The Memories page's "Rebuild vectors" button runs
+  `mode=missing` for an owner and appears whenever the page isn't in sync. The CLI,
   `python -m app.services.memory_vectors reindex [--mode missing|all] [--dry-run] [--batch-size N]`,
   also prunes orphans and is the only way to drop and re-create the
   collection (`--recreate --confirm-collection athena_memories`). Run the
@@ -572,7 +581,8 @@ through `admin/backend/app/services/memory_vectors.py`.
   on text truncated to 4000 characters (the model itself stops at 256
   tokens), in batches of 16, single-threaded; the image's peak memory is
   gated at 700 MiB in CI. admin-backend requests 512Mi and is limited to
-  1Gi. Memory text is capped at 8192 characters and summaries at 255.
+  1Gi. Memory text and search queries are capped at 8192 characters and
+  summaries at 255.
 - **Development.** Outside the image, fetch the model once into a cache
   directory and point `FASTEMBED_CACHE_PATH` at it:
   `FASTEMBED_CACHE_PATH=$HOME/.cache/fastembed python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2', lazy_load=True)"`.

@@ -160,3 +160,31 @@ def test_062_downgrade_drops_column(pg):
     _run_migration(pg, "upgrade")
     _run_migration(pg, "downgrade")
     assert _column(pg) is None
+
+
+def test_062_upgrade_gives_up_on_a_held_lock(pg):
+    """The migration's ALTER is lock-timeout bounded like the compat ALTER."""
+    locked = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        with pg.connect() as conn:
+            trans = conn.begin()
+            conn.execute(text("LOCK TABLE memories IN ACCESS EXCLUSIVE MODE"))
+            locked.set()
+            release.wait(60)
+            trans.rollback()
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    assert locked.wait(10)
+    try:
+        started = time.monotonic()
+        with pytest.raises(Exception) as info:
+            _run_migration(pg, "upgrade")
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        holder.join(60)
+    assert elapsed < 15
+    assert "lock timeout" in str(info.value).lower()

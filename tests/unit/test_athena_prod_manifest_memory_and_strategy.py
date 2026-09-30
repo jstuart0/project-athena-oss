@@ -34,3 +34,8 @@ def test_admin_backend_memory_budget():
     resources = container["resources"]
     assert _bytes(resources["limits"]["memory"]) >= _bytes("1Gi")
     assert _bytes(resources["requests"]["memory"]) >= _bytes("512Mi")
+
+
+def test_manifest_comment_names_no_private_design_reference():
+    text = (MANIFESTS / "admin-backend.yaml").read_text(encoding="utf-8")
+    assert "D16" not in text and "memory vector store design" not in text
