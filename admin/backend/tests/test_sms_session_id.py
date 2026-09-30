@@ -5,23 +5,24 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+from types import SimpleNamespace
 
 import pytest
-
-from shared.config import _clear_cache_for_tests
 
 NUMBER = "+15555550100"
 
 
 @pytest.fixture
 def key(monkeypatch):
+    """Patch the module's own get_config: other tests reload shared.config,
+    so clearing its cache wouldn't reach the function sms_webhook holds."""
+    import app.routes.sms_webhook as sms_webhook
+
     def use(value: str):
-        monkeypatch.setenv("SERVICE_API_KEY", value)
-        _clear_cache_for_tests()
+        monkeypatch.setattr(sms_webhook, "get_config", lambda: SimpleNamespace(service_api_key=value))
 
     use("sms-session-test-key-one")
-    yield use
-    _clear_cache_for_tests()
+    return use
 
 
 def _session_id(number: str) -> str:
