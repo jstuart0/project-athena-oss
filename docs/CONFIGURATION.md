@@ -661,8 +661,9 @@ can never claim owner. The precedence, most to least trusted:
 | Gateway (satellite/HA voice) | server-resolved via step 1-3 above | `household` — the gateway's fast path (`mode_gate.py`) only takes effect while the house is actually in owner mode |
 | SMS (`sms_webhook.py`) | server-resolved | `sms` |
 | LiveKit (`livekit_integration.py`) | server-resolved | `household` (a LiveKit room can only be created by a signed-in owner/operator, see below) |
-| jarvis-web, signed-in owner/operator | server-resolved via step 1-3 above | `web_authenticated` |
-| jarvis-web, home network | server-resolved via step 1-3 above (the guest network is always `guest`) | `web_local` |
+| jarvis-web, signed-in owner/operator or household member | server-resolved via step 1-3 above | `web_authenticated` |
+| jarvis-web, home network | server-resolved via step 1-3 above | `web_local` |
+| jarvis-web, guest network | always `guest` | `web_guest_net` |
 | jarvis-web, anyone else | never forwarded: 401 sign-in required | — |
 
 `household` is not a physical-presence check — it's every in-cluster caller
@@ -677,11 +678,47 @@ in the house.
 body field, and it affects **only** the owner-PIN voice-override branch —
 mode and permissions themselves come entirely from the table above. Only
 `household`, `sms`, and `web_authenticated` may attempt the owner-PIN
-utterance ("switch to owner mode, pin 123456"); `web_public` and untagged
-callers are refused before any throttle or mode-service call, with zero
-counter increments. A surface may only ever *say* "owner mode" in a
+utterance ("switch to owner mode, pin 123456"); `web_local`,
+`web_guest_net`, `web_public` and untagged callers are refused before any
+throttle or mode-service call, with zero counter increments. A surface may only ever *say* "owner mode" in a
 response if the request actually resolved to owner via the table above —
 narration never leads permission.
+
+**Who the assistant addresses by name.** The orchestrator decides this in
+one place (`build_query_context` and `resolve_addressee`), from the
+`caller_trust` value and the house's own mode:
+
+- **The staying guest's name** only for a guest-class caller —
+  `web_guest_net` (jarvis-web's guest network) or `sms` (a phone-matched
+  guest) — and only while the house's mode service reports guest mode and
+  isn't degraded. A household caller during a stay (the home network, a
+  signed-in member, a voice satellite) is never addressed as the guest.
+  Voice satellites and device-matched guest sessions aren't addressed by
+  name at all yet.
+- **A signed-in household member's first name** (see
+  `JARVIS_EDGE_NAME_HEADER`) only for `web_authenticated` during a stay. It's
+  given to the model as a quoted data field, not an instruction, and never
+  logged.
+- **The owner** in owner mode, by the `owner_name` base-knowledge entry
+  (never a display name); "what is my name" is answered from it directly.
+- **Nobody** while the mode service is degraded, and nobody on the public
+  audience.
+
+Answers addressed to a named caller (the guest by name, a signed-in member)
+are never read from or written to the semantic cache, so one caller's name
+can't reach another. A new `caller_trust` value must be classified in
+`tests/unit/test_trust_classification.py` before CI passes.
+
+**Base-knowledge name entries.** A static `guest_name` entry is ignored (the
+guest's name comes from the live stay, per caller; its row id is logged
+once as `base_knowledge_static_guest_name_ignored`). `owner_name`/`name`
+entries are rendered as "Property owner's name" in owner-mode prompts only.
+
+**SMS conversation ids** are `sms_` + 24 hex characters of an HMAC of the
+guest's number keyed on `SERVICE_API_KEY`; the number itself never appears.
+Rotating `SERVICE_API_KEY` therefore starts every SMS conversation afresh
+(earlier conversations simply expire). With an empty key (`DEV_MODE` only)
+the id still hides the number but isn't secret.
 
 **Guest floor and allowlist baselines.** Every guest's `restricted_entities`
 always includes `GUEST_BASELINE_RESTRICTED_ENTITIES` (a floor, unioned in,
@@ -1132,7 +1169,7 @@ Each request resolves to one class, from server-side evidence only:
 | Class | How | What it gets |
 |---|---|---|
 | Home network (`web_local`) | the home rule below, or an attested `home` from an auth proxy | UI, chat and household reads; owner-only routes while the house is in owner mode, else `403 guest_stay_active` |
-| Guest network | the address is in `JARVIS_GUEST_NETWORKS` | UI, chat and push-to-talk, always guest mode (even when the house is vacant or owner mode is forced), view-only controls, only the reads the guest UI loads (`403 guest_network` on sensors, media and appliances) |
+| Guest network (`web_guest_net`) | the address is in `JARVIS_GUEST_NETWORKS` | UI, chat and push-to-talk, always guest mode (even when the house is vacant or owner mode is forced), view-only controls, only the reads the guest UI loads (`403 guest_network` on sensors, media and appliances); the only browser class the assistant addresses by the staying guest's name |
 | Signed in (`web_authenticated`) | an auth proxy's attested identity in a household group, or a Bearer token for an owner/operator | everything |
 | Service | the orchestrator's `X-Service-Key` | the household GET routes it uses for voice answers (`/api/appliances/*`, `/api/sensors/*`, `/api/media`), nothing else |
 | Embed relay | chat-embed with `JARVIS_RELAY_KEY` | chat only, as the public audience |
@@ -1189,13 +1226,22 @@ mode). An address in both lists is a guest (with a warning).
    `X-authentik-username`) and its groups from `JARVIS_EDGE_GROUPS_HEADER`
    (default `X-authentik-groups`), split on `JARVIS_EDGE_GROUPS_SEPARATOR`
    (default `|`, Authentik's format) and matched exactly and
-   case-sensitively; anyone else gets `403 not_household`. The edge must
-   strip both header names from inbound requests; a name outside the
-   template's strip list stops jarvis-web at startup until
-   `JARVIS_EDGE_HEADERS_ACK_STRIPPED` lists exactly those custom names
-   (comma-separated) to confirm you added them there; `true`, or an ack
-   naming other headers, doesn't pass (the
-   full set it expects stripped is logged as `jarvis_edge_strip_headers`).
+   case-sensitively; anyone else gets `403 not_household`. A household
+   member's display name is read from `JARVIS_EDGE_NAME_HEADER` (default
+   `X-authentik-name`, which Authentik's outpost sends) and only its first
+   word is used, only if it's made of letters, marks and `.`, `-`, `'`
+   (1-32 characters); the assistant addresses the member by it during a
+   stay, the welcome greeting uses it, and it's never logged. A Bearer
+   sign-in carries no name. The edge must strip all three header names
+   from inbound requests; a name outside the template's strip list stops
+   jarvis-web at startup until `JARVIS_EDGE_HEADERS_ACK_STRIPPED` lists
+   exactly those custom names (comma-separated) to confirm you added them
+   there; `true`, or an ack naming other headers, doesn't pass (the full
+   set it expects stripped is logged as `jarvis_edge_strip_headers`).
+   jarvis-web also refuses to start if the identity, groups or name header
+   is `X-Jarvis-Edge-Class`, `X-Jarvis-Edge-Attestation`, `X-Service-Key`,
+   `X-Jarvis-Relay-Key` or `X-Jarvis-Relay-Client`, or if two of them name
+   the same header.
    Edge mode that can't serve the household doesn't start: no
    `TRUSTED_PROXY_CIDRS`, no usable `JARVIS_LOCAL_NETWORKS` entry, or no
    `JARVIS_ALLOWED_HOSTS` exits with `jarvis_edge_misconfigured`, so a
@@ -1530,7 +1576,7 @@ The `DEV_MODE=true` condition bypasses all OIDC gates; the other gates run in bo
 | `DEFAULT_CITY` | *(empty)* | Default city for weather |
 | `DEFAULT_STATE` | *(empty)* | Default state |
 | `DEFAULT_COUNTRY` | `US` | Default country |
-| `DEFAULT_TIMEZONE` | `UTC` | Default timezone |
+| `DEFAULT_TIMEZONE` | `UTC` | The property's IANA zone (for example `America/New_York`). It's the assistant's clock: the time and date in prompts and fast-path answers, "today"/"tomorrow", year inference for spoken dates, event/sports/transit day windows, and scheduled "at 7:00" waits. The process `TZ` is never used for these, so a UTC pod still answers in local time. The images ship the zone database (`tzdata`). An empty or unknown value falls back to UTC and logs `local_timezone_invalid` once |
 | `DEFAULT_AMTRAK_STATION` | *(empty)* | Default Amtrak station code |
 
 ---

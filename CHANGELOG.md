@@ -9,6 +9,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Rollout order.** Upgrade the orchestrator before jarvis-web: jarvis-web now sends `caller_trust: "web_guest_net"` for the guest network, which an older orchestrator rejects. Until jarvis-web is upgraded, no jarvis-web caller is addressed by the guest's name. To roll back, roll jarvis-web back first, then the orchestrator.
+- **Semantic cache.** Flush `athena_semantic:*` once after the orchestrator upgrade, so answers cached with a guest's name or a UTC date aren't served again.
+- **SMS conversations** start afresh once: their session ids change (see Security).
+- **Base knowledge.** A `guest_name` entry is now ignored, and `owner_name` is used only in owner mode. Nothing to migrate; delete a stale `guest_name` entry at your convenience.
+
+### Fixed
+
+- A household member using jarvis-web during a guest stay (at home or signed in) is no longer addressed by the staying guest's name. Only the guest network and SMS guests are addressed as the guest; a signed-in member is addressed by their own first name, and the owner by `owner_name` in owner mode.
+- The assistant's time and date, "today"/"tomorrow", spoken-date years, event, sports and transit day windows, and scheduled "at 7:00" waits follow `DEFAULT_TIMEZONE` instead of the pod's process timezone. SeatGeek, sports and community-event windows cover whole local days, including across daylight-saving changes. Impossible dates like "February 30" no longer raise an error.
+- Itineraries and other structured answers are no longer cut off at their second `---` divider or repeated `Label: value` line; thinking-mode repetition loops are still trimmed.
+
+### Changed
+
+- jarvis-web's guest network sends its own `caller_trust` value, `web_guest_net` (never allowed to use the owner PIN).
+- A degraded mode service addresses nobody by name and never frames the caller as the owner.
+- Answers addressed to a named caller are no longer served from or stored in the semantic cache.
+- The orchestrator, gateway and the community-events, SeatGeek, transportation, Tesla and sports images ship the IANA zone database.
+
+### Added
+
+- `JARVIS_EDGE_NAME_HEADER` (default `X-authentik-name`): the signed-in household member's display name from the auth proxy; only the first word is used. jarvis-web refuses to start if an edge identity, groups or name header is one of its own reserved headers, or two of them are the same.
+- CI: source guards that fail on a new process-timezone clock read, a newly logged name/address/location/phone number, or a `caller_trust` value the orchestrator doesn't accept.
+
+### Security
+
+- Guest, owner and member names, addresses, locations and full phone numbers are no longer written to logs (presence flags, ids and last-four digits instead). LiveKit logs the participant's session id, not its client-supplied identity.
+- SMS session ids no longer contain the guest's phone number: they're an HMAC keyed on `SERVICE_API_KEY`. Rotating that key starts every SMS conversation afresh.
+
 ---
 
 ## [0.5.0] - 2026-09-30 — Permission before every write, fail-closed web access, calendar-backed guest mode
