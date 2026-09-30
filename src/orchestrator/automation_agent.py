@@ -341,6 +341,23 @@ _LABEL_MAX_CHARS = 60
 _WHITESPACE_RUN = re.compile(r" +")
 
 
+def _scope_permissions() -> Dict[str, Any]:
+    """The permissions of the scope route_control opened for this turn, or
+    {} outside any scope (which never blocks)."""
+    from orchestrator.mode_permission import current_ha_scope
+
+    scope = current_ha_scope()
+    return scope.permissions if scope is not None else {}
+
+
+def _stay_read_only_refusal() -> Optional[str]:
+    """The refusal for an SMS from outside the current stay: it may not
+    create or remove automations (admin-DB writes)."""
+    from orchestrator.mode_permission import STAY_READ_ONLY_REFUSAL, is_stay_read_only
+
+    return STAY_READ_ONLY_REFUSAL if is_stay_read_only(_scope_permissions()) else None
+
+
 def _caller(context: Dict[str, Any]) -> Optional[tuple]:
     """The caller's voice-automation scope: ("owner", None), ("guest", name)
     for a named guest, or None when it can't be told (a guest turn with no
@@ -755,6 +772,9 @@ class AutomationAgent:
 
     async def _create_automation(self, args: Dict, context: Dict) -> str:
         """Create automation in HA and optionally store in admin backend."""
+        read_only = _stay_read_only_refusal()
+        if read_only:
+            return read_only
         if _caller(context) is None:
             return NO_CALLER_REFUSAL
         from orchestrator import write_fanout  # lazy, like mode_permission (see above)
@@ -1223,6 +1243,9 @@ class AutomationAgent:
         Home Assistant automation running), so voice "delete" archives. A
         guest can archive only their own rows; admin-backend enforces that.
         """
+        read_only = _stay_read_only_refusal()
+        if read_only:
+            return read_only
         caller = _caller(context)
         if caller is None:
             return NO_CALLER_REFUSAL

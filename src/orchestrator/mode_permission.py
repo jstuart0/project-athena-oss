@@ -795,6 +795,79 @@ def public_permissions() -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# SMS outside the current stay (answer-only)
+# ---------------------------------------------------------------------------
+
+# The one stay phase in which an SMS may change anything.
+SMS_WRITE_STAY_PHASES = frozenset({"current"})
+
+# Outside the current stay an SMS may ask travel and checkout questions,
+# which read nothing in the house (general_info carries the checkout FAQ
+# through base knowledge). Everything else, CONTROL included (so lock,
+# alarm, presence and camera state questions), is refused.
+OFF_STAY_ALLOWED_INTENTS = frozenset({
+    IntentCategory.GENERAL_INFO.value,
+    IntentCategory.WEATHER.value,
+    IntentCategory.DIRECTIONS.value,
+    IntentCategory.DINING.value,
+    IntentCategory.EVENTS.value,
+    IntentCategory.AIRPORTS.value,
+    IntentCategory.FLIGHTS.value,
+})
+
+OFF_STAY_ALLOWED_TOOLS = frozenset({
+    "get_weather", "get_directions", "search_restaurants", "search_events",
+    "get_airport_info", "search_flights", "search_transit", "get_train_schedule",
+})
+
+STAY_READ_ONLY_REFUSAL = (
+    "I can answer questions about your trip, but I can't change anything for the "
+    "house outside your stay dates."
+)
+
+
+def off_stay_overlay(permissions: Dict[str, Any], phase: Optional[str]) -> Dict[str, Any]:
+    """Guest permissions for an SMS from outside the current stay. Pure.
+
+    - every HA write is refused (``restricted_entities [".*"]``, the
+      ``__none__`` domain sentinel), by the existing authorize_* checks;
+    - ``stay_read_only`` makes the admin-DB writers refuse (automations,
+      notification preferences, SMS send; see is_stay_read_only);
+    - intents and offered tools narrow to OFF_STAY_* (house reads refused).
+    """
+    allowed = set(permissions.get("allowed_intents") or OFF_STAY_ALLOWED_INTENTS)
+    return {
+        **permissions,
+        "restricted_entities": [".*"],
+        "allowed_domains": ["__none__"],
+        "stay_read_only": True,
+        "sms_stay_phase": phase or "unknown",
+        "allowed_intents": sorted(allowed & OFF_STAY_ALLOWED_INTENTS),
+        "restricted_intents": sorted({i.value for i in IntentCategory} - OFF_STAY_ALLOWED_INTENTS),
+    }
+
+
+def is_stay_read_only(permissions: Optional[Dict[str, Any]]) -> bool:
+    """True when every admin-DB write must be refused for this request (an
+    SMS from outside the current stay). The one question admin-DB writers
+    ask; empty or missing permissions never block (owner/household)."""
+    return bool((permissions or {}).get("stay_read_only"))
+
+
+def offered_tools(tools: Optional[List[Dict[str, Any]]], permissions: Optional[Dict[str, Any]]):
+    """The tools this caller is offered (and may execute): the public
+    audience's allowlist, then the off-stay narrowing. Returns a new list
+    when it narrows, so cached schemas are never narrowed for later callers."""
+    if not tools:
+        return tools
+    if is_public_audience(permissions):
+        tools = [t for t in tools if t["function"]["name"] in PUBLIC_ALLOWED_TOOLS]
+    if is_stay_read_only(permissions):
+        tools = [t for t in tools if t["function"]["name"] in OFF_STAY_ALLOWED_TOOLS]
+    return tools
+
+
 def is_public_audience(permissions: Optional[Dict[str, Any]]) -> bool:
     """True when ``permissions`` belong to the public audience. The single
     way code asks this question after authorization."""
@@ -1236,9 +1309,12 @@ _SELF_GATED_VALUES = frozenset(i.value for i in SELF_GATED_INTENTS)
 
 
 def intent_refusal_message(permissions: Optional[Dict[str, Any]]) -> str:
-    """The one source of intent-refusal wording: public, degraded, or guest."""
+    """The one source of intent-refusal wording: public, off-stay SMS,
+    degraded, or guest."""
     if is_public_audience(permissions):
         return PUBLIC_INTENT_REFUSAL
+    if is_stay_read_only(permissions):
+        return STAY_READ_ONLY_REFUSAL
     if (permissions or {}).get("mode") == "degraded":
         return DEGRADED_INTENT_REFUSAL
     return GUEST_INTENT_REFUSAL
@@ -1250,8 +1326,9 @@ def intent_gate_refusal(intent: Any, permissions: Optional[Dict[str, Any]]) -> O
     Exempt: no intent and UNKNOWN (chit-chat reaches only the audience's
     already-narrowed tools). SELF_GATED_INTENTS are left to their node
     (which refuses before any dispatch with a domain-specific message),
-    except for the public audience: it never enters those nodes at all,
-    since some of them answer house-state reads before their own check.
+    except for the public audience and an SMS from outside the current
+    stay: they never enter those nodes at all, since some of them answer
+    house-state reads before their own check.
     Every entry path asks this before routing: the graph router, the
     streaming runner and /query's post-graph check.
     """
@@ -1262,9 +1339,11 @@ def intent_gate_refusal(intent: Any, permissions: Optional[Dict[str, Any]]) -> O
         return None
     if is_public_audience(permissions):
         return None if value in PUBLIC_ALLOWED_INTENTS else PUBLIC_INTENT_REFUSAL
+    subject = intent if hasattr(intent, "value") else SimpleNamespace(value=str(value))
+    if is_stay_read_only(permissions):
+        return None if check_intent_permission(subject, permissions or {}) else STAY_READ_ONLY_REFUSAL
     if value in _SELF_GATED_VALUES:
         return None
-    subject = intent if hasattr(intent, "value") else SimpleNamespace(value=str(value))
     if check_intent_permission(subject, permissions or {}):
         return None
     return intent_refusal_message(permissions)
@@ -1519,6 +1598,8 @@ async def resolve_request_authorization(
     request_mode: Optional[str],
     guest_info: Optional[Dict[str, Any]],
     caller_trust: Optional[str] = None,
+    *,
+    sms_stay_phase: Optional[str] = None,
 ) -> RequestAuthorization:
     """The single mode/permissions resolution path for every orchestrator
     entry point (D7, D6, D5).
@@ -1540,6 +1621,13 @@ async def resolve_request_authorization(
     ``mode="guest"`` with ``public_permissions()``, whatever the server's
     mode, the guest profile or a degraded mode service say. The mode
     service is still read, for ``mode_info`` only.
+
+    An SMS (``caller_trust == "sms"``) from outside the current stay
+    (``sms_stay_phase`` anything but "current", missing or unknown
+    included: fail closed) gets off_stay_overlay on top: answer-only.
+    ``sms_stay_phase`` comes from the admin-backend webhook's context; the
+    caller is trusted server code for it, like caller_trust. It's ignored
+    for every other caller.
     """
     mode_info = await get_current_mode()
     server_mode = mode_info.get("mode", "owner")
@@ -1584,6 +1672,10 @@ async def resolve_request_authorization(
             permissions = await get_guest_permissions()
     else:
         permissions = normalize_permissions(mode_info.get("permissions", {}))
+
+    if caller_trust == "sms" and sms_stay_phase not in SMS_WRITE_STAY_PHASES:
+        permissions = normalize_permissions(off_stay_overlay(permissions, sms_stay_phase))
+        logger.info("sms_stay_phase_read_only", phase=sms_stay_phase or "unknown")
 
     return RequestAuthorization(
         mode=effective_mode,

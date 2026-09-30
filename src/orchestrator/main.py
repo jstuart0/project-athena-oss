@@ -156,7 +156,7 @@ from orchestrator.mode_permission import (
     intent_gate_refusal,
     is_public_audience,
     is_public_caller,
-    PUBLIC_ALLOWED_TOOLS,
+    offered_tools,
     PUBLIC_INTENT_REFUSAL,
     record_intent_gate_refusal,
     resolve_request_authorization,
@@ -4607,11 +4607,11 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
         timing_breakdown["tool_loading"] = time.time() - tool_load_start
 
-        # The public audience is offered only its hard-coded allowlist. A new
-        # list, so the cached schemas are never narrowed for later callers.
-        if tools and is_public_audience(state.permissions):
-            tools = [t for t in tools if t["function"]["name"] in PUBLIC_ALLOWED_TOOLS]
-        # What this caller may execute: after the mode and public filters,
+        # The public audience is offered only its hard-coded allowlist, and an
+        # SMS from outside the current stay only travel tools. A new list, so
+        # the cached schemas are never narrowed for later callers.
+        tools = offered_tools(tools, state.permissions)
+        # What this caller may execute: after the mode, public and stay filters,
         # before the per-intent narrowing below (which only shapes the offer).
         entitled_tool_names = frozenset(t["function"]["name"] for t in (tools or []))
 
@@ -6384,7 +6384,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # own mode.
         with timing_tracker.track("pre_graph", "mode_determination"):
             authz = await resolve_request_authorization(
-                request.mode, guest_info, caller_trust=request.caller_trust
+                request.mode, guest_info, caller_trust=request.caller_trust,
+                sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
             permissions = authz.permissions
@@ -7236,7 +7237,8 @@ async def process_query_stream(request: QueryRequest):
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares.
             authz = await resolve_request_authorization(
-                request.mode, guest_info, caller_trust=request.caller_trust
+                request.mode, guest_info, caller_trust=request.caller_trust,
+                sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
 
@@ -7552,7 +7554,8 @@ async def process_query_stream_v2(request: QueryRequest):
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares.
             authz = await resolve_request_authorization(
-                request.mode, guest_info, caller_trust=request.caller_trust
+                request.mode, guest_info, caller_trust=request.caller_trust,
+                sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
 

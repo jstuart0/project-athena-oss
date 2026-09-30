@@ -56,3 +56,19 @@ def test_message_is_domain_separated(key):
         b"sms-session-test-key-one", b"athena-sms-session-v1|" + NUMBER.encode(), hashlib.sha256,
     ).hexdigest()[:24]
     assert _session_id(NUMBER) == "sms_" + separated
+
+
+_DOMAIN = b"athena-sms-session-v1|"
+
+
+def test_golden_vector_national_number(key):
+    expected = hmac.new(b"sms-session-test-key-one", _DOMAIN + b"5555550100", hashlib.sha256).hexdigest()[:24]
+    assert _session_id("5555550100") == "sms_" + expected
+
+
+def test_golden_vector_alphanumeric_sender(key):
+    """An alphanumeric sender normalises to nothing; its id is stable and
+    doesn't raise."""
+    expected = hmac.new(b"sms-session-test-key-one", _DOMAIN + b"", hashlib.sha256).hexdigest()[:24]
+    assert _session_id("ATHENA") == "sms_" + expected
+

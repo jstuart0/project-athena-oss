@@ -72,7 +72,7 @@ jobs:
       - name: Run the behaviour tests
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_helpers.py tests/unit/test_finalize.py tests/unit/test_local_time.py tests/unit/test_base_knowledge_clock.py tests/unit/test_date_extraction_local.py tests/unit/test_planning_prompt_local_date.py tests/unit/test_gateway_simple_commands_clock.py tests/unit/test_sequence_wait_local.py tests/unit/test_prompt_clock_sites.py tests/unit/test_addressee_matrix.py tests/unit/test_trust_classification.py tests/unit/test_assistant_profile_household.py tests/unit/test_semantic_cache_addressee.py tests/unit/test_base_knowledge_names.py tests/unit/test_public_caller_orchestrator.py tests/unit/test_logging_quiet_request_urls.py tests/unit/test_automation_agent_scope.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_helpers.py tests/unit/test_finalize.py tests/unit/test_local_time.py tests/unit/test_base_knowledge_clock.py tests/unit/test_date_extraction_local.py tests/unit/test_planning_prompt_local_date.py tests/unit/test_gateway_simple_commands_clock.py tests/unit/test_sequence_wait_local.py tests/unit/test_prompt_clock_sites.py tests/unit/test_addressee_matrix.py tests/unit/test_trust_classification.py tests/unit/test_assistant_profile_household.py tests/unit/test_semantic_cache_addressee.py tests/unit/test_base_knowledge_names.py tests/unit/test_public_caller_orchestrator.py tests/unit/test_logging_quiet_request_urls.py tests/unit/test_automation_agent_scope.py tests/unit/test_sms_stay_phase_authorization.py
 
       # The sports case needs feedparser, which only the sports image
       # carries; the sports-behaviour job runs it.
@@ -162,4 +162,4 @@ jobs:
       - name: Run the route-auth and guest-data tests
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/test_route_auth_population.py tests/test_route_walk_admin.py tests/test_calendar_sources_auth.py tests/test_guest_routes_auth.py tests/test_admin_config_real_seam.py tests/test_sms_webhook_signature.py tests/test_sms_session_id.py tests/test_settings_ollama_url_ssrf.py
+          python3 -m pytest -q -p no:cacheprovider tests/test_route_auth_population.py tests/test_route_walk_admin.py tests/test_calendar_sources_auth.py tests/test_guest_routes_auth.py tests/test_admin_config_real_seam.py tests/test_sms_phone_match.py tests/test_sms_webhook_signature.py tests/test_sms_session_id.py tests/test_settings_ollama_url_ssrf.py

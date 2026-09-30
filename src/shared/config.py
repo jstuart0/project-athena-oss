@@ -566,6 +566,33 @@ class AthenaConfig(BaseSettings):
     ha_write_fanout_confirm_threshold: int = Field(default=_FANOUT_CONFIRM_THRESHOLD_DEFAULT, ge=0)
     ha_write_fanout_hard_limit: int = Field(default=_FANOUT_HARD_LIMIT_DEFAULT, ge=0)
 
+    # sms_default_country_code: the country calling code (1-3 digits, no
+    #   "+") prefixed to a booking's national phone number when matching an
+    #   incoming SMS to a stay (admin-backend's sms_webhook.to_e164). An
+    #   invalid value logs one ERROR (sms_default_country_code_invalid) and
+    #   falls back to "1". A mismatch fails closed: the stay doesn't match.
+    sms_default_country_code: str = Field(default="1")
+    # twilio_allow_unsigned: "true" (exactly) lets admin-backend accept
+    #   Twilio webhooks with no signature check when TWILIO_AUTH_TOKEN is
+    #   unset outside DEV_MODE; anything else answers them 503. Opting in
+    #   means anyone who knows a guest's phone number can text as them. A
+    #   string on purpose: pydantic's bool parsing would also accept
+    #   1/yes/on. Ignored whenever TWILIO_AUTH_TOKEN is set.
+    twilio_allow_unsigned: str = Field(default="")
+
+    @field_validator("sms_default_country_code", mode="before")
+    @classmethod
+    def _validate_sms_country_code(cls, v: object) -> str:
+        value = v if isinstance(v, str) else ""
+        if 1 <= len(value) <= 3 and all(c in "0123456789" for c in value):
+            return value
+        logger.error(
+            "sms_default_country_code_invalid: SMS_DEFAULT_COUNTRY_CODE must be 1-3 digits "
+            "with no '+' (got %d characters); using 1",
+            len(value),
+        )
+        return "1"
+
     @model_validator(mode="after")
     def _validate_fanout_limits(self) -> "AthenaConfig":
         # Every service loading the shared config reads these, so an
