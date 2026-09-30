@@ -299,7 +299,7 @@ kubectl rollout status deployment/athena-admin-backend -n athena-prod
 
 A browser tab still running the previous frontend reconnects with a fresh ticket; a reload picks up the new frontend.
 
-**No request URLs in the admin logs:** admin-backend logs no access lines, and every uvicorn log line has its query string removed, including the WebSocket handshake line (which would otherwise carry `?token=<ticket>`). admin-frontend's nginx doesn't log `/api` requests. What remains is your own ingress: if your reverse proxy (e.g. Traefik) writes access logs, configure it to drop query strings, or it will record the ticket for the ≤ 45 seconds it's valid.
+**No request URLs in the admin logs:** admin-backend logs no access lines, and every uvicorn log line has its query string removed, including the WebSocket handshake line (which would otherwise carry `?token=<ticket>`). admin-frontend's nginx writes no `/api` line to its access log, and its error log for `/api` takes only `crit` and worse, so an unreachable admin-backend (logged at `error`, request line included) doesn't put `/api` query strings there either. What remains is your own ingress: if your reverse proxy (e.g. Traefik) writes access logs, configure it to drop query strings, or it will record the ticket for the ≤ 45 seconds it's valid.
 
 ---
 

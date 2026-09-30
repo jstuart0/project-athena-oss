@@ -17,7 +17,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Twilio.** Set `TWILIO_AUTH_TOKEN` (and `TWILIO_WEBHOOK_BASE_URL`) wherever SMS is used: without the token, admin-backend now answers the SMS webhooks with 503 outside `DEV_MODE`. `TWILIO_ALLOW_UNSIGNED=true` restores unsigned acceptance, at the cost that anyone who knows a guest's number can text as that guest.
 - **SMS numbers.** Bookings stored with a national (non-`+`) phone number are matched with `SMS_DEFAULT_COUNTRY_CODE` (default `1`). Set it if your guests' numbers aren't North American.
 - **Admin API docs.** `/docs`, `/redoc` and `/openapi.json` on admin-backend are served only with `DEV_MODE=true`.
-- **Log-based checks.** admin-backend no longer writes access lines, and admin-frontend's nginx no longer logs `/api`; a check that looked for a request in either log needs another signal.
+- **Log-based checks.** admin-backend no longer writes access lines, and admin-frontend's nginx writes no `/api` access line and no `/api` error line below `crit` (an unreachable admin-backend included); a check that looked for a request in either log needs another signal.
 
 ### Added
 
@@ -41,7 +41,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Guest records, the current stay's guests, device-to-guest sessions, voice automations, pipeline transcripts, proxied debug logs and the voice-pipeline mode are no longer readable or writable without a credential. Note that `SERVICE_API_KEY` can read guest data: keep it in a Secret.
 - A guest-scoped service call sees and changes only its own stay's voice automations, never another stay's (even one with the same guest name, like every "Airbnb Guest") or the owner's. Name-based bulk archive and restore are owner-only.
 - No log line carries the start of a query, transcript, answer, response body, exception message or cache key; lengths are logged instead.
-- admin-backend's log carries no request URL or WebSocket ticket, and admin-frontend's nginx no longer logs `/api` requests.
+- admin-backend's log carries no request URL or WebSocket ticket, and admin-frontend's nginx logs no `/api` request line, in its access log or, when admin-backend is unreachable, its error log.
 
 ---
 
