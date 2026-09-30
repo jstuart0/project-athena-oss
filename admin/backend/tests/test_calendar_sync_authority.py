@@ -375,3 +375,24 @@ async def test_ical_orphan_is_not_adopted(db):
     mine = db.query(CalendarEvent).filter(CalendarEvent.source_id == s.id).one()
     assert mine.external_id == _derived(s.id, "lodgify_43")
     assert mine.status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_api_insert_falls_back_when_the_derived_key_is_taken(db):
+    g = _source(db, name="G", source_type="generic_ical", ical_url="https://feed.example.com/g.ics")
+    s = _source(db)
+    _key(db)
+    g_row = _event(db, external_id="lodgify_44", source_id=g.id, source="generic_ical", created_by="ical_sync")
+    squatter = _event(db, external_id=_derived(s.id, "lodgify_44"), source_id=None, created_by="ical_sync",
+                      source="generic_ical")
+    before = {r.id: _snapshot(db, r.id) for r in (g_row, squatter)}
+    events = [_api_event(44, date(2026, 12, 20), date(2026, 12, 23))]
+    with patch(API, new=AsyncMock(return_value=events)):
+        outcome = await _run(s.id, db)
+    assert outcome.status == "success", outcome
+    assert outcome.added == 1 and outcome.rekeyed == 1
+    for rid, snap in before.items():
+        assert _snapshot(db, rid) == snap
+    mine = db.query(CalendarEvent).filter(CalendarEvent.source_id == s.id).one()
+    assert mine.external_id.startswith(f"ical-nouid:{s.id}:")
+    assert mine.status == "confirmed" and mine.created_by == "lodgify_api_sync"

@@ -277,9 +277,13 @@ def _upsert_api_events(db, source: CalendarSource, events: list, run_stamp: date
         if owner is None:
             key = k
         else:
-            key = derived
             counts.rekeyed += 1
             _log_rekeyed("api", source, k, owner)
+            # The derived key is normally free; a row outside this source
+            # holding it (e.g. the orphan of a deleted source that had this
+            # id) is never touched, so fall back like the iCal branch.
+            derived_taken = db.query(CalendarEvent.id).filter(CalendarEvent.external_id == derived).first()
+            key = derived if derived_taken is None else _nouid_key(source.id)
         row = _new_event(source, event, key, API_CREATED_BY, run_stamp)
         db.add(row)
         inserted[k] = row
