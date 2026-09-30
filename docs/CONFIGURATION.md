@@ -702,7 +702,14 @@ one place (`build_query_context` and `resolve_addressee`), from the
 - **The owner** in owner mode, by the `owner_name` base-knowledge entry
   (never a display name); "what is my name" is answered from it directly.
 - **Nobody** while the mode service is degraded, and nobody on the public
-  audience.
+  audience. A degraded request is also never served from or stored in the
+  semantic cache, and its prompt carries no name or owner base-knowledge
+  entries.
+
+The guest's and a member's names are given to the model as quoted data
+fields, after a clean: letters, marks and `.`, `-`, `'` only (a guest's
+name at most 4 words and 64 characters; a member's first word only). A
+name that fails the clean isn't used.
 
 Answers addressed to a named caller (the guest by name, a signed-in member)
 are never read from or written to the semantic cache, so one caller's name
@@ -713,6 +720,9 @@ can't reach another. A new `caller_trust` value must be classified in
 guest's name comes from the live stay, per caller; its row id is logged
 once as `base_knowledge_static_guest_name_ignored`). `owner_name`/`name`
 entries are rendered as "Property owner's name" in owner-mode prompts only.
+Every other user/owner entry whose key contains `name`, and every
+`owner`-category entry, is likewise rendered only in owner mode, and none
+of them while the mode service is degraded.
 
 **SMS conversation ids** are `sms_` + 24 hex characters of an HMAC of the
 guest's number keyed on `SERVICE_API_KEY`; the number itself never appears.
@@ -1240,8 +1250,9 @@ mode). An address in both lists is a guest (with a warning).
    set it expects stripped is logged as `jarvis_edge_strip_headers`).
    jarvis-web also refuses to start if the identity, groups or name header
    is `X-Jarvis-Edge-Class`, `X-Jarvis-Edge-Attestation`, `X-Service-Key`,
-   `X-Jarvis-Relay-Key` or `X-Jarvis-Relay-Client`, or if two of them name
-   the same header.
+   `X-Jarvis-Relay-Key`, `X-Jarvis-Relay-Client`, `Authorization`,
+   `Cookie`, `Host`, `X-Forwarded-For` or `CF-Connecting-IP`, or if two of
+   them name the same header.
    Edge mode that can't serve the household doesn't start: no
    `TRUSTED_PROXY_CIDRS`, no usable `JARVIS_LOCAL_NETWORKS` entry, or no
    `JARVIS_ALLOWED_HOSTS` exits with `jarvis_edge_misconfigured`, so a

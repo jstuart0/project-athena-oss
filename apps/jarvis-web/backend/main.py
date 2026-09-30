@@ -776,7 +776,7 @@ async def chat(message: ChatMessage, request: Request, response: Response):
     guest = await get_current_guest() if caller.addressed_as_guest else None
     context = _chat_context(caller, guest)
     if context:
-        logger.info("guest_context_attached", guest_id=context.get("guest_id"))
+        logger.info("chat_context_attached", context_keys=sorted(context))
 
     try:
         # mode and caller_trust are server-derived (caller_auth), never from

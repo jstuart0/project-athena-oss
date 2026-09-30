@@ -98,8 +98,9 @@
 # JARVIS_EDGE_HEADERS_ACK_STRIPPED=<exactly the custom names, comma-separated>
 # says you did (a boolean like "true" is never accepted). It also refuses to
 # start if any of the three names is X-Jarvis-Edge-Class,
-# X-Jarvis-Edge-Attestation, X-Service-Key, X-Jarvis-Relay-Key or
-# X-Jarvis-Relay-Client, or if two of them are the same header.
+# X-Jarvis-Edge-Attestation, X-Service-Key, X-Jarvis-Relay-Key,
+# X-Jarvis-Relay-Client, Authorization, Cookie, Host, X-Forwarded-For or
+# CF-Connecting-IP, or if two of them are the same header.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:

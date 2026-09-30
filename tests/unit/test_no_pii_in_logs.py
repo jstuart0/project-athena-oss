@@ -34,7 +34,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCAN_ROOTS = ("src", "apps", "admin/backend/app")
 SKIP = {
-    "src/jetson/athena_lite_llm.py": "PEP 701 f-string at :134; not a runtime image, parse fails on 3.11",
+    "src/jetson/athena_lite_llm.py": "a syntax error at :134 (an unclosed call); not a runtime image, parses on no Python version",
 }
 
 HOUSE_KEYS = (
