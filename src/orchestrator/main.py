@@ -156,6 +156,7 @@ from orchestrator.mode_permission import (
     intent_gate_refusal,
     is_public_audience,
     is_public_caller,
+    is_stay_read_only,
     offered_tools,
     PUBLIC_INTENT_REFUSAL,
     record_intent_gate_refusal,
@@ -6784,9 +6785,14 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 )
             # If tool_result is None, feature is disabled - continue with normal flow
 
-        # Check for memory forget intent BEFORE running the state machine
+        # Check for memory forget intent BEFORE running the state machine.
+        # Forgetting writes to the admin DB: never for the public audience or
+        # an SMS from outside the stay (answer-only).
         try:
-            memory_manager = None if is_public_audience(permissions) else await get_memory_manager()
+            memory_manager = (
+                None if is_public_audience(permissions) or is_stay_read_only(permissions)
+                else await get_memory_manager()
+            )
             if memory_manager is not None and memory_manager.should_forget_memory(request.query):
                 logger.info("memory_forget_intent_detected", query=request.query[:50])
 
@@ -6974,9 +6980,14 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             timing_tracker.track_sync("post_graph", "session_update", time.time() - session_update_start)
 
         # Memory creation: Check if this conversation should create a memory
+        # (an admin-DB write: never for the public audience or an SMS from
+        # outside the stay).
         memory_creation_start = time.time()
         try:
-            memory_manager = None if is_public_audience(permissions) else await get_memory_manager()
+            memory_manager = (
+                None if is_public_audience(permissions) or is_stay_read_only(permissions)
+                else await get_memory_manager()
+            )
             if memory_manager is not None and memory_manager.should_create_memory(request.query, answer, intent_str):
                 # Extract memorable content and calculate importance
                 memorable_content = memory_manager.extract_memorable_fact(request.query, answer, intent_str)

@@ -293,3 +293,20 @@ def test_no_overlap_with_the_travel_intents_still_refuses_house_intents(monkeypa
     for intent in (IntentCategory.CONTROL, IntentCategory.NEWS, IntentCategory.STREAMING, IntentCategory.RECIPES):
         assert not mp.check_intent_permission(intent, perms), intent
 
+
+def test_memory_writes_skip_an_off_stay_sms():
+    """process_query's two memory writers (forget, create) write to the admin
+    DB (/api/memories/internal/*). Like the public audience, an SMS from
+    outside the stay gets no memory manager there. Source-level: the writes
+    run after the graph, which this harness doesn't drive."""
+    tree = ast.parse((REPO_ROOT / "src/orchestrator/main.py").read_text())
+    (process_query,) = [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "process_query"]
+    writers = []
+    for node in ast.walk(process_query):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and getattr(node.targets[0], "id", None) == "memory_manager" and isinstance(node.value, ast.IfExp)):
+            writers.append(ast.unparse(node.value.test))
+    assert len(writers) == 2, writers
+    for test in writers:
+        assert "is_public_audience(permissions)" in test and "is_stay_read_only(permissions)" in test, test
+
