@@ -508,6 +508,84 @@ entry yet. This is a diagnostic log line only; it never blocks startup.
 | `QDRANT_HOST` | `localhost` | Qdrant host |
 | `QDRANT_PORT` | `6333` | Qdrant port |
 | `QDRANT_URL` | `http://localhost:6333` | Full URL (overrides host/port) |
+| `FASTEMBED_CACHE_PATH` | `/opt/fastembed_cache` in the image | fastembed's own model cache directory. The admin-backend image bakes the embedding model here at build time. |
+| `HF_HUB_OFFLINE` | `1` in the image | Hugging Face's own offline switch. The embedder also always passes `local_files_only=True`, so it never downloads a model at runtime. |
+
+#### Memory vectors
+
+PostgreSQL is the source of truth for memories; the Qdrant collection
+`athena_memories` holds one vector per memory and can always be rebuilt
+from Postgres. All of admin-backend's Qdrant and embedding access goes
+through `admin/backend/app/services/memory_vectors.py`.
+
+- **The collection manages itself.** admin-backend creates `athena_memories`
+  (384 dimensions, Cosine) when it's missing and records the embedding
+  model (`sentence-transformers/all-MiniLM-L6-v2`) in the collection's
+  metadata. Qdrant 1.16 and later keep that metadata; older servers
+  (verified on 1.12.1) accept and drop it, so every point also carries an
+  `embedding_model` stamp, and points stamped with another model count as
+  a model mismatch on every version. A collection with the wrong shape or a
+  different recorded model is never used and never modified automatically.
+  When admin-backend has to create the collection, it first marks every
+  memory that claimed a stored vector as pending, so a collection lost at
+  runtime (a storage change, a wiped volume) is rebuilt automatically.
+- **Every memory is saved first.** A memory is written to Postgres as
+  `vector_status: pending`, then embedded; only a confirmed vector write
+  marks it `stored`, and only stored memories are served by semantic
+  search. Editing a memory's text, summary, category or importance marks it
+  pending until its vector is rewritten. When the vector store is down, the
+  memory is still saved (and logged as `memory_vector_store_failed`).
+- **Automatic rebuild.** A background task re-checks the store (every 30 s
+  while it's unavailable, every 5 minutes while it's healthy) and embeds up
+  to 500 pending memories on startup, whenever the store recovers, and every
+  10 minutes while any remain. It never deletes vectors.
+- **Keyword fallback.** When semantic search can't run, the orchestrator's
+  memory recall (`GET /api/memories/internal/search`) falls back to keyword
+  matching: `qdrant_available` means "these results are usable",
+  `semantic_available` says whether semantic search contributed, and
+  `search_type` is `keyword_fallback`. This holds whether or not the
+  `hybrid_memory_search` feature is enabled. Keyword matching keeps numbers
+  and codes whole (`4417`, `b7x9`), so a door code or Wi-Fi password is
+  still found during an outage.
+- **Status.** The Memories page shows `GET /api/memories/qdrant/health`:
+  `pg_live_count`, `points_count`, `pending_count`, the store state
+  (`ready`, `unavailable`, `embedder_unavailable`, `shape_mismatch`,
+  `model_mismatch`), the expected and recorded embedding model, and up to
+  10 ids of vectors from another model. Postgres and the collection are
+  compared by id: `missing_count` (stored memories without a vector),
+  `orphan_count` (vectors without a live memory), each with up to 10 sample
+  ids. `in_sync` is `true` only when nothing is missing, orphaned or
+  pending; it's `null` with `sync_scan: "partial"` when there are too many
+  memories to compare in one pass (more than 10,240), never a guessed
+  `true`. `status` is `healthy`, `degraded` (reachable but not in sync),
+  `unavailable`, or `error` (a mismatch). URLs in the payload have
+  credentials removed.
+- **Manual rebuild.** `POST /api/memories/vector-store/reindex?mode=missing|all&dry_run=`:
+  an owner (the `manage_infrastructure` permission) may run either mode and
+  also removes orphan vectors; the `X-Service-Key` caller may run
+  `mode=missing` only and never removes anything. One rebuild runs at a
+  time across replicas, with a 60 s cooldown after a real run
+  (`409 reindex_busy` carries `retry_after_seconds`). Dry runs don't take
+  the rebuild lease at all: they have their own lease and 60 s cooldown,
+  so repeated dry runs can't hold up a real rebuild or the automatic pass. The Memories page's "Rebuild vectors" button runs
+  `mode=missing` for an owner and appears whenever the page isn't in sync. The CLI,
+  `python -m app.services.memory_vectors reindex [--mode missing|all] [--dry-run] [--batch-size N]`,
+  also prunes orphans and is the only way to drop and re-create the
+  collection (`--recreate --confirm-collection athena_memories`). Run the
+  CLI as a one-off Pod with its own memory limit, never as an exec into a
+  serving admin-backend pod: it loads a second copy of the model.
+- **Which Qdrant URL.** The Memories page and the memory store use
+  admin-backend's `QDRANT_URL`. The header status bar's Qdrant indicator
+  reads the service registry entry instead; point both at the same server.
+- **Sizing and limits.** The embedder runs one embed at a time per process,
+  on text truncated to 4000 characters (the model itself stops at 256
+  tokens), in batches of 16, single-threaded; the image's peak memory is
+  gated at 700 MiB in CI. admin-backend requests 512Mi and is limited to
+  1Gi. Memory text and search queries are capped at 8192 characters and
+  summaries at 255.
+- **Development.** Outside the image, fetch the model once into a cache
+  directory and point `FASTEMBED_CACHE_PATH` at it:
+  `FASTEMBED_CACHE_PATH=$HOME/.cache/fastembed python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2', lazy_load=True)"`.
 
 ### SearXNG (Web Search)
 

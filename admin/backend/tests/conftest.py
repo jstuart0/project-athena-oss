@@ -26,11 +26,18 @@ from sqlalchemy.pool import StaticPool
 os.environ["DEV_MODE"] = "true"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ.setdefault("SERVICE_API_KEY", "test-service-key-for-hardening-tests")
+# The memory vector store must never reach a real Qdrant from the unit suite:
+# a closed loopback port, so even a module-scoped TestClient(app) (which runs
+# the app's startup) can't touch localhost:6333.
+os.environ["QDRANT_URL"] = "http://127.0.0.1:1"
 
 from app.database import Base, get_db
 from app.models import User, UserAPIKey
 from app.auth.oidc import get_current_user
+from app.services import memory_vectors
 from main import app
+
+memory_vectors.set_background_enabled(False)
 
 
 # Create test database
@@ -40,6 +47,99 @@ engine = create_engine(
     poolclass=StaticPool,
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+# ---------------------------------------------------------------------------
+# Memory vector store harness (every test gets an in-memory Qdrant, a
+# deterministic embedder, a controllable clock and the test session factory)
+# ---------------------------------------------------------------------------
+
+def fake_embed(texts):
+    """384-d unit vectors seeded from sha256(text): deterministic, distinct."""
+    import hashlib
+    import math
+    import random
+
+    vectors = []
+    for text in texts:
+        rng = random.Random(int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big"))
+        raw = [rng.gauss(0.0, 1.0) for _ in range(memory_vectors.EMBEDDING_DIM)]
+        norm = math.sqrt(sum(x * x for x in raw)) or 1.0
+        vectors.append([x / norm for x in raw])
+    return vectors
+
+
+class FakeClock:
+    def __init__(self):
+        from datetime import datetime, timezone
+
+        self._mono = 1000.0
+        self._now = datetime.now(timezone.utc)
+
+    def monotonic(self):
+        return self._mono
+
+    def utcnow(self):
+        return self._now
+
+    def advance(self, seconds):
+        from datetime import timedelta
+
+        self._mono += seconds
+        self._now += timedelta(seconds=seconds)
+
+
+def failing_client():
+    """A client pointed at a port that was just free: every call is refused."""
+    import socket
+    from qdrant_client import QdrantClient
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return QdrantClient(url=f"http://127.0.0.1:{port}", timeout=1, check_compatibility=False)
+
+
+class DyingClient:
+    """Delegates to ``inner`` until ``die()``; then every call is refused."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._dead = False
+
+    def die(self):
+        self._dead = True
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def _call(*args, **kwargs):
+            if self._dead:
+                from qdrant_client.http.exceptions import ResponseHandlingException
+
+                raise ResponseHandlingException(ConnectionRefusedError("connection refused"))
+            return attr(*args, **kwargs)
+
+        return _call
+
+
+@pytest.fixture(autouse=True)
+def memory_vector_test_env():
+    from qdrant_client import QdrantClient
+
+    memory_vectors.reset_for_tests()
+    clock = FakeClock()
+    memory_vectors.set_client_for_tests(QdrantClient(":memory:"))
+    memory_vectors.set_embedder_for_tests(fake_embed)
+    memory_vectors.set_clock_for_tests(clock)
+    memory_vectors.set_session_factory_for_tests(TestingSessionLocal)
+    try:
+        yield clock
+    finally:
+        memory_vectors.reset_for_tests()
 
 
 @pytest.fixture(scope="function")

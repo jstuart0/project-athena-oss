@@ -200,3 +200,34 @@ def test_guest_forget_passes_session(client, monkeypatch):
     assert resp.status_code == 200
     manager.delete_memory_by_content.assert_awaited_once()
     assert manager.delete_memory_by_content.await_args.kwargs.get("guest_session_id") == 5
+
+
+def test_keyword_fallback_results_are_kept(monkeypatch):
+    """Semantic search down, keyword fallback up: the admin reports results
+    usable (qdrant_available true) and the manager keeps them."""
+    kw = {"content": "the garage code is 4417", "scope": "owner", "score": 1.0}
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "results": [kw], "qdrant_available": True, "semantic_available": False,
+            "search_type": "keyword_fallback",
+        })
+
+    real = httpx.AsyncClient
+
+    class _Client(real):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+    async def _run():
+        manager = memory_manager_module.MemoryManager()
+        await manager.initialize()
+        try:
+            return await manager.get_relevant_memories("garage code", mode="owner")
+        finally:
+            await manager.close()
+
+    assert asyncio.run(_run()) == [kw]

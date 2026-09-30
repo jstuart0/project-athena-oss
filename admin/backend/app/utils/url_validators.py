@@ -16,6 +16,7 @@ Rules enforced:
   enforces a 2048-character length cap (xander L-2).
 """
 import ipaddress
+import re
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -268,3 +269,15 @@ def parse_endpoint_url(endpoint_url: str) -> dict:
         'protocol': scheme,
         'health_endpoint': path,
     }
+
+
+_URL_USERINFO_RE = re.compile(r"(\w[\w+.-]*://)[^\s'\"<>]*@")
+
+
+def redact_urls_in_text(text: str) -> str:
+    """Strip userinfo from every URL inside free text (an exception message,
+    a status detail): ``error "http://u:p@h:6333/x"`` becomes
+    ``error "http://h:6333/x"``. Everything from the scheme to the last
+    ``@`` before whitespace, a quote or an angle bracket is treated as
+    userinfo, so a password containing ``/``, ``#`` or ``?`` is removed too."""
+    return _URL_USERINFO_RE.sub(r"\1", str(text))

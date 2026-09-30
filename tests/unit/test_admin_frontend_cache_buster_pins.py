@@ -26,7 +26,7 @@ INDEX_HTML = FRONTEND / "index.html"
 
 # file -> (sha256 prefix of its content, the ?v= it must be served with)
 PINS = {
-    "memory-management.js": ("089676669483a791", "20260929a"),
+    "memory-management.js": ("f6f77393245dbefa", "20260929c"),
     "guest-mode.js": ("b1fa51811cf6ba80", "20260929-cal"),
     "calendar-sources.js": ("6255c2e73188cec3", "20260929-cal3"),
 }

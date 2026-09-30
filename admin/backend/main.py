@@ -26,6 +26,7 @@ import structlog
 from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_dev_data, seed_oss_defaults, seed_oss_features, seed_oss_conversation_settings, seed_oss_service_registry, seed_oss_base_knowledge, OSS_DEFAULT_MODEL, OSS_OLLAMA_URL, OSS_AUTO_PULL_MODELS, OSS_SEED_DEFAULTS
 from shared.config import get_config
 from app.services.calendar_sync import start_background_sync, stop_background_sync
+from app.services import memory_vectors
 from app.services.health_poller import start_health_polling, stop_health_polling
 from app.auth.oidc import (
     oauth,
@@ -713,6 +714,11 @@ async def startup_event():
     # Start background calendar sync task
     start_background_sync()
 
+    # Memory vector store maintenance: revalidates the collection and embeds
+    # pending memories. Runs in DEV_MODE too -- a developer's Qdrant needs the
+    # same self-healing as production's.
+    memory_vectors.start_vector_store_maintenance()
+
     # Start background health poll task (Phase 4 / ATHENA-1)
     # DEV_MODE has no Redis client; production passes redis_client for leader election.
     if DEV_MODE:
@@ -794,6 +800,7 @@ async def shutdown_event():
     logger.info("athena_admin_shutdown")
     await stop_background_sync()
     await stop_health_polling()
+    await memory_vectors.stop_vector_store_maintenance()
 
 
 # Authentication routes

@@ -37,7 +37,12 @@ def _utcnow() -> datetime:
 
 class LeaseBusy(Exception):
     """The lease is held (unexpired) by another holder, or a takeover race
-    was lost."""
+    was lost. `expires_at` is the holder's expiry when it was read (None
+    when unknown, e.g. a lost race), so a caller can say when to retry."""
+
+    def __init__(self, msg: str = "", expires_at: Optional[datetime] = None):
+        super().__init__(msg)
+        self.expires_at = expires_at
 
 
 @dataclass
@@ -94,7 +99,7 @@ def acquire(
 
         observed_value = existing.value
         if not is_expired(observed_value, now):
-            raise LeaseBusy(busy_message)
+            raise LeaseBusy(busy_message, expires_at=_expires_at(observed_value))
 
         rowcount = (
             session.query(SystemSetting)
@@ -107,6 +112,27 @@ def acquire(
         return Lease(key=key, holder=holder, value=value)
     finally:
         session.close()
+
+
+def _expires_at(value: str) -> Optional[datetime]:
+    try:
+        expires_at_str = json.loads(value).get("expires_at")
+        return datetime.fromisoformat(expires_at_str) if expires_at_str else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def read(db: Session, key: str) -> Optional[dict]:
+    """The lease's JSON value at `key` (read on the caller's session), or
+    None when absent or unparsable."""
+    row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+    if row is None:
+        return None
+    try:
+        value = json.loads(row.value)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def is_expired(value: str, now: Clock = _utcnow) -> bool:

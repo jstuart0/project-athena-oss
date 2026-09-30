@@ -9,16 +9,18 @@ IMPORTANT: Route Ordering
     /guest-sessions) MUST be defined BEFORE dynamic routes (like /{memory_id})
     to prevent the dynamic route from catching everything.
 """
-import os
 import re
 import uuid
 import json
 import asyncio
+import functools
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, date, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import false, func as sql_func, or_
 from pydantic import BaseModel, Field
@@ -28,81 +30,13 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, Memory, GuestSession, MemoryConfig, Feature
 from app.routes.internal import require_service_key_401
+from app.services import memory_vectors
+from app.services.memory_vectors import EmbeddingUnavailable, VectorStoreNotReady
 from app.utils.service_auth import verify_service_or_oidc
-from app.utils.url_validators import redact_url_userinfo
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/memories", tags=["memories"])
-
-# Configuration
-QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
-QDRANT_PORT = os.getenv("QDRANT_PORT", "6333")
-QDRANT_URL = os.getenv("QDRANT_URL", f"http://{QDRANT_HOST}:{QDRANT_PORT}")
-COLLECTION_NAME = "athena_memories"
-
-# Lazy-loaded clients
-_qdrant_client = None
-_embedder = None
-
-
-def get_qdrant():
-    """Get or create Qdrant client."""
-    global _qdrant_client
-    if _qdrant_client is None:
-        try:
-            from qdrant_client import QdrantClient
-            _qdrant_client = QdrantClient(url=QDRANT_URL, timeout=10)
-            logger.info("qdrant_client_initialized", url=redact_url_userinfo(QDRANT_URL))
-        except Exception as e:
-            logger.error("qdrant_client_init_failed", error=str(e))
-            return None
-    return _qdrant_client
-
-
-def get_embedder():
-    """Get or create FastEmbed embedder (lightweight alternative to sentence-transformers)."""
-    global _embedder
-    if _embedder is None:
-        try:
-            from fastembed import TextEmbedding
-            # all-MiniLM-L6-v2 produces 384-dimensional embeddings
-            _embedder = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
-            logger.info("embedder_initialized", model="all-MiniLM-L6-v2")
-        except Exception as e:
-            logger.error("embedder_init_failed", error=str(e))
-            return None
-    return _embedder
-
-
-def embed_text(text: str) -> List[float]:
-    """Generate embedding for text using FastEmbed.
-
-    FastEmbed returns a generator, so we need to convert to list.
-    This wrapper provides a consistent interface.
-    """
-    embedder = get_embedder()
-    if embedder is None:
-        return []
-    # FastEmbed's embed() returns a generator, take first result
-    embeddings = list(embedder.embed([text]))
-    if embeddings:
-        return embeddings[0].tolist()
-    return []
-
-
-async def check_qdrant_available() -> bool:
-    """Check if Qdrant is reachable."""
-    client = get_qdrant()
-    if client is None:
-        return False
-    try:
-        client.get_collections()
-        return True
-    except Exception as e:
-        logger.warning("qdrant_health_check_failed", error=str(e))
-        return False
-
 
 async def get_config_value(db: Session, key: str, default=None):
     """Get a configuration value from memory_config table."""
@@ -170,21 +104,25 @@ def extract_keywords(query: str) -> List[str]:
         'last', 'week', 'month', 'year', 'today', 'yesterday', 'tomorrow'
     }
 
-    # Lowercase and extract words
-    words = re.findall(r'\b[a-zA-Z]+\b', query.lower())
+    # Lowercase and extract alphanumeric tokens. Tokens with a digit (door
+    # codes, dates, Wi-Fi passwords like "b7x9") are kept whole: they're
+    # often the whole point of the query and must match exactly.
+    tokens = re.findall(r'[a-z0-9]+', query.lower())
 
-    # Filter: remove stop words and short words (< 3 chars)
-    keywords = [w for w in words if w not in stop_words and len(w) >= 3]
-
-    # Simple stemming: truncate longer words to 4 chars for prefix matching
-    # This helps "drive", "driving", "drove" all become "driv"
     stems = []
-    for kw in keywords:
-        if len(kw) > 4:
-            stem = kw[:4]
+    for token in tokens:
+        if any(ch.isdigit() for ch in token):
+            if len(token) < 2:
+                continue
+            stem = token
         else:
-            stem = kw
-        if stem not in stems:  # Avoid duplicates
+            # Remove stop words and short words (< 3 chars); truncate longer
+            # words to 4 chars for prefix matching ("drive", "driving",
+            # "drove" all become "driv").
+            if token in stop_words or len(token) < 3:
+                continue
+            stem = token[:4] if len(token) > 4 else token
+        if stem not in stems:
             stems.append(stem)
 
     return stems
@@ -227,23 +165,6 @@ def _scope_sql_filter(scope_names: Tuple[str, ...], guest_session_id: Optional[i
     return or_(*clauses) if clauses else false()
 
 
-def _scope_qdrant_filter(scope_names: Tuple[str, ...], guest_session_id: Optional[int]):
-    """Qdrant rendering of a scope set; None when the set is empty (the
-    caller must then not search at all)."""
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
-
-    conditions = []
-    for name in scope_names:
-        if name == "guest":
-            conditions.append(Filter(must=[
-                FieldCondition(key="scope", match=MatchValue(value="guest")),
-                FieldCondition(key="guest_session_id", match=MatchValue(value=guest_session_id)),
-            ]))
-        else:
-            conditions.append(FieldCondition(key="scope", match=MatchValue(value=name)))
-    return Filter(should=conditions) if conditions else None
-
-
 MEMORY_READER_ROLES = frozenset({"owner", "operator"})
 
 
@@ -259,24 +180,103 @@ async def require_memory_reader(
     role: memories of every scope are household data.
     """
     await verify_service_or_oidc(request, db, x_service_key)
-    if x_service_key:
-        return
-    from app.auth.oidc import get_optional_user, optional_security
-
-    user = await get_optional_user(
-        credentials=await optional_security(request),
-        x_api_key=request.headers.get("X-API-Key"),
-        db=db,
-        request=request,
+    _memory_caller_kind(
+        request, lambda user: user.has_permission("read") and user.role in MEMORY_READER_ROLES,
     )
-    if user is None or not user.has_permission("read") or user.role not in MEMORY_READER_ROLES:
+
+
+async def require_memory_maintainer(
+    request: Request,
+    db: Session = Depends(get_db),
+    x_service_key: Optional[str] = Header(default=None, alias="X-Service-Key"),
+) -> str:
+    """Who may rebuild vectors: the service key (returns "service"; the
+    route limits it to mode=missing without prune) or a signed-in user with
+    manage_infrastructure (returns "user"). Any other user gets 403."""
+    await verify_service_or_oidc(request, db, x_service_key)
+    return _memory_caller_kind(request, lambda user: user.has_permission("manage_infrastructure"))
+
+
+def _memory_caller_kind(request: Request, allow) -> str:
+    """After verify_service_or_oidc: "service" for the service-key branch,
+    "user" for a user ``allow`` accepts, else 403. Uses the user that
+    verify_service_or_oidc authenticated (never a second resolution)."""
+    if getattr(request.state, "auth_kind", None) == "service":
+        return "service"
+    user = getattr(request.state, "auth_user", None)
+    if user is None or not allow(user):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    return "user"
 
 
 def _row_in_scopes(memory: Memory, scope_names: Tuple[str, ...], guest_session_id: Optional[int]) -> bool:
     if memory.scope == "guest":
         return "guest" in scope_names and memory.guest_session_id == guest_session_id
     return memory.scope in scope_names
+
+
+# States in which a semantic query may be attempted (an embedder failure is
+# retried: a later successful embed clears it).
+_SEMANTIC_USABLE = (memory_vectors.READY, memory_vectors.EMBEDDER_UNAVAILABLE)
+
+
+def _servable_rows_by_vector_id(db: Session, vector_ids: List[str]) -> Dict[str, Memory]:
+    """Rows a semantic hit may be served from: live and with a stored vector."""
+    if not vector_ids:
+        return {}
+    rows = db.query(Memory).filter(
+        Memory.vector_id.in_(vector_ids),
+        Memory.is_deleted == False,
+        Memory.vector_status == "stored",
+    ).all()
+    return {row.vector_id: row for row in rows}
+
+
+async def _semantic_search(
+    db: Session,
+    query: str,
+    scope_names: Tuple[str, ...],
+    guest_session_id: Optional[int],
+    limit: int,
+    min_score: float,
+) -> Tuple[Optional[List[Tuple[Memory, float]]], str]:
+    """Nearest live, stored rows in ``scope_names``, best first, at most
+    ``limit``. Results are built from Postgres rows; the vector store only
+    supplies ids and scores. Returns ``(None, reason)`` when semantic search
+    can't run."""
+    state = await run_in_threadpool(memory_vectors.get_state)
+    if state.status not in _SEMANTIC_USABLE:
+        return None, state.detail or state.status
+    try:
+        vector = (await run_in_threadpool(memory_vectors.embed, [query]))[0]
+    except EmbeddingUnavailable as exc:
+        return None, str(exc) or memory_vectors.EMBEDDER_UNAVAILABLE
+    fetch = min(limit * memory_vectors.SEARCH_OVERFETCH, memory_vectors.SEARCH_FETCH_CAP)
+    try:
+        hits = await run_in_threadpool(functools.partial(
+            memory_vectors.query, vector, readable_scopes=scope_names,
+            guest_session_id=guest_session_id, limit=fetch, score_threshold=min_score,
+        ))
+    except VectorStoreNotReady as exc:
+        return None, exc.state.detail or exc.state.status
+    rows = _servable_rows_by_vector_id(db, [point_id for point_id, _ in hits])
+    kept: List[Tuple[Memory, float]] = []
+    for point_id, score in hits:
+        row = rows.get(point_id)
+        if row is None or not _row_in_scopes(row, scope_names, guest_session_id):
+            continue
+        kept.append((row, score))
+        if len(kept) >= limit:
+            break
+    return kept, ""
+
+
+def _record_access(db: Session, rows: List[Memory]) -> None:
+    now = datetime.utcnow()
+    for row in rows:
+        row.access_count += 1
+        row.last_accessed_at = now
+    db.commit()
 
 
 async def keyword_search_memories(
@@ -387,10 +387,17 @@ def merge_search_results(
 # Pydantic Models
 # =============================================================================
 
+# Memory text is capped so one request can't hand the embedder an unbounded
+# input (the embedder truncates further, to EMBED_MAX_CHARS); the summary cap
+# is the column width.
+MEMORY_CONTENT_MAX_CHARS = 8192
+MEMORY_SUMMARY_MAX_CHARS = 255
+
+
 class MemoryCreate(BaseModel):
     """Schema for creating a new memory."""
-    content: str
-    summary: Optional[str] = None
+    content: str = Field(..., max_length=MEMORY_CONTENT_MAX_CHARS)
+    summary: Optional[str] = Field(None, max_length=MEMORY_SUMMARY_MAX_CHARS)
     scope: str  # 'global', 'owner', 'guest'
     guest_session_id: Optional[int] = None
     category: Optional[str] = None
@@ -401,8 +408,8 @@ class MemoryCreate(BaseModel):
 
 class MemoryUpdate(BaseModel):
     """Schema for updating a memory."""
-    content: Optional[str] = None
-    summary: Optional[str] = None
+    content: Optional[str] = Field(None, max_length=MEMORY_CONTENT_MAX_CHARS)
+    summary: Optional[str] = Field(None, max_length=MEMORY_SUMMARY_MAX_CHARS)
     category: Optional[str] = None
     importance: Optional[float] = Field(default=None, ge=0, le=1)
 
@@ -426,10 +433,10 @@ class MemoryResponse(BaseModel):
 
 class MemorySearchRequest(BaseModel):
     """Schema for memory search."""
-    query: str
+    query: str = Field(..., max_length=MEMORY_CONTENT_MAX_CHARS)
     mode: str  # 'guest' or 'owner'
     guest_session_id: Optional[int] = None
-    limit: int = Field(default=5, le=20)
+    limit: int = Field(default=5, ge=1, le=20)
     min_score: float = Field(default=0.6, ge=0, le=1)
 
 
@@ -532,51 +539,15 @@ async def create_memory(
             detail=f"Memory limit reached for {memory.scope} scope ({max_memories})"
         )
 
-    # Generate embedding and store in Qdrant
-    vector_id = str(uuid.uuid4())
-    qdrant = get_qdrant()
-
-    if qdrant:
-        try:
-            from qdrant_client.models import PointStruct
-
-            vector = embed_text(memory.content)
-            if not vector:
-                logger.warning("embedding_failed_for_memory", content=memory.content[:50])
-                vector_id = None
-            else:
-                qdrant.upsert(
-                    collection_name=COLLECTION_NAME,
-                    points=[
-                        PointStruct(
-                            id=vector_id,
-                            vector=vector,
-                            payload={
-                                "content": memory.content,
-                                "summary": memory.summary or memory.content[:100],
-                                "scope": memory.scope,
-                                "guest_session_id": memory.guest_session_id,
-                                "category": memory.category,
-                                "importance": memory.importance,
-                                "source_type": memory.source_type,
-                                "created_at": datetime.utcnow().isoformat(),
-                                "expires_at": expires_at.isoformat() if expires_at else None
-                            }
-                        )
-                    ]
-                )
-                logger.info("memory_stored_in_qdrant", vector_id=vector_id)
-        except Exception as e:
-            logger.error("qdrant_store_failed", error=str(e))
-            # Continue anyway - PostgreSQL is the source of truth
-
-    # Create memory in PostgreSQL
+    # Postgres first: the row commits pending, then its vector is written and
+    # the row marked stored. A vector-store failure leaves it pending.
     new_memory = Memory(
         content=memory.content,
         summary=memory.summary,
         scope=memory.scope,
         guest_session_id=memory.guest_session_id,
-        vector_id=vector_id,
+        vector_id=str(uuid.uuid4()),
+        vector_status="pending",
         category=memory.category,
         importance=memory.importance,
         source_type=memory.source_type,
@@ -586,6 +557,8 @@ async def create_memory(
 
     db.add(new_memory)
     db.commit()
+    db.refresh(new_memory)
+    await run_in_threadpool(memory_vectors.store_vector, memory_vectors.snapshot(new_memory))
     db.refresh(new_memory)
 
     logger.info("memory_created",
@@ -656,66 +629,35 @@ async def search_memories(
     - Guest with a session: global + that session's guest memories
     - Anything else (guest without a session, unknown mode): global only
 
+    Results are the live rows behind the nearest vectors. When semantic
+    search can't run, the response says so (semantic_available false).
+
     Requires X-Service-Key or a signed-in user.
     """
-    if not await check_qdrant_available():
-        return {"results": [], "qdrant_available": False}
-
     scopes = _memory_scopes(request.mode, request.guest_session_id)
-    filter_condition = _scope_qdrant_filter(scopes.readable, scopes.guest_session_id)
+    kept, reason = await _semantic_search(
+        db, request.query, scopes.readable, scopes.guest_session_id, request.limit, request.min_score,
+    )
+    if kept is None:
+        return {"results": [], "qdrant_available": False, "semantic_available": False, "error": reason}
 
-    # Generate query embedding
-    query_vector = embed_text(request.query)
-    if not query_vector:
-        return {"results": [], "qdrant_available": False, "error": "Embedder not available"}
-
-    # Search Qdrant using query_points API (qdrant-client 1.7+)
-    qdrant = get_qdrant()
-    try:
-        # Use query_points with the new API
-        search_result = qdrant.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_vector,
-            query_filter=filter_condition,
-            limit=request.limit,
-            score_threshold=request.min_score,
-            with_payload=True
-        )
-        # query_points returns a QueryResponse with .points attribute
-        results = search_result.points if hasattr(search_result, 'points') else []
-    except Exception as e:
-        logger.error("qdrant_search_failed", error=str(e))
-        return {"results": [], "qdrant_available": True, "error": str(e)}
-
-    # Update access counts and build results
-    result_list = []
-    for hit in results:
-        # Try to find in PostgreSQL to update access count
-        memory = db.query(Memory).filter(Memory.vector_id == str(hit.id)).first()
-        if memory:
-            memory.access_count += 1
-            memory.last_accessed_at = datetime.utcnow()
-
-        # Handle both ScoredPoint and QueryPoint response types
-        payload = hit.payload if hasattr(hit, 'payload') else {}
-        score = hit.score if hasattr(hit, 'score') else 0.0
-
-        result_list.append({
-            "id": memory.id if memory else 0,
-            "content": payload.get("content", ""),
-            "summary": payload.get("summary", ""),
-            "scope": payload.get("scope", ""),
-            "score": score,
-            "category": payload.get("category")
-        })
-
-    db.commit()
-
+    _record_access(db, [row for row, _ in kept])
     return {
-        "results": result_list,
+        "results": [
+            {
+                "id": row.id,
+                "content": row.content,
+                "summary": row.summary or "",
+                "scope": row.scope,
+                "score": score,
+                "category": row.category,
+            }
+            for row, score in kept
+        ],
         "query": request.query,
         "mode": request.mode,
-        "qdrant_available": True
+        "qdrant_available": True,
+        "semantic_available": True,
     }
 
 
@@ -870,32 +812,30 @@ async def seed_default_config(
 
 @router.get("/internal/search", dependencies=[Depends(require_service_key_401)])
 async def internal_memory_search(
-    query: str,
+    query: str = Query(..., max_length=MEMORY_CONTENT_MAX_CHARS),
     mode: str = "guest",
     guest_session_id: Optional[int] = None,
-    limit: int = Query(default=3, le=10),
+    limit: int = Query(default=3, ge=1, le=10),
     db: Session = Depends(get_db)
 ):
     """
     Internal endpoint for orchestrator memory retrieval.
-    Returns empty results gracefully if Qdrant unavailable.
 
-    When hybrid_memory_search feature flag is enabled, combines:
-    - Semantic vector search (via Qdrant)
-    - Keyword-based search (via PostgreSQL)
+    Results stay usable through a vector-store outage: ``qdrant_available``
+    means "these results are usable" and ``semantic_available`` says whether
+    semantic search contributed.
 
-    This improves recall for queries with specific keywords that may not
-    match semantically (e.g., "miles driven" vs "my car is a Tesla").
+    - hybrid_memory_search on: keyword (PostgreSQL) plus semantic results,
+      merged; semantic is skipped when it can't run.
+    - off: semantic results, or keyword results (search_type
+      "keyword_fallback") when semantic search can't run.
     """
-    qdrant_available = await check_qdrant_available()
-
     try:
-        # Check if hybrid search is enabled
         hybrid_enabled = is_hybrid_search_enabled(db)
-        threshold = await get_config_value(db, "similarity_threshold", 0.35)
+        threshold = float(await get_config_value(db, "similarity_threshold", 0.35))
+        scopes = _memory_scopes(mode, guest_session_id)
 
         if hybrid_enabled:
-            # Hybrid search: run keyword and semantic search in parallel
             config = get_hybrid_search_config(db)
             keywords = extract_keywords(query)
 
@@ -906,36 +846,16 @@ async def internal_memory_search(
                 mode=mode
             )
 
-            # Run searches in parallel for minimal latency
-            semantic_task = None
-            keyword_task = keyword_search_memories(db, keywords, mode, guest_session_id, limit)
+            (kept, _), keyword_results = await asyncio.gather(
+                _semantic_search(db, query, scopes.readable, scopes.guest_session_id, limit, threshold),
+                keyword_search_memories(db, keywords, mode, guest_session_id, limit),
+            )
+            semantic_results = [
+                {"content": row.content, "scope": row.scope, "score": score} for row, score in kept or []
+            ]
+            if kept:
+                _record_access(db, [row for row, _ in kept])
 
-            if qdrant_available:
-                async def run_semantic():
-                    result = await search_memories(MemorySearchRequest(
-                        query=query,
-                        mode=mode,
-                        guest_session_id=guest_session_id,
-                        limit=limit,
-                        min_score=float(threshold)
-                    ), db)
-                    return [
-                        {"content": r["content"], "scope": r["scope"], "score": r["score"]}
-                        for r in result.get("results", [])
-                    ]
-                semantic_task = run_semantic()
-
-            # Wait for both searches
-            if semantic_task:
-                semantic_results, keyword_results = await asyncio.gather(
-                    semantic_task,
-                    keyword_task
-                )
-            else:
-                semantic_results = []
-                keyword_results = await keyword_task
-
-            # Merge results with configurable weights
             merged = merge_search_results(
                 semantic_results,
                 keyword_results,
@@ -953,44 +873,38 @@ async def internal_memory_search(
 
             return {
                 "results": merged[:limit],
-                "qdrant_available": qdrant_available,
+                "qdrant_available": True,
+                "semantic_available": kept is not None,
                 "search_type": "hybrid"
             }
 
-        else:
-            # Standard semantic-only search
-            if not qdrant_available:
-                return {"results": [], "qdrant_available": False}
-
-            result = await search_memories(MemorySearchRequest(
-                query=query,
-                mode=mode,
-                guest_session_id=guest_session_id,
-                limit=limit,
-                min_score=float(threshold)
-            ), db)
-
+        kept, reason = await _semantic_search(db, query, scopes.readable, scopes.guest_session_id, limit, threshold)
+        if kept is not None:
+            _record_access(db, [row for row, _ in kept])
             return {
-                "results": [
-                    {
-                        "content": r["content"],
-                        "scope": r["scope"],
-                        "score": r["score"]
-                    }
-                    for r in result.get("results", [])
-                ],
+                "results": [{"content": row.content, "scope": row.scope, "score": score} for row, score in kept],
                 "qdrant_available": True,
+                "semantic_available": True,
                 "search_type": "semantic"
             }
 
+        logger.info("memory_search_keyword_fallback", reason=reason)
+        keyword_results = await keyword_search_memories(db, extract_keywords(query), mode, guest_session_id, limit)
+        return {
+            "results": [{"content": r["content"], "scope": r["scope"], "score": r["score"]} for r in keyword_results],
+            "qdrant_available": True,
+            "semantic_available": False,
+            "search_type": "keyword_fallback"
+        }
+
     except Exception as e:
         logger.error("internal_search_failed", error=str(e))
-        return {"results": [], "qdrant_available": False}
+        return {"results": [], "qdrant_available": False, "semantic_available": False}
 
 
 @router.post("/internal/create", dependencies=[Depends(require_service_key_401)])
 async def internal_create_memory(
-    content: str,
+    content: str = Query(..., max_length=MEMORY_CONTENT_MAX_CHARS),
     mode: str = "guest",
     guest_session_id: Optional[int] = None,
     category: str = "conversation",
@@ -1018,36 +932,6 @@ async def internal_create_memory(
         return {"created": False, "reason": "guest_without_session"}
 
     try:
-        # Generate embedding and store
-        vector_id = str(uuid.uuid4())
-        qdrant = get_qdrant()
-
-        if qdrant:
-            from qdrant_client.models import PointStruct
-            vector = embed_text(content)
-            if vector:
-                qdrant.upsert(
-                    collection_name=COLLECTION_NAME,
-                    points=[
-                        PointStruct(
-                            id=vector_id,
-                            vector=vector,
-                            payload={
-                                "content": content,
-                                "summary": content[:100],
-                                "scope": scope,
-                                "guest_session_id": guest_session_id,
-                                "category": category,
-                                "importance": importance,
-                                "source_type": "conversation",
-                                "created_at": datetime.utcnow().isoformat()
-                            }
-                        )
-                    ]
-                )
-            else:
-                vector_id = None
-
         # Calculate expiration for guest memories
         expires_at = None
         if scope == "guest" and guest_session_id:
@@ -1059,12 +943,13 @@ async def internal_create_memory(
                     datetime.min.time()
                 ) + timedelta(days=int(retention_days))
 
-        # Create in PostgreSQL
+        # Postgres first: the memory exists even if its vector can't be written.
         memory = Memory(
             content=content,
             scope=scope,
             guest_session_id=guest_session_id if scope == "guest" else None,
-            vector_id=vector_id,
+            vector_id=str(uuid.uuid4()),
+            vector_status="pending",
             category=category,
             importance=importance,
             source_type="conversation",
@@ -1075,16 +960,22 @@ async def internal_create_memory(
         db.add(memory)
         db.commit()
         db.refresh(memory)
-
-        return {"created": True, "memory_id": memory.id}
     except Exception as e:
+        db.rollback()
         logger.error("internal_create_failed", error=str(e))
         return {"created": False, "reason": str(e)}
+
+    vector_stored = await run_in_threadpool(memory_vectors.store_vector, memory_vectors.snapshot(memory))
+
+    return {"created": True, "memory_id": memory.id, "vector_stored": vector_stored}
+
+
+_FORGET_LIMIT = 5
 
 
 @router.post("/internal/forget", dependencies=[Depends(require_service_key_401)])
 async def internal_forget_memory(
-    search_query: str,
+    search_query: str = Query(..., max_length=MEMORY_CONTENT_MAX_CHARS),
     mode: str = "guest",
     min_score: float = 0.4,
     guest_session_id: Optional[int] = None,
@@ -1100,62 +991,24 @@ async def internal_forget_memory(
     if not scopes.deletable:
         return {"deleted": 0, "message": "Nothing this caller may forget"}
 
-    if not await check_qdrant_available():
-        return {"deleted": 0, "error": "Qdrant unavailable"}
-
     try:
-        filter_condition = _scope_qdrant_filter(scopes.deletable, scopes.guest_session_id)
-
-        # Generate query embedding
-        query_vector = embed_text(search_query)
-        if not query_vector:
-            return {"deleted": 0, "error": "Embedder not available"}
-
-        # Search for matching memories
-        qdrant = get_qdrant()
-        search_result = qdrant.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_vector,
-            query_filter=filter_condition,
-            limit=5,  # Only delete top matches
-            score_threshold=min_score,
-            with_payload=True
+        kept, reason = await _semantic_search(
+            db, search_query, scopes.deletable, scopes.guest_session_id, _FORGET_LIMIT, min_score,
         )
-        results = search_result.points if hasattr(search_result, 'points') else []
-
-        if not results:
+        if kept is None:
+            return {"deleted": 0, "error": "Semantic search unavailable"}
+        if not kept:
             return {"deleted": 0, "message": "No matching memories found"}
 
+        # Commit the soft deletes first, then remove the points.
+        now = datetime.utcnow()
         deleted_memories = []
-        for hit in results:
-            # Find in PostgreSQL
-            memory = db.query(Memory).filter(Memory.vector_id == str(hit.id)).first()
-            if (
-                memory
-                and not memory.is_deleted
-                and _row_in_scopes(memory, scopes.deletable, scopes.guest_session_id)
-            ):
-                # Soft delete in PostgreSQL
-                memory.is_deleted = True
-                memory.deleted_at = datetime.utcnow()
-
-                # Delete from Qdrant
-                try:
-                    from qdrant_client.models import PointIdsList
-                    qdrant.delete(
-                        collection_name=COLLECTION_NAME,
-                        points_selector=PointIdsList(points=[str(hit.id)])
-                    )
-                except Exception as e:
-                    logger.warning("qdrant_delete_failed", error=str(e), vector_id=str(hit.id))
-
-                deleted_memories.append({
-                    "id": memory.id,
-                    "content": memory.content[:100],
-                    "score": hit.score if hasattr(hit, 'score') else 0.0
-                })
-
+        for memory, score in kept:
+            memory.is_deleted = True
+            memory.deleted_at = now
+            deleted_memories.append({"id": memory.id, "content": memory.content[:100], "score": score})
         db.commit()
+        await run_in_threadpool(memory_vectors.delete_points, [memory.vector_id for memory, _ in kept])
 
         logger.info(
             "memories_forgotten",
@@ -1180,39 +1033,78 @@ async def internal_forget_memory(
 
 @router.get("/qdrant/health", dependencies=[Depends(require_memory_reader)])
 async def qdrant_health():
-    """Check Qdrant connection and collection status."""
-    available = await check_qdrant_available()
+    """Vector store status against Postgres, the source of truth, compared
+    by id (memory_vectors.sync_report).
 
-    if not available:
-        return {
-            "status": "unavailable",
-            "url": QDRANT_URL,
-            "collection": COLLECTION_NAME
-        }
+    status: healthy (ready and in_sync is exactly true: every stored memory
+    has its point, no point without a live memory, nothing pending),
+    degraded (ready but out of sync, or the comparison was partial),
+    unavailable (store or embedder down), error (shape or model mismatch,
+    or unreadable). The Postgres counts are always present."""
+    report = await run_in_threadpool(memory_vectors.describe)
+    sync = await run_in_threadpool(memory_vectors.sync_report)
+    state = report["state"]
+    if state in (memory_vectors.UNAVAILABLE, memory_vectors.EMBEDDER_UNAVAILABLE):
+        status = "unavailable"
+    elif state != memory_vectors.READY or report.get("error") is not None:
+        status = "error"
+    else:
+        status = "healthy" if sync["in_sync"] is True else "degraded"
+    return {**report, **sync, "status": status}
 
-    qdrant = get_qdrant()
+
+# =============================================================================
+# Vector store maintenance (before /{memory_id})
+# =============================================================================
+
+@router.post("/vector-store/reindex")
+async def reindex_memory_vectors(
+    request: Request,
+    mode: str = Query("missing", pattern="^(missing|all)$"),
+    dry_run: bool = False,
+    caller_kind: str = Depends(require_memory_maintainer),
+    db: Session = Depends(get_db),
+):
+    """Rebuild memory vectors from Postgres.
+
+    An owner (manage_infrastructure) may run either mode and prunes orphan
+    points. The service key may run mode=missing only and never prunes.
+    One rebuild at a time across replicas, with a cooldown after a real
+    run; 409 reindex_busy carries retry_after_seconds.
+    """
+    if caller_kind == "service" and mode != "missing":
+        raise HTTPException(status_code=403, detail="service_key_limited_to_missing")
+    if caller_kind == "service":
+        logger.info("memory_vector_reindex_requested", caller="service", mode=mode, dry_run=dry_run)
+
+    outcome: Dict[str, Any]
+    status_code = 200
     try:
-        info = qdrant.get_collection(COLLECTION_NAME)
-        # Handle different qdrant-client versions - attribute names vary
-        vectors_count = getattr(info, 'vectors_count', None)
-        if vectors_count is None:
-            vectors_count = getattr(info, 'indexed_vectors_count', 0)
-        points_count = getattr(info, 'points_count', 0)
+        report = await run_in_threadpool(functools.partial(
+            memory_vectors.reindex, mode, dry_run=dry_run, prune=caller_kind == "user", caller=caller_kind,
+        ))
+    except memory_vectors.ReindexBusy as busy:
+        status_code = 409
+        outcome = {"error": "reindex_busy", "retry_after_seconds": busy.retry_after_seconds}
+    else:
+        outcome = report.to_dict()
+        if report.refused:
+            status_code, outcome = 409, {"error": "reindex_refused", **outcome}
+        elif report.aborted:
+            status_code, outcome = 409, {"error": "reindex_aborted", **outcome}
 
-        return {
-            "status": "healthy",
-            "url": QDRANT_URL,
-            "collection": COLLECTION_NAME,
-            "vectors_count": vectors_count,
-            "points_count": points_count
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "url": QDRANT_URL,
-            "collection": COLLECTION_NAME,
-            "error": str(e)
-        }
+    if caller_kind == "user":
+        from app.routes.services import create_audit_log
+
+        create_audit_log(
+            db, request.state.auth_user, "memory_vector_reindex",
+            new_value={"mode": mode, "dry_run": dry_run, **outcome},
+            request=request, success=status_code == 200,
+            error_message=outcome.get("error"),
+        )
+    if status_code != 200:
+        return JSONResponse(status_code=status_code, content=outcome)
+    return outcome
 
 
 # =============================================================================
@@ -1268,48 +1160,22 @@ async def update_memory(
     if not memory:
         raise HTTPException(status_code=404, detail="Memory not found")
 
-    # Update fields if provided
-    if update_data.content is not None:
-        memory.content = update_data.content
-        # Re-embed if content changed
-        qdrant = get_qdrant()
-        if qdrant and memory.vector_id:
-            try:
-                from qdrant_client.models import PointStruct
-                vector = embed_text(update_data.content)
-                if vector:
-                    qdrant.upsert(
-                        collection_name=COLLECTION_NAME,
-                        points=[
-                            PointStruct(
-                                id=memory.vector_id,
-                                vector=vector,
-                                payload={
-                                    "content": update_data.content,
-                                    "summary": update_data.summary or memory.summary or update_data.content[:100],
-                                    "scope": memory.scope,
-                                    "guest_session_id": memory.guest_session_id,
-                                    "category": update_data.category or memory.category,
-                                    "importance": update_data.importance if update_data.importance is not None else memory.importance,
-                                    "source_type": memory.source_type,
-                                    "created_at": memory.created_at.isoformat() if memory.created_at else None,
-                                    "expires_at": memory.expires_at.isoformat() if memory.expires_at else None
-                                }
-                            )
-                        ]
-                    )
-            except Exception as e:
-                logger.error("qdrant_update_failed", error=str(e))
-
-    if update_data.summary is not None:
-        memory.summary = update_data.summary
-    if update_data.category is not None:
-        memory.category = update_data.category
-    if update_data.importance is not None:
-        memory.importance = update_data.importance
+    # Any change to what the vector or its payload carries makes the row
+    # pending in the same commit; store_vector alone marks it stored again.
+    changed = False
+    for field in ("content", "summary", "category", "importance"):
+        value = getattr(update_data, field)
+        if value is not None and value != getattr(memory, field):
+            setattr(memory, field, value)
+            changed = True
+    if changed:
+        memory.vector_status = "pending"
 
     db.commit()
     db.refresh(memory)
+    if changed:
+        await run_in_threadpool(memory_vectors.store_vector, memory_vectors.snapshot(memory))
+        db.refresh(memory)
 
     logger.info("memory_updated",
                user=current_user.username,
@@ -1338,17 +1204,7 @@ async def delete_memory(
     memory.deleted_at = datetime.utcnow()
     db.commit()
 
-    # Delete from Qdrant
-    qdrant = get_qdrant()
-    if qdrant:
-        try:
-            from qdrant_client.models import PointIdsList
-            qdrant.delete(
-                collection_name=COLLECTION_NAME,
-                points_selector=PointIdsList(points=[memory.vector_id])
-            )
-        except Exception as e:
-            logger.error("qdrant_delete_failed", error=str(e))
+    await run_in_threadpool(memory_vectors.delete_points, [memory.vector_id])
 
     logger.info("memory_deleted",
                user=current_user.username,
@@ -1397,60 +1253,15 @@ async def promote_memory(
             detail=f"Cannot promote from {current_scope} to {target_scope}"
         )
 
-    # Create new memory in target scope
-    new_vector_id = str(uuid.uuid4())
-
-    # Copy to Qdrant with new scope
-    qdrant = get_qdrant()
-    if qdrant:
-        try:
-            # with_vectors=True is required: qdrant-client 1.10+ defaults to
-            # with_vectors=False, so omitting it returns None for .vector and
-            # would silently upsert a null vector (data corruption).
-            original = qdrant.retrieve(
-                collection_name=COLLECTION_NAME,
-                ids=[memory.vector_id],
-                with_vectors=True
-            )
-
-            if not original:
-                raise ValueError(
-                    f"promote_memory: vector_id {memory.vector_id!r} not found in Qdrant"
-                )
-
-            if original[0].vector is None:
-                raise ValueError(
-                    f"promote_memory: retrieved point for vector_id {memory.vector_id!r} "
-                    "has no vector — refusing to upsert null vector"
-                )
-
-            from qdrant_client.models import PointStruct
-            qdrant.upsert(
-                collection_name=COLLECTION_NAME,
-                points=[
-                    PointStruct(
-                        id=new_vector_id,
-                        vector=original[0].vector,
-                        payload={
-                            **original[0].payload,
-                            "scope": target_scope,
-                            "guest_session_id": None,
-                            "expires_at": None,
-                            "promoted_from_id": memory_id
-                        }
-                    )
-                ]
-            )
-        except Exception as e:
-            logger.error("qdrant_promotion_failed", error=str(e))
-
-    # Create new PostgreSQL record
+    # A new row in the target scope, re-embedded from its content (never a
+    # copied vector: the copy could belong to different text).
     new_memory = Memory(
         content=memory.content,
         summary=memory.summary,
         scope=target_scope,
         guest_session_id=None,
-        vector_id=new_vector_id,
+        vector_id=str(uuid.uuid4()),
+        vector_status="pending",
         category=memory.category,
         importance=memory.importance,
         source_type='promotion',
@@ -1459,6 +1270,8 @@ async def promote_memory(
 
     db.add(new_memory)
     db.commit()
+    db.refresh(new_memory)
+    await run_in_threadpool(memory_vectors.store_vector, memory_vectors.snapshot(new_memory))
     db.refresh(new_memory)
 
     logger.info("memory_promoted",

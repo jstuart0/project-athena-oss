@@ -37,6 +37,11 @@ metadata:
     app: qdrant
 spec:
   replicas: 1
+  # One pod on a ReadWriteOnce volume: a rolling update would start the new
+  # pod while the old one still holds the volume, and it would never become
+  # ready. Recreate stops the old pod first.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: qdrant

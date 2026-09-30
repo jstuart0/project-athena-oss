@@ -1,45 +1,26 @@
-"""codex r3 diff-review Low (2026-09-28): app.routes.memories.get_qdrant()'s
+"""codex r3 diff-review Low (2026-09-28): the Qdrant client's
 qdrant_client_initialized info log printed the raw configured QDRANT_URL
 verbatim -- a URL shaped http://user:pass@host:port would put the
 credential straight into structured log output. Now redacted via
 app.utils.url_validators.redact_url_userinfo().
 
-QdrantClient(...) does not make a network call at construction time (only
-on first real operation), so this exercises the real get_qdrant() code
-path with no mocking of the client itself.
+The client is built in app.services.memory_vectors (the one module that
+owns Qdrant access). QdrantClient(...) makes no network call at
+construction when check_compatibility=False, which the module always
+passes: the default starts a version-check thread that hung the combined
+memory test run.
 """
 from __future__ import annotations
 
-import os
-import sys
-
-import pytest
-
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if os.path.join(_REPO_ROOT, 'src') not in sys.path:
-    sys.path.insert(0, os.path.join(_REPO_ROOT, 'src'))
-
-os.environ.setdefault("DEV_MODE", "true")
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-os.environ.setdefault("SERVICE_API_KEY", "test-svc-key-athena-118")
-
-pytest.importorskip("qdrant_client")
-
-import app.routes.memories as memories_module
+from app.services import memory_vectors
 
 
-@pytest.fixture(autouse=True)
-def _reset_qdrant_singleton(monkeypatch):
-    monkeypatch.setattr(memories_module, "_qdrant_client", None)
-    yield
-    monkeypatch.setattr(memories_module, "_qdrant_client", None)
-
-
-def test_get_qdrant_never_logs_url_userinfo(monkeypatch, capsys):
-    monkeypatch.setattr(memories_module, "QDRANT_URL", "http://qadmin:qsecret@localhost:6333")
+def test_client_never_logs_url_userinfo(monkeypatch, capsys):
+    memory_vectors.set_client_for_tests(None)
+    monkeypatch.setattr(memory_vectors, "QDRANT_URL", "http://qadmin:qsecret@localhost:6333")
 
     capsys.readouterr()
-    client = memories_module.get_qdrant()
+    client = memory_vectors._get_client()
     out = capsys.readouterr().out
 
     assert client is not None
@@ -47,3 +28,20 @@ def test_get_qdrant_never_logs_url_userinfo(monkeypatch, capsys):
     assert "http://localhost:6333" in out, out
     assert "qadmin:qsecret" not in out, out
     assert "qsecret" not in out, out
+
+
+def test_client_built_without_compatibility_check(monkeypatch):
+    import qdrant_client
+
+    captured = {}
+
+    class _Spy:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+    memory_vectors.set_client_for_tests(None)
+    monkeypatch.setattr(qdrant_client, "QdrantClient", _Spy)
+    memory_vectors._get_client()
+    assert captured.get("check_compatibility") is False
+    assert captured.get("url") == memory_vectors.QDRANT_URL
+    assert captured.get("timeout") == 10

@@ -1022,3 +1022,166 @@ def _extract_block_from_source(source: str, marker: str) -> str:
             if depth == 0:
                 return source[start:i + 1]
     raise AssertionError(f"unbalanced braces extracting {marker!r}")
+
+
+# --- Memory vector store status and rebuild (memory-management.js) ----------
+
+MEMORY_JS = FRONTEND_DIR / "memory-management.js"
+HOSTILE = '<img src=x onerror=alert(1)> \\ " \''
+
+
+def _qdrant_status(health, can_rebuild):
+    sources = [ESCAPE_HTML_JS.read_text(), _extract_block(MEMORY_JS, "function renderQdrantStatus(")]
+    return _run_node_with_sources(
+        sources, f"renderQdrantStatus({json.dumps(health)}, {json.dumps(can_rebuild)})")
+
+
+def _reindex_result(report):
+    sources = [ESCAPE_HTML_JS.read_text(), _extract_block(MEMORY_JS, "function renderReindexResult(")]
+    return _run_node_with_sources(sources, f"renderReindexResult({json.dumps(report)})")
+
+
+def _assert_neutralised(html):
+    assert "<img" not in html
+    assert "&lt;img" in html
+    assert HOSTILE not in html
+
+
+def _health(status, **extra):
+    base = {
+        "status": status, "state": "ready", "url": "http://qdrant:6333", "collection": "athena_memories",
+        "points_count": 3, "pg_live_count": 3, "pending_count": 0, "in_sync": status == "healthy",
+        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "collection_embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "model_recorded": True, "foreign_points": 0, "foreign_point_ids_sample": [],
+    }
+    base.update(extra)
+    return base
+
+
+def test_qdrant_status_healthy_shows_counts_and_escapes_url():
+    html = _qdrant_status(_health("healthy", url=HOSTILE), True)
+    _assert_neutralised(html)
+    assert "3 of 3" in html
+    assert "Rebuild" not in html
+
+
+def test_qdrant_status_degraded_owner_gets_enabled_rebuild():
+    html = _qdrant_status(_health("degraded", points_count=1, pending_count=2, detail=HOSTILE), True)
+    _assert_neutralised(html)
+    assert "rebuildMemoryVectors()" in html
+    assert "disabled" not in html
+    assert "2 not searchable" in html
+
+
+def test_qdrant_status_degraded_operator_button_disabled():
+    html = _qdrant_status(_health("degraded", pending_count=1), False)
+    assert "Rebuild" in html
+    assert "disabled" in html and 'title="Owner only"' in html
+    assert "rebuildMemoryVectors()" not in html
+
+
+def test_qdrant_status_unavailable_escapes_error_and_detail():
+    html = _qdrant_status(_health("unavailable", state="unavailable", error=HOSTILE, detail=HOSTILE,
+                                  points_count=None), True)
+    _assert_neutralised(html)
+    assert "Unavailable" in html and "keyword" in html.lower()
+
+
+def test_qdrant_status_error_escapes_model_and_foreign_sample():
+    html = _qdrant_status(_health("error", state="model_mismatch", collection_embedding_model=HOSTILE,
+                                  foreign_points=2, foreign_point_ids_sample=[HOSTILE, "abc"]), True)
+    _assert_neutralised(html)
+    assert "abc" in html
+    assert "rebuildMemoryVectors()" not in html
+
+
+def test_qdrant_status_numbers_are_coerced():
+    html = _qdrant_status(_health("degraded", points_count=HOSTILE, pg_live_count=HOSTILE,
+                                  pending_count=HOSTILE), True)
+    assert "<img" not in html and "onerror" not in html
+
+
+def test_reindex_result_success_summarises_counts():
+    html = _reindex_result({"mode": "missing", "embedded": 2, "already_present": 5, "failed": 0,
+                            "orphans_pruned": 1})
+    assert "2 embedded" in html and "1 orphan" in html
+
+
+def test_reindex_result_busy_shows_retry_after():
+    html = _reindex_result({"error": "reindex_busy", "retry_after_seconds": 42})
+    assert "42" in html
+
+
+def test_reindex_result_busy_retry_after_is_coerced():
+    html = _reindex_result({"error": "reindex_busy", "retry_after_seconds": HOSTILE})
+    assert "<img" not in html and "onerror" not in html
+
+
+def test_reindex_result_aborted_escapes():
+    html = _reindex_result({"error": "reindex_aborted", "aborted": HOSTILE, "embedded": 1})
+    _assert_neutralised(html)
+
+
+def test_reindex_result_refused_escapes_state():
+    html = _reindex_result({"error": "reindex_refused", "refused": HOSTILE})
+    _assert_neutralised(html)
+
+
+def test_reindex_result_forbidden_says_owner_only():
+    html = _reindex_result({"error": "forbidden"})
+    assert "owner" in html.lower()
+
+
+def test_reindex_result_unknown_error_escaped():
+    _assert_neutralised(_reindex_result({"error": HOSTILE}))
+
+
+def test_qdrant_status_wiring_uses_manage_infrastructure():
+    source = MEMORY_JS.read_text()
+    body = _extract_block(MEMORY_JS, "function updateQdrantStatus(")
+    assert "renderQdrantStatus(" in body and "hasPermission('manage_infrastructure')" in body
+    assert "/vector-store/reindex?mode=missing" in source
+
+
+# --- Review round 1: Rebuild whenever not in sync; rebuild HTTP errors -------
+
+def test_qdrant_status_partial_scan_offers_rebuild():
+    html = _qdrant_status(_health("degraded", in_sync=None, sync_scan="partial"), True)
+    assert "rebuildMemoryVectors()" in html
+    assert "partial" in html.lower() or "incomplete" in html.lower()
+
+
+def test_qdrant_status_green_only_when_in_sync_is_true():
+    html = _qdrant_status(_health("healthy", in_sync=None), True)
+    assert "Vectors in sync" not in html and "rebuildMemoryVectors()" in html
+
+
+def test_qdrant_status_escapes_missing_and_orphan_samples():
+    html = _qdrant_status(_health("degraded", missing_count=1, missing_vector_ids_sample=[HOSTILE],
+                                  orphan_count=1, orphan_point_ids_sample=[HOSTILE]), True)
+    _assert_neutralised(html)
+    assert "1 missing" in html and "1 orphan" in html
+
+
+def _reindex_outcome(status, body):
+    fn = _extract_block(MEMORY_JS, "function reindexOutcome(")
+    return _run_node_with_source(fn, f"reindexOutcome({json.dumps(status)}, {json.dumps(body)})")
+
+
+@pytest.mark.parametrize("status, body", [
+    (401, {"detail": "Authentication required"}),
+    (422, {"detail": [{"msg": "bad mode"}]}),
+    (500, {}),
+], ids=["401", "422", "500"])
+def test_rebuild_http_errors_are_reported_as_errors(status, body):
+    outcome = _reindex_outcome(status, body)
+    assert outcome["error"]
+    html = _reindex_result(outcome)
+    assert "Rebuilt" not in html and "failed" in html.lower()
+
+
+def test_rebuild_outcome_passes_through_success_and_conflicts():
+    assert _reindex_outcome(200, {"embedded": 3})["embedded"] == 3
+    assert _reindex_outcome(409, {"error": "reindex_busy", "retry_after_seconds": 5})["error"] == "reindex_busy"
+    assert _reindex_outcome(403, {"detail": "Insufficient permissions"}) == {"error": "forbidden"}

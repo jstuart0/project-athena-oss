@@ -154,8 +154,46 @@ def init_db():
     """
     logger.info("initializing_database_schema")
     Base.metadata.create_all(bind=engine)
+    _ensure_memories_table_compatibility()
     _ensure_users_table_compatibility()
     logger.info("database_schema_initialized")
+
+
+def _ensure_memories_table_compatibility(engine=None, dev_mode=None) -> bool:
+    """Add memories.vector_status to a table created before it existed.
+
+    Checks the catalog first, so an up-to-date table never takes the
+    ACCESS EXCLUSIVE lock an ALTER needs; when it does ALTER, a 5 s
+    lock_timeout keeps boot from queueing behind open transactions. Never
+    raises: a failure is logged and migration 062 covers the column."""
+    engine = engine if engine is not None else globals()["engine"]
+    dev_mode = DEV_MODE if dev_mode is None else dev_mode
+    if dev_mode or engine.dialect.name != "postgresql":
+        return False
+    try:
+        with engine.begin() as conn:
+            has_table = conn.execute(text(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = current_schema() AND table_name = 'memories'"
+            )).first()
+            if not has_table:
+                return False
+            has_column = conn.execute(text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'memories' "
+                "AND column_name = 'vector_status'"
+            )).first()
+            if has_column:
+                return False
+            conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+            conn.execute(text(
+                "ALTER TABLE memories ADD COLUMN IF NOT EXISTS vector_status VARCHAR(16) NOT NULL DEFAULT 'pending'"
+            ))
+        logger.info("memories_vector_status_column_added")
+        return True
+    except Exception as e:
+        logger.error("memories_schema_compat_failed", error=str(e))
+        return False
 
 
 def _ensure_users_table_compatibility():
