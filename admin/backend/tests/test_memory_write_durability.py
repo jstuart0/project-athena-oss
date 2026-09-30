@@ -143,8 +143,8 @@ def test_store_vector_upsert_404_self_heals(db):
     row = Memory(content="self heal", scope="owner", vector_id=str(uuid.uuid4()), importance=0.5)
     db.add(row)
     db.commit()
-    assert mv.store_vector(row) is True
-    assert fake.failed and row.vector_status == "stored"
+    assert mv.store_vector(mv.snapshot(row)) is True
+    assert fake.failed and _row(db, row.id).vector_status == "stored"
     assert fake.retrieve(mv.COLLECTION_NAME, ids=[row.vector_id])
 
 
@@ -378,12 +378,16 @@ def test_hit_below_min_score_not_returned(client, owner_client, db, hybrid):
 # ---------------------------------------------------------------------------
 
 def test_update_marks_pending_for_every_field(owner_client, db, monkeypatch):
+    from tests.conftest import TestingSessionLocal
+
     seen = []
     real = mv.store_vector
 
-    def _spy(memory):
-        seen.append(memory.vector_status)
-        return real(memory)
+    def _spy(item):
+        session = TestingSessionLocal()
+        seen.append(session.query(Memory).get(item.id).vector_status)
+        session.close()
+        return real(item)
 
     monkeypatch.setattr(mv, "store_vector", _spy)
     memory_id = _create(owner_client, "original").json()["id"]
@@ -638,7 +642,194 @@ def test_async_routes_offload_module_calls():
             if isinstance(func, ast.Name) and func.id == "run_in_threadpool":
                 offloaded += 1
             if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
-                    and func.value.id == "memory_vectors" and func.attr != "get_state"):
+                    and func.value.id == "memory_vectors" and func.attr not in ("get_state", "snapshot")):
                 direct.append(f"{fn.name}: memory_vectors.{func.attr}(")
     assert offloaded >= 8
     assert direct == []
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: a forgotten memory is never re-written, the stored mark is
+# conditional, and the worker thread never touches ORM rows (xander L1/L4,
+# codex Low)
+# ---------------------------------------------------------------------------
+
+def _delete_when_embedding(marker, rows):
+    """An embedder that soft-deletes (in its own session, as a concurrent
+    forget would) the row whose text contains ``marker``, then embeds."""
+    from tests.conftest import TestingSessionLocal
+
+    def _embed(texts):
+        if any(marker in t for t in texts):
+            session = TestingSessionLocal()
+            session.query(Memory).filter(Memory.content.contains(marker)).update(
+                {"is_deleted": True}, synchronize_session=False)
+            session.commit()
+            session.close()
+            rows.append(marker)
+        return fake_embed(texts)
+    return _embed
+
+
+def test_deleted_during_store_leaves_no_point_and_row_not_stored(owner_client, db):
+    deleted = []
+    mv.set_embedder_for_tests(_delete_when_embedding("doomed secret", deleted))
+    resp = _create(owner_client, "the doomed secret is 9911")
+    assert resp.status_code == 201 and deleted
+    row = _row(db, resp.json()["id"])
+    assert row.is_deleted is True and row.vector_status != "stored"
+    assert mv._get_client().retrieve(mv.COLLECTION_NAME, ids=[row.vector_id]) == []
+
+
+def test_internal_create_deleted_during_store_reports_not_stored(client, db):
+    deleted = []
+    mv.set_embedder_for_tests(_delete_when_embedding("doomed note", deleted))
+    body = _internal_create(client, "a doomed note about the gate").json()
+    assert body["created"] is True and body["vector_stored"] is False
+    row = _row(db, body["memory_id"])
+    assert row.vector_status != "stored"
+    assert mv._get_client().retrieve(mv.COLLECTION_NAME, ids=[row.vector_id]) == []
+
+
+def test_store_vector_requires_a_snapshot(db):
+    mv.refresh_state()
+    row = Memory(content="x", scope="owner", vector_id=str(uuid.uuid4()), importance=0.5)
+    db.add(row)
+    db.commit()
+    with pytest.raises(TypeError):
+        mv.store_vector(row)
+    assert mv.store_vector(mv.snapshot(row)) is True
+    assert _row(db, row.id).vector_status == "stored"
+
+
+def test_store_vector_never_marks_a_changed_row_stored(db):
+    """The stored mark is conditional on the content that was embedded."""
+    from tests.conftest import TestingSessionLocal
+
+    mv.refresh_state()
+    row = Memory(content="original text", scope="owner", vector_id=str(uuid.uuid4()), importance=0.5)
+    db.add(row)
+    db.commit()
+    snap = mv.snapshot(row)
+
+    def _edit_then_embed(texts):
+        session = TestingSessionLocal()
+        session.query(Memory).filter(Memory.id == row.id).update({"content": "edited text"})
+        session.commit()
+        session.close()
+        return fake_embed(texts)
+
+    mv.set_embedder_for_tests(_edit_then_embed)
+    assert mv.store_vector(snap) is False
+    assert _row(db, row.id).vector_status == "pending"
+
+
+def test_two_put_reorder_never_serves_stale_vector(client, owner_client, db, monkeypatch):
+    """PUT A's vector write stalls; PUT B completes; then A's write lands
+    over B's point. The row must never read stored with A's vector."""
+    memory_id = _create(owner_client, "gate code original").json()["id"]
+    real = mv.store_vector
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def _first_call_stalls(item):
+        calls.append(item.content)
+        if len(calls) == 1:
+            entered.set()
+            release.wait(10)
+        return real(item)
+
+    monkeypatch.setattr(mv, "store_vector", _first_call_stalls)
+    result = {}
+    first = threading.Thread(target=lambda: result.update(a=owner_client.put(
+        f"/api/memories/{memory_id}", json={"content": "gate code A 1111"})))
+    first.start()
+    assert entered.wait(10)
+    try:
+        resp_b = owner_client.put(f"/api/memories/{memory_id}", json={"content": "gate code B 2222"})
+        assert resp_b.status_code == 200
+    finally:
+        release.set()
+        first.join(10)
+    assert result["a"].status_code == 200
+
+    row = _row(db, memory_id)
+    assert row.content == "gate code B 2222"
+    # A's stale write landed last: its point holds A's vector, so the row
+    # must read pending (the conditional stored-mark refused it).
+    assert calls[0] == "gate code A 1111"
+    assert row.vector_status == "pending"
+    assert memory_id not in [r["id"] for r in _search(client, "gate code A 1111").json()["results"]]
+
+    import asyncio
+    asyncio.run(mv.tick())
+    row = _row(db, memory_id)
+    [point] = mv._get_client().retrieve(mv.COLLECTION_NAME, ids=[row.vector_id], with_vectors=True)
+    assert row.vector_status == "stored"
+    assert point.vector == pytest.approx(fake_embed(["gate code B 2222"])[0], abs=1e-6)
+
+
+def test_routes_pass_snapshots_to_store_vector():
+    """Every store_vector call from a route hands the worker a snapshot
+    built on the request thread, never a live ORM row."""
+    tree = ast.parse(MEMORIES_PY.read_text(encoding="utf-8"))
+    sites = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "run_in_threadpool"
+                and node.args and ast.unparse(node.args[0]) == "memory_vectors.store_vector"):
+            sites.append(node)
+            arg = node.args[1]
+            assert isinstance(arg, ast.Call) and ast.unparse(arg.func) == "memory_vectors.snapshot", ast.unparse(node)
+    assert len(sites) >= 4
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: search inputs are capped (codex M)
+# ---------------------------------------------------------------------------
+
+def test_search_query_cap(client, db):
+    assert _search(client, "q" * 8193).status_code == 422
+    assert _search(client, "q" * 8192).status_code == 200
+    assert _search(client, "garage", limit=0).status_code == 422
+
+
+def test_internal_search_and_forget_caps(client, db):
+    assert _internal_search(client, "q" * 8193).status_code == 422
+    assert _internal_search(client, "q" * 8192).status_code == 200
+    assert _internal_search(client, "garage", limit=0).status_code == 422
+    forget = lambda q: client.post("/api/memories/internal/forget",  # noqa: E731
+                                   params={"search_query": q, "mode": "owner"}, headers=_key())
+    assert forget("q" * 8193).status_code == 422
+    assert forget("q" * 8192).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: keyword fallback keeps numbers and codes (codex M)
+# ---------------------------------------------------------------------------
+
+def test_extract_keywords_keeps_numeric_and_alphanumeric_tokens():
+    keywords = memories_module.extract_keywords("what's the lockbox code B7X9 and 4417?")
+    assert "4417" in keywords and "b7x9" in keywords
+
+
+@pytest.mark.parametrize("hybrid_on", [True, False], ids=["hybrid_on", "hybrid_off"])
+@pytest.mark.parametrize("query, content", [
+    ("4417", "the garage code is 4417"),
+    ("lockbox code B7X9", "the lockbox code is B7X9-22"),
+], ids=["numeric_only", "mixed_code"])
+def test_outage_fallback_finds_numeric_and_code_queries(client, owner_client, db, hybrid, hybrid_on, query, content):
+    hybrid(hybrid_on)
+    dying = DyingClient(QdrantClient(":memory:"))
+    mv.set_client_for_tests(dying)
+    _create(owner_client, content)
+    _create(owner_client, "an unrelated note about tea")
+    dying.die()
+    body = _internal_search(client, query).json()
+    assert body["semantic_available"] is False and body["qdrant_available"] is True
+    assert content in [r["content"] for r in body["results"]]
+
+
+def test_extract_keywords_still_drops_stop_words_and_short_words():
+    assert memories_module.extract_keywords("what is the 4417 on it") == ["4417"]
+    assert memories_module.extract_keywords("is it x9 or b") == ["x9"]

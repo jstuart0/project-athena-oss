@@ -54,6 +54,10 @@ READY_RECHECK_SECONDS = 300
 PRUNE_MIN_AGE_SECONDS = 600
 FUTURE_SKEW_SECONDS = 60
 LEASE_KEY = "memory_vectors.reindex.lock"
+# Dry runs change nothing, so they never take the main lease: a caller
+# looping dry runs can't starve the automatic pass or an owner's rebuild.
+# They're rate-limited by their own cooldown instead.
+LEASE_KEY_DRYRUN = "memory_vectors.reindex.dryrun"
 LEASE_TTL_SECONDS = 300
 COOLDOWN_SECONDS = 60
 PENDING_PASS_MAX_ROWS = 500
@@ -534,25 +538,77 @@ def _upsert(vector_id: str, vector: Sequence[float], payload: Dict[str, Any]) ->
     )
 
 
-def store_vector(memory) -> bool:
-    """Embed ``memory`` and upsert its point under its own ``vector_id``;
-    the only path that sets ``vector_status='stored'``. On any failure the
-    row is left ``pending`` (the pending pass retries it). Never raises and
-    never commits: the caller owns the transaction."""
+@dataclass(frozen=True)
+class MemoryVectorInput:
+    """What a vector write needs from a memory row, copied on the request
+    thread so the worker thread never touches a live ORM object."""
+    id: int
+    vector_id: str
+    content: str
+    summary: Optional[str]
+    scope: str
+    guest_session_id: Optional[int]
+    category: Optional[str]
+    importance: float
+    source_type: Optional[str]
+    created_at: Optional[datetime]
+    expires_at: Optional[datetime]
+
+
+def snapshot(memory) -> MemoryVectorInput:
+    return MemoryVectorInput(
+        id=memory.id, vector_id=memory.vector_id, content=memory.content, summary=memory.summary,
+        scope=memory.scope, guest_session_id=memory.guest_session_id, category=memory.category,
+        importance=memory.importance, source_type=memory.source_type, created_at=memory.created_at,
+        expires_at=memory.expires_at,
+    )
+
+
+def _settle_written_row(memory_id: int, vector_id: str, embedded_content: str, session) -> bool:
+    """After a point was written for ``embedded_content``: mark the row
+    stored only if it's still live with exactly that content. A row deleted
+    meanwhile (forget, delete, guest cleanup) loses the point just written;
+    a row whose content changed meanwhile goes back to pending, since the
+    point may now hold the older text. Returns True when marked stored."""
+    from app.models import Memory
+
+    updated = session.query(Memory).filter(
+        Memory.id == memory_id, Memory.content == embedded_content, Memory.is_deleted == False,  # noqa: E712
+    ).update({"vector_status": "stored"}, synchronize_session=False)
+    if updated:
+        return True
+    current = session.query(Memory.is_deleted).filter(Memory.id == memory_id).first()
+    if current is None or current.is_deleted:
+        delete_points([vector_id])
+        logger.info("memory_vector_discarded", memory_id=memory_id, reason="deleted")
+    else:
+        session.query(Memory).filter(Memory.id == memory_id).update(
+            {"vector_status": "pending"}, synchronize_session=False)
+        logger.info("memory_vector_discarded", memory_id=memory_id, reason="content_changed")
+    return False
+
+
+def store_vector(item: MemoryVectorInput) -> bool:
+    """Embed a memory (a ``snapshot``) and upsert its point under its own
+    ``vector_id``; the only path that sets ``vector_status='stored'``, and
+    only while the row is still live with the embedded content (its own
+    session, conditional UPDATE). The caller commits the row ``pending``
+    first; on any failure it stays pending and the pending pass retries it.
+    Never raises."""
+    if not isinstance(item, MemoryVectorInput):
+        raise TypeError("store_vector takes memory_vectors.snapshot(row), not an ORM row")
     state = get_state()
     reason = state.status
     error = state.detail
     if state.status in (READY, EMBEDDER_UNAVAILABLE):
         try:
-            vector = embed([memory.content])[0]
+            vector = embed([item.content])[0]
         except EmbeddingUnavailable as exc:
             reason, error = EMBEDDER_UNAVAILABLE, str(exc)
         else:
             for attempt in (0, 1):
                 try:
-                    _upsert(memory.vector_id, vector, build_payload(memory))
-                    memory.vector_status = "stored"
-                    return True
+                    _upsert(item.vector_id, vector, build_payload(item))
                 except Exception as exc:
                     if attempt == 0 and _is_not_found(exc):
                         logger.warning("memory_vector_collection_not_found", operation="upsert")
@@ -565,8 +621,18 @@ def store_vector(memory) -> bool:
                     reason, error = "upsert_error", _error_text(exc)
                     _mark_unavailable(exc)
                     break
-    memory.vector_status = "pending"
-    logger.error("memory_vector_store_failed", memory_id=memory.id, reason=reason, error=error)
+                session = _get_session_factory()()
+                try:
+                    stored = _settle_written_row(item.id, item.vector_id, item.content, session)
+                    session.commit()
+                    return stored
+                except Exception as exc:
+                    session.rollback()
+                    logger.error("memory_vector_status_write_failed", memory_id=item.id, error=_error_text(exc))
+                    return False
+                finally:
+                    session.close()
+    logger.error("memory_vector_store_failed", memory_id=item.id, reason=reason, error=error)
     return False
 
 
@@ -575,6 +641,10 @@ def store_vector(memory) -> bool:
 # ---------------------------------------------------------------------------
 
 _SCROLL_PAGE = 256
+# The status report's exact comparison reads every point id and every live
+# row id; beyond this many pages (x _SCROLL_PAGE ids) it reports a partial
+# scan (in_sync null) instead of a guess.
+SYNC_SCAN_MAX_PAGES = 40
 _LEASE_DEPLOYMENT = "memory_vectors"
 
 
@@ -643,12 +713,12 @@ def _retry_after(expires_at: Optional[datetime]) -> int:
     return max(1, math.ceil((expires_at - _clock.utcnow()).total_seconds()))
 
 
-def _acquire(mode: str):
+def _acquire(mode: str, key: str = LEASE_KEY):
     from app.services import service_control_settings as scs
 
     try:
         return scs.acquire_lease(_get_session_factory(), _LEASE_DEPLOYMENT, mode, 0,
-                                 ttl=LEASE_TTL_SECONDS, now=_clock.utcnow, key=LEASE_KEY)
+                                 ttl=LEASE_TTL_SECONDS, now=_clock.utcnow, key=key)
     except scs.LeaseBusy as busy:
         raise ReindexBusy(_retry_after(busy.expires_at)) from busy
 
@@ -657,6 +727,62 @@ def _live_count(session) -> int:
     from app.models import Memory
 
     return session.query(Memory).filter(Memory.is_deleted == False).count()  # noqa: E712
+
+
+def sync_report() -> Dict[str, Any]:
+    """Postgres against the collection, by id: live stored rows whose point
+    is missing, points no live row owns, and pending rows. ``in_sync`` is
+    True only when all three are empty, None when the scan couldn't cover
+    everything within SYNC_SCAN_MAX_PAGES, False otherwise (including when
+    the store can't be read). Samples are bounded to FOREIGN_SAMPLE ids."""
+    from app.models import Memory
+
+    budget = SYNC_SCAN_MAX_PAGES * _SCROLL_PAGE
+    session = _get_session_factory()()
+    try:
+        live = session.query(Memory).filter(Memory.is_deleted == False)  # noqa: E712
+        pg_live_count = live.count()
+        pending = live.filter(Memory.vector_status == "pending").count()
+        rows = (session.query(Memory.vector_id, Memory.vector_status)
+                .filter(Memory.is_deleted == False).all()  # noqa: E712
+                if pg_live_count <= budget else None)
+    finally:
+        session.close()
+    report: Dict[str, Any] = {
+        "pg_live_count": pg_live_count, "pending_count": pending,
+        "missing_count": None, "missing_vector_ids_sample": [],
+        "orphan_count": None, "orphan_point_ids_sample": [],
+        "sync_scan": "skipped", "in_sync": False,
+    }
+    if _collection_state().status != READY:
+        return report
+    if rows is None:
+        report.update(sync_scan="partial", in_sync=None)
+        return report
+    points: set = set()
+    offset = None
+    try:
+        for _ in range(SYNC_SCAN_MAX_PAGES):
+            page, offset = _get_client().scroll(COLLECTION_NAME, limit=_SCROLL_PAGE, offset=offset,
+                                                with_payload=False, with_vectors=False)
+            points.update(str(p.id) for p in page)
+            if offset is None:
+                break
+    except Exception as exc:
+        report.update(sync_scan="failed", sync_error=_error_text(exc))
+        return report
+    if offset is not None:
+        report.update(sync_scan="partial", in_sync=None)
+        return report
+    live_ids = {vid for vid, _ in rows}
+    missing = sorted(vid for vid, status in rows if status == "stored" and vid not in points)
+    orphans = sorted(points - live_ids)
+    report.update(
+        missing_count=len(missing), missing_vector_ids_sample=missing[:FOREIGN_SAMPLE],
+        orphan_count=len(orphans), orphan_point_ids_sample=orphans[:FOREIGN_SAMPLE],
+        sync_scan="complete", in_sync=not missing and not orphans and pending == 0,
+    )
+    return report
 
 
 def pending_count() -> int:
@@ -697,28 +823,33 @@ def _present_ids(vector_ids: List[str]) -> set:
 
 
 def _write_batch(session, rows, report: ReindexReport) -> None:
-    """Embed and upsert ``rows`` under their existing ids, re-check their
-    content against Postgres, and mark stored only rows whose content is
-    what was embedded."""
+    """Embed and upsert ``rows`` under their existing ids, re-check them
+    against Postgres, and mark stored only rows still live with the content
+    that was embedded. A row deleted meanwhile loses its point."""
     from app.models import Memory
 
     embedded_content = {row.id: row.content for row in rows}
+    vector_ids = {row.id: row.vector_id for row in rows}
     vectors = embed([row.content for row in rows])
     for row, vector in zip(rows, vectors):
         _upsert(row.vector_id, vector, build_payload(row))
-    fresh = dict(session.query(Memory.id, Memory.content).filter(Memory.id.in_(list(embedded_content))).all())
-    changed = [row for row in rows if row.id in fresh and fresh[row.id] != embedded_content[row.id]]
+    fresh = {mid: (content, deleted) for mid, content, deleted in session.query(
+        Memory.id, Memory.content, Memory.is_deleted).filter(Memory.id.in_(list(embedded_content))).all()}
+    gone = [mid for mid in embedded_content if mid not in fresh or fresh[mid][1]]
+    if gone:
+        delete_points([vector_ids[mid] for mid in gone])
+        for mid in gone:
+            del embedded_content[mid]
+    changed = [row for row in rows if row.id in embedded_content and fresh[row.id][0] != embedded_content[row.id]]
     if changed:
         for row in changed:
             session.expire(row)
-        changed_vectors = embed([fresh[row.id] for row in changed])
+        changed_vectors = embed([fresh[row.id][0] for row in changed])
         for row, vector in zip(changed, changed_vectors):
             _upsert(row.vector_id, vector, build_payload(row))
-            embedded_content[row.id] = fresh[row.id]
+            embedded_content[row.id] = fresh[row.id][0]
     for row_id, content in embedded_content.items():
-        updated = session.query(Memory).filter(Memory.id == row_id, Memory.content == content).update(
-            {"vector_status": "stored"}, synchronize_session=False)
-        if updated:
+        if _settle_written_row(row_id, vector_ids[row_id], content, session):
             report.embedded += 1
         else:
             report.content_changed_retry += 1
@@ -821,7 +952,8 @@ def reindex(
     ``prune`` removes orphan points (owner and CLI only). ``recreate``
     drops and re-creates the collection first (CLI only; implies ``all``).
     ``pending_only`` is the automatic pass: at most ``max_rows`` pending
-    rows, no presence check, no prune. Raises ReindexBusy when the lease is
+    rows, no presence check, no prune. Dry runs take their own lease key and
+    cooldown, never the main one. Raises ReindexBusy when the lease is
     held or cooling down."""
     if recreate:
         mode = "all"
@@ -837,7 +969,7 @@ def reindex(
     from app.services import service_control_settings as scs
 
     factory = _get_session_factory()
-    lease = _acquire(mode)
+    lease = _acquire(mode, LEASE_KEY_DRYRUN if dry_run else LEASE_KEY)
     arm_cooldown = False
     try:
         logger.info("memory_vector_reindex_started", mode=mode, dry_run=dry_run, prune=prune,
@@ -908,7 +1040,8 @@ def reindex(
         except Exception:
             report.points_after = None
         report.foreign_point_ids_sample = get_state().foreign_point_ids_sample
-        arm_cooldown = not dry_run and not pending_only
+        # A real run cools down the main lease; a dry run its own key.
+        arm_cooldown = not pending_only
         logger.info("memory_vector_reindex_finished", caller=caller, **{
             k: v for k, v in report.to_dict().items() if k not in ("foreign_point_ids_sample",)})
         return report
@@ -956,7 +1089,9 @@ async def tick() -> None:
     global _prev_status, _last_pending_pass
     if _revalidation_due():
         await asyncio.to_thread(refresh_state)
-    state = _collection_state()
+    # Off the loop: the cache can be invalidated (a query's not-found) between
+    # the due-check and this read, and then this read probes Qdrant.
+    state = await asyncio.to_thread(_collection_state)
     previous, _prev_status = _prev_status, state.status
     if state.status != READY:
         return

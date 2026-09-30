@@ -205,8 +205,7 @@ def test_prune_spares_row_and_point_created_mid_run(db, world, monkeypatch):
 
     def _insert_then_prune(*args, **kwargs):
         row = _row(db, "india memory", status="pending")
-        mv.store_vector(row)
-        db.commit()
+        mv.store_vector(mv.snapshot(row))
         added["row"] = row
         return real(*args, **kwargs)
 
@@ -654,3 +653,88 @@ def test_read_lease_by_key(db, memory_vector_test_env):
                       key=mv.LEASE_KEY)
     assert scs.read_lease(db, "memory_vectors", key=mv.LEASE_KEY)["action"] == "missing"
     assert scs.read_lease(db, "memory_vectors") is None
+
+
+# ---------------------------------------------------------------------------
+# Review round 1
+# ---------------------------------------------------------------------------
+
+def test_reindex_skips_row_deleted_mid_batch(db):
+    """A forget that commits while its row is being embedded wins: no point,
+    and the row never reads stored (xander L1)."""
+    mv.refresh_state()
+    keep = _row(db, "keep this memory", status="pending")
+    doomed = _row(db, "forget this memory", status="pending")
+
+    def _embed_and_forget(texts):
+        if "forget this memory" in texts:
+            session = TestingSessionLocal()
+            session.query(Memory).filter(Memory.id == doomed.id).update({"is_deleted": True})
+            session.commit()
+            session.close()
+        return fake_embed(texts)
+
+    mv.set_embedder_for_tests(_embed_and_forget)
+    report = mv.reindex("missing")
+    assert report.failed == 0
+    assert _statuses(db, keep, doomed) == ["stored", "pending"]
+    assert _point_ids() == {keep.vector_id}
+
+
+def test_dry_runs_use_their_own_lease(db):
+    mv.refresh_state()
+    mv.reindex("missing", dry_run=True)
+    db.expire_all()
+    keys = {row.key for row in db.query(SystemSetting).all()}
+    assert mv.LEASE_KEY_DRYRUN in keys and mv.LEASE_KEY not in keys
+    with pytest.raises(mv.ReindexBusy) as busy:
+        mv.reindex("missing", dry_run=True)
+    assert 1 <= busy.value.retry_after_seconds <= mv.COOLDOWN_SECONDS
+
+
+def test_back_to_back_service_dry_runs_never_block_auto_pass_or_owner(client, db, test_user, no_dev_auth):
+    """xander L2: a service-key caller looping dry runs can't starve the
+    automatic pass or the owner."""
+    mv.refresh_state()
+    row = _row(db, "waiting for its vector", status="pending")
+    assert client.post(REINDEX, params={"dry_run": "true"}, headers=_key()).status_code == 200
+    second = client.post(REINDEX, params={"dry_run": "true"}, headers=_key())
+    assert second.status_code == 409 and second.json()["error"] == "reindex_busy"
+    mv.reset_state_for_tests()
+    asyncio.run(mv.tick())
+    assert _statuses(db, row) == ["stored"]
+    assert client.post(REINDEX, headers=_bearer(test_user)).status_code == 200
+
+
+def test_real_run_does_not_block_a_dry_run(db):
+    mv.refresh_state()
+    mv.reindex("missing")
+    assert mv.reindex("missing", dry_run=True).refused is None
+
+
+def test_tick_never_probes_on_the_event_loop(db, monkeypatch):
+    """xander L3: when the cache was invalidated between the due-check and
+    the read, the probe still runs off the loop thread."""
+    import threading
+
+    inner = QdrantClient(":memory:")
+    probe_threads = []
+
+    class _Recording:
+        def collection_exists(self, name):
+            probe_threads.append(threading.get_ident())
+            return inner.collection_exists(name)
+
+        def __getattr__(self, name):
+            return getattr(inner, name)
+
+    mv.set_client_for_tests(_Recording())
+    monkeypatch.setattr(mv, "_revalidation_due", lambda: False)
+
+    async def _run():
+        loop_thread = threading.get_ident()
+        await mv.tick()
+        return loop_thread
+
+    loop_thread = asyncio.run(_run())
+    assert probe_threads and loop_thread not in probe_threads

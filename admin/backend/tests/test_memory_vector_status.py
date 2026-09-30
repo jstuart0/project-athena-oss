@@ -170,3 +170,93 @@ def test_pending_row_with_stale_point_is_not_in_sync(client, db):
     body = _health(client).json()
     assert body["points_count"] == body["pg_live_count"] == 2 and body["pending_count"] == 1
     assert body["status"] == "degraded" and body["in_sync"] is False
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: in_sync is an exact id comparison (codex High)
+# ---------------------------------------------------------------------------
+
+def test_one_missing_plus_one_orphan_is_not_in_sync(client, db):
+    """Counts match (2 live, 2 points, 0 pending) but one stored row has no
+    point and one point has no row."""
+    mv.refresh_state()
+    present = _row(db, "a")
+    missing = _row(db, "b")
+    orphan = str(uuid.uuid4())
+    _point(present.vector_id, "a")
+    _point(orphan, "orphan")
+    body = _health(client).json()
+    assert (body["pg_live_count"], body["points_count"], body["pending_count"]) == (2, 2, 0)
+    assert body["in_sync"] is False and body["status"] == "degraded"
+    assert body["sync_scan"] == "complete"
+    assert body["missing_count"] == 1 and body["missing_vector_ids_sample"] == [missing.vector_id]
+    assert body["orphan_count"] == 1 and body["orphan_point_ids_sample"] == [orphan]
+
+
+def test_samples_are_bounded(client, db):
+    mv.refresh_state()
+    live = _row(db, "a")
+    _point(live.vector_id, "a")
+    for i in range(12):
+        _point(str(uuid.uuid4()), f"orphan {i}")
+    body = _health(client).json()
+    assert body["orphan_count"] == 12 and len(body["orphan_point_ids_sample"]) == 10
+    assert body["in_sync"] is False
+
+
+def test_partial_scan_is_never_reported_in_sync(client, db, monkeypatch):
+    monkeypatch.setattr(mv, "_SCROLL_PAGE", 2)
+    monkeypatch.setattr(mv, "SYNC_SCAN_MAX_PAGES", 1)
+    mv.refresh_state()
+    for text in ("a", "b", "c"):
+        row = _row(db, text)
+        _point(row.vector_id, text)
+    body = _health(client).json()
+    assert body["sync_scan"] == "partial"
+    assert body["in_sync"] is None and body["status"] == "degraded"
+
+
+def test_exact_in_sync_is_healthy(client, db):
+    mv.refresh_state()
+    for text in ("a", "b"):
+        row = _row(db, text)
+        _point(row.vector_id, text)
+    body = _health(client).json()
+    assert body["in_sync"] is True and body["status"] == "healthy"
+    assert body["missing_count"] == 0 and body["orphan_count"] == 0
+    assert body["missing_vector_ids_sample"] == [] and body["orphan_point_ids_sample"] == []
+
+
+def test_unavailable_scan_is_skipped(client, db):
+    _row(db, "a")
+    mv.set_client_for_tests(failing_client())
+    body = _health(client).json()
+    assert body["sync_scan"] == "skipped" and body["in_sync"] is False
+
+
+def test_scroll_budget_exhausted_is_partial(client, db, monkeypatch):
+    """Rows fit the budget but the points don't (orphans): the id scan stops
+    at SYNC_SCAN_MAX_PAGES and reports partial, not a verdict."""
+    monkeypatch.setattr(mv, "_SCROLL_PAGE", 2)
+    monkeypatch.setattr(mv, "SYNC_SCAN_MAX_PAGES", 2)
+    mv.refresh_state()
+    for text in ("a", "b"):
+        row = _row(db, text)
+        _point(row.vector_id, text)
+    for i in range(3):
+        _point(str(uuid.uuid4()), f"orphan {i}")
+    body = _health(client).json()
+    assert body["pg_live_count"] == 2
+    assert body["sync_scan"] == "partial" and body["in_sync"] is None and body["status"] == "degraded"
+
+
+def test_missing_point_alone_is_not_in_sync(client, db):
+    """A stored memory whose point is gone, nothing orphaned or pending."""
+    mv.refresh_state()
+    present = _row(db, "a")
+    missing = _row(db, "b")
+    _point(present.vector_id, "a")
+    body = _health(client).json()
+    assert body["orphan_count"] == 0 and body["pending_count"] == 0
+    assert body["missing_count"] == 1 and body["missing_vector_ids_sample"] == [missing.vector_id]
+    assert body["in_sync"] is False and body["status"] == "degraded"

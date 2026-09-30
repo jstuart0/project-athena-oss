@@ -104,21 +104,25 @@ def extract_keywords(query: str) -> List[str]:
         'last', 'week', 'month', 'year', 'today', 'yesterday', 'tomorrow'
     }
 
-    # Lowercase and extract words
-    words = re.findall(r'\b[a-zA-Z]+\b', query.lower())
+    # Lowercase and extract alphanumeric tokens. Tokens with a digit (door
+    # codes, dates, Wi-Fi passwords like "b7x9") are kept whole: they're
+    # often the whole point of the query and must match exactly.
+    tokens = re.findall(r'[a-z0-9]+', query.lower())
 
-    # Filter: remove stop words and short words (< 3 chars)
-    keywords = [w for w in words if w not in stop_words and len(w) >= 3]
-
-    # Simple stemming: truncate longer words to 4 chars for prefix matching
-    # This helps "drive", "driving", "drove" all become "driv"
     stems = []
-    for kw in keywords:
-        if len(kw) > 4:
-            stem = kw[:4]
+    for token in tokens:
+        if any(ch.isdigit() for ch in token):
+            if len(token) < 2:
+                continue
+            stem = token
         else:
-            stem = kw
-        if stem not in stems:  # Avoid duplicates
+            # Remove stop words and short words (< 3 chars); truncate longer
+            # words to 4 chars for prefix matching ("drive", "driving",
+            # "drove" all become "driv").
+            if token in stop_words or len(token) < 3:
+                continue
+            stem = token[:4] if len(token) > 4 else token
+        if stem not in stems:
             stems.append(stem)
 
     return stems
@@ -429,10 +433,10 @@ class MemoryResponse(BaseModel):
 
 class MemorySearchRequest(BaseModel):
     """Schema for memory search."""
-    query: str
+    query: str = Field(..., max_length=MEMORY_CONTENT_MAX_CHARS)
     mode: str  # 'guest' or 'owner'
     guest_session_id: Optional[int] = None
-    limit: int = Field(default=5, le=20)
+    limit: int = Field(default=5, ge=1, le=20)
     min_score: float = Field(default=0.6, ge=0, le=1)
 
 
@@ -554,8 +558,7 @@ async def create_memory(
     db.add(new_memory)
     db.commit()
     db.refresh(new_memory)
-    await run_in_threadpool(memory_vectors.store_vector, new_memory)
-    db.commit()
+    await run_in_threadpool(memory_vectors.store_vector, memory_vectors.snapshot(new_memory))
     db.refresh(new_memory)
 
     logger.info("memory_created",
@@ -809,10 +812,10 @@ async def seed_default_config(
 
 @router.get("/internal/search", dependencies=[Depends(require_service_key_401)])
 async def internal_memory_search(
-    query: str,
+    query: str = Query(..., max_length=MEMORY_CONTENT_MAX_CHARS),
     mode: str = "guest",
     guest_session_id: Optional[int] = None,
-    limit: int = Query(default=3, le=10),
+    limit: int = Query(default=3, ge=1, le=10),
     db: Session = Depends(get_db)
 ):
     """
@@ -962,13 +965,7 @@ async def internal_create_memory(
         logger.error("internal_create_failed", error=str(e))
         return {"created": False, "reason": str(e)}
 
-    vector_stored = await run_in_threadpool(memory_vectors.store_vector, memory)
-    try:
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        vector_stored = False
-        logger.error("memory_vector_status_commit_failed", memory_id=memory.id, error=str(e))
+    vector_stored = await run_in_threadpool(memory_vectors.store_vector, memory_vectors.snapshot(memory))
 
     return {"created": True, "memory_id": memory.id, "vector_stored": vector_stored}
 
@@ -978,7 +975,7 @@ _FORGET_LIMIT = 5
 
 @router.post("/internal/forget", dependencies=[Depends(require_service_key_401)])
 async def internal_forget_memory(
-    search_query: str,
+    search_query: str = Query(..., max_length=MEMORY_CONTENT_MAX_CHARS),
     mode: str = "guest",
     min_score: float = 0.4,
     guest_session_id: Optional[int] = None,
@@ -1035,32 +1032,25 @@ async def internal_forget_memory(
 # =============================================================================
 
 @router.get("/qdrant/health", dependencies=[Depends(require_memory_reader)])
-async def qdrant_health(db: Session = Depends(get_db)):
-    """Vector store status against Postgres, the source of truth.
+async def qdrant_health():
+    """Vector store status against Postgres, the source of truth, compared
+    by id (memory_vectors.sync_report).
 
-    status: healthy (ready and every live memory has its vector, nothing
-    pending), degraded (ready but out of sync), unavailable (store or
-    embedder down), error (shape or model mismatch, or unreadable). The
-    Postgres counts are always present."""
+    status: healthy (ready and in_sync is exactly true: every stored memory
+    has its point, no point without a live memory, nothing pending),
+    degraded (ready but out of sync, or the comparison was partial),
+    unavailable (store or embedder down), error (shape or model mismatch,
+    or unreadable). The Postgres counts are always present."""
     report = await run_in_threadpool(memory_vectors.describe)
-    live = db.query(Memory).filter(Memory.is_deleted == False)
-    pg_live_count = live.count()
-    pending_count = live.filter(Memory.vector_status == "pending").count()
+    sync = await run_in_threadpool(memory_vectors.sync_report)
     state = report["state"]
-    in_sync = (
-        state == memory_vectors.READY
-        and report.get("error") is None
-        and report.get("points_count") == pg_live_count
-        and pending_count == 0
-    )
     if state in (memory_vectors.UNAVAILABLE, memory_vectors.EMBEDDER_UNAVAILABLE):
         status = "unavailable"
     elif state != memory_vectors.READY or report.get("error") is not None:
         status = "error"
     else:
-        status = "healthy" if in_sync else "degraded"
-    return {**report, "status": status, "pg_live_count": pg_live_count, "pending_count": pending_count,
-            "in_sync": in_sync}
+        status = "healthy" if sync["in_sync"] is True else "degraded"
+    return {**report, **sync, "status": status}
 
 
 # =============================================================================
@@ -1184,8 +1174,7 @@ async def update_memory(
     db.commit()
     db.refresh(memory)
     if changed:
-        await run_in_threadpool(memory_vectors.store_vector, memory)
-        db.commit()
+        await run_in_threadpool(memory_vectors.store_vector, memory_vectors.snapshot(memory))
         db.refresh(memory)
 
     logger.info("memory_updated",
@@ -1282,8 +1271,7 @@ async def promote_memory(
     db.add(new_memory)
     db.commit()
     db.refresh(new_memory)
-    await run_in_threadpool(memory_vectors.store_vector, new_memory)
-    db.commit()
+    await run_in_threadpool(memory_vectors.store_vector, memory_vectors.snapshot(new_memory))
     db.refresh(new_memory)
 
     logger.info("memory_promoted",

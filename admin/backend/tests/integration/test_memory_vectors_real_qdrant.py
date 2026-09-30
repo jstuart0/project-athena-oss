@@ -159,11 +159,11 @@ def test_wrong_shape_is_refused_unmodified(db, real_qdrant):
 def test_collection_deleted_between_stores_is_recreated(db, real_qdrant):
     assert mv.refresh_state().status == "ready"
     first = _row(db, "first")
-    assert mv.store_vector(first)
+    assert mv.store_vector(mv.snapshot(first))
     db.commit()
     real_qdrant.delete_collection(mv.COLLECTION_NAME)
     second = _row(db, "second")
-    assert mv.store_vector(second) is True
+    assert mv.store_vector(mv.snapshot(second)) is True
     db.commit()
     assert real_qdrant.collection_exists(mv.COLLECTION_NAME)
     assert second.vector_id in _point_ids(real_qdrant)
@@ -172,11 +172,11 @@ def test_collection_deleted_between_stores_is_recreated(db, real_qdrant):
 def test_create_marks_pending_then_tick_restores(db, real_qdrant):
     assert mv.refresh_state().status == "ready"
     one, two = _row(db, "one"), _row(db, "two")
-    assert mv.store_vector(one) and mv.store_vector(two)
+    assert mv.store_vector(mv.snapshot(one)) and mv.store_vector(mv.snapshot(two))
     db.commit()
     real_qdrant.delete_collection(mv.COLLECTION_NAME)
     three = _row(db, "three")
-    assert mv.store_vector(three)
+    assert mv.store_vector(mv.snapshot(three))
     db.commit()
     assert [_status(db, one), _status(db, two), _status(db, three)] == ["pending", "pending", "stored"]
     asyncio.run(mv.tick())
