@@ -715,12 +715,16 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     logger.info(f"Dynamic agent mode - routing to automation agent: {state.query[:50]}...")
 
                     # Build context for automation agent
+                    # Guest identity lives in state.context (set by
+                    # build_query_context only for a named, non-degraded
+                    # guest house); the agent refuses guest-mode automation
+                    # management without it.
                     context = {
                         "room": state.room,
                         "mode": state.mode,
                         "session_id": state.session_id,
-                        "guest_name": getattr(state, 'guest_name', None),
-                        "guest_session_id": getattr(state, 'guest_session_id', None),
+                        "guest_name": state.context.get("guest_name"),
+                        "guest_id": state.context.get("guest_id"),
                     }
 
                     # Execute via automation agent (D2: surface any denial

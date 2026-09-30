@@ -22,6 +22,7 @@ import structlog
 import httpx
 
 from shared.admin_config import get_admin_client
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -258,10 +259,12 @@ async def find_similar_emerging_intent(
     similarity in Python (simpler than requiring pgvector).
     """
     try:
+        key = get_config().service_api_key
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{admin_api_url}/api/internal/emerging-intents",
-                params={"status": "discovered,reviewed"}
+                params={"status": "discovered,reviewed"},
+                headers={"X-Service-Key": key} if key else None,
             )
 
             if response.status_code != 200:
@@ -314,9 +317,11 @@ async def create_emerging_intent(
 ) -> Optional[int]:
     """Create a new emerging intent record."""
     try:
+        key = get_config().service_api_key
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{admin_api_url}/api/internal/emerging-intents",
+                headers={"X-Service-Key": key} if key else None,
                 json={
                     "canonical_name": canonical_name,
                     "display_name": display_name,
@@ -352,10 +357,12 @@ async def increment_intent_count(
 ) -> bool:
     """Increment occurrence count and add sample query."""
     try:
+        key = get_config().service_api_key
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{admin_api_url}/api/internal/emerging-intents/{intent_id}/increment",
-                json={"sample_query": sample_query}
+                json={"sample_query": sample_query},
+                headers={"X-Service-Key": key} if key else None,
             )
 
             if response.status_code == 200:
@@ -392,9 +399,11 @@ async def record_intent_metric(
     try:
         query_hash = hashlib.md5(raw_query.lower().encode()).hexdigest()
 
+        key = get_config().service_api_key
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.post(
                 f"{admin_api_url}/api/internal/intent-metrics",
+                headers={"X-Service-Key": key} if key else None,
                 json={
                     "intent": intent,
                     "confidence": confidence,

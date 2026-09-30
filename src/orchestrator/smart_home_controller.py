@@ -3404,8 +3404,12 @@ Return ONLY valid JSON."""
 
         try:
             admin_url = get_admin_url()
+            key = get_config().service_api_key
             async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-                response = await client.get(f"{admin_url}/api/settings/house-layout")
+                response = await client.get(
+                    f"{admin_url}/api/settings/house-layout",
+                    headers={"X-Service-Key": key} if key else None,
+                )
                 if response.status_code == 200:
                     data = response.json()
                     if data.get('has_layout'):

@@ -31,7 +31,9 @@ async function loadRoomGroups() {
 
 async function loadAvailableRooms() {
     try {
-        const response = await fetch(`${ROOM_GROUPS_API}/available-rooms`);
+        const response = await fetch(`${ROOM_GROUPS_API}/available-rooms`, {
+            headers: { 'Authorization': `Bearer ${getToken()}` }
+        });
         if (response.ok) {
             availableRooms = await response.json();
         }

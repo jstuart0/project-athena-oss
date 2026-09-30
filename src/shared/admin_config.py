@@ -5,13 +5,35 @@ Allows services to fetch configuration and secrets from the admin API.
 Uses service-to-service authentication with API key.
 """
 import time
+import urllib.parse
 import httpx
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
 import structlog
 from shared.admin_url import get_admin_url
 from shared.config import get_config as _get_athena_config  # local async get_config(key) below shadows this name; alias to keep both available
 
 logger = structlog.get_logger()
+
+CallerMode = Literal["owner", "guest"]
+
+
+def voice_automation_headers(api_key: str, caller_mode: str, caller_guest_name: Optional[str]) -> Dict[str, str]:
+    """Headers for a scoped voice-automation call: the service key plus the
+    caller's scope, which admin-backend enforces (a guest scope sees and
+    changes only that guest's rows).
+
+    Raises ValueError, before any request is made, for an unknown mode or a
+    guest scope with no name: an unscoped guest query is never sent. The
+    guest name travels percent-encoded in a header, never in the URL.
+    """
+    if caller_mode not in ("owner", "guest"):
+        raise ValueError(f"caller_mode must be 'owner' or 'guest', not {caller_mode!r}")
+    headers = {"X-Service-Key": api_key, "X-Athena-Caller-Mode": caller_mode}
+    if caller_mode == "guest":
+        if not caller_guest_name:
+            raise ValueError("a guest-scoped voice-automation call needs the guest's name")
+        headers["X-Athena-Guest-Name"] = urllib.parse.quote(caller_guest_name, safe="")
+    return headers
 
 
 class AdminConfigClient:
@@ -1192,7 +1214,7 @@ class AdminConfigClient:
             import urllib.parse
             encoded_term = urllib.parse.quote(query_term)
             url = f"{self.admin_url}/api/room-groups/resolve/{encoded_term}"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
 
             if response.status_code == 404:
                 # Not a room group - this is normal for individual rooms
@@ -1263,7 +1285,7 @@ class AdminConfigClient:
                 params["enabled"] = "true"
 
             url = f"{self.admin_url}/api/room-groups"
-            response = await self.client.get(url, params=params)
+            response = await self.client.get(url, params=params, headers={"X-Service-Key": self.api_key})
 
             if response.status_code == 200:
                 groups = response.json()
@@ -1374,7 +1396,7 @@ class AdminConfigClient:
             import urllib.parse
             encoded_device_id = urllib.parse.quote(device_id)
             url = f"{self.admin_url}/api/user-sessions/device/{encoded_device_id}"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
 
             if response.status_code == 404:
                 logger.debug(
@@ -1698,7 +1720,13 @@ class AdminConfigClient:
     # Voice Automations (Guest-Scoped with Archival)
     # ==========================================================================
 
-    async def create_voice_automation(self, automation: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def create_voice_automation(
+        self,
+        automation: Dict[str, Any],
+        *,
+        caller_mode: CallerMode,
+        caller_guest_name: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
         """
         Create a voice automation record in the database.
 
@@ -1715,13 +1743,17 @@ class AdminConfigClient:
                 - actions_config: JSONB action configuration
                 - is_one_time: Whether this is a one-time automation
                 - end_date: Date when automation expires (optional)
+            caller_mode, caller_guest_name: the caller's scope (see
+                voice_automation_headers). A guest scope may only create a
+                guest row carrying its own name.
 
         Returns:
             Created automation dict with ID, or None on failure
         """
+        headers = voice_automation_headers(self.api_key, caller_mode, caller_guest_name)
         try:
             url = f"{self.admin_url}/api/voice-automations"
-            response = await self.client.post(url, json=automation)
+            response = await self.client.post(url, json=automation, headers=headers)
 
             if response.status_code in (200, 201):
                 data = response.json()
@@ -1751,7 +1783,10 @@ class AdminConfigClient:
         self,
         owner_type: Optional[str] = None,
         guest_name: Optional[str] = None,
-        include_archived: bool = False
+        include_archived: bool = False,
+        *,
+        caller_mode: CallerMode,
+        caller_guest_name: Optional[str],
     ) -> List[Dict[str, Any]]:
         """
         Fetch voice automations with optional filters.
@@ -1760,10 +1795,13 @@ class AdminConfigClient:
             owner_type: Filter by 'owner' or 'guest'
             guest_name: Filter by guest name (for returning guests)
             include_archived: Include archived automations
+            caller_mode, caller_guest_name: the caller's scope. A guest scope
+                gets only that guest's rows, whatever the filters say.
 
         Returns:
             List of automation dicts
         """
+        headers = voice_automation_headers(self.api_key, caller_mode, caller_guest_name)
         try:
             params = {}
             if owner_type:
@@ -1774,7 +1812,7 @@ class AdminConfigClient:
                 params["include_archived"] = "true"
 
             url = f"{self.admin_url}/api/voice-automations"
-            response = await self.client.get(url, params=params)
+            response = await self.client.get(url, params=params, headers=headers)
 
             if response.status_code == 200:
                 automations = response.json()
@@ -1801,7 +1839,10 @@ class AdminConfigClient:
     async def archive_voice_automation(
         self,
         automation_id: int,
-        reason: str = "user_deleted"
+        reason: str = "user_deleted",
+        *,
+        caller_mode: CallerMode,
+        caller_guest_name: Optional[str],
     ) -> bool:
         """
         Archive a voice automation (soft delete).
@@ -1809,13 +1850,16 @@ class AdminConfigClient:
         Args:
             automation_id: ID of automation to archive
             reason: Archive reason ('guest_departed', 'user_deleted', 'expired', 'one_time_completed')
+            caller_mode, caller_guest_name: the caller's scope. A guest scope
+                can archive only its own rows (anything else is a 404).
 
         Returns:
             True if archived successfully
         """
+        headers = voice_automation_headers(self.api_key, caller_mode, caller_guest_name)
         try:
             url = f"{self.admin_url}/api/voice-automations/{automation_id}/archive"
-            response = await self.client.post(url, json={"reason": reason})
+            response = await self.client.post(url, json={"reason": reason}, headers=headers)
 
             if response.status_code == 200:
                 logger.info(
@@ -1840,19 +1884,27 @@ class AdminConfigClient:
             )
             return False
 
-    async def restore_voice_automation(self, automation_id: int) -> bool:
+    async def restore_voice_automation(
+        self,
+        automation_id: int,
+        *,
+        caller_mode: CallerMode,
+        caller_guest_name: Optional[str],
+    ) -> bool:
         """
         Restore an archived voice automation.
 
         Args:
             automation_id: ID of automation to restore
+            caller_mode, caller_guest_name: the caller's scope.
 
         Returns:
             True if restored successfully
         """
+        headers = voice_automation_headers(self.api_key, caller_mode, caller_guest_name)
         try:
             url = f"{self.admin_url}/api/voice-automations/{automation_id}/restore"
-            response = await self.client.post(url)
+            response = await self.client.post(url, headers=headers)
 
             if response.status_code == 200:
                 logger.info(
@@ -1880,6 +1932,10 @@ class AdminConfigClient:
         """
         Permanently delete a voice automation.
 
+        admin-backend keeps this route user-only (a hard delete would leave
+        the Home Assistant automation running), so from a service this is
+        refused (401) and returns False. Voice "delete" archives instead.
+
         Args:
             automation_id: ID of automation to delete
 
@@ -1888,7 +1944,7 @@ class AdminConfigClient:
         """
         try:
             url = f"{self.admin_url}/api/voice-automations/{automation_id}"
-            response = await self.client.delete(url)
+            response = await self.client.delete(url, headers={"X-Service-Key": self.api_key})
 
             if response.status_code in (200, 204):
                 logger.info(
@@ -1915,7 +1971,10 @@ class AdminConfigClient:
     async def archive_guest_automations(
         self,
         guest_session_id: Optional[str] = None,
-        guest_name: Optional[str] = None
+        guest_name: Optional[str] = None,
+        *,
+        caller_mode: CallerMode,
+        caller_guest_name: Optional[str],
     ) -> int:
         """
         Archive all automations for a guest (when they depart).
@@ -1923,10 +1982,13 @@ class AdminConfigClient:
         Args:
             guest_session_id: Session ID of the departing guest
             guest_name: Name of the departing guest
+            caller_mode, caller_guest_name: the caller's scope. A guest scope
+                can archive only its own name's rows.
 
         Returns:
             Number of automations archived
         """
+        headers = voice_automation_headers(self.api_key, caller_mode, caller_guest_name)
         try:
             url = f"{self.admin_url}/api/voice-automations/archive-guest"
             payload = {"reason": "guest_departed"}
@@ -1935,7 +1997,7 @@ class AdminConfigClient:
             if guest_name:
                 payload["guest_name"] = guest_name
 
-            response = await self.client.post(url, json=payload)
+            response = await self.client.post(url, json=payload, headers=headers)
 
             if response.status_code == 200:
                 data = response.json()
@@ -1965,19 +2027,27 @@ class AdminConfigClient:
             )
             return 0
 
-    async def restore_guest_automations(self, guest_name: str) -> int:
+    async def restore_guest_automations(
+        self,
+        guest_name: str,
+        *,
+        caller_mode: CallerMode,
+        caller_guest_name: Optional[str],
+    ) -> int:
         """
         Restore all archived automations for a returning guest.
 
         Args:
             guest_name: Name of the returning guest
+            caller_mode, caller_guest_name: the caller's scope.
 
         Returns:
             Number of automations restored
         """
+        headers = voice_automation_headers(self.api_key, caller_mode, caller_guest_name)
         try:
             url = f"{self.admin_url}/api/voice-automations/restore-guest"
-            response = await self.client.post(url, json={"guest_name": guest_name})
+            response = await self.client.post(url, json={"guest_name": guest_name}, headers=headers)
 
             if response.status_code == 200:
                 data = response.json()

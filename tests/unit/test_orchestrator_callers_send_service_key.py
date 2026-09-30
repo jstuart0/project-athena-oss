@@ -143,6 +143,19 @@ _ROUTE_PATTERN = re.compile(
     # header. GET .../url (service_registry.py line ~60) stays deliberately
     # unmatched -- it is documented as intentionally unauthenticated.
     r"""|/api/service-registry/services/\{service_name\}/toggle"""
+    # Guest-data hardening: the admin-backend routes it gated for a service
+    # caller (room groups, guest sessions by device, voice automations,
+    # emerging-intent discovery, house layout, origin placeholders). The
+    # intent_discovery.py calls the ATHENA-114 note above left out are
+    # covered now that they send the key. The function-scoped fast check is
+    # tests/unit/test_admin_guest_route_callers_send_service_key.py.
+    r"""|/api/room-groups(?:/resolve/)?"""
+    r"""|/api/user-sessions/device/"""
+    r"""|/api/voice-automations"""
+    r"""|/api/internal/emerging-intents"""
+    r"""|/api/internal/intent-metrics"""
+    r"""|/api/settings/house-layout"""
+    r"""|/api/settings/directions-origin-placeholders"""
 )
 
 _HTTP_METHODS = {"get", "post", "put", "delete", "stream", "request"}

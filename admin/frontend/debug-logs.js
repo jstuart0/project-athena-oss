@@ -32,7 +32,7 @@ async function initDebugLogs() {
 
 async function checkDebugStatus() {
     try {
-        const response = await fetch('/api/debug-logs/status');
+        const response = await fetch('/api/debug-logs/status', { headers: getAuthHeaders() });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
         const status = await response.json();
@@ -97,7 +97,7 @@ async function checkDebugStatus() {
 
 async function loadLogFiles() {
     try {
-        const response = await fetch('/api/debug-logs/files?days=7');
+        const response = await fetch('/api/debug-logs/files?days=7', { headers: getAuthHeaders() });
         if (!response.ok) throw new Error('Failed to load log files');
 
         debugLogsState.files = await response.json();
@@ -177,7 +177,7 @@ async function loadLogEntries() {
             params.append('level', debugLogsState.levelFilter);
         }
 
-        const response = await fetch(`/api/debug-logs/search?${params}`);
+        const response = await fetch(`/api/debug-logs/search?${params}`, { headers: getAuthHeaders() });
         if (!response.ok) throw new Error('Failed to load log entries');
 
         const result = await response.json();
@@ -592,7 +592,7 @@ async function tailLogFile() {
     }
 
     try {
-        const response = await fetch(`/api/debug-logs/tail/${debugLogsState.selectedFile}?lines=100`);
+        const response = await fetch(`/api/debug-logs/tail/${debugLogsState.selectedFile}?lines=100`, { headers: getAuthHeaders() });
         if (!response.ok) throw new Error('Failed to tail log file');
 
         const result = await response.json();

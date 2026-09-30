@@ -692,7 +692,8 @@ async def get_origin_placeholder_patterns() -> set:
     try:
         admin_client = get_admin_client()
         response = await admin_client.client.get(
-            f"{admin_client.admin_url}/api/settings/directions-origin-placeholders"
+            f"{admin_client.admin_url}/api/settings/directions-origin-placeholders",
+            headers={"X-Service-Key": admin_client.api_key},
         )
         response.raise_for_status()
         data = response.json()
