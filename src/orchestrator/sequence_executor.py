@@ -12,9 +12,11 @@ import asyncio
 import contextlib
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Dict, List, Optional, Any
 import json
+
+from shared.local_time import local_now, local_tz
 
 logger = logging.getLogger(__name__)
 
@@ -376,10 +378,16 @@ class SequenceExecutor:
         Args:
             time_str: Time in HH:MM or HH:MM:SS format
 
+        The target is a wall-clock time in the property zone (DEFAULT_TIMEZONE):
+        today if it's still ahead, otherwise tomorrow. The wait is real elapsed
+        time, computed between UTC instants, so it's right across a DST change.
+        A target that doesn't exist (inside the spring-forward gap) resolves
+        with fold=0, e.g. 02:30 becomes 03:30 daylight time.
+
         Returns:
-            Seconds to wait (0 if time has passed today, schedules for tomorrow)
+            Seconds to wait (0 if the time can't be parsed)
         """
-        now = datetime.now()
+        now = local_now()
 
         # Parse time
         try:
@@ -405,14 +413,12 @@ class SequenceExecutor:
             logger.warning(f"Could not parse time: {time_str}, executing immediately")
             return 0
 
-        # Create target datetime
-        target = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
-
-        # If time has passed today, schedule for tomorrow
+        tz = local_tz()
+        target = datetime.combine(now.date(), time(hour, minute, second), tzinfo=tz)
         if target <= now:
-            target += timedelta(days=1)
+            target = datetime.combine(now.date() + timedelta(days=1), time(hour, minute, second), tzinfo=tz)
 
-        wait_seconds = (target - now).total_seconds()
+        wait_seconds = (target.astimezone(timezone.utc) - now.astimezone(timezone.utc)).total_seconds()
         logger.info(f"Calculated wait for {time_str}: {wait_seconds:.1f}s (until {target})")
 
         return wait_seconds

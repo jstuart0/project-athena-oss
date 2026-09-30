@@ -32,3 +32,7 @@ extruct>=0.18.0      # JSON-LD and structured data extraction
 pandas>=2.2.0        # Table extraction
 lxml>=5.1.0          # HTML parsing (fast)
 asyncpg>=0.29.0
+
+# Zone database for shared.local_time (DEFAULT_TIMEZONE); slim images may
+# ship no /usr/share/zoneinfo.
+tzdata>=2024.1

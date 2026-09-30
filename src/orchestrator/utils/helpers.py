@@ -5,10 +5,11 @@ Utility functions for date extraction, model selection, and other common operati
 """
 
 import re
-from datetime import datetime
+from datetime import date
 from typing import Optional
 
 from shared.admin_config import get_admin_client
+from shared.local_time import local_today
 from shared.logging_config import configure_logging
 
 from .constants import FALLBACK_MODELS, _DEFAULT_MODEL
@@ -25,7 +26,7 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
     - date_str_api: API format like "2025-12-06"
     """
     query_lower = query.lower()
-    today = datetime.now()
+    today = local_today()
     current_year = today.year
 
     # Month name mapping
@@ -53,9 +54,12 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
         month = months.get(month_name)
         if month and 1 <= day <= 31:
             # Determine year - if the date is in the past, use next year
-            target_date = datetime(current_year, month, day)
-            if target_date < today:
-                target_date = datetime(current_year + 1, month, day)
+            try:
+                target_date = date(current_year, month, day)
+                if target_date < today:
+                    target_date = date(current_year + 1, month, day)
+            except ValueError:
+                return None
 
             display_str = target_date.strftime("%A, %B %d, %Y")
             api_str = target_date.strftime("%Y-%m-%d")
@@ -69,9 +73,12 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
         month_name = match.group(2)
         month = months.get(month_name)
         if month and 1 <= day <= 31:
-            target_date = datetime(current_year, month, day)
-            if target_date < today:
-                target_date = datetime(current_year + 1, month, day)
+            try:
+                target_date = date(current_year, month, day)
+                if target_date < today:
+                    target_date = date(current_year + 1, month, day)
+            except ValueError:
+                return None
 
             display_str = target_date.strftime("%A, %B %d, %Y")
             api_str = target_date.strftime("%Y-%m-%d")
@@ -84,9 +91,12 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
         month = int(match.group(1))
         day = int(match.group(2))
         if 1 <= month <= 12 and 1 <= day <= 31:
-            target_date = datetime(current_year, month, day)
-            if target_date < today:
-                target_date = datetime(current_year + 1, month, day)
+            try:
+                target_date = date(current_year, month, day)
+                if target_date < today:
+                    target_date = date(current_year + 1, month, day)
+            except ValueError:
+                return None
 
             display_str = target_date.strftime("%A, %B %d, %Y")
             api_str = target_date.strftime("%Y-%m-%d")

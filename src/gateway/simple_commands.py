@@ -13,11 +13,11 @@ Executes directly against HA API without orchestrator.
 import re
 import os
 from typing import Optional, Tuple
-from datetime import datetime
 import httpx
 import structlog
 
 from gateway.mode_gate import fast_path_allowed
+from shared.local_time import local_now
 
 logger = structlog.get_logger("gateway.simple_commands")
 
@@ -217,7 +217,7 @@ async def execute_simple_command(
         return None
 
     elif command_type == "time":
-        now = datetime.now()
+        now = local_now()
         hour = now.strftime('%I').lstrip('0')  # Remove leading zero from hour
         minute = now.minute
         if minute == 0:
@@ -230,7 +230,7 @@ async def execute_simple_command(
         return f"It's {time_str} {period}."
 
     elif command_type == "date":
-        now = datetime.now()
+        now = local_now()
         return f"Today is {now.strftime('%A, %B %d, %Y')}."
 
     elif command_type == "greeting":

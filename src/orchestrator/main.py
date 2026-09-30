@@ -719,10 +719,12 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
     - date_str_api: API format like "2025-12-06"
     """
     import re
-    from datetime import datetime, timedelta
+    from datetime import date
+
+    from shared.local_time import local_today
 
     query_lower = query.lower()
-    today = datetime.now()
+    today = local_today()
     current_year = today.year
 
     # Month name mapping
@@ -750,9 +752,12 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
         month = months.get(month_name)
         if month and 1 <= day <= 31:
             # Determine year - if the date is in the past, use next year
-            target_date = datetime(current_year, month, day)
-            if target_date < today:
-                target_date = datetime(current_year + 1, month, day)
+            try:
+                target_date = date(current_year, month, day)
+                if target_date < today:
+                    target_date = date(current_year + 1, month, day)
+            except ValueError:
+                return None
 
             display_str = target_date.strftime("%A, %B %d, %Y")
             api_str = target_date.strftime("%Y-%m-%d")
@@ -766,9 +771,12 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
         month_name = match.group(2)
         month = months.get(month_name)
         if month and 1 <= day <= 31:
-            target_date = datetime(current_year, month, day)
-            if target_date < today:
-                target_date = datetime(current_year + 1, month, day)
+            try:
+                target_date = date(current_year, month, day)
+                if target_date < today:
+                    target_date = date(current_year + 1, month, day)
+            except ValueError:
+                return None
 
             display_str = target_date.strftime("%A, %B %d, %Y")
             api_str = target_date.strftime("%Y-%m-%d")
@@ -781,9 +789,12 @@ def extract_date_from_query(query: str) -> Optional[tuple]:
         month = int(match.group(1))
         day = int(match.group(2))
         if 1 <= month <= 12 and 1 <= day <= 31:
-            target_date = datetime(current_year, month, day)
-            if target_date < today:
-                target_date = datetime(current_year + 1, month, day)
+            try:
+                target_date = date(current_year, month, day)
+                if target_date < today:
+                    target_date = date(current_year + 1, month, day)
+            except ValueError:
+                return None
 
             display_str = target_date.strftime("%A, %B %d, %Y")
             api_str = target_date.strftime("%Y-%m-%d")
@@ -4846,8 +4857,10 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
         # Add special instructions for planning/itinerary queries
         if is_planning_query:
-            from datetime import datetime, timedelta
-            today = datetime.now()
+            from datetime import timedelta
+
+            from shared.local_time import local_now
+            today = local_now()
             today_str = today.strftime("%A, %B %d, %Y")  # e.g., "Sunday, November 30, 2025"
             today_api = today.strftime("%Y-%m-%d")
             # Calculate next Saturday

@@ -26,3 +26,7 @@ structlog>=23.2.0
 numpy>=1.26
 livekit>=1.0
 livekit-api>=1.0
+
+# Zone database for shared.local_time (DEFAULT_TIMEZONE); slim images may
+# ship no /usr/share/zoneinfo.
+tzdata>=2024.1

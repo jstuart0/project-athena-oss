@@ -64,10 +64,11 @@ from orchestrator.urls import (
     WEBSEARCH_SERVICE_URL,
 )
 from shared.admin_config import get_admin_client
+from shared.local_time import local_now, local_today
 from shared.assistant_profile import get_assistant_profile
 from shared.service_registry import get_service_url as registry_get_service_url
 from orchestrator.config_loader import ADMIN_API_URL
-from orchestrator.utils.constants import DEFAULT_LOCATION, DEFAULT_TIMEZONE
+from orchestrator.utils.constants import DEFAULT_LOCATION
 
 logger = configure_logging("orchestrator.helpers")
 
@@ -623,9 +624,8 @@ def enhance_query_with_year(query: str) -> str:
         Enhanced query with year appended if applicable
     """
     import re
-    from datetime import datetime
 
-    current_year = datetime.now().year
+    current_year = local_today().year
     query_lower = query.lower()
 
     # Skip if query already contains a recent year (2020-2030)
@@ -1511,14 +1511,7 @@ def _direct_general_info_response(query: str) -> Optional[str]:
         "current time",
         "tell me the time",
     }:
-        try:
-            from zoneinfo import ZoneInfo
-            from datetime import datetime, timezone as tz
-            local_now = datetime.now(tz.utc).astimezone(ZoneInfo(DEFAULT_TIMEZONE))
-            return f"It's {local_now.strftime('%-I:%M %p')}."
-        except Exception as e:
-            logger.warning("direct_time_response_failed", error=str(e))
-            return None
+        return f"It's {local_now().strftime('%-I:%M %p')}."
 
     if normalized in {
         "what date is it",
@@ -1528,14 +1521,7 @@ def _direct_general_info_response(query: str) -> Optional[str]:
         "current date",
         "what day is it",
     }:
-        try:
-            from zoneinfo import ZoneInfo
-            from datetime import datetime, timezone as tz
-            local_now = datetime.now(tz.utc).astimezone(ZoneInfo(DEFAULT_TIMEZONE))
-            return f"Today is {local_now.strftime('%A, %B %-d, %Y')}."
-        except Exception as e:
-            logger.warning("direct_date_response_failed", error=str(e))
-            return None
+        return f"Today is {local_now().strftime('%A, %B %-d, %Y')}."
 
     return None
 

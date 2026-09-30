@@ -5,10 +5,10 @@ Provides functions to format and inject base knowledge context into LLM prompts.
 Handles dynamic placeholders like {dynamic:current_date} and {dynamic:current_time}.
 """
 import os
-from datetime import datetime
 from typing import List, Dict, Any
 import structlog
 from shared.config import get_config
+from shared.local_time import local_now
 
 logger = structlog.get_logger()
 
@@ -35,7 +35,7 @@ def resolve_dynamic_value(value: str) -> str:
     if "{dynamic:" not in value:
         return value
 
-    now = datetime.now()
+    now = local_now()
 
     # Replace dynamic placeholders
     value = value.replace(
