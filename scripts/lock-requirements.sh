@@ -68,7 +68,7 @@ require_uv
 # compile has no shared co-input. Everyone else gets src/shared/pyproject.toml
 # compiled alongside their own .in (Context: "uv pip compile
 # src/shared/pyproject.toml admin/backend/requirements.txt").
-NO_SHARED_DIRS=("apps/chat-embed" "apps/jarvis-web/backend")
+NO_SHARED_DIRS=("apps/chat-embed" "apps/jarvis-web/backend" ".github/ci-requirements/unit-min")
 
 is_no_shared_dir() {
     local d="$1"

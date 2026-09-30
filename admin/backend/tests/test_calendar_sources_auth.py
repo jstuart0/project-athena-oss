@@ -16,6 +16,7 @@ from app.auth.oidc import create_access_token
 from app.models import AuditLog, CalendarSource, ExternalAPIKey
 from main import app
 from shared.config import _clear_cache_for_tests, get_config
+from shared.route_walk import dependency_calls, iter_api_routes
 
 BASE = "/api/calendar-sources"
 SECRET_URL = "https://user:SECRET@feed.example.com:8443/x?token=SECRET"
@@ -76,13 +77,20 @@ def _lodgify_key(db, user, enabled=True):
 # (a) route population + anonymous 401
 # ---------------------------------------------------------------------------
 
+def _calendar_routes():
+    """(method, served path) -> walked route, for every calendar-sources
+    route the app serves. shared.route_walk sees through FastAPI 0.141's
+    included-router wrappers, which a flat app.routes walk doesn't."""
+    found = {}
+    for walked in iter_api_routes(app):
+        if walked.path == BASE or walked.path.startswith(BASE + "/"):
+            for method in walked.methods - {"HEAD", "OPTIONS"}:
+                found[(method, walked.path)] = walked
+    return found
+
+
 def test_route_population_is_exactly_the_eleven_routes():
-    found = set()
-    for route in app.routes:
-        path = getattr(route, "path", "")
-        if path == BASE or path.startswith(BASE + "/"):
-            for method in getattr(route, "methods", set()) - {"HEAD", "OPTIONS"}:
-                found.add((method, path))
+    found = set(_calendar_routes())
     assert len(found) >= 11
     assert ("POST", f"{BASE}/{{source_id}}/sync") in found
     assert found == EXPECTED_ROUTES
@@ -134,32 +142,17 @@ def _call(client, route, source_id, headers):
 _SUCCESS = {("POST", BASE): 201, ("DELETE", f"{BASE}/{{source_id}}"): 204}
 
 
-def _route_dependency_names(route):
-    names = set()
-    stack = [route.dependant]
-    while stack:
-        dep = stack.pop()
-        if dep.call is not None:
-            names.add(getattr(dep.call, "__qualname__", ""))
-        stack.extend(dep.dependencies)
-    return names
-
-
 def test_every_protected_route_uses_require_user_permission():
     seen = set()
-    for route in app.routes:
-        path = getattr(route, "path", "")
-        if not (path == BASE or path.startswith(BASE + "/")):
+    for key, walked in _calendar_routes().items():
+        if key == ("GET", f"{BASE}/types"):
             continue
-        for method in getattr(route, "methods", set()) - {"HEAD", "OPTIONS"}:
-            key = (method, path)
-            if key == ("GET", f"{BASE}/types"):
-                continue
-            seen.add(key)
-            names = _route_dependency_names(route)
-            assert any(n.startswith("require_user_permission.") for n in names), (key, names)
-    assert seen == set(PROTECTED_ROUTES)
+        seen.add(key)
+        names = {getattr(call, "__qualname__", "") for call in dependency_calls(walked)}
+        assert any(n.startswith("require_user_permission.") for n in names), (key, names)
     assert len(seen) == 10
+    assert ("POST", f"{BASE}/{{source_id}}/sync") in seen
+    assert seen == set(PROTECTED_ROUTES)
 
 
 def _creds(case, *, owner, viewer, operator, api_key, monkeypatch):
