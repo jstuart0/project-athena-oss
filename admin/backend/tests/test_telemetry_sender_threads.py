@@ -72,3 +72,43 @@ def test_two_concurrent_cycles_send_once(telemetry_env, tmp_path, monkeypatch):
         assert len(requests) == 1, (n, outcomes)
         assert ids == 1, (n, outcomes)
         assert "sent" in outcomes, outcomes
+
+
+def test_two_concurrent_manual_sends_post_once(telemetry_env, tmp_path, monkeypatch):
+    """Two manual sends from two replicas: the lease serializes them and the
+    in-lease spacing check stops the second, whichever order they land in."""
+    for n in range(ROUNDS):
+        path = tmp_path / f"manual-{n}.db"
+        engines = [_engine(path), _engine(path)]
+        Base.metadata.create_all(bind=engines[0])
+        maker_var = contextvars.ContextVar("maker")
+        lock = threading.Lock()
+        requests = []
+
+        def handler(request):
+            with lock:
+                requests.append(request.read())
+            return httpx.Response(200, content=b"{}")
+
+        monkeypatch.setattr(sender, "TRANSPORT", httpx.MockTransport(handler))
+        monkeypatch.setattr(sender, "LEASE_SESSION_FACTORY", lambda: maker_var.get()())
+        barrier = threading.Barrier(2)
+        outcomes = []
+
+        def replica(engine, delay):
+            maker_var.set(sessionmaker(bind=engine, autocommit=False, autoflush=False))
+            barrier.wait()
+            if delay:
+                # Land after the first replica's cycle has released the lease.
+                while not requests:
+                    threading.Event().wait(0.005)
+            outcomes.append(asyncio.run(sender.run_cycle(force=True, manual=True)))
+
+        threads = [threading.Thread(target=replica, args=(e, d)) for e, d in zip(engines, (False, n % 2 == 1))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        for e in engines:
+            e.dispose()
+        assert len(requests) == 1, (n, outcomes)

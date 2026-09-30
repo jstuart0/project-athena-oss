@@ -66,6 +66,9 @@ K_FAILURES = "telemetry.consecutive_failures"
 K_ERROR = "telemetry.last_error"
 K_PAYLOAD = "telemetry.last_payload"
 K_ADMIN_DISABLED = "telemetry.admin_disabled"
+K_SEND_REQUESTED = "telemetry.send_requested_at"
+K_MANUAL_SENT = "telemetry.manual_sent_at"
+MANUAL_SEND_INTERVAL = timedelta(minutes=10)
 RESET_KEYS = (K_ID, K_KEY, K_CREATED, K_PROVENANCE, K_FIRST_BOOT, K_ATTEMPT, K_SUCCESS, K_DUE, K_FAILURES,
               K_ERROR, K_PAYLOAD)
 
@@ -85,6 +88,7 @@ RESOLVER = None
 _AFTER_DUE_CHECK: Optional[Callable[[], Any]] = None
 _BEFORE_FENCE: Optional[Callable[[], Any]] = None
 _BEFORE_ID_INSERT: Optional[Callable[[], Any]] = None
+_BEFORE_SEND_RESERVE: Optional[Callable[[], Any]] = None
 
 _loop_task: Optional[asyncio.Task] = None
 _background: set = set()
@@ -305,7 +309,7 @@ def _record_outcome(session, now: datetime, status: Optional[int], error_type: O
     return "failed"
 
 
-async def _cycle(force: bool) -> str:
+async def _cycle(force: bool, manual: bool) -> str:
     session = LEASE_SESSION_FACTORY()
     try:
         state = _decide(session, warn=True)
@@ -352,6 +356,14 @@ async def _cycle(force: bool) -> str:
             session.expire_all()
             if _get(session, K_ADMIN_DISABLED) == "true":
                 return "disabled"
+            if manual:
+                # Under the lease, so no other replica can pass this check
+                # until the slot is taken: at most one manual POST per 10 min.
+                last_manual = _parse_time(_get(session, K_MANUAL_SENT))
+                if last_manual is not None and CLOCK() - last_manual < MANUAL_SEND_INTERVAL:
+                    return "too_soon"
+                _set(session, K_MANUAL_SENT, CLOCK().isoformat())
+                session.commit()
 
             try:
                 status, response = await _post(state["endpoint"], body, header)
@@ -368,13 +380,15 @@ async def _cycle(force: bool) -> str:
             logger.warning("telemetry_lease_release_failed", error_type=type(exc).__name__)
 
 
-async def run_cycle(force: bool = False) -> str:
+async def run_cycle(force: bool = False, manual: bool = False) -> str:
     """One bounded cycle. Never raises; returns the outcome: sent, failed,
-    not_due, busy, disabled, lease_lost, timeout or error. ``force`` skips
-    the due check only, never the lease or enablement."""
+    not_due, busy, disabled, lease_lost, too_soon, timeout or error.
+    ``force`` skips the due check only, never the lease or enablement;
+    ``manual`` (the Admin UI's Send) also enforces the 10-minute spacing
+    between manual POSTs inside the lease."""
     try:
         async with asyncio.timeout(CYCLE_TIMEOUT_SECONDS):
-            return await _cycle(force)
+            return await _cycle(force, manual)
     except TimeoutError:
         logger.warning("telemetry_cycle_timeout", seconds=CYCLE_TIMEOUT_SECONDS)
         return "timeout"
@@ -447,7 +461,7 @@ async def stop_telemetry() -> None:
 
 def request_send() -> None:
     """Schedule a forced cycle in the background and return immediately."""
-    task = asyncio.get_running_loop().create_task(run_cycle(force=True))
+    task = asyncio.get_running_loop().create_task(run_cycle(force=True, manual=True))
     _background.add(task)
     task.add_done_callback(_background.discard)
 
@@ -493,6 +507,34 @@ def current_state(db) -> Dict[str, Any]:
 
 def last_attempt_at(db) -> Optional[datetime]:
     return _parse_time(_get(db, K_ATTEMPT))
+
+
+def reserve_manual_send(db, now: datetime) -> bool:
+    """Claim the manual-send slot for the Admin API: false when a manual send
+    was requested, or any send attempted, in the last 10 minutes. The claim
+    is a compare-and-set on the stored timestamp (a unique INSERT when there
+    is none), so of two concurrent requests on any replicas exactly one
+    wins. The cycle re-checks the spacing under the send lease."""
+    row = db.query(SystemSetting).filter(SystemSetting.key == K_SEND_REQUESTED).first()
+    observed = row.value if row is not None else None
+    recent = [t for t in (_parse_time(observed), _parse_time(_get(db, K_ATTEMPT))) if t is not None]
+    if recent and now - max(recent) < MANUAL_SEND_INTERVAL:
+        return False
+    if _BEFORE_SEND_RESERVE is not None:
+        _BEFORE_SEND_RESERVE()
+    if observed is None:
+        db.add(SystemSetting(key=K_SEND_REQUESTED, value=now.isoformat(), category=CATEGORY))
+        try:
+            db.commit()
+            return True
+        except (IntegrityError, OperationalError):
+            db.rollback()
+            return False
+    claimed = (db.query(SystemSetting)
+               .filter(SystemSetting.key == K_SEND_REQUESTED, SystemSetting.value == observed)
+               .update({"value": now.isoformat()}, synchronize_session=False))
+    db.commit()
+    return claimed == 1
 
 
 def set_admin_disabled(db, disabled: bool) -> None:

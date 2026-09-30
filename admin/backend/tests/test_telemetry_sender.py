@@ -602,3 +602,43 @@ def test_startup_never_raises(harness, monkeypatch):
     with capture_logs() as logs:
         sender.start_telemetry()
     assert [e for e in logs if e["event"] == "telemetry_start_failed"]
+
+
+# ---------------------------------------------------------------------------
+# Manual sends (D46 / codex M): spacing re-checked inside the lease
+# ---------------------------------------------------------------------------
+
+def test_manual_sends_back_to_back_post_once(harness):
+    clock, rec = harness
+    assert asyncio.run(sender.run_cycle(force=True, manual=True)) == "sent"
+    clock.advance(minutes=9, seconds=59)
+    assert asyncio.run(sender.run_cycle(force=True, manual=True)) == "too_soon"
+    assert len(rec.requests) == 1
+    clock.advance(seconds=1)
+    assert asyncio.run(sender.run_cycle(force=True, manual=True)) == "sent"
+    assert len(rec.requests) == 2
+
+
+def test_manual_spacing_does_not_block_scheduled_or_plain_forced_cycles(harness):
+    clock, rec = harness
+    assert asyncio.run(sender.run_cycle(force=True, manual=True)) == "sent"
+    assert asyncio.run(sender.run_cycle(force=True)) == "sent"
+    assert len(rec.requests) == 2
+
+
+def test_manual_reservation_is_atomic(harness, db, monkeypatch):
+    clock, rec = harness
+    assert sender.reserve_manual_send(db, clock.now) is True
+    assert sender.reserve_manual_send(db, clock.now) is False
+    clock.advance(minutes=10)
+
+    def competing():
+        other = TestingSessionLocal()
+        try:
+            monkeypatch.setattr(sender, "_BEFORE_SEND_RESERVE", None)
+            assert sender.reserve_manual_send(other, clock.now) is True
+        finally:
+            other.close()
+
+    monkeypatch.setattr(sender, "_BEFORE_SEND_RESERVE", competing)
+    assert sender.reserve_manual_send(db, clock.now) is False

@@ -7,7 +7,6 @@ the admin switch can't override them. The install key is never returned.
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 from typing import Any, Dict, Optional
 
 import structlog
@@ -25,8 +24,6 @@ logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/telemetry", tags=["telemetry"])
 
-MANUAL_SEND_INTERVAL = timedelta(minutes=10)
-K_SEND_REQUESTED = "telemetry.send_requested_at"
 
 
 class TelemetrySettings(BaseModel):
@@ -88,12 +85,8 @@ async def send_telemetry_now(db: Session = Depends(get_db), current_user: User =
     state = sender.current_state(db)
     if not state["enabled"]:
         raise _conflict("disabled", reason=state["reason"])
-    now = sender.CLOCK()
-    recent = [t for t in (sender.last_attempt_at(db), sender._parse_time(sender._get(db, K_SEND_REQUESTED))) if t]
-    if recent and now - max(recent) < MANUAL_SEND_INTERVAL:
+    if not sender.reserve_manual_send(db, sender.CLOCK()):
         raise HTTPException(status_code=429, detail={"error": "too_soon"})
-    sender._set(db, K_SEND_REQUESTED, now.isoformat())
-    db.commit()
     sender.request_send()
     return {"status": "scheduled"}
 
