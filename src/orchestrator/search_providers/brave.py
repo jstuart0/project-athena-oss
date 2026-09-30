@@ -67,7 +67,7 @@ class BraveSearchProvider(SearchProvider):
             List of SearchResult objects
         """
         try:
-            logger.info(f"Brave Search: Querying for '{query}'")
+            logger.info(f"Brave Search: Querying for query_len={len(query)}")
 
             # Build request headers
             headers = {
@@ -164,11 +164,11 @@ class BraveSearchProvider(SearchProvider):
                     )
                     results.append(result)
 
-            logger.info(f"Brave Search: Returning {len(results)} total results for '{query}'")
+            logger.info(f"Brave Search: Returning {len(results)} total results for query_len={len(query)}")
             return results
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"Brave Search HTTP error: {e.response.status_code} - {e.response.text}")
+            logger.error(f"Brave Search HTTP error: {e.response.status_code} ({len(e.response.text)} chars)")
             return []
 
         except httpx.RequestError as e:

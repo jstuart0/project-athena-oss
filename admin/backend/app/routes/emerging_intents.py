@@ -2,7 +2,7 @@
 Emerging Intents API Routes.
 
 Provides endpoints for managing discovered/novel intents:
-- Internal endpoints for orchestrator (no auth required)
+- Internal endpoints for the orchestrator (service key, or a signed-in user)
 - Admin endpoints for review/management (auth required)
 """
 
@@ -15,6 +15,7 @@ import structlog
 from datetime import datetime
 
 from app.database import get_db
+from app.utils.service_auth import require_service_or_user_permission
 from app.auth.oidc import get_current_user
 from app.models import User, EmergingIntent, IntentMetric
 
@@ -101,10 +102,10 @@ class MergeRequest(BaseModel):
 
 
 # =============================================================================
-# Internal API Endpoints (No Auth - for Orchestrator)
+# Internal API Endpoints (service key or signed-in user - for Orchestrator)
 # =============================================================================
 
-@router.get("/api/internal/emerging-intents", response_model=List[EmergingIntentResponse])
+@router.get("/api/internal/emerging-intents", response_model=List[EmergingIntentResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_emerging_intents_internal(
     status: Optional[str] = Query(None, description="Comma-separated statuses to filter"),
     db: Session = Depends(get_db)
@@ -124,7 +125,7 @@ async def list_emerging_intents_internal(
     return [intent.to_dict() for intent in intents]
 
 
-@router.post("/api/internal/emerging-intents", response_model=EmergingIntentResponse)
+@router.post("/api/internal/emerging-intents", response_model=EmergingIntentResponse, dependencies=[Depends(require_service_or_user_permission("write"))])
 async def create_emerging_intent_internal(
     data: EmergingIntentCreate,
     db: Session = Depends(get_db)
@@ -171,7 +172,7 @@ async def create_emerging_intent_internal(
     return intent.to_dict()
 
 
-@router.post("/api/internal/emerging-intents/{intent_id}/increment")
+@router.post("/api/internal/emerging-intents/{intent_id}/increment", dependencies=[Depends(require_service_or_user_permission("write"))])
 async def increment_intent_count_internal(
     intent_id: int,
     data: IncrementRequest,
@@ -204,7 +205,7 @@ async def increment_intent_count_internal(
     return {"success": True, "occurrence_count": intent.occurrence_count}
 
 
-@router.post("/api/internal/intent-metrics")
+@router.post("/api/internal/intent-metrics", dependencies=[Depends(require_service_or_user_permission("write"))])
 async def record_intent_metric_internal(
     data: IntentMetricCreate,
     db: Session = Depends(get_db)

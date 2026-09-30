@@ -1,6 +1,8 @@
 """Structured logging configuration for Project Athena"""
 
+import copy
 import os
+import re
 import sys
 import logging
 import structlog
@@ -17,7 +19,60 @@ _debug_log_path = None
 # Loggers whose INFO lines are full request URLs, query string included
 # (uvicorn's access log; httpx/httpcore client request lines). A query
 # string can carry a location or an API key, so they log WARNING and up.
-_REQUEST_URL_LOGGERS = ("uvicorn.access", "httpx", "httpcore")
+REQUEST_URL_LOGGERS = ("uvicorn.access", "httpx", "httpcore")
+_REQUEST_URL_LOGGERS = REQUEST_URL_LOGGERS
+
+_QUERY_STRING = re.compile(r"\?[^\s\"']*")
+
+
+def quiet_request_url_loggers() -> None:
+    """Set the request-URL loggers to WARNING (see REQUEST_URL_LOGGERS)."""
+    for name in REQUEST_URL_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+def _strip_query(text: str) -> str:
+    return _QUERY_STRING.sub("", text)
+
+
+class StripQueryStringFilter(logging.Filter):
+    """Removes every ``?query`` from a record's message and string args.
+
+    uvicorn logs the WebSocket handshake (``"WebSocket <path?query>"``) on
+    uvicorn.error at INFO, and a query string can carry a ticket, a token or
+    a location. This isn't keyed on any message format, so a uvicorn wording
+    change can't re-leak: ``msg`` (when a str) and every str in a tuple
+    ``args`` lose their ``?…`` up to the next space or quote, and ``args``
+    stays a tuple. Mapping args are left alone. Never drops a record.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = _strip_query(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_strip_query(a) if isinstance(a, str) else a for a in record.args)
+        return True
+
+
+def quiet_uvicorn_log_config() -> dict:
+    """uvicorn's own LOGGING_CONFIG (for ``uvicorn.run(log_config=...)``)
+    with the request-URL loggers at WARNING and StripQueryStringFilter on
+    both uvicorn handlers (``default`` carries uvicorn.error, ``access``
+    uvicorn.access), so no uvicorn record logs a query string. Existing
+    loggers stay enabled (``disable_existing_loggers`` False)."""
+    from uvicorn.config import LOGGING_CONFIG
+
+    config = copy.deepcopy(LOGGING_CONFIG)
+    config["disable_existing_loggers"] = False
+    config.setdefault("filters", {})["strip_query"] = {"()": "shared.logging_config.StripQueryStringFilter"}
+    for handler in ("default", "access"):
+        filters = config["handlers"][handler].setdefault("filters", [])
+        if "strip_query" not in filters:
+            filters.append("strip_query")
+    loggers = config.setdefault("loggers", {})
+    for name in REQUEST_URL_LOGGERS:
+        loggers.setdefault(name, {})["level"] = "WARNING"
+    return config
 
 
 def payload_keys(value) -> list:
@@ -130,8 +185,7 @@ def configure_logging(service_name: str, level: Optional[str] = None):
 
     # uvicorn configures its own loggers before it imports the app, and the
     # app's import runs this, so these levels stick for the process.
-    for name in _REQUEST_URL_LOGGERS:
-        logging.getLogger(name).setLevel(logging.WARNING)
+    quiet_request_url_loggers()
 
     return structlog.get_logger()
 

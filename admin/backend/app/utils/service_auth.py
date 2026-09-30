@@ -247,4 +247,59 @@ def require_user_permission(permission: str):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
         return user
 
+    _dependency.required_permission = permission
+    _dependency.caller_kinds = ("user",)
+    return _dependency
+
+
+def require_service_or_user_permission(permission: str):
+    """Dependency factory for routes that a service (``X-Service-Key``) or a
+    signed-in user holding ``permission`` may call.
+
+    - A key is present: the request is decided on the key alone, exactly as
+      ``verify_service_or_oidc`` decides it (wrong key 401, key sent while
+      ``SERVICE_API_KEY`` is unset 503). A Bearer token sent alongside is
+      ignored.
+    - No key: the user is resolved with ``get_current_user``, so an anonymous
+      caller gets 401 and a scoped role gets its own 403, then the permission
+      is checked (403).
+
+    Returns ``"service"`` or ``"user"``. The user is on
+    ``request.state.auth_user`` (``None`` on the service branch), and
+    ``request.state.auth_kind`` names the branch.
+
+    ``get_current_user`` is called here, not declared with ``Depends``, so
+    ``app.dependency_overrides[get_current_user]`` doesn't reach it: tests
+    authenticate with real tokens.
+    """
+
+    async def _dependency(
+        request: Request,
+        db: Session = Depends(get_db),
+        x_service_key: Optional[str] = Header(default=None, alias="X-Service-Key"),
+    ) -> str:
+        if x_service_key:
+            await verify_service_or_oidc(request, db, x_service_key)
+            request.state.auth_kind = "service"
+            request.state.auth_user = None
+            return "service"
+
+        # Imported here for the same circular-import reason as in
+        # verify_service_or_oidc.
+        from app.auth.oidc import get_current_user, optional_security
+
+        user = await get_current_user(
+            credentials=await optional_security(request),
+            x_api_key=request.headers.get("X-API-Key"),
+            db=db,
+            request=request,
+        )
+        if not user.has_permission(permission):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+        request.state.auth_kind = "user"
+        request.state.auth_user = user
+        return "user"
+
+    _dependency.required_permission = permission
+    _dependency.caller_kinds = ("service", "user")
     return _dependency

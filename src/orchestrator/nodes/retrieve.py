@@ -97,7 +97,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
         # Skip RAG for pronoun-based follow-ups that need LLM to resolve from conversation history
         # e.g., "what team does he play for now" after "who was the MVP of the Super Bowl"
         if state.needs_history_context:
-            logger.info(f"Skipping RAG - query '{state.query[:50]}...' needs conversation history for pronoun resolution")
+            logger.info(f"Skipping RAG - query query_len={len(state.query)} needs conversation history for pronoun resolution")
             # Use previous response as context for the LLM to answer from
             prev_response = state.entities.get("previous_response", "")
             prev_query = state.entities.get("previous_query", "")
@@ -194,7 +194,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
 
                     if is_far_future:
                         # Return a limitation acknowledgment instead of inaccurate forecast
-                        logger.info(f"Far future weather request detected: '{state.query}'")
+                        logger.info(f"Far future weather request detected: query_len={len(state.query)}")
                         state.retrieved_data = {
                             "limitation": True,
                             "message": "Weather forecasts are only reliable up to about 7-10 days out. "

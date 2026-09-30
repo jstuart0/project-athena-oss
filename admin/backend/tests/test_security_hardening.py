@@ -3755,27 +3755,16 @@ class TestWsPhase4FrontendStaticGuards:
             "admin-jarvis.js must use POST when minting a ws-ticket"
         )
 
-    def test_no_direct_localstorage_token_in_ws_url_primary_path(self):
-        """The WS URL on the primary (ticket) path must not contain the raw localStorage token.
-
-        The legacy-fallback branches are the only places where sessionToken (the
-        local-storage value) may appear in a WS URL.  On the primary path the
-        wsUrl must be built from the minted ticket, not the raw token.
-        """
-        import re
+    def test_ws_url_carries_only_the_minted_ticket(self):
+        """The WS URL is built from the minted ticket only; the raw
+        localStorage session token never reaches it (ticket-only client)."""
         src = self._get_frontend_src()
-
-        # We verify by checking that wsToken (which holds the minted ticket on the
-        # primary path) — not sessionToken / localStorage — is what is interpolated
-        # into the primary wsUrl.
-        assert "wsToken" in src, (
-            "admin-jarvis.js must use a separate wsToken variable for the WS URL "
-            "on the primary path (not the raw localStorage token)"
+        assert "wsTicket = mintData.ticket" in src, (
+            "admin-jarvis.js must put the minted ticket (and only it) in the WS URL"
         )
-        # Ensure the primary wsUrl is built from wsToken, not directly from localStorage
-        assert "wsBasePath" in src or "wsUrl" in src, (
-            "admin-jarvis.js must build the WS URL from a ticket variable, not raw localStorage"
-        )
+        assert "?token=${wsTicket}" in src
+        assert "?token=${sessionToken}" not in src
+        assert "wsUrl" in src and "wsBasePath" in src
 
     def test_console_log_carries_no_query_string(self):
         """console.log for WS connect must log host+path only, never ?token= (xander C-2)."""
@@ -3829,47 +3818,23 @@ class TestWsPhase4FrontendStaticGuards:
             "not before it at module-init (xander L-3 — fresh ticket per connect)"
         )
 
-    def test_mint_time_fallback_gated_on_404_only(self):
-        """Mint-time legacy fallback must be gated on status === 404 only (bob M2).
-
-        401/403/5xx must not trigger a fallback — they must fail loudly.
-        """
-        import re
+    def test_any_mint_failure_aborts_the_connect(self):
+        """A failed mint (401/403/404/5xx) aborts the connect: there is no
+        fallback to the session JWT, not even on a 404."""
         src = self._get_frontend_src()
-
-        # The 404 gate must be present
-        assert "404" in src, (
-            "admin-jarvis.js must gate the mint-time legacy fallback on status 404"
-        )
-        # The fallback must explicitly check for 404, not a general failure condition
-        assert ".status === 404" in src or "status === 404" in src or "mintResp.status === 404" in src, (
-            "admin-jarvis.js mint-time fallback must be gated on mintResp.status === 404 "
-            "only (bob M2 — 401/403/5xx must fail loudly, not fall back)"
+        assert "if (!mintResp.ok) {" in src
+        assert "status === 404" not in src, (
+            "admin-jarvis.js must not special-case a 404 mint: the JWT fallback is gone"
         )
 
-    def test_capability_fallback_gated_on_4001_and_mint_200_and_not_retried(self):
-        """Upgrade-time capability fallback must be gated on closeCode===4001 && mintStatus===200 &&
-        !legacyRetried (Decision 3 / codex r2).
-
-        Any relaxation of this gate could launder a genuine auth failure into a
-        long-lived JWT-in-URL connection.
-        """
+    def test_a_4001_close_is_never_retried_with_a_jwt(self):
+        """A 4001 close (ticket refused) asks the user to reload; nothing
+        reconnects with the session JWT."""
         src = self._get_frontend_src()
-
-        # The three gate conditions must all appear in the source
-        assert "4001" in src, (
-            "admin-jarvis.js capability fallback must check close code 4001"
-        )
-        assert "ticketMintStatus === 200" in src or "mintStatus === 200" in src, (
-            "admin-jarvis.js capability fallback must be gated on ticketMintStatus === 200 "
-            "(Decision 3 — retry only when the mint itself succeeded)"
-        )
-        assert "legacyRetried" in src, (
-            "admin-jarvis.js must track legacyRetried to prevent a second fallback attempt"
-        )
-        assert "!legacyRetried" in src, (
-            "admin-jarvis.js capability fallback must check !legacyRetried to bound to one retry"
-        )
+        assert "event.code === 4001" in src
+        assert "legacyRetried" not in src
+        assert "ticketMintStatus" not in src
+        assert "Reload the page to reconnect" in src
 
     def test_no_retry_on_4003(self):
         """4003 (Origin) must never trigger a legacy retry (Decision 3)."""
@@ -3887,25 +3852,6 @@ class TestWsPhase4FrontendStaticGuards:
         assert "event.code === 4003" not in src or "legacyRetried = true" not in src.split("4003")[0].rsplit("legacyRetried = true", 1)[-1][:50], (
             "admin-jarvis.js must NOT set legacyRetried=true on 4003 — 4003 is Origin-block, "
             "not a capability signal (Decision 3)"
-        )
-
-    def test_legacy_retried_resets_per_connect(self):
-        """legacyRetried must reset to false at the start of each connectWebSocket() invocation.
-
-        This ensures a later reconnect re-probes the (possibly now fully-rolled-out)
-        backend rather than permanently pinning to the legacy token.
-        """
-        src = self._get_frontend_src()
-        assert "let legacyRetried = false" in src, (
-            "admin-jarvis.js must declare 'let legacyRetried = false' inside connectWebSocket() "
-            "so it resets on every fresh connect attempt (Decision 3)"
-        )
-        # Verify it's inside the function, not at module scope
-        idx_fn = src.find("async function connectWebSocket()")
-        idx_decl = src.find("let legacyRetried = false")
-        assert idx_decl > idx_fn, (
-            "'let legacyRetried = false' must be inside connectWebSocket(), "
-            "not at module scope"
         )
 
 
@@ -4015,10 +3961,11 @@ class TestWsAudMismatchVariableRemoved:
             f"found {len(matches)} reference(s): {matches!r}"
         )
 
-    def test_legacy_fallthrough_comment_present(self):
+    def test_no_legacy_session_jwt_path(self):
         """
-        Static: websocket.py must have a comment on the legacy fallthrough condition
-        explaining it is entered on decode-failure OR non-ticket payloads.
+        Static: the legacy session-JWT path is gone. Anything that isn't a
+        ws-ticket is closed 4001 "Ticket required"; decode_access_token is
+        never reached from the WebSocket handler.
         """
         ws_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "app", "routes", "websocket.py")
@@ -4026,12 +3973,10 @@ class TestWsAudMismatchVariableRemoved:
         with open(ws_path) as f:
             src = f.read()
 
-        # A comment near the JWTClaimsError except block should explain the broad scope.
-        assert "decode failure" in src or "decode_ws_ticket raised" in src or "ANY decode failure" in src.upper() or "any decode failure" in src.lower(), (
-            "websocket.py must have a comment near the legacy fallthrough explaining "
-            "it is entered on decode-failure OR non-ticket payloads, not only aud mismatch "
-            "(xander M-2)"
-        )
+        assert "decode_access_token" not in src
+        assert "websocket_legacy_token_auth_deprecated" not in src
+        assert 'reason="Ticket required"' in src
+        assert '"admin_jarvis_ws_rejected", reason="not_a_ticket"' in src
 
 
 class TestWsReplayGuardL1:
@@ -4073,15 +4018,8 @@ class TestWsReplayGuardL1:
             "websocket.py must close with 4001 on replay (xander L-1)"
         )
 
-        # The replay check must come BEFORE the legacy path in source order.
-        # This proves a replayed ticket cannot sneak through to the legacy decoder.
-        idx_replay = src.find("websocket_ticket_replayed")
-        idx_legacy = src.find("websocket_legacy_token_auth_deprecated")
-        assert idx_replay < idx_legacy, (
-            "websocket_ticket_replayed guard must appear before the legacy fallthrough "
-            "in websocket.py — a replayed ticket must never reach decode_access_token "
-            "(xander L-1 replay-then-legacy-sneak guard)"
-        )
+        # There is no legacy decoder left to sneak through to.
+        assert "decode_access_token" not in src
 
     def test_claim_jti_false_triggers_close_not_legacy(self):
         """
@@ -4109,13 +4047,10 @@ class TestWsReplayGuardL1:
             "(xander L-1 — replayed ticket must return, not fall through)"
         )
 
-        # The return must be before the legacy fallthrough section
-        idx_not_claimed = src.find("if not claimed")
-        idx_legacy = src.find("websocket_legacy_token_auth_deprecated")
-        assert 0 < idx_not_claimed < idx_legacy, (
-            "The 'if not claimed: return' block must appear before the legacy deprecation "
-            "warning in source order (xander L-1)"
-        )
+        # ...and it returns (no fallthrough to any other token path).
+        tail = src[src.find("if not claimed"):]
+        assert tail.find("return") < tail.find("websocket_ticket_validated")
+        assert "websocket_legacy_token_auth_deprecated" not in src
 
     def test_claim_jti_replay_unit(self):
         """

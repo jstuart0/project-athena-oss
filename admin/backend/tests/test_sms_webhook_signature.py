@@ -40,12 +40,12 @@ STATUS_PATH = "/api/sms/webhook/status"
 INCOMING_PARAMS = {
     "From": "+15550001111",
     "Body": "hi",
-    "MessageSid": "SM0000000000000000000000000000test",
+    "MessageSid": "SM" + "0" * 32,
     "To": "",
     "NumMedia": "0",
 }
 STATUS_PARAMS = {
-    "MessageSid": "SM0000000000000000000000000000test",
+    "MessageSid": "SM" + "0" * 32,
     "MessageStatus": "delivered",
     "To": "",
     "ErrorCode": "",
@@ -242,14 +242,104 @@ def test_multipart_rejected_not_500(route, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_token_unset_accepts_and_warns(monkeypatch):
+@pytest.fixture
+def twilio_env(monkeypatch):
+    """Set DEV_MODE / TWILIO_ALLOW_UNSIGNED for one case. They're read per
+    request through the get_config sms_webhook holds, so that function's
+    cache is cleared (not shared.config's, which other tests reload)."""
+
+    def _set(*, dev_mode, allow_unsigned=None):
+        monkeypatch.setenv("DEV_MODE", "true" if dev_mode else "false")
+        if allow_unsigned is None:
+            monkeypatch.delenv("TWILIO_ALLOW_UNSIGNED", raising=False)
+        else:
+            monkeypatch.setenv("TWILIO_ALLOW_UNSIGNED", allow_unsigned)
+        sw.get_config.cache_clear()
+
+    yield _set
+    sw.get_config.cache_clear()
+
+
+def _incoming_rows(db):
+    from app.models import SMSIncoming
+
+    db.expire_all()
+    return db.query(SMSIncoming).count()
+
+
+def test_token_unset_in_dev_mode_accepts_and_warns(monkeypatch, twilio_env):
     monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", "")
+    twilio_env(dev_mode=True)
     body = _encode_form(INCOMING_PARAMS.items())
     with structlog.testing.capture_logs() as cap:
         resp = post(INCOMING_PATH, body, signature=None)
     assert resp.status_code == 200
     events = [e.get("event") for e in cap]
     assert "twilio_auth_token_not_configured_skipping_validation" in events
+
+
+@pytest.mark.parametrize("flag", [None, "TRUE", "1", "yes", "True", " true"])
+def test_token_unset_outside_dev_is_503_unless_exactly_opted_in(monkeypatch, twilio_env, db, flag):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", "")
+    twilio_env(dev_mode=False, allow_unsigned=flag)
+    body = _encode_form(INCOMING_PARAMS.items())
+    with structlog.testing.capture_logs() as cap:
+        resp = post(INCOMING_PATH, body, signature=None)
+    assert resp.status_code == 503
+    assert _incoming_rows(db) == 0
+    errors = [e for e in cap if e.get("event") == "twilio_auth_token_not_configured"]
+    assert len(errors) == 1 and errors[0].get("log_level") == "error"
+
+
+def test_token_unset_outside_dev_opted_in_accepts_and_warns(monkeypatch, twilio_env, db):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", "")
+    twilio_env(dev_mode=False, allow_unsigned="true")
+    body = _encode_form(INCOMING_PARAMS.items())
+    with structlog.testing.capture_logs() as cap:
+        resp = post(INCOMING_PATH, body, signature=None)
+    assert resp.status_code == 200
+    warnings = [e for e in cap if e.get("event") == "twilio_unsigned_request_accepted"]
+    assert len(warnings) == 1 and warnings[0].get("log_level") == "warning"
+    assert set(warnings[0]) <= {"event", "log_level", "path"}
+    assert _incoming_rows(db) == 1
+
+
+def test_token_set_ignores_the_opt_in(monkeypatch, twilio_env):
+    monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", TOKEN)
+    twilio_env(dev_mode=False, allow_unsigned="true")
+    url = _signing_url(INCOMING_PATH)
+    wrong_sig = _sign(url, INCOMING_PARAMS, token="a-different-token-not-real")
+    body = _encode_form(INCOMING_PARAMS.items())
+    assert post(INCOMING_PATH, body, wrong_sig).status_code == 403
+    assert post(INCOMING_PATH, body, signature=None).status_code == 403
+
+
+_IMPORT_PROBE = (
+    "import structlog, structlog.testing\n"
+    "with structlog.testing.capture_logs() as cap:\n"
+    "    import app.routes.sms_webhook\n"
+    "print('EVENTS=' + ','.join(str(e.get('event')) + ':' + str(e.get('log_level')) for e in cap))\n"
+)
+
+
+@pytest.mark.parametrize("flag,expected", [("true", 1), (None, 0), ("TRUE", 0)])
+def test_import_time_unsigned_opt_in_logs_one_error(flag, expected):
+    """A subprocess import, not importlib.reload: reloading sms_webhook in
+    this process would replace the functions main.app's routes (and other
+    tests' identity checks) hold."""
+    env = dict(os.environ)
+    env.update({"DEV_MODE": "false", "DATABASE_URL": "sqlite:///:memory:", "TWILIO_AUTH_TOKEN": ""})
+    env.pop("TWILIO_ALLOW_UNSIGNED", None)
+    if flag is not None:
+        env["TWILIO_ALLOW_UNSIGNED"] = flag
+    result = subprocess.run(
+        [sys.executable, "-c", _IMPORT_PROBE],
+        cwd=str(Path(__file__).resolve().parent.parent), env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    line = [l for l in result.stdout.splitlines() if l.startswith("EVENTS=")][-1]
+    events = line[len("EVENTS="):].split(",") if line != "EVENTS=" else []
+    assert events.count("twilio_unsigned_webhooks_allowed:error") == expected, events
 
 
 def test_rejection_logs_omit_signature_and_token(monkeypatch):
@@ -452,8 +542,9 @@ def test_token_set_base_malformed_rejects_503(case, monkeypatch):
                 assert "hunter2-not-real" not in str(value)
 
 
-def test_token_unset_ignores_base_url(monkeypatch):
+def test_token_unset_ignores_base_url(monkeypatch, twilio_env):
     monkeypatch.setattr(sw, "TWILIO_AUTH_TOKEN", "")
+    twilio_env(dev_mode=True)
     monkeypatch.setattr(sw, "TWILIO_WEBHOOK_BASE_URL", "")
     body = _encode_form(INCOMING_PARAMS.items())
     resp = post(INCOMING_PATH, body, signature=None)

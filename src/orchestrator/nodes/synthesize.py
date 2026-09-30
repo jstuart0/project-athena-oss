@@ -83,7 +83,7 @@ async def synthesize_node(state: OrchestratorState) -> OrchestratorState:
                 state.node_timings["synthesize"] = duration
                 if state.timing_tracker:
                     state.timing_tracker.track_substage("graph", "synthesize", "direct_fast_path", duration)
-                logger.info("synthesis_skipped", reason="direct_general_info_fast_path", query=state.query[:40])
+                logger.info("synthesis_skipped", reason="direct_general_info_fast_path", query_len=len(state.query))
                 return state
 
         # Check if this is a continuation response (user answering a question from Athena)
@@ -129,7 +129,7 @@ INSTRUCTIONS:
 5. Be helpful and continue the task they originally requested
 
 Your response:"""
-            logger.info(f"Using continuation prompt for '{state.query}' with {len(state.conversation_history)} history messages")
+            logger.info(f"Using continuation prompt for query_len={len(state.query)} with {len(state.conversation_history)} history messages")
         elif state.intent == IntentCategory.GENERAL_INFO:
             synthesis_prompt = f"""Question: {state.query}
 
@@ -247,7 +247,7 @@ Keep your acknowledgment brief - don't dwell on the interruption.
 
 """
                 logger.info("interruption_context_injected",
-                           previous_query=previous_query[:30],
+                           previous_query_len=len(previous_query),
                            audio_position_ms=audio_position_ms)
 
         # Format conversation history for LLM context

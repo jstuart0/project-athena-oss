@@ -106,7 +106,7 @@ class HomeAssistantClient:
                 domain=domain,
                 service=service,
                 status_code=response.status_code,
-                response_text=response.text[:200] if response.text else "empty"
+                response_text_len=len(response.text or "")
             )
             response.raise_for_status()
             return response.json()
@@ -177,7 +177,7 @@ class HomeAssistantClient:
                     "ha_create_automation_rejected",
                     automation_id=automation_id,
                     status_code=response.status_code,
-                    response_text=response.text[:500] if response.text else "empty"
+                    response_text_len=len(response.text or "")
                 )
                 return False
 

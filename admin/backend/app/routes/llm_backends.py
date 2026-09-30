@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 import structlog
 
 from app.database import get_db
+from app.utils.service_auth import require_service_or_user_permission
 from app.auth.oidc import get_current_user
 from app.models import User, LLMBackend, LLMPerformanceMetric
 from datetime import datetime
@@ -464,7 +465,7 @@ async def get_backend(
     return LLMBackendResponse(**backend.to_dict())
 
 
-@router.get("/model/{model_name}", response_model=LLMBackendResponse)
+@router.get("/model/{model_name}", response_model=LLMBackendResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_backend_by_model(
     model_name: str,
     db: Session = Depends(get_db)
@@ -472,8 +473,7 @@ async def get_backend_by_model(
     """
     Get LLM backend configuration for a specific model.
 
-    This endpoint is called by services and does not require authentication
-    (uses service-to-service communication).
+    Called by services with the service key. Requires the service key, or a signed-in user with read permission.
     """
     backend = db.query(LLMBackend).filter(
         LLMBackend.model_name == model_name,

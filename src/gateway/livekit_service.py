@@ -92,7 +92,7 @@ async def fetch_livekit_credentials() -> Dict[str, str]:
             else:
                 logger.warning("livekit_credentials_fetch_failed",
                               status=response.status_code,
-                              detail=response.text[:100])
+                              detail_len=len(response.text))
     except Exception as e:
         logger.warning("livekit_credentials_fetch_error", error=str(e))
 
@@ -681,7 +681,7 @@ class LiveKitService:
 
             logger.info("query_transcribed",
                        session_id=session.session_id,
-                       transcript=transcript[:50])
+                       transcript_len=len(transcript))
 
             # Notify that query is ready
             if self._on_query_ready:

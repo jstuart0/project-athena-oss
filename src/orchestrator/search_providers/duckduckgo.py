@@ -59,7 +59,7 @@ class DuckDuckGoProvider(SearchProvider):
             List of SearchResult objects
         """
         try:
-            self.logger.info(f"DuckDuckGo search started: {query}")
+            self.logger.info(f"DuckDuckGo search started: query_len={len(query)}")
 
             # DuckDuckGo instant answer API
             url = f"https://api.duckduckgo.com/?q={quote_plus(query)}&format=json&no_html=1&skip_disambig=1"

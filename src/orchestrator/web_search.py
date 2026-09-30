@@ -36,7 +36,7 @@ class WebSearchClient:
             List of search results with title, snippet, and URL
         """
         try:
-            logger.info("web_search_started", query=query, max_results=max_results)
+            logger.info("web_search_started", query_len=len(query), max_results=max_results)
             
             # DuckDuckGo instant answer API
             url = f"https://api.duckduckgo.com/?q={quote_plus(query)}&format=json&no_html=1&skip_disambig=1"
@@ -67,13 +67,13 @@ class WebSearchClient:
                     })
             
             logger.info("web_search_completed", 
-                       query=query, 
+                       query_len=len(query),
                        results_count=len(results))
             
             return results[:max_results]
             
         except Exception as e:
-            logger.error("web_search_failed", query=query, error=str(e))
+            logger.error("web_search_failed", query_len=len(query), error=str(e))
             return []
     
     async def close(self):

@@ -156,7 +156,8 @@ from orchestrator.mode_permission import (
     intent_gate_refusal,
     is_public_audience,
     is_public_caller,
-    PUBLIC_ALLOWED_TOOLS,
+    is_stay_read_only,
+    offered_tools,
     PUBLIC_INTENT_REFUSAL,
     record_intent_gate_refusal,
     resolve_request_authorization,
@@ -394,7 +395,7 @@ async def handle_tool_creation_request(
 
     # Check if feature is enabled
     if not await manager.check_enabled():
-        logger.info("tool_creation_disabled", query=query[:50])
+        logger.info("tool_creation_disabled", query_len=len(query))
         return None
 
     if public:
@@ -413,7 +414,7 @@ async def handle_tool_creation_request(
         llm_router = _runtime.get_llm_router()
 
         # Generate tool definition from the request
-        logger.info("generating_tool_definition", query=query[:100])
+        logger.info("generating_tool_definition", query_len=len(query))
 
         result = await generate_tool_from_request(
             user_request=query,
@@ -692,7 +693,8 @@ async def get_origin_placeholder_patterns() -> set:
     try:
         admin_client = get_admin_client()
         response = await admin_client.client.get(
-            f"{admin_client.admin_url}/api/settings/directions-origin-placeholders"
+            f"{admin_client.admin_url}/api/settings/directions-origin-placeholders",
+            headers={"X-Service-Key": admin_client.api_key},
         )
         response.raise_for_status()
         data = response.json()
@@ -1179,7 +1181,7 @@ async def lifespan(app: FastAPI):
                 failed=len(results) - successes,
             )
         except Exception as e:
-            logger.warning("ollama_prewarm_outer_failed", error_type=type(e).__name__, error=str(e)[:200])
+            logger.warning("ollama_prewarm_outer_failed", error_type=type(e).__name__)
     asyncio.create_task(_do_prewarm())
 
     # Initialize entity manager for dynamic HA entity discovery
@@ -2014,13 +2016,13 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     for _pat in _JAILBREAK_PATTERNS:
         if _pat in query_lower:
             _safety_flag = True
-            logger.warning("safety_prescreen_jailbreak_detected", pattern=_pat, query=state.query[:80])
+            logger.warning("safety_prescreen_jailbreak_detected", pattern=_pat, query_len=len(state.query))
             break
     if not _safety_flag:
         for _pat in _HARM_PATTERNS:
             if _pat in query_lower:
                 _safety_flag = True
-                logger.warning("safety_prescreen_harm_detected", pattern=_pat, query=state.query[:80])
+                logger.warning("safety_prescreen_harm_detected", pattern=_pat, query_len=len(state.query))
                 break
 
     if _safety_flag:
@@ -2034,7 +2036,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         if wrong in query_lower:
             # Apply correction while preserving case where possible
             state.query = state.query.lower().replace(wrong, correct)
-            logger.info("stt_correction_applied", original=original_query, corrected=state.query)
+            logger.info("stt_correction_applied", original_len=len(original_query), corrected_len=len(state.query))
             break  # Apply only the first matching correction
 
     # Round 17: Typo correction for common misspellings (text input, not STT)
@@ -2080,7 +2082,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     if corrected:
         original_for_log = state.query
         state.query = query_lower
-        logger.info("typo_correction_applied", original=original_for_log, corrected=state.query)
+        logger.info("typo_correction_applied", original_len=len(original_for_log), corrected_len=len(state.query))
 
     # Round 21-30: FALSE MEMORY CLAIM DETECTION
     # Prevent LLM hallucination when user claims we said something in a "previous session"
@@ -2105,7 +2107,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
             state.answer = ("I don't have memory of previous sessions. Each conversation starts fresh. "
                           "Could you tell me what you're looking for? I'd be happy to help find it now!")
             state.node_timings["classify"] = time.time() - start
-            logger.info("false_memory_claim_intercepted", query=state.query[:50])
+            logger.info("false_memory_claim_intercepted", query_len=len(state.query))
             return state
 
     # Round 21-30: EMOTIONAL VENTING DETECTION
@@ -2124,7 +2126,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 state.intent = IntentCategory.GENERAL_INFO
                 state.answer = response
                 state.node_timings["classify"] = time.time() - start
-                logger.info("emotional_venting_intercepted", query=state.query[:50])
+                logger.info("emotional_venting_intercepted", query_len=len(state.query))
                 return state
             else:
                 # Mark as general info to prevent weather/control routing
@@ -2142,7 +2144,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         state.intent = IntentCategory.GENERAL_INFO
         state.answer = "I can't make phone calls, but I can help you find phone numbers or contact information for businesses."
         state.node_timings["classify"] = time.time() - start
-        logger.info("phone_call_request_intercepted", query=state.query[:50])
+        logger.info("phone_call_request_intercepted", query_len=len(state.query))
         return state
 
     # Round 21-30: Ambiguous ETA/travel time questions
@@ -2158,7 +2160,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         state.intent = IntentCategory.GENERAL_INFO
         state.answer = "I can calculate drive time and ETA for you! Just tell me the destination - what's the address or name of the place you're heading to?"
         state.node_timings["classify"] = time.time() - start
-        logger.info("eta_ambiguous_intercepted", query=state.query[:50])
+        logger.info("eta_ambiguous_intercepted", query_len=len(state.query))
         return state
 
     # SEQUENCE DETECTION - Check BEFORE multi-intent splitting
@@ -2166,7 +2168,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     # should NOT be split into multiple intents - they're a single sequence
     is_sequence_command = detect_sequence_intent(state.query)
     if is_sequence_command:
-        logger.info(f"Sequence command detected - bypassing multi-intent split: '{state.query[:60]}...'")
+        logger.info(f"Sequence command detected - bypassing multi-intent split: query_len={len(state.query)}")
 
     # MULTI-INTENT DETECTION
     # Check if query contains multiple intents (e.g., "turn on the lights and what's the weather")
@@ -2175,7 +2177,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         intent_parts = classifier.detect_multi_intent(state.query)
         if len(intent_parts) > 1:
             logger.info(
-                f"Multi-intent detected: '{state.query[:50]}...' split into {len(intent_parts)} parts",
+                f"Multi-intent detected: query_len={len(state.query)} split into {len(intent_parts)} parts",
                 extra={"intent_parts": intent_parts}
             )
             state.is_multi_intent = True
@@ -2183,7 +2185,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
             state.current_intent_index = 0
             # Process first intent part - subsequent parts handled in finalize_node
             state.query = intent_parts[0]
-            logger.info(f"Processing first intent: '{state.query}'")
+            logger.info(f"Processing first intent: query_len={len(state.query)}")
 
     # COMPREHENSIVE CONTEXT DETECTION
     # Detect if this query references previous conversation context
@@ -2253,7 +2255,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
             # This prevents "restaurant recommendations" from routing to weather
             # just because the previous query was about weather
             strong_intent = detect_strong_intent(state.query, prev_context.intent)
-            logger.info(f"DEBUG strong_intent check: query='{state.query}', prev_intent={prev_context.intent}, result={strong_intent}")
+            logger.info(f"DEBUG strong_intent check: query_len={len(state.query)}, prev_intent={prev_context.intent}, result={strong_intent}")
             if strong_intent["should_override_context"]:
                 detected_intent_str = strong_intent["detected_intent"]
 
@@ -2269,7 +2271,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 if is_conv_ref:
                     logger.info(
                         f"Strong intent {detected_intent_str} overridden by conversation reference "
-                        f"in '{state.query[:50]}' - routing to GENERAL_INFO to use history"
+                        f"in query_len={len(state.query)} - routing to GENERAL_INFO to use history"
                     )
                     # Don't override to the detected intent; fall through to
                     # context continuation which will route to GENERAL_INFO.
@@ -2300,7 +2302,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                     }
                 else:
                     logger.info(
-                        f"Strong intent detected: '{state.query}' has {detected_intent_str} "
+                        f"Strong intent detected: query_len={len(state.query)} has {detected_intent_str} "
                         f"indicators {strong_intent['matching_keywords']} - NOT continuing {prev_context.intent} context"
                     )
                     # Map detected intent string to IntentCategory and use it directly
@@ -2325,7 +2327,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                         state.confidence = 0.90  # Strong indicators = high confidence
                         state.complexity = determine_complexity(state.query, detected_intent_str)
                         logger.info(
-                            f"Fast path: strong intent override - routing '{state.query[:50]}...' "
+                            f"Fast path: strong intent override - routing query_len={len(state.query)} "
                             f"to {state.intent} (from {detected_intent_str} indicators)"
                         )
                         state.context_ref_info = context_ref_view(ref_info, "declined")
@@ -2337,7 +2339,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 # Meta-inquiries about system state/errors should NOT continue previous context
                 # "What happened?", "What was the error?" are asking about the system, not the topic
                 logger.info(
-                    f"Meta-inquiry detected: '{state.query}' is asking about system/error state "
+                    f"Meta-inquiry detected: query_len={len(state.query)} is asking about system/error state "
                     f"- NOT continuing {prev_context.intent} context"
                 )
                 # Store the previous context info so the response can reference what happened
@@ -2349,7 +2351,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 # Conversation breakers like "forget it", "I'm sorry", "thanks for your patience"
                 # should NOT continue the previous intent - they break the task context
                 logger.info(
-                    f"Conversation breaker detected: '{state.query}' breaks {prev_context.intent} context "
+                    f"Conversation breaker detected: query_len={len(state.query)} breaks {prev_context.intent} context "
                     f"- routing to fresh classification"
                 )
                 state.context_ref_info = context_ref_view(ref_info, "declined")
@@ -2383,7 +2385,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                     # Fall through to normal (cache/LLM) classification below.
                 else:
                     if decision_reason == "low_confidence_short":
-                        logger.info(f"Short query with context available: '{state.query}' - prev intent: {prev_context.intent}")
+                        logger.info(f"Short query with context available: query_len={len(state.query)} - prev intent: {prev_context.intent}")
                         # Mark as implicit context reference for short queries
                         # with no classifiable intent of their own.
                         ref_info["has_context_ref"] = True
@@ -2415,16 +2417,16 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                         # Set flag for pronoun-based follow-ups that need LLM to resolve from history
                         if merged.get("needs_history_context"):
                             state.needs_history_context = True
-                            logger.info(f"Pronoun follow-up detected: '{state.query}' needs conversation history for resolution")
+                            logger.info(f"Pronoun follow-up detected: query_len={len(state.query)} needs conversation history for resolution")
 
                         # Log what we merged
                         if ref_info["has_temporal_ref"]:
-                            logger.info(f"Temporal context: '{state.query}' - time_ref={merged['entities'].get('time_ref')}")
+                            logger.info(f"Temporal context: query_len={len(state.query)} - time_ref={merged['entities'].get('time_ref')}")
 
                         state.context_ref_info = context_ref_view(ref_info, "continued")
                         state.continuation_decision = {"decision": "continued", "reason": decision_reason}
                         state.node_timings["classify"] = time.time() - start
-                        logger.info(f"Context continuation for '{state.query}' - routing to {state.intent}, entities={state.entities}")
+                        logger.info(f"Context continuation for query_len={len(state.query)} - routing to {state.intent}, entities={state.entities}")
                         return state
                     except ValueError:
                         # Unknown intent in context, fall through to normal classification
@@ -2443,7 +2445,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     skip_cache = any(re.search(p, query_lower) for p in UNCACHEABLE_PATTERNS)
 
     if skip_cache:
-        logger.info(f"Intent cache SKIP for problem-reporting query: '{state.query[:50]}...'")
+        logger.info(f"Intent cache SKIP for problem-reporting query: query_len={len(state.query)}")
 
     cache_key = f"intent:{hashlib.md5(state.query.lower().encode()).hexdigest()}"
     cache_start = time.time()
@@ -2464,7 +2466,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 if preserved_location:
                     state.entities["location"] = preserved_location
                 state.node_timings["classify"] = time.time() - start
-                logger.info(f"Intent cache HIT for '{state.query}': {state.intent}")
+                logger.info(f"Intent cache HIT for query_len={len(state.query)}: {state.intent}")
                 return state
         else:
             if state.timing_tracker:
@@ -2477,7 +2479,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     # FAST PATH: Check for automation patterns
     # Queries that should be handled by the automation agent (schedules, recurring, triggers)
     if should_use_automation_agent(state.query):
-        logger.info(f"Fast path: automation pattern detected in '{state.query[:50]}...' - classifying as CONTROL (COMPLEX)")
+        logger.info(f"Fast path: automation pattern detected in query_len={len(state.query)} - classifying as CONTROL (COMPLEX)")
         state.intent = IntentCategory.CONTROL
         state.confidence = 0.9
         state.complexity = "COMPLEX"  # Automations always need complex handling
@@ -2491,7 +2493,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Intent classification cached for '{state.query}'")
+            logger.info(f"Intent classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -2517,7 +2519,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
     if has_room and has_color:
         # Room + color = light control command
-        logger.info(f"Fast path: room+color detected in '{state.query[:50]}...' - classifying as CONTROL")
+        logger.info(f"Fast path: room+color detected in query_len={len(state.query)} - classifying as CONTROL")
         state.intent = IntentCategory.CONTROL
         state.confidence = 0.9
         # Use complexity detector (catches "all rooms except X" patterns)
@@ -2542,7 +2544,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Intent classification cached for '{state.query}'")
+            logger.info(f"Intent classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -2552,7 +2554,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     # SMS Integration: Check for "text me that" intent
     # This must be handled specially to send SMS with previous response
     if is_text_me_that_request(state.query):
-        logger.info(f"Fast path: 'text me that' detected in '{state.query[:50]}...'")
+        logger.info(f"Fast path: 'text me that' detected in query_len={len(state.query)}")
         state.intent = IntentCategory.TEXT_ME_THAT
         state.confidence = 0.95
         # Text-me-that is always simple (just sending previous response)
@@ -2586,7 +2588,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     is_planning_not_scene = any(excl in query_lower for excl in planning_exclusions)
 
     if any(p in query_lower for p in scene_patterns) and not is_planning_not_scene:
-        logger.info(f"Fast path: scene/routine detected in '{state.query[:50]}...' - classifying as CONTROL")
+        logger.info(f"Fast path: scene/routine detected in query_len={len(state.query)} - classifying as CONTROL")
         state.intent = IntentCategory.CONTROL
         state.confidence = 0.95
         state.complexity = determine_complexity(state.query, "control")
@@ -2600,7 +2602,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Fast path scene classification cached for '{state.query}'")
+            logger.info(f"Fast path scene classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -2615,7 +2617,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     has_device = any(p in query_lower for p in device_patterns)
 
     if has_control_action and has_device:
-        logger.info(f"Fast path: control command detected in '{state.query[:50]}...' - classifying as CONTROL")
+        logger.info(f"Fast path: control command detected in query_len={len(state.query)} - classifying as CONTROL")
         state.intent = IntentCategory.CONTROL
         state.confidence = 0.95
         # Use complexity detector (catches "all lights except X" patterns)
@@ -2636,7 +2638,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Fast path control classification cached for '{state.query}'")
+            logger.info(f"Fast path control classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -2656,7 +2658,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     is_sensor_query = any(p in query_lower for p in sensor_patterns)
 
     if is_sensor_query:
-        logger.info(f"Fast path: sensor/occupancy query detected in '{state.query[:50]}...' - classifying as CONTROL")
+        logger.info(f"Fast path: sensor/occupancy query detected in query_len={len(state.query)} - classifying as CONTROL")
         state.intent = IntentCategory.CONTROL
         state.confidence = 0.95
         # Use complexity detector (catches multi-room motion queries)
@@ -2671,7 +2673,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Fast path sensor classification cached for '{state.query}'")
+            logger.info(f"Fast path sensor classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -2703,7 +2705,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
     is_music_fast_path = any(p in query_lower for p in music_control_fast_patterns)
     is_single_word_music = query_lower.strip() in single_word_music
     if is_music_fast_path or is_single_word_music:
-        logger.info(f"Fast path: music control detected in '{state.query[:50]}...' - classifying as MUSIC_CONTROL")
+        logger.info(f"Fast path: music control detected in query_len={len(state.query)} - classifying as MUSIC_CONTROL")
         state.intent = IntentCategory.MUSIC_CONTROL
         state.confidence = 0.95
         state.complexity = "simple"
@@ -2717,7 +2719,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 "complexity": state.complexity,
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Fast path music control classification cached for '{state.query}'")
+            logger.info(f"Fast path music control classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -2775,10 +2777,9 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
                     logger.info(
                         "preclassify_skip_llm",
-                        query=state.query[:50],
+                        query_len=len(state.query),
                         intent=state.intent.value,
                         confidence=round(preclassify_result.confidence, 3),
-                        matched_template=preclassify_result.matched_template[:30],
                         preclassify_ms=round(preclassify_duration * 1000, 1)
                     )
 
@@ -2788,7 +2789,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
                 # Low confidence - log but fall through to LLM
                 logger.info(
                     "preclassify_low_confidence",
-                    query=state.query[:50],
+                    query_len=len(state.query),
                     intent=preclassify_result.intent,
                     confidence=round(preclassify_result.confidence, 3),
                     threshold=preclassify_config.get("config", {}).get("confidence_threshold", 0.85)
@@ -2892,7 +2893,7 @@ Respond in JSON format:
             # Pattern-based classification for validation/override
             # Now returns (IntentCategory, confidence) where confidence indicates specific vs fallback match
             pattern_intent, pattern_confidence = _pattern_based_classification(state.query, return_confidence=True)
-            logger.info(f"DEBUG pattern classification: query='{state.query[:50]}', pattern_intent={pattern_intent.value}, pattern_confidence={pattern_confidence}")
+            logger.info(f"DEBUG pattern classification: query_len={len(state.query)}, pattern_intent={pattern_intent.value}, pattern_confidence={pattern_confidence}")
 
             # If LLM returns "unknown", use pattern-based fallback
             if state.intent == IntentCategory.UNKNOWN:
@@ -3197,7 +3198,7 @@ Respond in JSON format:
                 "complexity": state.complexity,  # NEW: Cache complexity
                 "entities": state.entities
             }, ttl=300)
-            logger.info(f"Intent classification cached for '{state.query}'")
+            logger.info(f"Intent classification cached for query_len={len(state.query)}")
         except Exception as e:
             logger.warning(f"Intent cache write failed: {e}")
 
@@ -4606,11 +4607,11 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
         timing_breakdown["tool_loading"] = time.time() - tool_load_start
 
-        # The public audience is offered only its hard-coded allowlist. A new
-        # list, so the cached schemas are never narrowed for later callers.
-        if tools and is_public_audience(state.permissions):
-            tools = [t for t in tools if t["function"]["name"] in PUBLIC_ALLOWED_TOOLS]
-        # What this caller may execute: after the mode and public filters,
+        # The public audience is offered only its hard-coded allowlist, and an
+        # SMS from outside the current stay only travel tools. A new list, so
+        # the cached schemas are never narrowed for later callers.
+        tools = offered_tools(tools, state.permissions)
+        # What this caller may execute: after the mode, public and stay filters,
         # before the per-intent narrowing below (which only shapes the offer).
         entitled_tool_names = frozenset(t["function"]["name"] for t in (tools or []))
 
@@ -4993,7 +4994,7 @@ PREVIOUS CONVERSATION CONTEXT (for follow-up reference):
 
 If the user is asking to repeat, search again, or modify the previous request, use the context above to understand what they want."""
                 messages[0]["content"] = f"{messages[0]['content']}\n\n{context_injection}"
-                logger.info(f"Injected prev context for follow-up: prev_query='{prev_query[:50]}...'")
+                logger.info(f"Injected prev context for follow-up: prev_query_len={len(prev_query)}")
 
         # Get LLM and backend from component config (database-configurable)
         temperature = settings.get("temperature", 0.7)
@@ -5044,22 +5045,22 @@ If the user is asking to repeat, search again, or modify the previous request, u
         # so the better model handles behavioral instructions and profile synthesis
         if getattr(state, "interface_type", "voice") == "chat" and complexity == "simple":
             complexity = "complex"
-            logger.info(f"chat_interface_complexity_upgrade: simple -> complex for query: {state.query[:50]}")
+            logger.info(f"chat_interface_complexity_upgrade: simple -> complex for query: query_len={len(state.query)}")
         if complexity == "simple":
             component_config = await get_component_config("tool_calling_simple")
             llm_model = component_config["model_name"]
             llm_backend = component_config["backend_type"]
-            logger.info(f"Using {llm_model} ({llm_backend}) for simple query: {state.query[:50]}")
+            logger.info(f"Using {llm_model} ({llm_backend}) for simple query: query_len={len(state.query)}")
         elif complexity == "complex":
             component_config = await get_component_config("tool_calling_complex")
             llm_model = component_config["model_name"]
             llm_backend = component_config["backend_type"]
-            logger.info(f"Using {llm_model} ({llm_backend}) for complex query: {state.query[:50]}")
+            logger.info(f"Using {llm_model} ({llm_backend}) for complex query: query_len={len(state.query)}")
         else:  # super_complex
             component_config = await get_component_config("tool_calling_super_complex")
             llm_model = component_config["model_name"]
             llm_backend = component_config["backend_type"]
-            logger.info(f"Using {llm_model} ({llm_backend}) for super complex query: {state.query[:50]}")
+            logger.info(f"Using {llm_model} ({llm_backend}) for super complex query: query_len={len(state.query)}")
 
         # Benchmark observability (ATHENA-57 Phase 1b — Changes 1 & 2):
         # Record the resolved model tag and component name ACTUALLY used by the tool-call node.
@@ -5270,7 +5271,7 @@ If the user is asking to repeat, search again, or modify the previous request, u
                     logger.error(f"Forced directions execution error: {e}")
                     # Fall through to let normal flow handle this
             else:
-                logger.warning(f"Could not extract destination from query: {state.query[:100]}")
+                logger.warning(f"Could not extract destination from query: query_len={len(state.query)}")
 
         if not tool_calls:
             # LLM didn't want to call any tools, use its direct response
@@ -5661,7 +5662,7 @@ Provide a helpful answer:"""
                     else:
                         enhanced_query = f"{enhance_query_with_year(state.query)} {context}"
 
-                    logger.info(f"Web search fallback for empty '{function_name}' results: '{enhanced_query[:80]}...'")
+                    logger.info(f"Web search fallback for empty '{function_name}' results: enhanced_query_len={len(enhanced_query)}")
 
                     intent, search_results = await psearch.search(
                         query=enhanced_query,
@@ -6383,7 +6384,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # own mode.
         with timing_tracker.track("pre_graph", "mode_determination"):
             authz = await resolve_request_authorization(
-                request.mode, guest_info, caller_trust=request.caller_trust
+                request.mode, guest_info, caller_trust=request.caller_trust,
+                sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
             permissions = authz.permissions
@@ -6504,10 +6506,10 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             if is_public_audience(permissions):
                 logger.info("memory_retrieval_skipped", reason="public_audience")
             elif _direct_general_info_response(request.query):
-                logger.info("memory_retrieval_skipped", reason="direct_general_info_fast_path", query_preview=request.query[:50])
+                logger.info("memory_retrieval_skipped", reason="direct_general_info_fast_path", query_len=len(request.query))
             else:
                 try:
-                    logger.info("memory_retrieval_starting", query_preview=request.query[:50], mode=current_mode)
+                    logger.info("memory_retrieval_starting", query_len=len(request.query), mode=current_mode)
                     memory_manager = await get_memory_manager()
                     guest_session_id = None
                     if guest_info:
@@ -6530,7 +6532,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                             "memories_retrieved_for_context",
                             count=len(memories),
                             mode=current_mode,
-                            memory_preview=memory_context[:100] if memory_context else ""
+                            memory_len=len(memory_context or "")
                         )
                     else:
                         logger.info("memory_retrieval_empty", mode=current_mode)
@@ -6618,7 +6620,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 if cached_intent and cached_intent != detected_strong_intent:
                     logger.info(
                         "semantic_cache_skipped_intent_mismatch",
-                        query_preview=request.query[:50],
+                        query_len=len(request.query),
                         detected_intent=detected_strong_intent,
                         cached_intent=cached_intent,
                         reason="Strong intent override"
@@ -6640,7 +6642,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                             if num >= 2:
                                 logger.info(
                                     "semantic_cache_skipped_far_future_weather",
-                                    query_preview=request.query[:50],
+                                    query_len=len(request.query),
                                     reason=f"Far future weather request ({num} weeks)"
                                 )
                                 cached_response = None
@@ -6648,7 +6650,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                         elif 'month' in pattern:
                             logger.info(
                                 "semantic_cache_skipped_far_future_weather",
-                                query_preview=request.query[:50],
+                                query_len=len(request.query),
                                 reason="Far future weather request (month)"
                             )
                             cached_response = None
@@ -6667,7 +6669,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 ):
                     logger.info(
                         "semantic_cache_bypassed_for_context",
-                        query=request.query[:50],
+                        query_len=len(request.query),
                         bypass_reason="context_reference" if is_conv_ref else "continuation"
                     )
                     cached_response = None
@@ -6676,7 +6678,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 # Cache hit - return cached response immediately
                 logger.info(
                     "semantic_cache_hit_returned",
-                    query_preview=request.query[:50],
+                    query_len=len(request.query),
                     cached_intent=cached_response.get("intent"),
                     cache_category=cached_response.get("_cache_metadata", {}).get("category")
                 )
@@ -6746,7 +6748,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
 
         # Check for tool creation intent BEFORE running the state machine
         if detect_tool_creation_intent(request.query):
-            logger.info("tool_creation_intent_detected", query=request.query[:50])
+            logger.info("tool_creation_intent_detected", query_len=len(request.query))
             tool_result = await handle_tool_creation_request(
                 query=request.query,
                 session_id=session.session_id,
@@ -6782,11 +6784,16 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 )
             # If tool_result is None, feature is disabled - continue with normal flow
 
-        # Check for memory forget intent BEFORE running the state machine
+        # Check for memory forget intent BEFORE running the state machine.
+        # Forgetting writes to the admin DB: never for the public audience or
+        # an SMS from outside the stay (answer-only).
         try:
-            memory_manager = None if is_public_audience(permissions) else await get_memory_manager()
+            memory_manager = (
+                None if is_public_audience(permissions) or is_stay_read_only(permissions)
+                else await get_memory_manager()
+            )
             if memory_manager is not None and memory_manager.should_forget_memory(request.query):
-                logger.info("memory_forget_intent_detected", query=request.query[:50])
+                logger.info("memory_forget_intent_detected", query_len=len(request.query))
 
                 # Extract what to forget
                 forget_content = memory_manager.extract_forget_content(request.query)
@@ -6972,9 +6979,14 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             timing_tracker.track_sync("post_graph", "session_update", time.time() - session_update_start)
 
         # Memory creation: Check if this conversation should create a memory
+        # (an admin-DB write: never for the public audience or an SMS from
+        # outside the stay).
         memory_creation_start = time.time()
         try:
-            memory_manager = None if is_public_audience(permissions) else await get_memory_manager()
+            memory_manager = (
+                None if is_public_audience(permissions) or is_stay_read_only(permissions)
+                else await get_memory_manager()
+            )
             if memory_manager is not None and memory_manager.should_create_memory(request.query, answer, intent_str):
                 # Extract memorable content and calculate importance
                 memorable_content = memory_manager.extract_memorable_fact(request.query, answer, intent_str)
@@ -7235,7 +7247,8 @@ async def process_query_stream(request: QueryRequest):
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares.
             authz = await resolve_request_authorization(
-                request.mode, guest_info, caller_trust=request.caller_trust
+                request.mode, guest_info, caller_trust=request.caller_trust,
+                sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
 
@@ -7551,7 +7564,8 @@ async def process_query_stream_v2(request: QueryRequest):
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares.
             authz = await resolve_request_authorization(
-                request.mode, guest_info, caller_trust=request.caller_trust
+                request.mode, guest_info, caller_trust=request.caller_trust,
+                sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
 
@@ -8353,7 +8367,7 @@ async def chat_completions(request: OpenAIChatRequest):
                 logger.info(
                     "streaming_request_started",
                     request_id=initial_state.request_id,
-                    query_preview=user_message[:50]
+                    query_len=len(user_message)
                 )
 
                 # Run orchestrator through RAG collection (no synthesis)

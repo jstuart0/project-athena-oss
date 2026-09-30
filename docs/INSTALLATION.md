@@ -281,31 +281,25 @@ The admin-jarvis WebSocket connection previously used `?token=<jwt>` in the upgr
 2. The frontend uses the returned ticket in `?token=<ticket>` on the WS upgrade URL. It never caches the URL — every reconnect mints a fresh ticket.
 3. The WS handler validates the ticket's `aud="ws"` claim and `ws_ticket: true` discriminator, then consumes the `jti` via Redis to prevent replay.
 
-**Deprecation window (one release):** the WS handler accepts both ticket JWTs and legacy session JWTs during this release. Old frontend code sending a session JWT in `?token=` continues to work with a `websocket_legacy_token_auth_deprecated` warning. Legacy acceptance will be removed in the next release (Phase 6, tracked as follow-up).
+**Tickets only:** the WS handler accepts only a ws-ticket. A session JWT (or anything else) in `?token=` is closed with 4001 "Ticket required", and the frontend never falls back to one: a failed mint aborts the connect, and a 4001 asks the user to reload.
 
-**Deploy ordering (ATHENA-55):** because backend and frontend roll as independent Kubernetes Deployments (no `sessionAffinity`), deploy the admin backend to the ticket-aware image first and verify it is fully rolled out before promoting the new frontend image:
+**Deploy ordering:** because backend and frontend roll as independent Kubernetes Deployments (no `sessionAffinity`), roll the ticket-only frontend first, then the backend that drops session JWTs. A backend that still accepts session JWTs serves the ticket-only frontend fine; a backend that refuses them would lock out a frontend that still falls back to one.
 
 ```bash
-# 1. Roll the backend
-kubectl set image deployment/athena-admin-backend \
-  admin-backend=<new-image> -n athena-prod
-kubectl rollout status deployment/athena-admin-backend -n athena-prod
-
-# 2. Only then roll the frontend
+# 1. Roll the frontend
 kubectl set image deployment/athena-admin-frontend \
   admin-frontend=<new-image> -n athena-prod
 kubectl rollout status deployment/athena-admin-frontend -n athena-prod
+
+# 2. Then roll the backend
+kubectl set image deployment/athena-admin-backend \
+  admin-backend=<new-image> -n athena-prod
+kubectl rollout status deployment/athena-admin-backend -n athena-prod
 ```
 
-The frontend's capability fallback (retry with legacy token on WS close 4001 when the mint returned 200) covers the residual window where a backend pod restarts after the frontend is already serving ticket-minting JS. Backend-before-frontend ordering keeps that window near-zero.
+A browser tab still running the previous frontend reconnects with a fresh ticket; a reload picks up the new frontend.
 
-**Uvicorn access-log redaction (xander M-1):** the ticket still transits the URL as `?token=<ticket>` for ≤ 45 seconds, so `?token=` will appear in uvicorn access logs for that window. Recommended mitigation for production: run uvicorn with `--no-access-log` for the admin backend, or configure a log filter to strip the query string. Example:
-
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8080 --no-access-log
-```
-
-If access logs are required for audit purposes, use a structured log processor (e.g. Fluent Bit Lua filter) to redact the `?token=` query parameter before the log is written to the audit sink.
+**No request URLs in the admin logs:** admin-backend logs no access lines, and every uvicorn log line has its query string removed, including the WebSocket handshake line (which would otherwise carry `?token=<ticket>`). admin-frontend's nginx writes no `/api` line to its access log, and its error log for `/api` takes only `crit` and worse, so an unreachable admin-backend (logged at `error`, request line included) doesn't put `/api` query strings there either. What remains is your own ingress: if your reverse proxy (e.g. Traefik) writes access logs, configure it to drop query strings, or it will record the ticket for the ≤ 45 seconds it's valid.
 
 ---
 

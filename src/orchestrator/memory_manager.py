@@ -122,7 +122,7 @@ class MemoryManager:
                         "memories_retrieved",
                         count=len(memories),
                         mode=mode,
-                        query_preview=query[:50]
+                        query_len=len(query)
                     )
                     return memories
                 else:
@@ -449,7 +449,7 @@ class MemoryManager:
                     logger.info(
                         "memories_deleted",
                         count=deleted_count,
-                        search_query=search_query[:50]
+                        search_query_len=len(search_query)
                     )
                 return data
             else:

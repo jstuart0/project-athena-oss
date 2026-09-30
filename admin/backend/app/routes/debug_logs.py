@@ -10,7 +10,8 @@ degrade gracefully (200 with empty/unavailable responses) rather than 503.
 import os
 import httpx
 from typing import List, Optional
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException
+from app.utils.service_auth import require_user_permission
 from pydantic import BaseModel
 from shared.config import get_config
 
@@ -104,7 +105,7 @@ async def proxy_to_control_agent(path: str, params: dict = None) -> Optional[dic
         return None
 
 
-@router.get("/status", response_model=DebugStatusResponse)
+@router.get("/status", response_model=DebugStatusResponse, dependencies=[Depends(require_user_permission("read"))])
 async def get_debug_status():
     """Check if debug mode is enabled and get log directory info."""
     if not get_config().control_agent_enabled:
@@ -119,7 +120,7 @@ async def get_debug_status():
     return DebugStatusResponse(**data)
 
 
-@router.get("/files", response_model=List[LogFile])
+@router.get("/files", response_model=List[LogFile], dependencies=[Depends(require_user_permission("read"))])
 async def list_log_files(
     days: int = Query(7, ge=1, le=30, description="Number of days to look back")
 ):
@@ -130,7 +131,7 @@ async def list_log_files(
     return [LogFile(**f) for f in data]
 
 
-@router.get("/search", response_model=LogSearchResult)
+@router.get("/search", response_model=LogSearchResult, dependencies=[Depends(require_user_permission("read"))])
 async def search_logs(
     query: Optional[str] = Query(None, description="Search query (regex supported)"),
     file: Optional[str] = Query(None, description="Specific log file to search"),
@@ -161,7 +162,7 @@ async def search_logs(
     )
 
 
-@router.get("/tail/{filename}", response_model=LogSearchResult)
+@router.get("/tail/{filename}", response_model=LogSearchResult, dependencies=[Depends(require_user_permission("read"))])
 async def tail_log(
     filename: str,
     lines: int = Query(100, ge=1, le=1000)

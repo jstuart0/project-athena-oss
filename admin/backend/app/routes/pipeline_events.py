@@ -16,6 +16,7 @@ from sqlalchemy import desc, func
 import structlog
 
 from app.database import get_db
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 from app.models import PipelineEvent
 
 logger = structlog.get_logger()
@@ -37,7 +38,7 @@ class PipelineEventResponse(BaseModel):
         from_attributes = True
 
 
-@router.get("", response_model=List[PipelineEventResponse])
+@router.get("", response_model=List[PipelineEventResponse], dependencies=[Depends(require_user_permission("read"))])
 async def get_pipeline_events(
     since: Optional[float] = Query(None, description="Unix timestamp - only return events after this time"),
     until: Optional[float] = Query(None, description="Unix timestamp - only return events before this time"),
@@ -103,7 +104,7 @@ async def get_pipeline_events(
         raise HTTPException(status_code=500, detail=f"Failed to fetch events: {str(e)}")
 
 
-@router.get("/sessions")
+@router.get("/sessions", dependencies=[Depends(require_user_permission("read"))])
 async def get_active_sessions(
     since_minutes: int = Query(5, ge=1, le=60, description="Look back N minutes for active sessions"),
     db: Session = Depends(get_db)
@@ -158,7 +159,7 @@ async def get_active_sessions(
         raise HTTPException(status_code=500, detail=f"Failed to fetch sessions: {str(e)}")
 
 
-@router.get("/stats")
+@router.get("/stats", dependencies=[Depends(require_user_permission("read"))])
 async def get_event_stats(
     hours: int = Query(24, ge=1, le=168, description="Hours to look back for stats"),
     db: Session = Depends(get_db)
@@ -218,7 +219,7 @@ async def get_event_stats(
         raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
 
 
-@router.get("/{session_id}")
+@router.get("/{session_id}", dependencies=[Depends(require_user_permission("read"))])
 async def get_session_events(
     session_id: str,
     db: Session = Depends(get_db)
@@ -276,7 +277,7 @@ async def get_session_events(
         raise HTTPException(status_code=500, detail=f"Failed to fetch session events: {str(e)}")
 
 
-@router.post("/emit")
+@router.post("/emit", dependencies=[Depends(require_service_or_user_permission("write"))])
 async def emit_pipeline_event(
     event_type: str,
     session_id: str,

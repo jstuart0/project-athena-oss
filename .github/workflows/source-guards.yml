@@ -10,6 +10,10 @@ name: Source Guards
 #   tests for the local clock, the repetition detector, the addressee rules,
 #   the caller classes and the sports date windows, each under its own
 #   image's hash-locked requirements.
+# - admin-backend-auth: every admin-backend route carries a permission-bearing
+#   auth dependency or is on a reviewed list, the gated routes' credential
+#   matrix, the orchestrator-to-admin seam, SMS matching and replay, and the
+#   admin-backend log hygiene, under admin-backend's hash-locked test lock.
 #
 # Every job reads pytest's own exit status (no pipes).
 on:
@@ -43,7 +47,7 @@ jobs:
       - name: Run the guards
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_local_clock_drift.py tests/unit/test_no_pii_in_logs.py tests/unit/test_trust_literal_contract.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_local_clock_drift.py tests/unit/test_no_pii_in_logs.py tests/unit/test_trust_literal_contract.py tests/unit/test_admin_guest_route_callers_send_service_key.py tests/unit/test_admin_frontend_gated_fetch_auth.py tests/unit/test_admin_frontend_nginx_api_access_log.py tests/unit/test_admin_jarvis_ticket_only.py tests/unit/test_voice_automations_js_escaping.py
 
   orchestrator-behaviour:
     name: Orchestrator behaviour tests
@@ -68,7 +72,7 @@ jobs:
       - name: Run the behaviour tests
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_helpers.py tests/unit/test_finalize.py tests/unit/test_local_time.py tests/unit/test_base_knowledge_clock.py tests/unit/test_date_extraction_local.py tests/unit/test_planning_prompt_local_date.py tests/unit/test_gateway_simple_commands_clock.py tests/unit/test_sequence_wait_local.py tests/unit/test_prompt_clock_sites.py tests/unit/test_addressee_matrix.py tests/unit/test_trust_classification.py tests/unit/test_assistant_profile_household.py tests/unit/test_semantic_cache_addressee.py tests/unit/test_base_knowledge_names.py tests/unit/test_public_caller_orchestrator.py tests/unit/test_logging_quiet_request_urls.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_helpers.py tests/unit/test_finalize.py tests/unit/test_local_time.py tests/unit/test_base_knowledge_clock.py tests/unit/test_date_extraction_local.py tests/unit/test_planning_prompt_local_date.py tests/unit/test_gateway_simple_commands_clock.py tests/unit/test_sequence_wait_local.py tests/unit/test_prompt_clock_sites.py tests/unit/test_addressee_matrix.py tests/unit/test_trust_classification.py tests/unit/test_assistant_profile_household.py tests/unit/test_semantic_cache_addressee.py tests/unit/test_base_knowledge_names.py tests/unit/test_public_caller_orchestrator.py tests/unit/test_logging_quiet_request_urls.py tests/unit/test_automation_agent_scope.py tests/unit/test_sms_stay_phase_authorization.py
 
       # The sports case needs feedparser, which only the sports image
       # carries; the sports-behaviour job runs it.
@@ -131,3 +135,31 @@ jobs:
         shell: bash
         run: |
           python3 -m pytest -q -p no:cacheprovider "tests/unit/test_rag_local_dates.py::test_sports_window_keeps_tonights_event"
+
+  admin-backend-auth:
+    name: Admin-backend route auth and guest data
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: admin/backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install admin-backend's locked test requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --require-hashes -r requirements-test.txt
+          python3 -m pip install --no-deps -e ../../src/shared
+
+      - name: Run the route-auth and guest-data tests
+        shell: bash
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests/test_route_auth_population.py tests/test_route_walk_admin.py tests/test_calendar_sources_auth.py tests/test_guest_routes_auth.py tests/test_admin_config_real_seam.py tests/test_sms_phone_match.py tests/test_sms_webhook_signature.py tests/test_sms_session_id.py tests/test_settings_ollama_url_ssrf.py tests/test_access_log_quiet.py tests/test_ws_ticket_only.py tests/test_migration_063_stay_scope.py

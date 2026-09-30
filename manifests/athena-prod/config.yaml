@@ -79,10 +79,12 @@ data:
   # SERVICE_REGISTRY_WRITE_PER_MINUTE: ""
   # SESSION_MAX_COUNT: ""
   # SITESCRAPER_ALLOWED_PRIVATE_HOSTS: ""
+  # SMS_DEFAULT_COUNTRY_CODE: ""
   # TRANSIT_GTFS_FEEDS: ""
   # TRANSIT_REGION_NAME: ""
   # TRANSIT_STATIC_SERVICES: ""
   # TRUSTED_PROXY_CIDRS: ""
+  # TWILIO_ALLOW_UNSIGNED: ""
   # ==========================================================================
   # LLM Backend Configuration
   # ==========================================================================
@@ -172,6 +174,13 @@ data:
   # webhooks answer 503. The Admin UI "Auth Token" field doesn't configure this
   # (ATHENA-75). See .env.example.
   # TWILIO_WEBHOOK_BASE_URL: "https://athena.example.com"
+  # With TWILIO_AUTH_TOKEN unset (outside DEV_MODE) the webhooks answer 503,
+  # unless TWILIO_ALLOW_UNSIGNED is exactly "true": then anyone who knows a
+  # guest's number can text as that guest. See .env.example.
+  # TWILIO_ALLOW_UNSIGNED: "true"
+  # Country code (1-3 digits) for bookings stored with a national phone
+  # number; default 1.
+  # SMS_DEFAULT_COUNTRY_CODE: "1"
 
   # Feature flags
   DEMO_MODE: "false"

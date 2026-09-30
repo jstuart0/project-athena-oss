@@ -5,6 +5,7 @@ Provides REST API for monitoring and managing Athena services.
 Deploys to Kubernetes.
 """
 
+import logging
 import os
 import httpx
 import subprocess
@@ -23,6 +24,7 @@ from redis.asyncio import Redis
 from sqlalchemy.orm import Session
 import structlog
 
+from shared.logging_config import StripQueryStringFilter, quiet_request_url_loggers, quiet_uvicorn_log_config
 from app.database import get_db, check_db_connection, init_db, DEV_MODE, seed_dev_data, seed_oss_defaults, seed_oss_features, seed_oss_conversation_settings, seed_oss_service_registry, seed_oss_base_knowledge, OSS_DEFAULT_MODEL, OSS_OLLAMA_URL, OSS_AUTO_PULL_MODELS, OSS_SEED_DEFAULTS
 from shared import __version__ as ATHENA_VERSION
 from shared.config import get_config
@@ -61,14 +63,32 @@ from app.routes import telemetry as telemetry_routes
 
 logger = structlog.get_logger()
 
+# No request URL reaches this process's log: the access log and client
+# request lines are WARNING-only, and every uvicorn handler strips query
+# strings (uvicorn logs the Admin Jarvis WebSocket handshake, ticket and
+# all, on uvicorn.error at INFO). This covers `uvicorn main:app` launches;
+# `python main.py` also passes quiet_uvicorn_log_config() below.
+quiet_request_url_loggers()
+for _uvicorn_logger in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    for _handler in logging.getLogger(_uvicorn_logger).handlers:
+        if not any(isinstance(f, StripQueryStringFilter) for f in _handler.filters):
+            _handler.addFilter(StripQueryStringFilter())
+
 if DEV_MODE:
     logger.info("dev_mode_active", message="Running in development mode with SQLite in-memory database")
+
+# The interactive docs and the OpenAPI schema list every route, including the
+# internal ones; they're served only in DEV_MODE.
+DOCS_ENABLED = get_config().dev_mode
 
 app = FastAPI(
     title="Project Athena Admin API",
     description="Admin interface for monitoring and managing Athena services",
     version=ATHENA_VERSION,
-    redirect_slashes=False  # Disable automatic trailing slash redirects
+    redirect_slashes=False,  # Disable automatic trailing slash redirects
+    docs_url="/docs" if DOCS_ENABLED else None,
+    redoc_url="/redoc" if DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
 
 # Session middleware (Redis in production, in-memory in DEV_MODE)
@@ -794,7 +814,7 @@ async def ensure_default_model():
                     logger.warning("default_model_pull_failed",
                                  model=OSS_DEFAULT_MODEL,
                                  status=response.status_code,
-                                 response=response.text[:200])
+                                 response_len=len(response.text))
 
     except Exception as e:
         logger.warning("ensure_default_model_error", error=str(e), model=OSS_DEFAULT_MODEL)
@@ -1289,4 +1309,4 @@ if os.path.exists(frontend_path):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8080"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_config=quiet_uvicorn_log_config())

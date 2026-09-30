@@ -7,7 +7,12 @@ from typing import Optional
 import structlog
 
 from orchestrator.helpers import configured_assistant_names
-from orchestrator.mode_permission import check_intent_permission, intent_refusal_message
+from orchestrator.mode_permission import (
+    STAY_READ_ONLY_REFUSAL,
+    check_intent_permission,
+    intent_refusal_message,
+    is_stay_read_only,
+)
 from orchestrator.state import IntentCategory, OrchestratorState
 from orchestrator.urls import NOTIFICATIONS_SERVICE_URL
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
@@ -68,6 +73,12 @@ async def notification_pref_node(state: OrchestratorState) -> OrchestratorState:
     start = time.time()
 
     # Permission first, before any I/O (including the assistant-name read).
+    # An SMS from outside the current stay is answer-only (the intent gate
+    # already refuses this intent for it; this is the writer's own check).
+    if is_stay_read_only(state.permissions):
+        state.answer = STAY_READ_ONLY_REFUSAL
+        state.error = "permission_denied"
+        return _finish(state, start)
     if not check_intent_permission(IntentCategory.NOTIFICATION_PREF, state.permissions or {}):
         state.answer = intent_refusal_message(state.permissions)
         state.error = "permission_denied"
@@ -189,7 +200,7 @@ async def notification_pref_node(state: OrchestratorState) -> OrchestratorState:
                 "notification_pref_complete",
                 action=action,
                 results=results,
-                answer=state.answer[:100]
+                answer_len=len(state.answer)
             )
 
     except httpx.ConnectError:

@@ -737,6 +737,51 @@ Rotating `SERVICE_API_KEY` therefore starts every SMS conversation afresh
 (earlier conversations simply expire). With an empty key (`DEV_MODE` only)
 the id still hides the number but isn't secret.
 
+**Which stay an SMS belongs to.** An incoming SMS matches a booking only when
+the sender's number, as Twilio sends it (E.164, `+` and 10-15 digits), equals
+the booking's phone number normalised to E.164. A booking stored as a national
+number (`(555) 012-3456`, `020 7946 0000`) gets `SMS_DEFAULT_COUNTRY_CODE`
+(default `1`; 1-3 digits, no `+`; an invalid value logs
+`sms_default_country_code_invalid` and uses `1`). A mismatched country code
+fails closed: the stay doesn't match and the sender gets the unknown-number
+reply. Alphanumeric senders never match. Only confirmed, not-deleted bookings
+count, in three phases, first match wins:
+
+| Phase | Window | What the SMS may do |
+|---|---|---|
+| `current` | check-in ≤ now ≤ checkout (on a changeover day, the stay checking out first) | Whatever the guest profile allows |
+| `recent` | checked out within the last 24 h | Answer only |
+| `upcoming` | checking in within the next 48 h | Answer only |
+
+"Answer only" means: no Home Assistant write; no automation, notification
+preference or "text me that" (nothing is written to the admin database); and
+only travel and checkout questions (general information, weather, directions,
+dining, events, airports, flights) with the matching tools, so house-state
+questions ("is the front door locked?") are refused. The phase travels to the
+orchestrator in the request context; a request from the SMS caller with no
+phase or an unknown one is answer-only too.
+
+**Twilio signatures.** With `TWILIO_AUTH_TOKEN` set, every webhook must carry
+a valid `X-Twilio-Signature` (403 otherwise). With it unset:
+
+- `DEV_MODE=true`: validation is skipped with a warning;
+- otherwise the webhooks answer **503** and store nothing, unless
+  `TWILIO_ALLOW_UNSIGNED` is exactly `true`. Then every webhook is accepted
+  unsigned (an ERROR `twilio_unsigned_webhooks_allowed` at startup, a
+  WARNING `twilio_unsigned_request_accepted` per request). **Anyone who knows
+  a guest's phone number can then text the assistant as that guest and read
+  its answers about the stay.** Set the token instead wherever possible.
+  `TWILIO_ALLOW_UNSIGNED` is ignored while the token is set.
+
+**Twilio retries.** A `MessageSid` that isn't `SM`/`MM` + 32 hex digits is
+rejected with 400. A retry of a message already answered, from the same
+number, gets the same reply without asking the orchestrator again (an
+unsigned request gets an empty reply instead, since its sender isn't
+authenticated). A retry of a message still being answered waits up to 10 s
+for the reply, then answers 503 with `Retry-After: 5` so Twilio retries or
+uses its fallback URL. The stored reply is always the text sent, never an
+error message.
+
 **Guest floor and allowlist baselines.** Every guest's `restricted_entities`
 always includes `GUEST_BASELINE_RESTRICTED_ENTITIES` (a floor, unioned in,
 never replaceable by admin config) — by default this covers locks, covers,
@@ -1513,6 +1558,76 @@ routes total) require an `X-Service-Key` header matching `SERVICE_API_KEY`.
 **Rollout recipe**: set `ORCHESTRATOR_INGRESS_AUTH=warn` first if you have callers you haven't audited (a custom Home Assistant integration, a script that calls `/query` directly). Watch for `orchestrator_unauthenticated_request` log lines over a representative window — each one names the unauthenticated caller's path and user agent. Once nothing unexpected shows up, switch to `enforce` (the default). Every in-repo caller (the gateway's orchestrator client, LiveKit integration, the Wyoming bridge, jarvis-web backend, admin-backend's SMS webhook) already sends the header.
 
 **`GET /api/base-knowledge/public` (admin-backend, D44)** requires the same `X-Service-Key` header matching `SERVICE_API_KEY`, or an authenticated admin session (Bearer JWT / `X-API-Key`) — no unauthenticated read of this table (it can hold a home address under `category='property'`). Both in-repo callers already send the header: `shared.admin_config.AdminConfigClient.get_base_knowledge` (used by the orchestrator) and `src/rag/directions/main.py`'s startup fetch. This is unrelated to `ORCHESTRATOR_INGRESS_AUTH` above (a different service, a different dependency — `verify_service_or_oidc`), but reuses the same `SERVICE_API_KEY` secret. An empty `SERVICE_API_KEY` logs `service_api_key_empty` once at startup, and base knowledge then silently drops out of every prompt that reads it (the `/public` call itself gets 401, not 503).
+
+### Admin API authentication
+
+Every admin-backend route either requires a credential or is on a reviewed
+list; `admin/backend/tests/test_route_auth_population.py` (the
+`admin-backend-auth` CI job) fails when a new route has neither. Three kinds
+of route:
+
+- **Signed-in user.** A Bearer session token or a user API key (`X-API-Key`)
+  for a user holding the route's permission (`read`/`write`: owner and
+  operator; `delete`: owner). An `X-Service-Key` sent to one of these routes
+  is refused. Examples: `/api/guests*`, `/api/user-sessions` (except the
+  device lookup), `/api/room-groups/available-rooms`, the LLM-memory,
+  tool-proposal and Ollama-URL settings, `/api/debug-logs/*`,
+  `POST /api/ha-pipelines/mode/set`, `/api/pipeline-events` (reads), and the
+  voice-automation hard delete (`DELETE /api/voice-automations/{id}`, owner).
+- **Service key or signed-in user.** `X-Service-Key: <SERVICE_API_KEY>` (the
+  orchestrator and other services), or a signed-in user as above. A wrong key
+  is 401; a key sent while `SERVICE_API_KEY` is unset is 503. Examples:
+  `GET /api/user-sessions/device/{id}`, `GET /api/room-groups` and
+  `/resolve/{term}`, the house-layout and directions-origin-placeholder
+  settings, `GET /api/settings/ollama-url/internal`,
+  `GET /api/llm-backends/model/{name}`,
+  `GET /api/sms/internal/current-preferences`, `POST /api/pipeline-events/emit`,
+  `/api/internal/emerging-intents*`, `/api/internal/intent-metrics`, and
+  every `/api/voice-automations` route except the hard delete.
+- **Service key only.** `POST /api/sms/internal/log-send`.
+
+**The service key can read guest data.** Current guests' names and phone
+numbers, device-to-guest sessions, SMS preferences and voice automations are
+all readable with `SERVICE_API_KEY`. Treat it as a guest-data secret: keep it
+in a Secret, never in a ConfigMap or an image, and rotate it if it leaks.
+
+**Voice automations are scoped to the caller's stay.** A service call to a
+voice-automation route must say whose automations it's acting for:
+`X-Athena-Caller-Mode: owner`, or `X-Athena-Caller-Mode: guest` plus
+`X-Athena-Guest-Name` (the guest's name, percent-encoded UTF-8) and
+`X-Athena-Guest-Stay` (the stay's calendar event id). Anything else is 400.
+Guest names aren't unique (every Airbnb booking is "Airbnb Guest"), so a guest
+scope lists, archives, restores, creates and reads only the guest automations
+of its own stay; any other row is reported as not found. An automation created
+before stays were recorded has no stay and is never visible to a guest. A
+guest scope named after a calendar-feed placeholder (`Airbnb Guest`, `VRBO
+Guest`, `Guest`) is refused with 403, and the name-based bulk routes
+(`/archive-guest`, `/restore-guest`) are owner-only. Signed-in users (the
+admin UI) always act as the owner.
+
+Where the stay id comes from: the SMS webhook sends the matched booking's id;
+jarvis-web's guest network sends the current stay's id (the one
+`/api/guest-mode/internal/current-guest` returns); the orchestrator keeps it
+only in a named guest house, alongside the guest's name, and drops it
+wherever it drops the name.
+
+**Voice "delete"** archives the automation in Athena; the Home Assistant
+automation keeps running until the host turns it off there, and the assistant
+says so.
+
+**Public routes** and their preconditions: `GET /health` (liveness only); the
+sign-in routes (`/api/auth/login`, `/callback`, `/logout`, `/methods`,
+`/session-token`, and their `/auth/*` aliases), where login mints a token
+only in demo mode, which production startup refuses; `POST
+/api/auth/local-login` (rate limit, lockout and timing floor);
+`GET /api/calendar-sources/types` (static); and
+`GET /api/settings/assistant-profile/public` and `/privacy/public` (persona
+and one boolean). A number of older internal and `/public` routes are still
+anonymous and are listed in the test as unreviewed; restrict `/api/` at your
+ingress for networks guests use.
+
+**API docs.** `/docs`, `/redoc` and `/openapi.json` are served only with
+`DEV_MODE=true`.
 
 ### Authentication (Optional)
 

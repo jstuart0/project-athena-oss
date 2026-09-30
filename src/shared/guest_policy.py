@@ -86,10 +86,10 @@ def parse_json_array_env(raw: Optional[str], default: List[str]) -> List[str]:
     try:
         parsed = json.loads(raw)
     except (json.JSONDecodeError, TypeError, ValueError):
-        logger.warning("guest_policy_invalid_json_env", extra={"raw": raw[:200]})
+        logger.warning("guest_policy_invalid_json_env", extra={"raw_len": len(raw)})
         return list(default)
     if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
-        logger.warning("guest_policy_invalid_json_shape", extra={"raw": raw[:200]})
+        logger.warning("guest_policy_invalid_json_shape", extra={"raw_len": len(raw)})
         return list(default)
     return parsed
 

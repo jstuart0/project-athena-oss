@@ -5,9 +5,11 @@ Provides CRUD operations for voice-created automations.
 Supports owner and guest-scoped automations with archival/restoration.
 """
 
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List, Literal, Optional
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Query
+from urllib.parse import unquote
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from pydantic import BaseModel, Field
@@ -16,10 +18,110 @@ import structlog
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import VoiceAutomation
+from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/voice-automations", tags=["voice-automations"])
+
+_GUEST_NAME_MAX = 255
+_READ = Depends(require_service_or_user_permission("read"))
+_WRITE = Depends(require_service_or_user_permission("write"))
+
+
+# Names the calendar feeds give every booking of a kind (calendar_sources:
+# Airbnb "Reserved" -> "Airbnb Guest", VRBO -> "VRBO Guest"). Any number of
+# stays share them, so a guest scope carrying one is refused outright
+# (defence in depth; the stay id is what actually scopes).
+PLACEHOLDER_GUEST_NAMES = frozenset({"airbnb guest", "vrbo guest", "guest"})
+_MAX_STAY_ID = 2**31 - 1
+
+
+def is_placeholder_guest_name(name: Optional[str]) -> bool:
+    return (name or "").strip().casefold() in PLACEHOLDER_GUEST_NAMES
+
+
+@dataclass(frozen=True)
+class CallerScope:
+    """Whose automations a caller may see and change: the owner (every row)
+    or one stay's guest (only guest rows of that stay).
+
+    Guest names aren't unique across stays, so a guest scope matches on the
+    stay id; a row with no stay id (created before stays were recorded) is
+    never a guest's."""
+
+    mode: str
+    guest_name: Optional[str] = None
+    stay_id: Optional[int] = None
+
+    @property
+    def is_guest(self) -> bool:
+        return self.mode == "guest"
+
+    def permits(self, row: VoiceAutomation) -> bool:
+        if not self.is_guest:
+            return True
+        return (
+            row.owner_type == "guest"
+            and row.calendar_event_id is not None
+            and row.calendar_event_id == self.stay_id
+        )
+
+    def permits_name(self, guest_name: Optional[str]) -> bool:
+        return not self.is_guest or guest_name == self.guest_name
+
+    def narrow(self, query):
+        """Restrict a VoiceAutomation query to what this scope may see."""
+        if not self.is_guest:
+            return query
+        return query.filter(
+            VoiceAutomation.owner_type == "guest",
+            VoiceAutomation.calendar_event_id == self.stay_id,
+        )
+
+
+def _bad_scope(detail: str):
+    return HTTPException(status_code=400, detail=detail)
+
+
+async def automation_caller_scope(request: Request) -> CallerScope:
+    """The caller's scope, after the auth factory has run.
+
+    A signed-in user (the admin UI) is the owner; the scope headers are
+    ignored. A service caller must declare it: ``X-Athena-Caller-Mode`` is
+    ``owner`` or ``guest``. A guest also sends ``X-Athena-Guest-Name``
+    (percent-encoded UTF-8, 1-255 characters decoded) and
+    ``X-Athena-Guest-Stay`` (the stay's calendar event id, a positive
+    integer). Anything else is 400, so an unscoped guest request is never
+    served; a feed placeholder name is 403. The name travels in a header so
+    it never lands in a URL or an access log.
+    """
+    kind = getattr(request.state, "auth_kind", None)
+    if kind == "user":
+        return CallerScope("owner")
+    if kind != "service":
+        raise HTTPException(status_code=401, detail="Authentication required")
+    mode = request.headers.get("X-Athena-Caller-Mode")
+    if mode == "owner":
+        return CallerScope("owner")
+    if mode != "guest":
+        raise _bad_scope("X-Athena-Caller-Mode must be 'owner' or 'guest'")
+    raw = request.headers.get("X-Athena-Guest-Name") or ""
+    try:
+        name = unquote(raw, errors="strict")
+    except UnicodeDecodeError:
+        raise _bad_scope("X-Athena-Guest-Name must be percent-encoded UTF-8")
+    if not 1 <= len(name) <= _GUEST_NAME_MAX:
+        raise _bad_scope("X-Athena-Guest-Name is required for a guest caller")
+    stay_raw = (request.headers.get("X-Athena-Guest-Stay") or "").strip()
+    if not stay_raw.isascii() or not stay_raw.isdigit() or not 1 <= int(stay_raw) <= _MAX_STAY_ID:
+        raise _bad_scope("X-Athena-Guest-Stay (the stay's calendar event id) is required for a guest caller")
+    if is_placeholder_guest_name(name):
+        raise HTTPException(status_code=403, detail="This guest can't be told apart from other stays")
+    return CallerScope("guest", name, int(stay_raw))
+
+
+_SCOPE = Depends(automation_caller_scope)
 
 
 # Pydantic models for request/response
@@ -48,9 +150,10 @@ class ActionConfig(BaseModel):
 class VoiceAutomationCreate(BaseModel):
     name: str = Field(..., description="Human-readable name")
     ha_automation_id: Optional[str] = None
-    owner_type: str = Field("owner", description="owner or guest")
+    owner_type: Literal["owner", "guest"] = Field("owner", description="owner or guest")
     guest_session_id: Optional[str] = None
     guest_name: Optional[str] = None
+    calendar_event_id: Optional[int] = Field(None, description="The stay a guest automation belongs to")
     created_by_room: Optional[str] = None
     trigger_config: dict = Field(..., description="Trigger configuration")
     conditions_config: Optional[List[dict]] = None
@@ -66,6 +169,7 @@ class VoiceAutomationResponse(BaseModel):
     owner_type: str
     guest_session_id: Optional[str]
     guest_name: Optional[str]
+    calendar_event_id: Optional[int] = None
     created_by_room: Optional[str]
     trigger_config: dict
     conditions_config: Optional[List[dict]]
@@ -94,7 +198,7 @@ class VoiceAutomationSummary(BaseModel):
 
 # Routes
 
-@router.get("", response_model=List[VoiceAutomationResponse])
+@router.get("", response_model=List[VoiceAutomationResponse], dependencies=[_READ])
 async def list_automations(
     owner_type: Optional[str] = Query(None, description="Filter by owner type"),
     guest_name: Optional[str] = Query(None, description="Filter by guest name"),
@@ -102,11 +206,17 @@ async def list_automations(
     status: Optional[str] = Query("active", description="Filter by status"),
     include_archived: bool = Query(False, description="Include archived automations"),
     name_search: Optional[str] = Query(None, description="Search by name"),
+    scope: CallerScope = _SCOPE,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user)
 ):
-    """List voice automations with optional filters."""
-    query = db.query(VoiceAutomation)
+    """List voice automations with optional filters.
+
+    A guest scope always gets only its own stay's rows, whatever the
+    owner_type/guest_name filters say.
+    """
+    if scope.is_guest:
+        owner_type, guest_name = "guest", None
+    query = scope.narrow(db.query(VoiceAutomation))
 
     if owner_type:
         query = query.filter(VoiceAutomation.owner_type == owner_type)
@@ -130,21 +240,26 @@ async def list_automations(
     return [VoiceAutomationResponse(**a.to_dict()) for a in automations]
 
 
-@router.get("/guest/{guest_name}/archived", response_model=List[VoiceAutomationSummary])
+@router.get("/guest/{guest_name}/archived", response_model=List[VoiceAutomationSummary], dependencies=[_READ])
 async def get_archived_for_guest(
     guest_name: str,
+    scope: CallerScope = _SCOPE,
     db: Session = Depends(get_db)
 ):
     """
     Get archived automations for a returning guest.
 
     Used to prompt returning guests about restoring their previous automations.
-    No authentication required - called internally by orchestrator.
+    A guest scope may ask only about its own name, and sees its own stay's
+    rows.
     """
-    automations = db.query(VoiceAutomation).filter(
+    if not scope.permits_name(guest_name):
+        raise HTTPException(status_code=404, detail="Guest not found")
+    query = scope.narrow(db.query(VoiceAutomation).filter(
         VoiceAutomation.guest_name == guest_name,
         VoiceAutomation.status == "archived"
-    ).order_by(VoiceAutomation.trigger_count.desc()).all()
+    ))
+    automations = query.order_by(VoiceAutomation.trigger_count.desc()).all()
 
     return [VoiceAutomationSummary(**a.to_summary()) for a in automations]
 
@@ -166,22 +281,32 @@ async def get_automation(
     return VoiceAutomationResponse(**automation.to_dict())
 
 
-@router.post("", response_model=VoiceAutomationResponse)
+@router.post("", response_model=VoiceAutomationResponse, dependencies=[_WRITE])
 async def create_automation(
     automation: VoiceAutomationCreate,
+    scope: CallerScope = _SCOPE,
     db: Session = Depends(get_db)
 ):
     """
     Create a new voice automation.
 
-    No authentication required - called internally by orchestrator/automation agent.
+    Called by the automation agent with the service key. A guest scope may
+    create only a guest row carrying its own name and stay (400 otherwise);
+    the row is bound to the scope's stay.
     """
+    calendar_event_id = automation.calendar_event_id
+    if scope.is_guest:
+        if not (automation.owner_type == "guest" and automation.guest_name == scope.guest_name
+                and calendar_event_id in (None, scope.stay_id)):
+            raise _bad_scope("A guest caller can create only its own stay's guest automations")
+        calendar_event_id = scope.stay_id
     db_automation = VoiceAutomation(
         name=automation.name,
         ha_automation_id=automation.ha_automation_id,
         owner_type=automation.owner_type,
         guest_session_id=automation.guest_session_id,
         guest_name=automation.guest_name,
+        calendar_event_id=calendar_event_id,
         created_by_room=automation.created_by_room,
         trigger_config=automation.trigger_config,
         conditions_config=automation.conditions_config,
@@ -197,7 +322,7 @@ async def create_automation(
     logger.info(
         "voice_automation_created",
         automation_id=db_automation.id,
-        name=automation.name,
+        name_len=len(automation.name),
         owner_type=automation.owner_type,
         has_guest_name=bool(automation.guest_name)
     )
@@ -205,22 +330,24 @@ async def create_automation(
     return VoiceAutomationResponse(**db_automation.to_dict())
 
 
-@router.post("/{automation_id}/archive")
+@router.post("/{automation_id}/archive", dependencies=[_WRITE])
 async def archive_automation(
     automation_id: int,
     reason: str = Query("user_deleted", description="Archive reason"),
+    scope: CallerScope = _SCOPE,
     db: Session = Depends(get_db)
 ):
     """
     Archive an automation (soft delete).
 
-    Used for guest automations when guest departs or manually deleted.
+    Used for guest automations when guest departs or manually deleted. A row
+    outside the caller's scope is reported exactly like a missing one.
     """
     automation = db.query(VoiceAutomation).filter(
         VoiceAutomation.id == automation_id
     ).first()
 
-    if not automation:
+    if not automation or not scope.permits(automation):
         raise HTTPException(status_code=404, detail="Automation not found")
 
     automation.status = "archived"
@@ -238,10 +365,11 @@ async def archive_automation(
     return {"status": "archived", "automation_id": automation_id}
 
 
-@router.post("/{automation_id}/restore")
+@router.post("/{automation_id}/restore", dependencies=[_WRITE])
 async def restore_automation(
     automation_id: int,
     new_session_id: Optional[str] = Query(None, description="New guest session ID"),
+    scope: CallerScope = _SCOPE,
     db: Session = Depends(get_db)
 ):
     """
@@ -254,7 +382,7 @@ async def restore_automation(
         VoiceAutomation.status == "archived"
     ).first()
 
-    if not automation:
+    if not automation or not scope.permits(automation):
         raise HTTPException(status_code=404, detail="Archived automation not found")
 
     automation.status = "active"
@@ -309,16 +437,20 @@ async def delete_automation(
     return {"status": "deleted", "automation_id": automation_id}
 
 
-@router.post("/guest-departure/{session_id}")
+@router.post("/guest-departure/{session_id}", dependencies=[_WRITE])
 async def handle_guest_departure(
     session_id: str,
+    scope: CallerScope = _SCOPE,
     db: Session = Depends(get_db)
 ):
     """
     Archive all automations for a departing guest.
 
-    Called by session manager when guest mode ends.
+    Called by session manager when guest mode ends. System housekeeping: a
+    guest scope never reaches it.
     """
+    if scope.is_guest:
+        raise HTTPException(status_code=404, detail="Not found")
     automations = db.query(VoiceAutomation).filter(
         VoiceAutomation.guest_session_id == session_id,
         VoiceAutomation.status == "active"
@@ -342,9 +474,10 @@ async def handle_guest_departure(
     return {"status": "archived", "count": count}
 
 
-@router.post("/{automation_id}/triggered")
+@router.post("/{automation_id}/triggered", dependencies=[_WRITE])
 async def record_trigger(
     automation_id: int,
+    scope: CallerScope = _SCOPE,
     db: Session = Depends(get_db)
 ):
     """
@@ -356,7 +489,7 @@ async def record_trigger(
         VoiceAutomation.id == automation_id
     ).first()
 
-    if not automation:
+    if not automation or not scope.permits(automation):
         raise HTTPException(status_code=404, detail="Automation not found")
 
     automation.last_triggered_at = datetime.utcnow()
@@ -377,18 +510,22 @@ async def record_trigger(
     }
 
 
-# Internal routes (no auth required - called by orchestrator)
+# Internal routes (service key or signed-in user; called by the orchestrator)
 
-@router.get("/internal/by-guest-name/{guest_name}", response_model=List[VoiceAutomationResponse])
+@router.get("/internal/by-guest-name/{guest_name}", response_model=List[VoiceAutomationResponse], dependencies=[_READ])
 async def get_automations_by_guest_name(
     guest_name: str,
     include_archived: bool = Query(False),
+    scope: CallerScope = _SCOPE,
     db: Session = Depends(get_db)
 ):
-    """Get all automations for a guest by name (internal use)."""
-    query = db.query(VoiceAutomation).filter(
+    """Get all automations for a guest by name (internal use). A guest
+    scope may ask only about its own name, and sees its own stay's rows."""
+    if not scope.permits_name(guest_name):
+        raise HTTPException(status_code=404, detail="Guest not found")
+    query = scope.narrow(db.query(VoiceAutomation).filter(
         VoiceAutomation.guest_name == guest_name
-    )
+    ))
 
     if not include_archived:
         query = query.filter(VoiceAutomation.status == "active")
@@ -409,16 +546,20 @@ class RestoreGuestRequest(BaseModel):
     new_session_id: Optional[str] = None
 
 
-@router.post("/archive-guest")
+@router.post("/archive-guest", dependencies=[_WRITE])
 async def archive_guest_automations(
     request: ArchiveGuestRequest,
+    scope: CallerScope = _SCOPE,
     db: Session = Depends(get_db)
 ):
     """
     Archive all automations for a guest.
 
     Called when a guest departs. Can match by session_id or guest_name.
+    Owner only: a name isn't unique across stays.
     """
+    if scope.is_guest:
+        raise HTTPException(status_code=403, detail="Owner only")
     query = db.query(VoiceAutomation).filter(
         VoiceAutomation.status == "active",
         VoiceAutomation.owner_type == "guest"
@@ -455,16 +596,20 @@ async def archive_guest_automations(
     return {"archived_count": count}
 
 
-@router.post("/restore-guest")
+@router.post("/restore-guest", dependencies=[_WRITE])
 async def restore_guest_automations(
     request: RestoreGuestRequest,
+    scope: CallerScope = _SCOPE,
     db: Session = Depends(get_db)
 ):
     """
     Restore all archived automations for a returning guest.
 
-    Matches by guest_name and optionally updates the session_id.
+    Matches by guest_name and optionally updates the session_id. Owner only:
+    a name isn't unique across stays.
     """
+    if scope.is_guest:
+        raise HTTPException(status_code=403, detail="Owner only")
     automations = db.query(VoiceAutomation).filter(
         VoiceAutomation.guest_name == request.guest_name,
         VoiceAutomation.status == "archived"

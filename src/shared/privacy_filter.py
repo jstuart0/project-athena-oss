@@ -90,7 +90,7 @@ class PrivacyFilter:
                     logger.warning(
                         "privacy_filter_context_warning",
                         word=word,
-                        query_preview=query[:50] + "..." if len(query) > 50 else query
+                        query_len=len(query)
                     )
 
         if detected_types:

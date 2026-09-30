@@ -281,7 +281,7 @@ async def resolve_flight_parameters(
             airports_service_url
         )
         if was_resolved:
-            logger.info("flight_query_resolved", original=resolved["query"], resolved=query)
+            logger.info("flight_query_resolved", original_len=len(resolved["query"]), resolved_len=len(query))
         resolved["query"] = query
 
     return resolved

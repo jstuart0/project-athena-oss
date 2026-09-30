@@ -282,8 +282,6 @@ async def _resolve_pending_write_confirmation(state: OrchestratorState, scope) -
         logger.warning(
             "pending_write_resolved_cross_identity",
             session_id=state.session_id,
-            pending_fingerprint=(fingerprint or "")[:6],
-            caller_fingerprint=(state.caller_fingerprint or "")[:6],
         )
         ha_write_fanout_confirm_total.labels(domain=_pending_domain(pending), outcome="cross_identity").inc()
         return True
@@ -506,7 +504,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
             "occupancy", "is the house empty", "house empty", "home empty"
         ]
         if any(p in query_lower for p in presence_patterns):
-            logger.info(f"Presence/occupancy query detected via pattern matching: {state.query[:50]}...")
+            logger.info(f"Presence/occupancy query detected via pattern matching: query_len={len(state.query)}")
             if smart_controller:
                 result = await smart_controller._handle_sensor_intent(
                     "sensor",
@@ -589,7 +587,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
 
                             logger.info(
                                 "status_query_optimized",
-                                query=state.query[:50],
+                                query_len=len(state.query),
                                 query_type=status_result.query_type,
                                 entity_count=len(status_result.entities),
                                 skip_synthesis=True,
@@ -679,7 +677,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         state.error = "state_question_write_blocked"
                         logger.error(
                             "state_question_write_blocked",
-                            query=state.query[:80],
+                            query_len=len(state.query),
                             device_type=uk.device_type,
                             room=uk.room,
                             request_id=state.request_id,
@@ -712,15 +710,20 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
 
                 # DYNAMIC AGENT: Route sequences/automations to LLM-based agent
                 if automation_mode == "dynamic_agent" and automation_agent and should_use_automation_agent(state.query):
-                    logger.info(f"Dynamic agent mode - routing to automation agent: {state.query[:50]}...")
+                    logger.info(f"Dynamic agent mode - routing to automation agent: query_len={len(state.query)}")
 
                     # Build context for automation agent
+                    # Guest identity lives in state.context (set by
+                    # build_query_context only for a named, non-degraded
+                    # guest house); the agent refuses guest-mode automation
+                    # management without it.
                     context = {
                         "room": state.room,
                         "mode": state.mode,
                         "session_id": state.session_id,
-                        "guest_name": getattr(state, 'guest_name', None),
-                        "guest_session_id": getattr(state, 'guest_session_id', None),
+                        "guest_name": state.context.get("guest_name"),
+                        "guest_id": state.context.get("guest_id"),
+                        "guest_stay_id": state.context.get("guest_stay_id"),
                     }
 
                     # Execute via automation agent (D2: surface any denial
@@ -755,7 +758,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 # legacy routing applies; the sequence executor's gate then
                 # stops a real question's writes.
                 if uk.kind != UtteranceKind.STATE_QUESTION and smart_controller.detect_sequence_intent(state.query):
-                    logger.info(f"Sequence intent detected (pattern matching mode): {state.query[:50]}...")
+                    logger.info(f"Sequence intent detected (pattern matching mode): query_len={len(state.query)}")
 
                     # Extract sequence from the complex command
                     sequence_data = await smart_controller.extract_sequence_intent(

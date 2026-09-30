@@ -78,7 +78,7 @@ class RequestTracingMiddleware(BaseHTTPMiddleware):
             logger.info(
                 "request_started",
                 client_ip=request.client.host if request.client else None,
-                user_agent=request.headers.get("user-agent", "")[:100]
+                user_agent_len=len(request.headers.get("user-agent", ""))
             )
 
             try:

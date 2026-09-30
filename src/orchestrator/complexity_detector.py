@@ -251,7 +251,7 @@ def determine_complexity(
             feature_score=feature_score,
             intent_baseline=intent_baseline,
             triggers=triggered_str,
-            query=query[:50]
+            query_len=len(query)
         )
         logger.debug("complexity_features", features=asdict(features))
 

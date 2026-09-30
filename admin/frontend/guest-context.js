@@ -98,7 +98,7 @@ async function generateDeviceFingerprint() {
  */
 async function getCurrentGuests() {
     try {
-        const response = await fetch(GUEST_API_BASE + '/api/guests/current');
+        const response = await fetch(GUEST_API_BASE + '/api/guests/current', { headers: getAuthHeaders() });
         if (!response.ok) return [];
         return await response.json();
     } catch (error) {
@@ -112,7 +112,7 @@ async function getCurrentGuests() {
  */
 async function getSessionByDevice(deviceId) {
     try {
-        const response = await fetch(GUEST_API_BASE + '/api/user-sessions/device/' + encodeURIComponent(deviceId));
+        const response = await fetch(GUEST_API_BASE + '/api/user-sessions/device/' + encodeURIComponent(deviceId), { headers: getAuthHeaders() });
         if (response.status === 404) return null;
         if (!response.ok) throw new Error('Failed to fetch session');
         return await response.json();
@@ -129,7 +129,7 @@ async function saveSessionToBackend(context) {
     try {
         const response = await fetch(GUEST_API_BASE + '/api/user-sessions', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getAuthHeaders(),
             body: JSON.stringify({
                 session_id: context.session_id,
                 guest_id: context.guest_id,
@@ -153,7 +153,7 @@ async function addGuestToCurrentReservation(name, email, phone) {
     try {
         const response = await fetch(GUEST_API_BASE + '/api/guests/current/add', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getAuthHeaders(),
             body: JSON.stringify({ name, email, phone })
         });
 

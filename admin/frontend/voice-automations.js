@@ -463,11 +463,11 @@ async function showAutomationDetail(id) {
                     </div>
                     <div>
                         <span class="text-gray-400">Owner:</span>
-                        <span class="text-white ml-2">${auto.owner_type}${auto.guest_name ? ` (${escapeHtml(auto.guest_name)})` : ''}</span>
+                        <span class="text-white ml-2">${escapeHtml(auto.owner_type)}${auto.guest_name ? ` (${escapeHtml(auto.guest_name)})` : ''}</span>
                     </div>
                     <div>
                         <span class="text-gray-400">Status:</span>
-                        <span class="text-white ml-2">${auto.status}</span>
+                        <span class="text-white ml-2">${escapeHtml(auto.status)}</span>
                     </div>
                     <div>
                         <span class="text-gray-400">Created:</span>

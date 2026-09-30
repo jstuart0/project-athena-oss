@@ -6,20 +6,23 @@ orchestrator for processing. Enables bidirectional SMS conversations
 with guests.
 """
 
+import asyncio
 import hashlib
 import hmac
-from datetime import datetime, timezone
-from typing import Optional
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple
 from urllib.parse import urlsplit
 import httpx
 import os
 import structlog
 from fastapi import APIRouter, Form, HTTPException, Response, Depends, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
 
-from ..database import get_db
+from ..database import SessionLocal, get_db
 from ..models import SMSIncoming, CalendarEvent, GuestSMSPreference
 from shared.config import get_config
 
@@ -81,17 +84,41 @@ def _base_url_is_valid(base: str) -> bool:
 if TWILIO_AUTH_TOKEN and not _base_url_is_valid(TWILIO_WEBHOOK_BASE_URL):
     logger.error("twilio_webhook_base_url_not_configured", at="import")
 
+if not TWILIO_AUTH_TOKEN and os.getenv("TWILIO_ALLOW_UNSIGNED") == "true":
+    # Once per process: every webhook will be accepted unsigned, so anyone
+    # who knows a guest's number can text as that guest.
+    logger.error("twilio_unsigned_webhooks_allowed", at="import")
+
 
 async def validate_twilio_signature(request: Request) -> None:
     """
     FastAPI dependency that validates the X-Twilio-Signature header.
 
-    Protects SMS webhook endpoints from spoofed requests.
-    Skips validation if TWILIO_AUTH_TOKEN is not configured (dev/non-SMS deployments).
+    Protects SMS webhook endpoints from spoofed requests. With
+    TWILIO_AUTH_TOKEN set, a missing or bad signature is 403 (the
+    TWILIO_ALLOW_UNSIGNED opt-in is never read). With it unset:
+
+    - DEV_MODE: validation is skipped with a warning (local development);
+    - TWILIO_ALLOW_UNSIGNED exactly "true": the request is accepted unsigned
+      with a warning. The sender is then unauthenticated: anyone who knows a
+      guest's number can text as that guest;
+    - otherwise 503, before the handler runs (nothing is stored).
+
+    DEV_MODE and the opt-in are read per request through get_config().
+    ``request.state.twilio_signed`` is True only when a signature was
+    verified.
     """
+    request.state.twilio_signed = False
     if not TWILIO_AUTH_TOKEN:
-        logger.warning("twilio_auth_token_not_configured_skipping_validation")
-        return
+        config = get_config()
+        if config.dev_mode:
+            logger.warning("twilio_auth_token_not_configured_skipping_validation")
+            return
+        if config.twilio_allow_unsigned == "true":
+            logger.warning("twilio_unsigned_request_accepted", path=request.url.path)
+            return
+        logger.error("twilio_auth_token_not_configured")
+        raise HTTPException(status_code=503, detail="SMS webhook not configured")
 
     signature = request.headers.get("X-Twilio-Signature", "")
     if not signature:
@@ -118,6 +145,94 @@ async def validate_twilio_signature(request: Request) -> None:
     if not validator.validate(validation_url, form, signature):
         logger.warning("twilio_signature_invalid", path=request.url.path)
         raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+    request.state.twilio_signed = True
+
+
+# A Twilio message SID: SM (SMS) or MM (MMS) + 32 hex digits.
+_MESSAGE_SID = re.compile(r"^(SM|MM)[0-9a-fA-F]{32}$")
+
+# How long a retry of a message still being answered waits for the reply,
+# and how often it looks. Twilio retries after its own 15 s timeout; our
+# orchestrator call can take up to 30 s, so the reply is usually seconds
+# away. Past the wait, 503 + Retry-After keeps Twilio's retry and fallback
+# path alive instead of ending the conversation with an empty 200.
+SMS_REPLAY_WAIT_SECONDS = 10.0
+SMS_REPLAY_POLL_SECONDS = 0.5
+_REPLAY_RETRY_AFTER = "5"
+
+UNKNOWN_SENDER_REPLY = (
+    "Hi! I'm Athena, your vacation rental assistant. "
+    "I don't recognize this number. If you're a guest, "
+    "please use the phone number from your reservation."
+)
+OPTED_OUT_REPLY = "You've opted out of SMS communication. Text 'START' to opt back in."
+UNSUBSCRIBED_REPLY = "You've been unsubscribed from SMS notifications. Text 'START' to opt back in."
+RESUBSCRIBED_REPLY = (
+    "Welcome back! You'll now receive SMS notifications again. "
+    "Text any question and I'll help you out!"
+)
+ERROR_REPLY = (
+    "Sorry, I'm having trouble processing your message right now. "
+    "Please try again in a moment or call the host directly."
+)
+
+
+def _twiml(text: Optional[str]) -> Response:
+    twiml = MessagingResponse()
+    if text:
+        twiml.message(text)
+    return Response(content=str(twiml), media_type="application/xml")
+
+
+def _find_replay(db: Session, message_sid: str, sender: str) -> Optional[SMSIncoming]:
+    """The earlier delivery of this message from this sender, if any. The
+    same SID from a different sender is not a replay (a forged request
+    carrying someone else's SID can't pull their reply)."""
+    rows = db.query(SMSIncoming).filter(SMSIncoming.twilio_sid == message_sid).all()
+    for row in rows:
+        if row.phone_number == sender:
+            return row
+    if rows:
+        logger.warning("sms_sid_sender_mismatch", message_sid=message_sid)
+    return None
+
+
+def _sid_held_by_another_sender(db: Session, message_sid: str, sender: str) -> bool:
+    return db.query(SMSIncoming.id).filter(
+        SMSIncoming.twilio_sid == message_sid, SMSIncoming.phone_number != sender,
+    ).first() is not None
+
+
+def _replay_response(content: Optional[str], signed: bool) -> Response:
+    """The stored reply, only to a verified sender. Unsigned, the sender is
+    unauthenticated, so a stored reply is never echoed."""
+    if not signed:
+        return _twiml(None)
+    logger.info("sms_replay_answered")
+    return _twiml(content)
+
+
+async def _answer_replay(row: SMSIncoming, signed: bool) -> Response:
+    if row.response_sent:
+        return _replay_response(row.response_content, signed)
+    row_id = row.id
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + SMS_REPLAY_WAIT_SECONDS
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(SMS_REPLAY_POLL_SECONDS, remaining))
+        # A fresh session: the request's own would read a stale snapshot.
+        session = SessionLocal()
+        try:
+            fresh = session.get(SMSIncoming, row_id)
+            if fresh is not None and fresh.response_sent:
+                return _replay_response(fresh.response_content, signed)
+        finally:
+            session.close()
+    logger.warning("sms_replay_in_progress_timeout", message_sid=row.twilio_sid)
+    return Response(status_code=503, headers={"Retry-After": _REPLAY_RETRY_AFTER})
 
 
 @router.post("/incoming")
@@ -150,8 +265,14 @@ async def handle_incoming_sms(
         db: Database session
 
     Returns:
-        TwiML response with assistant's reply
+        TwiML response with assistant's reply. A Twilio retry of a message
+        already answered gets the same reply (never a second orchestrator
+        call); a retry of one still being answered waits for it, then 503s.
     """
+    if not _MESSAGE_SID.match(MessageSid):
+        logger.warning("invalid_message_sid", sid_length=len(MessageSid))
+        raise HTTPException(status_code=400, detail="invalid_message_sid")
+
     logger.info(
         "incoming_sms_received",
         from_number=From[-4:],  # Log only last 4 digits
@@ -159,18 +280,25 @@ async def handle_incoming_sms(
         message_sid=MessageSid,
     )
 
-    # Create incoming SMS record
+    signed = bool(getattr(request.state, "twilio_signed", False))
+    earlier = _find_replay(db, MessageSid, From)
+    if earlier is not None:
+        return await _answer_replay(earlier, signed)
+
+    # Create incoming SMS record. twilio_sid is unique: a SID another sender
+    # already used (a forged request) is stored without it.
     incoming = SMSIncoming(
         phone_number=From,
         message=Body,
-        twilio_sid=MessageSid,
+        twilio_sid=None if _sid_held_by_another_sender(db, MessageSid, From) else MessageSid,
         received_at=datetime.now(timezone.utc),
         matched_guest=False,
         response_sent=False,
     )
 
-    # Try to match to a guest by phone number
-    guest = find_guest_by_phone(From, db)
+    # Match the sender to a stay (exact E.164 number)
+    match = find_guest_by_phone(From, db)
+    guest, stay_phase = match if match else (None, None)
 
     if guest:
         incoming.calendar_event_id = guest.id
@@ -178,25 +306,30 @@ async def handle_incoming_sms(
         logger.info(
             "incoming_sms_matched",
             event_id=guest.id,
+            stay_phase=stay_phase,
         )
 
     db.add(incoming)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Another delivery of this SID was stored between the replay lookup
+        # and this insert: answer it as that delivery's replay.
+        db.rollback()
+        logger.info("sms_replay_insert_race", message_sid=MessageSid)
+        earlier = _find_replay(db, MessageSid, From)
+        if earlier is None:
+            raise
+        return await _answer_replay(earlier, signed)
 
-    # Process the message
-    twiml = MessagingResponse()
+    def _answered(text: str) -> Response:
+        incoming.response_sent = True
+        incoming.response_content = text
+        db.commit()
+        return _twiml(text)
 
     if not guest:
-        # Unknown sender
-        twiml.message(
-            "Hi! I'm Athena, your vacation rental assistant. "
-            "I don't recognize this number. If you're a guest, "
-            "please use the phone number from your reservation."
-        )
-        incoming.response_sent = True
-        incoming.response_content = str(twiml)
-        db.commit()
-        return Response(content=str(twiml), media_type="application/xml")
+        return _answered(UNKNOWN_SENDER_REPLY)
 
     # Check if guest has opted out of SMS
     prefs = db.query(GuestSMSPreference).filter(
@@ -204,38 +337,17 @@ async def handle_incoming_sms(
     ).first()
 
     if prefs and prefs.opted_out:
-        twiml.message(
-            "You've opted out of SMS communication. "
-            "Text 'START' to opt back in."
-        )
-        incoming.response_sent = True
-        incoming.response_content = str(twiml)
-        db.commit()
-        return Response(content=str(twiml), media_type="application/xml")
+        return _answered(OPTED_OUT_REPLY)
 
     # Handle opt-in/opt-out commands
     body_lower = Body.strip().lower()
     if body_lower in ["stop", "unsubscribe", "cancel", "quit"]:
         await handle_opt_out(guest.id, db)
-        twiml.message(
-            "You've been unsubscribed from SMS notifications. "
-            "Text 'START' to opt back in."
-        )
-        incoming.response_sent = True
-        incoming.response_content = str(twiml)
-        db.commit()
-        return Response(content=str(twiml), media_type="application/xml")
+        return _answered(UNSUBSCRIBED_REPLY)
 
     if body_lower in ["start", "subscribe", "yes"]:
         await handle_opt_in(guest.id, db)
-        twiml.message(
-            "Welcome back! You'll now receive SMS notifications again. "
-            "Text any question and I'll help you out!"
-        )
-        incoming.response_sent = True
-        incoming.response_content = str(twiml)
-        db.commit()
-        return Response(content=str(twiml), media_type="application/xml")
+        return _answered(RESUBSCRIBED_REPLY)
 
     # Route to orchestrator for AI response
     try:
@@ -244,24 +356,14 @@ async def handle_incoming_sms(
             phone_number=From,
             calendar_event_id=guest.id,
             guest_name=guest.guest_name,
+            stay_phase=stay_phase,
         )
-
-        twiml.message(response_text)
-        incoming.response_sent = True
-        incoming.response_content = response_text
         incoming.processed_at = datetime.now(timezone.utc)
+        return _answered(response_text)
 
     except Exception as e:
-        logger.exception("orchestrator_error", error=str(e))
-        twiml.message(
-            "Sorry, I'm having trouble processing your message right now. "
-            "Please try again in a moment or call the host directly."
-        )
-        incoming.response_sent = True
-        incoming.response_content = "Error: " + str(e)
-
-    db.commit()
-    return Response(content=str(twiml), media_type="application/xml")
+        logger.exception("orchestrator_error", error_type=type(e).__name__)
+        return _answered(ERROR_REPLY)
 
 
 @router.post("/status")
@@ -335,63 +437,92 @@ def sms_session_id(phone_number: str) -> str:
     return "sms_" + digest[:24]
 
 
-def find_guest_by_phone(phone_number: str, db: Session) -> Optional[CalendarEvent]:
+_E164_SEPARATORS = str.maketrans("", "", " \t-.()")
+_ASCII_DIGITS = frozenset("0123456789")
+
+
+def to_e164(raw: Optional[str], default_cc: str, *, strict: bool = False) -> Optional[str]:
+    """``raw`` as ``+<10-15 digits>``, or None.
+
+    Spaces, tabs, ``-``, ``.``, ``(`` and ``)`` are dropped; anything left
+    must be ASCII digits with at most one leading ``+`` (so an alphanumeric
+    sender like "ATHENA" is None). ``+`` or ``00`` means international.
+    A national number gets ``default_cc``: after stripping one trunk ``0``
+    always, otherwise unless it already starts with the code and is at least
+    11 digits long. ``strict`` (the sender, as Twilio sends it) requires the
+    leading ``+``. Not the session-id input: that stays _normalize_phone.
     """
-    Find a current or recent guest by phone number.
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().translate(_E164_SEPARATORS)
+    international = value.startswith("+")
+    if strict and not international:
+        return None
+    digits = value[1:] if international else value
+    if not digits or any(c not in _ASCII_DIGITS for c in digits):
+        return None
+    if not international:
+        if digits.startswith("00"):
+            digits = digits[2:]
+        elif digits.startswith("0"):
+            digits = default_cc + digits[1:]
+        elif not (digits.startswith(default_cc) and len(digits) >= 11):
+            digits = default_cc + digits
+    if not 10 <= len(digits) <= 15:
+        return None
+    return "+" + digits
 
-    Args:
-        phone_number: Phone number to search for
-        db: Database session
 
-    Returns:
-        CalendarEvent if found, None otherwise
+def find_guest_by_phone(
+    phone_number: str, db: Session, *, now: Optional[datetime] = None
+) -> Optional[Tuple[CalendarEvent, str]]:
+    """The stay an incoming SMS belongs to, and which phase it's in.
+
+    Only confirmed, not-deleted stays with a phone on file are considered,
+    and only an exact E.164 match counts (the booking's number is normalised
+    leniently, with SMS_DEFAULT_COUNTRY_CODE; the sender strictly). Tiers,
+    first match wins:
+
+    - "current": checkin <= now <= checkout, the earliest checkout first
+      (the departing stay on a changeover day);
+    - "recent": checked out within the last 24 h, the latest first;
+    - "upcoming": checking in within the next 48 h, the soonest first.
+
+    A match proves only possession of the booking's number, and only when
+    Twilio signatures are validated. With TWILIO_ALLOW_UNSIGNED=true anyone
+    who knows a guest's number can impersonate them. Recent and upcoming
+    matches are answer-only (the orchestrator refuses house writes and
+    house reads for them).
     """
-    normalized = _normalize_phone(phone_number)
+    now = now or datetime.now(timezone.utc)
+    country_code = get_config().sms_default_country_code
+    sender = to_e164(phone_number, country_code, strict=True)
+    if sender is None:
+        return None
 
-    # Also check without country code
-    without_country = normalized.lstrip("+1")
+    def stays():
+        return db.query(CalendarEvent).filter(
+            CalendarEvent.deleted_at.is_(None),
+            CalendarEvent.status == "confirmed",
+            CalendarEvent.guest_phone.isnot(None),
+        )
 
-    now = datetime.now(timezone.utc)
-
-    # Look for current stays first
-    current_stay = db.query(CalendarEvent).filter(
-        CalendarEvent.deleted_at.is_(None),
-        CalendarEvent.checkin <= now,
-        CalendarEvent.checkout >= now,
-    ).filter(
-        (CalendarEvent.guest_phone.contains(normalized)) |
-        (CalendarEvent.guest_phone.contains(without_country))
-    ).first()
-
-    if current_stay:
-        return current_stay
-
-    # Look for recent past stays (within 24 hours of checkout)
-    recent_checkout = now - timedelta(hours=24)
-    recent_stay = db.query(CalendarEvent).filter(
-        CalendarEvent.deleted_at.is_(None),
-        CalendarEvent.checkout >= recent_checkout,
-        CalendarEvent.checkout <= now,
-    ).filter(
-        (CalendarEvent.guest_phone.contains(normalized)) |
-        (CalendarEvent.guest_phone.contains(without_country))
-    ).first()
-
-    if recent_stay:
-        return recent_stay
-
-    # Look for upcoming stays (check-in within 48 hours)
-    upcoming_window = now + timedelta(hours=48)
-    upcoming_stay = db.query(CalendarEvent).filter(
-        CalendarEvent.deleted_at.is_(None),
-        CalendarEvent.checkin >= now,
-        CalendarEvent.checkin <= upcoming_window,
-    ).filter(
-        (CalendarEvent.guest_phone.contains(normalized)) |
-        (CalendarEvent.guest_phone.contains(without_country))
-    ).first()
-
-    return upcoming_stay
+    tiers = (
+        ("current", lambda: stays().filter(
+            CalendarEvent.checkin <= now, CalendarEvent.checkout >= now,
+        ).order_by(CalendarEvent.checkout.asc(), CalendarEvent.checkin.desc())),
+        ("recent", lambda: stays().filter(
+            CalendarEvent.checkout >= now - timedelta(hours=24), CalendarEvent.checkout < now,
+        ).order_by(CalendarEvent.checkout.desc())),
+        ("upcoming", lambda: stays().filter(
+            CalendarEvent.checkin > now, CalendarEvent.checkin <= now + timedelta(hours=48),
+        ).order_by(CalendarEvent.checkin.asc())),
+    )
+    for phase, query in tiers:
+        for event in query():
+            if to_e164(event.guest_phone, country_code) == sender:
+                return event, phase
+    return None
 
 
 async def route_to_orchestrator(
@@ -399,6 +530,7 @@ async def route_to_orchestrator(
     phone_number: str,
     calendar_event_id: int,
     guest_name: Optional[str] = None,
+    stay_phase: Optional[str] = None,
 ) -> str:
     """
     Route the incoming SMS query to the orchestrator.
@@ -408,6 +540,8 @@ async def route_to_orchestrator(
         phone_number: Sender's phone number
         calendar_event_id: Associated calendar event ID
         guest_name: Guest's name if known
+        stay_phase: "current", "recent" or "upcoming" (find_guest_by_phone).
+            Anything but "current" is answer-only in the orchestrator.
 
     Returns:
         Response text from the orchestrator
@@ -428,6 +562,9 @@ async def route_to_orchestrator(
                     "calendar_event_id": calendar_event_id,
                     "guest_name": guest_name,
                     "channel": "sms",
+                    "stay_phase": stay_phase,
+                    # The stay a guest's voice automations are scoped to.
+                    "guest_stay_id": calendar_event_id,
                 },
             },
             headers={"X-Service-Key": get_config().service_api_key},
@@ -446,7 +583,7 @@ async def route_to_orchestrator(
             logger.error(
                 "orchestrator_request_failed",
                 status=response.status_code,
-                body=response.text[:200],
+                body_len=len(response.text),
             )
             raise Exception(f"Orchestrator returned {response.status_code}")
 
@@ -490,7 +627,3 @@ async def handle_opt_in(calendar_event_id: int, db: Session):
 
     db.commit()
     logger.info("guest_opted_in", event_id=calendar_event_id)
-
-
-# Import timedelta for phone matching
-from datetime import timedelta

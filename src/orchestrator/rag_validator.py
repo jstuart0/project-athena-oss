@@ -73,7 +73,7 @@ class RAGValidator:
         # Check for unhelpful patterns
         for pattern in self.UNHELPFUL_PATTERNS:
             if pattern in content_lower:
-                logger.warning(f"Content contains unhelpful pattern '{pattern}': {content[:100]}")
+                logger.warning(f"Content contains unhelpful pattern '{pattern}': content_len={len(content)}")
                 return (False, f"Contains unhelpful pattern: '{pattern}'")
 
         # Check for very short responses (< 20 chars) unless it's a simple fact
@@ -107,7 +107,7 @@ class RAGValidator:
             is_helpful, reason = self._check_content_quality(answer, query)
 
             if not is_helpful:
-                logger.warning(f"Answer quality validation failed: {reason}. Answer: {answer[:200]}")
+                logger.warning(f"Answer quality validation failed: {reason}. Answer: answer_len={len(answer)}")
                 return (
                     ValidationResult.INVALID,
                     f"Answer is unhelpful: {reason}",
@@ -225,7 +225,7 @@ class RAGValidator:
 
                 # Check if we have any useful data
                 if total_games == 0:
-                    logger.warning(f"Sports RAG returned no games for query: {query}")
+                    logger.warning(f"Sports RAG returned no games for query: query_len={len(query)}")
                     return (
                         ValidationResult.EMPTY,
                         "No games found in response",
@@ -268,7 +268,7 @@ class RAGValidator:
                 events = response_data.get("events", [])
 
                 if not events or len(events) == 0:
-                    logger.warning(f"Sports RAG returned empty events for query: {query}")
+                    logger.warning(f"Sports RAG returned empty events for query: query_len={len(query)}")
                     return (
                         ValidationResult.EMPTY,
                         "No events found in response",
@@ -282,7 +282,7 @@ class RAGValidator:
                 # This is valid - it means no upcoming games but we have team status info
                 if first_event.get("season_status") == "ended":
                     logger.info(
-                        f"Sports RAG indicates season ended for query: {query}",
+                        f"Sports RAG indicates season ended for query: query_len={len(query)}",
                         team_record=first_event.get("team_record"),
                         team_standing=first_event.get("team_standing")
                     )
@@ -357,7 +357,7 @@ class RAGValidator:
                 teams = response_data.get("teams", [])
 
                 if not teams or len(teams) == 0:
-                    logger.warning(f"Sports RAG returned empty teams for query: {query}")
+                    logger.warning(f"Sports RAG returned empty teams for query: query_len={len(query)}")
                     return (
                         ValidationResult.EMPTY,
                         "No teams found in response",
@@ -424,7 +424,7 @@ class RAGValidator:
                 current = response_data.get("current", {})
 
                 if not current:
-                    logger.warning(f"Weather RAG returned empty current data for query: {query}")
+                    logger.warning(f"Weather RAG returned empty current data for query: query_len={len(query)}")
                     return (
                         ValidationResult.EMPTY,
                         "No current weather data",
@@ -461,7 +461,7 @@ class RAGValidator:
                 forecast = response_data.get("forecast", [])
 
                 if not forecast or len(forecast) == 0:
-                    logger.warning(f"Weather RAG returned empty forecast for query: {query}")
+                    logger.warning(f"Weather RAG returned empty forecast for query: query_len={len(query)}")
                     return (
                         ValidationResult.EMPTY,
                         "No forecast data",
@@ -537,7 +537,7 @@ class RAGValidator:
                 airport = response_data.get("airport", {})
 
                 if not airport:
-                    logger.warning(f"Airports RAG returned empty airport data for query: {query}")
+                    logger.warning(f"Airports RAG returned empty airport data for query: query_len={len(query)}")
                     return (
                         ValidationResult.EMPTY,
                         "No airport data",
@@ -564,7 +564,7 @@ class RAGValidator:
                 flights = response_data.get("flights", [])
 
                 if not flights or len(flights) == 0:
-                    logger.warning(f"Airports RAG returned empty flights for query: {query}")
+                    logger.warning(f"Airports RAG returned empty flights for query: query_len={len(query)}")
                     return (
                         ValidationResult.EMPTY,
                         "No flights found in response",

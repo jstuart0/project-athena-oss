@@ -479,7 +479,7 @@ if WYOMING_AVAILABLE:
 
                         logger.info("wyoming_transcribe_complete",
                                    session_id=session_id,
-                                   text=text[:100],
+                                   text_len=len(text),
                                    stt_duration_ms=int(stt_elapsed * 1000))
 
                         # If we got a transcription, send it to orchestrator for processing
@@ -498,7 +498,7 @@ if WYOMING_AVAILABLE:
 
                         logger.error("wyoming_stt_error",
                                     status=response.status_code,
-                                    response=response.text[:200],
+                                    response_len=len(response.text),
                                     stt_duration_ms=int(stt_elapsed * 1000))
                         return Transcript(text='').event()
 
@@ -546,7 +546,7 @@ if WYOMING_AVAILABLE:
                     }
                     logger.info("wyoming_query_with_interruption_context",
                                session_id=session_id,
-                               previous_query=self.interruption_context.previous_query[:50])
+                               previous_query_len=len(self.interruption_context.previous_query))
 
                     # Clear after use
                     self.interruption_context = None
@@ -579,7 +579,7 @@ if WYOMING_AVAILABLE:
 
                         logger.info("wyoming_query_complete",
                                    session_id=session_id,
-                                   response_preview=self.current_response[:100],
+                                   response_len=len(self.current_response),
                                    llm_duration_ms=int(llm_elapsed * 1000),
                                    model=llm_model)
                     else:
@@ -705,7 +705,7 @@ if WYOMING_AVAILABLE:
 
                         logger.error("wyoming_tts_error",
                                     status=response.status_code,
-                                    response=response.text[:200],
+                                    response_len=len(response.text),
                                     tts_duration_ms=int(tts_elapsed * 1000))
 
             except Exception as e:

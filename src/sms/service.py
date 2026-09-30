@@ -146,8 +146,8 @@ class SMSService:
 
         if self.test_mode:
             logger.info(
-                f"[TEST MODE] Would send {segment_count} segment(s) to {to_number}\n"
-                f"Content preview: {content[:100]}..."
+                f"[TEST MODE] Would send {segment_count} segment(s) to ***{to_number[-4:]}\n"
+                f"Content length: {len(content)}"
             )
             return True, "test_mode", segment_count
 
@@ -164,7 +164,7 @@ class SMSService:
                 self._record_send()
 
                 logger.info(
-                    f"SMS sent: {message.sid} to {to_number} "
+                    f"SMS sent: {message.sid} to ***{to_number[-4:]} "
                     f"(segment {i+1}/{segment_count})"
                 )
 

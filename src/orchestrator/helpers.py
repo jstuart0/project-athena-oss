@@ -283,7 +283,7 @@ def log_continuation_decision(state: Any, session_id: str) -> None:
             "continuation_decision",
             decision=decision_dict.get("decision"),
             reason=decision_dict.get("reason"),
-            session_prefix=(session_id or "")[:12],
+            session_prefix=session_id[:12] if session_id else "",
         )
     except Exception:
         logger.warning("continuation_decision_log_failed", exc_info=True)
@@ -757,7 +757,9 @@ def build_query_context(
     context and never receives guest identity. For everyone else, the
     identity fields are decided here and nowhere else:
 
-    - ``guest_name``/``guest_id`` only while the house's own mode is guest
+    - ``guest_name``/``guest_id``/``guest_stay_id`` (the stay's calendar
+      event id, which scopes the guest's voice automations; the device leg
+      has none) only while the house's own mode is guest
       and the mode service isn't degraded, and only for a caller_trust in
       ``REQUEST_GUEST_NAME_TRUST`` (from the request) or
       ``DEVICE_GUEST_NAME_TRUST`` (from the device-matched guest session).
@@ -779,6 +781,7 @@ def build_query_context(
     context = raw
     request_guest_name = context.pop("guest_name", None)
     request_guest_id = context.pop("guest_id", None)
+    request_guest_stay_id = context.pop("guest_stay_id", None)
     request_first_name = context.pop("speaker_first_name", None)
     device_guest_name = guest_info.get("guest_name") if guest_info else None
     device_guest_id = guest_info.get("guest_id") if guest_info else None
@@ -788,6 +791,8 @@ def build_query_context(
         context["guest_name"] = request_guest_name
         if request_guest_id is not None:
             context["guest_id"] = request_guest_id
+        if request_guest_stay_id is not None:
+            context["guest_stay_id"] = request_guest_stay_id
     elif named_house and caller_trust in DEVICE_GUEST_NAME_TRUST and device_guest_name:
         context["guest_name"] = device_guest_name
         if device_guest_id is not None:
@@ -933,9 +938,9 @@ async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
     logger.info(
         "post_synthesis_fallback_triggered",
         matched_pattern=matched_pattern,
-        original_response_preview=state.answer[:100] if state.answer else None,
+        original_response_len=len(state.answer or ""),
         intent=state.intent.value if state.intent and hasattr(state.intent, 'value') else str(state.intent),
-        query_preview=state.query[:50] if state.query else None
+        query_len=len(state.query or "")
     )
 
     # Execute web search fallback
@@ -1040,8 +1045,8 @@ Based on these search results, provide a helpful, accurate answer to the user's 
                 if config.get("log_triggers", True):
                     logger.info(
                         "post_synthesis_fallback_succeeded",
-                        new_response_preview=new_response[:100],
-                        original_response_preview=original_response[:100] if original_response else None,
+                        new_response_len=len(new_response),
+                        original_response_len=len(original_response or ""),
                         results_count=len(search_results),
                         latency_ms=elapsed_ms
                     )

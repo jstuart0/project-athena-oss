@@ -142,7 +142,7 @@ class PlaybackStateManager:
         state.current_media = media
         state.paused_at = None
         state.resumed_at = time.time()
-        logger.debug("room_playing", room=room_name, media=media[:50] if media else None)
+        logger.debug("room_playing", room=room_name, media_len=len(media or ""))
 
     def set_paused(self, room_name: str, position_ms: int = 0):
         """Mark room as paused."""
@@ -712,7 +712,7 @@ class MusicHandler:
         for pattern in browser_patterns:
             if re.search(pattern, query_lower):
                 play_in_browser = True
-                logger.info("browser_playback_detected", pattern=pattern, query=query[:50])
+                logger.info("browser_playback_detected", pattern=pattern, query_len=len(query))
                 break
 
         # Also enable browser playback if interface is jarvis_web and room is "jarvis_web"
@@ -751,8 +751,7 @@ class MusicHandler:
             logger.debug(
                 "room_group_lookup_built",
                 group_count=len(room_groups),
-                term_count=len(room_group_lookup),
-                terms=list(room_group_lookup.keys())[:10]  # Log first 10 for debugging
+                term_count=len(room_group_lookup)
             )
         except Exception as e:
             logger.warning("room_group_lookup_failed", error=str(e))
@@ -919,7 +918,7 @@ class MusicHandler:
                                 break
 
                 if excluded:
-                    logger.info("exclusion_pattern_matched", excluded=excluded, query=query[:50])
+                    logger.info("exclusion_pattern_matched", excluded=excluded, query_len=len(query))
                 break
 
         return excluded

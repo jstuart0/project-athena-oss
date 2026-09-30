@@ -191,7 +191,7 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
 
     if has_specific_facts and not has_supporting_data and not is_builtin_time_or_date_query:
         logger.warning(f"Response contains specific facts but no supporting data retrieved")
-        logger.warning(f"Dates: {date_patterns}, Times: {time_patterns}, Money: {money_patterns}, Phones: {phone_patterns}")
+        logger.warning(f"Dates: {len(date_patterns)}, Times: {len(time_patterns)}, Money: {len(money_patterns)}, Phones: {len(phone_patterns)}")
 
         # Track suspicious patterns found (potential hallucinations without supporting data)
         if date_patterns:

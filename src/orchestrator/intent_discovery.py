@@ -22,6 +22,7 @@ import structlog
 import httpx
 
 from shared.admin_config import get_admin_client
+from shared.config import get_config
 
 logger = structlog.get_logger()
 
@@ -217,7 +218,7 @@ async def generate_novel_intent(
 
         # Validate required fields
         if not intent_data.get("canonical_name"):
-            logger.warning("novel_intent_missing_name", query=query)
+            logger.warning("novel_intent_missing_name", query_len=len(query))
             return None
 
         # Normalize canonical_name
@@ -230,15 +231,15 @@ async def generate_novel_intent(
 
         logger.info("novel_intent_generated",
                    canonical_name=intent_data["canonical_name"],
-                   query=query[:50])
+                   query_len=len(query))
 
         return intent_data
 
     except json.JSONDecodeError as e:
-        logger.error("novel_intent_json_parse_failed", error=str(e), query=query[:50])
+        logger.error("novel_intent_json_parse_failed", error=str(e), query_len=len(query))
         return None
     except Exception as e:
-        logger.error("novel_intent_generation_failed", error=str(e), query=query[:50])
+        logger.error("novel_intent_generation_failed", error=str(e), query_len=len(query))
         return None
 
 
@@ -258,10 +259,12 @@ async def find_similar_emerging_intent(
     similarity in Python (simpler than requiring pgvector).
     """
     try:
+        key = get_config().service_api_key
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{admin_api_url}/api/internal/emerging-intents",
-                params={"status": "discovered,reviewed"}
+                params={"status": "discovered,reviewed"},
+                headers={"X-Service-Key": key} if key else None,
             )
 
             if response.status_code != 200:
@@ -314,9 +317,11 @@ async def create_emerging_intent(
 ) -> Optional[int]:
     """Create a new emerging intent record."""
     try:
+        key = get_config().service_api_key
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{admin_api_url}/api/internal/emerging-intents",
+                headers={"X-Service-Key": key} if key else None,
                 json={
                     "canonical_name": canonical_name,
                     "display_name": display_name,
@@ -337,7 +342,7 @@ async def create_emerging_intent(
             else:
                 logger.error("emerging_intent_create_failed",
                            status=response.status_code,
-                           detail=response.text[:200])
+                           detail_len=len(response.text))
                 return None
 
     except Exception as e:
@@ -352,10 +357,12 @@ async def increment_intent_count(
 ) -> bool:
     """Increment occurrence count and add sample query."""
     try:
+        key = get_config().service_api_key
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{admin_api_url}/api/internal/emerging-intents/{intent_id}/increment",
-                json={"sample_query": sample_query}
+                json={"sample_query": sample_query},
+                headers={"X-Service-Key": key} if key else None,
             )
 
             if response.status_code == 200:
@@ -392,9 +399,11 @@ async def record_intent_metric(
     try:
         query_hash = hashlib.md5(raw_query.lower().encode()).hexdigest()
 
+        key = get_config().service_api_key
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.post(
                 f"{admin_api_url}/api/internal/intent-metrics",
+                headers={"X-Service-Key": key} if key else None,
                 json={
                     "intent": intent,
                     "confidence": confidence,
@@ -478,7 +487,7 @@ async def discover_intent(
     novel_intent = await generate_novel_intent(query, llm_router)
 
     if not novel_intent:
-        logger.warning("intent_discovery_failed_to_generate", query=query[:50])
+        logger.warning("intent_discovery_failed_to_generate", query_len=len(query))
         return IntentDiscoveryResult(
             is_novel=False,
             canonical_name=None,

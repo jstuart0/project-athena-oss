@@ -3,6 +3,7 @@
 import logging
 import time
 
+from orchestrator.mode_permission import STAY_READ_ONLY_REFUSAL, is_stay_read_only
 from orchestrator.state import OrchestratorState
 from sms.service import get_sms_service
 
@@ -18,6 +19,13 @@ async def send_sms_node(state: OrchestratorState) -> OrchestratorState:
     2. Extracts textable content
     3. Queues SMS for sending via admin backend
     """
+    # An SMS from outside the current stay is answer-only: nothing is sent.
+    if is_stay_read_only(state.permissions):
+        state.answer = STAY_READ_ONLY_REFUSAL
+        state.error = "permission_denied"
+        state.node_timings["send_sms"] = 0.0
+        return state
+
     from sms.text_me_that import handle_text_me_that
 
     start = time.time()
