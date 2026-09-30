@@ -395,3 +395,21 @@ def test_single_intent_happy_path():
     assert result.answer == "It will be sunny with a high of 72°F."
     assert result.is_fallback is False
     assert "finalize" in result.node_timings
+
+
+# ---------------------------------------------------------------------------
+# Structured answers survive the real repetition detector
+# ---------------------------------------------------------------------------
+
+def test_finalize_keeps_markdown_itinerary():
+    """The real stripper keeps every section of a divider-separated itinerary."""
+    from ._strip_fixtures import ITINERARY as _ITINERARY
+
+    state = _make_state(answer=_ITINERARY, validation_passed=True)
+    _runtime.set_cache_client(_make_cache_client())
+
+    with patch("orchestrator.nodes.finalize.maybe_post_synthesis_fallback", new=AsyncMock(return_value=False)):
+        result = _run(finalize_node(state))
+
+    assert result.answer == _ITINERARY
+    assert "## Evening" in result.answer

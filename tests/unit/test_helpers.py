@@ -46,6 +46,8 @@ from orchestrator.helpers import (
     summarize_conversation_history,
 )
 
+from ._strip_fixtures import ITINERARY as _ITINERARY
+
 
 # ---------------------------------------------------------------------------
 # Fixture: clean runtime + component model cache time between tests
@@ -187,6 +189,66 @@ def test_strip_hallucinated_continuation_strips_repetition():
     result = _strip_hallucinated_continuation(text)
     # Result should be truncated before the second occurrence
     assert result.count(para) == 1
+
+
+# Structured answers (headings, dividers, field lines) must survive the
+# repetition detector; thinking-mode loops must still be cut.
+
+
+
+def test_strip_keeps_markdown_itinerary():
+    assert _strip_hallucinated_continuation(_ITINERARY) == _ITINERARY
+
+
+def test_strip_keeps_repeated_field_lines():
+    tickets = "Tickets: https://tickets.example.com/exampletown-summer-series"
+    assert len(tickets) >= 40
+    text = (
+        "Two events this weekend in Exampletown.\n\n"
+        "## Jazz on the Green\nSaturday 7 PM at the bandstand, bring a chair.\n\n"
+        f"{tickets}\n\n"
+        "## Folk Night\nSunday 6 PM at the library courtyard, free parking nearby.\n\n"
+        f"{tickets}\n\n"
+        "Have fun!"
+    )
+    assert _strip_hallucinated_continuation(text) == text
+
+
+def test_strip_keeps_nonadjacent_short_repeats():
+    text = (
+        "## Morning\nBreakfast at Sample Bistro, then the riverside trail.\n\n"
+        "- Free time\n\n"
+        "## Afternoon\nLunch at the market hall and the museum tour.\n\n"
+        "- Free time\n\n"
+        "## Evening\nDinner downtown followed by a concert in the park.\n\n"
+        "- Free time"
+    )
+    assert _strip_hallucinated_continuation(text) == text
+
+
+def test_strip_cut_never_ends_on_rule():
+    loop = "Let me think about the best route through Exampletown for this afternoon."
+    text = f"{loop}\n\n---\n\n{loop}\n\n---\n\n{loop}"
+    assert _strip_hallucinated_continuation(text) == loop
+
+
+def test_strip_still_cuts_long_paragraph_loop():
+    a = "The forecast for Exampletown is mild with a light breeze in the afternoon."
+    b = "I should check whether the museum is open late on Tuesdays this month."
+    text = f"{a}\n\n{b}\n\n{a}\n\n{b}"
+    assert _strip_hallucinated_continuation(text) == f"{a}\n\n{b}"
+
+
+def test_strip_still_cuts_alternating_short_loop():
+    a, b = "Okay, let me think.", "The answer is 4."
+    text = "\n\n".join([a, b, a, b, a, b])
+    assert _strip_hallucinated_continuation(text) == f"{a}\n\n{b}"
+
+
+def test_strip_still_cuts_short_block_loop():
+    block = ["one.", "two.", "three."]
+    text = "\n\n".join(block * 3)
+    assert _strip_hallucinated_continuation(text) == "\n\n".join(block)
 
 
 # ===========================================================================

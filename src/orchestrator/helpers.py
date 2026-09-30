@@ -108,6 +108,15 @@ _CONTINUATION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Paragraph classes for the repetition detector in
+# _strip_hallucinated_continuation (see its docstring).
+_STRUCTURAL_RULE_PATTERN = re.compile(r'^\s*([-*_])(\s*\1){2,}\s*$')
+_STRUCTURAL_HEADING_PATTERN = re.compile(r'^\s*#{1,6}\s')
+_FIELD_LINE_PATTERN = re.compile(r'^\s*(?:[-*•]\s*)?\**[A-Za-z][A-Za-z /&]{0,30}\**\s*:\**\s*\S')
+_REPEAT_KEY_CHARS = 120
+_MIN_REPEAT_CHARS = 40
+_MAX_LOOP_BLOCK = 4
+
 
 # =============================================================================
 # OpenAI-compatible session resolution (ATHENA-88 / F88, D4/D5)
@@ -1531,20 +1540,97 @@ def _direct_general_info_response(query: str) -> Optional[str]:
     return None
 
 
+def _is_structural_paragraph(para: str) -> bool:
+    if "\n" in para:
+        return False
+    return bool(_STRUCTURAL_RULE_PATTERN.match(para) or _STRUCTURAL_HEADING_PATTERN.match(para))
+
+
+def _is_field_paragraph(para: str) -> bool:
+    return "\n" not in para and bool(_FIELD_LINE_PATTERN.match(para))
+
+
+def _repetition_cut_index(paragraphs: List[str]) -> Optional[int]:
+    """Index of the paragraph to cut before, or None when no loop is found."""
+    positions: List[int] = []
+    keys: List[str] = []
+    substantive: List[bool] = []
+    for i, para in enumerate(paragraphs):
+        if _is_structural_paragraph(para):
+            continue
+        key = " ".join(para.split())[:_REPEAT_KEY_CHARS]
+        positions.append(i)
+        keys.append(key)
+        substantive.append(not _is_field_paragraph(para) and len(key) >= _MIN_REPEAT_CHARS)
+
+    cuts: List[int] = []
+
+    seen_substantive = set()
+    for j, key in enumerate(keys):
+        if not substantive[j]:
+            continue
+        if key in seen_substantive:
+            cuts.append(positions[j])
+            break
+        seen_substantive.add(key)
+
+    for start in range(len(keys)):
+        for k in range(1, _MAX_LOOP_BLOCK + 1):
+            if start + 3 * k > len(keys):
+                break
+            first, second, third = (keys[start + n * k:start + (n + 1) * k] for n in range(3))
+            if first == second == third:
+                cuts.append(positions[start + k])
+                break
+
+    return min(cuts) if cuts else None
+
+
 def _strip_hallucinated_continuation(text: str) -> str:
     """
-    Strip LLM-hallucinated role-continuation text from a response.
+    Strip LLM-hallucinated role-continuation text and thinking-mode loops.
 
     Truncates at the first line that looks like a new role turn (e.g. "\\nUser:",
     "\\nHuman:", "\\nAssistant:", "\\nJarvis:"). These occur when the LLM starts
     generating the next conversation turn instead of stopping after its response.
 
-    Also detects paragraph-level repetition (e.g. thinking-mode leak that causes
-    the model to repeat the same block multiple times) and truncates before the
-    first repeated paragraph.
+    Then, when the answer has at least 3 paragraphs (split on blank lines,
+    all paragraphs counted), it cuts a repetition loop. Each paragraph is:
+
+    - structural: a single-line horizontal rule (``---``, ``***``, ``___``)
+      or a single-line markdown heading. Never keyed, never compared.
+    - field: a single ``Label: value`` line (optionally bulleted/bold).
+    - substantive: neither, with a whitespace-normalised key (first 120
+      characters) of at least 40 characters.
+
+    Two rules, over the keys of the non-structural paragraphs in order:
+
+    - R1: a substantive paragraph whose key already appeared as a
+      substantive paragraph is cut, with everything after it.
+    - R2 (block loop): a block of 1-4 keys repeated three times back to back
+      is cut after its first copy.
+
+    The earliest cut wins, and trailing structural paragraphs are dropped so
+    a cut never ends on a divider or heading. Accepted limits: two adjacent
+    short repeats aren't cut; a loop made only of structural paragraphs
+    isn't cut; a loop of field lines is cut only by R2.
     """
     if not text:
         return text
+    match = _CONTINUATION_PATTERN.search(text)
+    if match:
+        text = text[:match.start()].rstrip()
+
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if len(paragraphs) >= 3:
+        cut = _repetition_cut_index(paragraphs)
+        if cut is not None:
+            kept = paragraphs[:cut]
+            while kept and _is_structural_paragraph(kept[-1]):
+                kept.pop()
+            text = "\n\n".join(kept).rstrip()
+
+    return text
     match = _CONTINUATION_PATTERN.search(text)
     if match:
         text = text[:match.start()].rstrip()
