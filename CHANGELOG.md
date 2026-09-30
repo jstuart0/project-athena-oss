@@ -22,7 +22,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `SMS_DEFAULT_COUNTRY_CODE` and `TWILIO_ALLOW_UNSIGNED` (see Upgrading).
-- CI: an admin-backend route that carries no permission-bearing credential check, and isn't on a reviewed list, fails the build.
+- CI: an admin-backend route with no credential check, and not on a reviewed list, fails the build. A new authenticated route must also carry a permission check (the existing routes that authenticate without one are frozen on a list), and the guest-data routes are pinned to their permission.
 
 ### Changed
 

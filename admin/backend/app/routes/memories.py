@@ -197,6 +197,12 @@ async def require_memory_maintainer(
     return _memory_caller_kind(request, lambda user: user.has_permission("manage_infrastructure"))
 
 
+# Permission metadata for the route-auth gate (tests/test_route_auth_population.py):
+# both guards decide a permission on their user branch.
+require_memory_reader.required_permission = "read"
+require_memory_maintainer.required_permission = "manage_infrastructure"
+
+
 def _memory_caller_kind(request: Request, allow) -> str:
     """After verify_service_or_oidc: "service" for the service-key branch,
     "user" for a user ``allow`` accepts, else 403. Uses the user that

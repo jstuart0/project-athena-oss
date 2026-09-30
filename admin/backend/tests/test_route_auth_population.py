@@ -10,6 +10,13 @@ or is on one of two reviewed lists.
 - ``GATED``: the routes the guest-data hardening gated, pinned to the exact
   auth factory and permission each one carries.
 
+Every authenticated route must also carry a permission-bearing dependency:
+one exposing ``required_permission`` (the two factories, memories' reader
+and maintainer guards) or a service-only guard that admits no user at all.
+The operations that authenticate without one (a bare ``get_current_user``
+or ``verify_service_or_oidc``) are frozen in ``tests/route_auth_legacy.py``
+and compared exactly, so a new route can't join them.
+
 Both allowlists are compared per walked route (``shared.route_walk``), so a
 route registered twice or hidden from the OpenAPI schema can't hide.
 
@@ -35,6 +42,8 @@ from app.routes import guest_mode, internal, memories, sms_webhook
 from app.utils import service_auth
 from main import app
 from shared.route_walk import dependency_calls, iter_api_routes
+
+from tests.route_auth_legacy import LEGACY_PERMISSIONLESS, LEGACY_PERMISSIONLESS_COUNT
 
 BACKEND = Path(__file__).resolve().parents[1]
 
@@ -476,3 +485,94 @@ def test_voice_automation_routes_carry_the_caller_scope():
     assert len(scoped) >= 10
     assert ("POST", f"{VA}/{{automation_id}}/archive") in scoped
     assert scoped == CALLER_SCOPED
+
+
+# (k) permission-bearing dependency on every authenticated route ------------
+
+_SERVICE_ONLY = {
+    service_auth.verify_service_api_key,
+    internal.require_service_key_401,
+    sms_webhook.validate_twilio_signature,
+}
+
+
+def is_permissioned(calls) -> bool:
+    """A dependency that decides a permission (it exposes
+    ``required_permission``), or a guard that admits a service and never a
+    user (so no role can be under-checked)."""
+    for call in calls:
+        if getattr(call, "required_permission", None):
+            return True
+        try:
+            if call in _SERVICE_ONLY:
+                return True
+        except TypeError:
+            continue
+    return False
+
+
+def _permissionless(application):
+    return {
+        (m, p)
+        for m, p, w in _operations(application)
+        if _is_authenticated(w) and not is_permissioned(dependency_calls(w))
+    }
+
+
+def test_authenticated_routes_without_a_permission_are_exactly_the_frozen_list():
+    found = _permissionless(app)
+    new = sorted(found - LEGACY_PERMISSIONLESS)
+    gone = sorted(LEGACY_PERMISSIONLESS - found)
+    assert not new and not gone, (
+        f"{len(new)} authenticated route(s) with no permission-bearing dependency "
+        f"(use require_user_permission / require_service_or_user_permission): {new}\n"
+        f"{len(gone)} frozen route(s) now permissioned or gone (remove them from "
+        f"tests/route_auth_legacy.py): {gone}"
+    )
+
+
+def test_frozen_list_population():
+    assert len(LEGACY_PERMISSIONLESS) == LEGACY_PERMISSIONLESS_COUNT
+    assert LEGACY_PERMISSIONLESS_COUNT >= 400
+    # The user-only hard delete checks 'delete' in its handler; it's frozen,
+    # not permissioned.
+    assert ("DELETE", "/api/voice-automations/{automation_id}") in LEGACY_PERMISSIONLESS
+    assert not LEGACY_PERMISSIONLESS & set(GATED)
+    assert not LEGACY_PERMISSIONLESS & (set(INTENTIONALLY_PUBLIC) | set(UNREVIEWED_UNAUTHENTICATED))
+    # Every gated route is permissioned.
+    by_op = _walked_by_op()
+    assert all(is_permissioned(dependency_calls(w)) for op in GATED for w in by_op[op])
+
+
+def test_a_new_bare_user_route_is_not_permissioned():
+    """Negative control: a route guarded only by get_current_user (or
+    verify_service_or_oidc) authenticates but isn't permissioned, so it fails
+    the frozen-list comparison; the same route with the factory passes."""
+    from app.utils.service_auth import require_service_or_user_permission, require_user_permission
+
+    router = APIRouter()
+
+    @router.get("/api/zz-bare-user")
+    async def bare_user(user=Depends(get_current_user)):
+        return {}
+
+    @router.get("/api/zz-bare-dual", dependencies=[Depends(service_auth.verify_service_or_oidc)])
+    async def bare_dual():
+        return {}
+
+    @router.get("/api/zz-user-perm", dependencies=[Depends(require_user_permission("read"))])
+    async def user_perm():
+        return {}
+
+    @router.get("/api/zz-svc-perm", dependencies=[Depends(require_service_or_user_permission("read"))])
+    async def svc_perm():
+        return {}
+
+    @router.get("/api/zz-service-only", dependencies=[Depends(service_auth.verify_service_api_key)])
+    async def service_only():
+        return {}
+
+    toy = FastAPI()
+    toy.include_router(router)
+    assert _permissionless(toy) == {("GET", "/api/zz-bare-user"), ("GET", "/api/zz-bare-dual")}
+
