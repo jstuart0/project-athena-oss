@@ -30,6 +30,7 @@ import dataclasses
 import importlib
 import importlib.util
 import json
+import logging
 import os
 import sys
 import types
@@ -646,26 +647,55 @@ def _wire_env(monkeypatch):
     _clear_config_caches()
 
 
+def _needs(case: WireCase):
+    """(module whose presence marks this case's environment, the CI job that has it)."""
+    if case.env == "jarvis_web":
+        return "sqlalchemy", "jarvis-web-behaviour"
+    return "pydantic_settings", "orchestrator-behaviour"
+
+
+def _build(case: WireCase, monkeypatch, request):
+    transport = Transport(path for _method, path in case.requests)
+    transport.script = [case.ok]
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: transport.client(*a, **kw))
+    harness = Harness(monkeypatch, transport)
+    if case.file == "src/gateway/wyoming_bridge.py":
+        harness.wyoming_bridge = request.getfixturevalue("wyoming_bridge")
+    call, check_default = case.setup(harness)
+    return transport, call, check_default
+
+
+@pytest.fixture(autouse=True)
+def _modules_imported_before_any_capture(request, _wire_env):
+    """A service's main reconfigures structlog when it is first imported,
+    which detaches a log capture that is already open. Autouse fixtures run
+    before `captured_logs`, so the case's modules are imported here, with
+    patches that are undone straight away."""
+    case = getattr(getattr(request.node, "callspec", None), "params", {}).get("case")
+    if isinstance(case, WireCase) and importlib.util.find_spec(_needs(case)[0]) is not None:
+        with pytest.MonkeyPatch.context() as throwaway:
+            _build(case, throwaway, request)
+        _reset_refusal_state()
+
+
 @pytest.fixture
 def prepare(monkeypatch, request):
     """(case) -> (transport, call, check_default), with every httpx client
     the caller builds answered by the case's transport."""
 
     def build(case: WireCase):
-        wanted = "sqlalchemy" if case.env == "jarvis_web" else "pydantic_settings"
-        runs_in = "jarvis-web-behaviour" if case.env == "jarvis_web" else "orchestrator-behaviour"
+        wanted, runs_in = _needs(case)
         if importlib.util.find_spec(wanted) is None:
             pytest.skip(f"{case.file} imports only where {wanted} is installed; this case runs in {runs_in}")
-        transport = Transport(path for _method, path in case.requests)
-        transport.script = [case.ok]
-        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: transport.client(*a, **kw))
-        harness = Harness(monkeypatch, transport)
-        if case.file == "src/gateway/wyoming_bridge.py":
-            harness.wyoming_bridge = request.getfixturevalue("wyoming_bridge")
-        call, check_default = case.setup(harness)
-        return transport, call, check_default
+        return _build(case, monkeypatch, request)
 
     return build
+
+
+def _stdlib_text(caplog):
+    """Everything written through stdlib logging: each record's message and
+    its attributes (an `extra=` field doesn't show in the message)."""
+    return "\n".join(f"{r.name} {r.getMessage()} {sorted(vars(r).items())!r}" for r in caplog.records)
 
 
 def _refused(logs):
@@ -789,7 +819,8 @@ CONTROL_AGENT_CASE = _named(("src/control_agent/huggingface.py", "send_progress_
 
 
 @_by_id(CONTROL_AGENT_CASE)
-def test_control_agent_warns_once_when_its_key_is_unset(case, prepare, monkeypatch, captured_logs):
+def test_control_agent_warns_once_when_its_key_is_unset(case, prepare, monkeypatch, captured_logs, caplog):
+    caplog.set_level(logging.DEBUG)
     monkeypatch.delenv("SERVICE_API_KEY", raising=False)
     _clear_config_caches()
     transport, call, _default = prepare(case)
@@ -798,7 +829,7 @@ def test_control_agent_warns_once_when_its_key_is_unset(case, prepare, monkeypat
     assert len(transport.targeted) == 2, "the callback is still attempted"
     warnings = [r for r in captured_logs if r.get("log_level") == "warning" and "SERVICE_API_KEY" in repr(r)]
     assert len(warnings) == 1, captured_logs
-    assert WIRE_KEY not in repr(captured_logs)
+    assert WIRE_KEY not in repr(captured_logs) and WIRE_KEY not in _stdlib_text(caplog)
 
 
 # W8 -----------------------------------------------------------------------
@@ -834,7 +865,8 @@ REFUSAL_CASES = [(case, status) for case in WIRE_CASES for status in case.refusa
 
 @pytest.mark.parametrize(
     "case,status", REFUSAL_CASES, ids=[f"{case.id}-{status}" for case, status in REFUSAL_CASES])
-def test_refusal_is_logged_once_as_an_error(case, status, prepare, captured_logs):
+def test_refusal_is_logged_once_as_an_error(case, status, prepare, captured_logs, caplog):
+    caplog.set_level(logging.DEBUG)
     transport, call, _default = prepare(case)
     transport.script = [(status, {"detail": "refused"})]
     _run(call())
@@ -846,7 +878,20 @@ def test_refusal_is_logged_once_as_an_error(case, status, prepare, captured_logs
     _run(call())
     assert len(_refused(captured_logs)) == len(first), "the second refusal in the window logs nothing"
     assert len(transport.targeted) == 2 * len(case.requests)
-    assert WIRE_KEY not in repr(captured_logs)
+    # Neither structlog nor stdlib logging carries the key, or the concrete
+    # id a templated route was called with.
+    for text in (repr(captured_logs), _stdlib_text(caplog)):
+        assert WIRE_KEY not in text
+    assert all("zz-service" not in repr(r) and "/7/" not in repr(r) for r in _refused(captured_logs))
+
+
+def test_the_stdlib_leak_check_sees_a_stdlib_line(caplog):
+    """Positive control for the caplog half of the checks above."""
+    caplog.set_level(logging.DEBUG)
+    logging.getLogger("zz_planted").error("refused with %s", WIRE_KEY)
+    logging.getLogger("zz_planted").error("refused", extra={"key": "zz-extra-" + WIRE_KEY})
+    text = _stdlib_text(caplog)
+    assert text.count(WIRE_KEY) >= 2 and "zz-extra-" in text
 
 
 def test_refusal_cases_population():
