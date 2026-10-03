@@ -68,6 +68,7 @@ from shared.admin_config import get_admin_client
 from shared.local_time import local_now, local_today
 from shared.assistant_profile import clean_guest_name, get_assistant_profile
 from shared.service_registry import get_service_url as registry_get_service_url
+from shared.service_key import note_admin_refusal, service_key_headers
 from orchestrator.config_loader import ADMIN_API_URL
 from orchestrator.utils.constants import DEFAULT_LOCATION
 
@@ -479,7 +480,8 @@ async def get_feature_config(flag_name: str) -> Dict[str, Any]:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
                 f"{ADMIN_API_URL}/api/features/public",
-                params={"name": flag_name}
+                params={"name": flag_name},
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 flags = response.json()
@@ -491,6 +493,8 @@ async def get_feature_config(flag_name: str) -> Dict[str, Any]:
                         }
                         _feature_flag_cache[cache_key] = (time.time(), result)
                         return result
+            else:
+                note_admin_refusal(response.status_code, "/api/features/public")
     except Exception as e:
         logger.warning("feature_config_fetch_failed", flag=flag_name, error=str(e))
 
@@ -521,7 +525,8 @@ async def get_automation_system_mode() -> str:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
                 f"{ADMIN_API_URL}/api/features/public",
-                params={"name": flag_name}
+                params={"name": flag_name},
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 flags = response.json()
@@ -531,6 +536,8 @@ async def get_automation_system_mode() -> str:
                         mode = config.get("mode", "pattern_matching")
                         _feature_flag_cache[flag_name] = (time.time(), mode)
                         return mode
+            else:
+                note_admin_refusal(response.status_code, "/api/features/public")
     except Exception as e:
         logger.warning("automation_mode_fetch_failed", error=str(e))
 
@@ -561,7 +568,8 @@ async def get_weather_provider_mode() -> str:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
                 f"{ADMIN_API_URL}/api/features/public",
-                params={"name": flag_name}
+                params={"name": flag_name},
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 flags = response.json()
@@ -571,6 +579,8 @@ async def get_weather_provider_mode() -> str:
                         mode = config.get("mode", "standard")
                         _feature_flag_cache[flag_name] = (time.time(), mode)
                         return mode
+            else:
+                note_admin_refusal(response.status_code, "/api/features/public")
     except Exception as e:
         logger.warning("weather_provider_mode_fetch_failed", error=str(e))
 
