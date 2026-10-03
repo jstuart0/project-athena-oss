@@ -8,13 +8,18 @@ nothing overrides an auth dependency. Only the outbound calls the handlers
 make are stubbed, and a socket guard fails any test that dials out anyway.
 
 Ids are ``g<group>_<route file>_<n>-<case>``. The groups are the order the
-routes are gated in, so ``-k g1_`` selects the first group's 420 matrix
-cases and ``-k "g1_ or g2_"`` 650.
+routes are gated in (42, 23 and 28 routes), and the write tests carry their
+route's group id too, so ``-k`` selects a group's whole gate:
+
+- ``-k g1_``: 492 tests (462 matrix cases, 30 write and author tests);
+- ``-k "g1_ or g2_"``: 748 (715 matrix cases, 33 others);
+- the whole matrix: 1023 cases (93 routes x 11 credentials).
 """
 from __future__ import annotations
 
 import enum
 import inspect
+import os
 import re
 import socket
 from datetime import datetime, timezone
@@ -51,7 +56,7 @@ PROGRESS_BODY_KEYS = (
 
 CASES = (
     "none", "svc_correct", "svc_wrong", "svc_unset", "svc_non_ascii", "operator", "viewer",
-    "owner_svc_wrong", "dev_none", "dev_svc_wrong",
+    "owner_svc_wrong", "owner_svc_non_ascii", "dev_none", "dev_svc_wrong",
 )
 
 OPS = [
@@ -97,6 +102,11 @@ EXPECTED_PASS = {op: _NOT_200.get(op, (200, ""))[0] for _op_id, op in OPS}
 # route of the same router, so the handler can't be reached over HTTP at the
 # base commit (the sibling requires a user, so an anonymous call is a 401).
 # Their EXPECTED_PASS (200) is the handler's answer when called directly.
+#
+# This table is a record of a defect, not an exemption: nothing in the
+# matrix reads it, and it is never extended. It is deleted, together with
+# test_shadowed_routes_are_the_known_three, in the commit that registers the
+# static routes ahead of the parameterised ones (plan step 6.3).
 SHADOWED_AT_BASE = {
     ("GET", "/api/room-tv/apps"): "/api/room-tv/{room_name}",
     ("GET", "/api/room-tv/features"): "/api/room-tv/{room_name}",
@@ -258,6 +268,32 @@ def _production_auth(monkeypatch):
     _clear_cache_for_tests()
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _leaves_the_config_as_the_environment_says():
+    """After the last test here, whatever config object is cached (or would
+    be built) matches the environment: a later file can't inherit an empty
+    service key from the `svc_unset` cases."""
+    yield
+    assert get_config().service_api_key == os.environ.get("SERVICE_API_KEY", "") != ""
+
+
+@pytest.fixture
+def config_env():
+    """Set a config environment variable for one test. Undone in this order:
+    the variable first, then the config cache, so the next test (in this or
+    a later file) can't inherit a config object built from the patched
+    value."""
+    patch = pytest.MonkeyPatch()
+
+    def set_variable(name, value):
+        patch.setenv(name, value)
+        _clear_cache_for_tests()
+
+    yield set_variable
+    patch.undo()
+    _clear_cache_for_tests()
+
+
 def _dev_bypass_on(monkeypatch):
     from tests.conftest import get_current_user as served_get_current_user
 
@@ -306,7 +342,7 @@ def owner(test_user):
     return test_user
 
 
-def _creds(case, *, owner, viewer, operator, monkeypatch):
+def _creds(case, *, owner, viewer, operator, monkeypatch, config_env):
     if case in ("none", "dev_none"):
         headers = {}
     elif case == "svc_correct":
@@ -314,8 +350,7 @@ def _creds(case, *, owner, viewer, operator, monkeypatch):
     elif case in ("svc_wrong", "dev_svc_wrong"):
         headers = {"X-Service-Key": "wrong-key"}
     elif case == "svc_unset":
-        monkeypatch.setenv("SERVICE_API_KEY", "")
-        _clear_cache_for_tests()
+        config_env("SERVICE_API_KEY", "")
         headers = {"X-Service-Key": "anything"}
     elif case == "svc_non_ascii":
         headers = {"X-Service-Key": b"k\xff"}
@@ -325,6 +360,8 @@ def _creds(case, *, owner, viewer, operator, monkeypatch):
         headers = _bearer(viewer)
     elif case == "owner_svc_wrong":
         headers = {**_bearer(owner), "X-Service-Key": "wrong-key"}
+    elif case == "owner_svc_non_ascii":
+        headers = {**_bearer(owner), "X-Service-Key": b"k\xff"}
     else:
         raise AssertionError(case)
     if case.startswith("dev_"):
@@ -343,6 +380,9 @@ EXPECTED = {
     "operator":        (P, P, 422),
     "viewer":          (403, 403, 422),
     "owner_svc_wrong": (401, 401, 401),
+    # A key that can't even be compared is still a key: no fall-through to
+    # the valid user sent with it.
+    "owner_svc_non_ascii": (401, 401, 401),
     "dev_none":        (P, P, 422),
     "dev_svc_wrong":   (401, 401, 401),
 }
@@ -361,8 +401,8 @@ def _expected(op, case):
 
 def test_matrix_population():
     assert len(OPS) == 93
-    assert len(MATRIX) == 930
-    assert len(set(MATRIX_IDS)) == 930
+    assert len(MATRIX) == 1023
+    assert len(set(MATRIX_IDS)) == 1023
     pattern = re.compile(r"^g[123]_[a-z_]+_\d+-[a-z_]+$")
     assert all(pattern.match(case_id) for case_id in MATRIX_IDS)
     by_group = {group: sum(1 for op_id, _ in OPS if op_id.startswith(group + "_")) for group in ("g1", "g2", "g3")}
@@ -371,7 +411,7 @@ def test_matrix_population():
     assert OP_ID[PROGRESS_OP].startswith("g1_")
     assert OP_ID[("GET", "/api/voice-config/running-config")].startswith("g3_")
     assert {case for _i, _o, case in MATRIX} == set(EXPECTED) == set(CASES)
-    assert len(CASES) == 10
+    assert len(CASES) == 11
 
 
 # B2 -----------------------------------------------------------------------
@@ -403,9 +443,11 @@ def test_matrix_urls_resolve_to_their_own_route():
 
 
 def test_shadowed_routes_are_the_known_three():
-    """The three listed routes can't be reached at the base commit. Once the
-    routers register them ahead of their parameterised sibling this fails,
-    and the table (with the test above) is what to delete."""
+    """The three listed routes can't be reached at the base commit, and no
+    fourth is. Once the routers register the static routes ahead of their
+    parameterised sibling (plan step 6.3) this test fails; it and
+    SHADOWED_AT_BASE are then deleted, and nothing else:
+    test_matrix_urls_resolve_to_their_own_route stays, and goes green."""
     assert _misrouted() == SHADOWED_AT_BASE
 
 
@@ -432,8 +474,9 @@ def test_expected_pass_codes_are_pinned():
 # B4 -----------------------------------------------------------------------
 
 @pytest.mark.parametrize("op,case", [(op, case) for _i, op, case in MATRIX], ids=MATRIX_IDS)
-def test_credential_matrix(op, case, api, owner, viewer_user, operator_user, monkeypatch):
-    headers = _creds(case, owner=owner, viewer=viewer_user, operator=operator_user, monkeypatch=monkeypatch)
+def test_credential_matrix(op, case, api, owner, viewer_user, operator_user, monkeypatch, config_env):
+    headers = _creds(case, owner=owner, viewer=viewer_user, operator=operator_user, monkeypatch=monkeypatch,
+                     config_env=config_env)
     method, url, kwargs = _request(op)
     response = api.request(method, url, headers=headers, **kwargs)
     assert response.status_code == _expected(op, case), (
@@ -666,14 +709,24 @@ ALREADY_GATED = {
 }
 
 
-@pytest.mark.parametrize("kind", sorted(ALREADY_GATED))
-def test_non_ascii_key_is_refused_on_already_gated_routes(kind, api, db):
+# The same key sent with a valid owner Bearer, on the route kind that accepts
+# either credential: a comparison that gives up on the key must not fall
+# through to the user.
+ALREADY_GATED_KINDS = sorted(ALREADY_GATED) + ["service_or_user_with_owner_bearer"]
+
+
+@pytest.mark.parametrize("kind", ALREADY_GATED_KINDS)
+def test_non_ascii_key_is_refused_on_already_gated_routes(kind, api, db, owner):
     db.add(SMSCostTracking(month=datetime.now(timezone.utc).date().replace(day=1), message_count=0, segment_count=0,
                            incoming_count=0, outgoing_count=0, estimated_cost_cents=0,
                            outgoing_sms_cents=0, incoming_sms_cents=0))
     db.commit()
+    headers = {"X-Service-Key": b"k\xff"}
+    if kind.endswith("_with_owner_bearer"):
+        headers.update(_bearer(owner))
+        kind = kind[: -len("_with_owner_bearer")]
     method, url, kwargs = ALREADY_GATED[kind]
-    response = api.request(method, url, headers={"X-Service-Key": b"k\xff"}, **kwargs)
+    response = api.request(method, url, headers=headers, **kwargs)
     assert response.status_code == 401, f"{method} {url}: {response.status_code} {response.text[:200]}"
 
 
@@ -724,3 +777,4 @@ def test_no_test_opened_a_real_connection(socket_guard):
     socket_guard.clear()
     assert earlier == [], f"earlier test(s) in this file dialed out: {earlier}"
     _ALL_ATTEMPTS.clear()
+

@@ -11,21 +11,28 @@ What these tests need from the product (``app/utils/auth_rejections.py``):
 - ``AuthRejectionMiddleware(app)``: a pure ASGI middleware, registered on
   ``main.app`` innermost;
 - module attributes ``logger`` (structlog), ``_clock`` (a callable returning
-  seconds, looked up at call time), ``_reset_for_tests()`` and
-  ``flush_suppressed()`` (the shutdown hook).
+  seconds, looked up at call time), ``_reset_for_tests()``,
+  ``flush_suppressed()`` (the shutdown hook) and ``tracked_key_count()``
+  (how many rate-limit keys are held).
 
 A record is ``event="admin_auth_rejected"`` with ``route`` (the template, or
 ``"<unmatched>"``), ``method`` (one of a closed set, else ``"OTHER"``),
 ``status``, ``reason``, ``credential_presented`` (``service_key`` / ``user``
 / ``none``: what the request carried, not who sent it) and ``suppressed``
 (refusals with the same route, reason and credential that were not logged
-since the last line). One line per such key per minute.
+since the last line). One line per such key per minute. The key is the
+route template: requests for different ids on one route share it, so the
+tests send a different id every time.
+
+The leak checks read stdlib ``logging`` (``caplog``) as well as structlog.
 """
 from __future__ import annotations
 
 import asyncio
 import importlib
 import importlib.util
+import logging
+import os
 import sys
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
@@ -57,6 +64,13 @@ CREDENTIALS = {"service_key", "user", "none"}
 
 DEVICE_ROUTE = "/api/user-sessions/device/{device_id}"
 DEVICE_URL = "/api/user-sessions/device/zz-secret-id?probe=zz-query-value"
+
+
+def _device_url(n):
+    """A different device on the same route."""
+    return f"/api/user-sessions/device/zz-secret-id-{n}?probe=zz-query-value-{n}"
+
+
 LOG_SEND = "/api/sms/internal/log-send"
 LOG_SEND_PARAMS = {"phone_number": "+15550100000", "content": "hi", "status": "sent"}
 MODE_SET = "/api/ha-pipelines/mode/set"
@@ -139,6 +153,45 @@ def _production_auth(monkeypatch):
 
 
 @pytest.fixture
+def config_env():
+    """Set a config environment variable for one test. Undone in this order:
+    the variable first, then the config cache, so the next test (in this or
+    a later file) can't inherit a config object built from the patched
+    value."""
+    patch = pytest.MonkeyPatch()
+
+    def set_variable(name, value):
+        patch.setenv(name, value)
+        _clear_cache_for_tests()
+
+    yield set_variable
+    patch.undo()
+    _clear_cache_for_tests()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _leaves_the_config_as_the_environment_says():
+    """After the last test here, whatever config object is cached (or would
+    be built) matches the environment: a later file can't inherit the
+    zeroed login delay or the empty service key."""
+    yield
+    config = get_config()
+    assert config.service_api_key == os.environ.get("SERVICE_API_KEY", "") != ""
+    assert config.login_minimum_delay_ms == int(os.environ.get("LOGIN_MINIMUM_DELAY_MS", "400")) > 0
+    assert config.dev_mode is (os.environ.get("DEV_MODE", "").lower() == "true")
+
+
+def _stdlib_text(caplog):
+    """Everything the app wrote through stdlib logging. The test client's
+    own request line (logger `httpx`) is the client's, not the app's."""
+    return "\n".join(
+        f"{record.name} {record.getMessage()} {sorted(vars(record).items())!r}"
+        for record in caplog.records
+        if not record.name.startswith(("httpx", "httpcore"))
+    )
+
+
+@pytest.fixture
 def api(db):
     app.dependency_overrides[get_db] = lambda: db
     try:
@@ -196,9 +249,8 @@ def _key_on_a_user_only_route(api, **_users):
     return response, logs
 
 
-def _key_unconfigured(api, monkeypatch, **_users):
-    monkeypatch.setenv("SERVICE_API_KEY", "")
-    _clear_cache_for_tests()
+def _key_unconfigured(api, config_env, **_users):
+    config_env("SERVICE_API_KEY", "")
     with structlog.testing.capture_logs() as logs:
         response = api.get("/api/room-groups", headers={"X-Service-Key": "zz-any-key"})
     return response, logs
@@ -230,12 +282,14 @@ def _keyless_service_only(api, **_users):
 
 # L1 -----------------------------------------------------------------------
 
-def test_an_anonymous_request_is_logged_by_route_template(api):
+def test_an_anonymous_request_is_logged_by_route_template(api, caplog):
+    caplog.set_level(logging.DEBUG)
     response, logs = _anonymous(api)
     assert response.status_code == 401
     _one(logs, route=DEVICE_ROUTE, method="GET", status=401, reason="no_credential", credential_presented="none")
-    assert "zz-secret-id" not in repr(logs)
-    assert "zz-query-value" not in repr(logs)
+    for text in (repr(logs), _stdlib_text(caplog)):
+        assert "zz-secret-id" not in text
+        assert "zz-query-value" not in text
 
 
 # L2 -----------------------------------------------------------------------
@@ -258,8 +312,8 @@ def test_a_valid_key_on_a_user_only_route_is_logged(api):
 
 # L4 -----------------------------------------------------------------------
 
-def test_a_key_sent_while_none_is_configured_is_logged(api, monkeypatch):
-    response, logs = _key_unconfigured(api, monkeypatch)
+def test_a_key_sent_while_none_is_configured_is_logged(api, config_env):
+    response, logs = _key_unconfigured(api, config_env)
     assert response.status_code == 503
     _one(logs, route="/api/room-groups", method="GET", status=503, reason="service_key_unconfigured",
          credential_presented="service_key")
@@ -336,28 +390,56 @@ def test_other_4xx_answers_are_not_auth_rejections(api, operator_user):
 
 # L11 ----------------------------------------------------------------------
 
+BURST = 5
+
+
 def _burst_then_one_after_the_window(api, clock):
-    with structlog.testing.capture_logs() as logs:
-        for at in (0, 1, 2, 3, 4, 61):
-            clock.now = float(at)
-            assert api.get(DEVICE_URL).status_code == 401
-    return logs
+    """BURST refusals for BURST different devices inside one window, then
+    one for another device after it. ([in-window logs], [later logs])"""
+    with structlog.testing.capture_logs() as inside:
+        for n in range(BURST):
+            clock.now = float(n)
+            assert api.get(_device_url(n)).status_code == 401
+    with structlog.testing.capture_logs() as after:
+        clock.now = 61.0
+        assert api.get(_device_url(BURST)).status_code == 401
+    return inside, after
 
 
 def test_repeated_refusals_are_rate_limited_and_counted(api, monkeypatch):
     clock = _install_clock(monkeypatch)
-    records = _rejections(_burst_then_one_after_the_window(api, clock))
-    assert len(records) == 2, records
-    assert {r["route"] for r in records} == {DEVICE_ROUTE}
-    assert sum(r["suppressed"] for r in records) == 4
+    inside, after = _burst_then_one_after_the_window(api, clock)
+    # One line for the route, however many different ids were asked for.
+    first = _one(inside, route=DEVICE_ROUTE, method="GET", status=401, reason="no_credential",
+                 credential_presented="none")
+    assert first["suppressed"] == 0
+    second = _one(after, route=DEVICE_ROUTE, method="GET", status=401, reason="no_credential",
+                  credential_presented="none")
+    assert second["suppressed"] == BURST - 1
+
+
+def test_distinct_ids_on_one_route_hold_one_limiter_key(api, monkeypatch):
+    """The rate-limit table is keyed on the route template, so a caller
+    walking ids can't grow it (or get a log line per id)."""
+    clock = _install_clock(monkeypatch)
+    tracked = _namespace()["tracked_key_count"]
+    assert tracked() == 0
+    with structlog.testing.capture_logs() as logs:
+        for n in range(25):
+            clock.now = n / 10
+            assert api.get(_device_url(n)).status_code == 401
+    assert len(_rejections(logs)) == 1
+    assert tracked() == 1
+    assert api.get("/api/guests").status_code == 401
+    assert tracked() == 2
 
 
 # L13 ----------------------------------------------------------------------
 
-def test_failed_password_logins_are_not_logged(api, monkeypatch):
+def test_failed_password_logins_are_not_logged(api, config_env, caplog):
+    caplog.set_level(logging.DEBUG)
     # The login timing floor (0.4 s a failure) isn't what's under test.
-    monkeypatch.setenv("LOGIN_MINIMUM_DELAY_MS", "0")
-    _clear_cache_for_tests()
+    config_env("LOGIN_MINIMUM_DELAY_MS", "0")
     with structlog.testing.capture_logs() as logs:
         statuses = [
             api.post("/api/auth/local-login",
@@ -366,8 +448,9 @@ def test_failed_password_logins_are_not_logged(api, monkeypatch):
         ]
     assert statuses == [401, 401, 401, 401]
     assert _rejections(logs) == []
-    assert "zz-login-name" not in repr(logs)
-    assert "zz-wrong-password" not in repr(logs)
+    for text in (repr(logs), _stdlib_text(caplog)):
+        assert "zz-login-name" not in text
+        assert "zz-wrong-password" not in text
 
 
 def test_the_login_exclusion_is_one_route_not_a_path_prefix(api):
@@ -382,11 +465,11 @@ def test_the_login_exclusion_is_one_route_not_a_path_prefix(api):
 
 # L15 ----------------------------------------------------------------------
 
-def test_a_websocket_connection_is_left_alone(api, monkeypatch):
+def test_a_websocket_connection_is_left_alone(api, config_env):
     (ws_globals,) = [
         w.route.endpoint.__globals__ for w in iter_routes(app) if w.path == "/ws/admin-jarvis"
     ]
-    monkeypatch.setenv("DEV_MODE", "false")
+    config_env("DEV_MODE", "false")
     ws_globals["get_config"].cache_clear()
     try:
         with structlog.testing.capture_logs() as logs:
@@ -426,9 +509,9 @@ def test_a_failing_logger_does_not_change_the_response(api, monkeypatch):
 
 def _expired_key_is_flushed_by_another(api, clock):
     with structlog.testing.capture_logs() as logs:
-        for at in (0, 1, 2, 3, 4):
-            clock.now = float(at)
-            assert api.get(DEVICE_URL).status_code == 401
+        for n in range(BURST):
+            clock.now = float(n)
+            assert api.get(_device_url(n)).status_code == 401
         clock.now = 61.0
         assert api.get("/api/guests").status_code == 401
     return logs
@@ -451,9 +534,9 @@ def test_suppressed_counts_are_flushed_once_at_shutdown(api, monkeypatch):
     clock = _install_clock(monkeypatch)
     flush = _namespace()["flush_suppressed"]
     with structlog.testing.capture_logs() as logs:
-        for at in (0, 1, 2):
-            clock.now = float(at)
-            assert api.get(DEVICE_URL).status_code == 401
+        for n in (0, 1, 2):
+            clock.now = float(n)
+            assert api.get(_device_url(n)).status_code == 401
         before = len(_rejections(logs))
         flush()
         after_first = _rejections(logs)[before:]
@@ -527,7 +610,25 @@ SECRETS = (
 )
 
 
-def test_records_carry_only_the_agreed_fields(api, viewer_user, monkeypatch):
+def test_the_stdlib_leak_check_sees_a_stdlib_line(caplog):
+    """Positive control for the caplog half of the leak checks."""
+    caplog.set_level(logging.DEBUG)
+    logging.getLogger("app.zz_planted").info("GET /api/user-sessions/device/zz-secret-id refused")
+    logging.getLogger("app.zz_planted").warning("refused", extra={"path": "/x?probe=zz-query-value"})
+    logging.getLogger("httpx").warning("HTTP Request: GET http://testserver/zz-client-side-line")
+    text = _stdlib_text(caplog)
+    assert "zz-secret-id" in text and "zz-query-value" in text
+    assert "zz-client-side-line" not in text
+
+
+STDLIB_SECRETS = (
+    "zz-secret-id", "zz-query-value", "zz-wrong-key", "zz-any-key", "zz-garbage-token", "zz-unknown-api-key",
+    LONG_VERB,
+)
+
+
+def test_records_carry_only_the_agreed_fields(api, viewer_user, monkeypatch, config_env, caplog):
+    caplog.set_level(logging.DEBUG)
     clock = _install_clock(monkeypatch)
     server_key = get_config().service_api_key
     captured = []
@@ -535,13 +636,15 @@ def test_records_carry_only_the_agreed_fields(api, viewer_user, monkeypatch):
                      _unknown_api_key, _keyless_service_only):
         _reset()
         captured.extend(scenario(api, viewer=viewer_user)[1])
-    for replay in (_burst_then_one_after_the_window, _expired_key_is_flushed_by_another):
-        _reset()
-        captured.extend(replay(api, clock))
+    _reset()
+    inside, after = _burst_then_one_after_the_window(api, clock)
+    captured.extend(inside + after)
+    _reset()
+    captured.extend(_expired_key_is_flushed_by_another(api, clock))
     for logs in _unusual_methods():
         captured.extend(logs)
     _reset()
-    captured.extend(_key_unconfigured(api, monkeypatch)[1])
+    captured.extend(_key_unconfigured(api, config_env)[1])
 
     records = _rejections(captured)
     assert len(records) >= 12, f"{len(records)} {EVENT} record(s) examined"
@@ -558,12 +661,19 @@ def test_records_carry_only_the_agreed_fields(api, viewer_user, monkeypatch):
         assert server_key not in text
         for secret in SECRETS:
             assert secret not in text, f"{secret!r} reached a record: {record}"
+    # Nothing the requests carried reaches stdlib logging either (the
+    # address and "Bearer" aside: other loggers may name those).
+    stdlib = _stdlib_text(caplog)
+    assert server_key not in stdlib
+    for secret in STDLIB_SECRETS:
+        assert secret not in stdlib, f"{secret!r} reached stdlib logging"
 
 
 def test_case_population():
-    """19 tests: L1-L13 and L15-L18, with L13 and L17 as two tests each.
-    L14 is in the matrix file, with the route it needs."""
+    """21 tests: L1-L13 and L15-L18, with L11, L13 and L17 as two tests
+    each, and the positive control for the stdlib leak check. L14 is in the
+    matrix file, with the route it needs."""
     tests = [name for name in vars(sys.modules[__name__])
              if name.startswith("test_") and name != "test_case_population"]
-    assert len(tests) == 19, sorted(tests)
+    assert len(tests) == 21, sorted(tests)
     assert "test_an_anonymous_request_is_logged_by_route_template" in tests
