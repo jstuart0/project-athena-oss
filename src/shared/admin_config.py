@@ -11,6 +11,7 @@ from typing import Optional, Dict, Any, List, Literal
 import structlog
 from shared.admin_url import get_admin_url
 from shared.config import get_config as _get_athena_config  # local async get_config(key) below shadows this name; alias to keep both available
+from shared.service_key import SERVICE_KEY_VARIABLE, is_header_safe, note_admin_refusal
 
 logger = structlog.get_logger()
 
@@ -70,11 +71,19 @@ class AdminConfigClient:
                 message="SERVICE_API_KEY is not set; calls to authenticated admin endpoints "
                         "will receive 503. Set SERVICE_API_KEY in the service environment.",
             )
+        # A key that can't be a header value is left out of every header this
+        # client builds: httpx refuses it with an exception that carries the
+        # whole value, and the methods below log the exception text.
+        default_headers = {}
+        if is_header_safe(self.api_key):
+            default_headers["X-API-Key"] = self.api_key
+        else:
+            logger.error("service_api_key_unusable", variable=SERVICE_KEY_VARIABLE)
         # Reduced timeout from 10s to 3s - config/room calls should be fast
         # Critical paths like music playback compound multiple API calls
         self.client = httpx.AsyncClient(
             timeout=3.0,
-            headers={"X-API-Key": self.api_key},
+            headers=default_headers,
         )
 
         # Routing configuration cache (60-second TTL)
@@ -134,6 +143,15 @@ class AdminConfigClient:
         self._local_feature_flags = {
             "use_database_model_config": True,  # Enabled - models fetched from database
         }
+
+    def _service_key_header(self) -> Dict[str, str]:
+        """The service key for one call to a route that accepts it. Passed
+        per call, never as a client default: admin-backend's user-only routes
+        refuse any request that carries the key. Empty when the key is unset
+        or can't be a header value."""
+        if not self.api_key or not is_header_safe(self.api_key):
+            return {}
+        return {"X-Service-Key": self.api_key}
 
     async def get_secret(self, service_name: str) -> Optional[str]:
         """
@@ -268,10 +286,10 @@ class AdminConfigClient:
         if self._routing_cache and (time.time() - self._routing_cache_time < self._cache_ttl):
             return self._routing_cache
 
-        # Fetch from API (use public endpoint - no auth required)
+        # Fetch from API
         try:
             url = f"{self.admin_url}/api/intent-routing/routing/public"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 data = response.json()
@@ -298,6 +316,7 @@ class AdminConfigClient:
                 )
                 return routing
             else:
+                note_admin_refusal(response.status_code, "/api/intent-routing/routing/public")
                 logger.warning(
                     "intent_routing_fetch_failed",
                     status_code=response.status_code
@@ -325,10 +344,10 @@ class AdminConfigClient:
         if self._providers_cache and (time.time() - self._providers_cache_time < self._cache_ttl):
             return self._providers_cache
 
-        # Fetch from API (use public endpoint - no auth required)
+        # Fetch from API
         try:
             url = f"{self.admin_url}/api/intent-routing/providers/public"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 data = response.json()
@@ -360,6 +379,7 @@ class AdminConfigClient:
                 )
                 return providers
             else:
+                note_admin_refusal(response.status_code, "/api/intent-routing/providers/public")
                 logger.warning(
                     "provider_routing_fetch_failed",
                     status_code=response.status_code
@@ -390,7 +410,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/llm-backends/public"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 backends = response.json()
@@ -410,6 +430,7 @@ class AdminConfigClient:
                 )
                 return enabled_backends
             else:
+                note_admin_refusal(response.status_code, "/api/llm-backends/public")
                 logger.warning(
                     "llm_backends_fetch_failed",
                     status_code=response.status_code
@@ -440,7 +461,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/features/public?enabled_only=false"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 features = response.json()
@@ -459,6 +480,7 @@ class AdminConfigClient:
                 )
                 return flags
             else:
+                note_admin_refusal(response.status_code, "/api/features/public")
                 logger.warning(
                     "feature_flags_fetch_failed",
                     status_code=response.status_code
@@ -565,7 +587,7 @@ class AdminConfigClient:
         """
         try:
             url = f"{self.admin_url}/api/tool-calling/tools/by-name/{tool_name}/api-keys/public"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 404:
                 logger.debug(
@@ -585,6 +607,9 @@ class AdminConfigClient:
             return requirements
 
         except httpx.HTTPStatusError as e:
+            note_admin_refusal(
+                e.response.status_code, "/api/tool-calling/tools/by-name/{tool_name}/api-keys/public"
+            )
             logger.warning(
                 "tool_api_key_requirements_fetch_error",
                 tool_name=tool_name,
@@ -664,7 +689,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/tool-calling/settings/public"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 settings = response.json()
@@ -681,6 +706,7 @@ class AdminConfigClient:
                 )
                 return settings
             else:
+                note_admin_refusal(response.status_code, "/api/tool-calling/settings/public")
                 logger.warning(
                     "tool_calling_settings_fetch_failed",
                     status_code=response.status_code
@@ -777,7 +803,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/tool-calling/triggers/public?enabled_only=true"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 triggers = response.json()
@@ -796,6 +822,7 @@ class AdminConfigClient:
                 )
                 return triggers
             else:
+                note_admin_refusal(response.status_code, "/api/tool-calling/triggers/public")
                 logger.warning(
                     "fallback_triggers_fetch_failed",
                     status_code=response.status_code
@@ -828,7 +855,7 @@ class AdminConfigClient:
 
         try:
             url = f"{self.admin_url}/api/escalation/presets/active/public"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 preset = response.json()
@@ -850,6 +877,7 @@ class AdminConfigClient:
                 logger.warning("no_active_escalation_preset")
                 return None
             else:
+                note_admin_refusal(response.status_code, "/api/escalation/presets/active/public")
                 logger.warning("escalation_preset_fetch_failed", status=response.status_code)
 
         except Exception as e:
@@ -862,9 +890,10 @@ class AdminConfigClient:
         """Get current escalation state for a session."""
         try:
             url = f"{self.admin_url}/api/escalation/state/{session_id}/public"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
             if response.status_code == 200:
                 return response.json()
+            note_admin_refusal(response.status_code, "/api/escalation/state/{session_id}/public")
         except Exception as e:
             logger.warning("escalation_state_error", error=str(e), session_id=session_id[:8] if session_id else "none")
         return None
@@ -884,7 +913,8 @@ class AdminConfigClient:
                 "escalated_to": escalated_to,
                 "turns_remaining": turns_remaining,
                 "triggered_by_rule_id": rule_id
-            })
+            }, headers=self._service_key_header())
+            note_admin_refusal(response.status_code, "/api/escalation/state/internal")
             return response.status_code == 200
         except Exception as e:
             logger.warning("escalation_state_update_error", error=str(e))
@@ -1000,7 +1030,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/component-models/component/{component_name}"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1016,6 +1046,7 @@ class AdminConfigClient:
                 )
                 return config
             else:
+                note_admin_refusal(response.status_code, "/api/component-models/component/{component_name}")
                 logger.warning(
                     "component_model_fetch_failed",
                     component=component_name,
@@ -1061,13 +1092,14 @@ class AdminConfigClient:
 
         try:
             url = f"{self.admin_url}/api/component-models/public"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 models = response.json()
                 logger.debug("all_component_models_loaded", count=len(models))
                 return models
             else:
+                note_admin_refusal(response.status_code, "/api/component-models/public")
                 logger.warning(
                     "all_component_models_fetch_failed",
                     status_code=response.status_code
@@ -1333,7 +1365,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/gateway-config/public"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1349,6 +1381,7 @@ class AdminConfigClient:
                 )
                 return config
             else:
+                note_admin_refusal(response.status_code, "/api/gateway-config/public")
                 logger.warning(
                     "gateway_config_fetch_failed",
                     status_code=response.status_code
@@ -1469,7 +1502,7 @@ class AdminConfigClient:
 
         try:
             url = f"{self.admin_url}/api/voice-config/internal/stt"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1483,6 +1516,7 @@ class AdminConfigClient:
                 )
                 return config
             else:
+                note_admin_refusal(response.status_code, "/api/voice-config/internal/stt")
                 logger.warning(
                     "voice_config_stt_fetch_failed",
                     status_code=response.status_code
@@ -1524,7 +1558,7 @@ class AdminConfigClient:
 
         try:
             url = f"{self.admin_url}/api/voice-config/internal/tts"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1538,6 +1572,7 @@ class AdminConfigClient:
                 )
                 return config
             else:
+                note_admin_refusal(response.status_code, "/api/voice-config/internal/tts")
                 logger.warning(
                     "voice_config_tts_fetch_failed",
                     status_code=response.status_code
@@ -1571,7 +1606,7 @@ class AdminConfigClient:
 
         try:
             url = f"{self.admin_url}/api/voice-config/internal/all"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1585,6 +1620,7 @@ class AdminConfigClient:
                 )
                 return config
             else:
+                note_admin_refusal(response.status_code, "/api/voice-config/internal/all")
                 logger.warning(
                     "voice_config_all_fetch_failed",
                     status_code=response.status_code
@@ -1633,7 +1669,7 @@ class AdminConfigClient:
 
         try:
             url = f"{self.admin_url}/api/voice-interfaces/internal/config/{interface_name}"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1654,6 +1690,9 @@ class AdminConfigClient:
                 )
                 return None
             else:
+                note_admin_refusal(
+                    response.status_code, "/api/voice-interfaces/internal/config/{interface_name}"
+                )
                 logger.warning(
                     "voice_interface_config_fetch_failed",
                     interface_name=interface_name,
@@ -1684,11 +1723,12 @@ class AdminConfigClient:
         """
         try:
             url = f"{self.admin_url}/api/voice-config/health"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=self._service_key_header())
 
             if response.status_code == 200:
                 return response.json()
             else:
+                note_admin_refusal(response.status_code, "/api/voice-config/health")
                 logger.warning(
                     "voice_health_check_failed",
                     status_code=response.status_code

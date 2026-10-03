@@ -14,6 +14,7 @@ import httpx
 from typing import Optional, Dict
 import structlog
 from shared.admin_url import get_admin_url
+from shared.service_key import note_admin_refusal, service_key_headers
 
 logger = structlog.get_logger()
 
@@ -163,7 +164,8 @@ async def get_service_url(service_name: str) -> Optional[str]:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
-                f"{ADMIN_API_URL}/api/service-registry/services/{service_name}/url"
+                f"{ADMIN_API_URL}/api/service-registry/services/{service_name}/url",
+                headers=service_key_headers(),
             )
 
             if response.status_code == 200:
@@ -181,6 +183,9 @@ async def get_service_url(service_name: str) -> Optional[str]:
                 logger.warning(f"Service disabled in registry: {service_name}")
                 return None
             else:
+                # A 503 never reaches this branch: this route answers it for a
+                # disabled service, which is not a refused credential.
+                note_admin_refusal(response.status_code, "/api/service-registry/services/{service_name}/url")
                 logger.error(f"Service registry error: {response.status_code}")
                 return None
 

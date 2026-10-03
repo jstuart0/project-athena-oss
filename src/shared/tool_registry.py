@@ -394,13 +394,15 @@ class UnifiedToolRegistry:
         """Fetch MCP security configuration from Admin API."""
         try:
             from shared.admin_config import get_admin_client
+            from shared.service_key import note_admin_refusal, service_key_headers
             client = get_admin_client()
             url = f"{client.admin_url}/api/mcp-security/public"
-            response = await client.client.get(url)
+            response = await client.client.get(url, headers=service_key_headers())
 
             if response.status_code == 200:
                 return response.json()
             else:
+                note_admin_refusal(response.status_code, "/api/mcp-security/public")
                 logger.warning(f"Failed to fetch MCP security config: {response.status_code}")
         except Exception as e:
             logger.warning(f"Failed to fetch MCP security config: {e}")

@@ -45,10 +45,15 @@ _last_logged: dict[tuple[str, int], float] = {}
 _unusable_key_reported = False
 
 
-def _is_header_safe(key: str) -> bool:
-    """Visible ASCII only. Anything else (a trailing newline from a Secret,
-    a space, a non-ASCII character) is refused by the HTTP client with an
-    exception whose text carries the whole value, and callers log that text."""
+def is_header_safe(key: str) -> bool:
+    """True when ``key`` can be sent as a header value: visible ASCII only.
+    Anything else (a trailing newline from a Secret, a space, a non-ASCII
+    character) is refused by the HTTP client with an exception whose text
+    carries the whole value, and callers log that text.
+
+    For a sender that holds its own key instead of calling
+    ``service_key_headers()``: check before building the header, and send
+    none when this is False."""
     return all("\x21" <= character <= "\x7e" for character in key)
 
 
@@ -57,7 +62,7 @@ def service_key_headers() -> dict[str, str]:
     caller never sends the header with an empty value. A new dict each call.
 
     Also ``{}`` when the configured key can't be a header value (see
-    ``_is_header_safe``); the variable's name is logged once, never its
+    ``is_header_safe``); the variable's name is logged once, never its
     value. The call then goes out without a credential and is refused.
     """
     global _unusable_key_reported
@@ -66,7 +71,7 @@ def service_key_headers() -> dict[str, str]:
     key = get_config().service_api_key
     if not key:
         return {}
-    if not _is_header_safe(key):
+    if not is_header_safe(key):
         if not _unusable_key_reported:
             _unusable_key_reported = True
             try:
