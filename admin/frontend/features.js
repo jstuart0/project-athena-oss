@@ -334,7 +334,7 @@ async function loadFeatures() {
         } catch (authError) {
             // Fallback to public endpoint if auth fails
             console.log('Using public features endpoint');
-            response = await fetch('/api/features/public');
+            response = await fetch('/api/features/public', { headers: getAuthHeaders() });
             if (!response.ok) {
                 throw new Error(`Failed to load features: ${response.statusText}`);
             }

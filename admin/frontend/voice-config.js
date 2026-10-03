@@ -24,7 +24,7 @@ function getToken() {
 // Fetch running configuration via admin backend proxy (avoids CORS/mixed-content issues)
 async function loadRunningConfig() {
     try {
-        const response = await fetch('/api/voice-config/running-config');
+        const response = await fetch('/api/voice-config/running-config', { headers: getAuthHeaders() });
         if (response.ok) {
             const data = await response.json();
             if (data.error) {
@@ -45,9 +45,9 @@ async function loadRunningConfig() {
 async function loadVoiceConfig() {
     try {
         const [sttRes, ttsRes, servicesRes] = await Promise.all([
-            fetch('/api/voice-config/stt/models'),
-            fetch('/api/voice-config/tts/voices'),
-            fetch('/api/voice-config/services')
+            fetch('/api/voice-config/stt/models', { headers: getAuthHeaders() }),
+            fetch('/api/voice-config/tts/voices', { headers: getAuthHeaders() }),
+            fetch('/api/voice-config/services', { headers: getAuthHeaders() })
         ]);
 
         if (!sttRes.ok || !ttsRes.ok || !servicesRes.ok) {
@@ -123,8 +123,8 @@ async function loadHAPipelineConfig() {
     try {
         // Load pipelines and current mode in parallel
         const [pipelinesRes, preferredRes] = await Promise.all([
-            fetch('/api/ha-pipelines/pipelines'),
-            fetch('/api/ha-pipelines/pipelines/preferred')
+            fetch('/api/ha-pipelines/pipelines', { headers: getAuthHeaders() }),
+            fetch('/api/ha-pipelines/pipelines/preferred', { headers: getAuthHeaders() })
         ]);
 
         if (pipelinesRes.ok) {
@@ -295,7 +295,7 @@ async function setVoiceMode(mode) {
 
 async function checkVoiceHealth() {
     try {
-        const response = await fetch('/api/voice-config/health');
+        const response = await fetch('/api/voice-config/health', { headers: getAuthHeaders() });
         if (response.ok) {
             voiceHealth = await response.json();
             updateHealthIndicators();
