@@ -179,6 +179,153 @@ def test_noting_never_raises_or_leaks_the_key(monkeypatch, captured_logs, caplog
     assert len(attempts) == 1, "the raising logger was really called"
 
 
+# E12: the refusal table can't grow without bound ---------------------------
+
+def test_refusal_table_is_capped(captured_logs, clock):
+    cap = service_key.MAX_TRACKED_REFUSALS
+    assert 16 <= cap <= 4096
+    for index in range(cap + 40):
+        assert service_key.note_admin_refusal(401, f"/api/zz-route-{index}") is True
+    assert len(service_key._last_logged) <= cap
+    # An evicted key logs again instead of being silenced: every distinct
+    # route above got its line.
+    assert len(_refusals(captured_logs)) == cap + 40
+    # The most recently logged keys are the ones kept: still rate-limited.
+    for index in (cap + 39, cap + 38, 40):
+        assert service_key.note_admin_refusal(401, f"/api/zz-route-{index}") is True
+    assert len(_refusals(captured_logs)) == cap + 40
+    # The oldest were the ones dropped: they log again.
+    assert service_key.note_admin_refusal(401, "/api/zz-route-0") is True
+    assert service_key.note_admin_refusal(401, "/api/zz-route-39") is True
+    assert len(_refusals(captured_logs)) == cap + 42
+    assert len(service_key._last_logged) <= cap
+
+
+# E13: a route that isn't a template never reaches the log -------------------
+
+BAD_ROUTES = {
+    "query": "/api/features/public?token=zz-secret-token",
+    "overlong": "/api/" + "zz-secret-segment/" * 20,
+    "not_a_string": 12345,
+    "none": None,
+}
+
+
+@pytest.mark.parametrize("kind", sorted(BAD_ROUTES))
+def test_a_route_that_is_not_a_template_is_replaced(kind, captured_logs, caplog, clock):
+    caplog.set_level(logging.DEBUG)
+    assert service_key.note_admin_refusal(401, BAD_ROUTES[kind]) is True
+    assert captured_logs == [
+        {"event": "admin_backend_refused", "log_level": "error", "status": 401,
+         "route": service_key.INVALID_ROUTE},
+    ]
+    assert "zz-secret" not in repr(captured_logs) and "zz-secret" not in caplog.text
+    assert "?" not in service_key.INVALID_ROUTE and len(service_key.INVALID_ROUTE) < 40
+
+
+def test_replaced_routes_share_one_rate_limit_key(captured_logs, clock):
+    for index in range(30):
+        assert service_key.note_admin_refusal(401, f"/api/x?attempt={index}") is True
+    assert len(_refusals(captured_logs)) == 1
+    assert list(service_key._last_logged) == [(service_key.INVALID_ROUTE, 401)]
+
+
+def test_a_route_at_the_length_limit_is_kept(captured_logs, clock):
+    route = "/api/" + "a" * (service_key.MAX_ROUTE_LENGTH - 5)
+    assert len(route) == service_key.MAX_ROUTE_LENGTH
+    assert service_key.note_admin_refusal(401, route) is True
+    assert service_key.note_admin_refusal(401, route + "a") is True
+    assert [r["route"] for r in _refusals(captured_logs)] == [route, service_key.INVALID_ROUTE]
+
+
+# E14: "never raises" holds for any status -----------------------------------
+
+@pytest.mark.parametrize("status", [[401], {"status": 401}, None, "401", 401.5], ids=repr)
+def test_an_odd_status_is_not_a_refusal_and_does_not_raise(status, captured_logs, clock):
+    assert service_key.note_admin_refusal(status, ROUTE) is False
+    assert captured_logs == []
+
+
+# E15: a key that can't be a header value is never sent ----------------------
+# httpx/h11 refuse such a value with "Illegal header value b'<the key>'", and
+# callers log the exception text.
+
+UNUSABLE_KEYS = {
+    "trailing_newline": "zz-sentinel-key\n",
+    "carriage_return": "zz-sentinel-key\r",
+    "leading_space": " zz-sentinel-key",
+    "trailing_space": "zz-sentinel-key ",
+    "inner_space": "zz-sentinel key",
+    "tab": "zz-sentinel\tkey",
+    "delete": "zz-sentinel-key\x7f",
+    "non_ascii": "zz-sentinel-key\u00ff",
+}
+
+
+@pytest.mark.parametrize("kind", sorted(UNUSABLE_KEYS))
+def test_a_key_outside_visible_ascii_sends_no_header(kind, monkeypatch, captured_logs, caplog):
+    caplog.set_level(logging.DEBUG)
+    _set_key(monkeypatch, UNUSABLE_KEYS[kind])
+    from shared.config import get_config
+
+    assert get_config().service_api_key == UNUSABLE_KEYS[kind], "the configured value really carries it"
+    assert service_key.service_key_headers() == {}
+    assert service_key.service_key_headers() == {}
+    assert captured_logs == [
+        {"event": "service_api_key_unusable", "log_level": "error", "variable": "SERVICE_API_KEY"},
+    ], "one line, naming the variable"
+    assert "zz-sentinel" not in repr(captured_logs) and "zz-sentinel" not in caplog.text
+
+
+def test_reporting_an_unusable_key_never_raises(monkeypatch):
+    attempts = []
+
+    class _Raising:
+        def error(self, *args, **kwargs):
+            attempts.append(args)
+            raise RuntimeError("logger is broken")
+
+    monkeypatch.setattr(service_key, "logger", _Raising())
+    _set_key(monkeypatch, UNUSABLE_KEYS["trailing_newline"])
+    assert service_key.service_key_headers() == {}
+    assert len(attempts) == 1, "the raising logger was really called"
+
+
+def test_every_visible_ascii_character_is_a_usable_key(monkeypatch, captured_logs):
+    key = "".join(chr(code) for code in range(0x21, 0x7F))
+    _set_key(monkeypatch, key)
+    assert service_key.service_key_headers() == {"X-Service-Key": key}
+    assert captured_logs == []
+
+
+def test_an_unusable_key_really_is_refused_by_httpx():
+    """Why the rule exists: the client library refuses the value and puts
+    all of it in the exception text. A loopback listener, so the request
+    gets as far as writing its headers."""
+    import asyncio
+    import socket
+
+    import httpx
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    async def send():
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.get(f"http://127.0.0.1:{port}/", headers={"X-Service-Key": "zz-sentinel-key\n"})
+
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(httpx.LocalProtocolError) as refused:
+            loop.run_until_complete(send())
+    finally:
+        loop.close()
+        listener.close()
+    assert "zz-sentinel-key" in str(refused.value)
+
+
 # E10 ----------------------------------------------------------------------
 
 def _module_level_imports(tree):
