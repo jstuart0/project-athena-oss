@@ -33,6 +33,7 @@ from shared.config import get_config as _get_athena_config  # local async get_co
 from shared.ollama_client import OllamaClient
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
+from shared.service_key import note_admin_refusal, service_key_headers
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import (
     register_exception_handlers,
@@ -815,7 +816,8 @@ async def get_feature_flag(flag_name: str, default: bool = False) -> bool:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
                 f"{ADMIN_API_URL}/api/features/public",
-                params={"name": flag_name}
+                params={"name": flag_name},
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 flags = response.json()
@@ -824,6 +826,8 @@ async def get_feature_flag(flag_name: str, default: bool = False) -> bool:
                         value = flag.get("enabled", default)
                         _feature_flag_cache[flag_name] = (time.time(), value)
                         return value
+            elif not note_admin_refusal(response.status_code, "/api/features/public"):
+                logger.warning("feature_flag_fetch_failed", flag=flag_name, status=response.status_code)
     except Exception as e:
         logger.warning(f"Feature flag fetch failed for {flag_name}: {e}")
 
@@ -889,11 +893,11 @@ async def _log_metric_to_db(
 
         # Use shared metric_client for connection reuse (performance optimization)
         if metric_client:
-            response = await metric_client.post(url, json=metric_payload)
+            response = await metric_client.post(url, json=metric_payload, headers=service_key_headers())
         else:
             # Fallback if client not initialized (shouldn't happen normally)
             async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.post(url, json=metric_payload)
+                response = await client.post(url, json=metric_payload, headers=service_key_headers())
 
         if response.status_code == 201:
             logger.info(
@@ -902,7 +906,7 @@ async def _log_metric_to_db(
                 backend=backend,
                 tokens_per_sec=round(tokens_per_second, 2)
             )
-        else:
+        elif not note_admin_refusal(response.status_code, "/api/llm-backends/metrics"):
             logger.warning(
                 "failed_to_log_metric",
                 status_code=response.status_code,
@@ -2370,7 +2374,8 @@ async def list_models():
         # Fetch available backends from admin API
         admin_url = get_admin_url()
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{admin_url}/api/llm-backends/public")
+            response = await client.get(f"{admin_url}/api/llm-backends/public", headers=service_key_headers())
+            note_admin_refusal(response.status_code, "/api/llm-backends/public")
             response.raise_for_status()
             backends = response.json()
 

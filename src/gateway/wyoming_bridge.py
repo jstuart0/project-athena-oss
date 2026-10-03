@@ -97,6 +97,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from shared.service_key import note_admin_refusal, service_key_headers
 
 # Configuration
 DEFAULT_STT_URL = os.getenv("STT_URL", "http://localhost:10301")
@@ -198,8 +199,11 @@ if WYOMING_AVAILABLE:
             self._last_feature_flag_check = now
 
             try:
-                async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-                    response = await client.get(f"{ADMIN_API_URL}/api/features/public")
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(
+                        f"{ADMIN_API_URL}/api/features/public",
+                        headers=service_key_headers(),
+                    )
                     if response.status_code == 200:
                         features = response.json()
                         for feature in features:
@@ -212,6 +216,8 @@ if WYOMING_AVAILABLE:
                                                new_value=new_value)
                                 self._follow_ups_enabled = new_value
                                 return
+                    elif not note_admin_refusal(response.status_code, "/api/features/public"):
+                        logger.debug("wyoming_feature_flag_check_failed", status=response.status_code)
             except Exception as e:
                 logger.debug("wyoming_feature_flag_check_error", error=str(e))
 

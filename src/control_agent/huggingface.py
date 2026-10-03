@@ -8,6 +8,7 @@ Used by the admin backend to enable model management from the UI.
 import asyncio
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 from dataclasses import dataclass
@@ -17,11 +18,17 @@ import structlog
 
 logger = structlog.get_logger()
 
-# NOTE: SERVICE_API_KEY auth on the progress-callback endpoint is deferred.
-# The progress endpoint (/internal/{id}/progress) intentionally does not require
-# X-Service-Key while the Control Agent runs out-of-cluster. When xander:2 is
-# addressed (secret distribution to the Ollama host), add SERVICE_API_KEY here
-# and re-enable Depends(verify_service_api_key) on the progress route.
+# The progress callback's credential and refusal log. This host gets only
+# src/control_agent/, so the rules of shared/service_key.py are repeated here:
+# no header for an unset key or one that can't be a header value, and one
+# ERROR a minute when admin-backend refuses the callback.
+_SERVICE_KEY_VARIABLE = "SERVICE_API_KEY"
+_REFUSAL_STATUSES = frozenset({401, 403, 503})
+_REFUSAL_LOG_INTERVAL_SECONDS = 60.0
+_clock = time.monotonic
+_refusal_last_logged: Dict[int, float] = {}
+_key_unset_reported = False
+_key_unusable_reported = False
 
 # Download directory on the Control Agent host
 MODELS_DIR = Path.home() / "dev" / "project-athena" / "models" / "downloads"
@@ -498,6 +505,53 @@ async def start_download(
     return job_id
 
 
+def _is_header_safe(key: str) -> bool:
+    """Visible ASCII only; mirrors ``is_header_safe`` in shared/service_key.py.
+    The HTTP client refuses anything else with an exception whose text carries
+    the whole value, and that text is logged."""
+    return all("\x21" <= character <= "\x7e" for character in key)
+
+
+def _callback_headers() -> Dict[str, str]:
+    """``{"X-Service-Key": key}`` from this host's environment, read on each
+    call; ``{}`` when the key is unset or can't be a header value. Either
+    problem is logged once, by the variable's name and never its value."""
+    global _key_unset_reported, _key_unusable_reported
+    key = os.environ.get(_SERVICE_KEY_VARIABLE, "")
+    if not key:
+        if not _key_unset_reported:
+            _key_unset_reported = True
+            logger.warning(
+                "progress_callback_service_key_unset",
+                variable=_SERVICE_KEY_VARIABLE,
+                note="admin-backend refuses a progress callback that carries no service key",
+            )
+        return {}
+    if not _is_header_safe(key):
+        if not _key_unusable_reported:
+            _key_unusable_reported = True
+            logger.error("service_api_key_unusable", variable=_SERVICE_KEY_VARIABLE)
+        return {}
+    return {"X-Service-Key": key}
+
+
+def _refusal_is_due(status_code: int) -> bool:
+    """True at most once a minute per status."""
+    now = _clock()
+    last = _refusal_last_logged.get(status_code)
+    if last is not None and now - last < _REFUSAL_LOG_INTERVAL_SECONDS:
+        return False
+    _refusal_last_logged[status_code] = now
+    return True
+
+
+def _reset_callback_log_state_for_tests() -> None:
+    global _key_unset_reported, _key_unusable_reported
+    _refusal_last_logged.clear()
+    _key_unset_reported = False
+    _key_unusable_reported = False
+
+
 async def send_progress_callback(
     callback_url: str,
     download_id: int,
@@ -524,9 +578,17 @@ async def send_progress_callback(
                     "download_path": download_path,
                     "ollama_model_name": ollama_model_name,
                     "ollama_imported": ollama_imported
-                }
+                },
+                headers=_callback_headers(),
             )
-            if response.status_code != 200:
+            if response.status_code in _REFUSAL_STATUSES:
+                if _refusal_is_due(response.status_code):
+                    logger.error(
+                        "admin_backend_refused",
+                        status=response.status_code,
+                        route="/api/model-downloads/internal/{download_id}/progress",
+                    )
+            elif response.status_code != 200:
                 logger.warning(
                     "callback_failed",
                     download_id=download_id,

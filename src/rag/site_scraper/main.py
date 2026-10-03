@@ -67,7 +67,7 @@ async def load_config():
         # verify_service_api_key.  codex-r2:1 — without this header the service
         # received 422 at startup and silently fell back to empty allow/block lists,
         # meaning admin-configured allowlists were not enforced in production.
-        async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             admin_url = get_admin_url()
             service_key = get_config().service_api_key
             response = await client.get(

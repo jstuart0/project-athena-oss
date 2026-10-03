@@ -67,6 +67,8 @@ COPY apps/jarvis-web/backend/ /app/backend/
 COPY src/shared/admin_url.py /app/backend/admin_url.py
 # Shared client-address resolution and limiter; overwrites the local-dev shim.
 COPY src/shared/client_throttle.py /app/backend/client_throttle.py
+# Shared refusal log for admin-backend calls; overwrites the local-dev shim.
+COPY src/shared/service_key.py /app/backend/service_key.py
 COPY apps/jarvis-web/frontend/ /app/frontend/
 
 # Set working directory to backend

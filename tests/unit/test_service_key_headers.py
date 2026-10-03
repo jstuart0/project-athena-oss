@@ -534,3 +534,181 @@ def test_module_level_import_rule_planted_self_test():
     assert not _imports_helper_in_module_body("try:\n    import service_key\nexcept ImportError:\n    pass\n")
     assert not _imports_helper_in_module_body("if True:\n    import service_key\n")
     assert not _imports_helper_in_module_body("from shared.service_key import note_admin_refusal\n")
+
+
+# The Control Agent's inline form of the unusable-key rule ------------------
+#
+# Its host gets no ``shared`` module, so ``send_progress_callback`` reads the
+# key from the environment itself and applies the same rule as
+# ``is_header_safe``.
+
+def _drive_progress_callback(monkeypatch, key, calls=2):
+    """Requests recorded at the socket for `calls` progress callbacks sent
+    with SERVICE_API_KEY set to `key`."""
+    import asyncio
+    import importlib
+
+    import httpx
+
+    agent = importlib.import_module("control_agent.huggingface")
+    agent._reset_callback_log_state_for_tests()
+    monkeypatch.setenv("SERVICE_API_KEY", key)
+    recorded = []
+
+    def handler(request):
+        recorded.append(request)
+        return httpx.Response(200, json={})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=httpx.MockTransport(handler), **kwargs))
+    loop = asyncio.new_event_loop()
+    try:
+        for _ in range(calls):
+            loop.run_until_complete(agent.send_progress_callback(
+                "http://admin:8080/api/model-downloads", 7, "downloading"))
+    finally:
+        loop.close()
+        agent._reset_callback_log_state_for_tests()
+    return recorded
+
+
+@pytest.mark.parametrize("kind", sorted(UNUSABLE_KEYS))
+def test_control_agent_never_sends_a_key_outside_visible_ascii(kind, monkeypatch, captured_logs, caplog):
+    caplog.set_level(logging.DEBUG)
+    recorded = _drive_progress_callback(monkeypatch, UNUSABLE_KEYS[kind])
+    assert len(recorded) == 2, "the callback is still attempted"
+    assert all("X-Service-Key" not in request.headers for request in recorded)
+    assert captured_logs == [
+        {"event": "service_api_key_unusable", "log_level": "error", "variable": "SERVICE_API_KEY"},
+    ], "one line across both calls, naming the variable"
+    assert "zz-sentinel" not in repr(captured_logs) and "zz-sentinel" not in caplog.text
+
+
+def test_control_agent_sends_every_visible_ascii_character(monkeypatch, captured_logs):
+    """Positive control for the test above: the same drive with a usable key
+    sends it, so the absent header there is the rule and not the harness."""
+    key = "".join(chr(code) for code in range(0x21, 0x7F))
+    recorded = _drive_progress_callback(monkeypatch, key)
+    assert [request.headers.get("X-Service-Key") for request in recorded] == [key, key]
+    assert captured_logs == []
+
+
+def test_control_agent_rule_is_the_helper_s_rule():
+    """The inline check and ``is_header_safe`` agree on every single
+    character and on the named unusable keys."""
+    import importlib
+
+    agent = importlib.import_module("control_agent.huggingface")
+    samples = [chr(code) for code in range(0x00, 0x100)] + list(UNUSABLE_KEYS.values()) + ["zz-sentinel-key"]
+    assert len(samples) >= 256
+    disagreements = [
+        repr(sample) for sample in samples
+        if agent._is_header_safe(sample) != service_key.is_header_safe(sample)
+    ]
+    assert disagreements == []
+    assert agent._is_header_safe("zz-sentinel-key") is True
+    assert agent._is_header_safe("zz-sentinel-key\n") is False
+
+
+# Gateway callers read the key when they call -------------------------------
+#
+# ``gateway.main`` and ``gateway.livekit_service`` each keep a module constant
+# holding the key as it was when the module was imported. A reviewed caller
+# that sent the constant would keep sending a rotated-out or not-yet-set key,
+# and a test that never changes the key after the import can't tell.
+
+ROTATED_KEY = "zz-rotated-after-import"
+
+
+def _gateway_callers():
+    """{name: (module, async call, the admin path it requests)}"""
+    import importlib
+
+    gateway = importlib.import_module("gateway.main")
+    livekit = importlib.import_module("gateway.livekit_service")
+
+    async def feature_flag():
+        gateway._feature_flag_cache.clear()
+        return await gateway.get_feature_flag("zz_flag")
+
+    async def metric():
+        return await gateway._log_metric_to_db(
+            timestamp=1.0, model="m1", backend="ollama", latency_seconds=0.5, tokens=10, tokens_per_second=20.0)
+
+    async def follow_up_flags():
+        service = object.__new__(livekit.LiveKitService)
+        service._follow_ups_enabled, service._last_feature_flag_check = False, 0.0
+        service._feature_flag_check_interval = 60.0
+        return await service._refresh_feature_flags()
+
+    return {
+        "gateway.main.get_feature_flag": (gateway, feature_flag, "/api/features/public"),
+        "gateway.main._log_metric_to_db": (gateway, metric, "/api/llm-backends/metrics"),
+        "gateway.main.list_models": (gateway, gateway.list_models, "/api/llm-backends/public"),
+        "gateway.livekit_service._refresh_feature_flags": (livekit, follow_up_flags, "/api/features/public"),
+    }
+
+
+GATEWAY_CALLER_NAMES = (
+    "gateway.main.get_feature_flag", "gateway.main._log_metric_to_db", "gateway.main.list_models",
+    "gateway.livekit_service._refresh_feature_flags",
+)
+
+
+def _requests_after_a_key_change(monkeypatch, name, header_for=None):
+    import asyncio
+
+    import httpx
+
+    module, call, path = _gateway_callers()[name]
+    assert module.SERVICE_API_KEY != ROTATED_KEY, "the module was imported under another key"
+    admin_url = "http://admin-backend:8080"
+    monkeypatch.setenv("ADMIN_API_URL", admin_url)
+    monkeypatch.setattr(module, "ADMIN_API_URL", admin_url)
+    if hasattr(module, "metric_client"):
+        monkeypatch.setattr(module, "metric_client", None)
+    if header_for is not None:
+        monkeypatch.setattr(module, "service_key_headers", header_for(module))
+    _set_key(monkeypatch, ROTATED_KEY)
+    from shared.admin_url import _clear_cache_for_tests as clear_admin_url
+
+    clear_admin_url()
+    recorded = []
+
+    def handler(request):
+        recorded.append(request)
+        return httpx.Response(200, json=[])
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=httpx.MockTransport(handler), **kwargs))
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(call())
+    finally:
+        loop.close()
+        clear_admin_url()
+    assert [request.url.path for request in recorded] == [path]
+    return recorded
+
+
+@pytest.mark.parametrize("name", GATEWAY_CALLER_NAMES)
+def test_gateway_caller_sends_the_key_as_it_is_at_call_time(name, monkeypatch):
+    (request,) = _requests_after_a_key_change(monkeypatch, name)
+    assert request.headers.get("X-Service-Key") == ROTATED_KEY
+
+
+@pytest.mark.parametrize("name", GATEWAY_CALLER_NAMES)
+def test_the_call_time_check_sees_an_import_time_key(name, monkeypatch):
+    """Positive control: a caller that sends the module's own constant is
+    seen sending something other than the key now configured."""
+    (request,) = _requests_after_a_key_change(
+        monkeypatch, name, header_for=lambda module: lambda: {"X-Service-Key": module.SERVICE_API_KEY})
+    assert request.headers.get("X-Service-Key") != ROTATED_KEY
+
+
+def test_gateway_caller_population():
+    assert set(_gateway_callers()) == set(GATEWAY_CALLER_NAMES) and len(GATEWAY_CALLER_NAMES) == 4
