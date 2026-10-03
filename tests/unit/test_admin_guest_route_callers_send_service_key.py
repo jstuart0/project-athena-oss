@@ -299,11 +299,46 @@ class Index:
             pairs = []
             if isinstance(node, ast.Assign):
                 pairs = [(t, node.value) for t in node.targets]
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                pairs = [(node.target, node.value)]
             elif isinstance(node, (ast.With, ast.AsyncWith)):
                 pairs = [(item.optional_vars, item.context_expr) for item in node.items]
             for target, value in pairs:
                 if isinstance(target, ast.Name) and target.id == receiver:
                     yield value
+
+    def name_values(self, name, chain):
+        """What a bare name can hold at a call: its bindings in the nearest
+        enclosing function that has any, else its module-global bindings. A
+        parameter has none."""
+        for func in reversed(chain):
+            values = list(self._bound_values(func, name))
+            if values:
+                return values
+        return self.global_values(name)
+
+    def global_values(self, name):
+        """Bindings of a module global: at module level, and in any function
+        that declares it `global`. A same-named local of another function is
+        not one."""
+        found = []
+        scopes = [node for node in ast.walk(self.tree) if isinstance(node, _FUNCTION) and any(
+            isinstance(stmt, ast.Global) and name in stmt.names for stmt in ast.walk(node))]
+        for scope in scopes:
+            found.extend(self._bound_values(scope, name))
+        pending = list(self.tree.body)
+        while pending:
+            node = pending.pop()
+            if isinstance(node, _FUNCTION + (ast.ClassDef,)):
+                continue
+            pairs = []
+            if isinstance(node, ast.Assign):
+                pairs = [(t, node.value) for t in node.targets]
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                pairs = [(node.target, node.value)]
+            found.extend(value for target, value in pairs if isinstance(target, ast.Name) and target.id == name)
+            pending.extend(child for child in ast.iter_child_nodes(node) if isinstance(child, ast.stmt))
+        return found
 
     def client_headers_text(self, func, receiver) -> str:
         texts = []
@@ -340,11 +375,7 @@ class Index:
         if isinstance(receiver, ast.Call):
             return [receiver]
         if isinstance(receiver, ast.Name):
-            for func in reversed(call.chain):
-                values = list(self._bound_values(func, receiver.id))
-                if values:
-                    return values
-            return list(self._bound_values(self.tree, receiver.id))
+            return self.name_values(receiver.id, call.chain)
         if (isinstance(receiver, ast.Attribute) and isinstance(receiver.value, ast.Name)
                 and receiver.value.id == "self" and call.cls is not None):
             found = []
@@ -728,31 +759,137 @@ def test_the_only_caller_of_a_user_only_route_is_the_dead_one():
 
 # C8 / C8p -----------------------------------------------------------------
 
-def _unsafe_keywords(index: Index, call: Call):
-    """`verify=False` / `follow_redirects=True` on the call itself or on any
-    constructor the client it goes through was built with."""
+_HTTPX_CLIENTS = {"AsyncClient", "Client"}
+UNTRACED = "client not traceable to an httpx constructor"
+ADMIN_CONFIG = "src/shared/admin_config.py"
+
+# Keyed admin calls whose client this scan can't follow to a constructor:
+# {(file, function): (how many such calls, why they are safe)}. An entry that
+# is no longer needed, names a function the scan doesn't examine, or whose
+# count has changed fails the test below.
+UNTRACED_CLIENT_OK = {
+    ("src/mode_service/bookings.py", "_fetch_admin"): (
+        1,
+        "the client is a parameter; its only caller chain starts at src/mode_service/main.py, which passes "
+        "_get_admin_http_client(), and that helper's constructor is examined through _verify_owner_pin",
+    ),
+}
+
+
+def _is_literal(node, value) -> bool:
+    return isinstance(node, ast.Constant) and node.value is value
+
+
+def _keyword_problems(index: Index, node, what: str):
+    """Anything on this call that can turn TLS verification off or redirects
+    on: only a literal `verify=True` / `follow_redirects=False` is accepted,
+    and `**kwargs` can carry either."""
     found = []
-    nodes = [call.node]
-    for value in index.client_values(call):
-        nodes.extend(n for n in ast.walk(value) if isinstance(n, ast.Call))
-    for node in nodes:
-        for kw in node.keywords:
-            if not isinstance(kw.value, ast.Constant):
-                continue
-            if (kw.arg, kw.value.value) in {("verify", False), ("follow_redirects", True)}:
-                found.append((node.lineno, f"{kw.arg}={kw.value.value}"))
+    for kw in node.keywords:
+        if kw.arg is None:
+            found.append((node.lineno, f"**{index.seg(kw.value)} on the {what}"))
+        elif kw.arg == "verify" and not _is_literal(kw.value, True):
+            found.append((node.lineno, f"verify={index.seg(kw.value)}"))
+        elif kw.arg == "follow_redirects" and not _is_literal(kw.value, False):
+            found.append((node.lineno, f"follow_redirects={index.seg(kw.value)}"))
     return found
 
 
-def keyed_admin_callers(sources: dict, targets: dict):
-    """{(rel, function): [(lineno, problem)]} for every function that sends
-    the service key to an admin URL, and every named caller.
+def _httpx_constructors(value):
+    for node in ast.walk(value):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in _HTTPX_CLIENTS:
+                yield node
+
+
+def _constructors_behind(index: Index, value):
+    """The httpx constructors a client expression leads to: in the
+    expression itself, or one hop into a same-module helper it calls by bare
+    name (`client = _get_admin_http_client()`)."""
+    found = list(_httpx_constructors(value))
+    if found:
+        return found
+    inner = value.value if isinstance(value, ast.Await) else value
+    if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id in index.functions:
+        helper = index.functions[inner.func.id]
+        found = list(_httpx_constructors(helper))
+        for node in ast.walk(helper):
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Name):
+                for bound in index.global_values(node.value.id):
+                    found.extend(c for c in _httpx_constructors(bound) if c not in found)
+    return found
+
+
+@functools.lru_cache(maxsize=None)
+def _admin_config_client_problems():
+    """Problems with the one client AdminConfigClient builds (`self.client`)."""
+    index = index_of(_read(ADMIN_CONFIG))
+    built = [
+        constructor
+        for node in ast.walk(index.tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Attribute) and t.attr == "client" and isinstance(t.value, ast.Name)
+                and t.value.id == "self" for t in node.targets)
+        for constructor in _httpx_constructors(node.value)
+    ]
+    assert len(built) == 1, f"{len(built)} `self.client = httpx...` assignments in {ADMIN_CONFIG}"
+    return tuple((f"{ADMIN_CONFIG}:{lineno}", what) for lineno, what in _keyword_problems(index, built[0], "client"))
+
+
+def _goes_through_admin_config_client(index: Index, call: Call) -> bool:
+    """`x = get_admin_client()` ... `x.client.<verb>(...)`: the singleton
+    AdminConfigClient's own httpx client, built in another module."""
+    receiver = call.node.func.value
+    if not (isinstance(receiver, ast.Attribute) and receiver.attr == "client" and isinstance(receiver.value, ast.Name)):
+        return False
+    values = index.name_values(receiver.value.id, call.chain)
+    return bool(values) and all(
+        isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "get_admin_client" for v in values
+    )
+
+
+def _client_problems(index: Index, call: Call):
+    """(problems, how): what is unsafe about the client this call goes
+    through, and how the client was followed: "constructor" (every value it
+    can be leads to an `httpx.AsyncClient(...)` / `httpx.Client(...)`),
+    "admin_config_client", or "untraced"."""
+    problems = _keyword_problems(index, call.node, "request")
+    receiver = call.node.func.value
+    if isinstance(receiver, ast.Name) and receiver.id == "httpx":
+        return problems, "constructor"  # httpx.get(...): a default client for this one call
+    if _goes_through_admin_config_client(index, call):
+        return problems + list(_admin_config_client_problems()), "admin_config_client"
+    values = [v for v in index.client_values(call) if not _is_literal(v, None)]
+    how = "constructor" if values else "untraced"
+    for value in values:
+        constructors = _constructors_behind(index, value)
+        if not constructors:
+            how = "untraced"
+        for constructor in constructors:
+            problems.extend(_keyword_problems(index, constructor, "client"))
+    return problems, how
+
+
+_HOW_RANK = ("constructor", "admin_config_client", "allowlisted", "untraced")
+
+
+def keyed_admin_callers(sources: dict, targets: dict, untraced_ok=None):
+    """({(rel, function): [(lineno, problem)]}, {(rel, function): how},
+    {(rel, function): untraced call count}) for every function that sends
+    the service key to an admin URL, and every named caller. `how` is the
+    weakest of "constructor", "admin_config_client", "allowlisted",
+    "untraced" over the function's calls.
 
     A named caller is examined on its gated calls. Any other function is
     examined when its source (with the same-module helpers it calls) carries
     the key and it makes an HTTP call whose URL is built on an admin base;
-    each such call is checked through the client it goes through."""
-    examined = {}
+    each such call is checked through the client it goes through. A client
+    the scan can't follow to its constructor is a problem unless the
+    function is in `untraced_ok`: an unknown client is not a safe one."""
+    untraced_ok = untraced_ok or {}
+    examined, how, untraced_calls = {}, {}, {}
     for rel, source in sources.items():
         index = index_of(source)
         named = {index.functions[name]: name for name in targets.get(rel, set()) if name in index.functions}
@@ -770,25 +907,36 @@ def keyed_admin_callers(sources: dict, targets: dict):
                         owners.append(func)
             if not owners:
                 continue
-            problems = _unsafe_keywords(index, call)
+            problems, traced_how = _client_problems(index, call)
             for func in owners:
-                examined.setdefault((rel, func.name), [])
-                for lineno, what in problems:
-                    if (lineno, what) not in examined[(rel, func.name)]:
-                        examined[(rel, func.name)].append((lineno, what))
-    return examined
+                key = (rel, func.name)
+                found = examined.setdefault(key, [])
+                mine, resolution = list(problems), traced_how
+                if traced_how == "untraced":
+                    untraced_calls[key] = untraced_calls.get(key, 0) + 1
+                    if key in untraced_ok:
+                        resolution = "allowlisted"
+                    else:
+                        mine.append((call.node.lineno, UNTRACED))
+                if _HOW_RANK.index(resolution) > _HOW_RANK.index(how.get(key, "constructor")):
+                    how[key] = resolution
+                how.setdefault(key, resolution)
+                for problem in mine:
+                    if problem not in found:
+                        found.append(problem)
+    return examined, how, untraced_calls
 
 
 @functools.lru_cache(maxsize=None)
 def _tls_examined():
     wanted = re.compile(f"{KEY_MARKER.pattern}|{GATED_PATH.pattern}")
     sources = {rel: _read(rel) for rel in _source_files() if wanted.search(_read(rel))}
-    return keyed_admin_callers(sources, TARGETS)
+    return keyed_admin_callers(sources, TARGETS, UNTRACED_CLIENT_OK)
 
 
 @pytest.mark.parametrize("area", AREAS, ids=lambda a: f"area_{a}")
 def test_keyed_callers_verify_tls_and_do_not_follow_redirects(area):
-    examined = _tls_examined()
+    examined, _how, _untraced = _tls_examined()
     assert len(examined) >= 90, len(examined)
     assert len({rel for rel, _n in examined}) >= 25
     for named in (
@@ -808,8 +956,36 @@ def test_keyed_callers_verify_tls_and_do_not_follow_redirects(area):
     )
     assert not unsafe, (
         f"{len(unsafe)} client(s) that carry the service key to admin-backend without "
-        f"verifying TLS, or follow redirects: {unsafe}"
+        f"verifying TLS, that follow redirects, or that can't be traced: {unsafe}"
     )
+
+
+def test_untraced_client_allowlist_is_exact_and_reasoned():
+    _examined, how, untraced_calls = _tls_examined()
+    allowlisted = {key for key, resolution in how.items() if resolution == "allowlisted"}
+    assert allowlisted == set(UNTRACED_CLIENT_OK), (
+        f"stale or unused entries: {sorted(set(UNTRACED_CLIENT_OK) ^ allowlisted)}"
+    )
+    for key, (count, reason) in UNTRACED_CLIENT_OK.items():
+        assert untraced_calls[key] == count, f"{key}: {untraced_calls[key]} untraced call(s), the entry covers {count}"
+        assert len(reason.split()) >= 8, key
+    # The allowlisted parameter's source, checked: the mode service's helper
+    # builds its client with neither keyword, and is the value passed in.
+    mode_main = index_of(_read("src/mode_service/main.py"))
+    helper = mode_main.functions["_get_admin_http_client"]
+    constructors = [c for value in mode_main.global_values("_admin_http_client") for c in _httpx_constructors(value)]
+    assert len(constructors) == 1 and constructors[0] in list(ast.walk(helper))
+    assert _keyword_problems(mode_main, constructors[0], "client") == []
+    assert "admin_client=_get_admin_http_client()" in _read("src/mode_service/main.py")
+    assert how[("src/mode_service/main.py", "_verify_owner_pin")] == "constructor"
+
+
+def test_admin_config_client_is_built_without_tls_or_redirect_options():
+    assert _admin_config_client_problems() == ()
+    _examined, how, _untraced = _tls_examined()
+    through = {key for key, resolution in how.items() if resolution == "admin_config_client"}
+    assert ("src/shared/tool_registry.py", "_get_mcp_security") in through
+    assert ("src/orchestrator/main.py", "log_escalation_audit") in through
 
 
 TLS_PLANTED = '''
@@ -843,7 +1019,7 @@ async def case_4_not_a_target():
         return await client.get(f"{ADMIN_API_URL}/api/external-api-keys/public/x", headers=service_key_headers())
 
 async def case_5_verify_true():
-    async with httpx.AsyncClient(verify=True) as client:
+    async with httpx.AsyncClient(verify=True, follow_redirects=False) as client:
         return await client.get(f"{ADMIN_API_URL}/api/site-scraper/config/public", headers={"X-Service-Key": "k"})
 
 async def case_6_redirects():
@@ -857,18 +1033,111 @@ async def case_7_unkeyed_admin_call():
 async def case_8_keyed_but_not_admin():
     async with httpx.AsyncClient(verify=False) as client:
         return await client.get(f"{ORCHESTRATOR_URL}/query", headers={"X-Service-Key": "k"})
+
+async def case_9_pool():
+    client = await get_http_pool().get_client("admin")
+    return await client.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"})
+
+async def case_10_verify_from_a_name():
+    async with httpx.AsyncClient(verify=VERIFY_TLS) as client:
+        return await client.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"})
+
+async def case_11_constructor_kwargs():
+    async with httpx.AsyncClient(**CLIENT_KWARGS) as client:
+        return await client.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"})
+
+async def case_12_client_parameter(client):
+    return await client.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"})
+
+async def case_13_redirects_on_the_request():
+    async with httpx.AsyncClient() as client:
+        return await client.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"},
+                                follow_redirects=True)
+
+async def case_14_request_kwargs(**options):
+    async with httpx.AsyncClient() as client:
+        return await client.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"}, **options)
+
+async def case_15_one_branch_untraced(pooled):
+    client = httpx.AsyncClient()
+    if pooled:
+        client = await get_http_pool().get_client("admin")
+    return await client.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"})
+
+async def case_16_redirects_from_a_name():
+    async with httpx.AsyncClient(follow_redirects=FOLLOW) as client:
+        return await client.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"})
+
+async def case_17_admin_config_client():
+    client = get_admin_client()
+    return await client.client.get(f"{client.admin_url}/api/features/public", headers={"X-Service-Key": "k"})
+
+async def case_18_module_level_httpx():
+    return await httpx.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"})
+
+async def case_19_allowlisted_parameter(http):
+    return await http.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"})
+
+_shared_http = None
+_redirecting_http = None
+
+def _get_shared_http():
+    global _shared_http
+    if _shared_http is None:
+        _shared_http = httpx.AsyncClient(timeout=3.0)
+    return _shared_http
+
+def _get_redirecting_http():
+    global _redirecting_http
+    if _redirecting_http is None:
+        _redirecting_http = httpx.AsyncClient(follow_redirects=True)
+    return _redirecting_http
+
+async def case_20_same_module_helper():
+    http = _get_shared_http()
+    return await http.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"})
+
+async def case_21_helper_with_redirects():
+    http = _get_redirecting_http()
+    return await http.get(f"{ADMIN_API_URL}/api/features/public", headers={"X-Service-Key": "k"})
 '''
 
 
 def test_tls_rule_planted_self_test():
-    examined = keyed_admin_callers({"planted.py": TLS_PLANTED}, {"planted.py": {"case_1_local"}})
-    flagged = sorted(name for (_rel, name), problems in examined.items() if problems)
-    assert flagged == ["case_1_local", "case_2_global", "case_4_not_a_target", "case_6_redirects"]
-    assert sorted(name for _rel, name in examined) == [
-        "case_1_local", "case_2_global", "case_3_lifespan_shape", "case_4_not_a_target",
-        "case_5_verify_true", "case_6_redirects",
+    examined, how, untraced = keyed_admin_callers(
+        {"planted.py": TLS_PLANTED}, {"planted.py": {"case_1_local"}},
+        {("planted.py", "case_19_allowlisted_parameter"): (1, "planted")})
+    flagged = {name: [what for _l, what in problems] for (_rel, name), problems in examined.items() if problems}
+    assert flagged == {
+        "case_1_local": ["verify=False"],
+        "case_2_global": ["verify=False"],
+        "case_4_not_a_target": ["verify=False"],
+        "case_6_redirects": ["follow_redirects=True"],
+        "case_9_pool": [UNTRACED],
+        "case_10_verify_from_a_name": ["verify=VERIFY_TLS"],
+        "case_11_constructor_kwargs": ["**CLIENT_KWARGS on the client"],
+        "case_12_client_parameter": [UNTRACED],
+        "case_13_redirects_on_the_request": ["follow_redirects=True"],
+        "case_14_request_kwargs": ["**options on the request"],
+        "case_15_one_branch_untraced": [UNTRACED],
+        "case_16_redirects_from_a_name": ["follow_redirects=FOLLOW"],
+        "case_21_helper_with_redirects": ["follow_redirects=True"],
+    }
+    clean = sorted(name for (_rel, name), problems in examined.items() if not problems)
+    assert clean == [
+        "case_17_admin_config_client", "case_18_module_level_httpx", "case_19_allowlisted_parameter",
+        "case_20_same_module_helper", "case_3_lifespan_shape", "case_5_verify_true",
     ]
-    assert [what for _l, what in examined[("planted.py", "case_6_redirects")]] == ["follow_redirects=True"]
+    kinds = {name: kind for (_rel, name), kind in how.items()}
+    assert kinds["case_17_admin_config_client"] == "admin_config_client"
+    assert kinds["case_19_allowlisted_parameter"] == "allowlisted"
+    assert kinds["case_20_same_module_helper"] == "constructor"
+    assert kinds["case_9_pool"] == kinds["case_12_client_parameter"] == kinds["case_15_one_branch_untraced"] == "untraced"
+    assert kinds["case_5_verify_true"] == "constructor"
+    assert untraced[("planted.py", "case_19_allowlisted_parameter")] == 1
+    # Without its allowlist entry the same function is flagged.
+    examined, _how, _untraced = keyed_admin_callers({"planted.py": TLS_PLANTED}, {})
+    assert [what for _l, what in examined[("planted.py", "case_19_allowlisted_parameter")]] == [UNTRACED]
 
 
 # C9 -----------------------------------------------------------------------
@@ -975,11 +1244,30 @@ def refusal_note_problems(source: str):
             problems.append(f"{where}: route is not a string literal")
         elif not route.value.startswith("/api/") or "?" in route.value:
             problems.append(f"{where}: route {route.value!r} is not an /api/ template")
+    # A call under another name would not be seen above at all.
+    problems.extend(f"{lineno} <alias>: {what}" for lineno, what in other_names_for(index.tree, "note_admin_refusal"))
     return index.note_calls, problems
 
 
+def other_names_for(tree, name: str):
+    """[(lineno, what)] for every way `name` could be called under another
+    name: an aliased import, or a reference that isn't itself the call
+    (`note = note_admin_refusal`, `partial(note_admin_refusal, ...)`)."""
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name.split(".")[-1] == name and alias.asname not in (None, name):
+                    found.append((node.lineno, f"imported as {alias.asname}"))
+        elif isinstance(node, (ast.Name, ast.Attribute)) and id(node) not in called:
+            if (node.id if isinstance(node, ast.Name) else node.attr) == name and isinstance(node.ctx, ast.Load):
+                found.append((node.lineno, "referenced without being called"))
+    return sorted(found)
+
+
 def test_refusal_notes_pass_a_static_route_template():
-    marker = re.compile(r"note_admin_refusal\(")
+    marker = re.compile(r"note_admin_refusal")
     calls, files, problems, owners = 0, set(), [], set()
     for rel in _source_files():
         text = _read(rel)
@@ -1029,6 +1317,29 @@ def missing(resp):
     note_admin_refusal(resp.status_code)
 '''
 
+ALIASED_NOTE_PLANTED = '''
+from shared.service_key import note_admin_refusal as note
+from service_key import note_admin_refusal
+import service_key as sk
+
+def aliased_import(resp):
+    note(resp.status_code, str(resp.url))
+
+def module_alias_is_still_seen(resp):
+    sk.note_admin_refusal(resp.status_code, "/api/features/public")
+
+def rebound(resp):
+    report = note_admin_refusal
+    report(resp.status_code, str(resp.url))
+
+def rebound_through_a_module(resp):
+    report = sk.note_admin_refusal
+    report(resp.status_code, str(resp.url))
+
+def partial_application(resp):
+    functools.partial(note_admin_refusal, resp.status_code)(str(resp.url))
+'''
+
 
 def test_route_argument_planted_self_test():
     calls, problems = refusal_note_problems(ROUTE_ARGUMENT_PLANTED)
@@ -1038,3 +1349,92 @@ def test_route_argument_planted_self_test():
         "attribute", "concatenation", "f_string", "missing", "not_an_api_path",
         "stringified_url", "variable", "with_a_query",
     ]
+
+
+def test_refusal_note_under_another_name_is_rejected():
+    calls, problems = refusal_note_problems(ALIASED_NOTE_PLANTED)
+    assert [chain[-1].name for _node, chain in calls] == ["module_alias_is_still_seen"]
+    assert problems == [
+        "2 <alias>: imported as note",
+        "13 <alias>: referenced without being called",
+        "17 <alias>: referenced without being called",
+        "21 <alias>: referenced without being called",
+    ]
+    # The definition and a plain re-export are not aliases.
+    assert other_names_for(ast.parse(_read("src/shared/service_key.py")), "note_admin_refusal") == []
+    shim = (
+        "from shared.service_key import note_admin_refusal, service_key_headers  # noqa: E402\n"
+        "__all__ = ['note_admin_refusal', 'service_key_headers']\n"
+    )
+    assert other_names_for(ast.parse(shim), "note_admin_refusal") == []
+
+
+# The header helper needs shared.config -----------------------------------
+
+# Trees whose image or host has no `shared.config`: jarvis-web copies single
+# files from src/shared beside its main.py, and the Control Agent host gets
+# only src/control_agent/. `service_key_headers()` imports shared.config
+# when it is called, so a call there raises inside a caller's own
+# try/except and turns into a silent default. They send the key from their
+# own configuration instead.
+NO_SHARED_CONFIG_TREES = ("apps/jarvis-web/", "src/control_agent/")
+
+
+def header_helper_uses(source: str):
+    """[(lineno, what)] for every call of, reference to, or aliased import of
+    service_key_headers. A plain import (the local-dev shim's re-export) is
+    not a use."""
+    tree = ast.parse(source)
+    found = [(node.lineno, "called")
+             for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and (node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None))
+             == "service_key_headers"]
+    return sorted(found + other_names_for(tree, "service_key_headers"))
+
+
+def test_trees_without_shared_config_never_use_the_header_helper():
+    files = [rel for rel in _source_files() if rel.startswith(NO_SHARED_CONFIG_TREES)]
+    assert len(files) >= 9, len(files)
+    assert "apps/jarvis-web/backend/main.py" in files
+    assert "src/control_agent/huggingface.py" in files
+    marker = re.compile(r"service_key_headers")
+    uses = [
+        f"{rel}:{lineno} {what}"
+        for rel in files
+        if marker.search(_read(rel))
+        for lineno, what in header_helper_uses(_read(rel))
+    ]
+    assert not uses, f"{len(uses)} use(s) of service_key_headers where shared.config can't be imported: {uses}"
+
+
+HEADER_HELPER_PLANTED = '''
+from service_key import note_admin_refusal, service_key_headers
+from service_key import service_key_headers as key_headers
+import service_key
+
+async def direct(client, u):
+    return await client.get(f"{u}/api/features/public", headers=service_key_headers())
+
+async def through_the_module(client, u):
+    return await client.get(f"{u}/api/features/public", headers=service_key.service_key_headers())
+
+async def aliased(client, u):
+    return await client.get(f"{u}/api/features/public", headers=key_headers())
+
+async def rebound(client, u):
+    build = service_key_headers
+    return await client.get(f"{u}/api/features/public", headers=build())
+
+async def own_constant(client, u):
+    return await client.get(f"{u}/api/features/public", headers={"X-Service-Key": SERVICE_API_KEY})
+'''
+
+
+def test_header_helper_rule_planted_self_test():
+    assert header_helper_uses(HEADER_HELPER_PLANTED) == [
+        (3, "imported as key_headers"), (7, "called"), (10, "called"), (16, "referenced without being called"),
+    ]
+    assert header_helper_uses(
+        "from shared.service_key import note_admin_refusal, service_key_headers\n"
+        "__all__ = ['note_admin_refusal', 'service_key_headers']\n") == []
