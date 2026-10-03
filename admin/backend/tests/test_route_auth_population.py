@@ -1,14 +1,17 @@
 """Every admin-backend route carries a permission-bearing auth dependency,
-or is on one of two reviewed lists.
+or is on the one reviewed public list.
 
 - ``INTENTIONALLY_PUBLIC``: routes that must stay reachable without a
-  credential, each with the precondition that makes that safe.
-- ``UNREVIEWED_UNAUTHENTICATED``: routes that were anonymous when this test
-  was written and haven't been reviewed yet (ATHENA-168). The list is frozen:
-  a new anonymous route fails (b) until it's gated or reviewed here, and
-  gating one of these fails (b) until it's removed from the list.
-- ``GATED``: the routes the guest-data hardening gated, pinned to the exact
-  auth factory and permission each one carries.
+  credential, each with the precondition that makes that safe. Nothing else
+  may answer anonymously: a new anonymous route fails (b) until it's gated.
+- ``GATED``: every reviewed route, pinned to the exact auth factory and
+  permission it carries. It is the guest-data routes plus
+  ``REVIEWED_BY_FILE``, the 93 operations that used to answer anonymously
+  (ATHENA-168), keyed by the route file that defines them.
+
+``REVIEWED_BY_FILE`` and ``REVIEWED_GROUPS`` are pure literals: the stdlib
+scanners under ``tests/unit`` read them with ``ast.literal_eval`` instead of
+importing this module (which imports the app).
 
 Every authenticated route must also carry a permission-bearing dependency:
 one exposing ``required_permission`` (the two factories, memories' reader
@@ -115,43 +118,168 @@ INTENTIONALLY_PUBLIC = {
     ("GET", "/api/settings/privacy/public"): "one boolean; response keys pinned by test h",
 }
 
-_UNREVIEWED_REASON = "anonymous before the guest-data hardening; unreviewed (ATHENA-168)"
-_UNREVIEWED_BY_FILE = {
-    "alerts.py": ["GET /api/alerts/public/active-by-type", "POST /api/alerts/public/create", "POST /api/alerts/public/resolve-by-entity"],
-    "cloud_llm_usage.py": ["GET /api/cloud-llm-usage/alerts", "GET /api/cloud-llm-usage/analytics/by-intent", "GET /api/cloud-llm-usage/analytics/daily", "GET /api/cloud-llm-usage/analytics/hourly", "GET /api/cloud-llm-usage/recent", "GET /api/cloud-llm-usage/summary/month", "GET /api/cloud-llm-usage/summary/range", "GET /api/cloud-llm-usage/summary/today", "GET /api/cloud-llm-usage/summary/week", "POST /api/cloud-llm-usage"],
-    "cloud_providers.py": ["GET /api/cloud-providers", "GET /api/cloud-providers/health/all", "GET /api/cloud-providers/pricing/{provider}", "GET /api/cloud-providers/pricing/{provider}/{model_id}", "GET /api/cloud-providers/{provider}", "GET /api/cloud-providers/{provider}/health"],
-    "component_models.py": ["GET /api/component-models/component/{component_name}", "GET /api/component-models/public"],
-    "directions_settings.py": ["GET /api/directions-settings/public"],
-    "escalation.py": ["GET /api/escalation/metrics/prometheus", "GET /api/escalation/presets/active/public", "GET /api/escalation/presets/public", "GET /api/escalation/state/{session_id}/public", "POST /api/escalation/events/internal", "POST /api/escalation/state/internal", "PUT /api/escalation/state/{session_id}/decrement"],
-    "features.py": ["GET /api/features/public"],
-    "follow_me.py": ["GET /api/follow-me/internal/config"],
-    "gateway_config.py": ["GET /api/gateway-config/public"],
-    "ha_pipelines.py": ["GET /api/ha-pipelines/health", "GET /api/ha-pipelines/modes", "GET /api/ha-pipelines/pipelines", "GET /api/ha-pipelines/pipelines/preferred"],
-    "intent_routing.py": ["GET /api/intent-routing/providers/public", "GET /api/intent-routing/routing/public", "GET /api/intent-routing/strategy/configs/public", "GET /api/intent-routing/strategy/configs/{intent_name}"],
-    "llm_backends.py": ["GET /api/llm-backends/public", "GET /api/llm-backends/public/mlx-applicability", "POST /api/llm-backends/metrics"],
-    "mcp_security.py": ["GET /api/mcp-security/public", "POST /api/mcp-security/check-domain"],
-    "model_config.py": ["GET /api/model-configs/presets", "GET /api/model-configs/public", "GET /api/model-configs/public/{model_name:path}"],
-    "model_downloads.py": ["POST /api/model-downloads/internal/{download_id}/progress"],
-    "modules.py": ["GET /api/modules/", "GET /api/modules/admin-tabs", "GET /api/modules/enabled", "GET /api/modules/{module_id}", "POST /api/modules/refresh-all", "POST /api/modules/{module_id}/refresh"],
-    "music_config.py": ["GET /api/music-config/browser-playback", "GET /api/music-config/internal"],
-    "performance_presets.py": ["GET /api/presets/public/active"],
-    "rag_service_bypass.py": ["GET /api/rag-service-bypass", "GET /api/rag-service-bypass/{service_name}"],
-    "room_audio.py": ["GET /api/room-audio/internal", "GET /api/room-audio/internal/{room_name}"],
-    "room_tv.py": ["GET /api/room-tv/apps", "GET /api/room-tv/features", "GET /api/room-tv/internal", "GET /api/room-tv/internal/{room_name}"],
-    "service_registry.py": ["GET /api/service-registry/services/{service_name}", "GET /api/service-registry/services/{service_name}/url"],
-    "tool_calling.py": ["GET /api/tool-calling/settings/public", "GET /api/tool-calling/tools/by-name/{tool_name}/api-keys/public", "GET /api/tool-calling/tools/stats/public", "GET /api/tool-calling/tools/{tool_id}/api-keys/public", "GET /api/tool-calling/triggers/public"],
-    "tool_proposals.py": ["GET /api/tool-proposals", "GET /api/tool-proposals/stats/summary", "GET /api/tool-proposals/{proposal_id}", "POST /api/tool-proposals"],
-    "voice_config.py": ["GET /api/voice-config/health", "GET /api/voice-config/internal/all", "GET /api/voice-config/internal/stt", "GET /api/voice-config/internal/tts", "GET /api/voice-config/running-config", "GET /api/voice-config/services", "GET /api/voice-config/services/{service_type}", "GET /api/voice-config/stt/active", "GET /api/voice-config/stt/models", "GET /api/voice-config/tts/active", "GET /api/voice-config/tts/voices"],
-    "voice_interfaces.py": ["GET /api/voice-interfaces/engines/public/stt", "GET /api/voice-interfaces/engines/public/tts", "GET /api/voice-interfaces/internal/config/{interface_name}", "GET /api/voice-interfaces/public", "GET /api/voice-interfaces/public/{interface_name}"],
-}
-UNREVIEWED_UNAUTHENTICATED = {
-    tuple(op.split(" ", 1)): _UNREVIEWED_REASON
-    for ops in _UNREVIEWED_BY_FILE.values()
-    for op in ops
+# kind, permission. kind: "service_or_user" (X-Service-Key, or a user holding
+# the permission), "user" (a signed-in user only; any service key is refused),
+# "service" (X-Service-Key only).
+REVIEWED_BY_FILE = {
+    "alerts.py": {
+        ("GET", "/api/alerts/public/active-by-type"): ("user", "read:alerts"),
+        ("POST", "/api/alerts/public/create"): ("service_or_user", "write"),
+        ("POST", "/api/alerts/public/resolve-by-entity"): ("service_or_user", "write"),
+    },
+    "cloud_llm_usage.py": {
+        ("GET", "/api/cloud-llm-usage/alerts"): ("user", "read"),
+        ("GET", "/api/cloud-llm-usage/analytics/by-intent"): ("user", "read"),
+        ("GET", "/api/cloud-llm-usage/analytics/daily"): ("user", "read"),
+        ("GET", "/api/cloud-llm-usage/analytics/hourly"): ("user", "read"),
+        ("GET", "/api/cloud-llm-usage/recent"): ("user", "read"),
+        ("GET", "/api/cloud-llm-usage/summary/month"): ("user", "read"),
+        ("GET", "/api/cloud-llm-usage/summary/range"): ("user", "read"),
+        ("GET", "/api/cloud-llm-usage/summary/today"): ("user", "read"),
+        ("GET", "/api/cloud-llm-usage/summary/week"): ("user", "read"),
+        ("POST", "/api/cloud-llm-usage"): ("service_or_user", "write"),
+    },
+    "cloud_providers.py": {
+        ("GET", "/api/cloud-providers"): ("user", "read"),
+        ("GET", "/api/cloud-providers/health/all"): ("user", "read"),
+        ("GET", "/api/cloud-providers/pricing/{provider}"): ("user", "read"),
+        ("GET", "/api/cloud-providers/pricing/{provider}/{model_id}"): ("service_or_user", "read"),
+        ("GET", "/api/cloud-providers/{provider}"): ("user", "read"),
+        ("GET", "/api/cloud-providers/{provider}/health"): ("user", "read"),
+    },
+    "component_models.py": {
+        ("GET", "/api/component-models/component/{component_name}"): ("service_or_user", "read"),
+        ("GET", "/api/component-models/public"): ("service_or_user", "read"),
+    },
+    "directions_settings.py": {
+        ("GET", "/api/directions-settings/public"): ("service_or_user", "read"),
+    },
+    "escalation.py": {
+        ("GET", "/api/escalation/metrics/prometheus"): ("user", "read"),
+        ("GET", "/api/escalation/presets/active/public"): ("service_or_user", "read"),
+        ("GET", "/api/escalation/presets/public"): ("service_or_user", "read"),
+        ("GET", "/api/escalation/state/{session_id}/public"): ("service_or_user", "read"),
+        ("POST", "/api/escalation/events/internal"): ("service_or_user", "write"),
+        ("POST", "/api/escalation/state/internal"): ("service_or_user", "write"),
+        ("PUT", "/api/escalation/state/{session_id}/decrement"): ("service_or_user", "write"),
+    },
+    "features.py": {
+        ("GET", "/api/features/public"): ("service_or_user", "read"),
+    },
+    "follow_me.py": {
+        ("GET", "/api/follow-me/internal/config"): ("service_or_user", "read"),
+    },
+    "gateway_config.py": {
+        ("GET", "/api/gateway-config/public"): ("service_or_user", "read"),
+    },
+    "ha_pipelines.py": {
+        ("GET", "/api/ha-pipelines/health"): ("user", "read"),
+        ("GET", "/api/ha-pipelines/modes"): ("user", "read"),
+        ("GET", "/api/ha-pipelines/pipelines"): ("user", "read"),
+        ("GET", "/api/ha-pipelines/pipelines/preferred"): ("user", "read"),
+    },
+    "intent_routing.py": {
+        ("GET", "/api/intent-routing/providers/public"): ("service_or_user", "read"),
+        ("GET", "/api/intent-routing/routing/public"): ("service_or_user", "read"),
+        ("GET", "/api/intent-routing/strategy/configs/public"): ("service_or_user", "read"),
+        ("GET", "/api/intent-routing/strategy/configs/{intent_name}"): ("service_or_user", "read"),
+    },
+    "llm_backends.py": {
+        ("GET", "/api/llm-backends/public"): ("service_or_user", "read"),
+        ("GET", "/api/llm-backends/public/mlx-applicability"): ("user", "read"),
+        ("POST", "/api/llm-backends/metrics"): ("service_or_user", "write"),
+    },
+    "mcp_security.py": {
+        ("GET", "/api/mcp-security/public"): ("service_or_user", "read"),
+        ("POST", "/api/mcp-security/check-domain"): ("service_or_user", "read"),
+    },
+    "model_config.py": {
+        ("GET", "/api/model-configs/presets"): ("user", "read"),
+        ("GET", "/api/model-configs/public"): ("service_or_user", "read"),
+        ("GET", "/api/model-configs/public/{model_name:path}"): ("service_or_user", "read"),
+    },
+    "model_downloads.py": {
+        ("POST", "/api/model-downloads/internal/{download_id}/progress"): ("service", None),
+    },
+    "modules.py": {
+        ("GET", "/api/modules/"): ("user", "read"),
+        ("GET", "/api/modules/admin-tabs"): ("user", "read"),
+        ("GET", "/api/modules/enabled"): ("user", "read"),
+        ("GET", "/api/modules/{module_id}"): ("user", "read"),
+        ("POST", "/api/modules/refresh-all"): ("user", "write"),
+        ("POST", "/api/modules/{module_id}/refresh"): ("user", "write"),
+    },
+    "music_config.py": {
+        ("GET", "/api/music-config/browser-playback"): ("user", "read"),
+        ("GET", "/api/music-config/internal"): ("service_or_user", "read"),
+    },
+    "performance_presets.py": {
+        ("GET", "/api/presets/public/active"): ("service_or_user", "read"),
+    },
+    "rag_service_bypass.py": {
+        ("GET", "/api/rag-service-bypass"): ("user", "read"),
+        ("GET", "/api/rag-service-bypass/{service_name}"): ("user", "read"),
+    },
+    "room_audio.py": {
+        ("GET", "/api/room-audio/internal"): ("service_or_user", "read"),
+        ("GET", "/api/room-audio/internal/{room_name}"): ("service_or_user", "read"),
+    },
+    "room_tv.py": {
+        ("GET", "/api/room-tv/apps"): ("service_or_user", "read"),
+        ("GET", "/api/room-tv/features"): ("service_or_user", "read"),
+        ("GET", "/api/room-tv/internal"): ("service_or_user", "read"),
+        ("GET", "/api/room-tv/internal/{room_name}"): ("service_or_user", "read"),
+    },
+    "service_registry.py": {
+        ("GET", "/api/service-registry/services/{service_name}"): ("user", "read"),
+        ("GET", "/api/service-registry/services/{service_name}/url"): ("service_or_user", "read"),
+    },
+    "tool_calling.py": {
+        ("GET", "/api/tool-calling/settings/public"): ("service_or_user", "read"),
+        ("GET", "/api/tool-calling/tools/by-name/{tool_name}/api-keys/public"): ("service_or_user", "read"),
+        ("GET", "/api/tool-calling/tools/stats/public"): ("service_or_user", "read"),
+        ("GET", "/api/tool-calling/tools/{tool_id}/api-keys/public"): ("service_or_user", "read"),
+        ("GET", "/api/tool-calling/triggers/public"): ("service_or_user", "read"),
+    },
+    "tool_proposals.py": {
+        ("GET", "/api/tool-proposals"): ("user", "read"),
+        ("GET", "/api/tool-proposals/stats/summary"): ("user", "read"),
+        ("GET", "/api/tool-proposals/{proposal_id}"): ("user", "read"),
+        ("POST", "/api/tool-proposals"): ("service_or_user", "write"),
+    },
+    "voice_config.py": {
+        ("GET", "/api/voice-config/health"): ("service_or_user", "read"),
+        ("GET", "/api/voice-config/internal/all"): ("service_or_user", "read"),
+        ("GET", "/api/voice-config/internal/stt"): ("service_or_user", "read"),
+        ("GET", "/api/voice-config/internal/tts"): ("service_or_user", "read"),
+        ("GET", "/api/voice-config/running-config"): ("user", "read"),
+        ("GET", "/api/voice-config/services"): ("user", "read"),
+        ("GET", "/api/voice-config/services/{service_type}"): ("user", "read"),
+        ("GET", "/api/voice-config/stt/active"): ("user", "read"),
+        ("GET", "/api/voice-config/stt/models"): ("user", "read"),
+        ("GET", "/api/voice-config/tts/active"): ("user", "read"),
+        ("GET", "/api/voice-config/tts/voices"): ("user", "read"),
+    },
+    "voice_interfaces.py": {
+        ("GET", "/api/voice-interfaces/engines/public/stt"): ("service_or_user", "read"),
+        ("GET", "/api/voice-interfaces/engines/public/tts"): ("service_or_user", "read"),
+        ("GET", "/api/voice-interfaces/internal/config/{interface_name}"): ("service_or_user", "read"),
+        ("GET", "/api/voice-interfaces/public"): ("service_or_user", "read"),
+        ("GET", "/api/voice-interfaces/public/{interface_name}"): ("service_or_user", "read"),
+    },
 }
 
+# The order the routes are gated in (plan steps 6.1, 6.2, 6.3).
+REVIEWED_GROUPS = {
+    "g1": ["alerts.py", "cloud_llm_usage.py", "cloud_providers.py", "escalation.py", "tool_proposals.py", "llm_backends.py", "model_downloads.py", "modules.py", "mcp_security.py"],
+    "g2": ["component_models.py", "directions_settings.py", "features.py", "follow_me.py", "gateway_config.py", "intent_routing.py", "model_config.py", "performance_presets.py", "rag_service_bypass.py", "service_registry.py", "tool_calling.py"],
+    "g3": ["ha_pipelines.py", "music_config.py", "room_audio.py", "room_tv.py", "voice_config.py", "voice_interfaces.py"],
+}
+REVIEWED = {op: pin for ops in REVIEWED_BY_FILE.values() for op, pin in ops.items()}
+PROGRESS_OP = ("POST", "/api/model-downloads/internal/{download_id}/progress")
+
 VA = "/api/voice-automations"
-GATED = {
+GUEST_DATA_GATED = {
     # guests.py
     ("GET", "/api/guests"): ("user", "read"),
     ("GET", "/api/guests/current"): ("user", "read"),
@@ -210,6 +338,7 @@ GATED = {
     ("POST", "/api/internal/emerging-intents/{intent_id}/increment"): ("service_or_user", "write"),
     ("POST", "/api/internal/intent-metrics"): ("service_or_user", "write"),
 }
+GATED = {**GUEST_DATA_GATED, **REVIEWED}
 
 # The hard delete stays user-only: a service key must never reach it
 # (it removes the admin row while the HA automation keeps running).
@@ -252,9 +381,9 @@ def test_walk_is_not_vacuous_and_sees_hidden_routes():
 
 # (b) --------------------------------------------------------------------
 
-def test_unauthenticated_routes_are_exactly_the_reviewed_lists():
+def test_unauthenticated_routes_are_exactly_the_public_list():
     unauth = {(m, p) for m, p, w in _operations(app) if not _is_authenticated(w)}
-    allowed = set(INTENTIONALLY_PUBLIC) | set(UNREVIEWED_UNAUTHENTICATED)
+    allowed = set(INTENTIONALLY_PUBLIC)
     extra = sorted(unauth - allowed)
     missing = sorted(allowed - unauth)
     assert not extra and not missing, (
@@ -266,16 +395,19 @@ def test_unauthenticated_routes_are_exactly_the_reviewed_lists():
 # (c) --------------------------------------------------------------------
 
 def test_lists_are_disjoint_and_reasoned():
-    public, unreviewed, gated = set(INTENTIONALLY_PUBLIC), set(UNREVIEWED_UNAUTHENTICATED), set(GATED)
+    public, gated = set(INTENTIONALLY_PUBLIC), set(GATED)
     assert len(public) == 13
-    assert len(unreviewed) == 93
-    assert len(gated) == 46
-    assert not public & unreviewed
-    assert not public & gated
-    assert not unreviewed & gated
-    assert not USER_ONLY_PINNED & (public | unreviewed | gated)
+    assert len(GUEST_DATA_GATED) == 46
+    assert len(gated) == 139
+    assert sum(len(ops) for ops in REVIEWED_BY_FILE.values()) == 93
+    assert len(REVIEWED_BY_FILE) == 26
+    # No operation under two files, and none already pinned by the
+    # guest-data table (a dict merge would hide either).
+    assert len(REVIEWED) == 93
+    assert not set(REVIEWED) & set(GUEST_DATA_GATED)
+    assert public & gated == set()
+    assert not USER_ONLY_PINNED & (public | gated)
     assert all(r.strip() for r in INTENTIONALLY_PUBLIC.values())
-    assert all(r.strip() for r in UNREVIEWED_UNAUTHENTICATED.values())
 
 
 # (d) --------------------------------------------------------------------
@@ -320,6 +452,41 @@ def test_gated_named_members():
     assert GATED[("POST", "/api/guests/current/add")] == ("user", "write")
     assert GATED[("GET", "/api/user-sessions/device/{device_id}")] == ("service_or_user", "read")
     assert GATED[("GET", "/api/internal/emerging-intents")] == ("service_or_user", "read")
+    assert GATED[("GET", "/api/features/public")] == ("service_or_user", "read")
+    assert GATED[PROGRESS_OP] == ("service", None)
+    assert GATED[("GET", "/api/alerts/public/active-by-type")] == ("user", "read:alerts")
+    assert GATED[("POST", "/api/modules/refresh-all")] == ("user", "write")
+    assert GATED[("POST", "/api/tool-proposals")] == ("service_or_user", "write")
+    assert GATED[("GET", "/api/tool-proposals")] == ("user", "read")
+    # Read by a scraper or the UI, never by a holder of the shared key.
+    assert GATED[("GET", "/api/escalation/metrics/prometheus")] == ("user", "read")
+    assert GATED[("GET", "/api/cloud-providers/{provider}/health")] == ("user", "read")
+
+
+def test_reviewed_table_totals():
+    pins = list(REVIEWED.values())
+    assert collections.Counter(kind for kind, _ in pins) == {"service_or_user": 50, "user": 42, "service": 1}
+    assert collections.Counter(perm for _, perm in pins) == {"read": 81, "read:alerts": 1, "write": 10, None: 1}
+    grouped = [name for files in REVIEWED_GROUPS.values() for name in files]
+    assert sorted(grouped) == sorted(REVIEWED_BY_FILE), "every file is in exactly one group"
+    assert tuple(
+        sum(len(REVIEWED_BY_FILE[name]) for name in REVIEWED_GROUPS[group]) for group in ("g1", "g2", "g3")
+    ) == (42, 23, 28)
+
+
+# The one non-GET that changes nothing: it answers allow/deny for a URL.
+NON_MUTATING_POSTS = {("POST", "/api/mcp-security/check-domain")}
+
+
+def test_reviewed_writes_need_write():
+    non_get = {op: pin for op, pin in REVIEWED.items() if op[0] != "GET"}
+    assert len(non_get) == 12, sorted(non_get)
+    lenient = {op for op, pin in non_get.items() if pin != ("service", None) and pin[1] != "write"}
+    assert lenient == NON_MUTATING_POSTS
+
+
+def test_only_local_login_is_a_public_write():
+    assert {op for op in INTENTIONALLY_PUBLIC if op[0] != "GET"} == {("POST", "/api/auth/local-login")}
 
 
 def test_hard_delete_stays_user_only():
@@ -336,10 +503,26 @@ def test_hard_delete_stays_user_only():
 # (e) --------------------------------------------------------------------
 
 def test_optional_user_is_not_auth():
-    by_op = _walked_by_op()
-    op = ("GET", "/api/cloud-llm-usage/recent")
-    assert op in by_op
-    assert not any(_is_authenticated(w) for w in by_op[op])
+    from app.auth.oidc import get_optional_user
+    from app.utils.service_auth import require_user_permission
+
+    router = APIRouter()
+
+    @router.get("/api/zz-optional")
+    async def optional(user=Depends(get_optional_user)):
+        return {}
+
+    @router.get("/api/zz-optional-and-guarded", dependencies=[Depends(require_user_permission("read"))])
+    async def optional_and_guarded(user=Depends(get_optional_user)):
+        return {}
+
+    toy = FastAPI()
+    toy.include_router(router)
+    walked = {path: w for _m, path, w in _operations(toy)}
+    assert sorted(walked) == ["/api/zz-optional", "/api/zz-optional-and-guarded"]
+    assert get_optional_user in dependency_calls(walked["/api/zz-optional"]), "the walk sees the dependency"
+    assert _is_authenticated(walked["/api/zz-optional"]) is False
+    assert _is_authenticated(walked["/api/zz-optional-and-guarded"]) is True
 
 
 # (f) --------------------------------------------------------------------
@@ -538,10 +721,13 @@ def test_frozen_list_population():
     # not permissioned.
     assert ("DELETE", "/api/voice-automations/{automation_id}") in LEGACY_PERMISSIONLESS
     assert not LEGACY_PERMISSIONLESS & set(GATED)
-    assert not LEGACY_PERMISSIONLESS & (set(INTENTIONALLY_PUBLIC) | set(UNREVIEWED_UNAUTHENTICATED))
-    # Every gated route is permissioned.
+    assert not LEGACY_PERMISSIONLESS & set(INTENTIONALLY_PUBLIC)
+
+
+def test_every_gated_route_is_permissioned():
     by_op = _walked_by_op()
-    assert all(is_permissioned(dependency_calls(w)) for op in GATED for w in by_op[op])
+    bare = sorted(op for op in GATED if not all(is_permissioned(dependency_calls(w)) for w in by_op[op]))
+    assert not bare, f"{len(bare)} gated route(s) with no permission-bearing dependency: {bare}"
 
 
 def test_a_new_bare_user_route_is_not_permissioned():

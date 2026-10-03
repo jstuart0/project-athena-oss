@@ -245,6 +245,25 @@ def viewer_user(db):
 
 
 @pytest.fixture
+def support_user(db):
+    """Create a support user: the viewer's scoped reads (`read:dashboard`,
+    `read:alerts`) plus `read:analytics` and `view_audit`, and no bare
+    `read`."""
+    user = User(
+        authentik_id="support-001",
+        username="support",
+        email="support@example.com",
+        full_name="Support User",
+        role="support",
+        active=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@pytest.fixture
 def operator_user(db):
     """Create an operator user: `read`, `write`, `view_audit` -- notably NOT
     `manage_infrastructure` (ATHENA-118 / D20). Used to prove the owner gate

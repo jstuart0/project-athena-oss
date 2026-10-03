@@ -9,6 +9,10 @@ real route, dependency and handler.
 A negative control repeats the calls with the wrong service key: each
 positive assertion below must be telling a 401 apart from a success.
 
+The reads of the reviewed routes (feature flags, LLM backends, component
+models, escalation) and ``LLMRouter``'s backend lookup are covered the same
+way, on seeded rows so a default can't pass for data.
+
 Not covered here (their modules import the orchestrator runtime, which the
 admin test environment doesn't carry): ``_get_house_layout``,
 ``get_origin_placeholder_patterns`` and the emerging-intent discovery
@@ -25,21 +29,28 @@ import httpx
 import pytest
 
 from app.models import (
-    CalendarEvent, Guest, RoomGroup, RoomGroupAlias, UserSession, VoiceAutomation,
+    CalendarEvent, ComponentModelAssignment, EscalationPreset, EscalationState, Feature, Guest,
+    LLMBackend, RoomGroup, RoomGroupAlias, UserSession, VoiceAutomation,
 )
 from main import app
 from shared.admin_config import AdminConfigClient
-from shared.config import get_config
+from shared.config import _clear_cache_for_tests, get_config
+from shared.llm_router import LLMRouter
 
 
 class _RecordingTransport(httpx.ASGITransport):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.requests = []
+        self.sent = []       # the httpx.Request objects
+        self.statuses = []
 
     async def handle_async_request(self, request):
         self.requests.append((request.method, request.url.path))
-        return await super().handle_async_request(request)
+        self.sent.append(request)
+        response = await super().handle_async_request(request)
+        self.statuses.append(response.status_code)
+        return response
 
 
 @pytest.fixture(autouse=True)
@@ -160,3 +171,139 @@ def test_negative_control_wrong_key_fails_every_call(seeded):
     assert _run(admin.archive_voice_automation(seeded["ana"], "x", **OWNER)) is False
     # Every call really reached the app (and was refused there).
     assert len(transport.requests) == 6
+
+
+# ---------------------------------------------------------------------------
+# The reviewed routes
+# ---------------------------------------------------------------------------
+
+SEAM_COMPONENT = "seam_component"
+REVIEWED_READS = [
+    ("GET", "/api/features/public"),
+    ("GET", "/api/llm-backends/public"),
+    ("GET", f"/api/component-models/component/{SEAM_COMPONENT}"),
+    ("GET", "/api/escalation/presets/active/public"),
+]
+
+
+@pytest.fixture
+def reviewed_seed(client, db):
+    db.add(Feature(name="seam_flag", display_name="Seam flag", category="processing", enabled=True))
+    db.add(LLMBackend(model_name="m-seam", backend_type="mlx", endpoint_url="http://mlx.example:8080", enabled=True))
+    db.add(ComponentModelAssignment(component_name=SEAM_COMPONENT, display_name="Seam component",
+                                    model_name="seam-model:1b", enabled=True))
+    db.add(EscalationPreset(name="seam-preset", is_active=True))
+    db.commit()
+
+
+def _reviewed_reads(admin):
+    admin.enable_feature_flag("use_database_model_config")
+    return (
+        _run(admin.get_feature_flags()),
+        _run(admin.get_llm_backends()),
+        _run(admin.get_component_model(SEAM_COMPONENT)),
+        _run(admin.get_active_escalation_preset()),
+    )
+
+
+def test_reviewed_reads_return_seeded_data_with_the_key(reviewed_seed):
+    key = get_config().service_api_key
+    admin, transport = _admin(key)
+    flags, backends, component, preset = _reviewed_reads(admin)
+    assert flags.get("seam_flag") is True
+    assert "m-seam" in [b["model_name"] for b in backends]
+    assert component is not None and component["model_name"] == "seam-model:1b"
+    assert preset is not None and preset["name"] == "seam-preset"
+    assert transport.requests == REVIEWED_READS
+    for request in transport.sent:
+        assert request.headers.get("X-API-Key") == key, "the client's default header is kept"
+        assert request.headers.get("X-Service-Key") == key, (
+            f"{request.method} {request.url.path} sent no X-Service-Key"
+        )
+
+
+def test_reviewed_reads_fall_back_with_a_wrong_key(reviewed_seed):
+    admin, transport = _admin("wrong-key")
+    flags, backends, component, preset = _reviewed_reads(admin)
+    assert (flags, backends, component, preset) == ({}, [], None, None)
+    assert transport.requests == REVIEWED_READS
+
+
+class _CallerKey:
+    """Gives the caller a different SERVICE_API_KEY from the app's, as two
+    processes would have: the caller's value is in force except while the
+    app is handling a request."""
+
+    def __init__(self, monkeypatch, transport, caller_key):
+        server_key = get_config().service_api_key
+        inner = transport.handle_async_request
+
+        def use(key):
+            monkeypatch.setenv("SERVICE_API_KEY", key)
+            _clear_cache_for_tests()
+
+        async def handle(request):
+            use(server_key)
+            try:
+                return await inner(request)
+            finally:
+                use(caller_key)
+
+        transport.handle_async_request = handle
+        use(caller_key)
+        self.restore = lambda: use(server_key)
+
+
+def _router(monkeypatch, caller_key):
+    router = LLMRouter(admin_url="http://admin", persist_metrics=False)
+    transport = _RecordingTransport(app=app)
+    router.client = httpx.AsyncClient(transport=transport, base_url="http://admin")
+    return router, transport, _CallerKey(monkeypatch, transport, caller_key)
+
+
+def test_llm_router_reads_its_backend_through_the_real_app(reviewed_seed, monkeypatch):
+    key = get_config().service_api_key
+    router, transport, caller = _router(monkeypatch, key)
+    try:
+        config = _run(router._get_backend_config("m-seam"))
+    finally:
+        caller.restore()
+    assert config["backend_type"] == "mlx"
+    assert config["endpoint_url"] == "http://mlx.example:8080"
+    (request,) = transport.sent
+    assert (request.method, request.url.path) == ("GET", "/api/llm-backends/public")
+    assert request.headers.get("X-Service-Key") == key, "the router sent no X-Service-Key"
+    assert "X-API-Key" not in request.headers
+
+
+def test_llm_router_falls_back_when_the_app_refuses_it(reviewed_seed, monkeypatch):
+    router, transport, caller = _router(monkeypatch, "wrong-key")
+    try:
+        config = _run(router._get_backend_config("m-seam"))
+        ollama_url = get_config().ollama_url
+    finally:
+        caller.restore()
+    assert transport.statuses == [401]
+    assert config["backend_type"] == "ollama"
+    assert config["endpoint_url"] == ollama_url
+    assert (config["max_tokens"], config["timeout_seconds"]) == (2048, 60)
+
+
+def _stored_state(db, session_id):
+    db.expire_all()
+    row = db.query(EscalationState).filter(EscalationState.session_id == session_id).first()
+    return None if row is None else (row.escalated_to, row.turns_remaining)
+
+
+def test_escalation_state_write_through_the_real_app(client, db):
+    admin, _ = _admin(get_config().service_api_key)
+    assert _run(admin.update_escalation_state("seam-session", "complex", 3)) is True
+    state = _run(admin.get_escalation_state("seam-session"))
+    assert (state["escalated_to"], state["turns_remaining"]) == ("complex", 3)
+    assert _stored_state(db, "seam-session") == ("complex", 3)
+
+    refused, transport = _admin("wrong-key")
+    assert _run(refused.update_escalation_state("seam-session", "super_complex", 9)) is False
+    assert _run(refused.get_escalation_state("seam-session")) is None
+    assert transport.statuses == [401, 401]
+    assert _stored_state(db, "seam-session") == ("complex", 3)
