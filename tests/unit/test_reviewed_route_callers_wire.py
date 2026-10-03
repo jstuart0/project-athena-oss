@@ -16,8 +16,11 @@ Two environments run this file. jarvis-web's ``main.py`` imports only in
 the jarvis-web environment (its own requirements, no ``shared.config``);
 every other caller imports only where ``shared.config`` does. A case whose
 environment isn't the current one is skipped with that reason, so each CI
-job runs its own cases and a laptop with both runs them all. Test ids start
-with ``area_shared__``, ``area_orchestrator__`` or ``area_edge__``.
+job runs its own cases and a laptop with both runs them all.
+
+Every test that drives a caller carries that caller's id, which starts with
+``area_shared__``, ``area_orchestrator__`` or ``area_edge__``; ``-k`` on one
+of those selects everything for that area.
 """
 from __future__ import annotations
 
@@ -734,8 +737,9 @@ def test_refusal_falls_back_to_the_default(case, status, prepare):
 
 # W4 -----------------------------------------------------------------------
 
-def test_llm_backend_fallback_is_not_cached(prepare):
-    transport, call, _default = prepare(_case("src/shared/llm_router.py", "_get_backend_config"))
+@_by_id(_named(("src/shared/llm_router.py", "_get_backend_config")))
+def test_llm_backend_fallback_is_not_cached(case, prepare):
+    transport, call, _default = prepare(case)
     transport.script = [(401, {"detail": "refused"}), (200, BACKEND_ROWS)]
     _ollama_fallback(_run(call()))
     recovered = _run(call())
@@ -745,10 +749,9 @@ def test_llm_backend_fallback_is_not_cached(prepare):
 
 # W5 -----------------------------------------------------------------------
 
-def test_feature_config_default_is_not_cached(prepare, monkeypatch):
-    if not _HAS_SHARED_CONFIG:
-        pytest.skip("runs in orchestrator-behaviour")
-    transport, _call, _default = prepare(_case("src/orchestrator/helpers.py", "get_feature_config"))
+@_by_id(_named(("src/orchestrator/helpers.py", "get_feature_config")))
+def test_feature_config_default_is_not_cached(case, prepare):
+    transport, _call, _default = prepare(case)
     helpers = sys.modules["orchestrator.helpers"]
     runtime = sys.modules["orchestrator.nodes._runtime"]
     runtime.get_orch_feature_flag_cache().clear()
@@ -782,10 +785,14 @@ def test_unset_key_sends_no_header(case, prepare, monkeypatch):
 
 # W7 -----------------------------------------------------------------------
 
-def test_control_agent_warns_once_when_its_key_is_unset(prepare, monkeypatch, captured_logs):
+CONTROL_AGENT_CASE = _named(("src/control_agent/huggingface.py", "send_progress_callback"))
+
+
+@_by_id(CONTROL_AGENT_CASE)
+def test_control_agent_warns_once_when_its_key_is_unset(case, prepare, monkeypatch, captured_logs):
     monkeypatch.delenv("SERVICE_API_KEY", raising=False)
     _clear_config_caches()
-    transport, call, _default = prepare(_case("src/control_agent/huggingface.py", "send_progress_callback"))
+    transport, call, _default = prepare(case)
     _run(call())
     _run(call())
     assert len(transport.targeted) == 2, "the callback is still attempted"
@@ -807,8 +814,9 @@ def _progress_body_keys():
     raise AssertionError("PROGRESS_BODY_KEYS not found as a literal")
 
 
-def test_control_agent_body_keys_are_the_route_contract(prepare):
-    transport, call, _default = prepare(_case("src/control_agent/huggingface.py", "send_progress_callback"))
+@_by_id(CONTROL_AGENT_CASE)
+def test_control_agent_body_keys_are_the_route_contract(case, prepare):
+    transport, call, _default = prepare(case)
     _run(call())
     (request,) = transport.targeted
     expected = {
@@ -850,8 +858,9 @@ def test_refusal_cases_population():
 
 # W9a ----------------------------------------------------------------------
 
-def test_a_route_s_own_503_is_not_a_refusal(prepare, captured_logs):
-    transport, call, _default = prepare(_case("src/shared/service_registry.py", "get_service_url"))
+@_by_id(_named(("src/shared/service_registry.py", "get_service_url")))
+def test_a_route_s_own_503_is_not_a_refusal(case, prepare, captured_logs):
+    transport, call, _default = prepare(case)
     transport.script = [(503, {"detail": "Service is disabled"})]
     assert _run(call()) is None
     assert any("disabled" in str(r.get("event", "")).lower() for r in captured_logs), captured_logs
