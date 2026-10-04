@@ -16,12 +16,12 @@ import structlog
 import httpx
 
 from app.database import get_db
-from app.auth.oidc import get_current_user, get_optional_user
+from app.auth.oidc import get_current_user
 from app.models import (
     User, CloudLLMProvider, CloudLLMModelPricing, CloudLLMUsage, ExternalAPIKey
 )
 from app.utils.encryption import encrypt_value, decrypt_value
-from app.utils.service_auth import verify_service_api_key
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission, verify_service_api_key
 
 logger = structlog.get_logger()
 
@@ -127,11 +127,10 @@ class HealthCheckResponse(BaseModel):
 # Provider Management Routes
 # =============================================================================
 
-@router.get("", response_model=List[CloudProviderResponse])
+@router.get("", response_model=List[CloudProviderResponse], dependencies=[Depends(require_user_permission("read"))])
 async def list_providers(
     enabled_only: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """List all cloud LLM providers."""
     query = db.query(CloudLLMProvider)
@@ -157,11 +156,10 @@ async def list_providers(
     return result
 
 
-@router.get("/{provider}", response_model=CloudProviderResponse)
+@router.get("/{provider}", response_model=CloudProviderResponse, dependencies=[Depends(require_user_permission("read"))])
 async def get_provider(
     provider: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """Get specific cloud provider configuration."""
     config = db.query(CloudLLMProvider).filter(
@@ -374,10 +372,9 @@ async def remove_api_key(
 # Health Check Routes
 # =============================================================================
 
-@router.get("/health/all")
+@router.get("/health/all", dependencies=[Depends(require_user_permission("read"))])
 async def check_all_providers_health(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """Check health of all enabled cloud providers."""
     providers = db.query(CloudLLMProvider).filter(
@@ -395,11 +392,10 @@ async def check_all_providers_health(
     return results
 
 
-@router.get("/{provider}/health")
+@router.get("/{provider}/health", dependencies=[Depends(require_user_permission("read"))])
 async def get_provider_health(
     provider: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """Get health status for a specific provider and trigger a new health check."""
     config = db.query(CloudLLMProvider).filter(
@@ -553,11 +549,10 @@ async def check_provider_health(provider: str, db: Session) -> Dict[str, Any]:
 # Model Pricing Routes
 # =============================================================================
 
-@router.get("/pricing/{provider}")
+@router.get("/pricing/{provider}", dependencies=[Depends(require_user_permission("read"))])
 async def list_model_pricing(
     provider: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """List all model pricing for a provider."""
     pricing = db.query(CloudLLMModelPricing).filter(
@@ -568,7 +563,7 @@ async def list_model_pricing(
     return [p.to_dict() for p in pricing]
 
 
-@router.get("/pricing/{provider}/{model_id}")
+@router.get("/pricing/{provider}/{model_id}", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_model_pricing(
     provider: str,
     model_id: str,
@@ -624,7 +619,7 @@ async def create_model_pricing(
 
 
 # =============================================================================
-# Public Endpoints (No Auth Required)
+# Service Endpoints (X-Service-Key required)
 # =============================================================================
 
 @router.get("/public/enabled")

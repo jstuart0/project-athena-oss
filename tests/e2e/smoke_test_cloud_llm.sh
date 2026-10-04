@@ -7,12 +7,19 @@
 # Required env vars:
 #   SERVICE_API_KEY  — service-to-service key for authenticated admin endpoints.
 #                      Must match the value configured in the admin backend.
+# Optional env vars:
+#   TEST_API_KEY     — a user API key (X-API-Key) for the admin routes that
+#                      need a signed-in user; without it those checks are skipped.
 
 set -e
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-http://localhost:8001}"
 ADMIN_URL="${ADMIN_URL:-http://localhost:8080}"
+USER_AUTH=()
+if [[ -n "${TEST_API_KEY:-}" ]]; then
+    USER_AUTH=(-H "X-API-Key: ${TEST_API_KEY}")
+fi
 
 echo "=== Cloud LLM Smoke Test ==="
 echo "Gateway: $GATEWAY_URL"
@@ -49,7 +56,7 @@ fi
 
 # Test 4: Cloud providers endpoint
 echo -n "4. Cloud Providers API... "
-PROVIDERS=$(curl -sf "${ADMIN_URL}/api/cloud-providers" 2>/dev/null || echo "error")
+PROVIDERS=$(curl -sf "${USER_AUTH[@]}" "${ADMIN_URL}/api/cloud-providers" 2>/dev/null || echo "error")
 if [[ "$PROVIDERS" != "error" ]]; then
     echo "OK"
 else
@@ -79,7 +86,7 @@ fi
 
 # Test 7: Cloud usage endpoint
 echo -n "7. Cloud Usage API... "
-USAGE=$(curl -sf "${ADMIN_URL}/api/cloud-llm-usage/summary/today" 2>/dev/null || echo "error")
+USAGE=$(curl -sf "${USER_AUTH[@]}" "${ADMIN_URL}/api/cloud-llm-usage/summary/today" 2>/dev/null || echo "error")
 if [[ "$USAGE" != "error" ]]; then
     echo "OK"
 else

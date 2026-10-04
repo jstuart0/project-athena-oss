@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 import structlog
 
 from app.database import get_db
-from app.utils.service_auth import require_service_or_user_permission
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 from app.auth.oidc import get_current_user
 from app.models import User, LLMBackend, LLMPerformanceMetric
 from datetime import datetime
@@ -126,17 +126,18 @@ class LLMMetricCreate(BaseModel):
 
 # API Routes
 
-# Public endpoint (no auth) for services to query LLM backends
-@router.get("/public", response_model=List[LLMBackendResponse])
+# Service endpoint for services to query LLM backends
+@router.get("/public", response_model=List[LLMBackendResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_backends_public(
     enabled_only: bool = False,
     db: Session = Depends(get_db)
 ):
     """
-    List all LLM backend configurations (public endpoint, no auth required).
+    List all LLM backend configurations.
 
-    This endpoint is used by services (Gateway, Orchestrator, etc.) to check
-    LLM backend configuration without requiring authentication.
+    Used by services (Gateway, Orchestrator, etc.) to check LLM backend
+    configuration. Requires X-Service-Key, or a signed-in user with read
+    permission.
 
     Query params:
     - enabled_only: If true, only return enabled backends
@@ -159,8 +160,8 @@ async def list_backends_public(
     ]
 
 
-# Public endpoint for MLX applicability data
-@router.get("/public/mlx-applicability")
+# MLX applicability data for the admin UI
+@router.get("/public/mlx-applicability", dependencies=[Depends(require_user_permission("read"))])
 async def get_mlx_applicability(db: Session = Depends(get_db)):
     """
     Get MLX applicability data for components and models.
@@ -171,7 +172,7 @@ async def get_mlx_applicability(db: Session = Depends(get_db)):
     - Whether the mlx_backend feature flag is enabled
     - Summary of MLX usage across the system
 
-    This is a public endpoint for use by frontend and services.
+    Used by the admin UI; requires a signed-in user with read permission.
     """
     from app.models import Feature, ComponentModelAssignment, GatewayConfig
 
@@ -388,7 +389,7 @@ async def get_metrics(
     ]
 
 
-@router.post("/metrics", status_code=201)
+@router.post("/metrics", status_code=201, dependencies=[Depends(require_service_or_user_permission("write"))])
 async def create_metric(
     metric: LLMMetricCreate,
     db: Session = Depends(get_db)
@@ -396,8 +397,8 @@ async def create_metric(
     """
     Store LLM performance metric in database.
 
-    This endpoint is called internally by the LLM Router to persist metrics.
-    No authentication required for internal service-to-service calls.
+    Called by the LLM Router to persist metrics. Requires X-Service-Key, or
+    a signed-in user with write permission.
 
     Returns:
         201: Metric created successfully

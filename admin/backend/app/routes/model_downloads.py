@@ -641,7 +641,7 @@ class ProgressUpdateRequest(BaseModel):
     ollama_imported: bool = False
 
 
-@router.post("/internal/{download_id}/progress")
+@router.post("/internal/{download_id}/progress", dependencies=[Depends(verify_service_api_key)])
 async def update_download_progress(
     download_id: int,
     request: ProgressUpdateRequest,
@@ -650,11 +650,8 @@ async def update_download_progress(
     """
     Update download progress (called by Control Agent).
 
-    NOTE: Auth on this endpoint is intentionally deferred.
-    The Control Agent runs out-of-cluster (on the Ollama host) and distributing
-    SERVICE_API_KEY to external hosts was descoped (see xander:2 deferred items).
-    When xander:2 is addressed, add Depends(verify_service_api_key) and inject
-    SERVICE_API_KEY into the Control Agent environment.
+    Service-only: requires the X-Service-Key the Control Agent sends on its
+    callback.
     """
     download = db.query(ModelDownload).filter(ModelDownload.id == download_id).first()
     if not download:

@@ -9,7 +9,7 @@ import os
 import httpx
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -19,6 +19,7 @@ from app.database import get_db
 from app.models import ToolProposal, User, SystemSetting, ExternalAPIKey, ToolRegistry
 from app.auth.oidc import get_current_user
 from app.utils.encryption import decrypt_value
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 
 logger = structlog.get_logger()
 
@@ -59,6 +60,7 @@ class ToolProposalCreate(BaseModel):
     description: str
     trigger_phrases: List[str]
     workflow_definition: dict
+    # Accepted for older callers and ignored: the server sets the author.
     created_by: str = "llm"
 
 
@@ -76,7 +78,7 @@ class ToolProposalReject(BaseModel):
 # List and Get Proposals
 # =============================================================================
 
-@router.get("", response_model=List[ToolProposalResponse])
+@router.get("", response_model=List[ToolProposalResponse], dependencies=[Depends(require_user_permission("read"))])
 async def list_tool_proposals(
     status: Optional[str] = Query(None, description="Filter by status (pending, approved, rejected, deployed, failed)"),
     limit: int = Query(50, ge=1, le=200),
@@ -86,7 +88,7 @@ async def list_tool_proposals(
     """
     List tool proposals with optional status filter.
 
-    No authentication required for listing (read-only).
+    Requires a signed-in user with read permission.
     """
     try:
         query = db.query(ToolProposal)
@@ -121,7 +123,7 @@ async def list_tool_proposals(
         raise HTTPException(status_code=500, detail=f"Failed to list proposals: {str(e)}")
 
 
-@router.get("/{proposal_id}")
+@router.get("/{proposal_id}", dependencies=[Depends(require_user_permission("read"))])
 async def get_tool_proposal(
     proposal_id: str,
     db: Session = Depends(get_db)
@@ -143,15 +145,25 @@ async def get_tool_proposal(
 # Create Proposal
 # =============================================================================
 
-@router.post("", response_model=ToolProposalResponse)
+def _proposal_author(request: Request) -> str:
+    """Who created a proposal, from the credential the guard accepted."""
+    if request.state.auth_kind == "user":
+        return f"user:{request.state.auth_user.id}"
+    return "llm"
+
+
+@router.post("", response_model=ToolProposalResponse, dependencies=[Depends(require_service_or_user_permission("write"))])
 async def create_tool_proposal(
     data: ToolProposalCreate,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
     Create a new tool proposal.
 
-    Called by the LLM when it proposes a new tool.
+    Called by the LLM when it proposes a new tool (X-Service-Key), or by a
+    signed-in user with write permission. The author is set from the
+    credential, never from the request body.
     If auto-approve is enabled, the proposal is automatically approved.
     """
     import secrets
@@ -178,7 +190,7 @@ async def create_tool_proposal(
             description=data.description,
             trigger_phrases=data.trigger_phrases,
             workflow_definition=data.workflow_definition,
-            created_by=data.created_by,
+            created_by=_proposal_author(request),
             status=initial_status,
             approved_at=datetime.utcnow() if auto_approve else None,
         )
@@ -711,7 +723,7 @@ async def delete_tool_proposal(
 # Stats
 # =============================================================================
 
-@router.get("/stats/summary")
+@router.get("/stats/summary", dependencies=[Depends(require_user_permission("read"))])
 async def get_tool_proposal_stats(db: Session = Depends(get_db)):
     """Get summary statistics for tool proposals."""
     from sqlalchemy import func

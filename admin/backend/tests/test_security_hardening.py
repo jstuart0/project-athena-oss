@@ -639,27 +639,29 @@ class TestToolCallingMetricsRecordProtected:
         assert "metric_id" in data
 
 
-class TestModelDownloadProgressOpen:
-    """
-    Model download progress callback is intentionally open (no service key required).
+class TestModelDownloadProgressProtected:
+    """The model download progress callback is service-only: the Control Agent
+    sends X-Service-Key on it."""
 
-    Auth on this endpoint is deferred because the Control Agent runs out-of-cluster
-    on the Ollama host and distributing SERVICE_API_KEY there was descoped (xander:2).
-    When xander:2 is resolved, this class should be replaced with
-    TestModelDownloadProgressProtected (422/401 assertions).
-    """
+    PROGRESS = "/api/model-downloads/internal/1/progress"
+    BODY = {"status": "downloading", "progress_percent": 50}
 
-    def test_progress_callback_without_key_not_rejected_by_auth(self, app_client):
-        """/api/model-downloads/internal/{id}/progress must NOT return 422/401 for missing key."""
-        r = app_client.post(
-            "/api/model-downloads/internal/1/progress",
-            json={"status": "downloading", "progress_percent": 50},
+    def test_progress_callback_without_key_returns_422(self, app_client):
+        r = app_client.post(self.PROGRESS, json=self.BODY)
+        assert r.status_code == 422, (
+            f"Expected 422 (missing required service header) for the progress callback, got {r.status_code}"
         )
-        # 404 (download not found in test DB) or 200 is acceptable; 422/401 is not
-        assert r.status_code not in (422, 401), (
-            f"Progress callback endpoint must not require X-Service-Key (auth deferred, xander:2); "
-            f"got {r.status_code}"
-        )
+
+    def test_progress_callback_wrong_key_returns_401(self, app_client):
+        r = app_client.post(self.PROGRESS, json=self.BODY, headers={"X-Service-Key": "bad-key"})
+        assert r.status_code == 401
+
+    def test_progress_callback_with_the_key_reaches_the_handler(self, app_client):
+        from shared.config import get_config
+
+        r = app_client.post(self.PROGRESS, json=self.BODY, headers={"X-Service-Key": get_config().service_api_key})
+        # No download row 1 in the test database: the handler's own answer.
+        assert r.status_code == 404
 
 
 class TestServiceToggleProtected:
