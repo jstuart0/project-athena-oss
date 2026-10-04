@@ -166,10 +166,14 @@ def _profile_logs(logs):
 
 def test_owner_launch_of_a_profile_screen_app_presses_select(admin, sleep, denied_total, captured_logs):
     ha = _RecordingHA()
+    # The wait and the writes in one list: the profile screen needs the delay
+    # before the press, not after it.
+    order = ha.made
+    sleep.side_effect = lambda seconds: order.append(("sleep", seconds))
     result, scope = _launch(ha, mode="owner")
 
     assert result["success"] is True
-    assert ha.made == [SELECT_SOURCE, SEND_SELECT], "two writes, in order"
+    assert order == [SELECT_SOURCE, ("sleep", PROFILE_DELAY_MS / 1000), SEND_SELECT], "open, wait, then press"
     sleep.assert_awaited_once_with(PROFILE_DELAY_MS / 1000)
     assert scope.denials == [] and scope.allowed_writes == 2
     assert denied_total.increments == 0
@@ -203,6 +207,28 @@ def test_owner_launch_with_the_flag_off_makes_one_write(admin, sleep, denied_tot
 
     assert result["success"] is True
     assert ha.made == [SELECT_SOURCE]
+    sleep.assert_not_awaited()
+    assert scope.denials == []
+
+
+def test_owner_launch_of_an_app_without_a_profile_screen_makes_one_write(admin, sleep, denied_total):
+    ha = _RecordingHA()
+    result, scope = _launch(ha, mode="owner", app="Hulu")
+
+    assert admin.auto_profile_select is True, "the flag is on: only the app's own setting holds the press back"
+    assert result["success"] is True
+    assert ha.attempted == [_select_source("Hulu")]
+    sleep.assert_not_awaited()
+    assert scope.denials == []
+
+
+def test_owner_launch_of_an_app_not_in_the_list_makes_one_write(admin, sleep, denied_total):
+    ha = _RecordingHA()
+    assert "Twitch" not in [app["app_name"] for app in admin.apps]
+    result, scope = _launch(ha, mode="owner", app="Twitch")
+
+    assert result["success"] is True
+    assert ha.attempted == [_select_source("Twitch")]
     sleep.assert_not_awaited()
     assert scope.denials == []
 

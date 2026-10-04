@@ -54,6 +54,10 @@ os.environ.setdefault("ADMIN_API_URL", "http://admin-backend:8080")  # same valu
 from shared import service_key  # noqa: E402
 
 WIRE_KEY = "wire-test-key"
+# What the key is changed to once a caller has been imported and set up: a
+# caller that kept the value it saw at import (or at construction) sends
+# WIRE_KEY and fails W2.
+ROTATED_KEY = "wire-test-key-rotated"
 ADMIN_URL = "http://admin-backend:8080"
 # Module constants that hold the admin URL as it was when the module was
 # first imported (possibly by another test file, with no URL configured).
@@ -743,14 +747,25 @@ def test_every_caller_file_has_a_wire_case():
 
 # W2 -----------------------------------------------------------------------
 
+def _rotate_key(case, monkeypatch):
+    """Change the configured key after the caller is imported and set up.
+    jarvis-web keeps its key in a module constant by design (it has no
+    shared.config), so there the constant is what changes."""
+    monkeypatch.setenv("SERVICE_API_KEY", ROTATED_KEY)
+    _clear_config_caches()
+    if case.env == "jarvis_web":
+        monkeypatch.setattr(_jarvis_main(), "SERVICE_API_KEY", ROTATED_KEY)
+
+
 @_by_id(WIRE_CASES)
-def test_request_carries_the_configured_key(case, prepare):
+def test_request_carries_the_configured_key(case, prepare, monkeypatch):
     transport, call, _default = prepare(case)
+    _rotate_key(case, monkeypatch)
     _run(call())
     sent = [(r.method, r.url.path) for r in transport.targeted]
     assert sent == list(case.requests)
     for request in transport.targeted:
-        assert request.headers.get("X-Service-Key") == WIRE_KEY, (
+        assert request.headers.get("X-Service-Key") == ROTATED_KEY, (
             f"{request.method} {request.url.path} sent X-Service-Key={request.headers.get('X-Service-Key')!r}"
         )
         assert "Authorization" not in request.headers
@@ -916,10 +931,34 @@ def test_a_route_s_own_503_is_not_a_refusal(case, prepare, captured_logs):
 
 # W9b ----------------------------------------------------------------------
 
-@_by_id(UNSET_KEY_CASES)
+@_by_id(WIRE_CASES)
 def test_a_transport_error_is_not_a_refusal(case, prepare, captured_logs):
+    """Every caller, the ones that used to skip certificate verification
+    included: a connection that fails gives the default and no refusal line."""
     transport, call, check_default = prepare(case)
     transport.error = lambda request: httpx.ConnectError("connection refused", request=request)
     check_default(_run(call()))
-    assert len(transport.targeted) == len(case.requests)
+    # A caller with two requests to the same host may stop at the first
+    # failure (`_load_engines` does); none retries.
+    assert 1 <= len(transport.targeted) <= len(case.requests)
     assert _refused(captured_logs) == []
+
+
+# W4 for jarvis-web ----------------------------------------------------------
+
+@_by_id(_named(("apps/jarvis-web/backend/main.py", "get_persistent_sessions_config")))
+def test_jarvis_web_refusal_does_not_extend_a_stale_feature_cache(case, prepare):
+    """A refusal doesn't count as a fresh read: with an expired cache that
+    says the feature is off, a refused refresh answers from it once, and the
+    next call asks again and gets the real value."""
+    transport, _call, _default = prepare(case)
+    main = _jarvis_main()
+    main._feature_cache = {"persistent_chat_sessions": {"name": "persistent_chat_sessions", "enabled": False}}
+    main._feature_cache_time = 0.0
+    transport.script = [(401, {"detail": "refused"}), case.ok]
+    try:
+        assert _run(main.get_persistent_sessions_config()) is None
+        assert _run(main.get_persistent_sessions_config()) == {"a": 1}
+        assert len(transport.targeted) == 2
+    finally:
+        main._feature_cache, main._feature_cache_time = {}, 0.0

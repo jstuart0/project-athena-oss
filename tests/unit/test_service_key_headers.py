@@ -954,6 +954,38 @@ def test_control_agent_reports_a_keyless_422_as_a_refusal(why, monkeypatch, capt
     assert [r for r in captured_logs if r.get("event") == "callback_failed"] == []
 
 
+def test_control_agent_refusal_line_returns_after_a_minute(monkeypatch, captured_logs):
+    """The agent's inline once-a-minute rule (the helper's, without the
+    helper): refused at 0, 59 and 60 seconds, logged at 0 and 60."""
+    import asyncio
+    import importlib
+
+    import httpx
+
+    agent = importlib.import_module("control_agent.huggingface")
+    agent._reset_callback_log_state_for_tests()
+    monkeypatch.setenv("SERVICE_API_KEY", AGENT_KEY)
+    monkeypatch.setenv("ALLOWED_CALLBACK_HOSTS", "admin")
+    now = [0.0]
+    monkeypatch.setattr(agent, "_clock", lambda: now[0])
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda *args, **kwargs: real_client(
+            *args, transport=httpx.MockTransport(lambda request: httpx.Response(401, json={})), **kwargs))
+    lines_after = []
+    loop = asyncio.new_event_loop()
+    try:
+        for second in (0.0, 59.0, 60.0):
+            now[0] = second
+            loop.run_until_complete(agent.send_progress_callback(CALLBACK_BASE, 7, "downloading"))
+            lines_after.append(len(_agent_refusals(captured_logs)))
+    finally:
+        loop.close()
+        agent._reset_callback_log_state_for_tests()
+    assert lines_after == [1, 1, 2]
+
+
 def test_control_agent_keeps_a_keyed_422_as_a_failed_callback(monkeypatch, captured_logs):
     """The body was refused, not the credential: no refusal line."""
     recorded = _drive_progress_callback(monkeypatch, AGENT_KEY, status=422)
