@@ -11,9 +11,9 @@ Ids are ``g<group>_<route file>_<n>-<case>``. The groups are the order the
 routes are gated in (42, 23 and 28 routes), and the write tests carry their
 route's group id too, so ``-k`` selects a group's whole gate:
 
-- ``-k g1_``: 492 tests (462 matrix cases, 30 write and author tests);
-- ``-k "g1_ or g2_"``: 748 (715 matrix cases, 33 others);
-- the whole matrix: 1023 cases (93 routes x 11 credentials).
+- ``-k g1_``: 576 tests (546 matrix cases, 30 write and author tests);
+- ``-k "g1_ or g2_"``: 878 (845 matrix cases, 33 others);
+- the whole matrix: 1209 cases (93 routes x 13 credentials).
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ PROGRESS_BODY_KEYS = (
 
 CASES = (
     "none", "svc_correct", "svc_wrong", "svc_unset", "svc_non_ascii", "operator", "viewer",
-    "owner_svc_wrong", "owner_svc_non_ascii", "dev_none", "dev_svc_wrong",
+    "owner_svc_wrong", "owner_svc_non_ascii", "owner_svc_unset", "owner_svc_empty", "dev_none", "dev_svc_wrong",
 )
 
 OPS = [
@@ -131,7 +131,7 @@ _BODY = {
         "tokens": 10, "tokens_per_second": 20.0},
     ("POST", "/api/mcp-security/check-domain"): {"url": "https://mcp.example.org/sse"},
     PROGRESS_OP: {
-        "status": "processing", "progress_percent": 50.0, "downloaded_bytes": 1024, "error_message": None,
+        "status": "downloading", "progress_percent": 50.0, "downloaded_bytes": 1024, "error_message": None,
         "download_path": None, "ollama_model_name": None, "ollama_imported": False},
     ("POST", "/api/tool-proposals"): {
         "name": "zz_tool", "description": "A tool", "trigger_phrases": ["do the thing"],
@@ -347,6 +347,11 @@ def _creds(case, *, owner, viewer, operator, monkeypatch, config_env):
         headers = {**_bearer(owner), "X-Service-Key": "wrong-key"}
     elif case == "owner_svc_non_ascii":
         headers = {**_bearer(owner), "X-Service-Key": b"k\xff"}
+    elif case == "owner_svc_unset":
+        config_env("SERVICE_API_KEY", "")
+        headers = {**_bearer(owner), "X-Service-Key": "anything"}
+    elif case == "owner_svc_empty":
+        headers = {**_bearer(owner), "X-Service-Key": ""}
     else:
         raise AssertionError(case)
     if case.startswith("dev_"):
@@ -368,6 +373,15 @@ EXPECTED = {
     # A key that can't even be compared is still a key: no fall-through to
     # the valid user sent with it.
     "owner_svc_non_ascii": (401, 401, 401),
+    # A key sent while none is configured is a misconfiguration to report,
+    # whoever else the request says it is.
+    "owner_svc_unset": (503, 401, 503),
+    # An empty key header. Where a service or a user may call, it counts as
+    # no key and the request is that user's (a decision, not an accident:
+    # callers and proxies send an empty header when no key is set, and it
+    # carries no authority). The user-only guard refuses any key header it
+    # is sent, empty or not, and the service-only guard has nothing to match.
+    "owner_svc_empty": (P, 401, 401),
     "dev_none":        (P, P, 422),
     "dev_svc_wrong":   (401, 401, 401),
 }
@@ -386,8 +400,8 @@ def _expected(op, case):
 
 def test_matrix_population():
     assert len(OPS) == 93
-    assert len(MATRIX) == 1023
-    assert len(set(MATRIX_IDS)) == 1023
+    assert len(MATRIX) == 1209
+    assert len(set(MATRIX_IDS)) == 1209
     pattern = re.compile(r"^g[123]_[a-z_]+_\d+-[a-z_]+$")
     assert all(pattern.match(case_id) for case_id in MATRIX_IDS)
     by_group = {group: sum(1 for op_id, _ in OPS if op_id.startswith(group + "_")) for group in ("g1", "g2", "g3")}
@@ -396,7 +410,7 @@ def test_matrix_population():
     assert OP_ID[PROGRESS_OP].startswith("g1_")
     assert OP_ID[("GET", "/api/voice-config/running-config")].startswith("g3_")
     assert {case for _i, _o, case in MATRIX} == set(EXPECTED) == set(CASES)
-    assert len(CASES) == 11
+    assert len(CASES) == 13
 
 
 # B2 -----------------------------------------------------------------------
@@ -433,6 +447,9 @@ def test_first_match_self_test():
     assert _first_match("GET", "/api/tool-proposals/stats/summary") == "/api/tool-proposals/stats/summary"
     assert _first_match("GET", "/api/cloud-providers/health/all") == "/api/cloud-providers/health/all"
     assert _first_match("GET", "/api/zz-no-such-route") is None
+    # Outside the reviewed routes, so the matrix doesn't hold it: a static
+    # route that sat behind /api/room-tv/{room_name} until the reorder.
+    assert _first_match("GET", "/api/room-tv/discover") == "/api/room-tv/discover"
 
 
 # B3 -----------------------------------------------------------------------
@@ -682,13 +699,17 @@ ALREADY_GATED = {
                 {"params": {"phone_number": "+15550100000", "content": "hi", "status": "sent"}}),
     "service_401": ("POST", "/api/internal/guest-mode/verify-pin", {"json": {"pin": "0000", "tier": "household"}}),
     "user": ("GET", "/api/guests", {}),
+    # Its own guard and its own comparison (not the shared dependencies).
+    "guest_mode_config": ("GET", "/api/guest-mode/config", {}),
 }
 
 
 # The same key sent with a valid owner Bearer, on the route kind that accepts
 # either credential: a comparison that gives up on the key must not fall
 # through to the user.
-ALREADY_GATED_KINDS = sorted(ALREADY_GATED) + ["service_or_user_with_owner_bearer"]
+ALREADY_GATED_KINDS = sorted(ALREADY_GATED) + [
+    "service_or_user_with_owner_bearer", "guest_mode_config_with_owner_bearer",
+]
 
 
 @pytest.mark.parametrize("kind", ALREADY_GATED_KINDS)

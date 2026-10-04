@@ -47,7 +47,7 @@ from app.auth.oidc import create_access_token
 from app.database import get_db
 from app.models import SMSCostTracking
 from shared.config import _clear_cache_for_tests, get_config
-from shared.route_walk import iter_api_routes, iter_routes
+from shared.route_walk import dependency_calls, iter_api_routes, iter_routes
 
 from tests.conftest import app
 
@@ -71,6 +71,7 @@ def _device_url(n):
     return f"/api/user-sessions/device/zz-secret-id-{n}?probe=zz-query-value-{n}"
 
 
+REINDEX = "/api/memories/vector-store/reindex"
 LOG_SEND = "/api/sms/internal/log-send"
 LOG_SEND_PARAMS = {"phone_number": "+15550100000", "content": "hi", "status": "sent"}
 MODE_SET = "/api/ha-pipelines/mode/set"
@@ -328,6 +329,29 @@ def test_a_user_without_the_permission_is_logged(api, viewer_user):
          credential_presented="user")
 
 
+# L19 ----------------------------------------------------------------------
+#
+# A guard that authenticates through another guard and then refuses the
+# caller itself: the refusal is still an auth rejection.
+
+def test_a_user_the_memory_guard_refuses_is_logged(api, operator_user):
+    with structlog.testing.capture_logs() as logs:
+        response = api.post(REINDEX, headers=_bearer(operator_user))
+    assert response.status_code == 403
+    _one(logs, route=REINDEX, method="POST", status=403, reason="insufficient_permission",
+         credential_presented="user")
+
+
+def test_a_service_key_the_reindex_route_limits_is_logged(api):
+    """The key may only rebuild missing vectors; asking for everything is a
+    refusal of that credential."""
+    with structlog.testing.capture_logs() as logs:
+        response = api.post(REINDEX, params={"mode": "all"}, headers=_key())
+    assert response.status_code == 403 and "service_key_limited_to_missing" in response.text
+    _one(logs, route=REINDEX, method="POST", status=403, reason="service_key_refused",
+         credential_presented="service_key")
+
+
 # L6 -----------------------------------------------------------------------
 
 @pytest.mark.parametrize("scenario", [_garbage_bearer, _unknown_api_key], ids=["bearer", "x_api_key"])
@@ -420,10 +444,44 @@ def toy(db, operator_user):
     async def unguarded(body: Body):
         return {}
 
+    @small.get("/api/zz-unavailable")
+    async def unavailable():
+        raise HTTPException(status_code=503, detail="the handler's own answer")
+
+    def refusing(status):
+        async def handler():
+            raise HTTPException(status_code=status, detail="the handler's own answer")
+        return handler
+
+    for name, served in _served_key_guards().items():
+        for status in OWN_STATUSES:
+            small.get(f"/api/zz-own/{name}/{status}", dependencies=[Depends(served)])(refusing(status))
+        # The app's own get_db, as that guard's module holds it.
+        small.dependency_overrides[served.__globals__["get_db"]] = lambda: db
+
     small.dependency_overrides[get_db] = lambda: db
     with TestClient(small, raise_server_exceptions=False) as client:
         _reset()
         yield client
+
+
+OWN_STATUSES = (401, 403, 503)
+# guard name -> a route of the real app that runs it
+KEY_GUARD_ROUTES = {
+    "verify_service_api_key": ("POST", LOG_SEND),
+    "require_service_key_401": ("POST", "/api/internal/guest-mode/verify-pin"),
+    "_guest_mode_config_auth": ("GET", "/api/guest-mode/config"),
+}
+
+
+def _served_key_guards():
+    """The three guards that accept the service key outside the two
+    factories, as the app serves them."""
+    found = {}
+    for name, (method, path) in KEY_GUARD_ROUTES.items():
+        (walked,) = [w for w in iter_api_routes(app) if w.path == path and method in w.methods]
+        (found[name],) = {call for call in dependency_calls(walked) if getattr(call, "__name__", "") == name}
+    return found
 
 
 def test_a_permission_the_guard_itself_refuses_is_logged(toy, operator_user):
@@ -439,6 +497,40 @@ def test_a_keyless_422_is_reported_only_behind_the_service_only_guard(toy):
     with structlog.testing.capture_logs() as logs:
         response = toy.post("/api/zz-unguarded", json={})
     assert response.status_code == 422
+    assert _rejections(logs) == []
+
+
+# L21 ----------------------------------------------------------------------
+
+def test_a_keyless_503_is_not_a_rejection(toy):
+    """A route that is unavailable for its own reasons, asked with no key."""
+    with structlog.testing.capture_logs() as logs:
+        response = toy.get("/api/zz-unavailable")
+    assert response.status_code == 503
+    assert _rejections(logs) == []
+
+
+# L22 ----------------------------------------------------------------------
+
+OWN_REFUSALS = [
+    (guard, credential, status)
+    for guard, credential in (
+        ("verify_service_api_key", "key"), ("require_service_key_401", "key"),
+        ("_guest_mode_config_auth", "key"), ("_guest_mode_config_auth", "operator"),
+    )
+    for status in OWN_STATUSES
+]
+
+
+@pytest.mark.parametrize("guard,credential,status", OWN_REFUSALS,
+                         ids=[f"{g.strip('_')}-{c}-{s}" for g, c, s in OWN_REFUSALS])
+def test_a_handler_s_own_refusal_behind_a_key_guard_is_not_a_rejection(guard, credential, status, toy, operator_user):
+    """Each guard records the caller it accepted, so what the handler then
+    answers is the handler's."""
+    headers = _key() if credential == "key" else _bearer(operator_user)
+    with structlog.testing.capture_logs() as logs:
+        response = toy.get(f"/api/zz-own/{guard}/{status}", headers=headers)
+    assert response.status_code == status and "the handler's own answer" in response.text
     assert _rejections(logs) == []
 
 
@@ -601,6 +693,38 @@ def test_suppressed_counts_are_flushed_once_at_shutdown(api, monkeypatch):
     assert after_second == []
 
 
+# L20 ----------------------------------------------------------------------
+
+def test_app_shutdown_flushes_suppressed_counts(db, monkeypatch):
+    """Counts still held when the app stops are written by its shutdown."""
+    clock = _install_clock(monkeypatch)
+    app.dependency_overrides[get_db] = lambda: db
+    running = TestClient(app, raise_server_exceptions=False)
+    try:
+        client = running.__enter__()
+        with structlog.testing.capture_logs() as logs:
+            _reset()
+            for n in (0, 1, 2):
+                clock.now = float(n)
+                assert client.get(_device_url(n)).status_code == 401
+            running.__exit__(None, None, None)
+    finally:
+        app.dependency_overrides.clear()
+    assert [(r["route"], r["suppressed"]) for r in _rejections(logs)] == [(DEVICE_ROUTE, 0), (DEVICE_ROUTE, 2)]
+
+
+# Position -------------------------------------------------------------------
+
+def test_the_middleware_is_the_innermost(api):
+    """Registered first, so it runs last on the way in: next to the router,
+    where the matched route is in the scope and the response is still the
+    router's own. Starlette puts each later registration in front."""
+    names = [middleware.cls.__name__ for middleware in app.user_middleware]
+    assert len(names) >= 3 and "SessionMiddleware" in names and "CORSMiddleware" in names, names
+    assert names[-1] == "AuthRejectionMiddleware", names
+    assert names.count("AuthRejectionMiddleware") == 1
+
+
 # L18 ----------------------------------------------------------------------
 
 LONG_VERB = "Z" * 2000
@@ -724,11 +848,11 @@ def test_records_carry_only_the_agreed_fields(api, viewer_user, monkeypatch, con
 
 
 def test_case_population():
-    """23 tests: L1-L13 and L15-L18, with L11, L13 and L17 as two tests
-    each, the two small-app cases for L5 and L10, and the positive control
-    for the stdlib leak check. L14 is in the matrix file, with the route it
-    needs."""
+    """29 tests: L1-L13 and L15-L22, with L11, L13, L17 and L19 as two
+    tests each, the two small-app cases for L5 and L10, the middleware's
+    position, and the positive control for the stdlib leak check. L14 is in
+    the matrix file, with the route it needs."""
     tests = [name for name in vars(sys.modules[__name__])
              if name.startswith("test_") and name != "test_case_population"]
-    assert len(tests) == 23, sorted(tests)
+    assert len(tests) == 29, sorted(tests)
     assert "test_an_anonymous_request_is_logged_by_route_template" in tests

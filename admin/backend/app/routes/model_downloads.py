@@ -6,7 +6,7 @@ Uses Control Agent for actual download execution on the Control Agent host.
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -632,7 +632,10 @@ async def list_downloaded_files(
 # =============================================================================
 
 class ProgressUpdateRequest(BaseModel):
-    status: str
+    # The states the Control Agent reports ("completed", "failed") and the
+    # in-flight one this route broadcasts. The others a row can hold
+    # (pending, cancelled) are set only by admin-backend itself.
+    status: Literal["downloading", "completed", "failed"]
     progress_percent: float = 0
     downloaded_bytes: int = 0
     error_message: Optional[str] = None

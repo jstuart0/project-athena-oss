@@ -22,7 +22,7 @@ from app.models import User, GuestModeConfig, CalendarEvent, ModeOverride, Audit
 from app.routes.internal import require_service_key_401
 from app.utils.passwords import hash_password
 from app.utils.rag_urls import check_ssrf_safe
-from app.utils.service_auth import service_keys_match
+from app.utils.service_auth import service_keys_match, withdraw_acceptance
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -439,6 +439,7 @@ async def get_guest_mode_config(
 
     if config is None and not is_service_call:
         if not auth_user.has_permission('read'):
+            withdraw_acceptance(request)
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         config = GuestModeConfig(
             enabled=False,
@@ -467,6 +468,7 @@ async def get_guest_mode_config(
         return GuestModeConfigResponse(**_DEFAULT_CONFIG_RESPONSE_KWARGS, config_source="defaults")
 
     if not is_service_call and not auth_user.has_permission('read'):
+        withdraw_acceptance(request)
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     return _config_response(config, config_source="admin", db=db)

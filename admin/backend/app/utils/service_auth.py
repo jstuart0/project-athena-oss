@@ -141,6 +141,37 @@ def _check_service_key_raw(
     return True
 
 
+def _presented_service_key_is_valid(request: Request, x_service_key: str) -> bool:
+    """Decide a request on the ``X-Service-Key`` it presented: True when it
+    is the configured key, 401 when it isn't, 503 when no key is configured
+    (fail-closed, in DEV_MODE too, with no ``WWW-Authenticate``: retrying
+    won't help). Never falls back to a user credential.
+    """
+    # Captured once so the 503 check and the comparison see the same value
+    # (a second get_config() read would open a window if the config changes
+    # in between: test monkeypatching, live key rotation).
+    configured_key = get_config().service_api_key
+    if not configured_key:
+        safe_path = str(request.url.path).replace("\r", "\\r").replace("\n", "\\n")
+        logger.error(
+            "service_api_key_not_configured_with_header_present",
+            path=safe_path,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service authentication not configured",
+        )
+    return _check_service_key_raw(x_service_key, configured_key=configured_key)
+
+
+def withdraw_acceptance(request: Request) -> None:
+    """For a guard or handler that refuses the caller's credential or
+    permission after another guard has accepted the request: the request is
+    not accepted any more, so the rejection log reports the refusal. Call it
+    immediately before raising the 401/403."""
+    request.state.auth_kind = None
+
+
 async def verify_service_or_oidc(
     request: Request,
     db: Session = Depends(get_db),
@@ -174,30 +205,11 @@ async def verify_service_or_oidc(
     """
     # 1. X-Service-Key path (preferred for CA and internal callers)
     if x_service_key:
-        # Capture once so both the 503 guard and the helper see the same value.
-        # A second get_config() call inside _check_service_key_raw would re-open
-        # the TOCTOU window if the config mutates between the two reads (e.g. test
-        # monkeypatching, live key rotation) — xander Medium / ATHENA-21.
-        configured_key = get_config().service_api_key
-
-        # Fail-closed: if the caller signals intent to use service-key auth but
-        # SERVICE_API_KEY is not configured, return 503 immediately.  Falling
-        # through to OIDC would silently mask a server-side misconfiguration that
-        # the caller has no way to diagnose (xander MED-3 / ATHENA-21).
-        if not configured_key:
-            safe_path = str(request.url.path).replace("\r", "\\r").replace("\n", "\\n")
-            logger.error(
-                "service_api_key_not_configured_with_header_present",
-                path=safe_path,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Service authentication not configured",
-            )
-        # Pass the already-captured key so the helper does not call get_config()
-        # a second time.  Raises 401 on invalid key; returns True on match;
-        # returns False only when x_service_key is absent (guarded by the if above).
-        if _check_service_key_raw(x_service_key, configured_key=configured_key):
+        # Fail-closed: a caller that signals service-key auth while
+        # SERVICE_API_KEY is not configured gets 503. Falling through to OIDC
+        # would mask a server-side misconfiguration the caller can't diagnose
+        # (xander MED-3 / ATHENA-21). A wrong key is 401.
+        if _presented_service_key_is_valid(request, x_service_key):
             request.state.auth_kind = "service"
             return True
 
@@ -293,7 +305,14 @@ def require_service_or_user_permission(permission: str):
         x_service_key: Optional[str] = Header(default=None, alias="X-Service-Key"),
     ) -> str:
         if x_service_key:
-            await verify_service_or_oidc(request, db, x_service_key)
+            # The key check itself, not verify_service_or_oidc: "service" is
+            # recorded only for a key that was verified here, and nothing a
+            # user credential did can be recorded as the service.
+            if not _presented_service_key_is_valid(request, x_service_key):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid service key",
+                )
             request.state.auth_kind = "service"
             request.state.auth_user = None
             return "service"
