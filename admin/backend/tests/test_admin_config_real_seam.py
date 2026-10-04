@@ -307,3 +307,75 @@ def test_escalation_state_write_through_the_real_app(client, db):
     assert _run(refused.get_escalation_state("seam-session")) is None
     assert transport.statuses == [401, 401]
     assert _stored_state(db, "seam-session") == ("complex", 3)
+
+
+# R6 -----------------------------------------------------------------------
+
+# Every AdminConfigClient method that reports a refusal, with arguments that
+# reach its request.
+NOTED_READS = {
+    "get_intent_routing": (),
+    "get_provider_routing": (),
+    "get_llm_backends": (),
+    "get_feature_flags": (),
+    "get_tool_api_key_requirements": ("zz_tool",),
+    "get_tool_calling_settings": (),
+    "get_fallback_triggers": (),
+    "get_active_escalation_preset": (),
+    "get_escalation_state": ("zz-session",),
+    "update_escalation_state": ("zz-session", "complex", 3),
+    "get_component_model": ("zz_component",),
+    "get_all_component_models": (),
+    "get_gateway_config": (),
+    "get_voice_config_stt": (),
+    "get_voice_config_tts": (),
+    "get_voice_config_all": (),
+    "get_voice_interface_config": ("zz_interface",),
+    "check_voice_services_health": (),
+}
+
+
+def _methods_with_a_refusal_note():
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(inspect.getmodule(AdminConfigClient)))
+    (cls,) = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AdminConfigClient"]
+    return {
+        fn.name for fn in cls.body if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(isinstance(c, ast.Call) and getattr(c.func, "id", "") == "note_admin_refusal" for c in ast.walk(fn))
+    }
+
+
+def _fresh_refusal_logs():
+    """Both sides' rate limits emptied and their loggers rebound, so each
+    refusal below writes its own line on the caller and on the app."""
+    caller = AdminConfigClient.get_feature_flags.__globals__["note_admin_refusal"].__globals__
+    (served,) = [m.cls.__call__.__globals__ for m in app.user_middleware
+                 if getattr(m.cls, "__name__", "") == "AuthRejectionMiddleware"]
+    for namespace in (caller, served):
+        namespace["_reset_for_tests"]()
+        vars(namespace["logger"]).pop("bind", None)
+
+
+def test_every_reviewed_admin_client_read_notes_its_own_route(client, db):
+    """Each method sends the key, and the route it reports as refused is the
+    route the app matched for its request (the app's own rejection line
+    carries that route's template)."""
+    import structlog
+
+    assert _methods_with_a_refusal_note() == set(NOTED_READS)
+    assert len(NOTED_READS) >= 18
+    for name, args in sorted(NOTED_READS.items()):
+        admin, transport = _admin("wrong-key")
+        admin.enable_feature_flag("use_database_model_config")
+        _fresh_refusal_logs()
+        with structlog.testing.capture_logs() as logs:
+            _run(getattr(admin, name)(*args))
+        assert transport.statuses == [401], f"{name}: {transport.requests} {transport.statuses}"
+        (request,) = transport.sent
+        assert request.headers.get("X-Service-Key") == "wrong-key", f"{name} sent no X-Service-Key"
+        matched = [r["route"] for r in logs if r.get("event") == "admin_auth_rejected"]
+        noted = [(r["route"], r["status"]) for r in logs if r.get("event") == "admin_backend_refused"]
+        assert len(matched) == 1 and matched[0].startswith("/api/"), f"{name}: the app matched {matched}"
+        assert noted == [(matched[0], 401)], f"{name}: noted {noted}, the app matched {matched}"
