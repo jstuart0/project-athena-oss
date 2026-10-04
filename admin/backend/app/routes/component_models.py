@@ -18,6 +18,7 @@ from app.models import ComponentModelAssignment, User, LLMBackend, CloudLLMProvi
 from app.auth.oidc import get_current_user
 from app.utils.rag_urls import check_ollama_ssrf_safe
 from shared.config import get_config
+from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/component-models", tags=["component-models"])
@@ -110,13 +111,13 @@ async def list_component_models(
     return [ComponentModelResponse(**a.to_dict()) for a in assignments]
 
 
-@router.get("/public", response_model=List[ComponentModelResponse])
+@router.get("/public", response_model=List[ComponentModelResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_component_models_public(
     db: Session = Depends(get_db)
 ):
     """
-    List component model assignments (public endpoint for services).
-    No authentication required for service-to-service communication.
+    List component model assignments (service endpoint).
+    Requires X-Service-Key, or a signed-in user with read permission.
     """
     assignments = db.query(ComponentModelAssignment).filter(
         ComponentModelAssignment.enabled == True
@@ -125,13 +126,14 @@ async def list_component_models_public(
     return [ComponentModelResponse(**a.to_dict()) for a in assignments]
 
 
-@router.get("/component/{component_name}", response_model=ComponentModelResponse)
+@router.get("/component/{component_name}", response_model=ComponentModelResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_component_model(
     component_name: str,
     db: Session = Depends(get_db)
 ):
     """
-    Get model assignment for a specific component (public endpoint).
+    Get model assignment for a specific component (service endpoint).
+    Requires X-Service-Key, or a signed-in user with read permission.
     Called by services to fetch their model configuration.
     """
     assignment = db.query(ComponentModelAssignment).filter(

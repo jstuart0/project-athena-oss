@@ -14,14 +14,14 @@ import structlog
 from ..database import get_db
 from ..models import RAGServiceBypass
 from ..auth.oidc import get_current_user
-from ..utils.service_auth import verify_service_api_key
+from ..utils.service_auth import require_user_permission, verify_service_api_key
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/rag-service-bypass", tags=["RAG Service Bypass"])
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_user_permission("read"))])
 async def list_bypass_configs(
     enabled_only: bool = Query(False, description="Only return enabled configurations"),
     db: Session = Depends(get_db)
@@ -40,7 +40,7 @@ async def list_bypass_configs(
     return [c.to_dict() for c in configs]
 
 
-@router.get("/{service_name}")
+@router.get("/{service_name}", dependencies=[Depends(require_user_permission("read"))])
 async def get_bypass_config(
     service_name: str,
     db: Session = Depends(get_db)

@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, ToolRegistry, ToolCallingSetting, ToolCallingTrigger, ToolUsageMetric, ToolApiKeyRequirement, ExternalAPIKey
-from app.utils.service_auth import verify_service_api_key
+from app.utils.service_auth import require_service_or_user_permission, verify_service_api_key
 
 logger = structlog.get_logger()
 
@@ -517,12 +517,13 @@ async def get_tool_stats(
     }
 
 
-@router.get("/tools/stats/public")
+@router.get("/tools/stats/public", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_tool_stats_public(db: Session = Depends(get_db)):
     """
-    Get statistics about registered tools (public endpoint).
+    Get statistics about registered tools (service endpoint).
 
-    Used by services to get tool counts without authentication.
+    Used by services to get tool counts. Requires X-Service-Key, or a
+    signed-in user with read permission.
     """
     logger.info("get_tool_stats_public")
 
@@ -551,13 +552,13 @@ async def get_tool_stats_public(db: Session = Depends(get_db)):
 # Tool Calling Settings Endpoints
 # ============================================================================
 
-@router.get("/settings/public", response_model=ToolCallingSettingsResponse)
+@router.get("/settings/public", response_model=ToolCallingSettingsResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_settings_public(db: Session = Depends(get_db)):
     """
-    Get tool calling settings (public endpoint, no auth required).
+    Get tool calling settings (service endpoint).
 
-    This endpoint is used by services to get configuration
-    without requiring authentication.
+    Used by services to get configuration. Requires X-Service-Key, or a
+    signed-in user with read permission.
 
     Returns:
         Tool calling settings
@@ -647,13 +648,13 @@ async def update_settings(
 # Tool Calling Triggers Endpoints
 # ============================================================================
 
-@router.get("/triggers/public", response_model=List[ToolCallingTriggerResponse])
+@router.get("/triggers/public", response_model=List[ToolCallingTriggerResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_triggers_public(
     enabled_only: bool = False,
     db: Session = Depends(get_db)
 ):
     """
-    List all triggers (public endpoint, no auth required).
+    List all triggers (service endpoint).
 
     Query params:
     - enabled_only: If true, only return enabled triggers
@@ -972,13 +973,13 @@ async def get_tool_api_key_requirements(
     return [ToolApiKeyRequirementResponse(**req.to_dict()) for req in requirements]
 
 
-@router.get("/tools/{tool_id}/api-keys/public", response_model=List[ToolApiKeyRequirementResponse])
+@router.get("/tools/{tool_id}/api-keys/public", response_model=List[ToolApiKeyRequirementResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_tool_api_key_requirements_public(
     tool_id: int,
     db: Session = Depends(get_db)
 ):
     """
-    Get API key requirements for a specific tool (public endpoint).
+    Get API key requirements for a specific tool (service endpoint).
 
     Used by orchestrator to determine which keys to inject.
     """
@@ -995,13 +996,13 @@ async def get_tool_api_key_requirements_public(
     return [ToolApiKeyRequirementResponse(**req.to_dict()) for req in requirements]
 
 
-@router.get("/tools/by-name/{tool_name}/api-keys/public", response_model=List[ToolApiKeyRequirementResponse])
+@router.get("/tools/by-name/{tool_name}/api-keys/public", response_model=List[ToolApiKeyRequirementResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_tool_api_key_requirements_by_name(
     tool_name: str,
     db: Session = Depends(get_db)
 ):
     """
-    Get API key requirements for a tool by name (public endpoint).
+    Get API key requirements for a tool by name (service endpoint).
 
     Used by orchestrator to determine which keys to inject when tool name is known.
     """

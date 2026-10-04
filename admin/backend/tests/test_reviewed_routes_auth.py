@@ -755,15 +755,40 @@ def test_tool_proposal_author_is_stamped_by_the_server(caller, api, db, operator
 DISABLED_SERVICE_URL = ("GET", "/api/service-registry/services/{service_name}/url")
 
 
+def _fresh_rejection_log():
+    """Empty the served rejection middleware's rate-limit table and rebind
+    its logger: the matrix cases before this one were refused on the same
+    route, and a line inside their window would be suppressed either way."""
+    (served,) = [m.cls.__call__.__globals__ for m in app.user_middleware
+                 if getattr(m.cls, "__name__", "") == "AuthRejectionMiddleware"]
+    served["_reset_for_tests"]()
+    vars(served["logger"]).pop("bind", None)
+
+
 @pytest.mark.parametrize("op", [DISABLED_SERVICE_URL], ids=[OP_ID[DISABLED_SERVICE_URL]])
-def test_a_route_s_own_503_to_a_valid_key_is_not_an_auth_rejection(op, api, db):
+def test_a_route_s_own_503_to_a_valid_key_is_not_an_auth_rejection(op, api, db, monkeypatch):
     db.add(RagService(name="zz-disabled", display_name="Disabled", enabled=False, host="zz.example", port=8010))
     db.commit()
+    _fresh_rejection_log()
     with structlog.testing.capture_logs() as logs:
         response = api.get("/api/service-registry/services/zz-disabled/url", headers=_service_key())
     assert response.status_code == 503, response.text
     assert "disabled" in response.text
     assert [r for r in logs if r.get("event") == "admin_auth_rejected"] == []
+
+    # Positive control: the same request while no key is configured is a
+    # refusal with the same status, and this capture sees its line.
+    monkeypatch.setenv("SERVICE_API_KEY", "")
+    _clear_cache_for_tests()
+    try:
+        with structlog.testing.capture_logs() as logs:
+            refused = api.get("/api/service-registry/services/zz-disabled/url", headers={"X-Service-Key": "zz-any-key"})
+    finally:
+        monkeypatch.undo()
+        _clear_cache_for_tests()
+    assert refused.status_code == 503
+    assert [(r["route"], r["reason"]) for r in logs if r.get("event") == "admin_auth_rejected"] == [
+        (op[1], "service_key_unconfigured")]
 
 
 # B5 (last, so the session-wide record covers every test above) --------------

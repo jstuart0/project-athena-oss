@@ -16,6 +16,7 @@ from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, GatewayConfig, SystemSetting
 from shared.config import get_config
+from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 
@@ -133,15 +134,15 @@ async def get_gateway_config(
         raise HTTPException(status_code=500, detail="Failed to retrieve gateway configuration")
 
 
-@router.get("/public", response_model=GatewayConfigResponse)
+@router.get("/public", response_model=GatewayConfigResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_gateway_config_public(
     db: Session = Depends(get_db)
 ):
     """
-    Get gateway configuration (public endpoint).
+    Get gateway configuration (service endpoint).
 
-    Used by gateway service to fetch its configuration without authentication.
-    This is a service-to-service endpoint.
+    Used by the gateway service to fetch its configuration.
+    Requires X-Service-Key, or a signed-in user with read permission.
     """
     try:
         config = ensure_singleton_config(db)

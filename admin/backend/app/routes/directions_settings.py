@@ -12,6 +12,7 @@ import structlog
 from app.database import get_db
 from app.models import DirectionsSettings
 from app.auth.oidc import get_current_user
+from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/directions-settings", tags=["directions"])
@@ -32,9 +33,9 @@ async def get_all_settings(
     return [s.to_dict() for s in settings]
 
 
-@router.get("/public", response_model=Dict[str, Any])
+@router.get("/public", response_model=Dict[str, Any], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_public_settings(db: Session = Depends(get_db)):
-    """Get directions settings without auth (for RAG service)."""
+    """Get directions settings for the RAG service (X-Service-Key, or a signed-in user with read permission)."""
     settings = db.query(DirectionsSettings).all()
 
     # Return as key-value dict with typed values

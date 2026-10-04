@@ -14,6 +14,7 @@ from datetime import datetime
 from app.auth.oidc import get_current_user
 from app.database import get_db
 from app.models import FollowMeConfig, RoomMotionSensor, FollowMeExcludedRoom
+from app.utils.service_auth import require_service_or_user_permission
 
 router = APIRouter(prefix="/api/follow-me", tags=["Follow-Me Audio"])
 
@@ -252,13 +253,14 @@ async def remove_excluded_room(
 
 
 # ==============================================================================
-# Internal Endpoint (No Auth)
+# Internal Endpoint (X-Service-Key or a signed-in user)
 # ==============================================================================
 
-@router.get("/internal/config")
+@router.get("/internal/config", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_internal_config(db: Session = Depends(get_db)) -> Dict[str, Any]:
     """
-    Get follow-me config for orchestrator (no auth required).
+    Get follow-me config for the orchestrator (X-Service-Key, or a signed-in
+    user with read permission).
     Used internally by the orchestrator service.
     """
     config = db.query(FollowMeConfig).first()

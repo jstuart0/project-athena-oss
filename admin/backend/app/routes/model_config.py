@@ -14,6 +14,7 @@ import structlog
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, ModelConfiguration
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 
 logger = structlog.get_logger()
 
@@ -190,19 +191,20 @@ PRESET_CONFIGS = {
 
 
 # ============================================================================
-# Public endpoints (no auth) - for services to fetch configurations
+# Service endpoints - for services to fetch configurations
 # ============================================================================
 
-@router.get("/public", response_model=List[ModelConfigResponse])
+@router.get("/public", response_model=List[ModelConfigResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_configs_public(
     enabled_only: bool = True,
     db: Session = Depends(get_db)
 ):
     """
-    List all model configurations (public endpoint, no auth required).
+    List all model configurations (service endpoint).
 
-    This endpoint is used by services (Gateway, Orchestrator, LLM Router) to fetch
-    model configurations without requiring authentication.
+    Used by services (Gateway, Orchestrator, LLM Router) to fetch model
+    configurations. Requires X-Service-Key, or a
+    signed-in user with read permission.
 
     Query params:
     - enabled_only: If true (default), only return enabled configurations
@@ -221,13 +223,13 @@ async def list_configs_public(
     return [ModelConfigResponse(**config.to_dict()) for config in configs]
 
 
-@router.get("/public/{model_name:path}", response_model=ModelConfigResponse)
+@router.get("/public/{model_name:path}", response_model=ModelConfigResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_config_public(
     model_name: str,
     db: Session = Depends(get_db)
 ):
     """
-    Get model configuration for a specific model (public endpoint).
+    Get model configuration for a specific model (service endpoint).
 
     If no configuration exists for the model, returns the _default configuration.
     If no _default exists, returns 404.
@@ -259,10 +261,11 @@ async def get_config_public(
     return ModelConfigResponse(**config.to_dict())
 
 
-@router.get("/presets")
+@router.get("/presets", dependencies=[Depends(require_user_permission("read"))])
 async def get_presets():
     """
-    Get available preset configurations (public endpoint).
+    Get available preset configurations (admin UI; signed-in user with read
+    permission).
 
     Returns preset configurations that can be applied to any model.
     """

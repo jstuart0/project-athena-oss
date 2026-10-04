@@ -14,6 +14,7 @@ import structlog
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, IntentPattern, IntentRouting, ProviderRouting, IntentRoutingConfig
+from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 
@@ -688,16 +689,16 @@ async def delete_provider_routing(
 
 
 # ============================================================================
-# Public Endpoints (for Orchestrator - No Auth Required)
+# Service Endpoints (for the orchestrator: X-Service-Key or a signed-in user)
 # ============================================================================
 
-@router.get("/routing/public")
+@router.get("/routing/public", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_intent_routing_public(
     db: Session = Depends(get_db)
 ):
     """
-    Public endpoint for orchestrator to fetch intent routing configuration.
-    Returns all enabled routing configurations without authentication.
+    Service endpoint for the orchestrator to fetch intent routing configuration.
+    Returns all enabled routing configurations.
     """
     try:
         routes = db.query(IntentRouting).filter(
@@ -722,13 +723,13 @@ async def get_intent_routing_public(
         raise HTTPException(status_code=500, detail=f"Failed to retrieve intent routing: {str(e)}")
 
 
-@router.get("/providers/public")
+@router.get("/providers/public", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_provider_routing_public(
     db: Session = Depends(get_db)
 ):
     """
-    Public endpoint for orchestrator to fetch provider routing configuration.
-    Returns all enabled provider routings without authentication.
+    Service endpoint for the orchestrator to fetch provider routing configuration.
+    Returns all enabled provider routings.
     """
     try:
         providers = db.query(ProviderRouting).filter(
@@ -803,13 +804,13 @@ async def get_all_strategy_configs(
         raise HTTPException(status_code=500, detail=f"Failed to retrieve configs: {str(e)}")
 
 
-@router.get("/strategy/configs/public")
+@router.get("/strategy/configs/public", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_public_strategy_configs(
     db: Session = Depends(get_db)
 ):
     """
-    Public endpoint for orchestrator to fetch strategy configurations.
-    Returns all enabled configurations without authentication.
+    Service endpoint for the orchestrator to fetch strategy configurations.
+    Returns all enabled configurations.
     """
     try:
         configs = db.query(IntentRoutingConfig).filter(
@@ -830,14 +831,15 @@ async def get_public_strategy_configs(
         raise HTTPException(status_code=500, detail=f"Failed to retrieve configs: {str(e)}")
 
 
-@router.get("/strategy/configs/{intent_name}")
+@router.get("/strategy/configs/{intent_name}", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_strategy_config(
     intent_name: str,
     db: Session = Depends(get_db)
 ):
     """
     Get routing strategy for a specific intent.
-    Public endpoint - no auth required (for orchestrator).
+    Service endpoint for the orchestrator. Requires X-Service-Key, or a
+    signed-in user with read permission.
     """
     try:
         config = db.query(IntentRoutingConfig).filter(
