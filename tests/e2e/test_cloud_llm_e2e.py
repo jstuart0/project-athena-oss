@@ -91,7 +91,7 @@ class TestFullCloudPipeline:
                 f"{ADMIN_URL}/api/cloud-providers",
                 headers=get_auth_headers()
             )
-            # Should work even without auth for listing
+            # Listing needs a signed-in user: 401 without one
             assert response.status_code in [200, 401]
 
     @pytest.mark.asyncio

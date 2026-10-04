@@ -63,7 +63,7 @@ async function loadAlertsDropdown() {
         });
 
         if (!response.ok) {
-            // Try public endpoint if authenticated one fails
+            // Try the type-filtered route (named /public; it needs read:alerts) if the first one fails
             const publicResponse = await fetch(`${API_BASE}/api/alerts/public/active-by-type?alert_type=stuck_sensor`, { headers: getAuthHeaders() });
             if (publicResponse.ok) {
                 const data = await publicResponse.json();
@@ -207,7 +207,7 @@ async function loadAlertsStats() {
         });
 
         if (!response.ok) {
-            // Fallback to public endpoint to count
+            // Fall back to the type-filtered route (named /public; it needs read:alerts) to count
             const publicResponse = await fetch(`${API_BASE}/api/alerts/public/active-by-type?alert_type=stuck_sensor`, { headers: getAuthHeaders() });
             if (publicResponse.ok) {
                 const data = await publicResponse.json();
@@ -245,7 +245,7 @@ async function loadAlertsList() {
         });
 
         if (!response.ok) {
-            // Try public endpoint
+            // Try the type-filtered route (named /public; it needs read:alerts)
             const publicResponse = await fetch(`${API_BASE}/api/alerts/public/active-by-type?alert_type=${typeFilter || 'stuck_sensor'}`, { headers: getAuthHeaders() });
             if (publicResponse.ok) {
                 const data = await publicResponse.json();

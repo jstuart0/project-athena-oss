@@ -306,7 +306,7 @@ class LLMRouter:
 
                 return config
 
-        # Fetch from admin API using public endpoint (avoids URL encoding issues)
+        # Fetch every backend from the admin API's list route, which needs the service key (avoids URL encoding issues)
         try:
             url = f"{self.admin_url}/api/llm-backends/public"
             response = await self.client.get(url, headers=service_key_headers())
@@ -1678,7 +1678,7 @@ class LLMRouter:
                 return self._cloud_credentials_cache[provider]
 
         try:
-            # Fetch from admin API public endpoint
+            # Fetch the provider's key from the admin API (a service-key-only route; "/public" is only its name)
             url = f"{self.admin_url}/api/external-api-keys/public/{path_segment(provider)}/key"
             response = await self.client.get(url, timeout=5.0)
 

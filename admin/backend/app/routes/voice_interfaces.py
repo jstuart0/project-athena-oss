@@ -318,7 +318,7 @@ async def list_tts_engines(
 
 
 # =============================================================================
-# Internal/Public Endpoints (for Gateway/Orchestrator)
+# Internal/Public Endpoints (for Gateway/Orchestrator: X-Service-Key or a signed-in user)
 # =============================================================================
 
 @router.get("/public", response_model=List[VoiceInterfaceResponse], dependencies=[Depends(require_service_or_user_permission("read"))])

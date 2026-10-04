@@ -7,8 +7,8 @@ the Phase 4 background poller.  Between Phase 2 and Phase 4, those columns
 will be NULL / unknown — that is the documented transient state.
 
 Auth: GET /services requires get_current_user (OIDC bearer; Phase 4 reconcile
-xander MED-2).  Other GET endpoints (single service, URL lookup) remain
-unauthenticated — they expose only non-sensitive lookups.  Write (POST /
+xander MED-2).  GET /services/{service_name} needs a signed-in user with read;
+GET /services/{service_name}/url takes X-Service-Key or such a user.  Write (POST /
 DELETE) endpoints require dual-auth: X-Service-Key (Control Agent / internal
 callers) OR Bearer JWT / X-API-Key (admin UI) via verify_service_or_oidc.
 (xander CRIT-1 / D9 / ATHENA-1)
