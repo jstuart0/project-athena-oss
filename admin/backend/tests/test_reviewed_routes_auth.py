@@ -98,21 +98,6 @@ _NOT_200 = {
 }
 EXPECTED_PASS = {op: _NOT_200.get(op, (200, ""))[0] for _op_id, op in OPS}
 
-# Reviewed routes whose own URL is answered by an earlier, parameterised
-# route of the same router, so the handler can't be reached over HTTP at the
-# base commit (the sibling requires a user, so an anonymous call is a 401).
-# Their EXPECTED_PASS (200) is the handler's answer when called directly.
-#
-# This table is a record of a defect, not an exemption: nothing in the
-# matrix reads it, and it is never extended. It is deleted, together with
-# test_shadowed_routes_are_the_known_three, in the commit that registers the
-# static routes ahead of the parameterised ones (plan step 6.3).
-SHADOWED_AT_BASE = {
-    ("GET", "/api/room-tv/apps"): "/api/room-tv/{room_name}",
-    ("GET", "/api/room-tv/features"): "/api/room-tv/{room_name}",
-    ("GET", "/api/voice-interfaces/public"): "/api/voice-interfaces/{interface_name}",
-}
-
 PIPELINES = {"result": {"pipelines": [
     {"id": "p-simple", "name": "Ollama", "conversation_engine": "conversation.ollama_conversation"},
 ], "preferred_pipeline": "p-simple"}}
@@ -440,15 +425,6 @@ def test_matrix_urls_resolve_to_their_own_route():
     assert not misrouted, (
         f"{len(misrouted)} request(s) answered by a different route than the one under test: {misrouted}"
     )
-
-
-def test_shadowed_routes_are_the_known_three():
-    """The three listed routes can't be reached at the base commit, and no
-    fourth is. Once the routers register the static routes ahead of their
-    parameterised sibling (plan step 6.3) this test fails; it and
-    SHADOWED_AT_BASE are then deleted, and nothing else:
-    test_matrix_urls_resolve_to_their_own_route stays, and goes green."""
-    assert _misrouted() == SHADOWED_AT_BASE
 
 
 def test_first_match_self_test():

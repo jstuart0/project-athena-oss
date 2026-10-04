@@ -19,6 +19,7 @@ import os
 from app.database import get_db
 from app.models import RoomTVConfig, TVAppConfig, TVFeatureFlag
 from app.auth.oidc import get_current_user
+from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/room-tv", tags=["room-tv"])
@@ -81,43 +82,26 @@ async def list_room_tv_configs(
     return [config.to_dict() for config in configs]
 
 
-@router.get("/internal")
+@router.get("/internal", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_room_tv_configs_internal(
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
-    """List enabled room TV configs for orchestrator (no auth)."""
+    """List enabled room TV configs for the orchestrator (X-Service-Key, or a signed-in user with read permission)."""
     configs = db.query(RoomTVConfig).filter(
         RoomTVConfig.enabled == True
     ).order_by(RoomTVConfig.room_name).all()
     return [config.to_dict() for config in configs]
 
 
-@router.get("/internal/{room_name}")
+@router.get("/internal/{room_name}", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_room_tv_config_internal(
     room_name: str,
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Get room TV config by name for orchestrator (no auth)."""
+    """Get room TV config by name for the orchestrator (X-Service-Key, or a signed-in user with read permission)."""
     config = db.query(RoomTVConfig).filter(
         RoomTVConfig.room_name == room_name.lower(),
         RoomTVConfig.enabled == True
-    ).first()
-
-    if not config:
-        raise HTTPException(status_code=404, detail="Room TV config not found")
-
-    return config.to_dict()
-
-
-@router.get("/{room_name}")
-async def get_room_tv_config(
-    room_name: str,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
-) -> Dict[str, Any]:
-    """Get a specific room TV configuration by name."""
-    config = db.query(RoomTVConfig).filter(
-        RoomTVConfig.room_name == room_name.lower()
     ).first()
 
     if not config:
@@ -205,12 +189,12 @@ async def delete_room_tv_config(
 # TV App Configuration
 # ============================================================================
 
-@router.get("/apps")
+@router.get("/apps", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_app_configs(
     guest_mode: bool = False,
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
-    """List all app configurations, optionally filtered for guest mode (no auth - used by orchestrator)."""
+    """List all app configurations, optionally filtered for guest mode (used by the orchestrator: X-Service-Key, or a signed-in user with read permission)."""
     query = db.query(TVAppConfig).filter(TVAppConfig.enabled == True)
     if guest_mode:
         query = query.filter(TVAppConfig.guest_allowed == True)
@@ -305,11 +289,11 @@ async def delete_app_config(
 # Feature Flags
 # ============================================================================
 
-@router.get("/features")
+@router.get("/features", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_feature_flags(
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
-    """List all TV feature flags (no auth - used by orchestrator)."""
+    """List all TV feature flags (used by the orchestrator: X-Service-Key, or a signed-in user with read permission)."""
     flags = db.query(TVFeatureFlag).all()
     return [flag.to_dict() for flag in flags]
 
@@ -391,6 +375,25 @@ async def discover_apple_tvs(
 
     logger.info("apple_tv_discovery_complete", count=len(apple_tvs))
     return apple_tvs
+
+
+# Registered after the static GETs above (/apps, /features, /discover): a
+# parameter route registered first would answer those paths itself.
+@router.get("/{room_name}")
+async def get_room_tv_config(
+    room_name: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """Get a specific room TV configuration by name."""
+    config = db.query(RoomTVConfig).filter(
+        RoomTVConfig.room_name == room_name.lower()
+    ).first()
+
+    if not config:
+        raise HTTPException(status_code=404, detail="Room TV config not found")
+
+    return config.to_dict()
 
 
 @router.get("/apps/sync/{entity_id:path}")

@@ -19,6 +19,7 @@ import re
 from app.database import get_db
 from app.models import RoomAudioConfig
 from app.auth.oidc import get_current_user
+from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/room-audio", tags=["room-audio"])
@@ -68,23 +69,23 @@ async def list_room_configs(
     return [config.to_dict() for config in configs]
 
 
-@router.get("/internal")
+@router.get("/internal", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_room_configs_internal(
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
-    """List enabled room configs for orchestrator (no auth)."""
+    """List enabled room configs for the orchestrator (X-Service-Key, or a signed-in user with read permission)."""
     configs = db.query(RoomAudioConfig).filter(
         RoomAudioConfig.enabled == True
     ).order_by(RoomAudioConfig.room_name).all()
     return [config.to_dict() for config in configs]
 
 
-@router.get("/internal/{room_name}")
+@router.get("/internal/{room_name}", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_room_config_internal(
     room_name: str,
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Get room config by name for orchestrator (no auth)."""
+    """Get room config by name for the orchestrator (X-Service-Key, or a signed-in user with read permission)."""
     config = db.query(RoomAudioConfig).filter(
         RoomAudioConfig.room_name == room_name.lower(),
         RoomAudioConfig.enabled == True

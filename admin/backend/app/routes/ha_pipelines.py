@@ -158,13 +158,13 @@ async def ha_websocket_command(command: Dict[str, Any]) -> Dict[str, Any]:
 # Pipeline List and Info
 # =============================================================================
 
-@router.get("/pipelines")
+@router.get("/pipelines", dependencies=[Depends(require_user_permission("read"))])
 async def list_pipelines() -> Dict[str, Any]:
     """
     List all available voice pipelines from Home Assistant.
 
     Returns pipeline names, IDs, and conversation engines.
-    No authentication required - public config info.
+    Requires a signed-in user with read permission.
     """
     try:
         response = await ha_websocket_command({
@@ -198,12 +198,12 @@ async def list_pipelines() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/pipelines/preferred")
+@router.get("/pipelines/preferred", dependencies=[Depends(require_user_permission("read"))])
 async def get_preferred_pipeline() -> Dict[str, Any]:
     """
     Get the currently preferred (active) voice pipeline.
 
-    No authentication required - public config info.
+    Requires a signed-in user with read permission.
     """
     try:
         response = await ha_websocket_command({
@@ -423,12 +423,12 @@ async def set_voice_mode(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/modes")
+@router.get("/modes", dependencies=[Depends(require_user_permission("read"))])
 async def get_available_modes() -> Dict[str, Any]:
     """
     Get available voice modes and their configurations.
 
-    No authentication required - public config info.
+    Requires a signed-in user with read permission.
     """
     return {
         "modes": [
@@ -448,7 +448,7 @@ async def get_available_modes() -> Dict[str, Any]:
 # Health Check
 # =============================================================================
 
-@router.get("/health")
+@router.get("/health", dependencies=[Depends(require_user_permission("read"))])
 async def check_ha_connection() -> Dict[str, Any]:
     """
     Check connectivity to Home Assistant WebSocket API.
