@@ -59,6 +59,31 @@ router = APIRouter(prefix="/api/model-downloads", tags=["model-downloads"])
 # Control Agent URL - configurable via environment
 CONTROL_AGENT_URL = os.getenv("CONTROL_AGENT_URL", "http://localhost:8099")
 
+# Only right when the Control Agent runs on this host: on a host of its own,
+# loopback is the agent's host. Used when CONTROL_AGENT_CALLBACK_BASE_URL is
+# unset.
+_CALLBACK_BASE_FALLBACK = "http://localhost:8080"
+_callback_base_unset_reported = False
+
+
+def _progress_callback_base() -> str:
+    """The URL the Control Agent posts download progress under, built from
+    CONTROL_AGENT_CALLBACK_BASE_URL (where the agent's host reaches
+    admin-backend). Unset: the loopback fallback, with one warning."""
+    global _callback_base_unset_reported
+    base = get_config().control_agent_callback_base_url.strip().rstrip("/")
+    if not base:
+        if not _callback_base_unset_reported:
+            _callback_base_unset_reported = True
+            logger.warning(
+                "control_agent_callback_base_url_unset",
+                variable="CONTROL_AGENT_CALLBACK_BASE_URL",
+                note="download progress callbacks go to this host's loopback address, "
+                     "which only works when the Control Agent runs on the same host",
+            )
+        base = _CALLBACK_BASE_FALLBACK
+    return f"{base}/api/model-downloads"
+
 
 # =============================================================================
 # Pydantic Models
@@ -338,7 +363,7 @@ async def create_download(
     hf_token = await get_hf_token(db)
 
     # Callback URL for Control Agent to notify us of completion
-    callback_url = "http://localhost:8080/api/model-downloads"
+    callback_url = _progress_callback_base()
 
     success, result = await call_control_agent(
         "POST",
@@ -448,7 +473,7 @@ async def retry_download(
 
     # Trigger download with callback
     hf_token = await get_hf_token(db)
-    callback_url = "http://localhost:8080/api/model-downloads"
+    callback_url = _progress_callback_base()
 
     success, result = await call_control_agent(
         "POST",

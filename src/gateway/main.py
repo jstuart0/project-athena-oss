@@ -386,10 +386,12 @@ async def lifespan(app: FastAPI):
         orchestrator_url = ORCHESTRATOR_URL
         orchestrator_timeout = 120
 
+    # The default header is fixed for the life of the client: an unset key, or
+    # one that can't be a header value, installs none (and is reported once).
     orchestrator_client = httpx.AsyncClient(
         base_url=orchestrator_url,
         timeout=float(orchestrator_timeout),
-        headers={"X-Service-Key": SERVICE_API_KEY}
+        headers=service_key_headers(),
     )
 
     # Load LLM backends from database (with fallback to centralized system_settings)
@@ -2579,7 +2581,7 @@ async def _warmup_session(device_id: str):
             async with httpx.AsyncClient(timeout=2.0) as client:
                 await client.get(
                     f"{ORCHESTRATOR_URL}/session/{session_id}/warmup",
-                    headers={"X-Service-Key": SERVICE_API_KEY},
+                    headers=service_key_headers(),
                 )
                 logger.debug(f"Session warmed for device {device_id}")
         else:
@@ -2877,7 +2879,7 @@ async def get_music_config(request: Request):
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
                 f"{ADMIN_API_URL}/api/external-api-keys/public/music-assistant/credentials",
-                headers={"X-Service-Key": SERVICE_API_KEY},
+                headers=service_key_headers(),
             )
 
             if response.status_code == 200:
@@ -3137,7 +3139,7 @@ async def _fetch_ma_auth_token() -> str | None:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
                 f"{ADMIN_API_URL}/api/external-api-keys/public/music-assistant/credentials",
-                headers={"X-Service-Key": SERVICE_API_KEY},
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 config = response.json()

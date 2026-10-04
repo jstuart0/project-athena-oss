@@ -219,7 +219,7 @@ if WYOMING_AVAILABLE:
                     elif not note_admin_refusal(response.status_code, "/api/features/public"):
                         logger.debug("wyoming_feature_flag_check_failed", status=response.status_code)
             except Exception as e:
-                logger.debug("wyoming_feature_flag_check_error", error=str(e))
+                logger.warning("wyoming_feature_flag_check_error", error_type=type(e).__name__)
 
         def _cancel_follow_up_task(self):
             """Cancel any pending follow-up task."""
@@ -561,7 +561,7 @@ if WYOMING_AVAILABLE:
                     response = await client.post(
                         f"{ORCHESTRATOR_URL}/query",
                         json=request_data,
-                        headers={"X-Service-Key": get_config().service_api_key}
+                        headers=service_key_headers(),
                     )
 
                     llm_elapsed = time.time() - llm_start_time

@@ -542,9 +542,13 @@ def test_module_level_import_rule_planted_self_test():
 # key from the environment itself and applies the same rule as
 # ``is_header_safe``.
 
-def _drive_progress_callback(monkeypatch, key, calls=2):
-    """Requests recorded at the socket for `calls` progress callbacks sent
-    with SERVICE_API_KEY set to `key`."""
+CALLBACK_BASE = "http://admin:8080/api/model-downloads"
+
+
+def _drive_progress_callback(monkeypatch, key, calls=2, *, url=CALLBACK_BASE, allowed="admin", status=200):
+    """Requests recorded at the socket for `calls` progress callbacks to
+    `url`, sent with SERVICE_API_KEY set to `key` and ALLOWED_CALLBACK_HOSTS
+    set to `allowed`; admin-backend answers `status`."""
     import asyncio
     import importlib
 
@@ -552,12 +556,16 @@ def _drive_progress_callback(monkeypatch, key, calls=2):
 
     agent = importlib.import_module("control_agent.huggingface")
     agent._reset_callback_log_state_for_tests()
-    monkeypatch.setenv("SERVICE_API_KEY", key)
+    if key is None:
+        monkeypatch.delenv("SERVICE_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("SERVICE_API_KEY", key)
+    monkeypatch.setenv("ALLOWED_CALLBACK_HOSTS", allowed)
     recorded = []
 
     def handler(request):
         recorded.append(request)
-        return httpx.Response(200, json={})
+        return httpx.Response(status, json={})
 
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
@@ -566,8 +574,7 @@ def _drive_progress_callback(monkeypatch, key, calls=2):
     loop = asyncio.new_event_loop()
     try:
         for _ in range(calls):
-            loop.run_until_complete(agent.send_progress_callback(
-                "http://admin:8080/api/model-downloads", 7, "downloading"))
+            loop.run_until_complete(agent.send_progress_callback(url, 7, "downloading"))
     finally:
         loop.close()
         agent._reset_callback_log_state_for_tests()
@@ -612,22 +619,28 @@ def test_control_agent_rule_is_the_helper_s_rule():
     assert agent._is_header_safe("zz-sentinel-key\n") is False
 
 
-# Gateway callers read the key when they call -------------------------------
+# The edge senders read the key when they call, and never send a bad one ----
 #
-# ``gateway.main`` and ``gateway.livekit_service`` each keep a module constant
-# holding the key as it was when the module was imported. A reviewed caller
-# that sent the constant would keep sending a rotated-out or not-yet-set key,
-# and a test that never changes the key after the import can't tell.
+# ``gateway.main`` keeps a module constant holding the key as it was when the
+# module was imported. A caller that sent a constant like that would keep
+# sending a rotated-out or not-yet-set key, and a test that never changes the
+# key after the import can't tell. Each sender below goes through
+# ``service_key_headers()``, so it also sends no header at all for an unset
+# key or one that can't be a header value.
 
 ROTATED_KEY = "zz-rotated-after-import"
+EDGE_ADMIN_URL = "http://admin-backend:8080"
+EDGE_ORCHESTRATOR_URL = "http://orchestrator:8001"
 
 
-def _gateway_callers():
-    """{name: (module, async call, the admin path it requests)}"""
+def _edge_senders(monkeypatch):
+    """{name: (module, async call, the path it requests)}"""
     import importlib
+    import types
 
     gateway = importlib.import_module("gateway.main")
     livekit = importlib.import_module("gateway.livekit_service")
+    scraper = importlib.import_module("rag.site_scraper.main")
 
     async def feature_flag():
         gateway._feature_flag_cache.clear()
@@ -643,35 +656,64 @@ def _gateway_callers():
         service._feature_flag_check_interval = 60.0
         return await service._refresh_feature_flags()
 
+    async def warmup():
+        class _Sessions:
+            async def get_session_for_device(self, device_id):
+                return "zz-session"
+
+        monkeypatch.setattr(gateway, "device_session_mgr", _Sessions())
+        monkeypatch.setattr(gateway, "ORCHESTRATOR_URL", EDGE_ORCHESTRATOR_URL)
+        return await gateway._warmup_session("zz-device")
+
+    async def music_config():
+        request = types.SimpleNamespace(url=types.SimpleNamespace(scheme="http"))
+        return await gateway.get_music_config(request)
+
+    async def music_token():
+        monkeypatch.setattr(gateway, "_ma_auth_token_cache", None)
+        monkeypatch.delenv("MA_AUTH_TOKEN", raising=False)
+        return await gateway._fetch_ma_auth_token()
+
+    music = "/api/external-api-keys/public/music-assistant/credentials"
     return {
         "gateway.main.get_feature_flag": (gateway, feature_flag, "/api/features/public"),
         "gateway.main._log_metric_to_db": (gateway, metric, "/api/llm-backends/metrics"),
         "gateway.main.list_models": (gateway, gateway.list_models, "/api/llm-backends/public"),
+        "gateway.main._warmup_session": (gateway, warmup, "/session/zz-session/warmup"),
+        "gateway.main.get_music_config": (gateway, music_config, music),
+        "gateway.main._fetch_ma_auth_token": (gateway, music_token, music),
         "gateway.livekit_service._refresh_feature_flags": (livekit, follow_up_flags, "/api/features/public"),
+        "gateway.livekit_service.fetch_livekit_credentials": (
+            livekit, livekit.fetch_livekit_credentials, "/api/external-api-keys/public/livekit/credentials"),
+        "rag.site_scraper.main.load_config": (scraper, scraper.load_config, "/api/site-scraper/config/public"),
     }
 
 
-GATEWAY_CALLER_NAMES = (
+EDGE_SENDER_NAMES = (
     "gateway.main.get_feature_flag", "gateway.main._log_metric_to_db", "gateway.main.list_models",
-    "gateway.livekit_service._refresh_feature_flags",
+    "gateway.main._warmup_session", "gateway.main.get_music_config", "gateway.main._fetch_ma_auth_token",
+    "gateway.livekit_service._refresh_feature_flags", "gateway.livekit_service.fetch_livekit_credentials",
+    "rag.site_scraper.main.load_config",
 )
+STALE_KEY = "zz-import-time-key"
 
 
-def _requests_after_a_key_change(monkeypatch, name, header_for=None):
+def _edge_requests(monkeypatch, name, key, header_for=None):
+    """The requests `name` makes with SERVICE_API_KEY set to `key` after the
+    module was imported."""
     import asyncio
 
     import httpx
 
-    module, call, path = _gateway_callers()[name]
-    assert module.SERVICE_API_KEY != ROTATED_KEY, "the module was imported under another key"
-    admin_url = "http://admin-backend:8080"
-    monkeypatch.setenv("ADMIN_API_URL", admin_url)
-    monkeypatch.setattr(module, "ADMIN_API_URL", admin_url)
+    module, call, path = _edge_senders(monkeypatch)[name]
+    monkeypatch.setenv("ADMIN_API_URL", EDGE_ADMIN_URL)
+    if hasattr(module, "ADMIN_API_URL"):
+        monkeypatch.setattr(module, "ADMIN_API_URL", EDGE_ADMIN_URL)
     if hasattr(module, "metric_client"):
         monkeypatch.setattr(module, "metric_client", None)
     if header_for is not None:
-        monkeypatch.setattr(module, "service_key_headers", header_for(module))
-    _set_key(monkeypatch, ROTATED_KEY)
+        monkeypatch.setattr(module, "service_key_headers", header_for)
+    _set_key(monkeypatch, key)
     from shared.admin_url import _clear_cache_for_tests as clear_admin_url
 
     clear_admin_url()
@@ -679,7 +721,7 @@ def _requests_after_a_key_change(monkeypatch, name, header_for=None):
 
     def handler(request):
         recorded.append(request)
-        return httpx.Response(200, json=[])
+        return httpx.Response(200, json={})
 
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
@@ -695,20 +737,318 @@ def _requests_after_a_key_change(monkeypatch, name, header_for=None):
     return recorded
 
 
-@pytest.mark.parametrize("name", GATEWAY_CALLER_NAMES)
-def test_gateway_caller_sends_the_key_as_it_is_at_call_time(name, monkeypatch):
-    (request,) = _requests_after_a_key_change(monkeypatch, name)
+@pytest.mark.parametrize("name", EDGE_SENDER_NAMES)
+def test_edge_sender_sends_the_key_as_it_is_at_call_time(name, monkeypatch):
+    (request,) = _edge_requests(monkeypatch, name, ROTATED_KEY)
     assert request.headers.get("X-Service-Key") == ROTATED_KEY
 
 
-@pytest.mark.parametrize("name", GATEWAY_CALLER_NAMES)
+@pytest.mark.parametrize("name", EDGE_SENDER_NAMES)
 def test_the_call_time_check_sees_an_import_time_key(name, monkeypatch):
-    """Positive control: a caller that sends the module's own constant is
-    seen sending something other than the key now configured."""
-    (request,) = _requests_after_a_key_change(
-        monkeypatch, name, header_for=lambda module: lambda: {"X-Service-Key": module.SERVICE_API_KEY})
-    assert request.headers.get("X-Service-Key") != ROTATED_KEY
+    """Positive control: a caller that sends a value fixed earlier is seen
+    sending something other than the key now configured."""
+    (request,) = _edge_requests(monkeypatch, name, ROTATED_KEY, header_for=lambda: {"X-Service-Key": STALE_KEY})
+    assert request.headers.get("X-Service-Key") == STALE_KEY
 
 
-def test_gateway_caller_population():
-    assert set(_gateway_callers()) == set(GATEWAY_CALLER_NAMES) and len(GATEWAY_CALLER_NAMES) == 4
+@pytest.mark.parametrize("kind", ["trailing_newline", "non_ascii", "inner_space"])
+@pytest.mark.parametrize("name", EDGE_SENDER_NAMES)
+def test_edge_sender_never_sends_an_unusable_key(name, kind, monkeypatch, captured_logs, caplog):
+    caplog.set_level(logging.DEBUG)
+    (request,) = _edge_requests(monkeypatch, name, UNUSABLE_KEYS[kind])
+    assert "X-Service-Key" not in request.headers
+    unusable = [r for r in captured_logs if r.get("event") == "service_api_key_unusable"]
+    assert unusable == [{"event": "service_api_key_unusable", "log_level": "error", "variable": "SERVICE_API_KEY"}]
+    assert "zz-sentinel" not in repr(captured_logs) and "zz-sentinel" not in caplog.text
+
+
+@pytest.mark.parametrize("value", [None, ""], ids=["unset", "empty"])
+@pytest.mark.parametrize("name", EDGE_SENDER_NAMES)
+def test_edge_sender_sends_no_header_for_an_unset_key(name, value, monkeypatch):
+    (request,) = _edge_requests(monkeypatch, name, value)
+    assert "X-Service-Key" not in request.headers, "not even an empty one"
+
+
+def test_edge_sender_population(monkeypatch):
+    assert set(_edge_senders(monkeypatch)) == set(EDGE_SENDER_NAMES) and len(EDGE_SENDER_NAMES) == 9
+
+
+# Closed world: no hand-built key header in the edge sender files -----------
+#
+# The senders above are the ones a unit test can drive. The rest (the
+# gateway's orchestrator client default, the Wyoming handler's query, the
+# directions base-knowledge fetch, jarvis-web's chat routes) are held to the
+# same rule by source: the only way to put the key on a request is the helper.
+
+# file -> the fewest helper calls it holds
+EDGE_SENDER_FILES = {
+    "src/gateway/main.py": 8,
+    "src/gateway/livekit_service.py": 2,
+    "src/gateway/wyoming_bridge.py": 2,
+    "src/rag/directions/main.py": 2,
+    "src/rag/site_scraper/main.py": 1,
+    "apps/jarvis-web/backend/main.py": 5,
+}
+# jarvis-web has no shared.config; its own helper is the one place the header
+# is built there.
+LOCAL_HELPERS = {"apps/jarvis-web/backend/main.py": "_service_key_headers"}
+# Still hand-built, and not changed by the route-auth review: each sends
+# get_config().service_api_key to the orchestrator or the mode service.
+KNOWN_RAW_SENDERS = {"src/gateway/livekit_integration.py": 1, "src/gateway/mode_gate.py": 1}
+
+
+def _key_header_sites(source):
+    """([(lineno, enclosing function)] of dict literals with an
+    "X-Service-Key" key, number of key-header helper calls)."""
+    tree = ast.parse(source)
+    owner = {}
+    for func in ast.walk(tree):
+        if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for node in ast.walk(func):
+                owner.setdefault(id(node), func.name)
+    raw = sorted(
+        (node.lineno, owner.get(id(node), "<module>"))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Dict)
+        and any(isinstance(key, ast.Constant) and key.value == "X-Service-Key" for key in node.keys)
+    )
+    helper_calls = sum(
+        1 for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None))
+        in ("service_key_headers", "_service_key_headers")
+    )
+    return raw, helper_calls
+
+
+@pytest.mark.parametrize("rel", sorted(EDGE_SENDER_FILES))
+def test_edge_sender_files_build_the_key_header_only_through_the_helper(rel):
+    raw, helper_calls = _key_header_sites((REPO_ROOT / rel).read_text())
+    allowed = LOCAL_HELPERS.get(rel)
+    outside = [(lineno, func) for lineno, func in raw if func != allowed]
+    assert outside == [], f"hand-built X-Service-Key header(s) in {rel}: {outside}"
+    assert len(raw) == (1 if allowed else 0)
+    assert helper_calls >= EDGE_SENDER_FILES[rel], (rel, helper_calls)
+
+
+def test_known_raw_senders_are_exactly_the_two():
+    found = {
+        rel: len(_key_header_sites((REPO_ROOT / rel).read_text())[0])
+        for rel in sorted(str(p.relative_to(REPO_ROOT)) for p in (_SRC / "gateway").glob("*.py"))
+    }
+    assert {rel: n for rel, n in found.items() if n} == KNOWN_RAW_SENDERS
+
+
+def test_key_header_site_rule_planted_self_test():
+    planted = (
+        "async def raw(client):\n"
+        "    await client.get('/x', headers={'X-Service-Key': KEY})\n"
+        "async def through_the_helper(client):\n"
+        "    await client.get('/x', headers=service_key_headers())\n"
+        "def _service_key_headers():\n"
+        "    return {'X-Service-Key': KEY}\n"
+        "async def merged(client):\n"
+        "    await client.get('/x', headers={'Accept': 'a', **_service_key_headers()})\n"
+        "CLIENT = httpx.AsyncClient(headers={'X-Service-Key': KEY})\n"
+    )
+    raw, helper_calls = _key_header_sites(planted)
+    assert raw == [(2, "raw"), (6, "_service_key_headers"), (9, "<module>")]
+    assert helper_calls == 2
+
+
+def test_gateway_orchestrator_client_default_comes_from_the_helper():
+    """The default header is fixed when the client is built. Built from the
+    helper, an unset or unusable key installs no default at all."""
+    tree = ast.parse((_SRC / "gateway" / "main.py").read_text())
+    built = [
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "orchestrator_client" for t in node.targets)
+        and isinstance(node.value, ast.Call)
+    ]
+    assert len(built) == 1, "one construction of the gateway's orchestrator client"
+    headers = [ast.unparse(kw.value) for kw in built[0].keywords if kw.arg == "headers"]
+    assert headers == ["service_key_headers()"]
+
+
+# The Control Agent sends the key only to a host it was told to trust --------
+#
+# The callback URL arrives in a request body. ALLOWED_CALLBACK_HOSTS also lets
+# through any name that resolves to a public address, and loopback on a
+# separate agent host is that host, not admin-backend. So the key goes only to
+# a host that is itself an entry of the list.
+
+AGENT_KEY = "zz-agent-key"
+
+UNTRUSTED_CALLBACKS = {
+    # id: (callback base URL, ALLOWED_CALLBACK_HOSTS)
+    "another_host": ("http://other.example:8080/api/model-downloads", "admin"),
+    "public_address_passes_the_ssrf_rule": ("http://93.184.216.34/api/model-downloads", "admin"),
+    "public_name_passes_the_ssrf_rule": ("https://downloads.example.org/api/model-downloads", "admin"),
+    "loopback_name_not_listed": ("http://localhost:8080/api/model-downloads", "admin"),
+    "loopback_address_not_listed": ("http://127.0.0.1:8080/api/model-downloads", "admin,localhost"),
+    "empty_list": ("http://admin:8080/api/model-downloads", ""),
+    "entry_is_a_prefix": ("http://admin.evil.example/api/model-downloads", "admin"),
+    "entry_is_a_suffix": ("http://evil-admin/api/model-downloads", "admin"),
+    "entry_in_the_userinfo": ("http://admin@evil.example/api/model-downloads", "admin"),
+    "entry_in_the_path": ("http://evil.example/admin/api/model-downloads", "admin"),
+    "no_host": ("http:///api/model-downloads", "admin"),
+}
+
+TRUSTED_CALLBACKS = {
+    "exact_entry": ("http://admin:8080/api/model-downloads", "admin"),
+    "exact_entry_among_several": ("https://admin.example.org/api/model-downloads", "localhost, admin.example.org"),
+    "loopback_name_listed": ("http://localhost:8080/api/model-downloads", "localhost"),
+    "loopback_address_listed": ("http://127.0.0.1:8080/api/model-downloads", "127.0.0.1"),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(UNTRUSTED_CALLBACKS))
+def test_control_agent_withholds_the_key_from_a_host_not_on_its_list(kind, monkeypatch, captured_logs, caplog):
+    caplog.set_level(logging.DEBUG)
+    url, allowed = UNTRUSTED_CALLBACKS[kind]
+    recorded = _drive_progress_callback(monkeypatch, AGENT_KEY, url=url, allowed=allowed)
+    if kind != "no_host":
+        assert len(recorded) == 2, "the callback is still sent, without the key"
+    assert all("X-Service-Key" not in request.headers for request in recorded)
+    withheld = [r for r in captured_logs if r.get("event") == "progress_callback_service_key_withheld"]
+    assert len(withheld) == 1, captured_logs
+    assert withheld[0]["log_level"] == "warning" and withheld[0]["variable"] == "ALLOWED_CALLBACK_HOSTS"
+    assert AGENT_KEY not in repr(captured_logs) and AGENT_KEY not in caplog.text
+
+
+@pytest.mark.parametrize("kind", sorted(TRUSTED_CALLBACKS))
+def test_control_agent_sends_the_key_to_an_exact_list_entry(kind, monkeypatch, captured_logs):
+    url, allowed = TRUSTED_CALLBACKS[kind]
+    recorded = _drive_progress_callback(monkeypatch, AGENT_KEY, url=url, allowed=allowed)
+    assert [request.headers.get("X-Service-Key") for request in recorded] == [AGENT_KEY, AGENT_KEY]
+    assert captured_logs == []
+
+
+def test_callback_trust_populations():
+    assert len(UNTRUSTED_CALLBACKS) >= 11 and len(TRUSTED_CALLBACKS) >= 4
+    assert "loopback_name_not_listed" in UNTRUSTED_CALLBACKS and "exact_entry" in TRUSTED_CALLBACKS
+
+
+# A callback that went out without a key and came back 422 was refused -------
+#
+# The progress route takes the service key only. Without the header it
+# answers 422 (a missing required header), which is a refusal of the
+# credential. With the header, a 422 is about the body.
+
+def _agent_refusals(logs):
+    return [r for r in logs if r.get("event") == "admin_backend_refused"]
+
+
+@pytest.mark.parametrize("why", ["unset", "unusable", "host_not_listed"])
+def test_control_agent_reports_a_keyless_422_as_a_refusal(why, monkeypatch, captured_logs):
+    key, allowed = {
+        "unset": (None, "admin"), "unusable": ("zz-sentinel-key\n", "admin"), "host_not_listed": (AGENT_KEY, "elsewhere"),
+    }[why]
+    recorded = _drive_progress_callback(monkeypatch, key, calls=3, allowed=allowed, status=422)
+    assert len(recorded) == 3 and all("X-Service-Key" not in request.headers for request in recorded)
+    assert _agent_refusals(captured_logs) == [{
+        "event": "admin_backend_refused", "log_level": "error", "status": 422,
+        "route": "/api/model-downloads/internal/{download_id}/progress",
+    }], "one line for the three callbacks in the window"
+    assert [r for r in captured_logs if r.get("event") == "callback_failed"] == []
+
+
+def test_control_agent_keeps_a_keyed_422_as_a_failed_callback(monkeypatch, captured_logs):
+    """The body was refused, not the credential: no refusal line."""
+    recorded = _drive_progress_callback(monkeypatch, AGENT_KEY, status=422)
+    assert [request.headers.get("X-Service-Key") for request in recorded] == [AGENT_KEY, AGENT_KEY]
+    assert _agent_refusals(captured_logs) == []
+    failed = [r for r in captured_logs if r.get("event") == "callback_failed"]
+    assert len(failed) == 2 and all(r["status_code"] == 422 and r["log_level"] == "warning" for r in failed)
+
+
+# A transport failure of a keyed admin call is visible ------------------------
+#
+# With certificate verification back on, a private CA that isn't in the trust
+# bundle fails these calls before any answer comes back: nothing is refused,
+# so there is no admin_backend_refused line. The two follow-up flag refreshes
+# logged that at DEBUG only.
+
+_WYOMING_STAND_INS = (
+    "wyoming", "wyoming.server", "wyoming.event", "wyoming.audio", "wyoming.asr", "wyoming.tts",
+    "wyoming.info", "wyoming.handle",
+)
+
+
+def _wyoming_bridge_module():
+    """gateway.wyoming_bridge with its handler class defined; where the
+    `wyoming` package isn't installed, loaded once with empty stand-ins for
+    its names (the method under test touches none of them)."""
+    import importlib
+    import types
+
+    real = importlib.import_module("gateway.wyoming_bridge")
+    if getattr(real, "WYOMING_AVAILABLE", False):
+        return real
+
+    class _AnyName(types.ModuleType):
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return type(name, (), {})
+
+    saved = {name: sys.modules.get(name) for name in _WYOMING_STAND_INS}
+    sys.modules.update({name: _AnyName(name) for name in _WYOMING_STAND_INS})
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_helper_test_wyoming_bridge", _SRC / "gateway" / "wyoming_bridge.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        for name, previous in saved.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
+    return module
+
+
+def _flag_refreshers():
+    import importlib
+
+    livekit = importlib.import_module("gateway.livekit_service")
+    wyoming = _wyoming_bridge_module()
+    return {
+        "livekit": (livekit, livekit.LiveKitService, "feature_flag_check_error"),
+        "wyoming": (wyoming, wyoming.AthenaWyomingHandler, "wyoming_feature_flag_check_error"),
+    }
+
+
+@pytest.mark.parametrize("which", ["livekit", "wyoming"])
+def test_a_failed_flag_refresh_is_a_warning_with_the_error_type_only(which, monkeypatch, captured_logs, caplog):
+    import asyncio
+
+    import httpx
+
+    caplog.set_level(logging.DEBUG)
+    module, cls, event = _flag_refreshers()[which]
+    monkeypatch.setattr(module, "ADMIN_API_URL", "https://zz-admin.example:8443")
+    _set_key(monkeypatch, "zz-flag-key")
+
+    def handler(request):
+        raise httpx.ConnectError(f"certificate verify failed for {request.url}", request=request)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=httpx.MockTransport(handler), **kwargs))
+    instance = object.__new__(cls)
+    instance._follow_ups_enabled, instance._last_feature_flag_check = True, 0.0
+    instance._feature_flag_check_interval = 60.0
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(instance._refresh_feature_flags())
+    finally:
+        loop.close()
+    assert instance._follow_ups_enabled is True, "the flag keeps its value"
+    # (Importing the module can log too; only the refresh's own line counts.)
+    assert [r for r in captured_logs if "check" in str(r.get("event"))] == [
+        {"event": event, "log_level": "warning", "error_type": "ConnectError"}]
+    for text in (repr(captured_logs), caplog.text):
+        assert "zz-admin.example" not in text and "zz-flag-key" not in text and "certificate" not in text

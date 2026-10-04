@@ -31,6 +31,7 @@ from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
 from shared.admin_url import get_admin_url
+from shared.service_key import service_key_headers
 
 from shared.content_fetcher import ContentFetcher
 
@@ -69,10 +70,9 @@ async def load_config():
         # meaning admin-configured allowlists were not enforced in production.
         async with httpx.AsyncClient(timeout=5.0) as client:
             admin_url = get_admin_url()
-            service_key = get_config().service_api_key
             response = await client.get(
                 f"{admin_url}/api/site-scraper/config/public",
-                headers={"X-Service-Key": service_key},
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 svc_config = response.json()

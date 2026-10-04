@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 from dataclasses import dataclass
 from datetime import datetime
+from urllib.parse import urlparse
 
 import structlog
 
@@ -22,13 +23,25 @@ logger = structlog.get_logger()
 # src/control_agent/, so the rules of shared/service_key.py are repeated here:
 # no header for an unset key or one that can't be a header value, and one
 # ERROR a minute when admin-backend refuses the callback.
+#
+# The callback URL comes from a request body, so the key goes only to a host
+# that is itself an ALLOWED_CALLBACK_HOSTS entry. The SSRF check in
+# url_validator.py also accepts any name that resolves to a public address,
+# and loopback on a host of its own is this host, not admin-backend: neither
+# is a reason to hand over the key.
 _SERVICE_KEY_VARIABLE = "SERVICE_API_KEY"
+_CALLBACK_HOSTS_VARIABLE = "ALLOWED_CALLBACK_HOSTS"
 _REFUSAL_STATUSES = frozenset({401, 403, 503})
+# The progress route takes the service key only, so it answers a request with
+# no key header with this status. With the header sent, the same status is
+# about the body.
+_KEYLESS_REFUSAL_STATUS = 422
 _REFUSAL_LOG_INTERVAL_SECONDS = 60.0
 _clock = time.monotonic
 _refusal_last_logged: Dict[int, float] = {}
 _key_unset_reported = False
 _key_unusable_reported = False
+_key_withheld_reported = False
 
 # Download directory on the Control Agent host
 MODELS_DIR = Path.home() / "dev" / "project-athena" / "models" / "downloads"
@@ -512,11 +525,35 @@ def _is_header_safe(key: str) -> bool:
     return all("\x21" <= character <= "\x7e" for character in key)
 
 
-def _callback_headers() -> Dict[str, str]:
+def _is_trusted_callback_host(callback_url: str) -> bool:
+    """True when the URL's host is itself an ALLOWED_CALLBACK_HOSTS entry.
+    The same exact comparison url_validator.py makes for its allowlist."""
+    allowed = {
+        entry.strip() for entry in os.environ.get(_CALLBACK_HOSTS_VARIABLE, "").split(",") if entry.strip()
+    }
+    try:
+        host = urlparse(callback_url).hostname
+    except ValueError:
+        return False
+    return bool(host) and host in allowed
+
+
+def _callback_headers(callback_url: str) -> Dict[str, str]:
     """``{"X-Service-Key": key}`` from this host's environment, read on each
-    call; ``{}`` when the key is unset or can't be a header value. Either
-    problem is logged once, by the variable's name and never its value."""
-    global _key_unset_reported, _key_unusable_reported
+    call; ``{}`` when the callback host isn't on this host's list, or the key
+    is unset or can't be a header value. Each problem is logged once, by the
+    variable's name and never a value."""
+    global _key_unset_reported, _key_unusable_reported, _key_withheld_reported
+    if not _is_trusted_callback_host(callback_url):
+        if not _key_withheld_reported:
+            _key_withheld_reported = True
+            logger.warning(
+                "progress_callback_service_key_withheld",
+                variable=_CALLBACK_HOSTS_VARIABLE,
+                note="the callback host is not an entry of this list, so the callback goes out "
+                     "without the service key and admin-backend refuses it",
+            )
+        return {}
     key = os.environ.get(_SERVICE_KEY_VARIABLE, "")
     if not key:
         if not _key_unset_reported:
@@ -546,10 +583,11 @@ def _refusal_is_due(status_code: int) -> bool:
 
 
 def _reset_callback_log_state_for_tests() -> None:
-    global _key_unset_reported, _key_unusable_reported
+    global _key_unset_reported, _key_unusable_reported, _key_withheld_reported
     _refusal_last_logged.clear()
     _key_unset_reported = False
     _key_unusable_reported = False
+    _key_withheld_reported = False
 
 
 async def send_progress_callback(
@@ -567,6 +605,7 @@ async def send_progress_callback(
     import httpx
 
     try:
+        headers = _callback_headers(callback_url)
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{callback_url}/internal/{download_id}/progress",
@@ -579,9 +618,12 @@ async def send_progress_callback(
                     "ollama_model_name": ollama_model_name,
                     "ollama_imported": ollama_imported
                 },
-                headers=_callback_headers(),
+                headers=headers,
             )
-            if response.status_code in _REFUSAL_STATUSES:
+            refused = response.status_code in _REFUSAL_STATUSES or (
+                response.status_code == _KEYLESS_REFUSAL_STATUS and not headers
+            )
+            if refused:
                 if _refusal_is_due(response.status_code):
                     logger.error(
                         "admin_backend_refused",

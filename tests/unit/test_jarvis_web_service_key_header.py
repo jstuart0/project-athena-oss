@@ -55,12 +55,14 @@ async def _persistent_sessions():
     return await jarvis_main.get_persistent_sessions_config()
 
 
+GUEST_PATH = "/api/guest-mode/internal/current-guest"
+
 # (caller, the admin path it requests): every jarvis-web function that sends
 # the key to admin-backend and was touched by the route review.
 SENDERS = {
     "get_persistent_sessions_config": (_persistent_sessions, "/api/features/public"),
     "get_room_tv_configs": (lambda: jarvis_main.get_room_tv_configs(), "/api/room-tv/internal"),
-    "get_current_guest": (lambda: jarvis_main.get_current_guest(), "/api/guest-mode/internal/current-guest"),
+    "get_current_guest": (lambda: jarvis_main.get_current_guest(), GUEST_PATH),
 }
 
 
@@ -74,14 +76,16 @@ def drive(monkeypatch):
     monkeypatch.setattr(jarvis_main, "_service_key_unusable_reported", False)
     monkeypatch.setattr(jarvis_main, "get_admin_url", lambda: ADMIN_URL)
 
-    def run(name, key, calls=2):
+    def run(name, key, calls=2, status=200, error=None):
         monkeypatch.setattr(jarvis_main, "SERVICE_API_KEY", key)
         call, path = SENDERS[name]
         recorded = []
 
         def handler(request):
             recorded.append(request)
-            return httpx.Response(200, json=[] if path != "/api/guest-mode/internal/current-guest" else {})
+            if error is not None:
+                raise error(request)
+            return httpx.Response(status, json=[] if path != GUEST_PATH else {})
 
         def client(*args, **kwargs):
             kwargs.pop("verify", None)
@@ -89,12 +93,14 @@ def drive(monkeypatch):
 
         monkeypatch.setattr(httpx, "AsyncClient", client)
         loop = asyncio.new_event_loop()
+        results = []
         try:
             for _ in range(calls):
-                loop.run_until_complete(call())
+                results.append(loop.run_until_complete(call()))
         finally:
             loop.close()
         assert [request.url.path for request in recorded] == [path] * calls, "every call still goes out"
+        run.results = results
         return recorded
 
     return run
@@ -131,3 +137,54 @@ def test_an_unset_key_sends_no_header(sender, drive, captured_logs):
     recorded = drive(sender, "")
     assert all("X-Service-Key" not in request.headers for request in recorded)
     assert [r for r in captured_logs if r.get("event") == "service_api_key_unusable"] == []
+
+
+# A refused guest lookup says so ---------------------------------------------
+#
+# get_current_guest answers None for "no guest staying". A refused key gave
+# the same None with nothing logged, so guest recognition went quiet.
+
+GUEST_ROUTE = "/api/guest-mode/internal/current-guest"
+
+
+def _refusals(logs):
+    return [r for r in logs if r.get("event") == "admin_backend_refused"]
+
+
+@pytest.fixture
+def refusal_state(monkeypatch):
+    import service_key
+
+    canonical = sys.modules[service_key.note_admin_refusal.__module__]
+    canonical._reset_for_tests()
+    monkeypatch.setattr(canonical, "_clock", lambda: 1000.0)
+    yield
+    canonical._reset_for_tests()
+
+
+@pytest.mark.parametrize("status", [401, 403, 503])
+def test_a_refused_guest_lookup_is_logged_once_as_an_error(status, drive, refusal_state, captured_logs, caplog):
+    caplog.set_level(logging.DEBUG)
+    recorded = drive("get_current_guest", VISIBLE_ASCII, calls=2, status=status)
+    assert drive.results == [None, None], "still reads as no guest"
+    assert all(request.headers.get("X-Service-Key") == VISIBLE_ASCII for request in recorded)
+    assert _refusals(captured_logs) == [
+        {"event": "admin_backend_refused", "log_level": "error", "status": status, "route": GUEST_ROUTE},
+    ], "one line for the two refusals in the window"
+    assert VISIBLE_ASCII not in repr(captured_logs) and VISIBLE_ASCII not in caplog.text
+
+
+@pytest.mark.parametrize("status", [404, 500])
+def test_another_failed_guest_lookup_is_a_warning_not_a_refusal(status, drive, refusal_state, captured_logs):
+    drive("get_current_guest", VISIBLE_ASCII, calls=1, status=status)
+    assert drive.results == [None] and _refusals(captured_logs) == []
+    assert [(r["event"], r["log_level"], r.get("status")) for r in captured_logs] == [
+        ("failed_to_fetch_guest", "warning", status)]
+
+
+def test_a_guest_lookup_transport_error_is_not_a_refusal(drive, refusal_state, captured_logs):
+    drive("get_current_guest", VISIBLE_ASCII, calls=1,
+          error=lambda request: httpx.ConnectError("connection refused", request=request))
+    assert drive.results == [None] and _refusals(captured_logs) == []
+    assert [r["event"] for r in captured_logs] == ["failed_to_fetch_guest"]
+

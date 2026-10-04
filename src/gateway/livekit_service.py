@@ -64,7 +64,6 @@ LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
 
 # Admin API for fetching credentials
 ADMIN_API_URL = get_admin_url()
-SERVICE_API_KEY = get_config().service_api_key
 
 
 async def fetch_livekit_credentials() -> Dict[str, str]:
@@ -77,7 +76,7 @@ async def fetch_livekit_credentials() -> Dict[str, str]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{ADMIN_API_URL}/api/external-api-keys/public/livekit/credentials",
-                headers={"X-Service-Key": SERVICE_API_KEY},
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 data = response.json()
@@ -301,7 +300,7 @@ class LiveKitService:
                     logger.debug("feature_flag_check_failed",
                                 status=response.status_code)
         except Exception as e:
-            logger.debug("feature_flag_check_error", error=str(e))
+            logger.warning("feature_flag_check_error", error_type=type(e).__name__)
             # Keep existing value on error
 
     def generate_room_token(

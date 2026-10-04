@@ -135,7 +135,7 @@ async def lifespan(app: FastAPI):
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{ADMIN_API_URL}/api/base-knowledge/public?enabled=true",
-                headers={"X-Service-Key": service_key},
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 data = response.json()

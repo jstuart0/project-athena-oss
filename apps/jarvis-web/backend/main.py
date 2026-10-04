@@ -81,10 +81,11 @@ if not SERVICE_API_KEY:
 _service_key_unusable_reported = False
 
 
-def _admin_key_headers() -> Dict[str, str]:
-    """``{"X-Service-Key": SERVICE_API_KEY}`` for a call to admin-backend, or
-    ``{}`` when the key is unset or can't be a header value. An unusable key
-    is reported once, by the variable's name and never its value.
+def _service_key_headers() -> Dict[str, str]:
+    """``{"X-Service-Key": SERVICE_API_KEY}`` for a call to admin-backend or
+    the orchestrator, or ``{}`` when the key is unset or can't be a header
+    value. An unusable key is reported once, by the variable's name and never
+    its value.
 
     This image has no ``shared.config``, so ``service_key_headers()`` can't
     be called here."""
@@ -362,7 +363,7 @@ async def get_persistent_sessions_config() -> Optional[Dict[str, Any]]:
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{ADMIN_BACKEND_URL}/api/features/public", headers=_admin_key_headers())
+            resp = await client.get(f"{ADMIN_BACKEND_URL}/api/features/public", headers=_service_key_headers())
             if resp.status_code == 200:
                 _feature_cache = {f["name"]: f for f in resp.json()}
                 _feature_cache_time = now
@@ -582,7 +583,7 @@ async def get_current_guest() -> Optional[Dict[str, Any]]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{internal_url}/api/guest-mode/internal/current-guest",
-                headers={"Accept": "application/json", **_admin_key_headers()}
+                headers={"Accept": "application/json", **_service_key_headers()}
             )
             if response.status_code == 200:
                 data = response.json()
@@ -593,6 +594,8 @@ async def get_current_guest() -> Optional[Dict[str, Any]]:
                         guest_id=data.get("id")
                     )
                     return data
+            elif not note_admin_refusal(response.status_code, "/api/guest-mode/internal/current-guest"):
+                logger.warning("failed_to_fetch_guest", status=response.status_code)
             return None
     except Exception as e:
         logger.warning("failed_to_fetch_guest", error=str(e))
@@ -855,7 +858,7 @@ async def chat(message: ChatMessage, request: Request, response: Response):
             orch_response = await client.post(
                 f"{ORCHESTRATOR_URL}/query",
                 json=request_body,
-                headers={"X-Service-Key": SERVICE_API_KEY}
+                headers=_service_key_headers(),
             )
 
             if orch_response.status_code != 200:
@@ -1095,7 +1098,7 @@ async def chat_stream(message: ChatMessage, request: Request):
                     "POST",
                     f"{ORCHESTRATOR_URL}/query/stream",
                     json=request_body,
-                    headers={"X-Service-Key": SERVICE_API_KEY}
+                    headers=_service_key_headers(),
                 ) as response:
                     async for chunk in response.aiter_text():
                         if thread_id:
@@ -2463,7 +2466,7 @@ async def get_room_tv_configs() -> Dict[str, Dict[str, str]]:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
                 f"{ADMIN_INTERNAL_URL}/api/room-tv/internal",
-                headers=_admin_key_headers(),
+                headers=_service_key_headers(),
             )
             if response.status_code == 200:
                 configs = response.json()

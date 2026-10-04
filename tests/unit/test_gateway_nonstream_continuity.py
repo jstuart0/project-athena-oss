@@ -485,7 +485,9 @@ def test_G11_orchestrator_client_constructed_with_service_key_header():
     source = GATEWAY_MAIN_PY.read_text()
     idx = source.index("orchestrator_client = httpx.AsyncClient(")
     snippet = source[idx: idx + 300]
-    assert 'headers={"X-Service-Key": SERVICE_API_KEY}' in snippet
+    # Through the helper, so an unset or unusable key installs no default
+    # header (tests/unit/test_service_key_headers.py pins the behaviour).
+    assert "headers=service_key_headers()," in snippet
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +521,12 @@ def test_DC12_warmup_session_sends_service_key_header(monkeypatch):
 
     asyncio.run(gw._warmup_session("device-1"))
 
-    assert captured["headers"] == {"X-Service-Key": gw.SERVICE_API_KEY}
+    # The key as configured when the call is made, not the constant the
+    # module captured when it was imported.
+    from shared.config import get_config
+
+    assert captured["headers"] == {"X-Service-Key": get_config().service_api_key}
+    assert captured["headers"]["X-Service-Key"]
     assert captured["url"].endswith("/session/sess-warm-1/warmup")
 
 

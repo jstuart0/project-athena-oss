@@ -597,6 +597,8 @@ PROGRESS_ROUTE = "/api/model-downloads/internal/{download_id}/progress"
            requests=[("POST", "/api/model-downloads/internal/7/progress")], routes=[PROGRESS_ROUTE])
 def _progress_callback(h):
     module = h.load("control_agent.huggingface")
+    # The agent sends its key only to a host on its own list.
+    h.monkeypatch.setenv("ALLOWED_CALLBACK_HOSTS", "admin")
 
     async def call():
         return await module.send_progress_callback(
