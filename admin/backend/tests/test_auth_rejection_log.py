@@ -418,8 +418,27 @@ def test_other_4xx_answers_are_not_auth_rejections(api, operator_user):
 # guard's own permission check holds the permission (a scoped role is turned
 # away earlier, by path), and every route that needs a body is guarded.
 
+def _own_database_and_production_auth(small, db, monkeypatch):
+    """Every guard on the small app reads users from `db` and has the
+    DEV_MODE user bypass off, whichever copy of the app's modules it came
+    from. A test file that evicts and re-imports app.* leaves a second copy
+    in sys.modules; a guard built now takes get_current_user from that copy,
+    whose own get_db and DEV_MODE the fixtures above know nothing about (its
+    database holds a seeded owner with the id our operator has here)."""
+    calls = {call for walked in iter_api_routes(small) for call in dependency_calls(walked)}
+    resolvers = {call for call in calls if getattr(call, "__name__", "") == "get_current_user"}
+    resolvers |= {call.__globals__["get_current_user"] for call in calls
+                  if callable(getattr(call, "__globals__", {}).get("get_current_user"))}
+    for call in calls:
+        if getattr(call, "__name__", "") == "get_db":
+            small.dependency_overrides[call] = lambda: db
+    for resolver in resolvers:
+        monkeypatch.setitem(resolver.__globals__, "DEV_MODE", False)
+    assert resolvers and len(small.dependency_overrides) >= 1
+
+
 @pytest.fixture
-def toy(db, operator_user):
+def toy(db, operator_user, monkeypatch):
     """The middleware and the served user guard around two routes: one that
     needs a permission no operator holds, one with a body and no guard."""
     from fastapi import Depends, FastAPI
@@ -456,10 +475,8 @@ def toy(db, operator_user):
     for name, served in _served_key_guards().items():
         for status in OWN_STATUSES:
             small.get(f"/api/zz-own/{name}/{status}", dependencies=[Depends(served)])(refusing(status))
-        # The app's own get_db, as that guard's module holds it.
-        small.dependency_overrides[served.__globals__["get_db"]] = lambda: db
 
-    small.dependency_overrides[get_db] = lambda: db
+    _own_database_and_production_auth(small, db, monkeypatch)
     with TestClient(small, raise_server_exceptions=False) as client:
         _reset()
         yield client
