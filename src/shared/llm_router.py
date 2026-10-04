@@ -15,7 +15,7 @@ from enum import Enum
 from collections import deque
 from urllib.parse import urlparse
 import structlog
-from shared.admin_url import get_admin_url
+from shared.admin_url import get_admin_url, path_segment, path_segments
 from shared.config import get_config
 from shared.service_key import note_admin_refusal, service_key_headers
 
@@ -383,7 +383,7 @@ class LLMRouter:
 
         # Fetch from admin API
         try:
-            url = f"{self.admin_url}/api/model-configs/public/{model}"
+            url = f"{self.admin_url}/api/model-configs/public/{path_segments(model)}"
             response = await self.client.get(url, headers=service_key_headers())
 
             if response.status_code == 200:
@@ -1679,7 +1679,7 @@ class LLMRouter:
 
         try:
             # Fetch from admin API public endpoint
-            url = f"{self.admin_url}/api/external-api-keys/public/{provider}/key"
+            url = f"{self.admin_url}/api/external-api-keys/public/{path_segment(provider)}/key"
             response = await self.client.get(url, timeout=5.0)
 
             if response.status_code == 200:
@@ -1739,7 +1739,7 @@ class LLMRouter:
 
         # Try to fetch from admin API
         try:
-            url = f"{self.admin_url}/api/cloud-providers/pricing/{provider}/{model}"
+            url = f"{self.admin_url}/api/cloud-providers/pricing/{path_segment(provider)}/{path_segment(model)}"
             response = await self.client.get(url, timeout=3.0, headers=service_key_headers())
 
             if response.status_code == 200:

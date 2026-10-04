@@ -10,6 +10,10 @@ must not turn an app that opened into "Failed to launch".
 The handler's Home Assistant client is the real ``PermissionEnforcingHAClient``
 over a recording inner client, inside a real ``ha_permission_scope``. The app
 list and the feature flag answer in the shape of the seeded rows.
+
+The second half drives ``route_tv_node`` with the mode and permissions the
+real ``resolve_request_authorization`` gives for an owner house, a guest house
+and a degraded one (mode service unreachable, or still starting).
 """
 from __future__ import annotations
 
@@ -18,14 +22,18 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from orchestrator.nodes import _runtime, route_tv_node  # noqa: E402
+from orchestrator.nodes import route_tv as route_tv_module  # noqa: E402
 from orchestrator import mode_permission as mp  # noqa: E402
 from orchestrator import tv_handler  # noqa: E402
+from orchestrator.state import IntentCategory, OrchestratorState  # noqa: E402
 
 ROOM = "living_room"
 MEDIA_PLAYER = "media_player.living_room_tv"
@@ -53,7 +61,11 @@ SEEDED_APPS = [
     _app("Photos", has_profile_screen=False, guest_allowed=False),
 ]
 
-SELECT_SOURCE = ("media_player", "select_source", {"entity_id": MEDIA_PLAYER, "source": "Netflix"})
+def _select_source(app="Netflix", entity_id=MEDIA_PLAYER):
+    return ("media_player", "select_source", {"entity_id": entity_id, "source": app})
+
+
+SELECT_SOURCE = _select_source()
 SEND_SELECT = ("remote", "send_command", {"entity_id": REMOTE, "command": "select"})
 
 
@@ -108,21 +120,23 @@ def admin(monkeypatch):
     class _Admin:
         apps = list(SEEDED_APPS)
         auto_profile_select = True
+        multi_tv_commands = False
+        rooms = [ROOM]
 
     async def get_tv_configs():
-        return {ROOM: {
-            "room_name": ROOM,
-            "display_name": "Living Room",
-            "media_player_entity_id": MEDIA_PLAYER,
-            "remote_entity_id": REMOTE,
-        }}
+        return {room: {
+            "room_name": room,
+            "display_name": room.replace("_", " ").title(),
+            "media_player_entity_id": f"media_player.{room}_tv",
+            "remote_entity_id": f"remote.{room}_tv",
+        } for room in _Admin.rooms}
 
     async def get_app_configs(guest_mode=False):
         # The route filters on guest_allowed itself when asked for the guest list.
         return [app for app in _Admin.apps if app["guest_allowed"] or not guest_mode]
 
     async def get_feature_flag(feature_name):
-        return feature_name == "auto_profile_select" and _Admin.auto_profile_select
+        return bool(getattr(_Admin, feature_name, False))
 
     monkeypatch.setattr(tv_handler, "get_tv_configs", get_tv_configs)
     monkeypatch.setattr(tv_handler, "get_app_configs", get_app_configs)
@@ -243,20 +257,200 @@ def test_a_failed_select_source_is_a_failed_launch(admin, sleep, denied_total, c
     assert _profile_logs(captured_logs) == []
 
 
-# A denied press is never passed off as a success -----------------------------
+# A write the guard refuses is never passed off as a failed or optional one ----
 
-def test_a_denied_select_press_stays_a_denial(admin, sleep, denied_total, captured_logs):
-    """Not a guest, but the scope's permissions deny ``remote`` (a degraded
-    house whose fallback restricts it). Best-effort covers a press that
-    failed, not one the guard refused: the denial stays on the scope, where
-    the TV node turns it into the refusal the caller hears."""
-    degraded = {**mp.degraded_permissions(), "restricted_entities": [r"^remote\."]}
-    ha = _RecordingHA()
-    result, scope = _launch(ha, mode="owner", permissions=degraded)
+class _LatchingHA(_RecordingHA):
+    """Latches the scope shut once the app has opened, as a denial elsewhere
+    in the same request would, so the guard refuses the press."""
 
-    assert ha.attempted == [SELECT_SOURCE], "the denied press never reached Home Assistant"
-    assert [(d.domain, d.service) for d in scope.denials] == [("remote", "send_command")]
-    assert scope.halted is True and scope.allowed_writes == 1
+    async def call_service(self, domain, service, service_data=None):
+        result = await super().call_service(domain, service, service_data)
+        mp.current_ha_scope().halted = True
+        return result
+
+
+def test_a_press_the_guard_refuses_is_raised_not_swallowed(admin, sleep, denied_total, captured_logs):
+    ha = _LatchingHA()
+    handler = tv_handler.AppleTVHandler(ha, admin_client=None)
+
+    async def run():
+        with mp.ha_permission_scope({"mode": "owner"}, mode="owner") as scope:
+            with pytest.raises(mp.HAWritePermissionDenied):
+                await handler.handle_launch(app_name="Netflix", room=ROOM, guest_mode=False)
+        return scope
+
+    scope = asyncio.run(run())
+
+    assert ha.attempted == [SELECT_SOURCE], "the refused press never reached Home Assistant"
+    assert [(d.domain, d.service, d.reason) for d in scope.denials] == [
+        ("remote", "send_command", "halted_after_denial"),
+    ]
     assert denied_total.increments == 1
-    assert result["success"] is False
-    assert _profile_logs(captured_logs) == [], "a denial is the guard's to log, not a failed press"
+    assert _profile_logs(captured_logs) == [], "a refusal is the guard's to log, not a failed press"
+    assert _events(captured_logs, "tv_launch_failed") == [], "nor a failed launch"
+
+
+def test_a_launch_outside_any_scope_presses_nothing(admin, sleep, denied_total):
+    """No open scope means nobody has been established as the owner."""
+    ha = _RecordingHA()
+    handler = tv_handler.AppleTVHandler(ha, admin_client=None)
+
+    result = asyncio.run(handler.handle_launch(app_name="Netflix", room=ROOM, guest_mode=False))
+
+    assert result["success"] is True
+    assert ha.attempted == [SELECT_SOURCE]
+    sleep.assert_not_awaited()
+
+
+# Through route_tv_node, with the real mode resolution ------------------------
+
+GUEST_PERMISSIONS = {
+    "mode": "guest",
+    "allowed_intents": ["tv_control", "weather"],
+    "allowed_domains": ["light", "media_player", "switch", "climate"],
+    "restricted_entities": [],
+}
+
+
+class _Answer:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class _ModeService:
+    """The mode service as the orchestrator's client sees it. ``house`` is
+    "owner", "guest", "unreachable" (every call fails) or "cold_start" (it
+    answers ``mode="degraded"`` until its first config load)."""
+
+    def __init__(self, house, guest_permissions=None):
+        self.house = house
+        self.guest_permissions = guest_permissions or GUEST_PERMISSIONS
+
+    async def get(self, path, params=None):
+        if self.house == "unreachable":
+            raise httpx.ConnectError("mode service is down")
+        if path == "/mode":
+            if self.house == "cold_start":
+                return _Answer({"mode": "degraded", "reason": "config never loaded"})
+            return _Answer({"mode": self.house, "override_active": False})
+        assert path == "/mode/permissions", path
+        return _Answer({"mode": "owner"} if self.house == "owner" else self.guest_permissions)
+
+
+@pytest.fixture
+def node(monkeypatch, admin, sleep, denied_total):
+    """ask(house, ha, query) -> (authorization, state after route_tv_node)."""
+    monkeypatch.setattr(route_tv_module, "get_feature_config",
+                        AsyncMock(return_value={"enabled": False, "config": {}}))
+    monkeypatch.setattr(route_tv_module, "configured_assistant_names", AsyncMock(return_value=()))
+
+    def ask(house, ha, query="open Netflix", guest_permissions=None):
+        _runtime.set_mode_client(_ModeService(house, guest_permissions))
+        _runtime.set_tv_handler(tv_handler.AppleTVHandler(ha, admin_client=None))
+
+        async def run():
+            authz = await mp.resolve_request_authorization(None, None, "household")
+            state = OrchestratorState(
+                query=query, mode=authz.mode, permissions=authz.permissions, mode_degraded=authz.degraded,
+            )
+            state.intent = IntentCategory.TV_CONTROL
+            state.room = ROOM
+            return authz, await route_tv_node(state)
+
+        return asyncio.run(run())
+
+    yield ask
+    _runtime.reset_for_test()
+
+
+def _events(logs, event):
+    return [record for record in logs if record.get("event") == event]
+
+
+def test_node_owner_house_opens_the_app_and_presses_select(node, sleep):
+    ha = _RecordingHA()
+    authz, state = node("owner", ha)
+
+    assert (authz.mode, authz.degraded, authz.permissions["mode"]) == ("owner", False, "owner")
+    assert ha.made == [SELECT_SOURCE, SEND_SELECT]
+    assert state.answer == "Opening Netflix on Living Room TV." and state.error is None
+
+
+def test_node_guest_house_opens_a_listed_app_and_presses_nothing(node, sleep, denied_total):
+    ha = _RecordingHA()
+    authz, state = node("guest", ha)
+
+    assert (authz.mode, authz.degraded, authz.permissions["mode"]) == ("guest", False, "guest")
+    assert ha.attempted == [SELECT_SOURCE]
+    assert state.answer == "Opening Netflix on Living Room TV." and state.error is None
+    assert denied_total.increments == 0
+
+
+def test_node_guest_house_refuses_an_app_off_the_guest_list(node):
+    ha = _RecordingHA()
+    _authz, state = node("guest", ha, query="open Photos")
+
+    assert ha.attempted == []
+    assert state.answer == "Sorry, Photos is not available in guest mode."
+    assert state.error == "app_not_allowed"
+
+
+@pytest.mark.parametrize("house", ["unreachable", "cold_start"])
+def test_node_degraded_house_opens_the_app_and_presses_nothing(house, node, sleep, denied_total):
+    """A degraded house reports mode "owner" with the degraded permission
+    set, which restricts neither media_player nor remote. It isn't known to
+    be the owner's, so nobody is entered into the first profile."""
+    ha = _RecordingHA()
+    authz, state = node(house, ha)
+
+    assert (authz.mode, authz.degraded, authz.permissions["mode"]) == ("owner", True, "degraded")
+    assert state.mode == "owner" and state.mode_degraded is True
+    assert ha.attempted == [SELECT_SOURCE], "the app opens; no press is tried"
+    sleep.assert_not_awaited()
+    assert state.answer == "Opening Netflix on Living Room TV." and state.error is None
+    assert denied_total.increments == 0
+
+
+def test_node_degraded_house_does_not_apply_the_guest_app_list(node):
+    """Pins what the tree does today, not a decision: in a degraded house the
+    guest app list isn't consulted, like every other intent during an outage
+    ("owners keep lights, climate, and media"). Whether it should be is open."""
+    ha = _RecordingHA()
+    _authz, state = node("unreachable", ha, query="open Photos")
+
+    assert ha.made == [_select_source("Photos")]
+    assert state.answer == "Opening Photos on Living Room TV." and state.error is None
+
+
+def test_node_answers_a_refused_launch_with_the_refusal(node, denied_total, captured_logs):
+    """A guest whose permissions restrict this TV: the caller hears the
+    refusal, and no "launch failed" error is logged for a permission denial."""
+    ha = _RecordingHA()
+    restricted = {**GUEST_PERMISSIONS, "restricted_entities": [r"^media_player\.living_room"]}
+    _authz, state = node("guest", ha, guest_permissions=restricted)
+
+    assert ha.attempted == []
+    assert state.answer == "Sorry, I can't control the media player in guest mode."
+    assert state.error == "permission_denied"
+    assert denied_total.increments == 1
+    assert _events(captured_logs, "tv_launch_failed") == []
+
+
+def test_node_everywhere_stops_at_the_first_refused_tv(node, admin, denied_total, captured_logs):
+    admin.multi_tv_commands = True
+    admin.rooms = [ROOM, "den", "office"]
+    ha = _RecordingHA()
+    restricted = {**GUEST_PERMISSIONS, "restricted_entities": [r"^media_player\.den"]}
+    _authz, state = node("guest", ha, query="open Netflix everywhere", guest_permissions=restricted)
+
+    assert ha.attempted == [SELECT_SOURCE], "the first TV opened; nothing was tried after the refusal"
+    assert state.answer == "I did part of that, but I can't control the media player in guest mode."
+    assert state.error == "permission_denied"
+    assert denied_total.increments == 1, "one denial, not one more per remaining TV"
+    assert _events(captured_logs, "tv_launch_failed") == []

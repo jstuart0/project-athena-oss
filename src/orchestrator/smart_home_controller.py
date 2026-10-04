@@ -3175,7 +3175,9 @@ Return ONLY valid JSON."""
                     note_admin_refusal(response.status_code, "/api/alerts/public/resolve-by-entity")
 
         except Exception as e:
-            logger.debug(f"Error resolving stuck sensor alert: {e}")
+            # A warning, by type only: this call carries the service key, and
+            # a connection or certificate failure must show at the default level.
+            logger.warning(f"Error resolving stuck sensor alert: {type(e).__name__}")
 
     async def _check_stuck_sensors(self) -> str:
         """
@@ -3410,11 +3412,10 @@ Return ONLY valid JSON."""
 
         try:
             admin_url = get_admin_url()
-            key = get_config().service_api_key
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(
                     f"{admin_url}/api/settings/house-layout",
-                    headers={"X-Service-Key": key} if key else None,
+                    headers=service_key_headers(),
                 )
                 if response.status_code == 200:
                     data = response.json()
@@ -3424,7 +3425,7 @@ Return ONLY valid JSON."""
             return ""  # No layout configured
 
         except Exception as e:
-            logger.warning(f"Could not fetch house layout: {e}")
+            logger.warning(f"Could not fetch house layout: {type(e).__name__}")
             return ""
 
     async def _llm_occupancy_reasoning(self, motion_data: List[Dict], house_layout: str, original_query: str = None) -> str:

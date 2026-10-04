@@ -398,6 +398,14 @@ class AppleTVHandler:
         entity_id = config["media_player_entity_id"]
         remote_id = config["remote_entity_id"]
 
+        from orchestrator.mode_permission import HAWritePermissionDenied, current_ha_scope
+
+        # "Not a guest" isn't "the owner": a degraded house reports mode
+        # "owner" with the degraded permission set. Only permissions that
+        # positively say owner get entered into the first profile.
+        scope = current_ha_scope()
+        is_owner = scope is not None and scope.permissions.get("mode") == "owner"
+
         # Launch the app
         try:
             await self.ha.call_service(
@@ -406,10 +414,10 @@ class AppleTVHandler:
                 {"entity_id": entity_id, "source": app_name}
             )
 
-            # A guest stops at the profile screen and picks by hand: the
-            # guest baseline has no `remote` domain, so the press would be a
-            # denied write, and a guest isn't entered into the first profile.
-            if not guest_mode and app_config and app_config.get("has_profile_screen"):
+            # Anyone else stops at the profile screen and picks by hand. For
+            # a guest the press would also be a denied write: the guest
+            # baseline has no `remote` domain.
+            if is_owner and app_config and app_config.get("has_profile_screen"):
                 if await get_feature_flag("auto_profile_select"):
                     await self._press_profile_select(app_name, room, remote_id, app_config)
 
@@ -421,6 +429,10 @@ class AppleTVHandler:
                 "app": app_name
             }
 
+        except HAWritePermissionDenied:
+            # Not a failed launch. The guard has recorded and logged the
+            # denial on the request's scope; route_tv_node answers from it.
+            raise
         except Exception as e:
             logger.error("tv_launch_failed", app=app_name, room=room, error=str(e))
             return {
@@ -435,8 +447,8 @@ class AppleTVHandler:
         """Press select on the app's profile screen, once it has had time to
         appear. Optional: the app is already open, so a press that fails is
         logged and the launch still succeeds. A press the permission guard
-        denies is not a failure of that kind and is raised to the caller,
-        with the denial recorded on the request's scope."""
+        refuses is not a failure of that kind: it is raised, through
+        handle_launch, with the denial recorded on the request's scope."""
         from orchestrator.mode_permission import HAWritePermissionDenied
 
         await asyncio.sleep(app_config.get("profile_select_delay_ms", 1500) / 1000)
@@ -478,7 +490,9 @@ class AppleTVHandler:
         # Filter out aliases (bedroom, etc.)
         rooms = [name for name in tv_configs.keys() if name not in ("bedroom", "basement")]
 
-        # Launch on all TVs
+        # Launch on all TVs. A write the permission guard refuses stops the
+        # loop (it raises through handle_launch): the scope is latched shut,
+        # so every later TV would only be refused as well.
         results = []
         for room in rooms:
             result = await self.handle_launch(app_name, room, guest_mode)

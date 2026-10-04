@@ -24,7 +24,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from shared import service_key  # noqa: E402
-from shared.admin_config import AdminConfigClient  # noqa: E402
+from shared.admin_config import AdminConfigClient, voice_automation_headers  # noqa: E402
 from shared.config import _clear_cache_for_tests  # noqa: E402
 
 SENTINEL = "zz-sentinel"
@@ -100,11 +100,11 @@ def _fresh_state(monkeypatch):
     _clear_cache_for_tests()
 
 
-def _call(listener, api_key, method="get_feature_flags"):
+def _call(listener, api_key, method="get_feature_flags", *args, **kwargs):
     async def run():
         client = AdminConfigClient(admin_url=listener.url, api_key=api_key)
         try:
-            return client, await getattr(client, method)()
+            return client, await getattr(client, method)(*args, **kwargs)
         finally:
             await client.close()
 
@@ -172,3 +172,104 @@ def test_an_unset_key_sends_no_service_key_header(listener):
     assert flags == {}
     assert len(listener.heads) == 1
     assert "x-service-key" not in listener.heads[0], "no header at all, not an empty one"
+    assert "x-api-key" not in listener.heads[0], "nor an empty default"
+    assert "x-api-key" not in {name.lower() for name in client.client.headers}
+
+
+# The senders that were keyed before this rule existed ------------------------
+# (method, positional arguments, keyword arguments); each sends one request.
+
+OLDER_SENDERS = {
+    "get_external_api_key": ("get_external_api_key", ("some-service",), {}),
+    "get_enabled_tools": ("get_enabled_tools", (), {}),
+    "get_base_knowledge": ("get_base_knowledge", (), {}),
+    "record_tool_metric": ("record_tool_metric", ("some_tool", True, 12), {}),
+    "resolve_room_group": ("resolve_room_group", ("downstairs",), {}),
+    "get_room_groups": ("get_room_groups", (), {}),
+    "get_user_session_by_device": ("get_user_session_by_device", ("device-1",), {}),
+    "delete_voice_automation": ("delete_voice_automation", (7,), {}),
+    "get_service_usage": ("get_service_usage", ("some-service",), {}),
+    "record_service_usage": ("record_service_usage", ("some-service",), {}),
+    "get_voice_automations": ("get_voice_automations", (), {"caller_mode": "owner", "caller_guest_name": None, "caller_guest_stay": None}),
+    "archive_voice_automation": ("archive_voice_automation", (7,), {"caller_mode": "owner", "caller_guest_name": None, "caller_guest_stay": None}),
+}
+
+
+def _older(listener, api_key, sender):
+    method, args, kwargs = OLDER_SENDERS[sender]
+    return _call(listener, api_key, method, *args, **kwargs)
+
+
+@pytest.mark.parametrize("sender", sorted(OLDER_SENDERS))
+def test_an_older_sender_never_sends_or_logs_an_unusable_key(sender, listener, captured_logs, caplog):
+    caplog.set_level(logging.DEBUG)
+    _older(listener, UNUSABLE_KEYS["trailing_newline"], sender)
+
+    assert len(listener.heads) == 1, "the request was really sent, without a credential"
+    assert "x-service-key" not in listener.heads[0] and SENTINEL not in listener.heads[0]
+    assert SENTINEL not in repr(captured_logs) and SENTINEL not in caplog.text
+
+
+@pytest.mark.parametrize("sender", sorted(OLDER_SENDERS))
+def test_an_older_sender_still_sends_a_usable_key(sender, listener):
+    """Positive control: the same calls carry a usable key as before."""
+    _older(listener, USABLE_KEY, sender)
+
+    assert len(listener.heads) == 1
+    assert f"x-service-key: {USABLE_KEY}" in listener.heads[0]
+
+
+def test_get_secret_never_sends_or_logs_an_unusable_key(listener, captured_logs, caplog):
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(Exception) as raised:
+        _call(listener, UNUSABLE_KEYS["trailing_newline"], "get_secret", "some-service")
+
+    assert len(listener.heads) == 1 and "x-service-key" not in listener.heads[0]
+    assert SENTINEL not in str(raised.value)
+    assert SENTINEL not in repr(captured_logs) and SENTINEL not in caplog.text
+
+
+class _RecordingLogger:
+    """Stands in for the module's logger, whatever structlog configuration an
+    earlier test left behind."""
+
+    def __init__(self):
+        self.records = []
+
+    def __getattr__(self, level):
+        def log(event, **fields):
+            self.records.append({"event": event, "log_level": level, **fields})
+        return log
+
+
+def test_a_failed_external_key_fetch_logs_no_exception_text(listener, monkeypatch):
+    """The answer to this call holds another service's API key; its failure
+    is logged by type and status, never by the exception's text."""
+    import shared.admin_config as admin_config_module
+
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(admin_config_module, "logger", recorder)
+    _client, result = _call(listener, USABLE_KEY, "get_external_api_key", "some-service")
+
+    assert result is None
+    assert [r for r in recorder.records if r["event"].startswith("external_api_key_")] == [{
+        "event": "external_api_key_fetch_error",
+        "log_level": "warning",
+        "service_name": "some-service",
+        "status_code": 401,
+        "error_type": "HTTPStatusError",
+    }]
+
+
+@pytest.mark.parametrize("kind", sorted(UNUSABLE_KEYS))
+def test_scoped_voice_headers_leave_out_an_unusable_key(kind):
+    headers = voice_automation_headers(UNUSABLE_KEYS[kind], "guest", "Zed", 5)
+
+    assert headers == {"X-Athena-Caller-Mode": "guest", "X-Athena-Guest-Name": "Zed", "X-Athena-Guest-Stay": "5"}
+
+
+def test_scoped_voice_headers_carry_a_usable_key():
+    assert voice_automation_headers(USABLE_KEY, "owner", None) == {
+        "X-Service-Key": USABLE_KEY, "X-Athena-Caller-Mode": "owner",
+    }
+    assert "X-Service-Key" not in voice_automation_headers("", "owner", None)

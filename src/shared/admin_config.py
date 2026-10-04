@@ -4,18 +4,23 @@ Admin Configuration Client
 Allows services to fetch configuration and secrets from the admin API.
 Uses service-to-service authentication with API key.
 """
+import re
 import time
 import urllib.parse
 import httpx
 from typing import Optional, Dict, Any, List, Literal
 import structlog
-from shared.admin_url import get_admin_url
+from shared.admin_url import get_admin_url, path_segment
 from shared.config import get_config as _get_athena_config  # local async get_config(key) below shadows this name; alias to keep both available
 from shared.service_key import SERVICE_KEY_VARIABLE, is_header_safe, note_admin_refusal
 
 logger = structlog.get_logger()
 
 CallerMode = Literal["owner", "guest"]
+
+# A tool's name comes from the model's tool call. Registered tools are named
+# with these characters only; anything else is never put in a URL.
+_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
 
 def voice_automation_headers(
@@ -28,11 +33,14 @@ def voice_automation_headers(
     Raises ValueError, before any request is made, for an unknown mode, or a
     guest scope with no name or no stay id (the stay's calendar event id, a
     positive int): an unscoped guest query is never sent. The guest name
-    travels percent-encoded in a header, never in the URL.
+    travels percent-encoded in a header, never in the URL. A key that is
+    unset or can't be a header value is left out.
     """
     if caller_mode not in ("owner", "guest"):
         raise ValueError(f"caller_mode must be 'owner' or 'guest', not {caller_mode!r}")
-    headers = {"X-Service-Key": api_key, "X-Athena-Caller-Mode": caller_mode}
+    headers = {"X-Athena-Caller-Mode": caller_mode}
+    if api_key and is_header_safe(api_key):
+        headers = {"X-Service-Key": api_key, **headers}
     if caller_mode == "guest":
         if not caller_guest_name:
             raise ValueError("a guest-scoped voice-automation call needs the guest's name")
@@ -75,10 +83,10 @@ class AdminConfigClient:
         # client builds: httpx refuses it with an exception that carries the
         # whole value, and the methods below log the exception text.
         default_headers = {}
-        if is_header_safe(self.api_key):
-            default_headers["X-API-Key"] = self.api_key
-        else:
+        if not is_header_safe(self.api_key):
             logger.error("service_api_key_unusable", variable=SERVICE_KEY_VARIABLE)
+        elif self.api_key:
+            default_headers["X-API-Key"] = self.api_key
         # Reduced timeout from 10s to 3s - config/room calls should be fast
         # Critical paths like music playback compound multiple API calls
         self.client = httpx.AsyncClient(
@@ -144,7 +152,7 @@ class AdminConfigClient:
             "use_database_model_config": True,  # Enabled - models fetched from database
         }
 
-    def _service_key_header(self) -> Dict[str, str]:
+    def _service_key_headers(self) -> Dict[str, str]:
         """The service key for one call to a route that accepts it. Passed
         per call, never as a client default: admin-backend's user-only routes
         refuse any request that carries the key. Empty when the key is unset
@@ -167,8 +175,8 @@ class AdminConfigClient:
             Exception: If API call fails
         """
         try:
-            url = f"{self.admin_url}/api/secrets/service/{service_name}"
-            headers = {"X-Service-Key": self.api_key}
+            url = f"{self.admin_url}/api/secrets/service/{path_segment(service_name)}"
+            headers = self._service_key_headers()
 
             response = await self.client.get(url, headers=headers)
 
@@ -289,7 +297,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/intent-routing/routing/public"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 data = response.json()
@@ -347,7 +355,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/intent-routing/providers/public"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 data = response.json()
@@ -410,7 +418,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/llm-backends/public"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 backends = response.json()
@@ -461,7 +469,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/features/public?enabled_only=false"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 features = response.json()
@@ -520,8 +528,8 @@ class AdminConfigClient:
             Dict with api_key, endpoint_url, rate_limit_per_minute, or None if not found
         """
         try:
-            url = f"{self.admin_url}/api/external-api-keys/public/{service_name}/key"
-            headers = {"X-Service-Key": self.api_key}
+            url = f"{self.admin_url}/api/external-api-keys/public/{path_segment(service_name)}/key"
+            headers = self._service_key_headers()
             response = await self.client.get(url, headers=headers)
 
             if response.status_code == 404:
@@ -546,14 +554,14 @@ class AdminConfigClient:
                 "external_api_key_fetch_error",
                 service_name=service_name,
                 status_code=e.response.status_code,
-                error=str(e)
+                error_type=type(e).__name__
             )
             return None
         except Exception as e:
             logger.warning(
                 "external_api_key_connection_failed",
                 service_name=service_name,
-                error=str(e)
+                error_type=type(e).__name__
             )
             return None
 
@@ -585,9 +593,13 @@ class AdminConfigClient:
             List of API key requirement dicts with api_key_service, is_required, inject_as
             Returns empty list if tool not found or API unavailable
         """
+        if not isinstance(tool_name, str) or not _TOOL_NAME.fullmatch(tool_name):
+            logger.warning("tool_api_key_requirements_name_refused", name_len=len(str(tool_name)))
+            return []
+
         try:
-            url = f"{self.admin_url}/api/tool-calling/tools/by-name/{tool_name}/api-keys/public"
-            response = await self.client.get(url, headers=self._service_key_header())
+            url = f"{self.admin_url}/api/tool-calling/tools/by-name/{path_segment(tool_name)}/api-keys/public"
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 404:
                 logger.debug(
@@ -689,7 +701,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/tool-calling/settings/public"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 settings = response.json()
@@ -754,7 +766,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/tool-calling/tools/public?enabled_only=true"
-            response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 tools = response.json()
@@ -803,7 +815,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/tool-calling/triggers/public?enabled_only=true"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 triggers = response.json()
@@ -855,7 +867,7 @@ class AdminConfigClient:
 
         try:
             url = f"{self.admin_url}/api/escalation/presets/active/public"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 preset = response.json()
@@ -889,8 +901,8 @@ class AdminConfigClient:
     async def get_escalation_state(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get current escalation state for a session."""
         try:
-            url = f"{self.admin_url}/api/escalation/state/{session_id}/public"
-            response = await self.client.get(url, headers=self._service_key_header())
+            url = f"{self.admin_url}/api/escalation/state/{path_segment(session_id)}/public"
+            response = await self.client.get(url, headers=self._service_key_headers())
             if response.status_code == 200:
                 return response.json()
             note_admin_refusal(response.status_code, "/api/escalation/state/{session_id}/public")
@@ -913,7 +925,7 @@ class AdminConfigClient:
                 "escalated_to": escalated_to,
                 "turns_remaining": turns_remaining,
                 "triggered_by_rule_id": rule_id
-            }, headers=self._service_key_header())
+            }, headers=self._service_key_headers())
             note_admin_refusal(response.status_code, "/api/escalation/state/internal")
             return response.status_code == 200
         except Exception as e:
@@ -947,7 +959,7 @@ class AdminConfigClient:
                 if enabled_only:
                     url += "?enabled=true"
 
-                response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
+                response = await self.client.get(url, headers=self._service_key_headers())
 
                 if response.status_code == 200:
                     knowledge = response.json()
@@ -1029,8 +1041,8 @@ class AdminConfigClient:
 
         # Fetch from API
         try:
-            url = f"{self.admin_url}/api/component-models/component/{component_name}"
-            response = await self.client.get(url, headers=self._service_key_header())
+            url = f"{self.admin_url}/api/component-models/component/{path_segment(component_name)}"
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1092,7 +1104,7 @@ class AdminConfigClient:
 
         try:
             url = f"{self.admin_url}/api/component-models/public"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 models = response.json()
@@ -1195,7 +1207,7 @@ class AdminConfigClient:
             # X-API-Key (legacy), not X-Service-Key, so metrics writes returned 422
             # → tool usage analytics silently stopped recording.  codex-r2:3.
             response = await self.client.post(
-                url, json=payload, headers={"X-Service-Key": self.api_key}
+                url, json=payload, headers=self._service_key_headers()
             )
 
             if response.status_code in (200, 201):
@@ -1248,11 +1260,8 @@ class AdminConfigClient:
             }
         """
         try:
-            # URL-encode the query term
-            import urllib.parse
-            encoded_term = urllib.parse.quote(query_term)
-            url = f"{self.admin_url}/api/room-groups/resolve/{encoded_term}"
-            response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
+            url = f"{self.admin_url}/api/room-groups/resolve/{path_segment(query_term)}"
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 404:
                 # Not a room group - this is normal for individual rooms
@@ -1323,7 +1332,7 @@ class AdminConfigClient:
                 params["enabled"] = "true"
 
             url = f"{self.admin_url}/api/room-groups"
-            response = await self.client.get(url, params=params, headers={"X-Service-Key": self.api_key})
+            response = await self.client.get(url, params=params, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 groups = response.json()
@@ -1365,7 +1374,7 @@ class AdminConfigClient:
         # Fetch from API
         try:
             url = f"{self.admin_url}/api/gateway-config/public"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1432,10 +1441,8 @@ class AdminConfigClient:
             }
         """
         try:
-            import urllib.parse
-            encoded_device_id = urllib.parse.quote(device_id)
-            url = f"{self.admin_url}/api/user-sessions/device/{encoded_device_id}"
-            response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
+            url = f"{self.admin_url}/api/user-sessions/device/{path_segment(device_id)}"
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 404:
                 logger.debug(
@@ -1502,7 +1509,7 @@ class AdminConfigClient:
 
         try:
             url = f"{self.admin_url}/api/voice-config/internal/stt"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1558,7 +1565,7 @@ class AdminConfigClient:
 
         try:
             url = f"{self.admin_url}/api/voice-config/internal/tts"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1606,7 +1613,7 @@ class AdminConfigClient:
 
         try:
             url = f"{self.admin_url}/api/voice-config/internal/all"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1668,8 +1675,8 @@ class AdminConfigClient:
                 return self._voice_interface_cache[interface_name]
 
         try:
-            url = f"{self.admin_url}/api/voice-interfaces/internal/config/{interface_name}"
-            response = await self.client.get(url, headers=self._service_key_header())
+            url = f"{self.admin_url}/api/voice-interfaces/internal/config/{path_segment(interface_name)}"
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 config = response.json()
@@ -1723,7 +1730,7 @@ class AdminConfigClient:
         """
         try:
             url = f"{self.admin_url}/api/voice-config/health"
-            response = await self.client.get(url, headers=self._service_key_header())
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 return response.json()
@@ -1907,7 +1914,7 @@ class AdminConfigClient:
         """
         headers = voice_automation_headers(self.api_key, caller_mode, caller_guest_name, caller_guest_stay)
         try:
-            url = f"{self.admin_url}/api/voice-automations/{automation_id}/archive"
+            url = f"{self.admin_url}/api/voice-automations/{path_segment(automation_id)}/archive"
             response = await self.client.post(url, params={"reason": reason}, headers=headers)
 
             if response.status_code == 200:
@@ -1953,7 +1960,7 @@ class AdminConfigClient:
         """
         headers = voice_automation_headers(self.api_key, caller_mode, caller_guest_name, caller_guest_stay)
         try:
-            url = f"{self.admin_url}/api/voice-automations/{automation_id}/restore"
+            url = f"{self.admin_url}/api/voice-automations/{path_segment(automation_id)}/restore"
             response = await self.client.post(url, headers=headers)
 
             if response.status_code == 200:
@@ -1993,8 +2000,8 @@ class AdminConfigClient:
             True if deleted successfully
         """
         try:
-            url = f"{self.admin_url}/api/voice-automations/{automation_id}"
-            response = await self.client.delete(url, headers={"X-Service-Key": self.api_key})
+            url = f"{self.admin_url}/api/voice-automations/{path_segment(automation_id)}"
+            response = await self.client.delete(url, headers=self._service_key_headers())
 
             if response.status_code in (200, 204):
                 logger.info(
@@ -2144,8 +2151,8 @@ class AdminConfigClient:
             Returns {"monthly_count": 0} if API unavailable
         """
         try:
-            url = f"{self.admin_url}/api/internal/service-usage/{service_name}"
-            response = await self.client.get(url, headers={"X-Service-Key": self.api_key})
+            url = f"{self.admin_url}/api/internal/service-usage/{path_segment(service_name)}"
+            response = await self.client.get(url, headers=self._service_key_headers())
 
             if response.status_code == 200:
                 return response.json()
@@ -2179,9 +2186,9 @@ class AdminConfigClient:
             Dict with updated monthly_count, monthly_limit, remaining
         """
         try:
-            url = f"{self.admin_url}/api/internal/service-usage/{service_name}/increment"
+            url = f"{self.admin_url}/api/internal/service-usage/{path_segment(service_name)}/increment"
             response = await self.client.post(
-                url, params={"count": count}, headers={"X-Service-Key": self.api_key}
+                url, params={"count": count}, headers=self._service_key_headers()
             )
 
             if response.status_code == 200:

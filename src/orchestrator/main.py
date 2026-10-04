@@ -107,7 +107,7 @@ from shared.privacy_filter import (
     get_privacy_filter, configure_privacy_filter,
     filter_for_cloud, should_block_for_cloud
 )
-from shared.admin_url import get_admin_url
+from shared.admin_url import get_admin_url, path_segment
 from shared.service_key import note_admin_refusal, service_key_headers
 
 # Modular context imports
@@ -323,7 +323,7 @@ async def get_intent_routing_strategy(intent_name: str) -> str:
         import httpx
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
-                f"{ADMIN_API_URL}/api/intent-routing/strategy/configs/{cache_key}",
+                f"{ADMIN_API_URL}/api/intent-routing/strategy/configs/{path_segment(cache_key)}",
                 headers=service_key_headers(),
             )
             if response.status_code == 200:
@@ -1412,7 +1412,7 @@ async def check_service_bypass(intent: str) -> Optional[Dict[str, Any]]:
             headers["X-Service-Key"] = _SERVICE_API_KEY
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
-                f"{ADMIN_API_URL}/api/rag-service-bypass/public/{intent}/config",
+                f"{ADMIN_API_URL}/api/rag-service-bypass/public/{path_segment(intent)}/config",
                 headers=headers
             )
             if response.status_code == 200:
