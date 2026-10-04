@@ -279,8 +279,6 @@ ENCODERS = {"path_segment", "path_segments"}
 # {(file, function, expression): why it is left}. Compared exactly, so a new
 # site fails and a fixed one must be removed.
 UNENCODED_ELSEWHERE = {
-    ("src/rag/sports/main.py", "get_api_key_config", "service_name"):
-        "a keyed call whose value is a constant chosen in that module; converting it belongs to the edge callers",
     ("src/sms/scheduler.py", "_get_template", "template_id"):
         "sends no service key; an integer id read from the admin database",
     ("src/sms/tips.py", "get_tips_for_stay", "calendar_event_id"):

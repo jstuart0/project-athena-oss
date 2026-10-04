@@ -32,7 +32,7 @@ from shared.local_time import local_day_bounds_utc, local_today
 from shared.service_registry import startup_service, unregister_service
 from shared.logging_config import configure_logging
 from shared.metrics import setup_metrics_endpoint
-from shared.admin_url import get_admin_url
+from shared.admin_url import get_admin_url, path_segment
 
 # Configure logging
 logger = configure_logging("sports-rag")
@@ -119,7 +119,7 @@ async def get_api_key_config(service_name: str) -> Optional[Dict[str, Any]]:
     """Fetch API key/config from admin backend."""
     try:
         response = await http_client.get(
-            f"{ADMIN_API_URL}/api/external-api-keys/public/{service_name}/key",
+            f"{ADMIN_API_URL}/api/external-api-keys/public/{path_segment(service_name)}/key",
             headers={"X-Service-Key": SERVICE_API_KEY},
             timeout=5.0,
         )
