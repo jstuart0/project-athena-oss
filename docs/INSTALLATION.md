@@ -1026,7 +1026,8 @@ kubectl -n athena-prod logs -f deployment/athena-orchestrator
 
 **Check if module is enabled:**
 ```bash
-curl http://localhost:8080/api/modules | jq
+# Needs a signed-in user: a user API key (owner or operator) or a Bearer session token
+curl -H "X-API-Key: $ATHENA_USER_API_KEY" http://localhost:8080/api/modules/ | jq
 ```
 
 **Check module health:**

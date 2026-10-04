@@ -191,6 +191,7 @@ DATABASE_URL=postgresql://athena:password@localhost:5432/athena
 | `NOTIFICATIONS_SERVICE_URL` | `http://localhost:8050` | Notifications service |
 | `JARVIS_WEB_URL` | *(empty)* | jarvis-web API base for appliance/sensor/media lookups in the orchestrator's smart-home controller; empty skips them. |
 | `CONTROL_AGENT_URL` | `http://localhost:8099` | Service management API |
+| `CONTROL_AGENT_CALLBACK_BASE_URL` | *(empty)* | Where the Control Agent's host reaches admin-backend, for model-download progress callbacks. See "Admin API authentication". |
 | `CONTROL_AGENT_SERVICES_FILE` | *(empty)* | Path to a JSON file (read by the Control Agent process itself, not admin-backend) naming which bare processes, watchdog exclusions, and Docker containers this Control Agent may manage. Empty means it manages nothing. See below. |
 
 **Control Agent managed-services file (ATHENA-99, D46)**: `CONTROL_AGENT_SERVICES_FILE` points at a JSON file with three independent, all-optional, all-default-empty top-level keys:
@@ -1561,10 +1562,12 @@ routes total) require an `X-Service-Key` header matching `SERVICE_API_KEY`.
 
 ### Admin API authentication
 
-Every admin-backend route either requires a credential or is on a reviewed
-list; `admin/backend/tests/test_route_auth_population.py` (the
-`admin-backend-auth` CI job) fails when a new route has neither. Three kinds
-of route:
+Every admin-backend route requires a credential, except the 13 public routes
+listed below; `admin/backend/tests/test_route_auth_population.py` (the
+`admin-backend-auth` CI job) fails when a new route has neither a credential
+check nor an entry on that list. A path containing `/public` or `/internal`
+is a historical name, not a statement about access: those routes need a
+credential like any other. Three kinds of route:
 
 - **Signed-in user.** A Bearer session token or a user API key (`X-API-Key`)
   for a user holding the route's permission (`read`/`write`: owner and
@@ -1584,7 +1587,96 @@ of route:
   `GET /api/sms/internal/current-preferences`, `POST /api/pipeline-events/emit`,
   `/api/internal/emerging-intents*`, `/api/internal/intent-metrics`, and
   every `/api/voice-automations` route except the hard delete.
-- **Service key only.** `POST /api/sms/internal/log-send`.
+- **Service key only.** `POST /api/sms/internal/log-send`, and the Control
+  Agent's download-progress callback,
+  `POST /api/model-downloads/internal/{download_id}/progress`. A request with
+  no `X-Service-Key` header gets 422 there; a wrong key, 401.
+
+The configuration routes the services read, and the admin UI's read routes
+beside them, by family. Permission is `read` for a GET and `write` for
+anything else unless noted. Routes under the same prefixes that aren't
+listed were already gated and are unchanged.
+
+| Prefix | Service key or signed-in user | Signed-in user only |
+|--------|-------------------------------|---------------------|
+| `/api/alerts/public` | `POST /create`, `POST /resolve-by-entity` | `GET /active-by-type` (`read:alerts`, so viewer and support roles keep it) |
+| `/api/cloud-llm-usage` | `POST` (log a cloud call's cost) | every GET: `/recent`, `/alerts`, `/summary/*`, `/analytics/*` |
+| `/api/cloud-providers` | `GET /pricing/{provider}/{model_id}` | the list, `/{provider}`, `/{provider}/health`, `/health/all`, `/pricing/{provider}` |
+| `/api/component-models` | `/public`, `/component/{component_name}` | |
+| `/api/directions-settings`, `/api/features`, `/api/gateway-config` | `/public` on each | |
+| `/api/escalation` | `/presets/public`, `/presets/active/public`, `/state/{session_id}/public`, `POST /state/internal`, `POST /events/internal`, `PUT /state/{session_id}/decrement` | `GET /metrics/prometheus` |
+| `/api/follow-me` | `/internal/config` | |
+| `/api/ha-pipelines` | | `/pipelines`, `/pipelines/preferred`, `/modes`, `/health` |
+| `/api/intent-routing` | `/routing/public`, `/providers/public`, `/strategy/configs/public`, `/strategy/configs/{intent_name}` | |
+| `/api/llm-backends` | `GET /public`, `POST /metrics` | `GET /public/mlx-applicability` |
+| `/api/mcp-security` | `GET /public`, `POST /check-domain` (`read`: it changes nothing) | |
+| `/api/model-configs` | `/public`, `/public/{model_name}` | `/presets` |
+| `/api/modules` | | all six: the four reads, `POST /refresh-all`, `POST /{module_id}/refresh` |
+| `/api/music-config` | `/internal` | `/browser-playback` |
+| `/api/presets` | `/public/active` | |
+| `/api/rag-service-bypass` | | the list, `/{service_name}` |
+| `/api/room-audio` | `/internal`, `/internal/{room_name}` | |
+| `/api/room-tv` | `/internal`, `/internal/{room_name}`, `/apps`, `/features` | |
+| `/api/service-registry/services/{service_name}` | `/url` | the row itself |
+| `/api/tool-calling` | `/settings/public`, `/triggers/public`, `/tools/stats/public`, `/tools/{tool_id}/api-keys/public`, `/tools/by-name/{tool_name}/api-keys/public` | |
+| `/api/tool-proposals` | `POST` (create) | `GET` list, `/stats/summary`, `/{proposal_id}` |
+| `/api/voice-config` | `/internal/stt`, `/internal/tts`, `/internal/all`, `/health` | `/running-config`, `/services`, `/services/{service_type}`, `/stt/models`, `/stt/active`, `/tts/voices`, `/tts/active` |
+| `/api/voice-interfaces` | `/public`, `/public/{interface_name}`, `/internal/config/{interface_name}`, `/engines/public/stt`, `/engines/public/tts` | |
+
+The exact guard and permission of each route is pinned in
+`REVIEWED_BY_FILE` in `admin/backend/tests/test_route_auth_population.py`.
+
+How a route answers, by credential:
+
+| Request carries | Service key or signed-in user | Signed-in user only | Service key only |
+|-----------------|-------------------------------|---------------------|------------------|
+| nothing | 401 | 401 | 422 |
+| the service key | allowed | 401 | allowed |
+| a wrong service key (with or without a valid user credential) | 401 | 401 | 401 |
+| any service key while `SERVICE_API_KEY` is unset on admin-backend | 503 | 401 | 503 |
+| an owner or operator credential | allowed | allowed | 422 |
+| a viewer or support credential, on a `read` or `write` route | 403 | 403 | 422 |
+| a valid user credential plus an empty `X-Service-Key` header | allowed, as that user | 401 | 401 |
+
+An empty `X-Service-Key` header counts as no key on a route that accepts
+either credential (callers and proxies send one when no key is set, and it
+carries no authority); a signed-in-user route refuses any `X-Service-Key`
+header it's sent. A key that isn't plain ASCII is a wrong key (401).
+
+**Calling a route from a script, a scraper or a dashboard.** Authenticate as
+a user: a Bearer session token, or a user API key in `X-API-Key` (created
+on the admin UI's User API Keys page), for an owner or operator. A user API
+key acts with its user's role. Don't give an
+external consumer the service key: it's the services' shared secret, it reads
+guest data (below), and the signed-in-user routes refuse it. This applies to
+a Prometheus scrape of `/api/escalation/metrics/prometheus` too.
+
+```bash
+curl -H "X-API-Key: $ATHENA_USER_API_KEY" http://your-admin-host:8080/api/modules/
+```
+
+**The service key's format.** `SERVICE_API_KEY` must be visible ASCII
+(`!` to `~`): no space, tab, newline or non-ASCII character. A Secret
+created from a file often carries a trailing newline. The callers of the
+routes in the table above (`service_key_headers()` in
+`src/shared/service_key.py`, `AdminConfigClient`, jarvis-web and the Control
+Agent's progress callback) send no `X-Service-Key` at all for a key that
+fails this, log `service_api_key_unusable` once with the variable's name
+(never the value), and are then refused as anonymous. Older call sites still
+hand the key to the HTTP client, which rejects it with an error, so fix the
+key rather than rely on the check.
+
+**HTTPS to the admin API.** A call that carries the service key to
+admin-backend verifies the server's certificate and doesn't follow
+redirects. An in-cluster `http://` admin URL is unaffected. If the admin URL
+is `https://` and its certificate comes from a private CA, set
+`SSL_CERT_FILE` (or `SSL_CERT_DIR`) on each calling service to a **combined**
+bundle: the public roots plus your CA. That variable replaces the trust
+store for every outbound HTTPS call in that process, so a bundle holding
+only your CA breaks the service's calls to public APIs. A certificate
+failure is a connection error, not a refusal: nothing is logged on
+admin-backend, and the caller logs its usual fetch-failure line (table
+below) and runs on defaults.
 
 **The service key can read guest data.** Current guests' names and phone
 numbers, device-to-guest sessions, SMS preferences and voice automations are
@@ -1615,16 +1707,107 @@ wherever it drops the name.
 automation keeps running until the host turns it off there, and the assistant
 says so.
 
-**Public routes** and their preconditions: `GET /health` (liveness only); the
-sign-in routes (`/api/auth/login`, `/callback`, `/logout`, `/methods`,
-`/session-token`, and their `/auth/*` aliases), where login mints a token
-only in demo mode, which production startup refuses; `POST
-/api/auth/local-login` (rate limit, lockout and timing floor);
-`GET /api/calendar-sources/types` (static); and
-`GET /api/settings/assistant-profile/public` and `/privacy/public` (persona
-and one boolean). A number of older internal and `/public` routes are still
-anonymous and are listed in the test as unreviewed; restrict `/api/` at your
-ingress for networks guests use.
+**Public routes** (13) and their preconditions: `GET /health` (liveness
+only); the sign-in routes `GET /api/auth/login`, `/api/auth/callback` and
+`/api/auth/logout` with their `/auth/login`, `/auth/callback` and
+`/auth/logout` aliases, plus `GET /api/auth/methods` and
+`GET /api/auth/session-token`, where login mints a token only in demo mode,
+which production startup refuses; `POST /api/auth/local-login` (rate limit,
+lockout and timing floor); `GET /api/calendar-sources/types` (static); and
+`GET /api/settings/assistant-profile/public` and
+`GET /api/settings/privacy/public` (persona and one boolean). Nothing else
+answers without a credential. Restricting `/api/` at your ingress for
+networks guests use is still worthwhile as a second layer.
+
+**Refused requests: admin-backend's log.** admin-backend writes one WARNING,
+`admin_auth_rejected`, when it refuses a request for its credential: a 401
+or 403 from a credential or permission guard, a 503 answered to a request
+that carried `X-Service-Key` while no key is configured, or the 422 a
+service-key-only route gives a request with no key. Fields:
+
+| Field | Value |
+|-------|-------|
+| `route` | the route template (`/api/escalation/state/{session_id}/public`), never the concrete path; `<unmatched>` when no route matched |
+| `method` | the HTTP method, or `OTHER` |
+| `status` | 401, 403, 503 or 422 |
+| `reason` | `no_credential`, `service_key_refused`, `user_credential_refused`, `insufficient_permission` (a signed-in user without the route's permission) or `service_key_unconfigured` |
+| `credential_presented` | `service_key`, `user` or `none`: which headers the request carried, not who sent it |
+| `suppressed` | how many more refusals with the same route and reason were not logged since the previous line |
+
+The line carries no path value, query string, header or key value, or client
+address. It's limited to one line per route template and reason per minute,
+per admin-backend replica (two replicas can each write one); refusals inside
+the minute are counted and reported as `suppressed` on the next line for
+that route and reason, or when admin-backend shuts down. Repeating the same
+anonymous probe within a minute therefore produces no second line: read
+`suppressed`.
+
+What the line does and doesn't tell you:
+
+- `credential_presented="service_key"` means "check the services' own logs".
+  Anyone who can reach admin-backend can send a junk `X-Service-Key`, so the
+  line alone doesn't prove one of your services is misconfigured.
+- `credential_presented="none"` on a route none of your services calls
+  anonymously is an outside consumer (a script, a scraper, a dashboard) that
+  needs a user credential.
+- A failed password login (`POST /api/auth/local-login`) is not logged here;
+  that route has its own lockout and failure handling. A refused WebSocket
+  ticket isn't either.
+- It covers refusals made by the credential and permission guards. It is not
+  a record of every 403: a handler that refuses a request after a guard
+  accepted it (an owner-only action, for example) is generally not reported.
+  Any 503 answered to a request that carried `X-Service-Key` is reported as
+  `service_key_unconfigured`, whatever caused the 503.
+
+**Refused requests: the calling service's log.** A service whose call to
+admin-backend is answered 401, 403 or 503 writes one ERROR,
+`admin_backend_refused`, with `status` and `route` (the route template, no
+query). It makes the one request, doesn't retry, falls back to its default
+for that setting, and logs at most one line per route and status per minute.
+Startup and readiness probes are unaffected. This line is the authority for
+"one of my services is being refused": it means that service's
+`SERVICE_API_KEY` is missing, malformed or different from admin-backend's.
+Two cases aren't credential problems: a 503 through an ingress or load
+balancer while admin-backend restarts, and, during an upgrade, a 401 for
+`/api/room-tv/apps` or `/api/room-tv/features` from an upgraded orchestrator
+against an admin-backend that hasn't been upgraded yet.
+
+A connection or certificate failure is not a refusal and produces neither
+line. After upgrading a service, and before upgrading admin-backend, search
+its log for the events a failed connection produces:
+
+| Service | Event | Lost until fixed |
+|---------|-------|------------------|
+| orchestrator | `tv_configs_fetch_failed`, `app_configs_fetch_failed`, `feature_flags_fetch_failed` | the admin-configured TV rooms (a built-in fallback is used), TV app list, TV feature flags |
+| orchestrator | `room_configs_fetch_failed` | the admin-configured room speakers (a built-in fallback is used) |
+| gateway | `livekit_credentials_fetch_error` | LiveKit credentials |
+| gateway | `feature_flag_check_error`, `wyoming_feature_flag_check_error` | the flag keeps its previous value |
+| jarvis-web | `failed_to_fetch_guest`, `failed_to_fetch_tv_configs` | current-guest lookup, TV room list |
+| site-scraper RAG | `config_load_failed_using_defaults` | admin-configured allow and block lists |
+
+On the orchestrator, `feature_flags_loaded_from_db` after a restart is the
+positive sign that admin calls work.
+
+**Control Agent download-progress callback.** When a model download starts,
+admin-backend gives the Control Agent a callback URL and the agent posts
+progress to it with `X-Service-Key`.
+
+| Variable | Read by | Default | Description |
+|----------|---------|---------|-------------|
+| `CONTROL_AGENT_CALLBACK_BASE_URL` | admin-backend | *(empty)* | Where the Control Agent's host reaches admin-backend: scheme, host and optional port, no path (`https://your-admin-host`). Empty: admin-backend hands out `http://localhost:8080` and logs `control_agent_callback_base_url_unset` once, which is only right when the agent runs on admin-backend's host. |
+| `ALLOWED_CALLBACK_HOSTS` | Control Agent | *(empty)* | Comma-separated hostnames. Empty: the agent rejects every download request that names a callback, which admin-backend's always do (fail-closed). A callback URL whose hostname is an entry is accepted; with a non-empty list, a hostname that isn't an entry is still accepted when it resolves to a public address. The agent attaches the service key **only** when the callback's hostname is exactly an entry (hostname only, no scheme or port). |
+| `SERVICE_API_KEY` | Control Agent | *(empty)* | The same key admin-backend uses; also required for the agent's inbound routes. |
+
+So for an agent on its own host: set `CONTROL_AGENT_CALLBACK_BASE_URL` on
+admin-backend, and put that URL's hostname in the agent's
+`ALLOWED_CALLBACK_HOSTS`. Don't list `localhost` there unless admin-backend
+runs on the agent's host: whatever listens on that host's port 8080 would
+receive the key. Over plain `http://` the key crosses the network in clear
+text; use `https://` between hosts. When the key is withheld the agent logs
+`progress_callback_service_key_withheld` (host not on the list),
+`progress_callback_service_key_unset` or `service_api_key_unusable` once,
+each callback is refused (`admin_backend_refused` on the agent, at most once
+a minute per status), and the download row never shows progress.
 
 **API docs.** `/docs`, `/redoc` and `/openapi.json` are served only with
 `DEV_MODE=true`.

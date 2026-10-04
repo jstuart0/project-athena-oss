@@ -26,6 +26,7 @@ data:
   # DO_NOT_TRACK: "1"
   # COMMUNITY_EVENTS_SOURCES: ""
   # CONTENT_FETCHER_ALLOW_BROWSER_FETCH: ""
+  # CONTROL_AGENT_CALLBACK_BASE_URL: ""
   # CONTROL_AGENT_ENABLED: ""
   # DATABASE_URL: ""
   # DEFAULT_AMTRAK_STATION: ""
@@ -204,6 +205,14 @@ data:
   #
   # CONTROL_AGENT_ENABLED: "true"
   # CONTROL_AGENT_URL: "http://your-control-agent-host:8099"
+  #
+  # Model downloads through the Control Agent: the address the agent's host
+  # reaches admin-backend at (scheme://host[:port], no path). The agent posts
+  # download progress there with the service key, and only when that hostname
+  # is an exact entry of its own ALLOWED_CALLBACK_HOSTS. Unset: admin-backend
+  # falls back to http://localhost:8080 and logs a warning, which only works
+  # when the agent runs on admin-backend's own host (never the case for a pod).
+  # CONTROL_AGENT_CALLBACK_BASE_URL: "https://your-admin-host"
 
   # Service Control on Kubernetes (ATHENA-118) — opt-in. When true, admin-
   # backend's Service Control page can start/stop/restart RAG and core
