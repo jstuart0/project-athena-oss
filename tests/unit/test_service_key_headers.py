@@ -1052,14 +1052,22 @@ def _flag_refreshers():
     }
 
 
+@pytest.fixture
+def flag_refreshers():
+    """Requested before `captured_logs`: a gateway module configures logging
+    when it is first imported, which would detach a capture already open."""
+    return _flag_refreshers()
+
+
 @pytest.mark.parametrize("which", ["livekit", "wyoming"])
-def test_a_failed_flag_refresh_is_a_warning_with_the_error_type_only(which, monkeypatch, captured_logs, caplog):
+def test_a_failed_flag_refresh_is_a_warning_with_the_error_type_only(
+        which, monkeypatch, flag_refreshers, captured_logs, caplog):
     import asyncio
 
     import httpx
 
     caplog.set_level(logging.DEBUG)
-    module, cls, event = _flag_refreshers()[which]
+    module, cls, event = flag_refreshers[which]
     monkeypatch.setattr(module, "ADMIN_API_URL", "https://zz-admin.example:8443")
     _set_key(monkeypatch, "zz-flag-key")
 

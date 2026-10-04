@@ -938,9 +938,10 @@ def test_a_transport_error_is_not_a_refusal(case, prepare, captured_logs):
     transport, call, check_default = prepare(case)
     transport.error = lambda request: httpx.ConnectError("connection refused", request=request)
     check_default(_run(call()))
-    # A caller with two requests to the same host may stop at the first
-    # failure (`_load_engines` does); none retries.
-    assert 1 <= len(transport.targeted) <= len(case.requests)
+    # One attempt per request and no retry. `_load_engines` makes its two
+    # requests to one host in a row and stops at the first that fails.
+    expected = 1 if case.function == "_load_engines" else len(case.requests)
+    assert len(transport.targeted) == expected
     assert _refused(captured_logs) == []
 
 
