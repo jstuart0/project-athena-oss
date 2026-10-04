@@ -23,9 +23,8 @@ Endpoints:
 """
 from typing import Dict, Any, List, Literal, Optional
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 import asyncpg
-import hmac
 import os
 import re
 import structlog
@@ -33,7 +32,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.utils.service_auth import verify_service_api_key
+from app.utils.service_auth import service_keys_match, verify_service_api_key
 from app.utils.passwords import verify_password
 from app.database import get_db
 from app.models import GuestModeConfig, OwnerPinAttempt, RagService, CalendarEvent
@@ -51,6 +50,7 @@ router = APIRouter(
 
 
 async def require_service_key_401(
+    request: Request,
     x_service_key: Optional[str] = Header(default=None, alias="X-Service-Key"),
 ) -> bool:
     """Service-key-only auth that returns 401 (not 422) for a missing/wrong
@@ -71,8 +71,9 @@ async def require_service_key_401(
     key = get_config().service_api_key
     if not key:
         raise HTTPException(status_code=503, detail="Service authentication not configured")
-    if not x_service_key or not hmac.compare_digest(x_service_key, key):
+    if not x_service_key or not service_keys_match(x_service_key, key):
         raise HTTPException(status_code=401, detail="Invalid or missing service key")
+    request.state.auth_kind = "service"
     return True
 
 

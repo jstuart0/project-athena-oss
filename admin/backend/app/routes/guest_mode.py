@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr, field_validator
 from datetime import datetime, timedelta
-import hmac
 from urllib.parse import urlparse
 import re
 import structlog
@@ -23,6 +22,7 @@ from app.models import User, GuestModeConfig, CalendarEvent, ModeOverride, Audit
 from app.routes.internal import require_service_key_401
 from app.utils.passwords import hash_password
 from app.utils.rag_urls import check_ssrf_safe
+from app.utils.service_auth import service_keys_match
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -107,13 +107,16 @@ async def _guest_mode_config_auth(
         configured_key = get_config().service_api_key
         if not configured_key:
             raise HTTPException(status_code=503, detail="Service authentication not configured")
-        if not hmac.compare_digest(x_service_key, configured_key):
+        if not service_keys_match(x_service_key, configured_key):
             raise HTTPException(status_code=401, detail="Invalid service key")
+        request.state.auth_kind = "service"
         return None
 
     credentials = await optional_security(request)
     x_api_key = request.headers.get("X-API-Key")
-    return await get_current_user(credentials=credentials, x_api_key=x_api_key, db=db, request=request)
+    user = await get_current_user(credentials=credentials, x_api_key=x_api_key, db=db, request=request)
+    request.state.auth_kind = "user"
+    return user
 
 
 class GuestModeConfigCreate(BaseModel):

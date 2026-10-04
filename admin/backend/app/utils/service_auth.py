@@ -46,7 +46,17 @@ def control_agent_headers() -> dict:
     return {"X-Service-Key": key} if key else {}
 
 
-def verify_service_api_key(x_service_key: str = Header(..., alias="X-Service-Key")) -> bool:
+def service_keys_match(presented: str, configured: str) -> bool:
+    """Constant-time comparison of a presented service key with the
+    configured one, as UTF-8 bytes: ``hmac.compare_digest`` raises on a
+    ``str`` holding a non-ASCII character, and a header can carry one."""
+    return hmac.compare_digest(presented.encode("utf-8"), configured.encode("utf-8"))
+
+
+def verify_service_api_key(
+    request: Request,
+    x_service_key: str = Header(..., alias="X-Service-Key"),
+) -> bool:
     """
     FastAPI dependency that authenticates service-to-service requests.
 
@@ -70,12 +80,13 @@ def verify_service_api_key(x_service_key: str = Header(..., alias="X-Service-Key
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Service authentication not configured",
         )
-    if not hmac.compare_digest(x_service_key, key):
+    if not service_keys_match(x_service_key, key):
         logger.warning("service_api_key_invalid", key_length=len(x_service_key) if x_service_key else 0)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid service key",
         )
+    request.state.auth_kind = "service"
     return True
 
 
@@ -120,7 +131,7 @@ def _check_service_key_raw(
         # now raises 503 before calling this helper when key is unset.
         logger.warning("service_api_key_not_configured_during_dual_auth")
         return False
-    if not hmac.compare_digest(x_service_key, key):
+    if not service_keys_match(x_service_key, key):
         logger.warning("service_api_key_invalid_during_dual_auth",
                        key_length=len(x_service_key))
         raise HTTPException(
@@ -230,11 +241,13 @@ def require_user_permission(permission: str):
     header is refused with 401 -- correct, wrong, or with
     ``SERVICE_API_KEY`` unset alike -- so a leaked or shared service key can
     never reach these routes, and a caller can't mix the two credentials.
-    Returns the authenticated ``User``.
+    Returns the authenticated ``User`` and records the accepted caller in
+    ``request.state.auth_kind``.
     """
     from app.auth.oidc import get_current_user
 
     async def _dependency(
+        request: Request,
         user=Depends(get_current_user),
         x_service_key: Optional[str] = Header(default=None, alias="X-Service-Key"),
     ):
@@ -245,6 +258,7 @@ def require_user_permission(permission: str):
             )
         if not user.has_permission(permission):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+        request.state.auth_kind = "user"
         return user
 
     _dependency.required_permission = permission

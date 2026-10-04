@@ -388,6 +388,60 @@ def test_other_4xx_answers_are_not_auth_rejections(api, operator_user):
     assert _rejections(logs) == []
 
 
+# L5 and L10 on a small app ----------------------------------------------------
+#
+# Two rules the real app has no route for today: every role that reaches a
+# guard's own permission check holds the permission (a scoped role is turned
+# away earlier, by path), and every route that needs a body is guarded.
+
+@pytest.fixture
+def toy(db, operator_user):
+    """The middleware and the served user guard around two routes: one that
+    needs a permission no operator holds, one with a body and no guard."""
+    from fastapi import Depends, FastAPI
+    from pydantic import BaseModel
+
+    (guests,) = [w for w in iter_api_routes(app) if w.path == "/api/guests" and "GET" in w.methods]
+    (guard,) = [d.call for d in guests.route.dependant.dependencies
+                if getattr(d.call, "__qualname__", "").startswith("require_user_permission.")]
+    require_user_permission = guard.__globals__["require_user_permission"]
+
+    class Body(BaseModel):
+        name: str
+
+    small = FastAPI()
+    small.add_middleware(_namespace()["AuthRejectionMiddleware"])
+
+    @small.get("/api/zz-owner-only/{item_id}", dependencies=[Depends(require_user_permission("manage_users"))])
+    async def owner_only(item_id: str):
+        return {}
+
+    @small.post("/api/zz-unguarded")
+    async def unguarded(body: Body):
+        return {}
+
+    small.dependency_overrides[get_db] = lambda: db
+    with TestClient(small, raise_server_exceptions=False) as client:
+        _reset()
+        yield client
+
+
+def test_a_permission_the_guard_itself_refuses_is_logged(toy, operator_user):
+    """The guard records an accepted caller only after its permission check."""
+    with structlog.testing.capture_logs() as logs:
+        response = toy.get("/api/zz-owner-only/zz-secret-id", headers=_bearer(operator_user))
+    assert response.status_code == 403
+    _one(logs, route="/api/zz-owner-only/{item_id}", method="GET", status=403, reason="insufficient_permission",
+         credential_presented="user")
+
+
+def test_a_keyless_422_is_reported_only_behind_the_service_only_guard(toy):
+    with structlog.testing.capture_logs() as logs:
+        response = toy.post("/api/zz-unguarded", json={})
+    assert response.status_code == 422
+    assert _rejections(logs) == []
+
+
 # L11 ----------------------------------------------------------------------
 
 BURST = 5
@@ -670,10 +724,11 @@ def test_records_carry_only_the_agreed_fields(api, viewer_user, monkeypatch, con
 
 
 def test_case_population():
-    """21 tests: L1-L13 and L15-L18, with L11, L13 and L17 as two tests
-    each, and the positive control for the stdlib leak check. L14 is in the
-    matrix file, with the route it needs."""
+    """23 tests: L1-L13 and L15-L18, with L11, L13 and L17 as two tests
+    each, the two small-app cases for L5 and L10, and the positive control
+    for the stdlib leak check. L14 is in the matrix file, with the route it
+    needs."""
     tests = [name for name in vars(sys.modules[__name__])
              if name.startswith("test_") and name != "test_case_population"]
-    assert len(tests) == 21, sorted(tests)
+    assert len(tests) == 23, sorted(tests)
     assert "test_an_anonymous_request_is_logged_by_route_template" in tests
