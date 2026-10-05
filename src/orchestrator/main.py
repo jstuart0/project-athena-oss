@@ -107,7 +107,8 @@ from shared.privacy_filter import (
     get_privacy_filter, configure_privacy_filter,
     filter_for_cloud, should_block_for_cloud
 )
-from shared.admin_url import get_admin_url
+from shared.admin_url import get_admin_url, path_segment
+from shared.service_key import note_admin_refusal, service_key_headers
 
 # Modular context imports
 from orchestrator.context import (
@@ -274,7 +275,8 @@ async def get_feature_flag(flag_name: str, default: bool = False) -> bool:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
                 f"{ADMIN_API_URL}/api/features/public",
-                params={"name": flag_name}
+                params={"name": flag_name},
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 flags = response.json()
@@ -283,6 +285,8 @@ async def get_feature_flag(flag_name: str, default: bool = False) -> bool:
                         value = flag.get("enabled", default)
                         _orch_feature_flag_cache[flag_name] = (time.time(), value)
                         return value
+            else:
+                note_admin_refusal(response.status_code, "/api/features/public")
     except Exception as e:
         logger.warning("feature_flag_fetch_failed", flag=flag_name, error=str(e))
 
@@ -319,7 +323,8 @@ async def get_intent_routing_strategy(intent_name: str) -> str:
         import httpx
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
-                f"{ADMIN_API_URL}/api/intent-routing/strategy/configs/{cache_key}"
+                f"{ADMIN_API_URL}/api/intent-routing/strategy/configs/{path_segment(cache_key)}",
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 config = response.json()
@@ -331,6 +336,7 @@ async def get_intent_routing_strategy(intent_name: str) -> str:
                     strategy=strategy
                 )
                 return strategy
+            note_admin_refusal(response.status_code, "/api/intent-routing/strategy/configs/{intent_name}")
     except Exception as e:
         logger.warning(
             "intent_routing_strategy_fetch_failed",
@@ -1159,7 +1165,12 @@ async def lifespan(app: FastAPI):
         try:
             # Fetch configured model names from admin public endpoint
             async with httpx.AsyncClient(timeout=10.0) as _prewarm_http:
-                resp = await _prewarm_http.get(f"{admin_client.admin_url}/api/component-models/public")
+                resp = await _prewarm_http.get(
+                    f"{admin_client.admin_url}/api/component-models/public",
+                    headers=service_key_headers(),
+                )
+                # Before raise_for_status(): the except below logs only the error type.
+                note_admin_refusal(resp.status_code, "/api/component-models/public")
                 resp.raise_for_status()
                 components = resp.json()
             unique_models = sorted({
@@ -1225,8 +1236,11 @@ async def lifespan(app: FastAPI):
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 fm_response = await client.get(
-                    f"{admin_client.admin_url}/api/follow-me/internal/config"
+                    f"{admin_client.admin_url}/api/follow-me/internal/config",
+                    headers=service_key_headers(),
                 )
+                if fm_response.status_code != 200:
+                    note_admin_refusal(fm_response.status_code, "/api/follow-me/internal/config")
                 follow_me_config_response = fm_response.json() if fm_response.status_code == 200 else None
             if follow_me_config_response and follow_me_config_response.get("config"):
                 fm_cfg = follow_me_config_response["config"]
@@ -1398,7 +1412,7 @@ async def check_service_bypass(intent: str) -> Optional[Dict[str, Any]]:
             headers["X-Service-Key"] = _SERVICE_API_KEY
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
-                f"{ADMIN_API_URL}/api/rag-service-bypass/public/{intent}/config",
+                f"{ADMIN_API_URL}/api/rag-service-bypass/public/{path_segment(intent)}/config",
                 headers=headers
             )
             if response.status_code == 200:
@@ -1888,7 +1902,7 @@ async def log_escalation_audit(session_id: str, rule_name: str, target: str, tri
         admin_client = get_admin_client()
 
         # Log to escalation events table (for metrics dashboard)
-        await admin_client.client.post(
+        event_response = await admin_client.client.post(
             f"{admin_client.admin_url}/api/escalation/events/internal",
             json={
                 "session_id": session_id,
@@ -1900,8 +1914,10 @@ async def log_escalation_audit(session_id: str, rule_name: str, target: str, tri
                     "trigger_type": trigger_type,
                     "rule_name": rule_name
                 }
-            }
+            },
+            headers=service_key_headers(),
         )
+        note_admin_refusal(event_response.status_code, "/api/escalation/events/internal")
 
         # Also log to general audit table
         await admin_client.client.post(
@@ -7724,7 +7740,9 @@ async def list_models():
         # Fetch available backends from admin API
         admin_url = get_admin_url()
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{admin_url}/api/llm-backends/public")
+            response = await client.get(f"{admin_url}/api/llm-backends/public", headers=service_key_headers())
+            # Before raise_for_status(): the except below only says the fetch failed.
+            note_admin_refusal(response.status_code, "/api/llm-backends/public")
             response.raise_for_status()
             backends = response.json()
 

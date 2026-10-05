@@ -37,6 +37,7 @@ from sqlalchemy import text
 from admin_url import get_admin_url
 import caller_auth
 import client_throttle
+from service_key import is_header_safe, note_admin_refusal
 from caller_auth import CLASS_AUTHENTICATED, Caller, resolve_caller, resolve_caller_ws, route_dependency, ws_origin_allowed
 
 # Configure logging. Guarded: structlog.configure() is process-global, and
@@ -77,6 +78,28 @@ if not SERVICE_API_KEY:
         message="SERVICE_API_KEY is empty; orchestrator calls will be "
                 "rejected once ORCHESTRATOR_INGRESS_AUTH=enforce.",
     )
+_service_key_unusable_reported = False
+
+
+def _service_key_headers() -> Dict[str, str]:
+    """``{"X-Service-Key": SERVICE_API_KEY}`` for a call to admin-backend or
+    the orchestrator, or ``{}`` when the key is unset or can't be a header
+    value. An unusable key is reported once, by the variable's name and never
+    its value.
+
+    This image has no ``shared.config``, so ``service_key_headers()`` can't
+    be called here."""
+    global _service_key_unusable_reported
+    if not SERVICE_API_KEY:
+        return {}
+    if not is_header_safe(SERVICE_API_KEY):
+        if not _service_key_unusable_reported:
+            _service_key_unusable_reported = True
+            logger.error("service_api_key_unusable", variable="SERVICE_API_KEY")
+        return {}
+    return {"X-Service-Key": SERVICE_API_KEY}
+
+
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8000")
 ADMIN_BACKEND_URL = get_admin_url()
 DEFAULT_ROOM = os.getenv("DEFAULT_ROOM", "guest")
@@ -340,10 +363,12 @@ async def get_persistent_sessions_config() -> Optional[Dict[str, Any]]:
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{ADMIN_BACKEND_URL}/api/features/public")
-            resp.raise_for_status()
-            _feature_cache = {f["name"]: f for f in resp.json()}
-            _feature_cache_time = now
+            resp = await client.get(f"{ADMIN_BACKEND_URL}/api/features/public", headers=_service_key_headers())
+            if resp.status_code == 200:
+                _feature_cache = {f["name"]: f for f in resp.json()}
+                _feature_cache_time = now
+            elif not note_admin_refusal(resp.status_code, "/api/features/public"):
+                logger.warning("feature_cache_fetch_failed", status=resp.status_code)
     except Exception as e:
         logger.warning("feature_cache_fetch_failed", error=str(e))
 
@@ -555,11 +580,10 @@ async def get_current_guest() -> Optional[Dict[str, Any]]:
     internal_url = get_admin_url()
 
     try:
-        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-            # Use internal endpoint that doesn't require authentication
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{internal_url}/api/guest-mode/internal/current-guest",
-                headers={"Accept": "application/json", "X-Service-Key": SERVICE_API_KEY}
+                headers={"Accept": "application/json", **_service_key_headers()}
             )
             if response.status_code == 200:
                 data = response.json()
@@ -570,6 +594,8 @@ async def get_current_guest() -> Optional[Dict[str, Any]]:
                         guest_id=data.get("id")
                     )
                     return data
+            elif not note_admin_refusal(response.status_code, "/api/guest-mode/internal/current-guest"):
+                logger.warning("failed_to_fetch_guest", status=response.status_code)
             return None
     except Exception as e:
         logger.warning("failed_to_fetch_guest", error=str(e))
@@ -832,7 +858,7 @@ async def chat(message: ChatMessage, request: Request, response: Response):
             orch_response = await client.post(
                 f"{ORCHESTRATOR_URL}/query",
                 json=request_body,
-                headers={"X-Service-Key": SERVICE_API_KEY}
+                headers=_service_key_headers(),
             )
 
             if orch_response.status_code != 200:
@@ -1072,7 +1098,7 @@ async def chat_stream(message: ChatMessage, request: Request):
                     "POST",
                     f"{ORCHESTRATOR_URL}/query/stream",
                     json=request_body,
-                    headers={"X-Service-Key": SERVICE_API_KEY}
+                    headers=_service_key_headers(),
                 ) as response:
                     async for chunk in response.aiter_text():
                         if thread_id:
@@ -2437,9 +2463,10 @@ async def get_room_tv_configs() -> Dict[str, Dict[str, str]]:
     Returns dict mapping entity_id to {name, remote} config.
     """
     try:
-        async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
-                f"{ADMIN_INTERNAL_URL}/api/room-tv/internal"
+                f"{ADMIN_INTERNAL_URL}/api/room-tv/internal",
+                headers=_service_key_headers(),
             )
             if response.status_code == 200:
                 configs = response.json()
@@ -2452,6 +2479,8 @@ async def get_room_tv_configs() -> Dict[str, Dict[str, str]]:
                     }
                     for c in configs
                 }
+            if not note_admin_refusal(response.status_code, "/api/room-tv/internal"):
+                logger.warning("failed_to_fetch_tv_configs", status=response.status_code)
     except Exception as e:
         logger.warning("failed_to_fetch_tv_configs", error=str(e))
 

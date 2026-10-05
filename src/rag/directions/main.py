@@ -32,6 +32,8 @@ from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
 from shared.admin_url import get_admin_url
+# The function names, not the module: lifespan has a local named service_key.
+from shared.service_key import note_admin_refusal, service_key_headers
 
 # Configure logging
 logger = configure_logging("directions-rag")
@@ -104,11 +106,15 @@ async def lifespan(app: FastAPI):
     # Fetch settings from admin
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{ADMIN_API_URL}/api/directions-settings/public")
+            response = await client.get(
+                f"{ADMIN_API_URL}/api/directions-settings/public",
+                headers=service_key_headers(),
+            )
             if response.status_code == 200:
                 SETTINGS = response.json()
                 logger.info("settings_loaded", count=len(SETTINGS))
             else:
+                note_admin_refusal(response.status_code, "/api/directions-settings/public")
                 logger.warning("settings_fetch_failed", status=response.status_code)
                 load_default_settings()
     except Exception as e:
@@ -129,7 +135,7 @@ async def lifespan(app: FastAPI):
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{ADMIN_API_URL}/api/base-knowledge/public?enabled=true",
-                headers={"X-Service-Key": service_key},
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 data = response.json()

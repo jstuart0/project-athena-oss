@@ -15,8 +15,9 @@ from datetime import datetime, timedelta, timezone, date
 import structlog
 
 from app.database import get_db
-from app.auth.oidc import get_current_user, get_optional_user
+from app.auth.oidc import get_current_user
 from app.models import User, CloudLLMUsage, CloudLLMProvider, CloudLLMModelPricing
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 
 logger = structlog.get_logger()
 
@@ -98,7 +99,7 @@ class CostAlert(BaseModel):
 # Usage Logging Routes
 # =============================================================================
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, dependencies=[Depends(require_service_or_user_permission("write"))])
 async def log_usage(
     data: UsageLogCreate,
     db: Session = Depends(get_db)
@@ -106,8 +107,8 @@ async def log_usage(
     """
     Log cloud LLM usage.
 
-    Called by LLMRouter after each cloud request. No auth required
-    to allow internal services to log usage.
+    Called by LLMRouter after each cloud request. Requires X-Service-Key,
+    or a signed-in user with write permission.
     """
     usage = CloudLLMUsage(
         provider=data.provider,
@@ -145,13 +146,12 @@ async def log_usage(
 # Usage Query Routes
 # =============================================================================
 
-@router.get("/recent", response_model=List[UsageLogResponse])
+@router.get("/recent", response_model=List[UsageLogResponse], dependencies=[Depends(require_user_permission("read"))])
 async def get_recent_usage(
     minutes: int = Query(60, ge=1, le=1440, description="Minutes of history"),
     provider: Optional[str] = Query(None, description="Filter by provider"),
     limit: int = Query(100, ge=1, le=1000, description="Max results"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """Get recent cloud LLM usage logs."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
@@ -168,10 +168,9 @@ async def get_recent_usage(
     return [u.to_dict() for u in usage]
 
 
-@router.get("/summary/today")
+@router.get("/summary/today", dependencies=[Depends(require_user_permission("read"))])
 async def get_today_summary(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """Get usage summary for today."""
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -179,10 +178,9 @@ async def get_today_summary(
     return await _get_usage_summary(db, today_start, datetime.now(timezone.utc), "day")
 
 
-@router.get("/summary/week")
+@router.get("/summary/week", dependencies=[Depends(require_user_permission("read"))])
 async def get_week_summary(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """Get usage summary for the current week."""
     now = datetime.now(timezone.utc)
@@ -191,10 +189,9 @@ async def get_week_summary(
     return await _get_usage_summary(db, week_start, now, "week")
 
 
-@router.get("/summary/month")
+@router.get("/summary/month", dependencies=[Depends(require_user_permission("read"))])
 async def get_month_summary(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """Get usage summary for the current month."""
     now = datetime.now(timezone.utc)
@@ -203,12 +200,11 @@ async def get_month_summary(
     return await _get_usage_summary(db, month_start, now, "month")
 
 
-@router.get("/summary/range")
+@router.get("/summary/range", dependencies=[Depends(require_user_permission("read"))])
 async def get_range_summary(
     start_date: date = Query(..., description="Start date"),
     end_date: date = Query(..., description="End date"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """Get usage summary for a custom date range."""
     start = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
@@ -307,10 +303,9 @@ async def _get_usage_summary(
 # Cost Alerting Routes
 # =============================================================================
 
-@router.get("/alerts")
+@router.get("/alerts", dependencies=[Depends(require_user_permission("read"))])
 async def get_cost_alerts(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """
     Get current cost alerts based on configured thresholds.
@@ -392,11 +387,10 @@ async def get_cost_alerts(
 # Analytics Routes
 # =============================================================================
 
-@router.get("/analytics/daily")
+@router.get("/analytics/daily", dependencies=[Depends(require_user_permission("read"))])
 async def get_daily_analytics(
     days: int = Query(7, ge=1, le=90, description="Number of days"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """Get daily usage analytics for charting."""
     start = datetime.now(timezone.utc) - timedelta(days=days)
@@ -428,11 +422,10 @@ async def get_daily_analytics(
     ]
 
 
-@router.get("/analytics/hourly")
+@router.get("/analytics/hourly", dependencies=[Depends(require_user_permission("read"))])
 async def get_hourly_analytics(
     hours: int = Query(24, ge=1, le=168, description="Number of hours"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """Get hourly usage analytics."""
     start = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -462,11 +455,10 @@ async def get_hourly_analytics(
     ]
 
 
-@router.get("/analytics/by-intent")
+@router.get("/analytics/by-intent", dependencies=[Depends(require_user_permission("read"))])
 async def get_intent_analytics(
     days: int = Query(7, ge=1, le=90, description="Number of days"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_optional_user)
 ):
     """Get usage breakdown by intent."""
     start = datetime.now(timezone.utc) - timedelta(days=days)

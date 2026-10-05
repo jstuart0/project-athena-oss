@@ -55,6 +55,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from shared.service_key import note_admin_refusal, service_key_headers
 
 # Configuration - defaults, will be overridden by admin API
 LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
@@ -63,7 +64,6 @@ LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
 
 # Admin API for fetching credentials
 ADMIN_API_URL = get_admin_url()
-SERVICE_API_KEY = get_config().service_api_key
 
 
 async def fetch_livekit_credentials() -> Dict[str, str]:
@@ -73,10 +73,10 @@ async def fetch_livekit_credentials() -> Dict[str, str]:
     Falls back to environment variables if admin API fails.
     """
     try:
-        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{ADMIN_API_URL}/api/external-api-keys/public/livekit/credentials",
-                headers={"X-Service-Key": SERVICE_API_KEY},
+                headers=service_key_headers(),
             )
             if response.status_code == 200:
                 data = response.json()
@@ -275,10 +275,11 @@ class LiveKitService:
         self._last_feature_flag_check = now
 
         try:
-            async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 # Use the public features list endpoint and filter for our flag
                 response = await client.get(
-                    f"{ADMIN_API_URL}/api/features/public"
+                    f"{ADMIN_API_URL}/api/features/public",
+                    headers=service_key_headers(),
                 )
                 if response.status_code == 200:
                     features = response.json()
@@ -295,11 +296,11 @@ class LiveKitService:
                             return
                     # Feature not found in list - keep default (disabled)
                     logger.debug("feature_flag_not_found", flag="ai_follow_ups_enabled")
-                else:
+                elif not note_admin_refusal(response.status_code, "/api/features/public"):
                     logger.debug("feature_flag_check_failed",
                                 status=response.status_code)
         except Exception as e:
-            logger.debug("feature_flag_check_error", error=str(e))
+            logger.warning("feature_flag_check_error", error_type=type(e).__name__)
             # Keep existing value on error
 
     def generate_room_token(

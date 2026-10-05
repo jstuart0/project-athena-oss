@@ -24,6 +24,7 @@ from shared.ha_client import HomeAssistantClient
 from shared.admin_config import AdminConfigClient
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from shared.service_key import note_admin_refusal, service_key_headers
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # TVHandler.__init__ (not at module scope) -- see the identical note in
 # sequence_executor.py.
@@ -118,8 +119,9 @@ async def get_tv_configs() -> Dict[str, Dict[str, Any]]:
     admin_url = get_admin_url()
 
     try:
-        async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-            response = await client.get(f"{admin_url}/api/room-tv/internal")
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{admin_url}/api/room-tv/internal", headers=service_key_headers())
+            note_admin_refusal(response.status_code, "/api/room-tv/internal")
             if response.status_code == 200:
                 configs = response.json()
                 # Convert list to dict keyed by room_name
@@ -162,8 +164,11 @@ async def get_app_configs(guest_mode: bool = False) -> List[Dict[str, Any]]:
 
     try:
         params = {"guest_mode": "true"} if guest_mode else {}
-        async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-            response = await client.get(f"{admin_url}/api/room-tv/apps", params=params)
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                f"{admin_url}/api/room-tv/apps", params=params, headers=service_key_headers()
+            )
+            note_admin_refusal(response.status_code, "/api/room-tv/apps")
             if response.status_code == 200:
                 apps = response.json()
                 if not guest_mode:
@@ -192,8 +197,9 @@ async def get_feature_flag(feature_name: str) -> bool:
     admin_url = get_admin_url()
 
     try:
-        async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-            response = await client.get(f"{admin_url}/api/room-tv/features")
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{admin_url}/api/room-tv/features", headers=service_key_headers())
+            note_admin_refusal(response.status_code, "/api/room-tv/features")
             if response.status_code == 200:
                 flags = response.json()
                 _feature_flag_cache = {f["feature_name"]: f["enabled"] for f in flags}
@@ -392,6 +398,14 @@ class AppleTVHandler:
         entity_id = config["media_player_entity_id"]
         remote_id = config["remote_entity_id"]
 
+        from orchestrator.mode_permission import HAWritePermissionDenied, current_ha_scope
+
+        # "Not a guest" isn't "the owner": a degraded house reports mode
+        # "owner" with the degraded permission set. Only permissions that
+        # positively say owner get entered into the first profile.
+        scope = current_ha_scope()
+        is_owner = scope is not None and scope.permissions.get("mode") == "owner"
+
         # Launch the app
         try:
             await self.ha.call_service(
@@ -400,17 +414,12 @@ class AppleTVHandler:
                 {"entity_id": entity_id, "source": app_name}
             )
 
-            # Handle profile screen if configured
-            if app_config and app_config.get("has_profile_screen"):
-                auto_select = await get_feature_flag("auto_profile_select")
-                if auto_select:
-                    delay_ms = app_config.get("profile_select_delay_ms", 1500)
-                    await asyncio.sleep(delay_ms / 1000)
-                    await self.ha.call_service(
-                        "remote",
-                        "send_command",
-                        {"entity_id": remote_id, "command": "select"}
-                    )
+            # Anyone else stops at the profile screen and picks by hand. For
+            # a guest the press would also be a denied write: the guest
+            # baseline has no `remote` domain.
+            if is_owner and app_config and app_config.get("has_profile_screen"):
+                if await get_feature_flag("auto_profile_select"):
+                    await self._press_profile_select(app_name, room, remote_id, app_config)
 
             room_display = config.get("display_name", room.replace("_", " "))
             return {
@@ -420,6 +429,10 @@ class AppleTVHandler:
                 "app": app_name
             }
 
+        except HAWritePermissionDenied:
+            # Not a failed launch. The guard has recorded and logged the
+            # denial on the request's scope; route_tv_node answers from it.
+            raise
         except Exception as e:
             logger.error("tv_launch_failed", app=app_name, room=room, error=str(e))
             return {
@@ -427,6 +440,28 @@ class AppleTVHandler:
                 "message": f"Failed to launch {app_name}. Please try again.",
                 "error": str(e)
             }
+
+    async def _press_profile_select(
+        self, app_name: str, room: str, remote_id: str, app_config: Dict[str, Any]
+    ) -> None:
+        """Press select on the app's profile screen, once it has had time to
+        appear. Optional: the app is already open, so a press that fails is
+        logged and the launch still succeeds. A press the permission guard
+        refuses is not a failure of that kind: it is raised, through
+        handle_launch, with the denial recorded on the request's scope."""
+        from orchestrator.mode_permission import HAWritePermissionDenied
+
+        await asyncio.sleep(app_config.get("profile_select_delay_ms", 1500) / 1000)
+        try:
+            await self.ha.call_service(
+                "remote",
+                "send_command",
+                {"entity_id": remote_id, "command": "select"}
+            )
+        except HAWritePermissionDenied:
+            raise
+        except Exception as e:
+            logger.error("tv_profile_select_failed", app=app_name, room=room, error_type=type(e).__name__)
 
     async def handle_launch_everywhere(
         self,
@@ -455,7 +490,9 @@ class AppleTVHandler:
         # Filter out aliases (bedroom, etc.)
         rooms = [name for name in tv_configs.keys() if name not in ("bedroom", "basement")]
 
-        # Launch on all TVs
+        # Launch on all TVs. A write the permission guard refuses stops the
+        # loop (it raises through handle_launch): the scope is latched shut,
+        # so every later TV would only be refused as well.
         results = []
         for room in rooms:
             result = await self.handle_launch(app_name, room, guest_mode)

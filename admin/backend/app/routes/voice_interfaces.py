@@ -18,6 +18,7 @@ import structlog
 from app.database import get_db
 from app.models import VoiceInterface, STTEngine, TTSEngine
 from app.auth.oidc import get_current_user, User
+from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/voice-interfaces", tags=["voice-interfaces"])
@@ -152,27 +153,6 @@ async def list_voice_interfaces(
     logger.info("list_voice_interfaces", user=current_user.username, count=len(interfaces))
 
     return [VoiceInterfaceResponse(**vi.to_dict()) for vi in interfaces]
-
-
-@router.get("/{interface_name}", response_model=VoiceInterfaceResponse)
-async def get_voice_interface(
-    interface_name: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get a specific voice interface by name."""
-    if not current_user.has_permission('read'):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    interface = db.query(VoiceInterface).filter(
-        VoiceInterface.interface_name == interface_name
-    ).first()
-
-    if not interface:
-        raise HTTPException(status_code=404, detail=f"Voice interface '{interface_name}' not found")
-
-    logger.info("get_voice_interface", interface_name=interface_name, user=current_user.username)
-    return VoiceInterfaceResponse(**interface.to_dict())
 
 
 @router.post("", response_model=VoiceInterfaceResponse)
@@ -338,16 +318,17 @@ async def list_tts_engines(
 
 
 # =============================================================================
-# Internal/Public Endpoints (for Gateway/Orchestrator)
+# Internal/Public Endpoints (for Gateway/Orchestrator: X-Service-Key or a signed-in user)
 # =============================================================================
 
-@router.get("/public", response_model=List[VoiceInterfaceResponse])
+@router.get("/public", response_model=List[VoiceInterfaceResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_voice_interfaces_public(
     enabled_only: bool = True,
     db: Session = Depends(get_db)
 ):
     """
-    List voice interfaces (public endpoint, no auth).
+    List voice interfaces (service endpoint: X-Service-Key, or a signed-in
+    user with read permission).
 
     Used by Gateway/Orchestrator to fetch interface configurations.
     """
@@ -361,13 +342,37 @@ async def list_voice_interfaces_public(
     return [VoiceInterfaceResponse(**vi.to_dict()) for vi in interfaces]
 
 
-@router.get("/public/{interface_name}", response_model=VoiceInterfaceResponse)
+# Registered after GET /public: a parameter route registered first would
+# answer that path itself.
+@router.get("/{interface_name}", response_model=VoiceInterfaceResponse)
+async def get_voice_interface(
+    interface_name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get a specific voice interface by name."""
+    if not current_user.has_permission('read'):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    interface = db.query(VoiceInterface).filter(
+        VoiceInterface.interface_name == interface_name
+    ).first()
+
+    if not interface:
+        raise HTTPException(status_code=404, detail=f"Voice interface '{interface_name}' not found")
+
+    logger.info("get_voice_interface", interface_name=interface_name, user=current_user.username)
+    return VoiceInterfaceResponse(**interface.to_dict())
+
+
+@router.get("/public/{interface_name}", response_model=VoiceInterfaceResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_voice_interface_public(
     interface_name: str,
     db: Session = Depends(get_db)
 ):
     """
-    Get a specific voice interface (public endpoint, no auth).
+    Get a specific voice interface (service endpoint: X-Service-Key, or a
+    signed-in user with read permission).
 
     Used by Gateway/Orchestrator to fetch a specific interface config.
     """
@@ -382,7 +387,7 @@ async def get_voice_interface_public(
     return VoiceInterfaceResponse(**interface.to_dict())
 
 
-@router.get("/internal/config/{interface_name}")
+@router.get("/internal/config/{interface_name}", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_interface_full_config(
     interface_name: str,
     db: Session = Depends(get_db)
@@ -430,12 +435,12 @@ async def get_interface_full_config(
     }
 
 
-@router.get("/engines/public/stt", response_model=List[EngineResponse])
+@router.get("/engines/public/stt", response_model=List[EngineResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_stt_engines_public(
     enabled_only: bool = True,
     db: Session = Depends(get_db)
 ):
-    """List available STT engines (public endpoint)."""
+    """List available STT engines (service endpoint)."""
     query = db.query(STTEngine)
     if enabled_only:
         query = query.filter(STTEngine.enabled == True)
@@ -444,12 +449,12 @@ async def list_stt_engines_public(
     return [EngineResponse(**e.to_dict()) for e in engines]
 
 
-@router.get("/engines/public/tts", response_model=List[EngineResponse])
+@router.get("/engines/public/tts", response_model=List[EngineResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_tts_engines_public(
     enabled_only: bool = True,
     db: Session = Depends(get_db)
 ):
-    """List available TTS engines (public endpoint)."""
+    """List available TTS engines (service endpoint)."""
     query = db.query(TTSEngine)
     if enabled_only:
         query = query.filter(TTSEngine.enabled == True)

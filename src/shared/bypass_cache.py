@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 import httpx
 import structlog
+from shared.admin_url import path_segment
 
 logger = structlog.get_logger(__name__)
 
@@ -66,7 +67,7 @@ async def get_bypass_config(
             headers["X-Service-Key"] = api_key
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
-                f"{admin_url}/api/rag-service-bypass/public/{service_name}/config",
+                f"{admin_url}/api/rag-service-bypass/public/{path_segment(service_name)}/config",
                 headers=headers
             )
             if response.status_code == 200:

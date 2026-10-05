@@ -32,8 +32,37 @@ Replaces:
 import functools
 import logging
 import os
+import urllib.parse
 
 logger = logging.getLogger(__name__)
+
+
+def path_segment(value) -> str:
+    """``value`` as one path segment of an admin URL: percent-encoded, so it
+    can't add a segment, a query or a fragment to the route it is put in.
+
+    Raises ValueError for an empty value and for "." and "..": encoding
+    leaves those as they are, and the HTTP client (or a proxy in front of
+    admin-backend) resolves them into a different route. The message never
+    contains the value; callers log it.
+    """
+    text = str(value)
+    if text in ("", ".", ".."):
+        raise ValueError("refused an empty or dot path segment in an admin URL")
+    return urllib.parse.quote(text, safe="")
+
+
+def path_segments(value) -> str:
+    """``value`` for a route parameter that spans segments (``{name:path}``):
+    its slashes are kept and every segment between them is encoded.
+
+    Raises ValueError when any segment is "." or "..". An empty segment (a
+    leading or doubled slash) is kept: a model can be named by a file path.
+    """
+    parts = str(value).split("/")
+    if any(part in (".", "..") for part in parts):
+        raise ValueError("refused a dot path segment in an admin URL")
+    return "/".join(urllib.parse.quote(part, safe="") for part in parts)
 
 
 @functools.lru_cache(maxsize=1)

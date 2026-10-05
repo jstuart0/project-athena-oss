@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from app.database import get_db
 from app.models import MCPSecurity, ToolApprovalQueue
 from app.auth.oidc import get_current_user, User
+from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/mcp-security", tags=["mcp-security"])
@@ -119,12 +120,13 @@ async def get_mcp_security(
     return MCPSecurityResponse(**security.to_dict())
 
 
-@router.get("/public", response_model=MCPSecurityResponse)
+@router.get("/public", response_model=MCPSecurityResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_mcp_security_public(db: Session = Depends(get_db)):
     """
-    Get MCP security configuration (public endpoint).
+    Get MCP security configuration (service endpoint).
 
-    Used by services to check domain allowlists without authentication.
+    Used by services to check domain allowlists. Requires X-Service-Key, or
+    a signed-in user with read permission.
     """
     security = db.query(MCPSecurity).first()
     if not security:
@@ -316,7 +318,7 @@ async def remove_blocked_domain(
     return MCPSecurityResponse(**security.to_dict())
 
 
-@router.post("/check-domain", response_model=DomainCheckResponse)
+@router.post("/check-domain", response_model=DomainCheckResponse, dependencies=[Depends(require_service_or_user_permission("read"))])
 async def check_domain(
     request: DomainCheckRequest,
     db: Session = Depends(get_db)
@@ -324,7 +326,8 @@ async def check_domain(
     """
     Check if a URL's domain is allowed for MCP connections.
 
-    Public endpoint used by services to validate MCP endpoints.
+    Used by services to validate MCP endpoints. Requires X-Service-Key, or
+    a signed-in user with read permission.
     """
     url = request.url
     domain = _extract_domain(url)

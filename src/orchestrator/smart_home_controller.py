@@ -13,6 +13,7 @@ from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
 from shared.config import get_config
 from shared.local_time import local_now
+from shared.service_key import note_admin_refusal, service_key_headers
 from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance
 
 
@@ -3130,16 +3131,18 @@ Return ONLY valid JSON."""
                 "dedup_key": f"stuck_sensor_{sensor_data['entity_id']}"
             }
 
-            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
                     f"{admin_url}/api/alerts/public/create",
-                    json=alert_payload
+                    json=alert_payload,
+                    headers=service_key_headers(),
                 )
 
                 if response.status_code == 200:
                     result = response.json()
                     logger.info(f"Stuck sensor alert created/found: {result.get('id')}")
                 else:
+                    note_admin_refusal(response.status_code, "/api/alerts/public/create")
                     logger.warning(f"Failed to create stuck sensor alert: {response.status_code}")
 
         except Exception as e:
@@ -3154,22 +3157,27 @@ Return ONLY valid JSON."""
         try:
             admin_url = get_admin_url()
 
-            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
                     f"{admin_url}/api/alerts/public/resolve-by-entity",
                     params={
                         "entity_id": entity_id,
                         "alert_type": "stuck_sensor"
-                    }
+                    },
+                    headers=service_key_headers(),
                 )
 
                 if response.status_code == 200:
                     result = response.json()
                     if result.get('resolved_count', 0) > 0:
                         logger.info(f"Resolved stuck sensor alert for {entity_id}")
+                else:
+                    note_admin_refusal(response.status_code, "/api/alerts/public/resolve-by-entity")
 
         except Exception as e:
-            logger.debug(f"Error resolving stuck sensor alert: {e}")
+            # A warning, by type only: this call carries the service key, and
+            # a connection or certificate failure must show at the default level.
+            logger.warning(f"Error resolving stuck sensor alert: {type(e).__name__}")
 
     async def _check_stuck_sensors(self) -> str:
         """
@@ -3404,11 +3412,10 @@ Return ONLY valid JSON."""
 
         try:
             admin_url = get_admin_url()
-            key = get_config().service_api_key
-            async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(
                     f"{admin_url}/api/settings/house-layout",
-                    headers={"X-Service-Key": key} if key else None,
+                    headers=service_key_headers(),
                 )
                 if response.status_code == 200:
                     data = response.json()
@@ -3418,7 +3425,7 @@ Return ONLY valid JSON."""
             return ""  # No layout configured
 
         except Exception as e:
-            logger.warning(f"Could not fetch house layout: {e}")
+            logger.warning(f"Could not fetch house layout: {type(e).__name__}")
             return ""
 
     async def _llm_occupancy_reasoning(self, motion_data: List[Dict], house_layout: str, original_query: str = None) -> str:

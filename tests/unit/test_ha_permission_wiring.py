@@ -848,12 +848,12 @@ class TestLiveKitBrowserTokenSitesUseDefaultTTL:
     participant tokens, D27)."""
 
     EXPECTED_BROWSER_SITES = {
-        ("src/gateway/livekit_service.py", 408),
+        ("src/gateway/livekit_service.py", 409),
         ("src/gateway/livekit_routes.py", 126),
         ("src/gateway/livekit_routes.py", 156),
     }
     EXPECTED_ATHENA_SITES = {
-        ("src/gateway/livekit_service.py", 416),
+        ("src/gateway/livekit_service.py", 417),
         ("src/gateway/livekit_routes.py", 187),
     }
 

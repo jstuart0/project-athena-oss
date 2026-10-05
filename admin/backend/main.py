@@ -39,6 +39,7 @@ from app.auth.oidc import (
     get_current_user,
     decode_ws_ticket,
 )
+from app.utils.auth_rejections import AuthRejectionMiddleware, flush_suppressed
 from app.utils.rate_limit import login_rate_limit_dep
 from app.utils.sessions import rotate_session_id
 from app.utils.url_validators import redact_url_userinfo
@@ -104,6 +105,10 @@ else:
     REDIS_URL = get_config().redis_url
     redis_client = Redis.from_url(REDIS_URL)
     session_store = RedisStore(connection=redis_client, prefix="athena_session:")
+
+# Registered first, so it is the innermost middleware: it sees each response
+# as the router produced it, and the route the router matched.
+app.add_middleware(AuthRejectionMiddleware)
 
 # Session middleware - note: WebSocket connections bypass session via scope type check
 # in starsessions internals
@@ -829,6 +834,7 @@ async def shutdown_event():
     await stop_health_polling()
     await memory_vectors.stop_vector_store_maintenance()
     await telemetry.stop_telemetry()
+    flush_suppressed()
 
 
 # Authentication routes

@@ -19,6 +19,7 @@ from app.database import get_db
 from app.models import MusicConfig, Feature
 from app.auth.oidc import get_current_user
 from shared.config import get_config
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/music-config", tags=["music"])
@@ -117,11 +118,11 @@ async def update_music_config(
     return config.to_dict()
 
 
-@router.get("/internal")
+@router.get("/internal", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_internal_music_config(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Get music config for orchestrator (no auth required)."""
+    """Get music config for the orchestrator (X-Service-Key, or a signed-in user with read permission)."""
     config = get_or_create_config(db)
 
     # Also check if feature is enabled
@@ -335,16 +336,17 @@ async def delete_genre(
     return {"message": "Genre deleted", "genre": genre}
 
 
-@router.get("/browser-playback")
+@router.get("/browser-playback", dependencies=[Depends(require_user_permission("read"))])
 async def get_browser_playback_config(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
-    Get browser playback configuration (public endpoint for Jarvis Web).
+    Get browser playback configuration.
 
     Returns the configuration needed for browser-based music playback,
     including MA WebSocket URL, stream URL, and browser player settings.
-    No authentication required as this is fetched by the browser client.
+    Requires a signed-in user with read permission: it returns internal
+    Music Assistant URLs, and no service calls it.
     """
     config = get_or_create_config(db)
 

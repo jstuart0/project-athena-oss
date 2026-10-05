@@ -20,7 +20,7 @@ from app.models import (
 )
 from shared.config import _clear_cache_for_tests, get_config
 
-from tests.test_route_auth_population import GATED
+from tests.test_route_auth_population import GUEST_DATA_GATED as GATED
 
 VA = "/api/voice-automations"
 PIPELINES = {"result": {"pipelines": [

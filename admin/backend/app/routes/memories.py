@@ -32,7 +32,7 @@ from app.models import User, Memory, GuestSession, MemoryConfig, Feature
 from app.routes.internal import require_service_key_401
 from app.services import memory_vectors
 from app.services.memory_vectors import EmbeddingUnavailable, VectorStoreNotReady
-from app.utils.service_auth import verify_service_or_oidc
+from app.utils.service_auth import verify_service_or_oidc, withdraw_acceptance
 
 logger = structlog.get_logger()
 
@@ -211,6 +211,7 @@ def _memory_caller_kind(request: Request, allow) -> str:
         return "service"
     user = getattr(request.state, "auth_user", None)
     if user is None or not allow(user):
+        withdraw_acceptance(request)
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     return "user"
 
@@ -1079,6 +1080,7 @@ async def reindex_memory_vectors(
     run; 409 reindex_busy carries retry_after_seconds.
     """
     if caller_kind == "service" and mode != "missing":
+        withdraw_acceptance(request)
         raise HTTPException(status_code=403, detail="service_key_limited_to_missing")
     if caller_kind == "service":
         logger.info("memory_vector_reindex_requested", caller="service", mode=mode, dry_run=dry_run)

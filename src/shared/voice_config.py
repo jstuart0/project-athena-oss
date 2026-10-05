@@ -139,14 +139,20 @@ class VoiceConfigManager:
         """Load available STT and TTS engines from Admin API."""
         try:
             from shared.admin_config import get_admin_client
+            from shared.service_key import note_admin_refusal, service_key_headers
             client = get_admin_client()
 
             # Fetch engines from public endpoints
             stt_url = f"{client.admin_url}/api/voice-interfaces/engines/public/stt"
             tts_url = f"{client.admin_url}/api/voice-interfaces/engines/public/tts"
 
-            stt_response = await client.client.get(stt_url)
-            tts_response = await client.client.get(tts_url)
+            stt_response = await client.client.get(stt_url, headers=service_key_headers())
+            tts_response = await client.client.get(tts_url, headers=service_key_headers())
+
+            if stt_response.status_code != 200:
+                note_admin_refusal(stt_response.status_code, "/api/voice-interfaces/engines/public/stt")
+            if tts_response.status_code != 200:
+                note_admin_refusal(tts_response.status_code, "/api/voice-interfaces/engines/public/tts")
 
             if stt_response.status_code == 200:
                 for engine in stt_response.json():

@@ -15,8 +15,9 @@ from enum import Enum
 from collections import deque
 from urllib.parse import urlparse
 import structlog
-from shared.admin_url import get_admin_url
+from shared.admin_url import get_admin_url, path_segment, path_segments
 from shared.config import get_config
+from shared.service_key import note_admin_refusal, service_key_headers
 
 logger = structlog.get_logger()
 
@@ -305,10 +306,12 @@ class LLMRouter:
 
                 return config
 
-        # Fetch from admin API using public endpoint (avoids URL encoding issues)
+        # Fetch every backend from the admin API's list route, which needs the service key (avoids URL encoding issues)
         try:
             url = f"{self.admin_url}/api/llm-backends/public"
-            response = await self.client.get(url)
+            response = await self.client.get(url, headers=service_key_headers())
+            # Before raise_for_status(): the except below only says the fetch failed.
+            note_admin_refusal(response.status_code, "/api/llm-backends/public")
             response.raise_for_status()
 
             backends = response.json()
@@ -380,8 +383,8 @@ class LLMRouter:
 
         # Fetch from admin API
         try:
-            url = f"{self.admin_url}/api/model-configs/public/{model}"
-            response = await self.client.get(url)
+            url = f"{self.admin_url}/api/model-configs/public/{path_segments(model)}"
+            response = await self.client.get(url, headers=service_key_headers())
 
             if response.status_code == 200:
                 config = response.json()
@@ -392,6 +395,7 @@ class LLMRouter:
                     has_ollama_options=bool(config.get("ollama_options"))
                 )
             else:
+                note_admin_refusal(response.status_code, "/api/model-configs/public/{model_name}")
                 # Not found - use empty config (defaults will be used)
                 logger.debug(
                     "no_model_config_found",
@@ -1674,8 +1678,8 @@ class LLMRouter:
                 return self._cloud_credentials_cache[provider]
 
         try:
-            # Fetch from admin API public endpoint
-            url = f"{self.admin_url}/api/external-api-keys/public/{provider}/key"
+            # Fetch the provider's key from the admin API (a service-key-only route; "/public" is only its name)
+            url = f"{self.admin_url}/api/external-api-keys/public/{path_segment(provider)}/key"
             response = await self.client.get(url, timeout=5.0)
 
             if response.status_code == 200:
@@ -1735,8 +1739,8 @@ class LLMRouter:
 
         # Try to fetch from admin API
         try:
-            url = f"{self.admin_url}/api/cloud-providers/pricing/{provider}/{model}"
-            response = await self.client.get(url, timeout=3.0)
+            url = f"{self.admin_url}/api/cloud-providers/pricing/{path_segment(provider)}/{path_segment(model)}"
+            response = await self.client.get(url, timeout=3.0, headers=service_key_headers())
 
             if response.status_code == 200:
                 data = response.json()
@@ -1751,6 +1755,7 @@ class LLMRouter:
                 self._pricing_cache_expiry = now + 3600  # Cache for 1 hour
 
                 return pricing
+            note_admin_refusal(response.status_code, "/api/cloud-providers/pricing/{provider}/{model_id}")
         except Exception as e:
             logger.debug("pricing_fetch_failed", provider=provider, model=model, error=str(e))
 
@@ -2117,8 +2122,9 @@ class LLMRouter:
             }
 
             async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=payload, timeout=5.0)
+                response = await client.post(url, json=payload, timeout=5.0, headers=service_key_headers())
                 if response.status_code not in (200, 201):
+                    note_admin_refusal(response.status_code, "/api/cloud-llm-usage")
                     logger.warning(
                         "failed_to_track_cloud_usage",
                         status=response.status_code,
@@ -2471,8 +2477,9 @@ class LLMRouter:
 
             url = f"{self._admin_url_base}/api/llm-backends/metrics"
             async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=metric, timeout=5.0)
+                response = await client.post(url, json=metric, timeout=5.0, headers=service_key_headers())
                 if response.status_code != 201:
+                    note_admin_refusal(response.status_code, "/api/llm-backends/metrics")
                     logger.warning(
                         "failed_to_persist_metric",
                         status_code=response.status_code,

@@ -706,7 +706,7 @@ async function loadToolProposals() {
     container.innerHTML = '<p class="text-gray-500 text-sm">Loading...</p>';
 
     try {
-        const response = await fetch('/api/tool-proposals?status=pending');
+        const response = await fetch('/api/tool-proposals?status=pending', { headers: getAuthHeaders() });
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }

@@ -18,6 +18,7 @@ import structlog
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, Alert
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 
 logger = structlog.get_logger()
 
@@ -81,16 +82,17 @@ class AlertStats(BaseModel):
 
 
 # =============================================================================
-# Public Endpoints (for internal services)
+# Service Endpoints (X-Service-Key or a signed-in user; the read is user-only)
 # =============================================================================
 
-@router.post("/public/create", response_model=AlertResponse)
+@router.post("/public/create", response_model=AlertResponse, dependencies=[Depends(require_service_or_user_permission("write"))])
 async def create_alert_public(
     alert: AlertCreate,
     db: Session = Depends(get_db)
 ):
     """
-    Create a new alert (public endpoint for internal services).
+    Create a new alert (for internal services; requires X-Service-Key or a
+    signed-in user with write permission).
 
     Uses dedup_key to prevent duplicate alerts - if an alert with the same
     dedup_key already exists and is active, it will be returned instead.
@@ -136,7 +138,7 @@ async def create_alert_public(
     return AlertResponse(**new_alert.to_dict())
 
 
-@router.post("/public/resolve-by-entity")
+@router.post("/public/resolve-by-entity", dependencies=[Depends(require_service_or_user_permission("write"))])
 async def resolve_alerts_by_entity(
     entity_id: str,
     alert_type: Optional[str] = None,
@@ -175,7 +177,7 @@ async def resolve_alerts_by_entity(
     return {"resolved_count": resolved_count}
 
 
-@router.get("/public/active-by-type")
+@router.get("/public/active-by-type", dependencies=[Depends(require_user_permission("read:alerts"))])
 async def get_active_alerts_by_type(
     alert_type: str,
     db: Session = Depends(get_db)

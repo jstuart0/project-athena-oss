@@ -26,6 +26,7 @@ from shared.ha_client import HomeAssistantClient
 from shared.admin_config import AdminConfigClient
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from shared.service_key import note_admin_refusal, service_key_headers
 from orchestrator.follow_me_audio import get_most_recent_room
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # MusicHandler.__init__ (not at module scope) so callers that only need
@@ -297,8 +298,9 @@ async def get_room_configs() -> Dict[str, Dict[str, Any]]:
     admin_url = get_admin_url()
 
     try:
-        async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-            response = await client.get(f"{admin_url}/api/room-audio/internal")
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{admin_url}/api/room-audio/internal", headers=service_key_headers())
+            note_admin_refusal(response.status_code, "/api/room-audio/internal")
             if response.status_code == 200:
                 configs = response.json()
                 # Convert list to dict keyed by room_name

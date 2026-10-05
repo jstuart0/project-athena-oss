@@ -17,6 +17,7 @@ import structlog
 from app.database import get_db
 from app.models import STTModel, TTSVoice, VoiceServiceConfig, User
 from app.auth.oidc import get_current_user
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/voice-config", tags=["voice-config"])
@@ -38,20 +39,20 @@ class ServiceConfigUpdate(BaseModel):
 # STT Model Configuration
 # ============================================================================
 
-@router.get("/stt/models")
+@router.get("/stt/models", dependencies=[Depends(require_user_permission("read"))])
 async def list_stt_models(
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
-    """List all available STT models (no auth - public config)."""
+    """List all available STT models."""
     models = db.query(STTModel).order_by(STTModel.size_mb).all()
     return [model.to_dict() for model in models]
 
 
-@router.get("/stt/active")
+@router.get("/stt/active", dependencies=[Depends(require_user_permission("read"))])
 async def get_active_stt_model(
     db: Session = Depends(get_db)
 ) -> Optional[Dict[str, Any]]:
-    """Get the currently active STT model (no auth - public config)."""
+    """Get the currently active STT model."""
     model = db.query(STTModel).filter(STTModel.is_active == True).first()
     return model.to_dict() if model else None
 
@@ -93,20 +94,20 @@ async def set_active_stt_model(
 # TTS Voice Configuration
 # ============================================================================
 
-@router.get("/tts/voices")
+@router.get("/tts/voices", dependencies=[Depends(require_user_permission("read"))])
 async def list_tts_voices(
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
-    """List all available TTS voices (no auth - public config)."""
+    """List all available TTS voices."""
     voices = db.query(TTSVoice).order_by(TTSVoice.display_name).all()
     return [voice.to_dict() for voice in voices]
 
 
-@router.get("/tts/active")
+@router.get("/tts/active", dependencies=[Depends(require_user_permission("read"))])
 async def get_active_tts_voice(
     db: Session = Depends(get_db)
 ) -> Optional[Dict[str, Any]]:
-    """Get the currently active TTS voice (no auth - public config)."""
+    """Get the currently active TTS voice."""
     voice = db.query(TTSVoice).filter(TTSVoice.is_active == True).first()
     return voice.to_dict() if voice else None
 
@@ -148,16 +149,16 @@ async def set_active_tts_voice(
 # Service Configuration
 # ============================================================================
 
-@router.get("/services")
+@router.get("/services", dependencies=[Depends(require_user_permission("read"))])
 async def list_voice_services(
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
-    """List voice service configurations (no auth - public config)."""
+    """List voice service configurations."""
     services = db.query(VoiceServiceConfig).all()
     return [service.to_dict() for service in services]
 
 
-@router.get("/services/{service_type}")
+@router.get("/services/{service_type}", dependencies=[Depends(require_user_permission("read"))])
 async def get_voice_service(
     service_type: str,
     db: Session = Depends(get_db)
@@ -206,10 +207,10 @@ async def update_voice_service(
 
 
 # ============================================================================
-# Internal Endpoints (for orchestrator/gateway - no auth)
+# Internal Endpoints (for orchestrator/gateway: X-Service-Key or a signed-in user)
 # ============================================================================
 
-@router.get("/internal/stt")
+@router.get("/internal/stt", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def internal_get_stt_config(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
@@ -245,7 +246,7 @@ async def internal_get_stt_config(
     }
 
 
-@router.get("/internal/tts")
+@router.get("/internal/tts", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def internal_get_tts_config(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
@@ -282,7 +283,7 @@ async def internal_get_tts_config(
     }
 
 
-@router.get("/internal/all")
+@router.get("/internal/all", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def internal_get_all_voice_config(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
@@ -322,7 +323,7 @@ async def internal_get_all_voice_config(
 # Health Check for Voice Services
 # ============================================================================
 
-@router.get("/health")
+@router.get("/health", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def check_voice_services_health(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
@@ -385,7 +386,7 @@ async def check_voice_services_health(
 VOICE_CONTROL_URL = os.getenv("VOICE_CONTROL_URL", "http://localhost:8098")
 
 
-@router.get("/running-config")
+@router.get("/running-config", dependencies=[Depends(require_user_permission("read"))])
 async def get_running_voice_config() -> Dict[str, Any]:
     """
     Proxy to get running configuration from the voice host's containers.

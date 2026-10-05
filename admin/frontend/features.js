@@ -317,7 +317,7 @@ async function loadMLXApplicability() {
  */
 async function loadFeatures() {
     try {
-        // Try authenticated endpoint first, fallback to public endpoint
+        // Try /api/features first, then fall back to /api/features/public (also authenticated)
         let response;
         try {
             if (typeof ApiClient !== 'undefined') {
@@ -332,9 +332,9 @@ async function loadFeatures() {
                 featuresData = await response.json();
             }
         } catch (authError) {
-            // Fallback to public endpoint if auth fails
+            // Fall back to the /public route (it needs the signed-in user too)
             console.log('Using public features endpoint');
-            response = await fetch('/api/features/public');
+            response = await fetch('/api/features/public', { headers: getAuthHeaders() });
             if (!response.ok) {
                 throw new Error(`Failed to load features: ${response.statusText}`);
             }

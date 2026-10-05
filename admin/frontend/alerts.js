@@ -63,8 +63,8 @@ async function loadAlertsDropdown() {
         });
 
         if (!response.ok) {
-            // Try public endpoint if authenticated one fails
-            const publicResponse = await fetch(`${API_BASE}/api/alerts/public/active-by-type?alert_type=stuck_sensor`);
+            // Try the type-filtered route (named /public; it needs read:alerts) if the first one fails
+            const publicResponse = await fetch(`${API_BASE}/api/alerts/public/active-by-type?alert_type=stuck_sensor`, { headers: getAuthHeaders() });
             if (publicResponse.ok) {
                 const data = await publicResponse.json();
                 renderDropdownAlerts(data.alerts || []);
@@ -207,8 +207,8 @@ async function loadAlertsStats() {
         });
 
         if (!response.ok) {
-            // Fallback to public endpoint to count
-            const publicResponse = await fetch(`${API_BASE}/api/alerts/public/active-by-type?alert_type=stuck_sensor`);
+            // Fall back to the type-filtered route (named /public; it needs read:alerts) to count
+            const publicResponse = await fetch(`${API_BASE}/api/alerts/public/active-by-type?alert_type=stuck_sensor`, { headers: getAuthHeaders() });
             if (publicResponse.ok) {
                 const data = await publicResponse.json();
                 document.getElementById('stat-active').textContent = data.count || 0;
@@ -245,8 +245,8 @@ async function loadAlertsList() {
         });
 
         if (!response.ok) {
-            // Try public endpoint
-            const publicResponse = await fetch(`${API_BASE}/api/alerts/public/active-by-type?alert_type=${typeFilter || 'stuck_sensor'}`);
+            // Try the type-filtered route (named /public; it needs read:alerts)
+            const publicResponse = await fetch(`${API_BASE}/api/alerts/public/active-by-type?alert_type=${typeFilter || 'stuck_sensor'}`, { headers: getAuthHeaders() });
             if (publicResponse.ok) {
                 const data = await publicResponse.json();
                 renderAlertsList(data.alerts || []);

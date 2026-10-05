@@ -169,7 +169,13 @@ _HEADER_LITERAL = "X-Service-Key"
 # build their headers with shared.admin_config.voice_automation_headers(),
 # which always sets X-Service-Key (and the caller scope) -- same kind of
 # helper as control_agent_headers().
-_HEADER_MARKERS = (_HEADER_LITERAL, "control_agent_headers(", "voice_automation_headers(")
+# Route-auth review: the gateway and jarvis-web build the header with
+# shared.service_key.service_key_headers() / jarvis-web's own
+# _service_key_headers(), which send the key or, when it is unset or can't
+# be a header value, no header at all.
+_HEADER_MARKERS = (
+    _HEADER_LITERAL, "control_agent_headers(", "voice_automation_headers(", "service_key_headers(",
+)
 
 
 def _has_header_marker(text: str) -> bool:

@@ -4,16 +4,17 @@ Module status API endpoints.
 Provides endpoints for checking module status and getting enabled admin tabs.
 Used by the admin frontend to dynamically show/hide tabs based on enabled modules.
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from typing import List, Dict, Any
 import os
 
 from shared.module_registry import module_registry, MODULES, ModuleStatus
+from app.utils.service_auth import require_user_permission
 
 router = APIRouter(prefix="/api/modules", tags=["modules"])
 
 
-@router.get("/")
+@router.get("/", dependencies=[Depends(require_user_permission("read"))])
 async def list_modules() -> List[Dict[str, Any]]:
     """
     List all available modules with their status.
@@ -51,7 +52,7 @@ async def list_modules() -> List[Dict[str, Any]]:
     return result
 
 
-@router.get("/admin-tabs")
+@router.get("/admin-tabs", dependencies=[Depends(require_user_permission("read"))])
 async def get_enabled_admin_tabs() -> List[str]:
     """
     Get list of admin tabs that should be visible.
@@ -64,7 +65,7 @@ async def get_enabled_admin_tabs() -> List[str]:
     return module_registry.get_enabled_admin_tabs()
 
 
-@router.get("/enabled")
+@router.get("/enabled", dependencies=[Depends(require_user_permission("read"))])
 async def get_enabled_modules() -> List[str]:
     """
     Get list of enabled module IDs.
@@ -75,7 +76,7 @@ async def get_enabled_modules() -> List[str]:
     return module_registry.get_enabled_modules()
 
 
-@router.get("/{module_id}")
+@router.get("/{module_id}", dependencies=[Depends(require_user_permission("read"))])
 async def get_module_status(module_id: str) -> Dict[str, Any]:
     """
     Get status of a specific module.
@@ -119,7 +120,7 @@ async def get_module_status(module_id: str) -> Dict[str, Any]:
     }
 
 
-@router.post("/{module_id}/refresh")
+@router.post("/{module_id}/refresh", dependencies=[Depends(require_user_permission("write"))])
 async def refresh_module_health(module_id: str) -> Dict[str, Any]:
     """
     Force refresh health checks for a module.
@@ -149,7 +150,7 @@ async def refresh_module_health(module_id: str) -> Dict[str, Any]:
     }
 
 
-@router.post("/refresh-all")
+@router.post("/refresh-all", dependencies=[Depends(require_user_permission("write"))])
 async def refresh_all_module_health() -> Dict[str, Any]:
     """
     Force refresh health checks for all modules.

@@ -1,6 +1,7 @@
 """
 Test configuration and fixtures for API key testing.
 """
+import contextlib
 import os
 import sys
 
@@ -127,6 +128,53 @@ class DyingClient:
         return _call
 
 
+def _app_modules():
+    return {
+        name: module for name, module in sys.modules.items()
+        if name == "main" or name.startswith(("main.", "app.", "shared."))
+    }
+
+
+@contextlib.contextmanager
+def one_copy_of_the_app_modules():
+    """Whatever evicts `app.*`, `main` or `shared.*` from sys.modules inside
+    this block (to re-import them under its own environment) gets the
+    originals put back at the end, and the copies it imported are dropped.
+
+    Left in place, the copies are a second app: a later test that imports
+    `app.*` (or builds a guard through a factory that does) gets functions
+    that aren't the ones the suite's `main.app` runs, with their own
+    `get_db`, their own DEV_MODE flag and, after a startup, their own
+    seeded database.
+    """
+    before = _app_modules()
+    try:
+        yield
+    finally:
+        after = _app_modules()
+        if any(after.get(name) is not module for name, module in before.items()):
+            for name in after:
+                del sys.modules[name]
+            sys.modules.update(before)
+            # The evicting tests keep the top-level `app` and `shared`
+            # packages, so a re-import rebinds their attributes
+            # (`app.routes`, ...) to the copies. `import a.b.c as m` reads
+            # those attributes, `from a.b.c import f` reads sys.modules:
+            # both must give the original again.
+            for name, module in before.items():
+                parent, _, child = name.rpartition(".")
+                if parent in sys.modules:
+                    setattr(sys.modules[parent], child, module)
+
+
+@pytest.fixture(autouse=True)
+def _one_copy_of_the_app_modules():
+    """Around every test. First here, so it is set up before and torn down
+    after every other autouse fixture."""
+    with one_copy_of_the_app_modules():
+        yield
+
+
 @pytest.fixture(autouse=True)
 def memory_vector_test_env():
     from qdrant_client import QdrantClient
@@ -236,6 +284,25 @@ def viewer_user(db):
         email="viewer@example.com",
         full_name="Viewer User",
         role="viewer",
+        active=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@pytest.fixture
+def support_user(db):
+    """Create a support user: the viewer's scoped reads (`read:dashboard`,
+    `read:alerts`) plus `read:analytics` and `view_audit`, and no bare
+    `read`."""
+    user = User(
+        authentik_id="support-001",
+        username="support",
+        email="support@example.com",
+        full_name="Support User",
+        role="support",
         active=True,
     )
     db.add(user)

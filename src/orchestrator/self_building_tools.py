@@ -41,6 +41,7 @@ import httpx
 import structlog
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from shared.service_key import note_admin_refusal, service_key_headers
 
 logger = structlog.get_logger()
 
@@ -319,7 +320,10 @@ class SelfBuildingToolsManager:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 # Use the public features endpoint and filter by name
-                response = await client.get(f"{self.admin_url}/api/features/public")
+                response = await client.get(
+                    f"{self.admin_url}/api/features/public", headers=service_key_headers()
+                )
+                note_admin_refusal(response.status_code, "/api/features/public")
                 if response.status_code == 200:
                     features = response.json()
                     # Find self_building_tools feature in the list
@@ -464,9 +468,11 @@ class SelfBuildingToolsManager:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
                     f"{self.admin_url}/api/tool-proposals",
-                    json=payload
+                    json=payload,
+                    headers=service_key_headers(),
                 )
                 if response.status_code not in (200, 201):
+                    note_admin_refusal(response.status_code, "/api/tool-proposals")
                     logger.warning("proposal_save_warning",
                                   status=response.status_code,
                                   response_text_len=len(response.text))

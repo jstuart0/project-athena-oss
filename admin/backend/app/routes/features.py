@@ -17,7 +17,7 @@ import httpx
 from app.database import get_db
 from app.auth.oidc import get_current_user
 from app.models import User, Feature, LLMPerformanceMetric
-from app.utils.service_auth import verify_service_api_key
+from app.utils.service_auth import require_service_or_user_permission, verify_service_api_key
 from shared.config import get_config
 
 import os
@@ -135,18 +135,19 @@ class WhatIfScenario(BaseModel):
 
 # API Routes
 
-# Public endpoint (no auth) for services to query feature flags
-@router.get("/public", response_model=List[FeatureResponse])
+# Service endpoint for services to query feature flags
+@router.get("/public", response_model=List[FeatureResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_features_public(
     category: Optional[str] = None,
     enabled_only: bool = False,
     db: Session = Depends(get_db)
 ):
     """
-    List all system features (public endpoint, no auth required).
+    List all system features (service endpoint).
 
-    This endpoint is used by services (Gateway, Orchestrator, etc.) to check
-    feature flag configuration without requiring authentication.
+    Used by services (Gateway, Orchestrator, etc.) to check feature flag
+    configuration. Requires X-Service-Key, or a
+    signed-in user with read permission.
 
     Query params:
     - category: Filter by category (optional)

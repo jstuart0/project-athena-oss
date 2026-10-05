@@ -195,6 +195,15 @@ class AthenaConfig(BaseSettings):
     # a Control Agent on a host (e.g., an Apple Silicon Mac alongside Ollama).
     # Valid values: true / false / 1 / 0. Do not set to a blank string.
     control_agent_enabled: bool = Field(default=False)
+    # control_agent_callback_base_url: where the Control Agent's host reaches
+    # admin-backend (scheme://host[:port], no path), e.g.
+    # "https://admin.example.org". admin-backend hands it to the Control
+    # Agent as the base of the download-progress callback, and the agent
+    # sends its service key there only when that host is an entry of the
+    # agent's own ALLOWED_CALLBACK_HOSTS. Empty (the default): admin-backend
+    # falls back to its own loopback address and logs a warning, which is
+    # only right when the agent runs on admin-backend's host.
+    control_agent_callback_base_url: str = Field(default="")
 
     # ------------------------------------------------------------------
     # Service Control on Kubernetes — opt-in feature flag (ATHENA-118)

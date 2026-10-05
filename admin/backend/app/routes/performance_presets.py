@@ -23,6 +23,7 @@ from app.auth.oidc import get_current_user
 from shared.config import get_config
 
 import os
+from app.utils.service_auth import require_service_or_user_permission
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/presets", tags=["performance-presets"])
@@ -131,9 +132,9 @@ async def get_active_preset(
     return PresetResponse(**preset.to_dict())
 
 
-@router.get("/public/active")
+@router.get("/public/active", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_active_preset_public(db: Session = Depends(get_db)):
-    """Get active preset settings (public endpoint for services)."""
+    """Get active preset settings (service endpoint: X-Service-Key or a signed-in user)."""
     preset = db.query(PerformancePreset).filter(
         PerformancePreset.is_active == True
     ).first()

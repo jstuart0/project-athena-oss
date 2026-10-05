@@ -7,8 +7,8 @@ the Phase 4 background poller.  Between Phase 2 and Phase 4, those columns
 will be NULL / unknown — that is the documented transient state.
 
 Auth: GET /services requires get_current_user (OIDC bearer; Phase 4 reconcile
-xander MED-2).  Other GET endpoints (single service, URL lookup) remain
-unauthenticated — they expose only non-sensitive lookups.  Write (POST /
+xander MED-2).  GET /services/{service_name} needs a signed-in user with read;
+GET /services/{service_name}/url takes X-Service-Key or such a user.  Write (POST /
 DELETE) endpoints require dual-auth: X-Service-Key (Control Agent / internal
 callers) OR Bearer JWT / X-API-Key (admin UI) via verify_service_or_oidc.
 (xander CRIT-1 / D9 / ATHENA-1)
@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import RagService, User
 from app.auth.oidc import get_current_user
-from app.utils.service_auth import verify_service_or_oidc
+from app.utils.service_auth import require_service_or_user_permission, require_user_permission, verify_service_or_oidc
 from app.utils.rate_limit import service_registry_rate_limit_dep
 from app.utils.url_validators import validate_endpoint_url, parse_endpoint_url, validate_host
 from app.utils.service_state import normalized_health_status
@@ -167,7 +167,7 @@ def _overall_health(services: list) -> str:
 # GET /services/{service_name} — single service
 # ---------------------------------------------------------------------------
 
-@router.get("/services/{service_name}")
+@router.get("/services/{service_name}", dependencies=[Depends(require_user_permission("read"))])
 async def get_service(
     service_name: str,
     db: Session = Depends(get_db),
@@ -190,7 +190,7 @@ async def get_service(
 # GET /services/{service_name}/url — lightweight URL lookup
 # ---------------------------------------------------------------------------
 
-@router.get("/services/{service_name}/url")
+@router.get("/services/{service_name}/url", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_service_url(
     service_name: str,
     db: Session = Depends(get_db),

@@ -26,7 +26,8 @@ from ..models import (
     EscalationEvent,
     User
 )
-from ..auth.oidc import get_current_user, get_optional_user
+from ..auth.oidc import get_current_user
+from ..utils.service_auth import require_service_or_user_permission, require_user_permission
 
 logger = structlog.get_logger(__name__)
 
@@ -147,26 +148,26 @@ async def _increment_preset_version():
             logger.warning("cache_version_increment_failed", error=str(e))
 
 
-# ============== Public Endpoints (No Auth Required) ==============
+# ============== Service Endpoints (X-Service-Key or a signed-in user) ==============
 
-@router.get("/presets/public")
+@router.get("/presets/public", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_presets_public(
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
     """
-    List all escalation presets (public endpoint for orchestrator).
+    List all escalation presets (service endpoint for the orchestrator).
     Returns presets without rules for quick listing.
     """
     presets = db.query(EscalationPreset).order_by(EscalationPreset.id).all()
     return [p.to_dict() for p in presets]
 
 
-@router.get("/presets/active/public")
+@router.get("/presets/active/public", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_active_preset_public(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
-    Get active preset with all rules (public endpoint for orchestrator).
+    Get active preset with all rules (service endpoint for the orchestrator).
     This is the main endpoint used by the orchestrator for rule evaluation.
     """
     preset = db.query(EscalationPreset).options(
@@ -185,12 +186,12 @@ async def get_active_preset_public(
     return result
 
 
-@router.get("/state/{session_id}/public")
+@router.get("/state/{session_id}/public", dependencies=[Depends(require_service_or_user_permission("read"))])
 async def get_escalation_state_public(
     session_id: str,
     db: Session = Depends(get_db)
 ) -> Optional[Dict[str, Any]]:
-    """Get current escalation state for a session (public endpoint)."""
+    """Get current escalation state for a session (service endpoint)."""
     state = db.query(EscalationState).filter(
         EscalationState.session_id == session_id
     ).first()
@@ -720,7 +721,7 @@ async def cancel_override(
 
 # ============== Internal Endpoints (for Orchestrator) ==============
 
-@router.post("/state/internal")
+@router.post("/state/internal", dependencies=[Depends(require_service_or_user_permission("write"))])
 async def update_state_internal(
     data: InternalStateUpdate,
     db: Session = Depends(get_db)
@@ -751,7 +752,7 @@ async def update_state_internal(
     return state.to_dict()
 
 
-@router.put("/state/{session_id}/decrement")
+@router.put("/state/{session_id}/decrement", dependencies=[Depends(require_service_or_user_permission("write"))])
 async def decrement_turns(
     session_id: str,
     db: Session = Depends(get_db)
@@ -785,7 +786,7 @@ async def decrement_turns(
     return state.to_dict()
 
 
-@router.post("/events/internal")
+@router.post("/events/internal", dependencies=[Depends(require_service_or_user_permission("write"))])
 async def create_event_internal(
     data: EscalationEventCreate,
     db: Session = Depends(get_db)
@@ -975,7 +976,7 @@ async def get_recent_events(
 
 # ============== Prometheus Metrics ==============
 
-@router.get("/metrics/prometheus", response_class=PlainTextResponse)
+@router.get("/metrics/prometheus", response_class=PlainTextResponse, dependencies=[Depends(require_user_permission("read"))])
 async def get_prometheus_metrics(
     db: Session = Depends(get_db)
 ) -> str:
