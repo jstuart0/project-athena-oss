@@ -1756,8 +1756,18 @@ What the line does and doesn't tell you:
 - It covers refusals made by the credential and permission guards. It is not
   a record of every 403: a handler that refuses a request after a guard
   accepted it (an owner-only action, for example) is generally not reported.
-  Any 503 answered to a request that carried `X-Service-Key` is reported as
-  `service_key_unconfigured`, whatever caused the 503.
+- A 503 is reported, as `service_key_unconfigured`, only when the request
+  carried `X-Service-Key` and no guard accepted it: that is the answer a
+  guard gives a key while admin-backend has none configured. A 503 a route
+  answers for its own reasons to a caller whose credential was accepted (a
+  disabled service, for example) is not reported. On a route with no guard
+  at all, a 503 to a request that happens to carry the header is still
+  reported under that reason.
+- The list of service-key-only routes (for the 422 case) is built the first
+  time one is needed, not at startup. If that fails, admin-backend logs one
+  ERROR, `admin_auth_rejection_route_walk_failed`, with the error's type,
+  keeps serving, and stops reporting the 422 case until it restarts; every
+  other refusal is still logged.
 
 **Refused requests: the calling service's log.** A service whose call to
 admin-backend is answered 401, 403 or 503 writes one ERROR,
