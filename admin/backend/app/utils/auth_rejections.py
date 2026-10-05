@@ -8,6 +8,11 @@
 - 503 while an ``X-Service-Key`` header was sent (the key isn't configured);
 - 422 without an ``X-Service-Key`` on a route behind the service-only guard
   (FastAPI refuses the missing required header before any guard code runs).
+  The set of those routes is built on the first such 422, not at startup: a
+  logging aid must never be able to stop the app from starting. If the walk
+  fails, ``admin_auth_rejection_route_walk_failed`` is logged once per
+  process and keyless 422s go unreported for that app (without the set one
+  can't be told from a validation error on a public route).
 
 Failed password logins (``POST /api/auth/local-login``) are not reported:
 that route has its own lockout and failure handling.
@@ -36,6 +41,7 @@ from shared.route_walk import dependency_calls, iter_api_routes
 logger = structlog.get_logger()
 
 EVENT = "admin_auth_rejected"
+WALK_FAILED_EVENT = "admin_auth_rejection_route_walk_failed"
 UNMATCHED_ROUTE = "<unmatched>"
 WINDOW_SECONDS = 60.0
 
@@ -52,11 +58,14 @@ _clock = time.monotonic
 _windows: dict[tuple[str, str, str], list] = {}
 # id(app) -> templates of the routes behind the service-only guard
 _service_only_templates: dict[int, frozenset] = {}
+_walk_failure_reported = False
 
 
 def _reset_for_tests() -> None:
+    global _walk_failure_reported
     _windows.clear()
     _service_only_templates.clear()
+    _walk_failure_reported = False
 
 
 def tracked_key_count() -> int:
@@ -99,13 +108,28 @@ def _record(key: tuple[str, str, str], method: str, status: int) -> None:
 def _service_only(app: Any, template: str) -> bool:
     templates = _service_only_templates.get(id(app))
     if templates is None:
-        templates = frozenset(
-            walked.path for walked in iter_api_routes(app)
-            if any((getattr(call, "__module__", None), getattr(call, "__qualname__", None)) == _SERVICE_ONLY_GUARD
-                   for call in dependency_calls(walked))
-        )
+        try:
+            templates = frozenset(
+                walked.path for walked in iter_api_routes(app)
+                if any((getattr(call, "__module__", None), getattr(call, "__qualname__", None)) == _SERVICE_ONLY_GUARD
+                       for call in dependency_calls(walked))
+            )
+        except Exception as exc:
+            # An app's routes don't change, so the walk isn't tried again:
+            # the empty set stands, and no keyless 422 is reported for it.
+            templates = frozenset()
+            _report_walk_failure(exc)
         _service_only_templates[id(app)] = templates
     return template in templates
+
+
+def _report_walk_failure(exc: Exception) -> None:
+    """Once per process, with the error's type only: its text can hold a path."""
+    global _walk_failure_reported
+    if _walk_failure_reported:
+        return
+    _walk_failure_reported = True
+    logger.error(WALK_FAILED_EVENT, error_type=type(exc).__name__)
 
 
 def _reason(status: int, credential: str) -> str:

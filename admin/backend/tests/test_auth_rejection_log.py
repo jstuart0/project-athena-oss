@@ -370,6 +370,69 @@ def test_a_keyless_call_to_a_service_only_route_is_logged(api):
     _one(logs, route=LOG_SEND, method="POST", status=422, reason="no_credential", credential_presented="none")
 
 
+# L7, when the route walk fails ------------------------------------------------
+
+WALK_FAILED = "admin_auth_rejection_route_walk_failed"
+
+
+def test_a_failing_route_walk_is_reported_once_and_changes_nothing(api, monkeypatch, caplog):
+    """The set of service-only routes is built on the first keyless 422. If
+    that walk fails, the middleware says so once (the error's type, never
+    its text), the response is untouched, and the keyless 422 isn't reported
+    as a rejection: without the set it can't be told from a validation error
+    on a public route."""
+    caplog.set_level(logging.DEBUG)
+    expected = _keyless_service_only(api)[0]
+    assert expected.status_code == 422
+    walks = []
+
+    def failing_walk(app_):
+        walks.append(app_)
+        raise RuntimeError("zz-walk-error-text for /api/zz-secret-path")
+
+    namespace = _namespace()
+    _reset()
+    monkeypatch.setitem(namespace, "iter_api_routes", failing_walk)
+    with structlog.testing.capture_logs() as logs:
+        first = api.post(LOG_SEND, params=LOG_SEND_PARAMS)
+        second = api.post(LOG_SEND, params=LOG_SEND_PARAMS)
+    for response in (first, second):
+        assert (response.status_code, response.json()) == (422, expected.json())
+    assert [r for r in logs if r.get("event") == WALK_FAILED] == [
+        {"event": WALK_FAILED, "log_level": "error", "error_type": "RuntimeError"}]
+    assert len(walks) == 1, "the walk isn't retried on every keyless 422"
+    assert _rejections(logs) == []
+
+    # A second app in the same process walks for itself, fails too, and
+    # doesn't write the line again.
+    from fastapi import FastAPI
+    from pydantic import BaseModel
+
+    class Body(BaseModel):
+        name: str
+
+    other = FastAPI()
+    other.add_middleware(namespace["AuthRejectionMiddleware"])
+
+    @other.post("/api/zz-other")
+    async def needs_a_body(body: Body):
+        return {}
+
+    with structlog.testing.capture_logs() as more:
+        with TestClient(other, raise_server_exceptions=False) as second_app:
+            assert second_app.post("/api/zz-other", json={}).status_code == 422
+    assert len(walks) == 2 and walks[1] is not walks[0]
+    assert [r for r in more if r.get("event") == WALK_FAILED] == []
+    assert _rejections(more) == []
+    for text in (repr(logs), repr(more), _stdlib_text(caplog)):
+        assert "zz-walk-error-text" not in text and "zz-secret-path" not in text
+
+    # Other refusals are still reported while the set is missing.
+    with structlog.testing.capture_logs() as logs:
+        assert api.get(DEVICE_URL).status_code == 401
+    _one(logs, route=DEVICE_ROUTE, method="GET", status=401, reason="no_credential", credential_presented="none")
+
+
 # L8 -----------------------------------------------------------------------
 
 def test_accepted_requests_are_not_logged(api, db, operator_user):
@@ -865,11 +928,11 @@ def test_records_carry_only_the_agreed_fields(api, viewer_user, monkeypatch, con
 
 
 def test_case_population():
-    """29 tests: L1-L13 and L15-L22, with L11, L13, L17 and L19 as two
-    tests each, the two small-app cases for L5 and L10, the middleware's
-    position, and the positive control for the stdlib leak check. L14 is in
-    the matrix file, with the route it needs."""
+    """30 tests: L1-L13 and L15-L22, with L11, L13, L17 and L19 as two
+    tests each, the two small-app cases for L5 and L10, the failing route
+    walk, the middleware's position, and the positive control for the stdlib
+    leak check. L14 is in the matrix file, with the route it needs."""
     tests = [name for name in vars(sys.modules[__name__])
              if name.startswith("test_") and name != "test_case_population"]
-    assert len(tests) == 29, sorted(tests)
+    assert len(tests) == 30, sorted(tests)
     assert "test_an_anonymous_request_is_logged_by_route_template" in tests
