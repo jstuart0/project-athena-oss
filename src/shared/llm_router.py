@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 import structlog
 from shared.admin_url import get_admin_url, path_segment, path_segments
 from shared.config import get_config
+from shared.output_channel import normalize_stop_reason
 from shared.service_key import note_admin_refusal, service_key_headers
 
 logger = structlog.get_logger()
@@ -45,6 +46,22 @@ def _strip_think_tags(text: str) -> str:
         parts = text.split("</think>")
         cleaned = parts[-1].strip()
     return cleaned
+
+
+def _google_finish_reason(response: Any) -> Optional[str]:
+    """The first candidate's finish reason name (`STOP`, `MAX_TOKENS`, ...), or
+    None when the response has no candidate or no readable reason."""
+    try:
+        candidates = response.candidates
+        if not candidates:
+            return None
+        reason = candidates[0].finish_reason
+        if reason is None:
+            return None
+        name = getattr(reason, "name", None)
+        return name if isinstance(name, str) else str(reason)
+    except Exception:
+        return None
 
 
 def _build_ollama_generate_payload(
@@ -739,7 +756,8 @@ class LLMRouter:
                         "backend": "mlx",
                         "model": model,
                         "content": msg.get("content", ""),
-                        "finish_reason": choice.get("finish_reason", "stop")
+                        "finish_reason": choice.get("finish_reason", "stop"),
+                        "stop_reason": normalize_stop_reason(choice.get("finish_reason", "stop"))
                     }
             else:
                 raise ValueError(f"Unsupported backend for tool calling: {backend}")
@@ -854,7 +872,8 @@ class LLMRouter:
             result = {
                 "backend": "openai",
                 "model": model,
-                "finish_reason": choice.finish_reason
+                "finish_reason": choice.finish_reason,
+                "stop_reason": normalize_stop_reason(choice.finish_reason)
             }
 
             # Check if tool calls were made
@@ -946,7 +965,8 @@ class LLMRouter:
             result = {
                 "backend": "anthropic",
                 "model": model,
-                "finish_reason": response.stop_reason
+                "finish_reason": response.stop_reason,
+                "stop_reason": normalize_stop_reason(response.stop_reason)
             }
 
             # Check for tool use blocks
@@ -1040,7 +1060,8 @@ class LLMRouter:
             result = {
                 "backend": "google",
                 "model": model,
-                "finish_reason": response.candidates[0].finish_reason.name if response.candidates else "unknown"
+                "finish_reason": _google_finish_reason(response) or "unknown",
+                "stop_reason": normalize_stop_reason(_google_finish_reason(response))
             }
 
             # Check for function calls
@@ -1159,7 +1180,8 @@ class LLMRouter:
                 "model": model,
                 "done": data.get("done", True),
                 "eval_count": data.get("eval_count", 0),
-                "total_duration": data.get("total_duration", 0)
+                "total_duration": data.get("total_duration", 0),
+                "stop_reason": normalize_stop_reason(data.get("done_reason"))
             }
 
             # Check if tool calls were made
@@ -1278,7 +1300,8 @@ class LLMRouter:
                 "model": model,
                 "done": data.get("done", True),
                 "total_duration": data.get("total_duration"),
-                "eval_count": data.get("eval_count")
+                "eval_count": data.get("eval_count"),
+                "stop_reason": normalize_stop_reason(data.get("done_reason"))
             }
 
         finally:
@@ -1356,6 +1379,7 @@ class LLMRouter:
                                 "done": True,
                                 "total_duration": data.get("total_duration"),
                                 "eval_count": data.get("eval_count"),
+                                "stop_reason": normalize_stop_reason(data.get("done_reason")),
                                 "model": model,
                                 "backend": "ollama"
                             }
@@ -1477,7 +1501,8 @@ class LLMRouter:
                 "model": model,
                 "backend": "google",
                 "eval_count": result.get("output_tokens", 0),
-                "prompt_eval_count": result.get("input_tokens", 0)
+                "prompt_eval_count": result.get("input_tokens", 0),
+                "stop_reason": result.get("stop_reason")
             }
 
         elif backend_type == BackendType.MLX:
@@ -1552,6 +1577,7 @@ class LLMRouter:
                 if value is not None and key != "stream":
                     payload[key] = value
 
+        mlx_finish_reason = None
         try:
             async with httpx.AsyncClient(base_url=endpoint_url, timeout=timeout) as client:
                 async with client.stream("POST", "/v1/chat/completions", json=payload) as response:
@@ -1561,10 +1587,12 @@ class LLMRouter:
                             continue
                         payload_str = line[6:].strip()
                         if payload_str == "[DONE]":
-                            yield {"token": "", "done": True, "model": model, "backend": "mlx"}
+                            yield {"token": "", "done": True, "model": model, "backend": "mlx",
+                                   "stop_reason": normalize_stop_reason(mlx_finish_reason)}
                             return
                         try:
                             chunk = _json.loads(payload_str)
+                            mlx_finish_reason = chunk.get("choices", [{}])[0].get("finish_reason") or mlx_finish_reason
                             delta = chunk.get("choices", [{}])[0].get("delta", {})
                             token = delta.get("content", "")
                             if token:
@@ -1647,7 +1675,8 @@ class LLMRouter:
                 "model": model,
                 "done": True,
                 "total_duration": None,  # MLX doesn't provide this
-                "eval_count": data.get("usage", {}).get("completion_tokens")
+                "eval_count": data.get("usage", {}).get("completion_tokens"),
+                "stop_reason": normalize_stop_reason(choice.get("finish_reason"))
             }
 
         finally:
@@ -1962,7 +1991,8 @@ class LLMRouter:
                 "done": True,
                 "input_tokens": usage.prompt_tokens if usage else 0,
                 "output_tokens": usage.completion_tokens if usage else 0,
-                "finish_reason": choice.finish_reason
+                "finish_reason": choice.finish_reason,
+                "stop_reason": normalize_stop_reason(choice.finish_reason)
             }
 
         except Exception as e:
@@ -2013,7 +2043,8 @@ class LLMRouter:
                 "done": True,
                 "input_tokens": response.usage.input_tokens,
                 "output_tokens": response.usage.output_tokens,
-                "finish_reason": response.stop_reason
+                "finish_reason": response.stop_reason,
+                "stop_reason": normalize_stop_reason(response.stop_reason)
             }
 
         except Exception as e:
@@ -2071,7 +2102,8 @@ class LLMRouter:
                 "done": True,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "finish_reason": "stop"
+                "finish_reason": _google_finish_reason(response) or "unknown",
+                "stop_reason": normalize_stop_reason(_google_finish_reason(response))
             }
 
         except Exception as e:
@@ -2172,6 +2204,7 @@ class LLMRouter:
         first_token_time = None
         input_tokens = 0
         output_tokens = 0
+        finish_reason = None
 
         try:
             stream = await client.chat.completions.create(
@@ -2190,6 +2223,7 @@ class LLMRouter:
                     output_tokens = chunk.usage.completion_tokens or 0
 
                 if chunk.choices and len(chunk.choices) > 0:
+                    finish_reason = getattr(chunk.choices[0], "finish_reason", None) or finish_reason
                     delta = chunk.choices[0].delta
                     if hasattr(delta, 'content') and delta.content:
                         if first_token_time is None:
@@ -2231,6 +2265,7 @@ class LLMRouter:
                 "backend": "openai",
                 "eval_count": output_tokens,
                 "prompt_eval_count": input_tokens,
+                "stop_reason": normalize_stop_reason(finish_reason),
                 "total_duration": int(duration * 1e9)
             }
 
@@ -2268,6 +2303,7 @@ class LLMRouter:
         first_token_time = None
         input_tokens = 0
         output_tokens = 0
+        stop_reason = None
 
         try:
             async with client.messages.stream(
@@ -2299,6 +2335,7 @@ class LLMRouter:
                         # Capture output token count from final delta
                         if hasattr(event, 'usage') and event.usage:
                             output_tokens = event.usage.output_tokens or 0
+                        stop_reason = getattr(getattr(event, "delta", None), "stop_reason", None) or stop_reason
 
             duration = time.time() - start_time
             ttft_ms = int((first_token_time - start_time) * 1000) if first_token_time else None
@@ -2329,6 +2366,7 @@ class LLMRouter:
                 "backend": "anthropic",
                 "eval_count": output_tokens,
                 "prompt_eval_count": input_tokens,
+                "stop_reason": normalize_stop_reason(stop_reason),
                 "total_duration": int(duration * 1e9)
             }
 

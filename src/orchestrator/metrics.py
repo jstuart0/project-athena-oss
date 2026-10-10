@@ -124,6 +124,12 @@ fast_path_deferred_total = Counter(
     ['route', 'reason']  # reason: pending_confirmation|awaiting_context|open_question|context_unreadable
 )
 
+speech_answer_truncated_total = Counter(
+    'athena_speech_answer_truncated_total',
+    'Spoken answers cut off by the voice token cap and trimmed to a complete sentence',
+    ['stage']  # the LLM call that produced the answer
+)
+
 ambient_fragment_gated_total = Counter(
     'athena_ambient_fragment_gated_total',
     'Spoken low-information fragments answered without tool selection',

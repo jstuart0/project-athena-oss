@@ -2359,6 +2359,10 @@ async function loadAssistantProfileSettings() {
         document.getElementById('assistant-simple-max-sentences').value = config.guardrails?.simple_response?.max_sentences ?? 2;
         document.getElementById('assistant-min-response-chars').value = config.guardrails?.validation?.min_response_chars ?? 10;
         document.getElementById('assistant-max-response-chars').value = config.guardrails?.validation?.max_response_chars ?? 2000;
+        document.getElementById('assistant-voice-max-sentences').value = config.guardrails?.voice_response?.max_sentences ?? 3;
+        document.getElementById('assistant-voice-max-tokens').value = config.guardrails?.voice_response?.max_tokens ?? 200;
+        document.getElementById('assistant-voice-max-tokens-long').value = config.guardrails?.voice_response?.max_tokens_long ?? 600;
+        document.getElementById('assistant-ambient-fragment-gate').checked = config.guardrails?.voice_response?.ambient_fragment_gate === true;
         document.getElementById('assistant-profile-status').textContent = 'Assistant profile loaded';
         document.getElementById('assistant-profile-status').className = 'text-sm text-green-400';
     } catch (error) {
@@ -2391,6 +2395,12 @@ async function saveAssistantProfileSettings() {
                 validation: {
                     min_response_chars: parseInt(document.getElementById('assistant-min-response-chars').value, 10),
                     max_response_chars: parseInt(document.getElementById('assistant-max-response-chars').value, 10)
+                },
+                voice_response: {
+                    max_sentences: parseInt(document.getElementById('assistant-voice-max-sentences').value, 10),
+                    max_tokens: parseInt(document.getElementById('assistant-voice-max-tokens').value, 10),
+                    max_tokens_long: parseInt(document.getElementById('assistant-voice-max-tokens-long').value, 10),
+                    ambient_fragment_gate: document.getElementById('assistant-ambient-fragment-gate').checked
                 }
             }
         };

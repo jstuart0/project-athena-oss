@@ -48,6 +48,7 @@ from shared.logging_config import configure_logging
 from orchestrator.context.storage import clear_conversation_context
 from orchestrator.mode_permission import SIGNED_IN_TRUST, is_public_audience, is_public_caller
 from orchestrator.nodes import _runtime
+from orchestrator.metrics import speech_answer_truncated_total
 from orchestrator.session_keys import context_storage_key, id_class
 from orchestrator.state import ConversationContext
 from orchestrator.urls import (
@@ -69,8 +70,15 @@ from shared.admin_config import get_admin_client
 from shared.base_knowledge_utils import extract_owner_name, load_visible_knowledge
 from shared.knowledge_tiers import KnowledgeAudience
 from shared.fast_path_vocab import normalize as normalize_fast_path_query, reply_for as fast_path_reply_for
+from shared.output_channel import (
+    OutputChannel,
+    answer_hit_cap,
+    channel_for_interface_type,
+    speech_max_tokens,
+    trim_to_complete_sentence,
+)
 from shared.local_time import local_now, local_today
-from shared.assistant_profile import clean_guest_name, get_assistant_profile
+from shared.assistant_profile import clean_guest_name, get_assistant_profile, get_voice_response_limits
 from shared.service_registry import get_service_url as registry_get_service_url
 from shared.service_key import note_admin_refusal, service_key_headers
 from orchestrator.config_loader import ADMIN_API_URL
@@ -672,6 +680,78 @@ def enhance_query_with_year(query: str) -> str:
     return query
 
 
+# A tool-call request needs room for the call's JSON, so the voice cap never drops below this.
+TOOL_CALL_MIN_TOKENS = 512
+
+
+_LONG_FORM_INTENTS = frozenset({"recipes", "directions"})
+_LONG_FORM_QUERY_RE = re.compile(
+    r"\bstep[- ]by[- ]step\b|\bwalk me through\b|\bitinerary\b|\bplan (?:my|a|the) (?:day|trip|weekend)\b|\bhow (?:do|can) i (?:make|cook|bake)\b",
+    re.IGNORECASE,
+)
+
+
+def is_long_form_turn(intent: Any, query: Optional[str]) -> bool:
+    """A recipe, directions, itinerary or step-by-step request: its spoken
+    answer is allowed the longer cap (`voice_response.max_tokens_long`)."""
+    value = getattr(intent, "value", intent)
+    if isinstance(value, str) and value.lower() in _LONG_FORM_INTENTS:
+        return True
+    return bool(query and _LONG_FORM_QUERY_RE.search(query))
+
+
+async def answer_max_tokens(
+    interface_type: Optional[str],
+    requested: Optional[int],
+    *,
+    tool_calling: bool = False,
+    long_form: bool = False,
+) -> Optional[int]:
+    """The token limit for an answer-producing LLM call.
+
+    Text and chat get exactly `requested`. A spoken answer gets the smaller of
+    `requested` and the admin-set voice cap (`voice_response.max_tokens`,
+    default 200; `max_tokens_long`, default 600, for a long-form turn); a
+    tool-calling request uses a cap of at least 512 so the call's JSON is
+    never cut. Every answer-producing call passes its limit
+    through here (`tests/unit/test_answer_token_cap_wiring.py`).
+    """
+    channel = channel_for_interface_type(interface_type)
+    if channel is not OutputChannel.SPEECH:
+        return requested
+    limits = await get_voice_response_limits()
+    cap = limits["max_tokens_long"] if long_form else limits["max_tokens"]
+    if tool_calling:
+        cap = max(cap, TOOL_CALL_MIN_TOKENS)
+    return speech_max_tokens(channel, requested, cap)
+
+
+def finish_spoken_answer(
+    text: Optional[str],
+    interface_type: Optional[str],
+    result: Optional[Dict[str, Any]],
+    max_tokens: Optional[int],
+    *,
+    stage: str,
+) -> Optional[str]:
+    """A spoken answer the backend cut off at its token limit is trimmed to its
+    last complete sentence (after any leaked think block is dropped). An answer
+    that wasn't cut off, and every text answer, comes back exactly as given."""
+    if not text or channel_for_interface_type(interface_type) is not OutputChannel.SPEECH:
+        return text
+    if not answer_hit_cap(result, max_tokens):
+        return text
+    from shared.llm_router import _strip_think_tags
+
+    speech_answer_truncated_total.labels(stage=stage).inc()
+    cleaned = _strip_think_tags(text)
+    # A cut-off answer can end inside a think block that never closed: that is thinking, not speech.
+    unclosed = cleaned.lower().find("<think>")
+    if unclosed != -1:
+        cleaned = cleaned[:unclosed].strip()
+    return trim_to_complete_sentence(cleaned)
+
+
 _SHORT_ANSWER_CLOSERS = "\"')]}\u201d\u2019\u00bb"
 _SHORT_ANSWER_TERMINATORS = ".!?\u2026"
 
@@ -1057,10 +1137,15 @@ Based on these search results, provide a helpful, accurate answer to the user's 
             synthesis_start = time.time()
 
             llm_router = _runtime.get_llm_router()
+            fallback_interface = getattr(state, "interface_type", None)
+            fallback_max_tokens = await answer_max_tokens(
+                fallback_interface, None, long_form=is_long_form_turn(state.intent, state.query)
+            )
             synthesis_result = await llm_router.generate(
                 model=synthesis_model,
                 prompt=synthesis_prompt,
                 temperature=0.7,
+                max_tokens=fallback_max_tokens,
                 system_prompt=_component_system_prompt(synthesis_config),
                 request_id=state.request_id,
                 session_id=state.session_id,
@@ -1076,7 +1161,10 @@ Based on these search results, provide a helpful, accurate answer to the user's 
                     "post_synthesis_fallback", synthesis_model, tokens, int(synthesis_duration * 1000), "synthesis"
                 )
 
-            new_response = synthesis_result.get("response", "")
+            new_response = finish_spoken_answer(
+                synthesis_result.get("response", ""), fallback_interface, synthesis_result,
+                fallback_max_tokens, stage="post_synthesis_fallback",
+            )
             if new_response and len(new_response) > 20:
                 # Store original response for debugging
                 original_response = state.answer

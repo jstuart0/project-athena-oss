@@ -44,15 +44,18 @@ class OllamaClient:
         model: str,
         messages: list,
         temperature: float = 0.7,
-        stream: bool = False
+        stream: bool = False,
+        num_predict: Optional[int] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Chat completion from Ollama"""
+        """Chat completion from Ollama. `num_predict` caps the generated tokens."""
         payload = {
             "model": model,
             "messages": messages,
             "stream": stream,
             "options": {"temperature": temperature}
         }
+        if num_predict is not None:
+            payload["options"]["num_predict"] = num_predict
         
         async with self.client.stream("POST", "/api/chat", json=payload) as response:
             response.raise_for_status()

@@ -452,6 +452,7 @@ class AutomationAgent:
         room = context.get("room", "office")
         session_id = context.get("session_id")
         guest_name = context.get("guest_name")
+        interface_type = context.get("interface_type")
 
         # Build system prompt with context
         system_prompt = await self._build_system_prompt(mode, room, guest_name)
@@ -472,7 +473,7 @@ class AutomationAgent:
 
             try:
                 # Get LLM response with tool calling
-                response = await self._call_llm_with_tools(messages, model)
+                response = await self._call_llm_with_tools(messages, model, interface_type)
 
                 # Check for tool calls
                 tool_calls = response.get("tool_calls", [])
@@ -534,8 +535,13 @@ class AutomationAgent:
         prompt = await build_automation_system_prompt(mode, room, guest_name)
         return f"{prompt}\nCurrent Time:\n- Time: {current_time}\n- Date: {current_date}"
 
-    async def _call_llm_with_tools(self, messages: List[Dict], model: str) -> Dict:
-        """Call LLM with tool definitions."""
+    async def _call_llm_with_tools(self, messages: List[Dict], model: str, interface_type: Optional[str] = None) -> Dict:
+        """Call LLM with tool definitions. A spoken turn is capped by the voice
+        limit but never below the room a tool call's JSON needs; a direct
+        spoken reply that hit the cap is trimmed to its last complete sentence."""
+        # Imported at call time: orchestrator.helpers imports the nodes package, which imports this module.
+        from orchestrator.helpers import answer_max_tokens, finish_spoken_answer
+
         try:
             # Use the LLM router's chat_with_tools method if available
             if hasattr(self.llm, 'chat_with_tools'):
@@ -550,15 +556,21 @@ class AutomationAgent:
             # Convert messages to a prompt string
             prompt = self._messages_to_prompt(messages)
 
+            max_tokens = await answer_max_tokens(interface_type, 2000, tool_calling=True)
             response = await self.llm.generate(
                 model=model,
                 prompt=prompt,
                 temperature=0.1,
-                max_tokens=2000
+                max_tokens=max_tokens
             )
 
             # Parse tool calls from response
-            return self._parse_tool_calls_from_text(response.get('response', ''))
+            parsed = self._parse_tool_calls_from_text(response.get('response', ''))
+            if not parsed.get("tool_calls") and parsed.get("content"):
+                parsed["content"] = finish_spoken_answer(
+                    parsed["content"], interface_type, response, max_tokens, stage="automation_agent"
+                )
+            return parsed
 
         except Exception as e:
             logger.error(f"LLM call failed: {e}")

@@ -8,7 +8,7 @@ import os
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 import structlog
 import json
 
@@ -19,6 +19,7 @@ from app.models import User, Secret, SystemSetting
 from app.utils.encryption import encrypt_value, decrypt_value
 from app.utils.url_validators import validate_host, is_local_host, redact_url_userinfo
 from app.utils.rag_urls import check_ssrf_safe
+from shared.assistant_profile import clamp_voice_response
 from shared.config import get_config
 
 logger = structlog.get_logger()
@@ -77,6 +78,9 @@ DEFAULT_ASSISTANT_PROFILE_CONFIG: Dict[str, Any] = {
             "max_response_chars": 2000,
         },
         "voice_response": {
+            "max_sentences": 3,
+            "max_tokens": 200,
+            "max_tokens_long": 600,
             "ambient_fragment_gate": False,
         },
     },
@@ -98,6 +102,19 @@ class OIDCSettingsResponse(BaseModel):
     redirect_uri: str
 
 
+class VoiceResponseSettings(BaseModel):
+    """`guardrails.voice_response`: how long a spoken answer may be, and the
+    opt-in gate for overheard fragments. Ranges match the orchestrator's
+    read-time clamp (shared.assistant_profile), so a saved value is never
+    silently changed on the way back out."""
+    model_config = ConfigDict(extra="forbid")
+
+    max_sentences: StrictInt = Field(3, ge=1, le=10)
+    max_tokens: StrictInt = Field(200, ge=32, le=1024)
+    max_tokens_long: StrictInt = Field(600, ge=64, le=2048)
+    ambient_fragment_gate: StrictBool = False
+
+
 class AssistantProfileConfig(BaseModel):
     assistant_name: str
     project_name: str
@@ -106,9 +123,40 @@ class AssistantProfileConfig(BaseModel):
     communication_style: List[str]
     guardrails: Dict[str, Any]
 
+    @field_validator("guardrails")
+    @classmethod
+    def _validate_voice_response(cls, guardrails: Dict[str, Any]) -> Dict[str, Any]:
+        """Other guardrail keys stay free-form; `voice_response` is typed. Only
+        the keys that were sent are kept, so a save can leave the rest to the
+        stored values (see save_assistant_profile)."""
+        if "voice_response" in guardrails:
+            validated = VoiceResponseSettings.model_validate(guardrails["voice_response"])
+            guardrails = {**guardrails, "voice_response": validated.model_dump(exclude_unset=True)}
+        return guardrails
+
 
 def _get_system_setting(db: Session, key: str) -> Optional[SystemSetting]:
     return db.query(SystemSetting).filter(SystemSetting.key == key).first()
+
+
+def _merge_stored_guardrails(setting: Optional[SystemSetting], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    """The guardrails to store: whatever the stored profile holds that this save
+    didn't send, then what it did send. The admin form sends every text rule but
+    not `voice_response`, and a client may send only some `voice_response` keys;
+    a save must not reset what it didn't mention. `voice_response` always comes
+    back complete and in range."""
+    try:
+        stored = json.loads(setting.value).get("guardrails", {}) if setting else {}
+    except (json.JSONDecodeError, AttributeError):
+        stored = {}
+    stored = stored if isinstance(stored, dict) else {}
+    merged = {**stored, **incoming}
+    if "voice_response" in stored or "voice_response" in incoming:
+        sent = incoming.get("voice_response") or {}
+        merged["voice_response"] = VoiceResponseSettings.model_validate(
+            {**clamp_voice_response(stored.get("voice_response")), **sent}
+        ).model_dump()
+    return merged
 
 
 def _get_assistant_profile_config(db: Session) -> Dict[str, Any]:
@@ -123,6 +171,8 @@ def _get_assistant_profile_config(db: Session) -> Dict[str, Any]:
             merged.update({k: v for k, v in parsed.items() if k != "guardrails"})
             merged_guardrails = DEFAULT_ASSISTANT_PROFILE_CONFIG["guardrails"].copy()
             merged_guardrails.update(parsed.get("guardrails", {}))
+            # A hand-edited or stale stored value must not turn a read into a 422/500.
+            merged_guardrails["voice_response"] = clamp_voice_response(merged_guardrails.get("voice_response"))
             merged["guardrails"] = merged_guardrails
             return merged
     except json.JSONDecodeError:
@@ -162,6 +212,7 @@ async def save_assistant_profile(
     try:
         payload = config.model_dump()
         setting = _get_system_setting(db, ASSISTANT_PROFILE_SETTING_KEY)
+        payload["guardrails"] = _merge_stored_guardrails(setting, payload["guardrails"])
         serialized = json.dumps(payload)
 
         if setting:

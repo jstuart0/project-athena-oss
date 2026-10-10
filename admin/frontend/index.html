@@ -2270,6 +2270,36 @@
                             </div>
                         </div>
 
+                        <div>
+                            <h4 class="text-sm font-semibold text-white mb-2">Voice response</h4>
+                            <p class="text-xs text-gray-500 mb-3">How long a spoken answer may be. Text and chat answers are not limited by these.</p>
+                            <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+                                <div>
+                                    <label for="assistant-voice-max-sentences" class="block text-sm font-medium text-gray-400 mb-2">Spoken answer: max sentences</label>
+                                    <input type="number" id="assistant-voice-max-sentences" min="1" max="10" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
+                                    <p class="text-xs text-gray-500 mt-1">1 to 10. Asked of the model in the prompt.</p>
+                                </div>
+                                <div>
+                                    <label for="assistant-voice-max-tokens" class="block text-sm font-medium text-gray-400 mb-2">Spoken answer: max tokens</label>
+                                    <input type="number" id="assistant-voice-max-tokens" min="32" max="1024" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
+                                    <p class="text-xs text-gray-500 mt-1">32 to 1024. A cut-off answer ends on its last full sentence.</p>
+                                </div>
+                                <div>
+                                    <label for="assistant-voice-max-tokens-long" class="block text-sm font-medium text-gray-400 mb-2">Recipes, directions, itineraries: max tokens</label>
+                                    <input type="number" id="assistant-voice-max-tokens-long" min="64" max="2048" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
+                                    <p class="text-xs text-gray-500 mt-1">64 to 2048. Used instead of the limit on the left for step-by-step answers.</p>
+                                </div>
+                                <div>
+                                    <span class="block text-sm font-medium text-gray-400 mb-2">Overheard fragments</span>
+                                    <label class="flex items-center gap-2 text-sm text-gray-300">
+                                        <input type="checkbox" id="assistant-ambient-fragment-gate" class="rounded">
+                                        Answer unclear speech with "Sorry, I didn't catch that."
+                                    </label>
+                                    <p class="text-xs text-gray-500 mt-1">Off by default. Voice only; never applied to commands, questions or yes/no replies.</p>
+                                </div>
+                            </div>
+                        </div>
+
                         <div class="flex items-center justify-between">
                             <div id="assistant-profile-status" class="text-sm text-gray-400"></div>
                             <button onclick="saveAssistantProfileSettings()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors">
@@ -5005,7 +5035,7 @@
     <script src="/integrations.js?v=20260927"></script>
     <script src="/keyboard.js?v=20260108"></script>
 
-    <script src="/app.js?v=20261010"></script>
+    <script src="/app.js?v=20261011"></script>
     <script src="/crud-extensions.js?v=20260913"></script>
     <script src="/conversation.js?v=20260913"></script>
     <script src="/routing.js?v=20260913"></script>

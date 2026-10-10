@@ -178,7 +178,10 @@ from orchestrator.fast_path import (
 )
 from shared.fast_path_vocab import AMBIENT_REPLY
 from orchestrator.helpers import (
+    answer_max_tokens,
+    finish_spoken_answer,
     get_feature_config,
+    is_long_form_turn,
     get_automation_system_mode,
     get_post_synthesis_fallback_config,
     enhance_query_with_year,
@@ -1501,13 +1504,17 @@ async def handle_query_with_bypass(
         # Generate with cloud LLM
         llm_router = _runtime.get_llm_router()
 
+        bypass_interface = getattr(state, "interface_type", None)
+        bypass_max_tokens = await answer_max_tokens(
+            bypass_interface, bypass_config.get('max_tokens', 1024), long_form=is_long_form_turn(intent, query)
+        )
         bypass_start = time.time()
         response = await llm_router.generate(
             model=model,
             prompt=query,
             system_prompt=system_prompt,
             temperature=bypass_config.get('temperature', 0.7),
-            max_tokens=bypass_config.get('max_tokens', 1024),
+            max_tokens=bypass_max_tokens,
             metadata={
                 'intent': intent,
                 'bypass': True,
@@ -1524,7 +1531,9 @@ async def handle_query_with_bypass(
                 state.timing_tracker.record_llm_call(
                     "service_bypass", model, tokens, int(bypass_duration * 1000), "cloud_bypass"
                 )
-            return response['response']
+            return finish_spoken_answer(
+                response['response'], bypass_interface, response, bypass_max_tokens, stage="service_bypass"
+            )
 
     except Exception as e:
         logger.error("service_bypass_failed", intent=intent, error=str(e))
@@ -4786,6 +4795,8 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
         system_content = await build_core_assistant_prompt(
             include_voice_formatting=True,
+            interface_type="voice" if channel_for_interface_type(getattr(state, "interface_type", None)) is OutputChannel.SPEECH else None,
+            long_form=is_long_form_turn(state.intent, state.query),
             **addressee.prompt_kwargs(),
         ) + "\n"
         home_address = DEFAULT_LOCATION  # Permanent home address (for "directions from home")
@@ -5041,11 +5052,13 @@ If the user is asking to repeat, search again, or modify the previous request, u
                          "another story", "different story", "new story"]
         is_story_query = any(p in query_lower for p in story_patterns)
 
-        if is_continue_query and getattr(state, 'interface_type', 'voice') != 'voice':
+        selection_interface = getattr(state, 'interface_type', 'voice')
+        selection_is_text = channel_for_interface_type(selection_interface) is not OutputChannel.SPEECH
+        if is_continue_query and selection_is_text:
             # Continuation requests always get extended tokens
             max_tokens = 500  # Good length for continuing any truncated response
             logger.info("Continue request detected, using extended max_tokens=500")
-        elif is_story_query and getattr(state, 'interface_type', 'voice') != 'voice':
+        elif is_story_query and selection_is_text:
             max_tokens = 2000  # Extended limit for stories on non-voice interfaces
             logger.info("Story query detected in tool_call phase, using extended max_tokens=2000")
 
@@ -5089,7 +5102,11 @@ If the user is asking to repeat, search again, or modify the previous request, u
 
         logger.info(f"Calling LLM for tool selection: model={llm_model}, backend={llm_backend}, complexity={complexity}")
 
-        # Call LLM with tools
+        # Call LLM with tools. A spoken turn is capped by the voice limit, but
+        # never below the room a tool call's JSON needs.
+        max_tokens = await answer_max_tokens(
+            selection_interface, max_tokens, tool_calling=True, long_form=is_long_form_turn(state.intent, state.query)
+        )
         llm_call_start = time.time()
         llm_response = await llm.generate_with_tools(
             model=llm_model,
@@ -5287,7 +5304,9 @@ If the user is asking to repeat, search again, or modify the previous request, u
             # LLM didn't want to call any tools, use its direct response
             content = llm_response.get("content", "")
             if content:
-                state.answer = content
+                state.answer = finish_spoken_answer(
+                    content, selection_interface, llm_response, max_tokens, stage="tool_selection"
+                )
                 state.data_source = f"LLM ({llm_model}) - no tools needed"
                 # Capture token metrics from direct LLM response
                 state.llm_tokens = llm_response.get("eval_count", 0)
@@ -5360,11 +5379,15 @@ Provide a helpful answer:"""
                                 synthesis_config = await get_component_config("response_synthesis")
                                 synthesis_model = synthesis_config["model_name"]
                                 fallback_start = time.time()
+                                fallback_max_tokens = await answer_max_tokens(
+                                    selection_interface, None, long_form=is_long_form_turn(state.intent, state.query)
+                                )
                                 synthesis_result = await llm.generate(
                                     model=synthesis_model,
                                     prompt=synthesis_prompt,
                                     temperature=0.7,
                                     system_prompt=_component_system_prompt(synthesis_config),
+                                    max_tokens=fallback_max_tokens,
                                     request_id=state.request_id,
                                     session_id=state.session_id,
                                     stage="fallback_synthesis"
@@ -5378,7 +5401,10 @@ Provide a helpful answer:"""
                                         "fallback_synthesis", synthesis_model, tokens, int(fallback_duration * 1000), "synthesis"
                                     )
 
-                                state.answer = synthesis_result.get("response", "")
+                                state.answer = finish_spoken_answer(
+                                    synthesis_result.get("response", ""), selection_interface, synthesis_result,
+                                    fallback_max_tokens, stage="fallback_synthesis",
+                                )
                                 state.data_source = f"Web Search Fallback ({state.data_source})"
                                 logger.info("Web search fallback synthesis completed")
                             except Exception as synth_err:
@@ -5825,6 +5851,10 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
         # Call LLM again to synthesize final response
         logger.info("Calling LLM to synthesize final response from tool results")
 
+        synthesis_max_tokens = await answer_max_tokens(
+            interface_type, synthesis_max_tokens,
+            long_form=is_planning_query or is_long_form_turn(state.intent, state.query),
+        )
         synthesis_start_time = time.time()
         final_response = await llm.generate_with_tools(
             model=synthesis_model,
@@ -5850,7 +5880,10 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
             )
 
         # Extract final answer
-        state.answer = final_response.get("content", "I couldn't generate a response from the tool results.")
+        state.answer = finish_spoken_answer(
+            final_response.get("content", "I couldn't generate a response from the tool results."),
+            interface_type, final_response, synthesis_max_tokens, stage="tool_synthesis",
+        )
 
         # Check if response was truncated due to token limit
         finish_reason = final_response.get("finish_reason", "stop")
@@ -7633,7 +7666,11 @@ async def process_query_stream(
 
                 # Use per-intent max_tokens from component config, same as synthesize_node.
                 synthesis_config = await get_component_config("response_synthesis")
-                max_tokens = (synthesis_config or {}).get("max_tokens") or 2048
+                max_tokens = await answer_max_tokens(
+                    request.interface_type, (synthesis_config or {}).get("max_tokens") or 2048,
+                    long_form=is_long_form_turn(state.intent, request.query),
+                )
+                stream_final = {}
 
                 logger.info(
                     "streaming_llm_started",
@@ -7669,6 +7706,7 @@ async def process_query_stream(
                             if not speak_answer:
                                 yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': token})}\n\n"
                         if chunk.get("done", False):
+                            stream_final = chunk
                             stream_completed = True
                             break
                 except asyncio.CancelledError:
@@ -7677,7 +7715,10 @@ async def process_query_stream(
                 except Exception as e:
                     logger.error("streaming_error", request_id=request_id, tokens_emitted=token_count, error=str(e))
 
-                full_answer = _strip_hallucinated_continuation("".join(response_tokens))
+                full_answer = finish_spoken_answer(
+                    _strip_hallucinated_continuation("".join(response_tokens)),
+                    request.interface_type, stream_final, max_tokens, stage="stream_synthesis",
+                )
                 if not full_answer:
                     full_answer = "I'm not sure how to help with that. Could you rephrase your question?"
                     yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': full_answer})}\n\n"
@@ -8357,6 +8398,7 @@ Response:"""
     system_context = await build_core_assistant_prompt(
         include_voice_formatting=state.interface_type != "chat",
         interface_type=state.interface_type,
+        long_form=is_long_form_turn(state.intent, state.query),
         **addressee.prompt_kwargs(),
     ) + "\n"
 
@@ -8765,12 +8807,16 @@ async def chat_completions(request: OpenAIChatRequest):
                     # For text/chat: stream tokens directly (original behavior)
                     is_voice = channel_for_interface_type(interface_type) is OutputChannel.SPEECH
 
+                    v1_max_tokens = await answer_max_tokens(
+                        interface_type, 2048, long_form=is_long_form_turn(state.intent, user_message)
+                    )
+                    v1_stream_final = {}
                     async for chunk in llm.generate_stream(
                         model=synthesis_model,
                         prompt=full_prompt,
                         system_prompt=synthesis_system_prompt,
                         temperature=state.temperature,
-                        max_tokens=2048
+                        max_tokens=v1_max_tokens
                     ):
                         token = chunk.get("token", "")
                         if token:
@@ -8794,6 +8840,7 @@ async def chat_completions(request: OpenAIChatRequest):
 
                         # Check if done
                         if chunk.get("done", False):
+                            v1_stream_final = chunk
                             break
 
                     stream_duration = time.time() - start_time
@@ -8801,7 +8848,12 @@ async def chat_completions(request: OpenAIChatRequest):
                     # For voice interface: normalize and stream the complete response
                     if is_voice and response_tokens:
                         full_response = "".join(response_tokens)
-                        normalized_response = render_answer(full_response, interface_type)
+                        normalized_response = render_answer(
+                            finish_spoken_answer(
+                                full_response, interface_type, v1_stream_final, v1_max_tokens, stage="stream_synthesis"
+                            ),
+                            interface_type,
+                        )
                         logger.info(
                             "tts_normalization_applied",
                             request_id=state.request_id,

@@ -48,12 +48,16 @@ from gateway.intent_prerouter import classify_intent, handle_simple_intent
 from gateway.circuit_breaker import CircuitBreaker, CircuitState
 from gateway.rate_limiter import TokenBucketRateLimiter
 from shared.client_throttle import invalid_network_entries, parse_networks, read_forwarded_for
+from shared.assistant_profile import get_voice_response_limits
 from shared.output_channel import (
     OutputChannel,
+    answer_hit_cap,
     classify_openai_caller,
     interface_type_for_channel,
     render_for_channel,
     render_sink_text,
+    speech_max_tokens,
+    trim_to_complete_sentence,
     without_networks_overlapping,
 )
 from gateway.conversation_limiter import (
@@ -1383,21 +1387,31 @@ async def route_to_ollama(
             for msg in request.messages
         ]
 
+        # A spoken fallback answer is capped by the voice limit, like the orchestrator's.
+        num_predict = speech_max_tokens(channel, None, (await get_voice_response_limits())["max_tokens"]) \
+            if channel is OutputChannel.SPEECH else None
+        chat_kwargs = {"num_predict": num_predict} if num_predict is not None else {}
+
         # Call Ollama
         with request_duration.labels(endpoint="ollama").time():
             response_text = ""
             eval_count = 0
+            final_chunk = {}
             async for chunk in ollama_client.chat(
                 model=ollama_model,
                 messages=messages,
                 temperature=request.temperature,
-                stream=False
+                stream=False,
+                **chat_kwargs
             ):
                 if chunk.get("done"):
                     response_text = chunk.get("message", {}).get("content", "")
                     eval_count = chunk.get("eval_count", 0)
+                    final_chunk = chunk
                     break
 
+        if num_predict is not None and answer_hit_cap(final_chunk, num_predict):
+            response_text = trim_to_complete_sentence(response_text)
         response_text = render_for_channel(response_text, channel)
 
         # Calculate metrics
