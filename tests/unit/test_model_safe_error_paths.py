@@ -240,16 +240,25 @@ def test_a_stream_error_event_is_fixed_text(monkeypatch, route):
 
 def test_the_query_route_returns_an_opaque_500(monkeypatch):
     fp = _boom_rig(monkeypatch)
-    resp = asyncio.run(fp.send("query", "tell me about the town", interface_type="text"))
-    assert resp.status_code == 500 and resp.json() == {"detail": "internal_error"}
+    resp = asyncio.run(fp.send("query", "tell me about the town", interface_type="text", headers={"X-Request-ID": "req-abc-123"}))
+    assert resp.status_code == 500 and resp.json() == {"detail": "internal_error request_id=req-abc-123"}
+    assert resp.headers["X-Request-ID"] == "req-abc-123"
     assert_clean(resp.text)
 
 
 def test_the_v1_route_returns_an_opaque_500(monkeypatch):
     fp = _boom_rig(monkeypatch)
-    resp = asyncio.run(fp.send("v1_nonstream", "tell me about the town", interface_type="text"))
-    assert resp.status_code == 500 and resp.json() == {"detail": "internal_error"}
+    resp = asyncio.run(fp.send("v1_nonstream", "tell me about the town", interface_type="text", headers={"X-Request-ID": "req-def-456"}))
+    assert resp.status_code == 500 and resp.json() == {"detail": "internal_error request_id=req-def-456"}
     assert_clean(resp.text)
+
+
+def test_a_500_without_a_request_id_header_still_carries_the_generated_one(monkeypatch):
+    fp = _boom_rig(monkeypatch)
+    resp = asyncio.run(fp.send("query", "tell me about the town", interface_type="text"))
+    detail = resp.json()["detail"]
+    assert detail.startswith("internal_error request_id=") and detail.split("=", 1)[1] not in ("", "unknown")
+    assert detail.split("=", 1)[1] == resp.headers["X-Request-ID"]
 
 
 def test_a_websearch_error_is_a_phrase_in_the_data_source():

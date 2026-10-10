@@ -171,11 +171,11 @@ def answer_of(route: str, response: httpx.Response) -> str:
     return next(e["full_response"] for e in parsed if e.get("stage") == "complete")
 
 
-async def send(route: str, text: str, **kwargs) -> httpx.Response:
+async def send(route: str, text: str, *, headers=None, **kwargs) -> httpx.Response:
     path, body = request_for(route, text, **kwargs)
     transport = httpx.ASGITransport(app=h.main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.post(path, json=body, headers=h.service_headers())
+        return await client.post(path, json=body, headers={**h.service_headers(), **(headers or {})})
 
 
 async def stored_messages(route: str = "query"):

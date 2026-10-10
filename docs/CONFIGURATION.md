@@ -1654,7 +1654,7 @@ Every LLM call writes a row to `llm_performance_metrics`, including the streamed
 
 ### Error messages
 
-A backend's error text (hostnames, addresses, environment-variable names, class names) never reaches the model, the speaker or an API client. The assistant says a fixed phrase for the kind of failure (not set up, needs more detail, unavailable, timed out, failed); streaming clients get "Sorry, something went wrong." and a failing HTTP route answers 500 `internal_error`. The one exception is a short, plain 4xx message from a RAG service (letters, digits, spaces and `.,'-`, at most 200 characters, one line), which is passed on so a tool can tell the assistant what to ask for. The raw text stays in the logs and in the tool usage metrics.
+A backend's error text (hostnames, addresses, environment-variable names, class names) never reaches the model, the speaker or an API client. The assistant says a fixed phrase for the kind of failure (not set up, needs more detail, unavailable, timed out, failed); streaming clients get "Sorry, something went wrong." and a failing query route answers 500 `internal_error request_id=<id>` (the `X-Request-ID`, to find the logged cause). The one exception is a short, plain 4xx message from a RAG service (letters, digits, spaces and `.,'-`, at most 200 characters, one line), which is passed on so a tool can tell the assistant what to ask for. The raw text stays in the logs and in the tool usage metrics.
 
 ### Wyoming Protocol (STT/TTS)
 

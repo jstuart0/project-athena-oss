@@ -54,6 +54,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A short, finished answer ("Done.", "Yes!") is no longer retried or sent to a web search. The "Min Response Chars" field is now "Minimum length for an unfinished answer (characters)".
 - Backend error text is never spoken, streamed or returned: the assistant says what kind of failure it was, streaming clients get a fixed message, and failing routes answer `internal_error`.
 - `/v1/chat/completions` reports the real token usage of the turn; LLM metric rows record prompt tokens, including streamed answers. The gateway passes the orchestrator's usage through.
+- A streaming `/v1/chat/completions` request that sends `stream_options: {"include_usage": true}` gets the OpenAI-style final usage chunk (empty `choices`) before `data: [DONE]`, through the gateway too; without the option the stream is unchanged.
+- A failing `/query` or `/v1/chat/completions` answers 500 `internal_error request_id=<id>` (the `X-Request-ID` of the request) instead of the exception text.
 - Saving the Assistant profile no longer resets settings the form does not show.
 - Base Knowledge has four audiences: Everyone, Guests only, Household and Owner only. Owner only reaches only a proven owner (see "Who hears a base-knowledge entry" in `docs/CONFIGURATION.md`); `owner`-category entries other than `owner_name` and `name` need that proof too.
 - The directions default origin uses Everyone entries only: an address stored as Owner only, Household or Guests only is no longer the default origin.

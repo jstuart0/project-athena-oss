@@ -9,6 +9,7 @@ LangGraph-based state machine that coordinates between:
 - Response validation
 """
 
+import structlog
 import os
 
 # Load environment variables from .env file BEFORE any other imports
@@ -7442,7 +7443,7 @@ async def process_query(
                 error=str(e)
             )
 
-        raise HTTPException(status_code=500, detail="internal_error")
+        raise HTTPException(status_code=500, detail=_internal_error_detail())
 
 @app.post("/query/stream", dependencies=[Depends(require_service_caller)])
 async def process_query_stream(
@@ -8032,6 +8033,13 @@ async def process_query_stream_v2(
 # ============================================================================
 # OpenAI-Compatible API Endpoints (for Home Assistant integration)
 # ============================================================================
+
+def _internal_error_detail() -> str:
+    """The body of a 500: `internal_error` and the request id (the X-Request-ID the tracing middleware
+    bound), so an operator can find the logged cause. Never the exception text."""
+    request_id = structlog.contextvars.get_contextvars().get("request_id") or "unknown"
+    return f"internal_error request_id={request_id}"
+
 
 def _stream_usage_line(request: "OpenAIChatRequest", chunk_id: str) -> str:
     """The OpenAI `stream_options.include_usage` chunk: empty `choices` and the turn's usage, sent
@@ -9017,7 +9025,7 @@ async def chat_completions(request: OpenAIChatRequest):
 
     except Exception as e:
         logger.error("chat_completions_error", **log_safe(e))
-        raise HTTPException(status_code=500, detail="internal_error")
+        raise HTTPException(status_code=500, detail=_internal_error_detail())
 
 
 # ============================================================================
