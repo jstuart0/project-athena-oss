@@ -804,7 +804,7 @@ async def log_analytics_event(event: AnalyticsEventRequest) -> Dict[str, Any]:
     import time
 
     # Whatever an (older) orchestrator sends, no conversation text is stored or broadcast.
-    metadata = strip_conversation_text(event.metadata)
+    metadata = strip_conversation_text(event.metadata, event.event_type)
 
     conn = None
     try:

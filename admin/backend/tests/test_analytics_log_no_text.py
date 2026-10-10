@@ -113,3 +113,85 @@ def test_old_rows_with_text_are_not_returned_by_the_query_logs_report(client, db
     entry = resp.json()["logs"][0]
     assert entry["query"] == "" and entry["query_len"] == len(SECRET)
     assert "SECRET-TEXT" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Pipeline events (STT transcripts) and lists
+# ---------------------------------------------------------------------------
+
+def test_strip_recurses_through_lists_of_dicts():
+    cleaned = strip_conversation_text({"calls": [{"args": {"query": SECRET, "n": 1}}, {"answer": "x"}], "ok": [1, 2]})
+    assert cleaned == {"calls": [{"args": {"query_len": len(SECRET), "n": 1}}, {}], "ok": [1, 2]}
+
+
+def test_transcript_events_lose_text_but_other_events_keep_their_message_fields():
+    stt = strip_conversation_text({"text": SECRET, "engine": "whisper", "duration_ms": 90}, "stt_complete")
+    assert stt == {"text_len": len(SECRET), "engine": "whisper", "duration_ms": 90}
+    error = {"message": "model unavailable", "text": "status text", "content": "x"}
+    assert strip_conversation_text(error, "error") == error, "non-transcript payloads are untouched"
+    assert strip_conversation_text({"message": "x", "content": "y"}, "query_received") == {}
+
+
+def test_the_stt_producer_sends_a_length_not_the_transcript():
+    import asyncio
+
+    from shared import events
+
+    seen = []
+
+    class Emitter:
+        async def emit(self, event_type, session_id, data, interface=None):
+            seen.append(data)
+
+    original = events.EventEmitterFactory.get
+    events.EventEmitterFactory.get = staticmethod(lambda: Emitter())
+    try:
+        asyncio.run(events.emit_stt_complete("s", "turn on the porch light", "whisper", 80))
+    finally:
+        events.EventEmitterFactory.get = original
+    assert seen == [{"text_len": 23, "engine": "whisper", "duration_ms": 80}]
+
+
+def test_the_livekit_events_carry_lengths_only():
+    import re
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[3] / "src" / "gateway" / "livekit_integration.py").read_text()
+    blocks = re.findall(r'_emit_event\("(query_received|response_generated)", session_id, \{(.*?)\}\)', source, re.DOTALL)
+    assert {name for name, _ in blocks} == {"query_received", "response_generated"}
+    for name, body in blocks:
+        assert '"query":' not in body and '"response":' not in body and '"interruption_context":' not in body, name
+    assert '"query_len": len(transcript)' in source and '"response_len": len(answer)' in source
+
+
+def test_the_emit_route_stores_and_broadcasts_no_transcript(client, db, owner_client, monkeypatch):
+    from app.models import PipelineEvent
+
+    broadcasts = []
+
+    async def capture(event):
+        broadcasts.append(event)
+
+    monkeypatch.setattr(websocket_routes.ws_manager, "broadcast", capture)
+    resp = owner_client.post("/api/pipeline-events/emit?event_type=stt_complete&session_id=s9",
+                             json={"text": SECRET, "engine": "whisper", "nested": [{"utterance": "x"}]})
+    assert resp.status_code == 200, resp.text
+    db.expire_all()
+    stored = db.query(PipelineEvent).filter(PipelineEvent.session_id == "s9").one().event_data
+    assert stored == {"text_len": len(SECRET), "engine": "whisper", "nested": [{}]}
+    assert "SECRET-TEXT" not in json.dumps(broadcasts)
+
+
+def test_old_stored_events_are_sanitised_on_the_way_out(client, db, owner_client):
+    from app.models import PipelineEvent
+
+    db.add(PipelineEvent(session_id="old-s", event_type="stt_complete", event_data={"text": SECRET, "engine": "w"},
+                         timestamp=datetime.utcnow()))
+    db.add(PipelineEvent(session_id="old-s", event_type="tool_selected",
+                         event_data={"tool_name": "websearch", "args": {"query": SECRET}}, timestamp=datetime.utcnow()))
+    db.commit()
+    listing = owner_client.get("/api/pipeline-events")
+    assert listing.status_code == 200 and "SECRET-TEXT" not in listing.text
+    assert any(e["data"] == {"text_len": len(SECRET), "engine": "w"} for e in listing.json())
+    timeline = owner_client.get("/api/pipeline-events/old-s")
+    assert timeline.status_code == 200 and "SECRET-TEXT" not in timeline.text

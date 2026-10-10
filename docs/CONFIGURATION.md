@@ -2190,7 +2190,7 @@ Conversations are kept for **30 days** by default (1 to 3650; there is no "forev
 - **Automatic**: admin-backend deletes expired turns every 6 hours (first run 5 minutes after it starts, skipped in `DEV_MODE`), whether or not Analytics Mode is on. Expired data is deleted even after capture is turned off.
 - **Manual** (owner): "Delete conversations older than N days now", or "Delete all conversations…" with a typed confirmation. Both run under the lease `conversation_capture.purge.lock`, so replicas never purge at once, and each purge is audited (started, finished, failed or interrupted, with counts only).
 
-Turning Analytics Mode off stops capture at once and keeps what is stored until it expires or is purged. Turning it on takes effect within about 30 seconds.
+Turning Analytics Mode off stops capture at once and keeps what is stored until it expires or is purged. While it is off, no new conversation text is saved to the conversation history you can review here; Athena still keeps short-lived working memory to follow a conversation (sessions last about an hour) and a response cache (up to 24 hours), which are separate from captured conversations. Turning it on takes effect within about 30 seconds.
 
 ### Which database
 
@@ -2212,7 +2212,7 @@ Debug detail does not switch itself off: the banner shows "Debug detail ON since
 
 ### The older analytics log carries no text
 
-The `conversation_analytics` table (intent events behind the Dashboard traffic numbers and the Query Analytics page) and the Admin Jarvis live feed carry **no conversation text**: the orchestrator sends the query's length, intent, confidence and timings only, and admin-backend drops any query or answer text an older orchestrator still sends before it stores or broadcasts anything. Query Analytics shows lengths where it used to show the query.
+The `conversation_analytics` table (intent events behind the Dashboard traffic numbers and the Query Analytics page), the pipeline events and the Admin Jarvis live feed carry **no conversation text**: the services send the query's or transcript's length, intent, confidence and timings only, and admin-backend drops any query, answer or transcript text an older service still sends before it stores or broadcasts anything, and removes it from stored pipeline events when they are read. Query Analytics shows lengths where it used to show the query.
 
 Rows written by earlier versions may still hold the query text in their `metadata` (keys `query`, `query_preview`), whatever Analytics Mode said. They are not deleted and are not shown anywhere. To clear the text and keep the counts, run this against admin-backend's database:
 

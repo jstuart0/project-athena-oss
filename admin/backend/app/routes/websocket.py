@@ -317,8 +317,8 @@ async def broadcast_to_admin_jarvis(event: dict):
     """
     from app.utils.conversation_text import strip_conversation_text
 
-    if isinstance(event, dict) and isinstance(event.get("data"), dict):
-        event = {**event, "data": strip_conversation_text(event["data"])}
+    if isinstance(event, dict) and isinstance(event.get("data"), (dict, list)):
+        event = {**event, "data": strip_conversation_text(event["data"], event.get("event_type"))}
     await ws_manager.broadcast(event)
 
 

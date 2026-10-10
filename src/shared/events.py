@@ -444,7 +444,7 @@ async def emit_stt_complete(
     emitter = EventEmitterFactory.get()
     if emitter:
         await emitter.emit(EventType.STT_COMPLETE, session_id, {
-            'text': text,
+            'text_len': len(text),
             'engine': engine,
             'duration_ms': duration_ms,
         }, interface)

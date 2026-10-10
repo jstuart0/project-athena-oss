@@ -331,7 +331,9 @@ def test_pipeline_events_need_a_user(client, db, operator_user):
     assert client.get("/api/pipeline-events").status_code == 401
     resp = client.get("/api/pipeline-events", headers=_bearer(operator_user))
     assert resp.status_code == 200
-    assert any(e["data"].get("text") == "turn on the porch" for e in resp.json())
+    stt = [e for e in resp.json() if e["event_type"] == "stt_complete"]
+    assert stt and stt[0]["data"] == {"text_len": len("turn on the porch")}, "an operator sees the length, never the transcript"
+    assert "turn on the porch" not in resp.text
 
 
 # ---------------------------------------------------------------------------

@@ -1067,7 +1067,7 @@ async def get_privacy_settings(
         description = (
             "Analytics mode is on. Answered turns are stored in this install's database."
             if enabled
-            else "Analytics mode is off. While it is off, no new conversation text is stored; existing conversations stay until they expire or you purge them."
+            else "Analytics mode is off. While it is off, no new conversation text is saved to the conversation history you can review here; Athena still keeps short-lived working memory to follow a conversation (sessions last about an hour) and a response cache (up to 24 hours). Existing conversations stay until they expire or you purge them."
         )
 
         return PrivacySettingsResponse(analytics_mode_enabled=enabled, description=description)

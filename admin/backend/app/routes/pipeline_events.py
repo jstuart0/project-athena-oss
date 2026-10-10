@@ -18,6 +18,7 @@ import structlog
 from app.database import get_db
 from app.utils.service_auth import require_service_or_user_permission, require_user_permission
 from app.models import PipelineEvent
+from app.utils.conversation_text import strip_conversation_text
 
 logger = structlog.get_logger()
 
@@ -88,7 +89,7 @@ async def get_pipeline_events(
                 event_type=event.event_type,
                 session_id=event.session_id,
                 interface=event.interface,
-                data=event.event_data or {},
+                data=strip_conversation_text(event.event_data or {}, event.event_type),
                 timestamp=event.timestamp.timestamp() if event.timestamp else 0,
                 created_at=event.timestamp
             ))
@@ -252,7 +253,7 @@ async def get_session_events(
                 "id": event.id,
                 "event_type": event.event_type,
                 "interface": event.interface,
-                "data": event.event_data or {},
+                "data": strip_conversation_text(event.event_data or {}, event.event_type),
                 "timestamp": event.timestamp.timestamp() if event.timestamp else 0,
                 "created_at": event.timestamp.isoformat() if event.timestamp else None,
                 "offset_ms": offset_ms
@@ -296,7 +297,7 @@ async def emit_pipeline_event(
         from app.routes.websocket import broadcast_to_admin_jarvis
         from app.utils.conversation_text import strip_conversation_text
 
-        data = strip_conversation_text(data or {})
+        data = strip_conversation_text(data or {}, event_type)
         event = PipelineEvent(
             event_type=event_type,
             session_id=session_id,

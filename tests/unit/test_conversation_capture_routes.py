@@ -463,12 +463,17 @@ async def drive(route, *, disconnect_after_first_chunk=False):
         sent.append(message)
         if disconnect_after_first_chunk and message["type"] == "http.response.body" and message.get("body"):
             disconnect.set()
+        if message["type"] == "http.response.body" and not message.get("more_body"):
+            disconnect.set()  # a real client closes once the response is complete
 
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST", "path": path,
              "raw_path": path.encode(), "query_string": b"", "scheme": "http", "root_path": "", "server": ("t", 80),
              "client": ("127.0.0.1", 1234),
              "headers": [(b"content-type", b"application/json"), (b"host", b"t"),
                          (b"x-service-key", h.service_headers()["X-Service-Key"].encode())]}
+    # A response that never completes (the pipeline was cancelled or failed) still ends: the
+    # client is gone after a moment, which is what lets Starlette's disconnect listener finish.
+    asyncio.get_running_loop().call_later(1.0, disconnect.set)
     try:
         await asyncio.wait_for(h.main.app(scope, receive, send), 10)
     except BaseException as exc:  # a cancelled or failed stream is the point of these tests
