@@ -4017,7 +4017,7 @@ const TOOLTIP_CONTENT = {
     // Base Knowledge
     'knowledge-category': 'Type of knowledge: property info, location data, user preferences, or temporal context.',
     'knowledge-priority': 'Higher priority knowledge is used when there are conflicts. Range: 0-100.',
-    'knowledge-applies-to': 'Who this knowledge applies to: both modes, guest only, or owner only.',
+    'knowledge-applies-to': 'Who hears this entry: everyone, guests only, the household, or only the owner signed in to Jarvis web.',
     'knowledge-key': 'Unique identifier for this knowledge entry.',
     'knowledge-value': 'The actual content of this knowledge entry.',
 

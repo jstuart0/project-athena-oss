@@ -669,7 +669,8 @@ can never claim owner. The precedence, most to least trusted:
 | Gateway (satellite/HA voice) | server-resolved via step 1-3 above | `household` — the gateway's fast path (`mode_gate.py`) only takes effect while the house is actually in owner mode |
 | SMS (`sms_webhook.py`) | server-resolved | `sms` |
 | LiveKit (`livekit_integration.py`) | server-resolved | `household` (a LiveKit room can only be created by a signed-in owner/operator, see below) |
-| jarvis-web, signed-in owner/operator or household member | server-resolved via step 1-3 above | `web_authenticated` |
+| jarvis-web, signed-in operator Bearer or edge-attested household member | server-resolved via step 1-3 above | `web_authenticated` |
+| jarvis-web, Bearer-authenticated admin with the `owner` role | server-resolved via step 1-3 above | `web_owner` (owner proof only together with a valid `X-Service-Key`; see "Who hears a base-knowledge entry") |
 | jarvis-web, home network | server-resolved via step 1-3 above | `web_local` |
 | jarvis-web, guest network | always `guest` | `web_guest_net` |
 | jarvis-web, anyone else | never forwarded: 401 sign-in required | — |
@@ -685,7 +686,7 @@ in the house.
 `caller_trust` is set **only by server code**, never copied from a request
 body field, and it affects **only** the owner-PIN voice-override branch —
 mode and permissions themselves come entirely from the table above. Only
-`household`, `sms`, and `web_authenticated` may attempt the owner-PIN
+`household`, `sms`, `web_authenticated` and `web_owner` may attempt the owner-PIN
 utterance ("switch to owner mode, pin 123456"); `web_local`,
 `web_guest_net`, `web_public` and untagged callers are refused before any
 throttle or mode-service call, with zero counter increments. A surface may only ever *say* "owner mode" in a
@@ -707,8 +708,11 @@ one place (`build_query_context` and `resolve_addressee`), from the
   `JARVIS_EDGE_NAME_HEADER`) only for `web_authenticated` during a stay. It's
   given to the model as a quoted data field, not an instruction, and never
   logged.
-- **The owner** in owner mode, by the `owner_name` base-knowledge entry
-  (never a display name); "what is my name" is answered from it directly.
+- **The owner** only when the request is a *proven owner* (see "Who hears a
+  base-knowledge entry"), by the `owner_name` base-knowledge entry (never a
+  display name); "what is my name" is answered from it directly. A voice
+  satellite, the home network, SMS and a plain signed-in member are not
+  addressed as the owner, so "what is my name" no longer names them.
 - **Nobody** while the mode service is degraded, and nobody on the public
   audience. A degraded request is also never served from or stored in the
   semantic cache, and its prompt carries no name or owner base-knowledge
@@ -727,10 +731,113 @@ can't reach another. A new `caller_trust` value must be classified in
 **Base-knowledge name entries.** A static `guest_name` entry is ignored (the
 guest's name comes from the live stay, per caller; its row id is logged
 once as `base_knowledge_static_guest_name_ignored`). `owner_name`/`name`
-entries are rendered as "Property owner's name" in owner-mode prompts only.
-Every other user/owner entry whose key contains `name`, and every
-`owner`-category entry, is likewise rendered only in owner mode, and none
-of them while the mode service is degraded.
+entries are rendered as "Property owner's name" in owner-mode prompts only
+(an entry tiered Household therefore still renders for unproven household
+callers; only the "you are speaking with" line needs proof). Every other
+user/owner entry whose key contains `name` is likewise rendered only in owner
+mode, and none of them while the mode service is degraded. Every other
+`owner`-category entry renders only for a proven owner, whatever tier it is
+stored under. `owner_name` and `name` are valid only in the `owner` and `user`
+categories.
+
+**Who hears a base-knowledge entry.** Each Base Knowledge entry has one
+audience:
+
+| Audience (stored `applies_to`) | Who hears it |
+|---|---|
+| Everyone (`both`) | Guests and the household. |
+| Guests only (`guest`) | Guests, during a real stay: the server's own guest mode, or a guest matched to the caller's device. A client that merely sends `mode=guest` in an owner-mode house doesn't count, and its turns skip the semantic cache. |
+| Household (`household`) | Anyone at home when no stay is active: voice satellites, the home network, SMS and signed-in members. Visitors at home hear these. |
+| Owner only (`owner`) | Only a *proven owner*. |
+
+The stored value `owner` used to mean "owner mode", which every household
+caller shared; it now means owner only. `household` is the value for the old
+shared meaning. A degraded mode service sees Everyone entries only. Any other
+stored value (the legacy `chat`) is never rendered; the admin page shows it as
+"Unknown: chat" so you can re-tier it.
+
+- **A proven owner** is the owner signed in to Jarvis web with the admin
+  `owner` account (a Bearer token whose role is `owner`; an operator, an edge
+  sign-in and the home network are not), arriving over an authenticated service
+  hop (jarvis-web sends the service key), while the house is in owner mode and
+  the mode service is healthy. The orchestrator recomputes the hop from the
+  `X-Service-Key` header; a `web_owner` claim in a request body is never
+  enough, so it is not proof in `warn` ingress mode or under `DEV_MODE` without
+  the key. Anyone holding the shared service key can still claim `web_owner`:
+  that is the existing service-key trust boundary, now covering owner-only
+  entries too. The PIN override, `web_authenticated`, `web_local`,
+  `household`, `sms` and `web_public` are never proof. During a stay with the
+  PIN override active (one house-wide override) the mode service reports
+  owner, so a signed-in owner is proven then: the proof is the Bearer, not the
+  house state.
+- **Bearer decisions are cached**: 10 seconds for the `owner` role, 60 seconds
+  for other roles, so a revoked token keeps working for up to that long.
+- **Owner-category entries** (category `owner`) other than `owner_name` and
+  `name` render only for a proven owner, whatever tier they are stored under,
+  and the admin API refuses to save one under any other tier.
+- **Instructions** (category `instruction`) change how the assistant behaves for
+  everyone in their audience; a persona stored as Household or Everyone changes
+  what visitors hear. The admin page warns about this.
+- **Bystanders.** A proven owner's answer is spoken or shown in the room, so
+  anyone nearby hears it.
+- **Cache and memories.** A turn from an owner caller, proven or not, neither
+  reads nor writes the semantic cache and creates no automatic memory,
+  including an explicit "remember ..." (add memories on the admin Memories
+  page). Owner-scope memories are household-level: they're heard by everyone at
+  home, and admin-created memories follow that. Cache keys carry a `kv2` version
+  segment (the old keys are simply never read again) and a digest of exactly the
+  entries the caller's audience can see, so editing, disabling, deleting or
+  narrowing an entry changes every key derived from it and an answer built on
+  the old text is never replayed. If the entries can't be loaded, the cache is
+  skipped for that request. Each service reuses the fetched entry list for at
+  most 5 seconds, so a narrowing reaches prompts and cache keys within about
+  that long (plus the orchestrator's usual request time); a reply already being
+  generated when you save may still use the old text.
+- **Conversations.** A proven owner's conversation is its own session class
+  (ids start `own-`, stored under `athena:owner_session:` and
+  `athena:owner_context:`), and jarvis-web keeps the owner's chat thread under a
+  derived identity, so signing out or using the same browser from the home
+  network never restores it. An owner turn during a stay or while the mode
+  service is degraded is unproven: it gets a fresh conversation without the
+  owner's history, and the owner loses continuity for that turn. Owner turns are
+  still recorded by conversation analytics, where admins can view them; the
+  audience controls what the assistant says to whom, not what administrators can
+  see. Operators with write access can read and retype Owner-only entries, but
+  moving one to another audience or deleting one needs the owner role (403
+  `insufficient_role`); every write is audited by id, audience and field name.
+- **Household and guest conversations never cross.** A stay starting or ending
+  never hands one audience the other's conversation. Guest-audience turns (the
+  server's own guest mode, or a guest matched to the caller's device) use their
+  own session class (ids start `gst-`, stored under `athena:guest_session:` and
+  `athena:guest_context:`); a caller that keeps one session id, such as a voice
+  satellite or an SMS number, gets one conversation per audience. jarvis-web
+  likewise keeps a separate persistent chat thread for guest-mode callers, so a
+  browser never restores a household thread during a stay or the guest's after
+  it. A client's own `mode=guest` hint doesn't start a guest conversation.
+- **Already-built history is not scrubbed.** When you narrow an entry (re-tier,
+  disable, delete or edit it), new prompts and cache keys stop using the old
+  text within about 5 seconds, but a live household conversation that already
+  quotes it keeps its turns and summary until it expires. A session is kept for
+  one hour (`session_ttl_seconds`) and is resumed only within 30 minutes of its
+  last turn (`timeout_seconds`); persistent web threads follow
+  `session_ttl_days`. After narrowing something sensitive, end the conversations
+  that may hold it: delete a session with `DELETE /sessions/{session_id}` on the
+  orchestrator (service key required), use Start Fresh in Jarvis web, or wait
+  out the one-hour expiry.
+- **Directions.** The directions service's default origin, used when a request
+  gives none, comes from Everyone entries only. An address stored as Everyone is
+  therefore sent to the directions provider as the origin for any caller,
+  including a guest; one stored under any other audience falls back to
+  `DEFAULT_CITY`/`DEFAULT_STATE`.
+- **Admin API.** Writes validate the audience (`both`, `guest`, `household`,
+  `owner`), the category (`^[a-z][a-z0-9_]{0,49}$`) and the key
+  (`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$`) with 422 and a single-string detail;
+  values are at most 4000 characters with no control characters other than
+  newline and tab; `POST /api/base-knowledge/bulk` takes at most 500 entries. A
+  duplicate category, key and audience returns 409, and so does a re-tier that
+  would collide. `POST /api/base-knowledge/bulk-tier` moves up to 500 entries
+  to one audience, all or nothing (signed-in users with write permission; a
+  service key is refused).
 
 **SMS conversation ids** are `sms_` + 24 hex characters of an HMAC of the
 guest's number keyed on `SERVICE_API_KEY`; the number itself never appears.

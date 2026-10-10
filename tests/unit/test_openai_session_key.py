@@ -14,6 +14,8 @@ import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+from shared.knowledge_tiers import KnowledgeAudience
 from unittest import mock
 
 import pytest
@@ -451,7 +453,7 @@ def test_non_stream_branch_passes_resolved_session():
 
     captured_requests = []
 
-    async def _fake_process_query(query_request):
+    async def _fake_process_query(query_request, **_kw):
         captured_requests.append(query_request)
         return SimpleNamespace(request_id="req-fake", answer="ok")
 
@@ -594,6 +596,7 @@ def test_streaming_endpoint_persists_session_history(monkeypatch):
         mock.AsyncMock(return_value=SimpleNamespace(
             mode="owner", permissions={}, server_mode="owner", degraded=False,
             escalation_ignored=False, mode_info={"mode": "owner", "permissions": {}},
+            knowledge_audience=KnowledgeAudience(mode="owner", degraded=False, public=False, owner_caller=False, owner_proven=False),
         )),
     )
     fake_conv_config = SimpleNamespace(
@@ -678,6 +681,7 @@ def test_true_streaming_endpoint_persists_session_history(monkeypatch):
         mock.AsyncMock(return_value=SimpleNamespace(
             mode="owner", permissions={}, server_mode="owner", degraded=False,
             escalation_ignored=False, mode_info={"mode": "owner", "permissions": {}},
+            knowledge_audience=KnowledgeAudience(mode="owner", degraded=False, public=False, owner_caller=False, owner_proven=False),
         )),
     )
     monkeypatch.setattr(

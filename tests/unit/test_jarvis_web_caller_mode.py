@@ -182,7 +182,8 @@ class TestChatCallerMode:
             resp = client.post("/api/chat", json={"message": "hello"}, headers={**_bearer(), **CSRF})
         assert resp.status_code == 200
         assert captured["body"]["mode"] == "owner"  # no guest booked -> auto owner
-        assert captured["body"]["caller_trust"] == "web_authenticated"
+        # only the admin owner role counts as owner proof; an operator is just signed in
+        assert captured["body"]["caller_trust"] == ("web_owner" if role == "owner" else "web_authenticated")
 
     @pytest.mark.parametrize("role", ["viewer", "support", "unknown-role"])
     def test_scoped_role_bearer_is_unauthenticated(self, client, role):
@@ -200,7 +201,7 @@ class TestChatCallerMode:
                 headers={**_bearer(), **CSRF},
             )
         assert resp.status_code == 200
-        assert captured["body"]["caller_trust"] == "web_authenticated"
+        assert captured["body"]["caller_trust"] == "web_owner"
         assert captured["body"]["source"] == "voice"  # analytics only
 
 

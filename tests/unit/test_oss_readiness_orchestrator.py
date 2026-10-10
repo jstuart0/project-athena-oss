@@ -85,7 +85,7 @@ def test_O1_nonstream_branch_forwards_room_and_temperature():
 
     captured = []
 
-    async def _fake_process_query(query_request):
+    async def _fake_process_query(query_request, **_kw):
         captured.append(query_request)
         return SimpleNamespace(request_id="req-fake", answer="ok")
 
@@ -144,7 +144,7 @@ def test_O2_gateway_payload_builder_resolves_same_session_id_in_orchestrator():
 
     captured = []
 
-    async def _fake_process_query(query_request):
+    async def _fake_process_query(query_request, **_kw):
         captured.append(query_request)
         return SimpleNamespace(request_id="req-fake", answer="ok")
 
@@ -224,7 +224,8 @@ def test_O3_logs_continuation_decision_with_expected_fields(monkeypatch):
     assert len(events) == 1
     assert events[0]["decision"] == "declined"
     assert events[0]["reason"] == "strong_intent"
-    assert events[0]["session_prefix"] == "oai-abcdef0123456789"[:12]
+    assert events[0]["session_class"] == "other"  # the class, never a slice of the id
+    assert "session_prefix" not in events[0] and "oai-abcdef" not in repr(events[0])
 
 
 def test_O3_empty_dict_does_not_raise():

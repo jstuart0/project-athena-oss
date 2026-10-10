@@ -17,6 +17,11 @@ from shared.cache import get_cache_client
 from orchestrator.utils.constants import DEFAULT_CITY
 import structlog
 
+# Bumped when what a cached answer may contain changes. Sits right before the
+# mode_ segment so the "athena_semantic:{category}_*" invalidation prefix still
+# matches; segments appended after the location (e.g. iface_) stay last.
+CACHE_KEY_VERSION = "kv2"
+
 logger = structlog.get_logger(__name__)
 
 
@@ -579,6 +584,7 @@ def get_cache_key(
     location_override: dict = None,
     guest_id: Optional[Any] = None,
     *,
+    knowledge_digest: str,
     interface_type: str,
 ) -> str:
     """Generate cache key with optional mode/guest/location context.
@@ -610,6 +616,10 @@ def get_cache_key(
     query_hash = hashlib.md5(raw_query.lower().strip().encode()).hexdigest()[:8]
     key_parts.append(query_hash)
 
+    key_parts.append(CACHE_KEY_VERSION)
+    # Digest of exactly the base-knowledge rows this audience can see: any change
+    # to them rotates every derived key, so a narrowed row's answers can't replay.
+    key_parts.append(f"kb_{knowledge_digest}")
     key_parts.append(f"mode_{mode or 'unknown'}")
     if guest_id is not None and str(guest_id) != "":
         key_parts.append(f"guest:{guest_id}")
@@ -639,6 +649,7 @@ async def get_cached_response(
     location_override: dict = None,
     guest_id: Optional[Any] = None,
     *,
+    knowledge_digest: str,
     interface_type: str,
 ) -> Optional[Dict[str, Any]]:
     """
@@ -650,6 +661,7 @@ async def get_cached_response(
         mode: The effective mode (part of the key)
         location_override: Optional location override dict with address, latitude, longitude
         guest_id: The device-identified guest's id, if any (part of the key)
+        knowledge_digest: Digest of the base-knowledge rows the caller can see (part of the key)
         interface_type: The request's interface type (the last part of the key)
 
     Returns:
@@ -662,7 +674,10 @@ async def get_cached_response(
         logger.debug("semantic_cache_skip", category=category, reason="not_cacheable")
         return None
 
-    cache_key = get_cache_key(normalized_query, query, room, mode, location_override, guest_id, interface_type=interface_type)
+    cache_key = get_cache_key(
+        normalized_query, query, room, mode, location_override, guest_id,
+        knowledge_digest=knowledge_digest, interface_type=interface_type,
+    )
     cache = get_cache_client()
 
     try:
@@ -692,6 +707,7 @@ async def cache_response(
     location_override: dict = None,
     guest_id: Optional[Any] = None,
     *,
+    knowledge_digest: str,
     interface_type: str,
 ) -> bool:
     """
@@ -704,6 +720,7 @@ async def cache_response(
         mode: The effective mode (part of the key)
         location_override: Optional location override dict with address, latitude, longitude
         guest_id: The device-identified guest's id, if any (part of the key)
+        knowledge_digest: Digest of the base-knowledge rows the caller can see (part of the key)
         interface_type: The request's interface type (the last part of the key)
 
     Returns:
@@ -717,7 +734,10 @@ async def cache_response(
 
     # Get TTL for this category
     ttl = CACHE_TTL_CONFIG.get(category, CACHE_TTL_CONFIG["general"])
-    cache_key = get_cache_key(normalized_query, query, room, mode, location_override, guest_id, interface_type=interface_type)
+    cache_key = get_cache_key(
+        normalized_query, query, room, mode, location_override, guest_id,
+        knowledge_digest=knowledge_digest, interface_type=interface_type,
+    )
     cache = get_cache_client()
 
     try:

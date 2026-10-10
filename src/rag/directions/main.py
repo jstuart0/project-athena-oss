@@ -32,6 +32,7 @@ from shared.logging_config import configure_logging
 from shared.admin_config import get_admin_client
 from shared.metrics import setup_metrics_endpoint
 from shared.admin_url import get_admin_url
+from shared.knowledge_tiers import entry_visible
 # The function names, not the module: lifespan has a local named service_key.
 from shared.service_key import note_admin_refusal, service_key_headers
 
@@ -149,10 +150,14 @@ async def lifespan(app: FastAPI):
                 # Defense in depth alongside the ?enabled=true query param
                 # above: a row this client shouldn't act on stays excluded
                 # even if a server ever fails to honor that filter.
+                # Only Everyone rows: this map supplies the origin for any
+                # caller that omits one, a guest included, and the origin is
+                # sent to the directions provider. The orchestrator passes an
+                # audience-filtered origin on the normal path.
                 BASE_KNOWLEDGE = {
                     item["key"]: item["value"]
                     for item in entries
-                    if item.get("enabled", True)
+                    if item.get("enabled", True) and entry_visible(item, frozenset({"both"}))
                 }
                 logger.info("base_knowledge_loaded", keys=list(BASE_KNOWLEDGE.keys()))
     except Exception as e:

@@ -226,9 +226,11 @@ def test_cache_stores_raw_text_under_a_key_that_ends_with_the_interface_type(app
 
 def test_cache_key_is_the_real_one_and_ends_with_the_interface_type_whatever_precedes_it():
     voice = semantic_cache.get_cache_key("weather_current", QUERY, mode="owner", guest_id=7,
-                                         location_override={"address": "Somewhere"}, interface_type="voice")
+                                         location_override={"address": "Somewhere"}, interface_type="voice",
+                                         knowledge_digest="abc123def456")
     chat = semantic_cache.get_cache_key("weather_current", QUERY, mode="owner", guest_id=7,
-                                        location_override={"address": "Somewhere"}, interface_type="chat")
+                                        location_override={"address": "Somewhere"}, interface_type="chat",
+                                        knowledge_digest="abc123def456")
     assert voice.endswith(":iface_voice") and chat.endswith(":iface_chat")
     assert voice.rsplit(":", 1)[0] == chat.rsplit(":", 1)[0]
     assert ":mode_owner" in voice and ":guest:7" in voice and ":loc_" in voice

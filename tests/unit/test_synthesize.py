@@ -48,6 +48,7 @@ sys.path.insert(0, "src")
 from orchestrator.nodes import synthesize_node
 from orchestrator.nodes import _runtime
 from orchestrator.state import OrchestratorState, IntentCategory
+from shared.knowledge_tiers import KnowledgeAudience
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +72,12 @@ def _make_state(
     interruption_context: dict | None = None,
     interface_type: str = "voice",
     timing_tracker=None,
+    proven_owner: bool = False,
 ) -> OrchestratorState:
     state = OrchestratorState(query=query)
+    state.knowledge_audience = KnowledgeAudience(
+        mode=mode, degraded=False, public=False, owner_caller=proven_owner, owner_proven=proven_owner,
+    )
     state.intent = intent
     state.retrieved_data = retrieved_data or {}
     state.session_id = session_id
@@ -338,17 +343,16 @@ def test_no_rag_no_history_uses_no_access_prompt():
 # Test 8: Owner mode → base knowledge lookup
 # ---------------------------------------------------------------------------
 
-def test_owner_mode_calls_get_base_knowledge():
-    """In owner mode, get_base_knowledge is called to resolve owner_name."""
+def _synthesize_owner_turn(*, proven_owner):
     router = _make_llm_router()
     _runtime.set_llm_router(router)
 
     admin_client = MagicMock()
     admin_client.get_base_knowledge = AsyncMock(return_value=[
-        {"category": "owner", "key": "owner_name", "value": "Alice"}
+        {"category": "owner", "key": "owner_name", "value": "Alice", "applies_to": "owner"}
     ])
 
-    state = _make_state(mode="owner", retrieved_data={})
+    state = _make_state(mode="owner", retrieved_data={}, proven_owner=proven_owner)
     with (
         _patch_direct_response(None),
         _patch_component_config(),
@@ -359,8 +363,19 @@ def test_owner_mode_calls_get_base_knowledge():
         _patch_sms_detection(),
     ):
         asyncio.run(synthesize_node(state))
+    return admin_client
 
+
+def test_proven_owner_calls_get_base_knowledge_with_owner_tier():
+    """Only a proven owner is addressed by name, so only then is owner_name looked up."""
+    admin_client = _synthesize_owner_turn(proven_owner=True)
     admin_client.get_base_knowledge.assert_awaited_once()
+    assert "owner" in admin_client.get_base_knowledge.await_args.kwargs["tiers"]
+
+
+def test_unproven_owner_mode_does_not_look_up_the_owner_name():
+    admin_client = _synthesize_owner_turn(proven_owner=False)
+    admin_client.get_base_knowledge.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

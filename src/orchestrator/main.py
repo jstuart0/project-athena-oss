@@ -44,7 +44,7 @@ from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
 from shared.admin_config import get_admin_client
 from shared.assistant_profile import build_core_assistant_prompt
-from shared.base_knowledge_utils import get_knowledge_context_for_user, get_home_address_for_user
+from shared.base_knowledge_utils import build_knowledge_context, extract_home_address, get_knowledge_context_for_user, knowledge_cache_digest, load_visible_knowledge
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import register_exception_handlers, RateLimitError, ServiceUnavailableError
 from shared.config import get_config
@@ -58,12 +58,15 @@ from orchestrator.search_providers.result_fusion import ResultFusion
 
 # Session manager imports
 from orchestrator.session_manager import (
+    CALLER_CLASS_GUEST,
     CALLER_CLASS_OTHER,
+    CALLER_CLASS_OWNER,
     CALLER_CLASS_PUBLIC,
     get_session_manager,
     get_session_summary, update_session_summary
 )
 from orchestrator.config_loader import get_config
+from shared.knowledge_tiers import KnowledgeAudience
 from orchestrator.timing import TimingTracker
 from shared.output_channel import OutputChannel, channel_for_interface_type, render_answer, renders_spoken_answer
 
@@ -93,7 +96,7 @@ from orchestrator.follow_me_audio import (
 # Resilience pattern imports
 from orchestrator.rag_client import get_rag_client, initialize_rag_client
 from orchestrator.circuit_breaker import get_circuit_breaker_registry
-from orchestrator.ingress_auth import require_service_caller
+from orchestrator.ingress_auth import require_service_caller, service_authenticated
 from orchestrator.rate_limiter import get_rate_limiter_registry
 
 # Semantic query caching for latency optimization
@@ -511,6 +514,7 @@ tool_config_cache: Dict[str, List[Dict[str, Any]]] = {}
 # Forward import — main consolidated import is at line 609 but
 # get_conversation_context's type annotation at line 493 needs it earlier.
 from orchestrator.state import ConversationContext  # noqa: E402
+from orchestrator.session_keys import class_qualified_id, context_storage_key, id_class  # noqa: E402
 
 # ConversationContext now imported from orchestrator.state (via IntentCategory/ModelTier import block above)
 # Note: CONTEXT_REF_PATTERNS, ROOM_INDICATORS, and detect_context_reference
@@ -541,7 +545,7 @@ async def get_conversation_context(session_id: str) -> Optional[ConversationCont
     cache = _runtime.get_cache_client()
     if cache and cache.client:
         try:
-            context_key = f"athena:context:{session_id}"
+            context_key = context_storage_key(session_id)
             # Use asyncio.wait_for to prevent hanging on dead Redis connections
             context_json = await asyncio.wait_for(
                 cache.client.get(context_key),
@@ -4806,8 +4810,10 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             if not is_public_audience(state.permissions):
                 admin_client = get_admin_client()
                 user_mode = _tool_user_mode
-                knowledge_context = await get_knowledge_context_for_user(
-                    admin_client, user_mode, degraded=state.mode_degraded,
+                visible_knowledge = await load_visible_knowledge(admin_client, audience=state.knowledge_audience)
+                knowledge_context = (
+                    build_knowledge_context(visible_knowledge, audience=state.knowledge_audience)
+                    if visible_knowledge else ""
                 )
                 if knowledge_context:
                     system_content += f"\n{knowledge_context}"
@@ -4815,7 +4821,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                     logger.info(f"Base knowledge context injected for mode={user_mode} in tool_call")
 
                 # Get permanent home address (for "directions from home" type queries)
-                home_address = await get_home_address_for_user(admin_client, user_mode)
+                home_address = extract_home_address(visible_knowledge)
                 search_location = home_address  # Default search location to home
                 logger.info("home_address_resolved", address_set=bool(home_address))
 
@@ -6255,7 +6261,7 @@ class QueryRequest(BaseModel):
             "never claim owner."
         ),
     )
-    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_local", "web_guest_net", "web_public"]] = Field(
+    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_owner", "web_local", "web_guest_net", "web_public"]] = Field(
         None,
         description=(
             "Set by the calling service in server code, never by an end "
@@ -6264,7 +6270,10 @@ class QueryRequest(BaseModel):
             "'web_guest_net' and 'web_public' are refused before any "
             "throttle or mode-service call). 'web_guest_net' is jarvis-web's "
             "guest network, the only browser caller addressed by the staying "
-            "guest's name. 'web_public' also selects the public audience: a "
+            "guest's name. 'web_owner' is jarvis-web's Bearer-authenticated "
+            "admin owner; it counts as owner proof only on a request that "
+            "also carries a valid X-Service-Key, and only while the house is "
+            "in owner mode with a healthy mode service. 'web_public' also selects the public audience: a "
             "hard-coded narrow allowlist, no guest identity, no base "
             "knowledge, memories, cache or web search."
         ),
@@ -6302,8 +6311,47 @@ class QueryRequest(BaseModel):
     )
 
 
-def _session_caller_class(request: "QueryRequest") -> str:
-    return CALLER_CLASS_PUBLIC if is_public_caller(request.caller_trust) else CALLER_CLASS_OTHER
+def _audience_session_class(audience: KnowledgeAudience) -> str:
+    """The session class a server-built audience belongs to: owner only for a
+    server-proven owner, guest only for the server's own guest mode or a
+    device-matched stay (never a client's mode=guest hint), the public
+    audience, else the household. A conversation is never resumed across
+    classes, so a stay starting never hands a guest the household's turns."""
+    if audience.public:
+        return CALLER_CLASS_PUBLIC
+    if audience.owner_proven:
+        return CALLER_CLASS_OWNER
+    if audience.mode == "guest" and audience.guest_verified:
+        return CALLER_CLASS_GUEST
+    return CALLER_CLASS_OTHER
+
+
+def _session_caller_class(request: "QueryRequest", audience: KnowledgeAudience) -> str:
+    if is_public_caller(request.caller_trust):
+        return CALLER_CLASS_PUBLIC
+    return _audience_session_class(audience)
+
+
+def _drop_unproven_owner_history(request: "QueryRequest", audience: KnowledgeAudience) -> bool:
+    """True when request.chat_history must be ignored.
+
+    The client (jarvis-web) builds chat_history from a persistent thread it
+    chose using its own view of the house. It is accepted only when the class
+    of the session id it presents (own-/gst-/plain) is the class this server
+    just derived from the KnowledgeAudience; any disagreement (a stay starting
+    or ending between the two views, an owner who is not proven this turn)
+    drops it, so the race fails closed. Counts only are logged.
+    """
+    if not request.chat_history:
+        return False
+    if id_class(request.session_id) == _audience_session_class(audience):
+        return False
+    logger.info(
+        "chat_history_dropped",
+        reason="owner_unproven" if audience.owner_caller and not audience.owner_proven else "session_class_mismatch",
+        turns=len(request.chat_history),
+    )
+    return True
 
 
 def _cache_guest_id(guest_info: Optional[Dict[str, Any]]) -> Optional[Any]:
@@ -6338,7 +6386,10 @@ class QueryResponse(BaseModel):
 
 @app.post("/query", response_model=QueryResponse, dependencies=[Depends(require_service_caller)])
 @renders_spoken_answer
-async def process_query(request: QueryRequest) -> QueryResponse:
+async def process_query(
+    request: QueryRequest,
+    service_authenticated: bool = Depends(service_authenticated),
+) -> QueryResponse:
     """
     Process a user query through the orchestrator state machine.
     """
@@ -6355,6 +6406,10 @@ async def process_query(request: QueryRequest) -> QueryResponse:
 
     # Initialize timing tracker for granular execution time tracking
     timing_tracker = TimingTracker()
+    # Digest of the base-knowledge rows this request's audience can see; part of
+    # every semantic-cache key. None means "not computed or could not load":
+    # the cache is neither read nor written.
+    cache_knowledge_digest: Optional[str] = None
 
     try:
         # Multi-guest identification: Look up user by device fingerprint
@@ -6378,30 +6433,15 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                         device_id=request.device_id[:16] + "..." if len(request.device_id) > 16 else request.device_id
                     )
 
-        # Session management: get or create session
-        with timing_tracker.track("pre_graph", "session_management"):
-            logger.info(
-                "session_request_received",
-                request_session_id=request.session_id,
-                user_id=user_id,
-                zone=request.room
-            )
-            session = await sm.get_or_create_session(
-                session_id=request.session_id,
-                user_id=user_id,
-                zone=request.room,
-                caller_class=_session_caller_class(request),
-            )
-
-        logger.info(f"Processing query in session {session.session_id}")
-
-        # Phase 2 (ATHENA-69 D6/D7): server-derived mode and permissions --
+        # Phase 2 (ATHENA-69 D6/D7): server-derived mode and permissions, resolved
+        # BEFORE the session so the session class can depend on owner proof --
         # the single resolution path for every entry point. request.mode is
         # a narrowing hint only; it can never escalate above the server's
         # own mode.
         with timing_tracker.track("pre_graph", "mode_determination"):
             authz = await resolve_request_authorization(
                 request.mode, guest_info, caller_trust=request.caller_trust,
+                service_authenticated=service_authenticated is True,
                 sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
@@ -6415,6 +6455,23 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 degraded=authz.degraded,
                 escalation_ignored=authz.escalation_ignored,
             )
+
+        # Session management: get or create session
+        with timing_tracker.track("pre_graph", "session_management"):
+            logger.info(
+                "session_request_received",
+                request_session_id=request.session_id,
+                user_id=user_id,
+                zone=request.room
+            )
+            session = await sm.get_or_create_session(
+                session_id=request.session_id,
+                user_id=user_id,
+                zone=request.room,
+                caller_class=_session_caller_class(request, authz.knowledge_audience),
+            )
+
+        logger.info(f"Processing query in session {session.session_id}")
 
         # Phase 4 (ATHENA-69 D16/D24): the owner-PIN voice/utterance path.
         # caller_trust is set by the calling SERVICE, in server code, never
@@ -6509,7 +6566,9 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     logger.info(f"History mode: full - loaded {len(conversation_history)} previous messages")
 
         # Inject persistent chat history when no live session was found
-        if request.chat_history and not conversation_history:
+        if _drop_unproven_owner_history(request, authz.knowledge_audience):
+            pass
+        elif request.chat_history and not conversation_history:
             conversation_history = [
                 {"role": m["role"], "content": m["content"]}
                 for m in request.chat_history
@@ -6578,6 +6637,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             history_summary=history_summary,  # Summarized context for summarized mode
             permissions=permissions,  # Phase 2: Include permissions for entity checks
             mode_degraded=authz.degraded,
+            knowledge_audience=authz.knowledge_audience,
             interface_type=request.interface_type,  # SMS Integration: Pass interface type for response formatting
             context=query_context,  # SMS Integration + Multi-guest: Pass context (phone_number, calendar_event_id, guest_name, etc.)
             memory_context=memory_context,  # Memory augmentation: Relevant memories for LLM context
@@ -6619,8 +6679,25 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             # signed-in member) are never read from or written to the cache.
             # A degraded mode service resolves to owner, whose answers can
             # carry owner facts: never cached either.
-            named_addressee = addressee_kind(query_context, current_mode, authz.degraded) in NAMED_ADDRESSEE_KINDS
-            if request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee or authz.degraded:
+            named_addressee = addressee_kind(query_context, audience=authz.knowledge_audience) in NAMED_ADDRESSEE_KINDS
+            # An owner caller's turn (proven or not) never touches the cache:
+            # an unproven one is the caller most likely to repeat owner
+            # content, and its answer would be stored under mode_guest.
+            owner_caller = authz.knowledge_audience.owner_caller
+            # A mode=guest hint in an owner-mode house is mode_guest by key but
+            # not a real guest: it must not read what a real stay wrote.
+            unverified_guest = authz.knowledge_audience.mode == "guest" and not authz.knowledge_audience.guest_verified
+            cache_blocked = (
+                request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee
+                or authz.degraded or owner_caller or unverified_guest
+            )
+            if not cache_blocked:
+                # Same filtered rows the prompt uses; a failed load disables the
+                # cache for this request (read and write) instead of keying on "no rows".
+                cache_knowledge_digest = await knowledge_cache_digest(
+                    get_admin_client(), audience=authz.knowledge_audience
+                )
+            if cache_blocked or cache_knowledge_digest is None:
                 cached_response = None
             else:
                 cached_response = await get_cached_response(
@@ -6629,6 +6706,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     mode=current_mode,
                     location_override=location_override,
                     guest_id=_cache_guest_id(guest_info),
+                    knowledge_digest=cache_knowledge_digest,
                     interface_type=request.interface_type,
                 )
 
@@ -6804,10 +6882,14 @@ async def process_query(request: QueryRequest) -> QueryResponse:
 
         # Check for memory forget intent BEFORE running the state machine.
         # Forgetting writes to the admin DB: never for the public audience or
-        # an SMS from outside the stay (answer-only).
+        # an SMS from outside the stay (answer-only), an owner caller that
+        # isn't proven this turn, or an unverified mode=guest hint.
+        audience = authz.knowledge_audience
         try:
             memory_manager = (
                 None if is_public_audience(permissions) or is_stay_read_only(permissions)
+                or (audience.owner_caller and not audience.owner_proven)
+                or (audience.mode == "guest" and not audience.guest_verified)
                 else await get_memory_manager()
             )
             if memory_manager is not None and memory_manager.should_forget_memory(request.query):
@@ -7001,8 +7083,11 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # outside the stay).
         memory_creation_start = time.time()
         try:
+            if authz.knowledge_audience.owner_caller:
+                logger.info("memory_creation_skipped", reason="owner_caller")
             memory_manager = (
                 None if is_public_audience(permissions) or is_stay_read_only(permissions)
+                or authz.knowledge_audience.owner_caller
                 else await get_memory_manager()
             )
             if memory_manager is not None and memory_manager.should_create_memory(request.query, answer, intent_str):
@@ -7121,7 +7206,10 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         should_cache = (
             not request.skip_semantic_cache
             and not is_public_caller(request.caller_trust)
-            and addressee_kind(query_context, current_mode, authz.degraded) not in NAMED_ADDRESSEE_KINDS
+            and addressee_kind(query_context, audience=authz.knowledge_audience) not in NAMED_ADDRESSEE_KINDS
+            and cache_knowledge_digest is not None
+            and not authz.knowledge_audience.owner_caller
+            and not (authz.knowledge_audience.mode == "guest" and not authz.knowledge_audience.guest_verified)
             and not authz.degraded
             and response.answer
             and not final_state.get("is_fallback", False)
@@ -7142,6 +7230,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                         mode=current_mode,
                         location_override=cache_location_override,
                         guest_id=_cache_guest_id(guest_info),
+                        knowledge_digest=cache_knowledge_digest,
                         interface_type=request.interface_type,
                     )
                 )
@@ -7208,7 +7297,10 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         )
 
 @app.post("/query/stream", dependencies=[Depends(require_service_caller)])
-async def process_query_stream(request: QueryRequest):
+async def process_query_stream(
+    request: QueryRequest,
+    service_authenticated: bool = Depends(service_authenticated),
+):
     """
     Process a user query with TRUE streaming response (Server-Sent Events).
 
@@ -7251,21 +7343,23 @@ async def process_query_stream(request: QueryRequest):
                         has_guest_name=bool(guest_info.get("guest_name"))
                     )
 
+            # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
+            # via the single resolution path every entry point shares. Done
+            # before the session: the session class depends on owner proof.
+            authz = await resolve_request_authorization(
+                request.mode, guest_info, caller_trust=request.caller_trust,
+                service_authenticated=service_authenticated is True,
+                sms_stay_phase=(request.context or {}).get("stay_phase"),
+            )
+            current_mode = authz.mode
+
             # Session management
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room,
-                caller_class=_session_caller_class(request),
+                caller_class=_session_caller_class(request, authz.knowledge_audience),
             )
-
-            # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
-            # via the single resolution path every entry point shares.
-            authz = await resolve_request_authorization(
-                request.mode, guest_info, caller_trust=request.caller_trust,
-                sms_stay_phase=(request.context or {}).get("stay_phase"),
-            )
-            current_mode = authz.mode
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
             # utterance path -- every entry point runs this, not just
@@ -7330,7 +7424,9 @@ async def process_query_stream(request: QueryRequest):
                     logger.info(f"History mode: full - loaded {len(conversation_history)} previous messages")
 
             # Inject persistent chat history when no live session was found
-            if request.chat_history and not conversation_history:
+            if _drop_unproven_owner_history(request, authz.knowledge_audience):
+                pass
+            elif request.chat_history and not conversation_history:
                 conversation_history = [
                     {"role": m["role"], "content": m["content"]}
                     for m in request.chat_history
@@ -7351,6 +7447,7 @@ async def process_query_stream(request: QueryRequest):
                 room=request.room,
                 permissions=authz.permissions,
                 mode_degraded=authz.degraded,
+                knowledge_audience=authz.knowledge_audience,
                 conversation_history=conversation_history,
                 history_summary=history_summary,
                 session_id=session.session_id,
@@ -7525,7 +7622,10 @@ async def process_query_stream(request: QueryRequest):
 
 
 @app.post("/query/stream/v2", dependencies=[Depends(require_service_caller)])
-async def process_query_stream_v2(request: QueryRequest):
+async def process_query_stream_v2(
+    request: QueryRequest,
+    service_authenticated: bool = Depends(service_authenticated),
+):
     """
     Process a user query with true LLM streaming and sentence buffering.
 
@@ -7575,21 +7675,23 @@ async def process_query_stream_v2(request: QueryRequest):
                         has_guest_name=bool(guest_info.get("guest_name"))
                     )
 
+            # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
+            # via the single resolution path every entry point shares. Done
+            # before the session: the session class depends on owner proof.
+            authz = await resolve_request_authorization(
+                request.mode, guest_info, caller_trust=request.caller_trust,
+                service_authenticated=service_authenticated is True,
+                sms_stay_phase=(request.context or {}).get("stay_phase"),
+            )
+            current_mode = authz.mode
+
             # Session management
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room,
-                caller_class=_session_caller_class(request),
+                caller_class=_session_caller_class(request, authz.knowledge_audience),
             )
-
-            # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
-            # via the single resolution path every entry point shares.
-            authz = await resolve_request_authorization(
-                request.mode, guest_info, caller_trust=request.caller_trust,
-                sms_stay_phase=(request.context or {}).get("stay_phase"),
-            )
-            current_mode = authz.mode
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
             # utterance path -- every entry point runs this, not just
@@ -7617,6 +7719,7 @@ async def process_query_stream_v2(request: QueryRequest):
                 history_summary="",
                 permissions=authz.permissions,
                 mode_degraded=authz.degraded,
+                knowledge_audience=authz.knowledge_audience,
                 interface_type=request.interface_type,
                 context=build_query_context(
                     request, guest_info, server_mode=authz.server_mode, degraded=authz.degraded,
@@ -8105,9 +8208,8 @@ Response:"""
     try:
         if not is_public_audience(state.permissions):
             admin_client = get_admin_client()
-            user_mode = state.mode if state.mode else "guest"
             knowledge_context = await get_knowledge_context_for_user(
-                admin_client, user_mode, degraded=state.mode_degraded,
+                admin_client, audience=state.knowledge_audience,
             )
             if knowledge_context:
                 system_context += knowledge_context
@@ -8267,6 +8369,14 @@ async def chat_completions(request: OpenAIChatRequest):
             secret=session_hmac_secret(_shared_config.get_config()),
         )
         sm = _runtime.get_session_manager()
+        # The audience (and so the session class) comes first: the first-turn
+        # reset, the OpenAI index/cap and the session itself must all use the
+        # one class-qualified id (a guest-mode conversation is stored as gst-<id>).
+        authz = await resolve_request_authorization(None, None, service_authenticated=False)
+        session_class = _audience_session_class(authz.knowledge_audience)
+        resolved_session = resolved_session._replace(
+            session_id=class_qualified_id(resolved_session.session_id, session_class)
+        )
         await prepare_openai_session(
             resolved_session,
             sm,
@@ -8278,7 +8388,7 @@ async def chat_completions(request: OpenAIChatRequest):
             "openai_session_resolved",
             source=resolved_session.source,
             first_turn=resolved_session.is_first_turn,
-            session_prefix=resolved_session.session_id[:12],
+            session_class=id_class(resolved_session.session_id),
             identity_kind=resolved_session.identity_kind,
         )
 
@@ -8298,16 +8408,15 @@ async def chat_completions(request: OpenAIChatRequest):
                 if orchestrator_graph is None:
                     orchestrator_graph = create_orchestrator_graph()
 
+                # authz (resolved above, before the session id was prepared):
+                # OpenAIChatRequest has no mode/device_id fields at all and no
+                # caller_trust, so it is never an owner caller.
                 session = await sm.get_or_create_session(
                     session_id=resolved_session.session_id,
                     user_id="openwebui",
-                    zone="web"
+                    zone="web",
+                    caller_class=session_class,
                 )
-
-                # ATHENA-69 D6/D7: server-derived mode via the single
-                # resolution path every entry point shares. OpenAIChatRequest
-                # has no mode/device_id fields at all, so both args are None.
-                authz = await resolve_request_authorization(None, None)
 
                 # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
                 # utterance path -- every entry point runs this. This
@@ -8383,6 +8492,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     room=room,
                     permissions=authz.permissions,
                     mode_degraded=authz.degraded,
+                    knowledge_audience=authz.knowledge_audience,
                     conversation_history=conversation_history,
                     history_summary=history_summary,
                     session_id=session.session_id,
@@ -8592,7 +8702,7 @@ async def chat_completions(request: OpenAIChatRequest):
             interface_type=interface_type,
         )
 
-        result = await process_query(query_request)
+        result = await process_query(query_request, service_authenticated=False)
 
         # Convert to OpenAI format
         response = OpenAIChatResponse(

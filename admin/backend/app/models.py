@@ -2217,7 +2217,7 @@ class BaseKnowledge(Base):
     category = Column(String(50), nullable=False, index=True)  # 'property', 'location', 'user', 'temporal', 'general'
     key = Column(String(100), nullable=False)
     value = Column(Text, nullable=False)
-    applies_to = Column(String(20), nullable=False, server_default='both', index=True)  # 'guest', 'owner', 'both'
+    applies_to = Column(String(20), nullable=False, server_default='both', index=True)  # both|guest|household|owner; 'owner' = owner only, 'household' = anyone at home with no stay (shared.knowledge_tiers)
     priority = Column(Integer, nullable=False, server_default='0')  # Higher = injected first
     extra_metadata = Column(JSONB, nullable=True)
     enabled = Column(Boolean, nullable=False, server_default='true', index=True)

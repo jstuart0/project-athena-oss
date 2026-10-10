@@ -61,6 +61,14 @@ _VALID_MODES = frozenset({"enforce", "warn"})
 _invalid_mode_warned = False
 
 
+def _keys_equal(presented: str, configured: str) -> bool:
+    """Constant-time comparison on bytes. hmac.compare_digest raises TypeError
+    on a non-ASCII str, which would turn a hostile header into a 500."""
+    return hmac.compare_digest(
+        presented.encode("utf-8", "surrogatepass"), configured.encode("utf-8", "surrogatepass")
+    )
+
+
 async def require_service_caller(request: Request) -> None:
     """FastAPI dependency: gate a route behind X-Service-Key (D10)."""
     global _invalid_mode_warned
@@ -76,7 +84,7 @@ async def require_service_caller(request: Request) -> None:
         mode = "enforce"
 
     # Step 1: a present, non-empty, WRONG key is never tolerated, in any mode.
-    if header_value and configured_key and not hmac.compare_digest(header_value, configured_key):
+    if header_value and configured_key and not _keys_equal(header_value, configured_key):
         logger.warning(
             "orchestrator_bad_service_key",
             path=request.url.path,
@@ -85,7 +93,7 @@ async def require_service_caller(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Invalid service key")
 
     # Step 2: a header that matches a non-empty configured key.
-    if header_value and configured_key and hmac.compare_digest(header_value, configured_key):
+    if header_value and configured_key and _keys_equal(header_value, configured_key):
         return
 
     # Step 3: DEV_MODE bypass (no header, or a header that matched above).
@@ -108,3 +116,27 @@ async def require_service_caller(request: Request) -> None:
 
     # Step 6: enforce (or an invalid mode, already normalized to enforce).
     raise HTTPException(status_code=401, detail="Not authenticated")
+
+
+def service_key_matches(request: Request) -> bool:
+    """True only when the request carries an X-Service-Key equal to a
+    non-empty configured SERVICE_API_KEY (same comparison as step 2 above).
+
+    This is the proof that a request crossed an authenticated service hop.
+    It is False for DEV_MODE and warn-mode passthrough (no header), and for an
+    empty configured key, so a caller-supplied body field alone can never be
+    taken as coming from trusted server code.
+    """
+    configured_key = get_config().service_api_key
+    header_value = request.headers.get("X-Service-Key")
+    return bool(header_value and configured_key and _keys_equal(header_value, configured_key))
+
+
+async def service_authenticated(request: Request) -> bool:
+    """FastAPI dependency: ``service_key_matches`` for the handler to consume.
+
+    Independent of ``require_service_caller`` and of dependency ordering.
+    Handlers must test the result with ``is True``, so a direct call that
+    passes nothing (leaving the ``Depends`` default object) fails closed.
+    """
+    return service_key_matches(request)

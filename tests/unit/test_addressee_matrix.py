@@ -1,5 +1,8 @@
 """The addressee matrix: who the model is told it's speaking with.
 
+No row is a proven owner (owner proof arrives with the web_owner trust value),
+so no row is addressed as the owner.
+
 Each row builds the real context (build_query_context) from the real
 authorization (resolve_request_authorization against a fake mode service),
 resolves the addressee, and captures the real prompt text from each of the
@@ -12,7 +15,7 @@ guest_name row ("Zed Former") plus the owner's name ("Olive Owner").
 Sentinels: the live guest's name ("Gina Guest", or "Sam Texter" over SMS)
 appears only in rows addressed to the guest; the stale row and the device
 guest ("Bob Device") never appear; "Olive Owner" appears only where the
-effective mode is owner, and is the addressee only for an owner row.
+effective mode is owner, and is never the addressee here.
 """
 from __future__ import annotations
 
@@ -62,17 +65,17 @@ def _sam(**extra):
 
 
 ROWS = [
-    Row(1, "household", "owner", kind="owner", name=OWNER),
+    Row(1, "household", "owner"),
     Row(2, "household", "guest"),
     Row(3, "household", "owner", device=DEVICE),
     Row(4, "household", "guest", device=DEVICE),
-    Row(5, "web_local", "owner", _gina(), request_mode="owner", kind="owner", name=OWNER),
+    Row(5, "web_local", "owner", _gina(), request_mode="owner"),
     Row(6, "web_local", "guest", _gina(), request_mode="guest"),
     Row(7, "web_guest_net", "owner", _gina(), request_mode="guest"),
     Row(8, "web_guest_net", "guest", _gina(), request_mode="guest", kind="guest", name=GINA),
-    Row(9, "web_authenticated", "owner", {"speaker_first_name": "Pat Example"}, request_mode="owner", kind="owner", name=OWNER),
+    Row(9, "web_authenticated", "owner", {"speaker_first_name": "Pat Example"}, request_mode="owner"),
     Row(10, "web_authenticated", "guest", {"speaker_first_name": "Pat Example"}, request_mode="guest", kind="household", name=PAT),
-    Row(11, "web_authenticated", "owner", request_mode="owner", kind="owner", name=OWNER),
+    Row(11, "web_authenticated", "owner", request_mode="owner"),
     Row(12, "web_authenticated", "guest", request_mode="guest"),
     Row(13, "web_authenticated", "guest", _gina(speaker_first_name="Pat"), device=DEVICE, request_mode="guest",
         kind="household", name=PAT),
@@ -119,6 +122,8 @@ def rig(monkeypatch, admin):
     for module in (h.main, h.synthesize_module):
         monkeypatch.setattr(module, "build_core_assistant_prompt", real_core)
         monkeypatch.setattr(module, "get_knowledge_context_for_user", real_knowledge)
+    for name in ("load_visible_knowledge", "build_knowledge_context", "extract_home_address"):
+        monkeypatch.setattr(h.main, name, getattr(base_knowledge_utils, name))
     monkeypatch.setattr(assistant_profile, "get_assistant_profile",
                         mock.AsyncMock(return_value=dict(assistant_profile.DEFAULT_ASSISTANT_PROFILE)))
     monkeypatch.setattr(assistant_profile, "get_guardrails",
@@ -137,7 +142,7 @@ def _state(row: Row, query: str = "tell me about the area"):
     else:
         h.install_mode_client(server_mode=row.server)
     authz = asyncio.run(h.mode_permission.resolve_request_authorization(
-        row.request_mode, row.device, caller_trust=row.trust,
+        row.request_mode, row.device, caller_trust=row.trust, service_authenticated=False,
     ))
     assert authz.degraded == (row.server == "degraded")
     if row.stub:
@@ -155,6 +160,7 @@ def _state(row: Row, query: str = "tell me about the area"):
         context=context,
         session_id=None,
         mode_degraded=authz.degraded,
+        knowledge_audience=authz.knowledge_audience,
     )
     return state, authz
 

@@ -545,7 +545,7 @@ class TestResolveRequestAuthorization:
         fetch_guest = AsyncMock(return_value=fetched_guest_perms)
         monkeypatch.setattr(mode_permission, "get_guest_permissions", fetch_guest)
 
-        authz = _run(mode_permission.resolve_request_authorization(request_mode, guest_info))
+        authz = _run(mode_permission.resolve_request_authorization(request_mode, guest_info, service_authenticated=False))
 
         expected_mode = "guest" if (guest_info or request_mode == "guest" or server == "guest") else server_info["mode"]
         assert authz.mode == expected_mode
@@ -571,7 +571,7 @@ class TestResolveRequestAuthorization:
         permissions["mode"] == "guest", escalation_ignored is True."""
         server_info = _server_mode_info("guest")
         monkeypatch.setattr(mode_permission, "get_current_mode", AsyncMock(return_value=server_info))
-        authz = _run(mode_permission.resolve_request_authorization("owner", None))
+        authz = _run(mode_permission.resolve_request_authorization("owner", None, service_authenticated=False))
         assert authz.mode == "guest"
         assert authz.permissions["mode"] == "guest"
         assert authz.escalation_ignored is True
@@ -607,7 +607,7 @@ class TestDegradedPathMakesNoGuestFetch:
         fetch_guest = AsyncMock(side_effect=AssertionError("get_guest_permissions must not be called when degraded"))
         monkeypatch.setattr(mode_permission, "get_guest_permissions", fetch_guest)
 
-        authz = _run(mode_permission.resolve_request_authorization("guest", None))
+        authz = _run(mode_permission.resolve_request_authorization("guest", None, service_authenticated=False))
 
         fetch_guest.assert_not_awaited()
         assert authz.mode == "guest"

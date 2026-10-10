@@ -46,8 +46,9 @@ from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 from shared.logging_config import configure_logging
 
 from orchestrator.context.storage import clear_conversation_context
-from orchestrator.mode_permission import is_public_audience, is_public_caller
+from orchestrator.mode_permission import SIGNED_IN_TRUST, is_public_audience, is_public_caller
 from orchestrator.nodes import _runtime
+from orchestrator.session_keys import context_storage_key, id_class
 from orchestrator.state import ConversationContext
 from orchestrator.urls import (
     AIRPORTS_SERVICE_URL,
@@ -65,6 +66,8 @@ from orchestrator.urls import (
     WEBSEARCH_SERVICE_URL,
 )
 from shared.admin_config import get_admin_client
+from shared.base_knowledge_utils import extract_owner_name, load_visible_knowledge
+from shared.knowledge_tiers import KnowledgeAudience
 from shared.local_time import local_now, local_today
 from shared.assistant_profile import clean_guest_name, get_assistant_profile
 from shared.service_registry import get_service_url as registry_get_service_url
@@ -284,7 +287,7 @@ def log_continuation_decision(state: Any, session_id: str) -> None:
             "continuation_decision",
             decision=decision_dict.get("decision"),
             reason=decision_dict.get("reason"),
-            session_prefix=session_id[:12] if session_id else "",
+            session_class=id_class(session_id),
         )
     except Exception:
         logger.warning("continuation_decision_log_failed", exc_info=True)
@@ -398,7 +401,7 @@ async def prepare_openai_session(
         if within_grace:
             logger.info(
                 "openai_session_reset_skipped_grace_window",
-                session_id=resolved.session_id,
+                session_class=id_class(resolved.session_id),
                 age_seconds=age_seconds,
             )
         else:
@@ -727,8 +730,9 @@ PUBLIC_CONTEXT_KEYS = frozenset({"location_override"})
 # tests/unit/test_trust_classification.py.
 REQUEST_GUEST_NAME_TRUST = frozenset({"web_guest_net", "sms"})
 DEVICE_GUEST_NAME_TRUST: frozenset = frozenset()  # voice/device naming: a follow-up
-SPEAKER_NAME_TRUST = "web_authenticated"
-NAMED_ADDRESSEE_KINDS = frozenset({"guest", "household"})
+# A web_owner (Bearer) caller is signed in too, but jarvis-web never gives a
+# Bearer caller a display name, so speaker_first_name stays absent for it.
+NAMED_ADDRESSEE_KINDS = frozenset({"guest", "household", "owner"})
 _SPEAKER_NAME_MAX_LENGTH = 32
 _SPEAKER_NAME_PUNCTUATION = frozenset(".-'")
 
@@ -808,7 +812,7 @@ def build_query_context(
         if device_guest_id is not None:
             context["guest_id"] = device_guest_id
 
-    if caller_trust == SPEAKER_NAME_TRUST and not degraded:
+    if caller_trust in SIGNED_IN_TRUST and not degraded:
         first_name = clean_speaker_first_name(request_first_name)
         if first_name:
             context["speaker_first_name"] = first_name
@@ -819,18 +823,20 @@ def build_query_context(
     return context
 
 
-def addressee_kind(context: Optional[Dict[str, Any]], mode: Optional[str], degraded: bool) -> Optional[str]:
+def addressee_kind(context: Optional[Dict[str, Any]], *, audience: KnowledgeAudience) -> Optional[str]:
     """Who the prompt addresses: "owner", "guest", "household" or None.
 
-    Pure. None whenever the mode service is degraded (never "owner"). The
-    semantic cache and resolve_addressee both ask this, so they can't
-    disagree about which answers carry a caller's name.
+    Pure. None for the public audience and whenever the mode service is
+    degraded. "owner" only for a server-proven owner; any other owner-mode
+    caller is addressed by nobody. The semantic cache and resolve_addressee
+    both ask this, so they can't disagree about which answers carry a
+    caller's name.
     """
-    if degraded:
+    if audience.public or audience.degraded:
         return None
-    if mode == "owner":
-        return "owner"
-    if mode != "guest":
+    if audience.mode == "owner":
+        return "owner" if audience.owner_proven else None
+    if audience.mode != "guest":
         return None
     context = context or {}
     if context.get("speaker_first_name"):
@@ -856,12 +862,9 @@ class Addressee(NamedTuple):
 NO_ADDRESSEE = Addressee(None, None)
 
 
-async def _owner_name(admin_client: Any) -> Optional[str]:
+async def _owner_name(admin_client: Any, *, audience: KnowledgeAudience) -> Optional[str]:
     try:
-        entries = await admin_client.get_base_knowledge(applies_to="owner", enabled_only=True)
-        for entry in (entries or []):
-            if entry.get("category") in ("owner", "user") and entry.get("key") in ("owner_name", "name"):
-                return (entry.get("value") or "").strip() or None
+        return extract_owner_name(await load_visible_knowledge(admin_client, audience=audience))
     except Exception as e:
         logger.warning("addressee_owner_name_failed", error=str(e))
     return None
@@ -879,9 +882,10 @@ async def resolve_addressee(state: Any, admin_client: Any) -> Addressee:
     if is_public_audience(getattr(state, "permissions", None)):
         return NO_ADDRESSEE
     context = getattr(state, "context", None) or {}
-    kind = addressee_kind(context, getattr(state, "mode", None), bool(getattr(state, "mode_degraded", False)))
+    audience = getattr(state, "knowledge_audience", KnowledgeAudience.UNRESOLVED)
+    kind = addressee_kind(context, audience=audience)
     if kind == "owner":
-        return Addressee("owner", await _owner_name(admin_client))
+        return Addressee("owner", await _owner_name(admin_client, audience=audience))
     if kind == "household":
         return Addressee("household", clean_speaker_first_name(context.get("speaker_first_name")))
     if kind == "guest":
@@ -1108,7 +1112,7 @@ async def store_conversation_context(
     redis_success = False
     if cache_client and cache_client.client:
         try:
-            context_key = f"athena:context:{session_id}"
+            context_key = context_storage_key(session_id)
             await asyncio.wait_for(
                 cache_client.client.setex(context_key, ttl, context.model_dump_json()),
                 timeout=2.0  # 2 second timeout

@@ -41,6 +41,7 @@ import structlog
 from orchestrator.metrics import ha_write_denied_total, intent_gate_refused_total
 from orchestrator.state import IntentCategory
 from shared.config import get_config
+from shared.knowledge_tiers import KnowledgeAudience
 from shared.guest_policy import apply_guest_baseline, baseline_allowed_domains, guest_baseline, parse_json_array_env
 
 logger = structlog.get_logger(__name__)
@@ -396,7 +397,20 @@ async def activate_owner_override(
 # ATHENA-69 D16/D24: owner-override surface gating and per-tier throttle
 # ============================================================================
 
-PIN_TRUSTED_TIERS = frozenset({"household", "sms", "web_authenticated"})
+# The one caller_trust that can become a proven owner: jarvis-web sends it only
+# for a Bearer-authenticated admin owner. It counts only together with an
+# authenticated service hop (see resolve_request_authorization).
+OWNER_PROOF_TRUST = "web_owner"
+# Signed-in browser callers. A web_owner is a signed-in caller too, but a
+# Bearer caller never carries a display name (speaker_first_name).
+SIGNED_IN_TRUST = frozenset({"web_authenticated", OWNER_PROOF_TRUST})
+PIN_TRUSTED_TIERS = frozenset({"household", "sms"}) | SIGNED_IN_TRUST
+
+
+def _pin_tier(caller_trust: Optional[str]) -> Optional[str]:
+    """The tier the throttle and the mode/admin services see: a web_owner is a
+    signed-in browser caller, so their caller_tier Literals stay unchanged."""
+    return "web_authenticated" if caller_trust == OWNER_PROOF_TRUST else caller_trust
 
 
 class OwnerOverrideThrottle:
@@ -472,7 +486,8 @@ async def handle_owner_mode_utterance(
             refused_reason="untrusted_surface",
         )
 
-    if not _owner_override_throttle.check(caller_trust):
+    tier = _pin_tier(caller_trust)
+    if not _owner_override_throttle.check(tier):
         logger.warning("owner_override_throttled", caller_trust=caller_trust)
         return OwnerOverrideOutcome(
             success=False,
@@ -483,7 +498,7 @@ async def handle_owner_mode_utterance(
 
     pin = extract_pin_from_query(query)
     success, message, override_data = await activate_owner_override(
-        pin, caller_tier=caller_trust, voice_device_id=room
+        pin, caller_tier=tier, voice_device_id=room
     )
     return OwnerOverrideOutcome(success=success, message=message, override_data=override_data, refused_reason=None)
 
@@ -1618,6 +1633,24 @@ class RequestAuthorization:
     degraded: bool
     escalation_ignored: bool
     mode_info: Dict[str, Any]
+    knowledge_audience: KnowledgeAudience
+
+
+def _knowledge_audience(
+    effective_mode: str, degraded: bool, public: bool, *,
+    owner_caller: bool = False, owner_proven: bool = False, guest_verified: bool = True,
+) -> KnowledgeAudience:
+    """The base-knowledge audience for a resolved request. A mode other than
+    owner/guest (the mode service answered something unexpected) is treated as
+    unknown and sees nothing. The only place a KnowledgeAudience is built with
+    owner flags: they come from server inputs (the authenticated hop, the
+    server's mode), never from a request field."""
+    if effective_mode not in ("owner", "guest"):
+        return KnowledgeAudience.UNRESOLVED
+    return KnowledgeAudience(
+        mode=effective_mode, degraded=degraded, public=public,
+        owner_caller=owner_caller, owner_proven=owner_proven, guest_verified=guest_verified,
+    )
 
 
 async def resolve_request_authorization(
@@ -1625,6 +1658,7 @@ async def resolve_request_authorization(
     guest_info: Optional[Dict[str, Any]],
     caller_trust: Optional[str] = None,
     *,
+    service_authenticated: bool,
     sms_stay_phase: Optional[str] = None,
 ) -> RequestAuthorization:
     """The single mode/permissions resolution path for every orchestrator
@@ -1654,10 +1688,23 @@ async def resolve_request_authorization(
     ``sms_stay_phase`` comes from the admin-backend webhook's context; the
     caller is trusted server code for it, like caller_trust. It's ignored
     for every other caller.
+
+    Owner proof (``KnowledgeAudience``): ``owner_caller`` needs
+    ``caller_trust == "web_owner"`` AND ``service_authenticated is True`` (the
+    request carried a valid X-Service-Key) and a non-public caller.
+    ``owner_proven`` additionally needs the effective mode and the server's
+    own mode both ``owner`` and a healthy mode service. During a stay with the
+    PIN override active the mode service reports owner, so a signed-in owner
+    is proven then: the proof is the Bearer, not the house state.
     """
     mode_info = await get_current_mode()
     server_mode = mode_info.get("mode", "owner")
     degraded = bool(mode_info.get("degraded", False))
+    owner_caller = (
+        caller_trust == OWNER_PROOF_TRUST
+        and service_authenticated is True
+        and not is_public_caller(caller_trust)
+    )
 
     if is_public_caller(caller_trust):
         escalation_ignored = request_mode == "owner"
@@ -1676,6 +1723,7 @@ async def resolve_request_authorization(
             degraded=degraded,
             escalation_ignored=escalation_ignored,
             mode_info=mode_info,
+            knowledge_audience=_knowledge_audience("guest", degraded, public=True),
         )
 
     effective_mode = "guest" if (guest_info or request_mode == "guest" or server_mode == "guest") else server_mode
@@ -1703,6 +1751,8 @@ async def resolve_request_authorization(
         permissions = normalize_permissions(off_stay_overlay(permissions, sms_stay_phase))
         logger.info("sms_stay_phase_read_only", phase=sms_stay_phase or "unknown")
 
+    owner_proven = owner_caller and effective_mode == "owner" and server_mode == "owner" and not degraded
+    logger.info("owner_proof_resolved", owner_caller=owner_caller, owner_proven=owner_proven)
     return RequestAuthorization(
         mode=effective_mode,
         permissions=permissions,
@@ -1710,4 +1760,8 @@ async def resolve_request_authorization(
         degraded=degraded,
         escalation_ignored=escalation_ignored,
         mode_info=mode_info,
+        knowledge_audience=_knowledge_audience(
+            effective_mode, degraded, public=False, owner_caller=owner_caller, owner_proven=owner_proven,
+            guest_verified=bool(guest_info) or server_mode == "guest",
+        ),
     )

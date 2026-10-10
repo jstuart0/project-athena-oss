@@ -620,7 +620,12 @@ async def get_base_knowledge() -> Dict[str, Any]:
     conn = None
     try:
         conn = await get_athena_db_connection()
-        row = await conn.fetchrow("SELECT * FROM base_knowledge LIMIT 1")
+        # Only an Everyone row: this single-row read is tier-blind otherwise, and any
+        # caller of the route could be handed an owner-only or household row.
+        row = await conn.fetchrow(
+            "SELECT * FROM base_knowledge WHERE enabled AND applies_to = 'both' "
+            "ORDER BY priority DESC, id LIMIT 1"
+        )
         if row:
             return dict(row)
         # Return default values if no config exists
@@ -719,7 +724,11 @@ async def get_all_config() -> Dict[str, Any]:
         result['intent_chains'] = [dict(row) for row in rows]
 
         # Base knowledge
-        row = await athena_conn.fetchrow("SELECT * FROM base_knowledge LIMIT 1")
+        # Same: an Everyone row only (see get_base_knowledge).
+        row = await athena_conn.fetchrow(
+            "SELECT * FROM base_knowledge WHERE enabled AND applies_to = 'both' "
+            "ORDER BY priority DESC, id LIMIT 1"
+        )
         result['base_knowledge'] = dict(row) if row else {
             "default_location": None,
             "user_name": None,

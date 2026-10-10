@@ -33,10 +33,16 @@ def _reset():
     h.reset_runtime()
 
 
-def _build(user_mode, degraded=False):
+def _audience(mode, degraded=False, proven=False):
+    from shared.knowledge_tiers import KnowledgeAudience
+
+    return KnowledgeAudience(mode=mode, degraded=degraded, public=False, owner_caller=proven, owner_proven=proven)
+
+
+def _build(user_mode, degraded=False, proven=False, rows=None):
     from shared.base_knowledge_utils import build_knowledge_context
 
-    return build_knowledge_context(ROWS, user_mode, degraded=degraded)
+    return build_knowledge_context(ROWS if rows is None else rows, audience=_audience(user_mode, degraded, proven))
 
 
 def test_guest_name_row_is_never_rendered(captured_logs):
@@ -61,14 +67,53 @@ def test_owner_name_only_in_owner_prompts():
     assert "Nora Name" not in guest
 
 
-def test_every_name_key_and_owner_row_is_owner_mode_only():
+def test_every_name_key_is_owner_mode_only_and_owner_rows_need_proof():
     guest = _build("guest")
     assert "Fay First" not in guest
     assert "Owner Blue" not in guest
     assert "Vegetarian household" in guest
     owner = _build("owner")
     assert "Fay First" in owner
-    assert "Owner Blue" in owner
+    assert "Owner Blue" not in owner  # owner-category row stored as Everyone: proof required
+    proven = _build("owner", proven=True)
+    assert "Fay First" in proven
+    assert "Owner Blue" in proven
+    assert "Property owner's name: Olive Owner" in proven
+
+
+@pytest.mark.parametrize("category", ["owner", "Owner", " owner ", "OWNER\t"])
+def test_legacy_owner_category_spellings_need_proof(category):
+    row = {"id": 90, "category": category, "key": "employer", "value": "SENTINEL_EMPLOYER", "applies_to": "both"}
+    for mode, degraded in (("owner", False), ("owner", True), ("guest", False)):
+        assert "SENTINEL_EMPLOYER" not in _build(mode, degraded, rows=[row])
+    assert "SENTINEL_EMPLOYER" in _build("owner", proven=True, rows=[row])
+
+
+def test_owner_name_keys_in_a_legacy_spelled_category_keep_the_household_gate():
+    row = {"id": 91, "category": " Owner ", "key": "owner_name", "value": "Olive Legacy", "applies_to": "household"}
+    assert "Olive Legacy" in _build("owner", rows=[row])
+    assert "Olive Legacy" not in _build("owner", degraded=True, rows=[row])
+    assert "Olive Legacy" not in _build("guest", rows=[row])
+
+
+def test_rows_outside_the_audience_tiers_are_dropped_by_the_builder_itself():
+    rows = [
+        {"id": 1, "category": "property", "key": "a", "value": "S_OWNER", "applies_to": "owner"},
+        {"id": 2, "category": "property", "key": "b", "value": "S_HOUSEHOLD", "applies_to": "household"},
+        {"id": 3, "category": "property", "key": "c", "value": "S_GUEST", "applies_to": "guest"},
+        {"id": 4, "category": "property", "key": "d", "value": "S_BOTH", "applies_to": "both"},
+        {"id": 5, "category": "property", "key": "e", "value": "S_CHAT", "applies_to": "chat"},
+        {"id": 6, "category": "property", "key": "f", "value": "S_NONE"},
+    ]
+    owner = _build("owner", rows=rows)
+    assert "S_HOUSEHOLD" in owner and "S_BOTH" in owner
+    for absent in ("S_OWNER", "S_GUEST", "S_CHAT", "S_NONE"):
+        assert absent not in owner
+    guest = _build("guest", rows=rows)
+    assert "S_GUEST" in guest and "S_BOTH" in guest and "S_HOUSEHOLD" not in guest
+    degraded = _build("owner", degraded=True, rows=rows)
+    assert "S_BOTH" in degraded and "S_HOUSEHOLD" not in degraded
+    assert "S_OWNER" in _build("owner", proven=True, rows=rows)
 
 
 def test_degraded_owner_prompt_has_no_names_or_owner_rows():

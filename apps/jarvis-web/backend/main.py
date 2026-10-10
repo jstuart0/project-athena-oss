@@ -11,6 +11,7 @@ Mode Logic:
 - Owner Mode: When no guest is booked, or manually overridden
 - Guest Mode: When a guest is currently booked (restricted tool access)
 """
+import contextvars
 import os
 import re
 from collections import OrderedDict
@@ -133,6 +134,7 @@ async def get_current_mode() -> str:
         return mode_override
 
     # Auto-detect based on guest booking
+    _mode_lookup_failed.set(False)
     guest = await get_current_guest()
     if guest and guest.get("has_guest"):
         logger.debug("mode_auto_guest", guest_id=guest.get("id"))
@@ -577,6 +579,13 @@ class SetTemperatureRequest(BaseModel):
     temperature: int
 
 
+# Set when the guest lookup failed during this request, so a mode of "owner"
+# that only means "couldn't tell" is never treated as owner proof for the
+# owner's own conversation (get_current_guest otherwise reads a failure as "no
+# guest booked").
+_mode_lookup_failed: contextvars.ContextVar = contextvars.ContextVar("jarvis_mode_lookup_failed", default=False)
+
+
 async def get_current_guest() -> Optional[Dict[str, Any]]:
     """Fetch current guest from admin backend using internal endpoint."""
     # Use internal cluster service URL for service-to-service calls
@@ -597,10 +606,13 @@ async def get_current_guest() -> Optional[Dict[str, Any]]:
                         guest_id=data.get("id")
                     )
                     return data
-            elif not note_admin_refusal(response.status_code, "/api/guest-mode/internal/current-guest"):
-                logger.warning("failed_to_fetch_guest", status=response.status_code)
+            else:
+                _mode_lookup_failed.set(True)
+                if not note_admin_refusal(response.status_code, "/api/guest-mode/internal/current-guest"):
+                    logger.warning("failed_to_fetch_guest", status=response.status_code)
             return None
     except Exception as e:
+        _mode_lookup_failed.set(True)
         logger.warning("failed_to_fetch_guest", error=str(e))
         return None
 
@@ -742,12 +754,79 @@ if not SERVICE_API_KEY:
 
 
 def _session_mac(session_part: str, browser_key: str) -> str:
-    return hmac.new(_CHAT_SESSION_KEY, f"{session_part}|{browser_key}".encode(), hashlib.sha256).hexdigest()[:24]
+    # NUL separates the fields: neither a session part (hex, optionally
+    # "own-") nor a browser key (urlsafe base64) can contain it, so
+    # ("P|x", "y") and ("P", "x|y") can't collide.
+    return hmac.new(_CHAT_SESSION_KEY, f"{session_part}\x00{browser_key}".encode(), hashlib.sha256).hexdigest()[:24]
 
 
-def _new_session_id(browser_key: str) -> str:
-    part = uuid.uuid4().hex
+_SESSION_PART_RE = re.compile(r"(own-|gst-)?[0-9a-f]{32}")
+
+
+# An owner conversation's ids start with "own-". The orchestrator reads the
+# prefix as the session's caller class (orchestrator/session_keys.py: the same
+# rule, pinned by tests/unit/test_owner_session_ids.py), so an owner id is kept
+# for a proven owner and never adopted by anyone else.
+OWNER_SESSION_PREFIX = "own-"
+# A guest-mode conversation's ids start "gst-", the same rule on the orchestrator
+# side (orchestrator/session_keys.py), so a stay starting or ending never hands
+# one audience the other's conversation.
+GUEST_SESSION_PREFIX = "gst-"
+CLASS_OWNER, CLASS_GUEST, CLASS_HOUSEHOLD = "owner", "guest", "household"
+_PREFIX_BY_CLASS = {CLASS_OWNER: OWNER_SESSION_PREFIX, CLASS_GUEST: GUEST_SESSION_PREFIX, CLASS_HOUSEHOLD: ""}
+
+
+def _owner_history(caller: Caller) -> bool:
+    """True when this turn belongs to the owner's own conversation: a Bearer
+    owner while jarvis-web's own view of the house is owner mode. During a stay
+    the owner uses the ordinary thread and ordinary ids; those turns are
+    unproven at the orchestrator too, so nothing private is in them."""
+    return (
+        caller.trust == caller_auth.OWNER_TRUST
+        and caller.mode == "owner"
+        and not _mode_lookup_failed.get()
+    )
+
+
+def _audience_class(caller: Caller) -> str:
+    """Which conversation this turn belongs to: the owner's own, a guest-mode
+    one, or the household's. A failed guest lookup reads as guest (the
+    narrowest), never as the household."""
+    if _owner_history(caller):
+        return CLASS_OWNER
+    if caller.mode == "guest" or _mode_lookup_failed.get():
+        return CLASS_GUEST
+    return CLASS_HOUSEHOLD
+
+
+def _part_class(part: str) -> str:
+    if part.startswith(OWNER_SESSION_PREFIX):
+        return CLASS_OWNER
+    if part.startswith(GUEST_SESSION_PREFIX):
+        return CLASS_GUEST
+    return CLASS_HOUSEHOLD
+
+
+def _new_session_id(browser_key: str, audience_class: str = CLASS_HOUSEHOLD) -> str:
+    part = f"{_PREFIX_BY_CLASS[audience_class]}{uuid.uuid4().hex}"
     return f"{part}.{_session_mac(part, browser_key)}"
+
+
+def _history_identity_key(cookie_id: str, caller: Caller) -> str:
+    """The persistent-chat identity key. The owner's thread is keyed on an
+    HMAC of the cookie, never the raw cookie, so signing out, or using the
+    same browser from the home network, never restores or injects it, and a
+    cookie value can't be forged into it without SERVICE_API_KEY. 36
+    characters: it fits web_browser_identities.cookie_id (VARCHAR(36)).
+    A guest-mode caller likewise gets its own derived key ("g" + 35 hex), so a
+    browser never restores a household thread during a stay, nor the guest's
+    thread after it. Only the household uses the raw cookie."""
+    audience = _audience_class(caller)
+    if audience == CLASS_HOUSEHOLD:
+        return cookie_id
+    label, prefix = ("owner-thread", "o") if audience == CLASS_OWNER else ("guest-thread", "g")
+    digest = hmac.new(_CHAT_SESSION_KEY, f"{label}|{cookie_id}".encode(), hashlib.sha256).hexdigest()
+    return prefix + digest[:35]
 
 
 def _bound_session_id(presented: Optional[str], request: Request, caller: Caller) -> tuple:
@@ -769,13 +848,17 @@ def _bound_session_id(presented: Optional[str], request: Request, caller: Caller
     new_key = None
     if not browser_key:
         browser_key = new_key = secrets.token_urlsafe(24)
+    audience = _audience_class(caller)
     if presented and "." in presented:
         part, mac = presented.rsplit(".", 1)
-        if part and hmac.compare_digest(mac, _session_mac(part, browser_key)):
-            return presented, new_key
+        if _SESSION_PART_RE.fullmatch(part) and hmac.compare_digest(mac, _session_mac(part, browser_key)):
+            if _part_class(part) == audience:
+                return presented, new_key
+            logger.info("chat_session_id_wrong_class", action="fresh_session", audience=audience)
+            return _new_session_id(browser_key, audience), new_key
     if presented:
         logger.info("chat_session_id_not_bound_to_browser", action="fresh_session")
-    return _new_session_id(browser_key), new_key
+    return _new_session_id(browser_key, audience), new_key
 
 
 def _set_chat_key_cookie(response: Response, request: Request, value: Optional[str]) -> None:
@@ -957,7 +1040,7 @@ async def restore_session(request: Request, response: Response):
     if await get_engine() is None:
         return {"restored": False, "reason": "db_unavailable"}
 
-    identity_id = await get_or_create_identity(cookie_id, ttl_days)
+    identity_id = await get_or_create_identity(_history_identity_key(cookie_id, request.state.caller), ttl_days)
     if not identity_id:
         return {"restored": False, "reason": "db_error"}
 
@@ -996,7 +1079,9 @@ async def clear_session(request: Request):
     if await get_engine() is None:
         return {"cleared": False, "reason": "db_unavailable"}
 
-    identity_id = await get_or_create_identity(cookie_id, config.get("session_ttl_days", 90))
+    identity_id = await get_or_create_identity(
+        _history_identity_key(cookie_id, request.state.caller), config.get("session_ttl_days", 90)
+    )
     if not identity_id:
         return {"cleared": False, "reason": "db_error"}
 
@@ -1044,7 +1129,7 @@ async def chat_stream(message: ChatMessage, request: Request):
             cookie_id = str(uuid.uuid4())
 
         ttl_days = config.get("session_ttl_days", 90)
-        identity_id = await get_or_create_identity(cookie_id, ttl_days)
+        identity_id = await get_or_create_identity(_history_identity_key(cookie_id, caller), ttl_days)
         if identity_id:
             thread = await get_or_create_active_thread(identity_id)
 
@@ -1056,7 +1141,7 @@ async def chat_stream(message: ChatMessage, request: Request):
                 max_turns = config.get("max_restored_turns", 20)
                 chat_history_msgs = await load_chat_history(thread_id, max_turns)
                 inject_history = True
-                orch_session_id = _new_session_id(stream_browser_key)
+                orch_session_id = _new_session_id(stream_browser_key, _audience_class(caller))
 
     async def generate():
         buffer = []

@@ -182,7 +182,7 @@ def test_an_unset_key_sends_no_service_key_header(listener):
 OLDER_SENDERS = {
     "get_external_api_key": ("get_external_api_key", ("some-service",), {}),
     "get_enabled_tools": ("get_enabled_tools", (), {}),
-    "get_base_knowledge": ("get_base_knowledge", (), {}),
+    "get_base_knowledge": ("get_base_knowledge", (), {"tiers": frozenset({"both"})}),
     "record_tool_metric": ("record_tool_metric", ("some_tool", True, 12), {}),
     "resolve_room_group": ("resolve_room_group", ("downstairs",), {}),
     "get_room_groups": ("get_room_groups", (), {}),

@@ -109,7 +109,7 @@ def test_public_prompts_carry_no_private_data(rig, path, stream_mode):
         assert marker not in body, marker
         assert marker not in _executor_text(rig["execute"]), marker
     rig["knowledge"].assert_not_awaited()
-    rig["home"].assert_not_awaited()
+    rig["home"].assert_not_called()
     rig["admin"].get_user_session_by_device.assert_not_awaited()
 
 

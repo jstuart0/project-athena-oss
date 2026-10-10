@@ -3540,25 +3540,28 @@
                 <div class="mb-4 p-4 bg-blue-900/20 border border-blue-500/30 rounded-lg">
                     <p class="text-sm text-blue-200">
                         <strong>Base Knowledge</strong> provides context-aware information that gets injected into LLM prompts.
-                        Use categories to organize knowledge (property, location, user, temporal, general) and applies_to to control guest/owner visibility.
+                        Use categories to organize knowledge (property, location, user, temporal, general) and choose who hears each entry: everyone, guests only, the household, or only the owner.
                     </p>
                 </div>
 
                 <!-- Filter Bar -->
                 <div class="mb-4 flex gap-4 flex-wrap">
-                    <select id="knowledge-category-filter" onchange="filterBaseKnowledge()" class="px-3 py-2 bg-dark-card border border-dark-border rounded-lg text-white text-sm">
+                    <select id="knowledge-category-filter" aria-label="Filter by category" onchange="filterBaseKnowledge()" class="px-3 py-2 bg-dark-card border border-dark-border rounded-lg text-white text-sm">
                         <option value="">All Categories</option>
                         <option value="property">Property</option>
                         <option value="location">Location</option>
                         <option value="user">User Context</option>
                         <option value="temporal">Temporal</option>
                         <option value="general">General</option>
+                        <option value="owner">Owner</option>
+                        <option value="instruction">Instruction</option>
                     </select>
-                    <select id="knowledge-applies-filter" onchange="filterBaseKnowledge()" class="px-3 py-2 bg-dark-card border border-dark-border rounded-lg text-white text-sm">
-                        <option value="">All Applies To</option>
-                        <option value="both">Both</option>
-                        <option value="guest">Guest Only</option>
-                        <option value="owner">Owner Only</option>
+                    <select id="knowledge-applies-filter" aria-label="Filter by who hears the entry" onchange="filterBaseKnowledge()" class="px-3 py-2 bg-dark-card border border-dark-border rounded-lg text-white text-sm">
+                        <option value="">All audiences</option>
+                        <option value="both">Everyone</option>
+                        <option value="guest">Guests only</option>
+                        <option value="household">Household</option>
+                        <option value="owner">Owner only</option>
                     </select>
                     <label class="flex items-center gap-2 text-sm text-gray-400">
                         <input type="checkbox" id="knowledge-enabled-filter" onchange="filterBaseKnowledge()" checked class="rounded">
@@ -3566,8 +3569,23 @@
                     </label>
                 </div>
 
+                <div id="knowledge-owner-banner" role="status" class="hidden mb-4 p-4 bg-yellow-900/20 border border-yellow-500/30 rounded-lg flex items-start justify-between gap-4">
+                    <p class="text-sm text-yellow-200">
+                        <span id="knowledge-owner-banner-count">0</span> enabled entries are Owner only. Only you hear them, signed in to Jarvis web with your admin account. Voice, SMS and the home network no longer hear them. Move facts the household should know to Household.
+                    </p>
+                    <div class="flex gap-2 shrink-0">
+                        <button type="button" id="knowledge-show-owner" class="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white rounded text-sm transition-colors">Show Owner-only entries</button>
+                        <button type="button" id="knowledge-dismiss-banner" class="px-3 py-1 bg-gray-600 hover:bg-gray-700 text-white rounded text-sm transition-colors">Dismiss</button>
+                    </div>
+                </div>
+
+                <div id="knowledge-selection-toolbar" class="mb-2 flex items-center gap-3">
+                    <button type="button" id="knowledge-move-household" aria-disabled="true" aria-describedby="knowledge-selected-count" title="Select entries first" class="px-3 py-1 bg-teal-700 hover:bg-teal-600 text-white rounded text-sm transition-colors aria-disabled:opacity-50 aria-disabled:cursor-not-allowed">Move 0 to Household</button>
+                    <span id="knowledge-selected-count" aria-live="polite" class="text-sm text-gray-400">No entries selected</span>
+                </div>
+
                 <!-- Knowledge Entries Table -->
-                <div id="base-knowledge-container" class="bg-dark-card border border-dark-border rounded-lg overflow-hidden">
+                <div id="base-knowledge-container" class="bg-dark-card border border-dark-border rounded-lg overflow-x-auto">
                     <div class="text-center text-gray-400 py-8">
                         <div class="text-2xl mb-2">📚</div>
                         <p>Loading base knowledge entries...</p>
@@ -4668,59 +4686,100 @@
 
     <!-- Base Knowledge Modal -->
     <div id="knowledge-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50" onclick="closeKnowledgeModal(event)">
-        <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+        <div class="bg-dark-card border border-dark-border rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="knowledge-modal-title" onclick="event.stopPropagation()">
             <div class="flex justify-between items-center mb-4">
                 <h3 class="text-xl font-semibold text-white" id="knowledge-modal-title">Add Base Knowledge Entry</h3>
-                <button onclick="closeKnowledgeModal()" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+                <button type="button" onclick="closeKnowledgeModal()" aria-label="Close" class="text-gray-400 hover:text-white text-2xl">&times;</button>
             </div>
 
             <form id="knowledge-form" onsubmit="saveKnowledge(event)" class="space-y-4">
                 <input type="hidden" id="knowledge-id">
 
-                <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Category *</label>
+                <div id="knowledge-category-field">
+                    <label for="knowledge-category" class="block text-sm font-medium text-gray-400 mb-2">Category *</label>
                     <select id="knowledge-category" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                         <option value="property">Property</option>
                         <option value="location">Location</option>
                         <option value="user">User Context</option>
                         <option value="temporal">Temporal</option>
                         <option value="general">General</option>
+                        <option value="owner">Owner</option>
+                        <option value="instruction">Instruction</option>
                     </select>
                 </div>
+                <div id="knowledge-category-display-field" class="hidden">
+                    <label for="knowledge-category-display" class="block text-sm font-medium text-gray-400 mb-2">Category</label>
+                    <input type="text" id="knowledge-category-display" readonly class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-400">
+                </div>
 
-                <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Key *</label>
+                <div id="knowledge-key-field">
+                    <label for="knowledge-key" class="block text-sm font-medium text-gray-400 mb-2">Key *</label>
                     <input type="text" id="knowledge-key" required placeholder="e.g., address, user_type, current_date" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                </div>
+                <div id="knowledge-key-display-field" class="hidden">
+                    <label for="knowledge-key-display" class="block text-sm font-medium text-gray-400 mb-2">Key</label>
+                    <input type="text" id="knowledge-key-display" readonly class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-400">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Value *</label>
-                    <textarea id="knowledge-value" required rows="3" placeholder="The actual knowledge content. Use {dynamic:current_date} or {dynamic:current_time} for dynamic values." class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white"></textarea>
+                    <label for="knowledge-value" class="block text-sm font-medium text-gray-400 mb-2">Value *</label>
+                    <textarea id="knowledge-value" required rows="3" maxlength="4000" placeholder="The actual knowledge content. Use {dynamic:current_date} or {dynamic:current_time} for dynamic values." class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white"></textarea>
                     <p class="text-xs text-gray-500 mt-1">Tip: Use {dynamic:current_date} or {dynamic:current_time} for dynamic placeholders</p>
                 </div>
 
-                <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Applies To *</label>
-                    <select id="knowledge-applies-to" required class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
-                        <option value="both">Both Guest & Owner</option>
-                        <option value="guest">Guest Only</option>
-                        <option value="owner">Owner Only</option>
-                    </select>
+                <fieldset id="knowledge-tier-fieldset" aria-describedby="knowledge-owner-category-hint" class="border border-dark-border rounded-lg p-3">
+                    <legend class="px-1 text-sm font-medium text-gray-400">Who hears this entry *</legend>
+                    <div class="space-y-2">
+                        <div>
+                            <label for="knowledge-tier-both" class="flex items-start gap-2 text-sm text-gray-200">
+                                <input type="radio" name="knowledge-tier" id="knowledge-tier-both" value="both" required aria-describedby="knowledge-tier-both-desc" class="mt-1">
+                                <span>Everyone</span>
+                            </label>
+                            <p id="knowledge-tier-both-desc" class="ml-6 text-xs text-gray-500">Everyone: guests and household</p>
+                        </div>
+                        <div>
+                            <label for="knowledge-tier-guest" class="flex items-start gap-2 text-sm text-gray-200">
+                                <input type="radio" name="knowledge-tier" id="knowledge-tier-guest" value="guest" required aria-describedby="knowledge-tier-guest-desc" class="mt-1">
+                                <span>Guests only</span>
+                            </label>
+                            <p id="knowledge-tier-guest-desc" class="ml-6 text-xs text-gray-500">Guests only, during a stay</p>
+                        </div>
+                        <div>
+                            <label for="knowledge-tier-household" class="flex items-start gap-2 text-sm text-gray-200">
+                                <input type="radio" name="knowledge-tier" id="knowledge-tier-household" value="household" required aria-describedby="knowledge-tier-household-desc" class="mt-1">
+                                <span>Household</span>
+                            </label>
+                            <p id="knowledge-tier-household-desc" class="ml-6 text-xs text-gray-500">Anyone at home when no stay is active, including voice satellites, the home network and SMS. Visitors at home hear these.</p>
+                        </div>
+                        <div>
+                            <label for="knowledge-tier-owner" class="flex items-start gap-2 text-sm text-gray-200">
+                                <input type="radio" name="knowledge-tier" id="knowledge-tier-owner" value="owner" required aria-describedby="knowledge-tier-owner-desc" class="mt-1">
+                                <span>Owner only</span>
+                            </label>
+                            <p id="knowledge-tier-owner-desc" class="ml-6 text-xs text-gray-500">Only the owner, signed in to Jarvis web with your admin account. Never voice, SMS or the home network.</p>
+                        </div>
+                    </div>
+                    <p id="knowledge-tier-legacy-note" class="hidden mt-2 text-xs text-yellow-300"></p>
+                    <p id="knowledge-owner-category-hint" class="mt-2 text-xs text-gray-500">Entries in the Owner category are Owner only, except owner_name and name.</p>
+                </fieldset>
+
+                <div id="knowledge-instruction-warning" role="note" class="hidden p-3 bg-yellow-900/20 border border-yellow-500/30 rounded-lg text-sm text-yellow-200">
+                    Instructions change how the assistant behaves for everyone in this entry's audience. A persona here (for example a portfolio or showcase role) changes what visitors hear.
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
+                    <label for="knowledge-priority" class="block text-sm font-medium text-gray-400 mb-2">Priority</label>
                     <input type="number" id="knowledge-priority" value="0" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                     <p class="text-xs text-gray-500 mt-1">Higher priority entries appear first in context (default: 0)</p>
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-400 mb-2">Description</label>
-                    <input type="text" id="knowledge-description" placeholder="Optional description for internal reference" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
+                    <label for="knowledge-description" class="block text-sm font-medium text-gray-400 mb-2">Description</label>
+                    <input type="text" id="knowledge-description" maxlength="255" placeholder="Optional description for internal reference" class="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-white">
                 </div>
 
                 <div>
-                    <label class="flex items-center gap-2 text-sm text-gray-400">
+                    <label for="knowledge-enabled" class="flex items-center gap-2 text-sm text-gray-400">
                         <input type="checkbox" id="knowledge-enabled" checked class="rounded">
                         <span>Enabled</span>
                     </label>
@@ -4946,7 +5005,7 @@
     <script src="/integrations.js?v=20260927"></script>
     <script src="/keyboard.js?v=20260108"></script>
 
-    <script src="/app.js?v=20261001"></script>
+    <script src="/app.js?v=20261010"></script>
     <script src="/crud-extensions.js?v=20260913"></script>
     <script src="/conversation.js?v=20260913"></script>
     <script src="/routing.js?v=20260913"></script>
@@ -4956,7 +5015,7 @@
     <script src="/tool-calling.js?v=20260913"></script>
     <script src="/escalation.js?v=20260913"></script>
     <script src="/debug-logs.js?v=20260930"></script>
-    <script src="/base-knowledge.js?v=20260913"></script>
+    <script src="/base-knowledge.js?v=20261010"></script>
     <script src="/guest-mode.js?v=20260929-cal"></script>
     <script src="/mode-audit.js"></script>
     <script src="/sms.js?v=20260913"></script>

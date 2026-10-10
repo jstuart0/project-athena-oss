@@ -197,7 +197,7 @@ Response:"""
                 admin_client = get_admin_client()
                 user_mode = state.mode if state.mode else "guest"
                 knowledge_context = await get_knowledge_context_for_user(
-                    admin_client, user_mode, degraded=state.mode_degraded,
+                    admin_client, audience=state.knowledge_audience,
                 )
                 if knowledge_context:
                     system_context += knowledge_context

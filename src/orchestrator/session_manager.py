@@ -15,6 +15,21 @@ from datetime import datetime, timedelta
 import structlog
 
 from orchestrator.config_loader import get_config
+from orchestrator.session_keys import (  # noqa: F401  (re-exported: callers import these from here)
+    CALLER_CLASS_GUEST,
+    CALLER_CLASS_OTHER,
+    CALLER_CLASS_OWNER,
+    CALLER_CLASS_PUBLIC,
+    OAI_SESSION_INDEX_KEY,
+    OWNER_SESSION_PREFIX,
+    PUBLIC_SESSION_PREFIX,
+    class_qualified_id,
+    guest_session_id,
+    id_class,
+    new_session_id,
+    session_storage_key,
+    usable_session_id,
+)
 # Alias because the async config_loader.get_config above shadows the sync
 # shared.config.get_config name — SESSION_MAX_COUNT lives on the sync
 # AthenaConfig, not the DB-driven conversation-settings object.
@@ -29,13 +44,10 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_ENABLED = os.getenv("REDIS_ENABLED", "false").lower() == "true"
 
-# Session key prefix
-SESSION_KEY_PREFIX = "athena:session:"
-
-# Redis sorted-set index of OpenAI-compatible session ids, scored by
-# creation time (ATHENA-88 / F88 D4). Used by register_bounded_session to
-# bound the count of concurrent per-conversation sessions.
-OAI_SESSION_INDEX_KEY = "athena:session:oai_index"
+# Session ids, caller classes and every Redis key come from session_keys.
+# OAI_SESSION_INDEX_KEY is the sorted-set index of OpenAI-compatible session
+# ids, scored by creation time (ATHENA-88 / F88 D4), used by
+# register_bounded_session to bound the count of concurrent sessions.
 
 # ATHENA-88 / F40: registers a member and evicts the oldest overflow in one
 # atomic EVAL. KEYS[1]=index key, ARGV[1]=score (creation time),
@@ -60,11 +72,6 @@ return evicted
 # In-memory fallback storage
 _memory_sessions: Dict[str, Dict[str, Any]] = {}
 
-CALLER_CLASS_PUBLIC = "public"
-CALLER_CLASS_OTHER = "other"
-# Every public session id carries this prefix, so a public caller can never
-# adopt or guess its way into an id another caller uses.
-PUBLIC_SESSION_PREFIX = "pub-"
 
 
 class ConversationSession:
@@ -225,8 +232,13 @@ class ConversationSession:
         session.last_activity = datetime.fromisoformat(data["last_activity"])
         session.messages = data.get("messages", [])
         session.metadata = data.get("metadata", {})
+        stored_class = data.get("caller_class")
+        # Fail closed: an unknown class is "other", which by the id-prefix rule
+        # can never resume an own-, gst- or pub- id.
         session.caller_class = (
-            CALLER_CLASS_PUBLIC if data.get("caller_class") == CALLER_CLASS_PUBLIC else CALLER_CLASS_OTHER
+            stored_class
+            if stored_class in (CALLER_CLASS_PUBLIC, CALLER_CLASS_OWNER, CALLER_CLASS_GUEST)
+            else CALLER_CLASS_OTHER
         )
         return session
 
@@ -305,12 +317,13 @@ class SessionManager:
         Returns:
             New ConversationSession instance
         """
-        # Use provided session_id or generate new one
-        if (caller_class == CALLER_CLASS_PUBLIC) != (session_id or PUBLIC_SESSION_PREFIX).startswith(PUBLIC_SESSION_PREFIX):
-            session_id = None
-        session_id = session_id or (
-            f"{PUBLIC_SESSION_PREFIX}{uuid.uuid4()}" if caller_class == CALLER_CLASS_PUBLIC else str(uuid.uuid4())
-        )
+        # An id belongs to one caller class (its prefix says which). A
+        # presented id of another class is discarded for a fresh one, so this
+        # also covers the expired-session branch of get_or_create_session.
+        if session_id is None:
+            session_id = new_session_id(caller_class)
+        else:
+            session_id = usable_session_id(session_id, caller_class)
         session = ConversationSession(
             session_id=session_id,
             user_id=user_id,
@@ -352,7 +365,7 @@ class SessionManager:
         # Try Redis first
         if self.redis_client:
             try:
-                data = await self.redis_client.get(f"{SESSION_KEY_PREFIX}{session_id}")
+                data = await self.redis_client.get(session_storage_key(session_id))
                 if data:
                     session_dict = json.loads(data)
                     session = ConversationSession.from_dict(session_dict)
@@ -390,7 +403,9 @@ class SessionManager:
             session_id: Optional existing session ID
             user_id: Optional user identifier
             zone: Optional zone identifier
-            caller_class: "public" for an anonymous embed caller, else "other"
+            caller_class: "public" (anonymous embed caller), "owner" (a
+                server-proven owner), "guest" (a guest-audience turn) or "other"
+                (the household)
 
         Returns:
             ConversationSession instance
@@ -402,15 +417,21 @@ class SessionManager:
         adopted for a public caller. The reverse holds too: a caller that
         isn't public never resumes (or claims the id of) a public session,
         so public and household conversations never mix in either
-        direction.
+        direction. The same holds for an owner session: any crossing of
+        caller classes mints a fresh session, and an owner id (own-) is never
+        adopted by a caller that isn't owner-class, even after the session
+        expired or was evicted.
         """
         if session_id:
+            session_id = class_qualified_id(session_id, caller_class)
+        if session_id:
             session = await self.get_session(session_id)
-            if session and (caller_class == CALLER_CLASS_PUBLIC) != (session.caller_class == CALLER_CLASS_PUBLIC):
+            if session and session.caller_class != caller_class:
                 logger.warning(
                     "session_audience_mismatch_refused",
-                    session_id=session_id,
+                    session_class=id_class(session_id),
                     caller_public=caller_class == CALLER_CLASS_PUBLIC,
+                    caller_class=caller_class,
                 )
                 return await self.create_session(user_id=user_id, zone=zone, caller_class=caller_class)
             if session:
@@ -506,7 +527,7 @@ class SessionManager:
         # Delete from Redis
         if self.redis_client:
             try:
-                await self.redis_client.delete(f"{SESSION_KEY_PREFIX}{session_id}")
+                await self.redis_client.delete(session_storage_key(session_id))
             except Exception as e:
                 logger.warning("redis_delete_failed",
                              session_id=session_id,
@@ -531,7 +552,7 @@ class SessionManager:
         if self.redis_client:
             try:
                 await self.redis_client.setex(
-                    f"{SESSION_KEY_PREFIX}{session.session_id}",
+                    session_storage_key(session.session_id),
                     ttl,
                     json.dumps(session_dict)
                 )

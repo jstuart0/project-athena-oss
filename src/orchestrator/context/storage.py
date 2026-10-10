@@ -9,6 +9,7 @@ import time
 from typing import Optional
 
 from shared.logging_config import configure_logging
+from orchestrator.session_keys import context_storage_key
 from orchestrator.state import ConversationContext
 
 logger = configure_logging("orchestrator.context.storage")
@@ -32,7 +33,7 @@ async def get_conversation_context(
         return None
 
     try:
-        context_key = f"athena:context:{session_id}"
+        context_key = context_storage_key(session_id)
         context_json = await cache_client.client.get(context_key)
         if context_json:
             data = json.loads(context_json)
@@ -81,7 +82,7 @@ async def store_conversation_context(
             response=response,
             timestamp=time.time()
         )
-        context_key = f"athena:context:{session_id}"
+        context_key = context_storage_key(session_id)
         await cache_client.client.setex(context_key, ttl, context.model_dump_json())
         logger.info(f"Stored conversation context for session {session_id[:8]}...: intent={intent}")
         return True
@@ -109,7 +110,7 @@ async def clear_conversation_context(cache_client, session_id: str) -> bool:
         return False
 
     try:
-        context_key = f"athena:context:{session_id}"
+        context_key = context_storage_key(session_id)
         await cache_client.client.delete(context_key)
         return True
     except Exception as e:

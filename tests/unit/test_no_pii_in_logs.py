@@ -87,6 +87,7 @@ ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("admin/backend/app/routes/base_knowledge.py", "bulk_create_base_knowledge"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/base_knowledge.py", "create_base_knowledge"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/base_knowledge.py", "delete_base_knowledge"): (1, OPERATOR_AUDIT),
+    ("admin/backend/app/routes/base_knowledge.py", "_audit"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/base_knowledge.py", "get_base_knowledge"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/base_knowledge.py", "update_base_knowledge"): (1, OPERATOR_AUDIT),
     ("admin/backend/app/routes/calendar_sources.py", "_audit"): (1, OPERATOR_AUDIT),

@@ -69,6 +69,9 @@ import client_throttle as throttle
 logger = structlog.get_logger()
 
 _AUTH_CACHE_TTL_SECONDS = 60
+# An owner-role decision is what lets a request count as owner proof, so a
+# revoked owner token stops being accepted sooner than other roles.
+_OWNER_AUTH_CACHE_TTL_SECONDS = 10
 _AUTH_CACHE_MAX_ENTRIES = 10_000
 _AUTH_ME_TIMEOUT_SECONDS = 3.0
 _AUTH_ATTEMPTS_PER_MINUTE = 10
@@ -240,6 +243,12 @@ UPSTREAM_TRUST = {
     CLASS_PUBLIC: "web_public",
     CLASS_RELAY: "web_public",
 }
+
+# The one caller_trust that can become a proven owner at the orchestrator: a
+# Bearer-authenticated admin with role "owner". An edge-attested member, an
+# operator Bearer and the home network never get it. It is set only here, in
+# server code; nothing the browser sends reaches it.
+OWNER_TRUST = "web_owner"
 
 HouseholdModeResolver = Callable[[], Awaitable[str]]
 AuthMeCallable = Callable[[str], Awaitable[httpx.Response]]
@@ -681,7 +690,21 @@ class Caller:
     @property
     def trust(self) -> str:
         """The caller_trust value sent to the orchestrator."""
+        if self.is_bearer_owner:
+            return OWNER_TRUST
         return UPSTREAM_TRUST.get(self.caller_class, "web_public")
+
+    @property
+    def is_bearer_owner(self) -> bool:
+        """Signed in with the admin ``owner`` role over a Bearer token. The
+        role comes from /api/auth/me, whose decision is cached for
+        ``_AUTH_CACHE_TTL_SECONDS``, so a revoked owner keeps this for up to
+        ``_OWNER_AUTH_CACHE_TTL_SECONDS`` (10 s; other roles 60 s)."""
+        return (
+            self.caller_class == CLASS_AUTHENTICATED
+            and self.source == "bearer"
+            and self.role == "owner"
+        )
 
     @property
     def is_browser(self) -> bool:
@@ -789,7 +812,11 @@ def _digest(value: str) -> str:
 
 def _cache_get(key: str, now: float) -> Optional[_AuthDecision]:
     cached = _auth_cache.get(key)
-    if cached is None or (now - cached[1]) >= _AUTH_CACHE_TTL_SECONDS:
+    if cached is None:
+        return None
+    is_owner = cached[0].authenticated and cached[0].role == "owner"
+    ttl = _OWNER_AUTH_CACHE_TTL_SECONDS if is_owner else _AUTH_CACHE_TTL_SECONDS
+    if (now - cached[1]) >= ttl:
         return None
     _auth_cache.move_to_end(key)
     return cached[0]

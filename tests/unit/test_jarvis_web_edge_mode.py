@@ -418,7 +418,7 @@ def test_not_household_upgraded_by_bearer_gets_no_name(out):
     resp = h.client().post("/api/chat", json={"message": "hi"}, headers=headers)
     assert resp.status_code == 200
     body = out.orchestrator_bodies()[-1]
-    assert body["caller_trust"] == "web_authenticated"
+    assert body["caller_trust"] == "web_owner"
     assert "speaker_first_name" not in body["context"]
 
 

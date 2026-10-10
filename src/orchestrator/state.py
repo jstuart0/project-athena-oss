@@ -12,6 +12,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from shared.knowledge_tiers import KnowledgeAudience
+
 # Model configuration from environment (defaults to qwen3:4b-instruct-2507-q4_K_M for portability)
 _DEFAULT_MODEL = os.getenv("ATHENA_DEFAULT_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
 
@@ -95,6 +97,10 @@ class OrchestratorState(BaseModel):
     # The mode service couldn't be trusted for this request (authz.degraded):
     # nobody is addressed by name or framed as the owner.
     mode_degraded: bool = Field(False, description="Server-set: the mode service was degraded when this request was authorized")
+    # Who the base-knowledge readers, the addressee and the cache rules serve.
+    # UNRESOLVED (the default) sees no tier at all, so a construction site that
+    # forgets to set it fails closed.
+    knowledge_audience: KnowledgeAudience = Field(default=KnowledgeAudience.UNRESOLVED, description="Server-set at each entry point from resolve_request_authorization")
 
     # ATHENA-128 (D13/D14): pending write-confirmation carriage. Both are
     # set server-side at each construction site, never copied from stored
