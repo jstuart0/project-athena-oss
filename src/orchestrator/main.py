@@ -185,7 +185,7 @@ from orchestrator.model_safe_errors import (
     tool_error_result,
 )
 from shared.fast_path_vocab import AMBIENT_REPLY
-from shared.llm_router import llm_usage_scope, with_llm_usage_scope, with_llm_usage_scope_stream
+from shared.llm_router import current_usage, llm_usage_scope, with_llm_usage_scope, with_llm_usage_scope_stream
 from orchestrator.helpers import (
     answer_max_tokens,
     finish_spoken_answer,
@@ -8033,6 +8033,20 @@ async def process_query_stream_v2(
 # OpenAI-Compatible API Endpoints (for Home Assistant integration)
 # ============================================================================
 
+def _stream_usage_line(request: "OpenAIChatRequest", chunk_id: str) -> str:
+    """The OpenAI `stream_options.include_usage` chunk: empty `choices` and the turn's usage, sent
+    just before `[DONE]` and only when the caller asked for it (an empty string otherwise)."""
+    if (request.stream_options or {}).get("include_usage") is not True:
+        return ""
+    usage = current_usage()
+    prompt, completion = (usage.prompt_tokens, usage.completion_tokens) if usage else (0, 0)
+    chunk = {
+        "id": chunk_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": request.model,
+        "choices": [], "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion},
+    }
+    return f"data: {json.dumps(chunk)}\n\n"
+
+
 class OpenAIChatMessage(BaseModel):
     """OpenAI chat message format."""
     role: str
@@ -8045,6 +8059,8 @@ class OpenAIChatRequest(BaseModel):
     temperature: float = 0.7
     max_tokens: Optional[int] = None
     stream: bool = False  # Enable streaming responses
+    # OpenAI: {"include_usage": true} asks for a final chunk with empty `choices` and the usage.
+    stream_options: Optional[Dict[str, Any]] = None
     extra_body: Optional[Dict[str, Any]] = None  # Extra context (room, interface_type)
     # ATHENA-88 / F88: per-conversation session identity, forwarded by the
     # gateway. All optional so pre-existing callers keep working unchanged.
@@ -8663,6 +8679,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     pin_request_id = hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8]
                     yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': render_answer(outcome.message, interface_type)}, 'finish_reason': None}]})}\n\n"
                     yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                    yield _stream_usage_line(request, pin_request_id)
                     yield "data: [DONE]\n\n"
                     return
 
@@ -8686,6 +8703,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     yield f"data: {json.dumps({'id': fast_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': render_answer(fast.text, interface_type)}, 'finish_reason': None}]})}\n\n"
                     yield f"data: {json.dumps({'id': fast_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
                     await _persist_fast_path_messages(session.session_id, user_message, fast)
+                    yield _stream_usage_line(request, fast_id)
                     yield "data: [DONE]\n\n"
                     return
 
@@ -8943,6 +8961,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     }]
                 }
                 yield f"data: {json.dumps(final_chunk)}\n\n"
+                yield _stream_usage_line(request, initial_state.request_id)
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(

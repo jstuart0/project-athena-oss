@@ -229,3 +229,59 @@ def test_every_stream_synthesis_call_is_labelled():
         keywords = {k.arg: ast.unparse(k.value) for k in call.keywords}
         assert keywords.get("stage") == "'stream_synthesis'", call.lineno
         assert "request_id" in keywords and "session_id" in keywords, call.lineno
+
+
+# --- stream_options.include_usage ------------------------------------------------------------------------------------
+
+
+def _chunks(response):
+    from openai.types.chat import ChatCompletionChunk
+
+    events = fp._events(response.text)
+    assert events[-1] == "[DONE]"
+    return [ChatCompletionChunk.model_validate(json.loads(e)) for e in events[:-1]]
+
+
+def test_include_usage_adds_a_final_chunk_with_no_choices_and_the_real_counts(monkeypatch):
+    rig = _Rig(monkeypatch)
+    resp = asyncio.run(fp.send("v1_stream", "tell me about the town", interface_type="text", stream_options={"include_usage": True}))
+    chunks = _chunks(resp)                                  # the SDK's own model parses every chunk
+    last = chunks[-1]
+    assert last.choices == []
+    assert (last.usage.prompt_tokens, last.usage.completion_tokens, last.usage.total_tokens) == (PROMPT, COMPLETION, PROMPT + COMPLETION)
+    assert all(c.usage is None and c.choices for c in chunks[:-1]), "only the last chunk carries usage"
+    assert chunks[-2].choices[0].finish_reason == "stop", "the usage chunk comes after the stop chunk"
+
+
+@pytest.mark.parametrize("options", [None, {}, {"include_usage": False}, {"include_usage": "true"}, {"include_usage": 1}])
+def test_without_include_usage_the_stream_is_unchanged(monkeypatch, options):
+    rig = _Rig(monkeypatch)
+    resp = asyncio.run(fp.send("v1_stream", "tell me about the town", interface_type="text", stream_options=options))
+    chunks = _chunks(resp)
+    assert all(c.usage is None and c.choices for c in chunks)
+    assert chunks[-1].choices[0].finish_reason == "stop"
+
+
+def test_include_usage_on_a_fast_path_turn_reports_zeros(monkeypatch):
+    rig = _Rig(monkeypatch)
+    resp = asyncio.run(fp.send("v1_stream", "hello", interface_type="text", stream_options={"include_usage": True}))
+    last = _chunks(resp)[-1]
+    assert last.choices == [] and (last.usage.prompt_tokens, last.usage.completion_tokens, last.usage.total_tokens) == (0, 0, 0)
+
+
+def test_include_usage_on_the_owner_pin_path_reports_zeros(monkeypatch):
+    from types import SimpleNamespace
+    from unittest import mock
+
+    rig = _Rig(monkeypatch)
+    outcome = SimpleNamespace(message="Owner mode on.", success=True, override_data=None, refused_reason=None)
+    monkeypatch.setattr(h.main, "handle_owner_mode_utterance", mock.AsyncMock(return_value=outcome))
+    resp = asyncio.run(fp.send("v1_stream", "hello", interface_type="text", stream_options={"include_usage": True}))
+    last = _chunks(resp)[-1]
+    assert last.choices == [] and last.usage.total_tokens == 0
+
+
+def test_the_non_stream_response_is_unaffected_by_stream_options(monkeypatch):
+    rig = _Rig(monkeypatch)
+    resp = asyncio.run(fp.send("v1_nonstream", "what is the capital of France", stream_options={"include_usage": True}))
+    assert resp.json()["usage"]["prompt_tokens"] == PROMPT

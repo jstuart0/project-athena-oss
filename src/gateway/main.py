@@ -717,6 +717,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: float = Field(1.0, ge=0, le=1, description="Top-p sampling")
     n: int = Field(1, ge=1, le=10, description="Number of completions")
     stream: bool = Field(False, description="Stream response")
+    stream_options: Optional[Dict[str, Any]] = Field(None, description="OpenAI stream options (include_usage)")
     stop: Optional[List[str]] = Field(None, description="Stop sequences")
     max_tokens: Optional[int] = Field(None, description="Max tokens to generate")
     presence_penalty: float = Field(0, ge=-2, le=2)
@@ -1544,6 +1545,8 @@ def _orchestrator_openai_payload(
     }
     # ATHENA-88 / F88: forward identity top-level too, omitting unset
     # values (never send them as None or "").
+    if stream and (request.stream_options or {}).get("include_usage") is True:
+        payload["stream_options"] = {"include_usage": True}
     if request.user is not None:
         payload["user"] = request.user
     if request.session_id is not None:

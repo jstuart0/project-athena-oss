@@ -132,7 +132,7 @@ def install(monkeypatch, *, server_mode: str = "owner", guest_profile=None, slow
 
 
 def request_for(route: str, text: str, *, session_id: str = "", interface_type: str = "voice",
-                caller_trust: str = "household"):
+                caller_trust: str = "household", stream_options=None):
     session_id = session_id or session_id_for(route)
     if route.startswith("v1"):
         body = {
@@ -140,6 +140,8 @@ def request_for(route: str, text: str, *, session_id: str = "", interface_type: 
             "messages": [{"role": "user", "content": text}],
             "extra_body": {"interface_type": interface_type},
         }
+        if stream_options is not None:
+            body["stream_options"] = stream_options
         return "/v1/chat/completions", body
     path = {"query": "/query", "query_stream": "/query/stream", "query_stream_v2": "/query/stream/v2"}[route]
     body = {"query": text, "session_id": session_id, "caller_trust": caller_trust,

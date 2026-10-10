@@ -111,5 +111,3 @@ def ok(data):
 
 def failed(error, status=None, user_detail=None):
     return RAGResponse(success=False, error=error, status_code=status, service_name="x", user_detail=user_detail)
-
-
