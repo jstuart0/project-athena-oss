@@ -187,6 +187,7 @@ to stay complete — when you add a field, add its row here too.
 | `session_max_count` | `SESSION_MAX_COUNT` | `5000` | Cap on concurrent per-conversation OpenAI-compatible sessions |
 | `new_conversation_per_minute_per_ip` | `NEW_CONVERSATION_PER_MINUTE_PER_IP` | `120` | Gateway sliding-window limit on new (first-turn) conversations per rate-limit key |
 | `trusted_proxy_cidrs` | `TRUSTED_PROXY_CIDRS` | `""` | CIDRs/hosts the new-conversation limiter trusts `X-Forwarded-For` from; empty means every caller's TCP peer is trusted directly |
+| `openai_speech_client_networks` | `OPENAI_SPEECH_CLIENT_NETWORKS` | `""` | CIDRs/addresses of OpenAI-compatible clients whose answers are spoken by a TTS that isn't Athena's; they get speech-normalized text. Empty means only the `/v1/voice` routes are spoken |
 | `new_conversation_reset_grace_seconds` | `NEW_CONVERSATION_RESET_GRACE_SECONDS` | `120` | Grace window before a first-turn fingerprint reset, to tolerate HA's truncated-ASR retry |
 | `orchestrator_ingress_auth` | `ORCHESTRATOR_INGRESS_AUTH` | `enforce` | `enforce`\|`warn`; gates the orchestrator's query/session routes behind `X-Service-Key` |
 | `music_assistant_url` | `MUSIC_ASSISTANT_URL` | `""` | Empty means Music Assistant isn't configured (no hardcoded-host fallback) |
@@ -200,7 +201,8 @@ to stay complete — when you add a field, add its row here too.
 | `ha_satellite_room_map` | `HA_SATELLITE_ROOM_MAP` | `""` | Voice PE `assist_satellite` entity → room map (takes priority over the generic friendly-name parse) |
 | `ha_tv_entities` | `HA_TV_ENTITIES` | `""` | Fallback room → Apple TV entity map, used only when the admin API is unreachable |
 | `ha_bed_warmer_entities` | `HA_BED_WARMER_ENTITIES` | `""` | Entity ids for a Sunbeam-via-Tuya bed-warmer integration |
-| `ha_light_groups` | `HA_LIGHT_GROUPS` | `""` | Room → light-group entity map, read only by the scene-activation-failed fallback (per room; empty means no fallback for that room, never house-wide) |
+| `ha_light_groups` | `HA_LIGHT_GROUPS` | `""` | Room → light-group entity map: the authoritative group for room light commands and status, and the scene-activation-failed fallback (keys match regardless of case, spaces or underscores; a room with no entry is resolved by name, and gets no scene fallback) |
+| `ha_room_light_exclude_entities` | `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | `""` | JSON array of regexes (`re.search` on the entity id); a light picked for a room only by name is dropped when it matches. Unset = built-in LED-ring/status-LED pattern, `"[]"` = off |
 | `ha_music_players` | `HA_MUSIC_PLAYERS` | `""` | Fallback room → Music Assistant entity map, used only when the admin API is unreachable |
 | `ha_permission_fallback_restricted_entities` | `HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES` | `""` | Entity-id regex patterns applied as the "degraded" permission set when the mode service is unreachable or rejecting (ATHENA-69 D4); empty string means "use the built-in default list", explicit `[]` means an outage grants unrestricted HA writes |
 | `guest_baseline_restricted_entities` | `GUEST_BASELINE_RESTRICTED_ENTITIES` | `""` | Floor unioned into every guest's `restricted_entities` regardless of admin config (D8); always unioned in, never replaced |

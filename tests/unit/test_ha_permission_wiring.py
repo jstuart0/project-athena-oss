@@ -840,6 +840,46 @@ class TestOrchestratorQueryCallersTagSupportsFollowup:
         assert _resolve_payload_tag(func_node, json_value, "supports_followup") is True
 
 
+class TestOrchestratorQueryCallersTagInterfaceType:
+    """Every /query caller names its channel with a server-chosen literal
+    (never a value copied from a request): the three speech edges say
+    "voice", SMS says "text", jarvis-web's two chat routes say "chat". The
+    orchestrator renders the answer by this value, so an edge that left it
+    off would silently inherit the QueryRequest default."""
+
+    EXPECTED = {
+        ("src/gateway/main.py", "route_to_orchestrator"): "voice",
+        ("src/gateway/wyoming_bridge.py", "_process_query"): "voice",
+        ("src/gateway/livekit_integration.py", "_handle_query"): "voice",
+        ("admin/backend/app/routes/sms_webhook.py", "route_to_orchestrator"): "text",
+        ("apps/jarvis-web/backend/main.py", "chat"): "chat",
+        ("apps/jarvis-web/backend/main.py", "chat_stream"): "chat",
+    }
+
+    def test_orchestrator_query_callers_tag_interface_type(self):
+        found = _scan_query_callers("interface_type")
+
+        assert set(found) == TestOrchestratorQueryCallersTagCallerTrust.EXPECTED_POPULATION
+        assert found == self.EXPECTED
+        assert sorted(found.values()) == ["chat", "chat", "text", "voice", "voice", "voice"]
+        # Named member: jarvis-web's value is the literal, not message.interface_type.
+        assert found[("apps/jarvis-web/backend/main.py", "chat")] == "chat"
+
+    def test_a_request_field_passthrough_is_not_a_literal(self):
+        source = (
+            "import httpx\n\n"
+            "async def synthetic_caller(message):\n"
+            "    payload = {'query': 'hi', 'interface_type': message.interface_type or 'chat'}\n"
+            "    async with httpx.AsyncClient() as client:\n"
+            "        return await client.post('http://orchestrator/query', json=payload)\n"
+        )
+        visitor = _QueryCallVisitor()
+        visitor.visit(ast.parse(source))
+        func_node, json_value = visitor.found[0]
+        resolved = _resolve_payload_tag(func_node, json_value, "interface_type")
+        assert resolved not in {"voice", "text", "chat"}
+
+
 class TestLiveKitBrowserTokenSitesUseDefaultTTL:
     """Pattern K drift guard: every generate_room_token( call site either
     passes no ttl_minutes (the three browser-facing sites, which pick up

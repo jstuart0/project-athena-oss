@@ -135,6 +135,7 @@ def test_O2_gateway_payload_builder_resolves_same_session_id_in_orchestrator():
     sys.modules.setdefault("prometheus_client", mock.MagicMock())
     os.environ.setdefault("ADMIN_API_URL", "http://localhost:8080")
     import gateway.main as gw
+    from shared.output_channel import OutputChannel
 
     sm = SessionManager()
     sm.redis_client = None
@@ -158,7 +159,7 @@ def test_O2_gateway_payload_builder_resolves_same_session_id_in_orchestrator():
             stream=False,
             user="alice",
         )
-        turn1_payload = gw._orchestrator_openai_payload(gw_request, device_id="kitchen", stream=False)
+        turn1_payload = gw._orchestrator_openai_payload(gw_request, device_id="kitchen", stream=False, channel=OutputChannel.TEXT)
         resp1 = client.post("/v1/chat/completions", json=turn1_payload, headers=_SERVICE_HEADERS)
 
         gw_request2 = gw.ChatCompletionRequest(
@@ -172,7 +173,7 @@ def test_O2_gateway_payload_builder_resolves_same_session_id_in_orchestrator():
             stream=False,
             user="alice",
         )
-        turn2_payload = gw._orchestrator_openai_payload(gw_request2, device_id="office", stream=False)
+        turn2_payload = gw._orchestrator_openai_payload(gw_request2, device_id="office", stream=False, channel=OutputChannel.TEXT)
         resp2 = client.post("/v1/chat/completions", json=turn2_payload, headers=_SERVICE_HEADERS)
 
         gw_request3 = gw.ChatCompletionRequest(
@@ -181,7 +182,7 @@ def test_O2_gateway_payload_builder_resolves_same_session_id_in_orchestrator():
             stream=False,
             user="bob",
         )
-        turn3_payload = gw._orchestrator_openai_payload(gw_request3, device_id="kitchen", stream=False)
+        turn3_payload = gw._orchestrator_openai_payload(gw_request3, device_id="kitchen", stream=False, channel=OutputChannel.TEXT)
         resp3 = client.post("/v1/chat/completions", json=turn3_payload, headers=_SERVICE_HEADERS)
     finally:
         _main_module.process_query = original

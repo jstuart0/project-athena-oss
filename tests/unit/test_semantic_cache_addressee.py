@@ -147,32 +147,24 @@ def test_primed_household_answer_never_reaches_named_callers(client, monkeypatch
 
 def _key(**kw):
     kw.setdefault("knowledge_digest", "abc123def456")
+    kw.setdefault("interface_type", "chat")
     return semantic_cache.get_cache_key("weather_current", QUERY, **kw)
 
 
-def test_key_version_segment_sits_right_before_mode():
-    parts = _key(mode="owner", guest_id=7, location_override={"address": "1 Main"}).split(":")
-    assert parts[0] == "athena_semantic"
-    # …:kv2:kb_<digest>:mode_…
-    assert parts[parts.index("kv2") + 1] == "kb_abc123def456"
-    assert parts[parts.index("kv2") + 2] == "mode_owner"
-    assert semantic_cache.CACHE_KEY_VERSION == "kv2"
-
-
-def test_a_later_interface_segment_stays_last():
-    # The speech campaign appends iface_<type> after everything else; the
-    # version segment must still precede mode_ and the location segment.
-    parts = (_key(mode="guest", guest_id=3, location_override={"address": "1 Main"}) + ":iface_voice").split(":")
-    assert parts[-1] == "iface_voice"
-    assert parts.index("kv2") < parts.index("kb_abc123def456") < parts.index("mode_guest")
-    assert parts.index("mode_guest") < next(i for i, p in enumerate(parts) if p.startswith("loc_"))
-
-
-def test_invalidation_prefix_still_matches_a_new_key():
+def test_key_segments_and_their_order():
+    """…:kv2:kb_<digest>:mode_<m>[:guest:<id>][:loc_…]:iface_<t>, with the
+    category invalidation prefix still matching."""
     import fnmatch
 
-    key = semantic_cache.get_cache_key("weather_current", QUERY, mode="owner", knowledge_digest="abc123def456")
-    assert fnmatch.fnmatch(key, "athena_semantic:weather_*")
+    parts = _key(mode="guest", guest_id=3, location_override={"address": "1 Main"}, interface_type="voice").split(":")
+    assert parts[0] == "athena_semantic" and parts[1] == "weather_current"
+    assert len(parts[2]) == 8  # the query hash
+    assert parts[3:] == ["kv2", "kb_abc123def456", "mode_guest", "guest", "3", parts[8], "iface_voice"]
+    assert parts[8].startswith("loc_")
+    assert semantic_cache.CACHE_KEY_VERSION == "kv2"
+    assert fnmatch.fnmatch(":".join(parts), "athena_semantic:weather_*")
+    bare = _key(mode="owner").split(":")
+    assert bare[3:] == ["kv2", "kb_abc123def456", "mode_owner", "iface_chat"]
 
 
 # --- the knowledge digest (a narrowed row can't be replayed from the cache) ---------

@@ -46,7 +46,15 @@ from gateway.simple_commands import detect_simple_command, execute_simple_comman
 from gateway.intent_prerouter import classify_intent, handle_simple_intent
 from gateway.circuit_breaker import CircuitBreaker, CircuitState
 from gateway.rate_limiter import TokenBucketRateLimiter
-from shared.client_throttle import read_forwarded_for
+from shared.client_throttle import invalid_network_entries, parse_networks, read_forwarded_for
+from shared.output_channel import (
+    OutputChannel,
+    classify_openai_caller,
+    interface_type_for_channel,
+    render_for_channel,
+    render_sink_text,
+    without_networks_overlapping,
+)
 from gateway.conversation_limiter import (
     NewConversationLimiter,
     RedisNewConversationLimiter,
@@ -157,6 +165,52 @@ SERVICE_API_KEY = _get_athena_config().service_api_key
 # multiple gateway replicas share one budget per key.
 NEW_CONVERSATION_PER_MINUTE_PER_IP = _get_athena_config().new_conversation_per_minute_per_ip
 TRUSTED_PROXY_CIDRS = _get_athena_config().trusted_proxy_cidrs
+
+# Which OpenAI-compatible callers' answers are spoken by a TTS that isn't
+# Athena's (an HA conversation agent with HA-side TTS). A network that
+# overlaps the trusted proxies is dropped here, at import, so a request that
+# arrives before lifespan() logs the problem is still classified safely; the
+# ERROR itself (a count only) is logged once from lifespan().
+OPENAI_SPEECH_CLIENT_NETWORKS = _get_athena_config().openai_speech_client_networks
+_TRUSTED_PROXY_NETWORKS = parse_networks(TRUSTED_PROXY_CIDRS)
+_SPEECH_CLIENT_NETWORKS, _SPEECH_NETWORKS_DROPPED = without_networks_overlapping(
+    parse_networks(OPENAI_SPEECH_CLIENT_NETWORKS), _TRUSTED_PROXY_NETWORKS, log_error=False
+)
+
+
+def _log_speech_network_config() -> None:
+    """Startup validation for OPENAI_SPEECH_CLIENT_NETWORKS. Counts only, never addresses."""
+    invalid = invalid_network_entries(OPENAI_SPEECH_CLIENT_NETWORKS)
+    if invalid:
+        logger.error("openai_speech_client_networks_invalid", count=len(invalid))
+    if _SPEECH_NETWORKS_DROPPED:
+        logger.error("openai_speech_networks_overlap_trusted_proxies", count=_SPEECH_NETWORKS_DROPPED)
+    if _SPEECH_CLIENT_NETWORKS and not _TRUSTED_PROXY_NETWORKS:
+        logger.warning("openai_speech_networks_without_trusted_proxy")
+
+
+def _classify_openai_channel(raw_request: Request) -> OutputChannel:
+    """Decide, from the server's own view of the request, whether the answer is spoken.
+
+    A request on a /v1/voice route is speech; otherwise the client network rule
+    applies; otherwise text. Only the matched route template is read, never the
+    URL or the query string, and nothing the client sends decides it.
+    """
+    route_path = getattr(raw_request.scope.get("route"), "path", None)
+    decision = classify_openai_caller(
+        voice_path=isinstance(route_path, str) and route_path.startswith("/v1/voice/"),
+        peer=raw_request.client.host if raw_request.client else None,
+        forwarded_for=read_forwarded_for(raw_request.headers),
+        speech_networks=_SPEECH_CLIENT_NETWORKS,
+        trusted_proxies=_TRUSTED_PROXY_NETWORKS,
+    )
+    logger.info(
+        "openai_output_channel",
+        channel=decision.channel.value,
+        rule=decision.rule,
+        route=route_path if isinstance(route_path, str) else "unmatched",
+    )
+    return decision.channel
 
 
 def _warn_if_trusted_proxy_unset(cidrs: str) -> bool:
@@ -354,6 +408,7 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Gateway service")
     _warn_if_trusted_proxy_unset(TRUSTED_PROXY_CIDRS)
+    _log_speech_network_config()
 
     # Initialize shared HTTP clients for reuse (performance optimization)
     metric_client = httpx.AsyncClient(timeout=5.0)  # For metric logging
@@ -1201,9 +1256,9 @@ async def route_to_orchestrator(
             )
             # Fall back to Ollama immediately
             if return_session_id:
-                fallback_response = await route_to_ollama(request)
+                fallback_response = await route_to_ollama(request, channel=OutputChannel.SPEECH)
                 return fallback_response, f"session-{uuid.uuid4().hex[:8]}"
-            return await route_to_ollama(request)
+            return await route_to_ollama(request, channel=OutputChannel.SPEECH)
 
     try:
         # Extract user message
@@ -1225,6 +1280,8 @@ async def route_to_orchestrator(
                 # inbound request. Trusted for the orchestrator's owner-mode
                 # PIN override path.
                 "caller_trust": "household",
+                # The HA conversation route is always spoken; a literal, never a client value.
+                "interface_type": "voice",
             }
 
             # ATHENA-128 D14: a literal, set only for callers that opt in --
@@ -1291,17 +1348,23 @@ async def route_to_orchestrator(
             await orchestrator_circuit_breaker.record_failure()
         # Fall back to Ollama
         if return_session_id:
-            fallback_response = await route_to_ollama(request)
+            fallback_response = await route_to_ollama(request, channel=OutputChannel.SPEECH)
             return fallback_response, f"session-{uuid.uuid4().hex[:8]}"
-        return await route_to_ollama(request)
+        return await route_to_ollama(request, channel=OutputChannel.SPEECH)
 
 async def route_to_ollama(
     request: ChatCompletionRequest,
     device_id: Optional[str] = None,
     session_id: Optional[str] = None,
-    user_id: Optional[str] = None
+    user_id: Optional[str] = None,
+    *,
+    channel: OutputChannel,
 ) -> ChatCompletionResponse:
-    """Route request directly to Ollama with metric logging."""
+    """Route request directly to Ollama with metric logging.
+
+    This is the fallback when the orchestrator can't answer, so its text is raw
+    model output: the caller's channel decides whether it is rendered for speech.
+    """
     start_time = time.time()
 
     try:
@@ -1328,6 +1391,8 @@ async def route_to_ollama(
                     response_text = chunk.get("message", {}).get("content", "")
                     eval_count = chunk.get("eval_count", 0)
                     break
+
+        response_text = render_for_channel(response_text, channel)
 
         # Calculate metrics
         latency_seconds = time.time() - start_time
@@ -1415,11 +1480,19 @@ async def stream_response(request: ChatCompletionRequest) -> AsyncIterator[str]:
         yield "data: [DONE]\n\n"
 
     except Exception as e:
-        logger.error(f"Streaming error: {e}", exc_info=True)
-        yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+        logger.error("ollama_stream_error", error=type(e).__name__, exc_info=True)
+        yield _stream_error_line()
+
+STREAM_ERROR_MESSAGE = "The request could not be completed."
+
+
+def _stream_error_line() -> str:
+    """An SSE error line for a failed stream: generic text, never the exception's."""
+    return f"data: {json.dumps({'error': STREAM_ERROR_MESSAGE})}\n\n"
+
 
 def _orchestrator_openai_payload(
-    request: ChatCompletionRequest, device_id: Optional[str] = None, *, stream: bool
+    request: ChatCompletionRequest, device_id: Optional[str] = None, *, stream: bool, channel: OutputChannel
 ) -> dict:
     """Build the OpenAI-shaped payload the orchestrator's
     /v1/chat/completions expects. Shared by the streaming
@@ -1428,7 +1501,8 @@ def _orchestrator_openai_payload(
     both resolve the same OpenAI session the same way. room is passed both
     top-level and via extra_body (resolve_openai_session reads request.room
     or extra_body.room), and identity fields are omitted entirely when
-    unset rather than sent as None/"" (ATHENA-88 / F88)."""
+    unset rather than sent as None/"" (ATHENA-88 / F88). interface_type is the
+    server-decided channel, never a value taken from the client's request."""
     payload = {
         "model": request.model,
         "messages": [
@@ -1437,7 +1511,10 @@ def _orchestrator_openai_payload(
         ],
         "temperature": request.temperature,
         "stream": stream,
-        "extra_body": {"room": device_id or "unknown"}  # Pass room context
+        "extra_body": {
+            "room": device_id or "unknown",  # Pass room context
+            "interface_type": interface_type_for_channel(channel),
+        },
     }
     # ATHENA-88 / F88: forward identity top-level too, omitting unset
     # values (never send them as None or "").
@@ -1451,7 +1528,7 @@ def _orchestrator_openai_payload(
 
 
 async def route_chat_completion_to_orchestrator(
-    request: ChatCompletionRequest, device_id: Optional[str] = None
+    request: ChatCompletionRequest, device_id: Optional[str] = None, *, channel: OutputChannel
 ) -> ChatCompletionResponse:
     """F97 non-streaming path (D1-B): forwards the full OpenAI payload (not
     just the last user message) to the orchestrator's /v1/chat/completions,
@@ -1471,14 +1548,14 @@ async def route_chat_completion_to_orchestrator(
                 state=orchestrator_circuit_breaker.state.value,
                 message="Falling back to Ollama due to circuit breaker"
             )
-            return await route_to_ollama(request)
+            return await route_to_ollama(request, channel=channel)
 
     user_message = ""
     for msg in request.messages:
         if msg.role == "user":
             user_message = msg.content
 
-    payload = _orchestrator_openai_payload(request, device_id, stream=False)
+    payload = _orchestrator_openai_payload(request, device_id, stream=False, channel=channel)
 
     try:
         with request_duration.labels(endpoint="orchestrator").time():
@@ -1521,18 +1598,20 @@ async def route_chat_completion_to_orchestrator(
         logger.error(f"Failed to route to orchestrator: {e}", exc_info=True)
         if circuit_breaker_enabled and orchestrator_circuit_breaker:
             await orchestrator_circuit_breaker.record_failure()
-        return await route_to_ollama(request)
+        return await route_to_ollama(request, channel=channel)
 
 
 async def stream_orchestrator_response(
     request: ChatCompletionRequest,
-    device_id: Optional[str] = None
+    device_id: Optional[str] = None,
+    *,
+    channel: OutputChannel,
 ) -> AsyncIterator[str]:
     """Stream response from orchestrator's OpenAI-compatible endpoint."""
     try:
         # Forward streaming request to orchestrator's /v1/chat/completions endpoint
         # Note: room context passed via extra_body for orchestrator to use
-        payload = _orchestrator_openai_payload(request, device_id, stream=True)
+        payload = _orchestrator_openai_payload(request, device_id, stream=True, channel=channel)
 
         # Stream from orchestrator using the same timeout as non-streaming path (audit bob:5)
         async with orchestrator_client.stream(
@@ -1549,8 +1628,8 @@ async def stream_orchestrator_response(
                     yield f"{line}\n\n"
 
     except Exception as e:
-        logger.error(f"Orchestrator streaming error: {e}", exc_info=True)
-        yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+        logger.error("orchestrator_stream_error", error=type(e).__name__, exc_info=True)
+        yield _stream_error_line()
 
 async def _check_new_conversation_limit(
     client_host: str,
@@ -1602,6 +1681,7 @@ async def _check_new_conversation_limit(
         )
 
 
+@app.post("/v1/voice/chat/completions", response_model=ChatCompletionResponse)
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(
     request: ChatCompletionRequest,
@@ -1613,8 +1693,12 @@ async def chat_completions(
     Routes to orchestrator for Athena queries, Ollama for general queries.
 
     Rate limiting and circuit breaker are applied based on gateway configuration.
+
+    /v1/voice/chat/completions is the same handler for callers whose TTS isn't
+    Athena's: the route template (not a client field) makes the answer speech.
     """
     request_counter.labels(endpoint="chat_completions", status="started").inc()
+    channel = _classify_openai_channel(raw_request)
 
     # Check rate limiter if enabled
     rate_limit_enabled = gateway_config.get("rate_limit_enabled", True) if gateway_config else True
@@ -1654,7 +1738,7 @@ async def chat_completions(
 
             # Always stream from orchestrator to ensure tools are available
             return StreamingResponse(
-                stream_orchestrator_response(request, device_id=room),
+                stream_orchestrator_response(request, device_id=room, channel=channel),
                 media_type="text/event-stream"
             )
 
@@ -1666,7 +1750,7 @@ async def chat_completions(
             logger.info("Routing to orchestrator (default - tools always available)")
 
         # Always use orchestrator so tools are available, pass room for context
-        response = await route_chat_completion_to_orchestrator(request, device_id=room)
+        response = await route_chat_completion_to_orchestrator(request, device_id=room, channel=channel)
 
         request_counter.labels(endpoint="chat_completions", status="success").inc()
         return response
@@ -1738,6 +1822,7 @@ def _responses_to_chat_request(request: ResponsesAPIRequest) -> ChatCompletionRe
     )
 
 
+@app.post("/v1/voice/responses")
 @app.post("/v1/responses")
 async def responses_api(
     request: ResponsesAPIRequest,
@@ -1749,8 +1834,11 @@ async def responses_api(
 
     Converts to Chat Completions format and routes to orchestrator.
     Used by some clients like HA OpenAI Conversation Plus.
+
+    /v1/voice/responses is the same handler, and a speech channel by route.
     """
     request_counter.labels(endpoint="responses_api", status="started").inc()
+    channel = _classify_openai_channel(raw_request)
 
     # D12: reject rather than silently drop -- the gateway stores no
     # responses to resume from, so honouring this would need a new state
@@ -1795,12 +1883,12 @@ async def responses_api(
             request_counter.labels(endpoint="responses_api", status="streaming").inc()
             # For streaming, we need to convert the SSE format
             return StreamingResponse(
-                stream_responses_api(chat_request, room),
+                stream_responses_api(chat_request, room, channel=channel),
                 media_type="text/event-stream"
             )
 
         # Non-streaming: route to orchestrator
-        response = await route_chat_completion_to_orchestrator(chat_request, device_id=room)
+        response = await route_chat_completion_to_orchestrator(chat_request, device_id=room, channel=channel)
 
         # Convert ChatCompletionResponse to ResponsesAPIResponse
         response_text = ""
@@ -1838,63 +1926,75 @@ async def responses_api(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-async def stream_responses_api(request: ChatCompletionRequest, device_id: str) -> AsyncIterator[str]:
+async def stream_responses_api(
+    request: ChatCompletionRequest, device_id: str, *, channel: OutputChannel
+) -> AsyncIterator[str]:
     """Stream responses in Responses API format.
 
     OpenAI Responses API streaming requires specific events in order:
     1. response.created - Initial response creation
-    2. response.output_item.added - Output item (message) being added
-    3. response.content_part.added - Content part being added
-    4. response.output_text.delta - Text deltas as they arrive
-    5. response.output_text.done - Text generation complete
-    6. response.content_part.done - Content part complete
-    7. response.output_item.done - Output item complete
-    8. response.done - Response complete
+    2. response.in_progress
+    3. response.output_item.added - Output item (message) being added
+    4. response.content_part.added - Content part being added
+    5. response.output_text.delta - Text deltas as they arrive
+    6. response.output_text.done - Text generation complete
+    7. response.content_part.done - Content part complete
+    8. response.output_item.done - Output item complete
+    9. response.completed - Response complete
+
+    Every event carries a running sequence_number, and the objects carry the
+    fields the OpenAI client models require (item status, annotations,
+    logprobs, the response's model/tools), so a typed client parses the stream.
     """
     import uuid
     response_id = f"resp_{uuid.uuid4().hex[:24]}"
     item_id = f"item_{uuid.uuid4().hex[:16]}"
     content_idx = 0
     full_text = ""
+    created_at = time.time()
+    sequence = 0
+
+    def _event(payload: Dict[str, Any]) -> str:
+        nonlocal sequence
+        payload["sequence_number"] = sequence
+        sequence += 1
+        return f"data: {json.dumps(payload)}\n\n"
+
+    def _response_object(status: str, output: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": status,
+            "model": request.model,
+            "output": output,
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+    def _text_part(text: str) -> Dict[str, Any]:
+        return {"type": "output_text", "text": text, "annotations": [], "logprobs": []}
+
+    def _message_item(status: str, content: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {"id": item_id, "type": "message", "role": "assistant", "status": status, "content": content}
 
     try:
-        # 1. Send response.created event first (REQUIRED by OpenAI SDK)
-        created_event = {
-            "type": "response.created",
-            "response": {
-                "id": response_id,
-                "object": "response",
-                "status": "in_progress",
-                "output": []
-            }
-        }
-        yield f"data: {json.dumps(created_event)}\n\n"
+        # 1-2. response.created, then response.in_progress (REQUIRED by OpenAI SDK)
+        yield _event({"type": "response.created", "response": _response_object("in_progress", [])})
+        yield _event({"type": "response.in_progress", "response": _response_object("in_progress", [])})
 
-        # 2. Send output item added event
-        item_added_event = {
-            "type": "response.output_item.added",
-            "output_index": 0,
-            "item": {
-                "id": item_id,
-                "type": "message",
-                "role": "assistant",
-                "content": []
-            }
-        }
-        yield f"data: {json.dumps(item_added_event)}\n\n"
+        # 3. Send output item added event
+        yield _event({"type": "response.output_item.added", "output_index": 0, "item": _message_item("in_progress", [])})
 
-        # 3. Send content part added event
-        content_added_event = {
+        # 4. Send content part added event
+        yield _event({
             "type": "response.content_part.added",
             "item_id": item_id,
             "output_index": 0,
             "content_index": content_idx,
-            "part": {
-                "type": "output_text",
-                "text": ""
-            }
-        }
-        yield f"data: {json.dumps(content_added_event)}\n\n"
+            "part": _text_part(""),
+        })
 
         # 4. TRUE PARALLEL: Start orchestrator request FIRST (background task),
         # then send acknowledgment while orchestrator is processing
@@ -1912,7 +2012,7 @@ async def stream_responses_api(request: ChatCompletionRequest, device_id: str) -
             try:
                 logger.info(f"ACK_TIMING: Orchestrator task STARTED at {time_module.time() - ack_start_time:.3f}s")
                 first_chunk = True
-                async for chunk in stream_orchestrator_response(request, device_id=device_id):
+                async for chunk in stream_orchestrator_response(request, device_id=device_id, channel=channel):
                     if first_chunk:
                         logger.info(f"ACK_TIMING: First orchestrator chunk at {time_module.time() - ack_start_time:.3f}s")
                         first_chunk = False
@@ -1994,81 +2094,50 @@ async def stream_responses_api(request: ChatCompletionRequest, device_id: str) -
                         content = delta.get("content", "")
                         if content:
                             full_text += content
-                            delta_event = {
+                            yield _event({
                                 "type": "response.output_text.delta",
                                 "item_id": item_id,
                                 "output_index": 0,
                                 "content_index": content_idx,
-                                "delta": content
-                            }
-                            yield f"data: {json.dumps(delta_event)}\n\n"
+                                "delta": content,
+                                "logprobs": [],
+                            })
                     except json.JSONDecodeError:
                         pass  # Skip malformed chunks
 
         # Ensure background task is complete
         await orchestrator_task
 
-        # 5. Send output_text.done event
-        text_done_event = {
+        # 6. Send output_text.done event
+        yield _event({
             "type": "response.output_text.done",
             "item_id": item_id,
             "output_index": 0,
             "content_index": content_idx,
-            "text": full_text
-        }
-        yield f"data: {json.dumps(text_done_event)}\n\n"
+            "text": full_text,
+            "logprobs": [],
+        })
 
-        # 6. Send content_part.done event
-        content_done_event = {
+        # 7. Send content_part.done event
+        yield _event({
             "type": "response.content_part.done",
             "item_id": item_id,
             "output_index": 0,
             "content_index": content_idx,
-            "part": {
-                "type": "output_text",
-                "text": full_text
-            }
-        }
-        yield f"data: {json.dumps(content_done_event)}\n\n"
+            "part": _text_part(full_text),
+        })
 
-        # 7. Send output_item.done event
-        item_done_event = {
-            "type": "response.output_item.done",
-            "output_index": 0,
-            "item": {
-                "id": item_id,
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": full_text}]
-            }
-        }
-        yield f"data: {json.dumps(item_done_event)}\n\n"
+        # 8. Send output_item.done event
+        final_item = _message_item("completed", [_text_part(full_text)])
+        yield _event({"type": "response.output_item.done", "output_index": 0, "item": final_item})
 
-        # 8. Send response.done event (final event)
-        done_event = {
-            "type": "response.done",
-            "response": {
-                "id": response_id,
-                "object": "response",
-                "status": "completed",
-                "output": [{
-                    "id": item_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": full_text}]
-                }]
-            }
-        }
-        yield f"data: {json.dumps(done_event)}\n\n"
+        # 9. Send response.completed event (final event)
+        yield _event({"type": "response.completed", "response": _response_object("completed", [final_item])})
 
     except Exception as e:
-        logger.error(f"Responses API streaming error: {e}", exc_info=True)
-        # Send error event
-        error_event = {
-            "type": "error",
-            "error": {"message": str(e), "type": "server_error"}
-        }
-        yield f"data: {json.dumps(error_event)}\n\n"
+        logger.error("responses_stream_error", error=type(e).__name__, exc_info=True)
+        # Send error event: a generic message, never the exception text
+        yield _event({"type": "error", "code": "server_error", "message": STREAM_ERROR_MESSAGE, "param": None})
 
 
 @app.get("/health")
@@ -2369,6 +2438,7 @@ async def debug_feature_flags():
     }
 
 
+@app.get("/v1/voice/models")
 @app.get("/v1/models")
 async def list_models():
     """List available models (OpenAI-compatible) - returns actual available LLM backends."""
@@ -2634,11 +2704,15 @@ def _ha_response_payload(speech_text: str, language: str) -> Dict[str, Any]:
     built the response through them raised NameError after the requested
     action had already executed. Mirrors the shape the orchestrator-routed
     success path below already builds correctly.
+
+    HA speaks this text, so it is rendered for speech here, once, for all four
+    HA conversation returns (the two gateway-local answers, the pre-routed one,
+    and the orchestrator's, which is already rendered: rendering is idempotent).
     """
     return {
         "speech": {
             "plain": {
-                "speech": speech_text,
+                "speech": render_sink_text(speech_text, sink="ha_conversation"),
                 "extra_data": None
             }
         },

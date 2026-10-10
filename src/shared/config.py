@@ -360,6 +360,17 @@ class AthenaConfig(BaseSettings):
     # left-most value. Keep this scoped to the actual reverse-proxy
     # subnet, not a broad cluster-wide default.
     trusted_proxy_cidrs: str = Field(default="")
+    # openai_speech_client_networks: comma-separated CIDRs/addresses of OpenAI-
+    # compatible clients (/v1/chat/completions, /v1/responses) whose answers are
+    # spoken by a TTS that isn't Athena's, e.g. a Home Assistant conversation
+    # agent with HA-side TTS. Such a caller gets speech-normalized text ("25
+    # miles per hour"); every other caller gets text as written. The client
+    # address is the one the new-conversation limiter uses (nearest
+    # X-Forwarded-For hop outside trusted_proxy_cidrs), so set
+    # trusted_proxy_cidrs too when the gateway sits behind a proxy. An entry
+    # that overlaps trusted_proxy_cidrs is ignored with an ERROR. Empty
+    # (default): no network rule; the /v1/voice routes still select speech.
+    openai_speech_client_networks: str = Field(default="")
     # new_conversation_reset_grace_seconds: F38 (codex r2 Medium) — a
     # first-turn fingerprint reset is skipped when a session under the same
     # fingerprint was created within this many seconds. HA's known truncated
@@ -474,6 +485,14 @@ class AthenaConfig(BaseSettings):
     #   house ("all") when a specific room's group isn't configured is a
     #   house-wide regression, not a safe default.
     ha_light_groups: str = Field(default="")
+    # ha_room_light_exclude_entities: JSON array of regexes (re.search on the
+    #   entity id). A light matched only by room *name* is dropped when it
+    #   matches one, so a voice satellite's status LED or LED ring is not
+    #   treated as a room fixture. Unset uses the built-in LED-ring/status-LED
+    #   pattern; "[]" opts out entirely; a malformed value falls back to the
+    #   default. Never applied to an explicit HA_LIGHT_GROUPS entry or to a
+    #   member of a candidate group.
+    ha_room_light_exclude_entities: str = Field(default="")
     # ha_music_players: fallback room -> Music Assistant media_player
     #   entity mapping, used only when the admin API's room_audio_config
     #   table is unreachable (see src/orchestrator/music_handler.py's

@@ -21,7 +21,7 @@ Complete reference for all configuration options in Project Athena.
 
 ## Centralized Configuration via AthenaConfig
 
-`AthenaConfig` (`src/shared/config.py`) is the canonical pydantic-settings `BaseSettings` object for Athena. It centralizes 41 env vars, starting with 11 high-leverage vars migrated in Campaign 4 (ATHENA-7) and extended by later campaigns (ATHENA-1, ATHENA-11, ATHENA-12, ATHENA-14, ATHENA-59, ATHENA-88, ATHENA-89). The remaining env vars in the codebase continue to use direct `os.getenv` and are migrated per-PR — see `CONTRIBUTING.md` for the extension pattern.
+`AthenaConfig` (`src/shared/config.py`) is the canonical pydantic-settings `BaseSettings` object for Athena. It centralizes 64 env vars, starting with 11 high-leverage vars migrated in Campaign 4 (ATHENA-7) and extended by later campaigns (ATHENA-1, ATHENA-11, ATHENA-12, ATHENA-14, ATHENA-59, ATHENA-88, ATHENA-89). The remaining env vars in the codebase continue to use direct `os.getenv` and are migrated per-PR — see `CONTRIBUTING.md` for the extension pattern.
 
 ### Reading config in code
 
@@ -1496,7 +1496,65 @@ value is ignored with a warning.
 increments the `athena_ha_write_denied_total{domain, scope_mode}` Prometheus
 counter, regardless of which entry point or node produced it — alert on a
 sustained rise if you want to notice a caller hammering a write it doesn't
-have.
+have. A room light command that drops a light the request may not use
+(see "How a room's lights are chosen") adds one increment for that command,
+plus one for every denial the guard itself raises; so a single guest command
+can count more than once.
+
+#### How a room's lights are chosen
+
+A room light command ("turn on the kitchen lights") resolves to the smallest
+set of light entities that cover that room's lights, and writes each physical
+bulb at most once.
+
+1. **`HA_LIGHT_GROUPS`.** If the room has an entry, that entity is the room.
+   Keys match regardless of case, spaces or underscores (`living room`,
+   `Living_Room`). An entry naming an entity Home Assistant doesn't report is
+   logged and ignored. The same entry answers "are the kitchen lights on".
+2. **Name matching.** Otherwise a light belongs to the room when the room's
+   words are whole words at the start of its entity id or friendly name
+   (`kitchen` matches `light.kitchen_ceiling`, not `light.master_kitchen`). A
+   requested part ("hall and nook") that has no such light falls back to a
+   whole-word match anywhere in the name, for that part only. Lights matching
+   `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` (by default an id with `led_ring` or
+   `status_led`, such as a voice satellite's ring) are left out of this tier
+   only.
+3. **Synonyms.** `hall`/`hallway`/`corridor`/`foyer`, `bath`/`bathroom`/
+   `restroom`/`washroom`, `living room`/`livingroom`/`lounge`, `office`/
+   `study`/`home_office`, `basement`/`cellar`, `garage`/`carport`,
+   `kitchen`/`kitchenette`, `dining`, `front` (also `entrance`/`entryway`),
+   `back`/`backyard`/`rear`/`patio`, `outside` (also `porch`/`outdoor`/
+   `exterior`/`patio`), `porch` (also `front_porch`/`back_porch`/`back_yard`), `master bedroom` (also `main_bedroom`/`primary_bedroom`). Saying
+   a synonym reaches its room, except that `porch` and `patio` do not reach
+   `outside`, and `patio` does not reach `back`: those two bare words open
+   other lights' names (`outside_*`, `back_door_*`), so "outside" reaches
+   `porch` and `patio` but not the other way round. Broader aliases such as `bed`, `work`, `family`,
+   `primary` or a floor name are not synonyms, because as a word that opens
+   an id they would pull in other rooms' lights; use `HA_LIGHT_GROUPS` or a
+   room group for those.
+4. **Cover.** A group that is part of another matched group is dropped, and
+   groups that overlap only partly contribute just the lights not already
+   covered, as individual lights. A cycle of groups counts as one light.
+5. **Guests.** A group containing a light the request's permissions deny is
+   replaced by its permitted lights. If nothing permitted is left, the answer
+   is the guest-mode refusal; if only some were dropped, the command runs and
+   the answer says it did part of it.
+6. **The fan-out gate** counts the bulbs a write reaches, not the ids written:
+   a room with one group of 20 bulbs counts 20, so it needs the confirmation
+   or the "all" wording that 20 individual lights would, and can exceed
+   `HA_WRITE_FANOUT_HARD_LIMIT`.
+
+Notes. Group membership and names come from Home Assistant's state list,
+cached for five minutes, so a bulb added to a group or a renamed light takes
+effect within that window. A nested group that the state list doesn't include
+(stale, or hidden from a non-admin token) can't be expanded: its members
+aren't visible, so it is permission-checked by its own id only; restrict such
+ids directly in `restricted_entities` if needed. Status answers ("are the
+kitchen lights on") read light state outside the permission guard and may name
+a light a guest couldn't control. The gateway's simple-command fast path builds
+a single entity name itself and doesn't use any of this. To debug a room, read
+the `room_lights_resolved` and `light_targets_finalized` log events (counts and
+tiers only).
 
 ### Monitoring
 
@@ -1597,6 +1655,57 @@ admin UI's External API Keys page (store keys `api-newsapiai` / `api-webz`).
 | `VOICE_CONTROL_URL` | `http://localhost:8098` | Voice control API |
 | `VOICE_API_URL` | `http://localhost:10201` | Voice API endpoint |
 
+### Spoken vs text responses
+
+An answer is formatted for the ear ("25 miles per hour", "1 degree Fahrenheit")
+only when the server knows it will be spoken. The server decides; a field in the
+client's request never does.
+
+| Where the answer goes | Spoken text |
+|-----------------------|-------------|
+| Wyoming `athena-tts` engine, LiveKit voice, jarvis-web voice playback, `/ha/conversation`, spoken automation announcements | Always. Each Athena TTS sink normalizes its input, whatever sent it |
+| `/query*` with `interface_type: voice` | Yes |
+| `/query*` with `chat` or `text` | No (text as written) |
+| `/v1/chat/completions`, `/v1/responses` | Only for a speech caller (below) |
+
+**OpenAI-compatible callers.** A Home Assistant conversation agent that uses
+its own text-to-speech sends the gateway's `/v1` routes a request that looks
+like any chat client's. The gateway classifies each request, in this order:
+
+1. **A `/v1/voice` route** (`/v1/voice/chat/completions`,
+   `/v1/voice/responses`, `/v1/voice/models`) is speech. It is the same
+   handler, credential check and response shape as its `/v1` twin; only the
+   channel differs. Point the integration's base URL at `http://<gateway>/v1/voice`.
+   `/v1/voice/models`, like `/v1/models`, is never gated by `GATEWAY_API_KEY`.
+2. **`OPENAI_SPEECH_CLIENT_NETWORKS`** (comma-separated CIDRs/addresses; empty
+   by default): a request whose client address falls inside is speech, with no
+   change to the client. The client address is the one the new-conversation
+   limiter uses: the nearest `X-Forwarded-For` hop outside `TRUSTED_PROXY_CIDRS`
+   (right to left), or the TCP peer when it is not a trusted proxy. Behind a
+   reverse proxy set `TRUSTED_PROXY_CIDRS` as well. An entry that overlaps
+   `TRUSTED_PROXY_CIDRS` is ignored, with an ERROR at startup that logs a count
+   only; a speech network with no trusted proxy logs a WARNING.
+3. **Otherwise text.** An unclassified caller gets text as written ("25 mph").
+
+Each request logs `openai_output_channel` with `channel`, `rule`
+(`voice_path`, `client_network` or `default`) and the route template, never an
+address. If a speech caller shows `rule=default`, the proxy is not delivering
+the client's address in `X-Forwarded-For`, or the network is wrong; use the
+`/v1/voice` base URL instead.
+
+The channel only changes formatting. It never feeds authorization: mode and
+permissions come from the server's own resolution.
+
+**Wyoming.** The Wyoming bridge (`python -m gateway.wyoming_bridge`) is an optional
+component that runs on its own; it needs the `wyoming` package (`pip install wyoming`),
+which the gateway image does not include. Where it runs, text Home Assistant sends
+it to synthesize is normalized for speech before it reaches the TTS engine.
+
+**Upgrading.** Non-stream `/v1/chat/completions` used to be formatted for
+speech by default. It is now text unless the caller uses `/v1/voice` or matches
+`OPENAI_SPEECH_CLIENT_NETWORKS`. Streaming answers from command handlers
+(lights, music, TV) are no longer normalized for a text caller.
+
 ---
 
 ## Security Settings
@@ -1638,11 +1747,15 @@ into one session. Send a genuinely per-conversation `user` — or an explicit
 `session_id`/`extra_body.session_id` matching `^explicit-[A-Za-z0-9._:-]{1,55}$`
 — to avoid this.
 
+Whether an answer on these routes is formatted for speech is a separate decision; see
+[Spoken vs text responses](#spoken-vs-text-responses).
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SESSION_MAX_COUNT` | `5000` | Cap on concurrent per-conversation sessions (in-memory fallback dict + Redis creation-time index). The oldest session (by last activity / creation time) is evicted once exceeded. |
 | `NEW_CONVERSATION_PER_MINUTE_PER_IP` | `120` | Gateway-side sliding-window limit on *new* conversations (first-turn requests with no explicit `session_id`) per rate-limit key (see `TRUSTED_PROXY_CIDRS`), applied to both `/v1/chat/completions` and `/v1/responses`. Raised from an earlier default of 30 — behind a reverse proxy every caller can share one resolved key, making a low per-source limit a whole-house limit. |
 | `TRUSTED_PROXY_CIDRS` | *(empty)* | Comma-separated CIDRs/hosts. The new-conversation limiter trusts `X-Forwarded-For`'s original-client address only when the immediate TCP peer (your reverse proxy) falls inside one of these ranges; an untrusted caller can't spoof another source's key via that header. Empty (the default) means every caller's TCP peer address is used directly — correct with no reverse proxy in front of the gateway, but a shared rate-limit bucket for everyone behind one (the gateway logs `trusted_proxy_cidrs_unset` once at startup as a nudge to set this). The header is parsed right-to-left, returning the nearest hop not in this CIDR set (falling back to the TCP peer if every hop is trusted), so a trusted proxy that appends rather than overwrites `X-Forwarded-For` doesn't let an upstream caller forge the left-most value. Example for a flannel/kubeadm-default cluster's pod CIDR: `10.244.0.0/16`. Keep this list scoped to your actual reverse-proxy subnet, not a broad cluster-wide default. |
+| `OPENAI_SPEECH_CLIENT_NETWORKS` | *(empty)* | Comma-separated CIDRs/addresses of OpenAI-compatible clients whose answers are spoken by a text-to-speech that isn't Athena's. They get speech-normalized text; every other `/v1` caller gets text as written. The `/v1/voice` routes are always spoken. Uses the same client address as the new-conversation limiter, so set `TRUSTED_PROXY_CIDRS` behind a proxy; an entry overlapping it is ignored. See [Spoken vs text responses](#spoken-vs-text-responses) |
 | `NEW_CONVERSATION_RESET_GRACE_SECONDS` | `120` | A first-turn fingerprint reset is skipped when a session under the same fingerprint was created within this many seconds — protects against Home Assistant's truncated-ASR retry path, which resends the same single-user-message opener for the same turn. |
 
 The new-conversation limiter's counters are backed by Redis (`REDIS_URL`)
@@ -2165,7 +2278,8 @@ rather than guessing a device/room your HA instance doesn't have. See
 | `HA_TV_ENTITIES` | *(empty)* | Fallback room → Apple TV entity mapping, used only when the admin API's Room TV Config is unreachable. JSON array of `{room, media_player_entity_id, remote_entity_id}` objects, or comma-separated `room:media_player_entity_id[:remote_entity_id]` triples. |
 | `HA_MUSIC_PLAYERS` | *(empty)* | Fallback room → Music Assistant `media_player` entity mapping, used only when the admin API's room audio config is unreachable. JSON object `{room: entity_id}` or comma-separated `room:entity_id` pairs. |
 | `HA_BED_WARMER_ENTITIES` | *(empty)* | JSON object naming the 5 HA entities a Sunbeam-via-Tuya dual-zone bed-warmer/mattress-pad integration exposes (`level_left`, `level_right`, `power_main`, `power_side_a`, `power_side_b`). |
-| `HA_LIGHT_GROUPS` | *(empty)* | JSON object mapping a room name to a light-group entity ID (`{"<room>": "<light group entity>"}`), read by `smart_home_controller.py`'s scene-activation-failed fallback (dim/turn on that room's lights when the requested scene or script doesn't exist). A room with no configured group gets no fallback — turning on every light in the house when one room's group isn't configured would be a house-wide regression, not a safe default. |
+| `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | *(empty)* | JSON array of regexes (`re.search` on the entity id). A light picked for a room only by name is dropped when it matches. Unset uses the built-in pattern for an id with a `led_ring` or `status_led` word; `[]` turns the exclusion off; a malformed value falls back to the built-in pattern. Never applied to an `HA_LIGHT_GROUPS` entry or to a member of a picked group. See "How a room's lights are chosen". |
+| `HA_LIGHT_GROUPS` | *(empty)* | JSON object mapping a room name to a light-group entity ID (`{"<room>": "<light group entity>"}`). The authoritative group for room light commands and status (keys match regardless of case, spaces or underscores), and read by `smart_home_controller.py`'s scene-activation-failed fallback (dim/turn on that room's lights when the requested scene or script doesn't exist). For the scene fallback a room with no configured group gets no fallback — turning on every light in the house when one room's group isn't configured would be a house-wide regression, not a safe default. |
 
 ### jarvis-web appliance and media entities
 
