@@ -118,10 +118,18 @@ class TestOwnerOverrideAllowedForTrustedTiers:
         assert outcome.success is True
         client.post.assert_awaited_once()
         _, kwargs = client.post.call_args
-        assert kwargs["json"]["caller_tier"] == tier
+        # web_owner is a signed-in browser caller: the mode service sees web_authenticated
+        assert kwargs["json"]["caller_tier"] == ("web_authenticated" if tier == "web_owner" else tier)
 
     def test_population_set_equal_to_pin_trusted_tiers(self):
-        assert set(mode_permission.PIN_TRUSTED_TIERS) == {"household", "sms", "web_authenticated"}
+        assert set(mode_permission.PIN_TRUSTED_TIERS) == {"household", "sms", "web_authenticated", "web_owner"}
+
+    def test_web_owner_is_throttled_with_web_authenticated(self):
+        throttle = mode_permission._owner_override_throttle
+        _install_fake_mode_client()
+        _run(mode_permission.handle_owner_mode_utterance("switch to owner mode pin 123456", "web_owner", "kitchen"))
+        assert len(throttle._attempts.get("web_authenticated", [])) == 1
+        assert throttle._attempts.get("web_owner", []) == []
 
 
 class TestAnonymousAttemptsDoNotConsumeHouseholdThrottle:

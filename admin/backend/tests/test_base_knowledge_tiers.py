@@ -406,3 +406,19 @@ def test_owner_role_can_delete_an_owner_tier_row(owner_client, db):
     secret = _row(db, key="b", applies_to="owner")
     assert owner_client.delete(f"{URL}/{secret.id}").status_code == 204
     assert db.get(BaseKnowledge, secret.id) is None
+
+
+@pytest.mark.parametrize("category", ["property", "general"])
+def test_owner_name_keys_outside_owner_or_user_category_are_422(owner_client, db, category):
+    for key in ("owner_name", "name"):
+        r = owner_client.post(URL, json=_payload(category=category, key=key, applies_to="household"))
+        assert r.status_code == 422 and r.json()["detail"].startswith("key: ")
+    assert _count(db) == 0
+    assert owner_client.post(URL, json=_payload(category="user", key="name", applies_to="household")).status_code == 201
+
+
+def test_legacy_property_name_row_can_still_be_retiered(owner_client, db):
+    legacy = _row(db, category="property", key="name", applies_to="both")
+    assert owner_client.put(f"{URL}/{legacy.id}", json={"applies_to": "guest"}).status_code == 200
+    owner_name = _row(db, category="owner", key="owner_name", applies_to="owner")
+    assert owner_client.put(f"{URL}/{owner_name.id}", json={"applies_to": "household"}).status_code == 200

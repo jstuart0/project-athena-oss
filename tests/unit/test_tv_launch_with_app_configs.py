@@ -381,7 +381,7 @@ def node(monkeypatch, admin, sleep, denied_total):
         _runtime.set_tv_handler(tv_handler.AppleTVHandler(ha, admin_client=None))
 
         async def run():
-            authz = await mp.resolve_request_authorization(None, None, "household")
+            authz = await mp.resolve_request_authorization(None, None, "household", service_authenticated=False)
             state = OrchestratorState(
                 query=query, mode=authz.mode, permissions=authz.permissions, mode_degraded=authz.degraded,
             )

@@ -21,7 +21,9 @@ from app.utils.service_auth import require_user_permission, verify_service_or_oi
 from shared.config import get_config
 from shared.knowledge_tiers import (
     KNOWLEDGE_TIERS,
+    NAME_KEY_CATEGORIES,
     OWNER_CATEGORY,
+    OWNER_NAME_KEYS,
     OWNER_TIER,
     WRITABLE_TIERS,
     validate_entry_fields,
@@ -104,7 +106,11 @@ def _tier_rule_violation(entry: BaseKnowledge, new_tier: str) -> Optional[str]:
     category = (entry.category or "").strip().lower()
     if category != OWNER_CATEGORY and validate_entry_fields(category, "k", new_tier) is not None:
         category = "c"
-    key = entry.key if validate_entry_fields("x", entry.key, new_tier) is None else "k"
+    key = entry.key
+    if validate_entry_fields("user", key, new_tier) is not None or (
+        key in OWNER_NAME_KEYS and category not in NAME_KEY_CATEGORIES
+    ):
+        key = "k"
     return validate_entry_fields(category, key, new_tier)
 
 

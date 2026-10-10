@@ -142,7 +142,7 @@ def _state(row: Row, query: str = "tell me about the area"):
     else:
         h.install_mode_client(server_mode=row.server)
     authz = asyncio.run(h.mode_permission.resolve_request_authorization(
-        row.request_mode, row.device, caller_trust=row.trust,
+        row.request_mode, row.device, caller_trust=row.trust, service_authenticated=False,
     ))
     assert authz.degraded == (row.server == "degraded")
     if row.stub:

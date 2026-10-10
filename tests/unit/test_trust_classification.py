@@ -20,6 +20,7 @@ EXPECTED = {
     "household": (False, False, False, False),
     "sms": (True, False, False, False),
     "web_authenticated": (False, False, True, False),
+    "web_owner": (False, False, True, False),
     "web_local": (False, False, False, False),
     "web_guest_net": (True, False, False, False),
     "web_public": (False, False, False, True),

@@ -53,7 +53,7 @@ def guest_house(monkeypatch):
 
 
 def _perms(phase, caller_trust="sms"):
-    authz = _run(mp.resolve_request_authorization("guest", None, caller_trust, sms_stay_phase=phase))
+    authz = _run(mp.resolve_request_authorization("guest", None, caller_trust, service_authenticated=False, sms_stay_phase=phase))
     return authz.permissions
 
 

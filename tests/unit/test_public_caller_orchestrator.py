@@ -31,6 +31,7 @@ def client(monkeypatch):
 
 
 def _authorize(**kwargs):
+    kwargs.setdefault("service_authenticated", False)
     return asyncio.run(h.mode_permission.resolve_request_authorization(**kwargs))
 
 

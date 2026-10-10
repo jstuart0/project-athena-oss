@@ -32,6 +32,8 @@ WRITABLE_TIERS = frozenset(KNOWLEDGE_TIERS)
 OWNER_TIER = "owner"
 OWNER_CATEGORY = "owner"
 OWNER_NAME_KEYS = frozenset({"owner_name", "name"})
+# The only categories whose owner_name/name rows are read as the owner's name.
+NAME_KEY_CATEGORIES = frozenset({"owner", "user"})
 
 _CATEGORY_RE = re.compile(r"[a-z][a-z0-9_]{0,49}")
 _KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}")
@@ -55,11 +57,15 @@ class KnowledgeAudience:
     public: bool
     owner_caller: bool
     owner_proven: bool
+    # Guest mode backed by something the server knows: its own guest mode or a
+    # device-matched stay. A caller's "mode=guest" hint alone narrows who they
+    # are, but doesn't make them a guest, so the guest tier stays hidden.
+    guest_verified: bool = True
 
     UNRESOLVED: ClassVar["KnowledgeAudience"]
 
     def __post_init__(self) -> None:
-        for flag in (self.degraded, self.public, self.owner_caller, self.owner_proven):
+        for flag in (self.degraded, self.public, self.owner_caller, self.owner_proven, self.guest_verified):
             if not isinstance(flag, bool):
                 raise ValueError("audience flags must be bool")
         if self.mode is not None and self.mode not in (_MODE_GUEST, _MODE_OWNER):
@@ -84,7 +90,7 @@ class KnowledgeAudience:
         if self.degraded:
             return frozenset({"both"})
         if self.mode == _MODE_GUEST:
-            return frozenset({"both", "guest"})
+            return frozenset({"both", "guest"}) if self.guest_verified else frozenset({"both"})
         if self.owner_proven:
             return frozenset({"both", "household", "owner"})
         return frozenset({"both", "household"})
@@ -109,6 +115,8 @@ def validate_entry_fields(category: Any, key: Any, applies_to: Any) -> Optional[
         return "category: must be 1-50 characters, lowercase letters, digits and underscores, starting with a letter"
     if not isinstance(key, str) or not _KEY_RE.fullmatch(key):
         return "key: must be 1-100 characters of letters, digits and _ . : -, starting with a letter or digit"
+    if key in OWNER_NAME_KEYS and category not in NAME_KEY_CATEGORIES:
+        return "key: owner_name and name are only valid in the owner or user category"
     if category == OWNER_CATEGORY and applies_to != OWNER_TIER and key not in OWNER_NAME_KEYS:
         return "applies_to: an entry in the owner category must be Owner only, except owner_name and name"
     return None

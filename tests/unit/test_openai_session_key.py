@@ -453,7 +453,7 @@ def test_non_stream_branch_passes_resolved_session():
 
     captured_requests = []
 
-    async def _fake_process_query(query_request):
+    async def _fake_process_query(query_request, **_kw):
         captured_requests.append(query_request)
         return SimpleNamespace(request_id="req-fake", answer="ok")
 

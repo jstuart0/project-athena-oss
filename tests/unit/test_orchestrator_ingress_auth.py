@@ -71,7 +71,7 @@ def client():
     _runtime.set_session_manager(sm)
     _runtime.set_cache_client(_FakeSessionCacheClient())
 
-    async def _fake_process_query(query_request):
+    async def _fake_process_query(query_request, **_kw):
         return SimpleNamespace(
             request_id="req-fake", answer="ok", intent="general_info",
             confidence=1.0, citations=[], session_id="sess-fake",

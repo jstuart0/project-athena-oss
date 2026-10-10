@@ -188,3 +188,34 @@ def test_owner_category_allowed_cases():
         for tier in KNOWLEDGE_TIERS:
             assert validate_entry_fields("owner", key, tier) is None
     assert validate_entry_fields("property", "employer", "household") is None
+
+
+# --- guest_verified and the owner-name key rule ---------------------------------
+
+def test_unverified_guest_mode_sees_only_everyone_rows():
+    hint_only = KnowledgeAudience(mode="guest", degraded=False, public=False, owner_caller=False,
+                                  owner_proven=False, guest_verified=False)
+    assert hint_only.visible_tiers() == frozenset({"both"})
+    assert _aud("guest").visible_tiers() == frozenset({"both", "guest"})  # verified is the default
+    owner = KnowledgeAudience(mode="owner", degraded=False, public=False, owner_caller=False,
+                              owner_proven=False, guest_verified=False)
+    assert owner.visible_tiers() == frozenset({"both", "household"})  # only guest mode cares
+
+
+def test_guest_verified_must_be_a_bool():
+    with pytest.raises(ValueError):
+        KnowledgeAudience(mode="guest", degraded=False, public=False, owner_caller=False,
+                          owner_proven=False, guest_verified="yes")
+
+
+@pytest.mark.parametrize("category", ["property", "general", "location", "instruction"])
+@pytest.mark.parametrize("key", sorted(OWNER_NAME_KEYS))
+def test_owner_name_keys_are_rejected_outside_the_owner_and_user_categories(category, key):
+    detail = validate_entry_fields(category, key, "both")
+    assert detail is not None and detail.startswith("key: ")
+
+
+@pytest.mark.parametrize("category", ["owner", "user"])
+@pytest.mark.parametrize("key", sorted(OWNER_NAME_KEYS))
+def test_owner_name_keys_are_valid_in_the_owner_and_user_categories(category, key):
+    assert validate_entry_fields(category, key, "household") is None

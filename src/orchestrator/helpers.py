@@ -46,8 +46,9 @@ from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 from shared.logging_config import configure_logging
 
 from orchestrator.context.storage import clear_conversation_context
-from orchestrator.mode_permission import is_public_audience, is_public_caller
+from orchestrator.mode_permission import SIGNED_IN_TRUST, is_public_audience, is_public_caller
 from orchestrator.nodes import _runtime
+from orchestrator.session_keys import context_storage_key
 from orchestrator.state import ConversationContext
 from orchestrator.urls import (
     AIRPORTS_SERVICE_URL,
@@ -729,7 +730,8 @@ PUBLIC_CONTEXT_KEYS = frozenset({"location_override"})
 # tests/unit/test_trust_classification.py.
 REQUEST_GUEST_NAME_TRUST = frozenset({"web_guest_net", "sms"})
 DEVICE_GUEST_NAME_TRUST: frozenset = frozenset()  # voice/device naming: a follow-up
-SPEAKER_NAME_TRUST = "web_authenticated"
+# A web_owner (Bearer) caller is signed in too, but jarvis-web never gives a
+# Bearer caller a display name, so speaker_first_name stays absent for it.
 NAMED_ADDRESSEE_KINDS = frozenset({"guest", "household", "owner"})
 _SPEAKER_NAME_MAX_LENGTH = 32
 _SPEAKER_NAME_PUNCTUATION = frozenset(".-'")
@@ -810,7 +812,7 @@ def build_query_context(
         if device_guest_id is not None:
             context["guest_id"] = device_guest_id
 
-    if caller_trust == SPEAKER_NAME_TRUST and not degraded:
+    if caller_trust in SIGNED_IN_TRUST and not degraded:
         first_name = clean_speaker_first_name(request_first_name)
         if first_name:
             context["speaker_first_name"] = first_name
@@ -1110,7 +1112,7 @@ async def store_conversation_context(
     redis_success = False
     if cache_client and cache_client.client:
         try:
-            context_key = f"athena:context:{session_id}"
+            context_key = context_storage_key(session_id)
             await asyncio.wait_for(
                 cache_client.client.setex(context_key, ttl, context.model_dump_json()),
                 timeout=2.0  # 2 second timeout

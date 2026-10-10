@@ -85,7 +85,7 @@ def test_O1_nonstream_branch_forwards_room_and_temperature():
 
     captured = []
 
-    async def _fake_process_query(query_request):
+    async def _fake_process_query(query_request, **_kw):
         captured.append(query_request)
         return SimpleNamespace(request_id="req-fake", answer="ok")
 
@@ -143,7 +143,7 @@ def test_O2_gateway_payload_builder_resolves_same_session_id_in_orchestrator():
 
     captured = []
 
-    async def _fake_process_query(query_request):
+    async def _fake_process_query(query_request, **_kw):
         captured.append(query_request)
         return SimpleNamespace(request_id="req-fake", answer="ok")
 

@@ -59,11 +59,13 @@ from orchestrator.search_providers.result_fusion import ResultFusion
 # Session manager imports
 from orchestrator.session_manager import (
     CALLER_CLASS_OTHER,
+    CALLER_CLASS_OWNER,
     CALLER_CLASS_PUBLIC,
     get_session_manager,
     get_session_summary, update_session_summary
 )
 from orchestrator.config_loader import get_config
+from shared.knowledge_tiers import KnowledgeAudience
 from orchestrator.timing import TimingTracker
 from orchestrator.tts_normalizer import normalize_for_tts
 
@@ -93,7 +95,7 @@ from orchestrator.follow_me_audio import (
 # Resilience pattern imports
 from orchestrator.rag_client import get_rag_client, initialize_rag_client
 from orchestrator.circuit_breaker import get_circuit_breaker_registry
-from orchestrator.ingress_auth import require_service_caller
+from orchestrator.ingress_auth import require_service_caller, service_authenticated
 from orchestrator.rate_limiter import get_rate_limiter_registry
 
 # Semantic query caching for latency optimization
@@ -511,6 +513,7 @@ tool_config_cache: Dict[str, List[Dict[str, Any]]] = {}
 # Forward import — main consolidated import is at line 609 but
 # get_conversation_context's type annotation at line 493 needs it earlier.
 from orchestrator.state import ConversationContext  # noqa: E402
+from orchestrator.session_keys import context_storage_key  # noqa: E402
 
 # ConversationContext now imported from orchestrator.state (via IntentCategory/ModelTier import block above)
 # Note: CONTEXT_REF_PATTERNS, ROOM_INDICATORS, and detect_context_reference
@@ -541,7 +544,7 @@ async def get_conversation_context(session_id: str) -> Optional[ConversationCont
     cache = _runtime.get_cache_client()
     if cache and cache.client:
         try:
-            context_key = f"athena:context:{session_id}"
+            context_key = context_storage_key(session_id)
             # Use asyncio.wait_for to prevent hanging on dead Redis connections
             context_json = await asyncio.wait_for(
                 cache.client.get(context_key),
@@ -6257,7 +6260,7 @@ class QueryRequest(BaseModel):
             "never claim owner."
         ),
     )
-    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_local", "web_guest_net", "web_public"]] = Field(
+    caller_trust: Optional[Literal["household", "sms", "web_authenticated", "web_owner", "web_local", "web_guest_net", "web_public"]] = Field(
         None,
         description=(
             "Set by the calling service in server code, never by an end "
@@ -6266,7 +6269,10 @@ class QueryRequest(BaseModel):
             "'web_guest_net' and 'web_public' are refused before any "
             "throttle or mode-service call). 'web_guest_net' is jarvis-web's "
             "guest network, the only browser caller addressed by the staying "
-            "guest's name. 'web_public' also selects the public audience: a "
+            "guest's name. 'web_owner' is jarvis-web's Bearer-authenticated "
+            "admin owner; it counts as owner proof only on a request that "
+            "also carries a valid X-Service-Key, and only while the house is "
+            "in owner mode with a healthy mode service. 'web_public' also selects the public audience: a "
             "hard-coded narrow allowlist, no guest identity, no base "
             "knowledge, memories, cache or web search."
         ),
@@ -6304,8 +6310,24 @@ class QueryRequest(BaseModel):
     )
 
 
-def _session_caller_class(request: "QueryRequest") -> str:
-    return CALLER_CLASS_PUBLIC if is_public_caller(request.caller_trust) else CALLER_CLASS_OTHER
+def _session_caller_class(request: "QueryRequest", audience: KnowledgeAudience) -> str:
+    """The session class: owner only for a server-proven owner, so an owner
+    session is never resumed (or written to) by anyone who isn't one."""
+    if is_public_caller(request.caller_trust):
+        return CALLER_CLASS_PUBLIC
+    return CALLER_CLASS_OWNER if audience.owner_proven else CALLER_CLASS_OTHER
+
+
+def _drop_unproven_owner_history(request: "QueryRequest", audience: KnowledgeAudience) -> bool:
+    """True when request.chat_history must be ignored: an owner caller that is
+    not proven this turn (a stay, a degraded mode service) could be handed the
+    owner's own thread by a client whose view of the house disagrees with
+    ours, and its answer must not rest on owner conversation."""
+    if not (audience.owner_caller and not audience.owner_proven):
+        return False
+    if request.chat_history:
+        logger.info("chat_history_dropped", reason="owner_unproven", turns=len(request.chat_history))
+    return True
 
 
 def _cache_guest_id(guest_info: Optional[Dict[str, Any]]) -> Optional[Any]:
@@ -6339,7 +6361,10 @@ class QueryResponse(BaseModel):
     sms_content_type: Optional[str] = Field(None, description="Type of detected SMS content")
 
 @app.post("/query", response_model=QueryResponse, dependencies=[Depends(require_service_caller)])
-async def process_query(request: QueryRequest) -> QueryResponse:
+async def process_query(
+    request: QueryRequest,
+    service_authenticated: bool = Depends(service_authenticated),
+) -> QueryResponse:
     """
     Process a user query through the orchestrator state machine.
     """
@@ -6379,30 +6404,15 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                         device_id=request.device_id[:16] + "..." if len(request.device_id) > 16 else request.device_id
                     )
 
-        # Session management: get or create session
-        with timing_tracker.track("pre_graph", "session_management"):
-            logger.info(
-                "session_request_received",
-                request_session_id=request.session_id,
-                user_id=user_id,
-                zone=request.room
-            )
-            session = await sm.get_or_create_session(
-                session_id=request.session_id,
-                user_id=user_id,
-                zone=request.room,
-                caller_class=_session_caller_class(request),
-            )
-
-        logger.info(f"Processing query in session {session.session_id}")
-
-        # Phase 2 (ATHENA-69 D6/D7): server-derived mode and permissions --
+        # Phase 2 (ATHENA-69 D6/D7): server-derived mode and permissions, resolved
+        # BEFORE the session so the session class can depend on owner proof --
         # the single resolution path for every entry point. request.mode is
         # a narrowing hint only; it can never escalate above the server's
         # own mode.
         with timing_tracker.track("pre_graph", "mode_determination"):
             authz = await resolve_request_authorization(
                 request.mode, guest_info, caller_trust=request.caller_trust,
+                service_authenticated=service_authenticated is True,
                 sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
@@ -6416,6 +6426,23 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 degraded=authz.degraded,
                 escalation_ignored=authz.escalation_ignored,
             )
+
+        # Session management: get or create session
+        with timing_tracker.track("pre_graph", "session_management"):
+            logger.info(
+                "session_request_received",
+                request_session_id=request.session_id,
+                user_id=user_id,
+                zone=request.room
+            )
+            session = await sm.get_or_create_session(
+                session_id=request.session_id,
+                user_id=user_id,
+                zone=request.room,
+                caller_class=_session_caller_class(request, authz.knowledge_audience),
+            )
+
+        logger.info(f"Processing query in session {session.session_id}")
 
         # Phase 4 (ATHENA-69 D16/D24): the owner-PIN voice/utterance path.
         # caller_trust is set by the calling SERVICE, in server code, never
@@ -6510,7 +6537,9 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     logger.info(f"History mode: full - loaded {len(conversation_history)} previous messages")
 
         # Inject persistent chat history when no live session was found
-        if request.chat_history and not conversation_history:
+        if _drop_unproven_owner_history(request, authz.knowledge_audience):
+            pass
+        elif request.chat_history and not conversation_history:
             conversation_history = [
                 {"role": m["role"], "content": m["content"]}
                 for m in request.chat_history
@@ -6622,7 +6651,14 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             # A degraded mode service resolves to owner, whose answers can
             # carry owner facts: never cached either.
             named_addressee = addressee_kind(query_context, audience=authz.knowledge_audience) in NAMED_ADDRESSEE_KINDS
-            if request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee or authz.degraded:
+            # An owner caller's turn (proven or not) never touches the cache:
+            # an unproven one is the caller most likely to repeat owner
+            # content, and its answer would be stored under mode_guest.
+            owner_caller = authz.knowledge_audience.owner_caller
+            # A mode=guest hint in an owner-mode house is mode_guest by key but
+            # not a real guest: it must not read what a real stay wrote.
+            unverified_guest = authz.knowledge_audience.mode == "guest" and not authz.knowledge_audience.guest_verified
+            if request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee or authz.degraded or owner_caller or unverified_guest:
                 cached_response = None
             else:
                 cached_response = await get_cached_response(
@@ -6805,10 +6841,14 @@ async def process_query(request: QueryRequest) -> QueryResponse:
 
         # Check for memory forget intent BEFORE running the state machine.
         # Forgetting writes to the admin DB: never for the public audience or
-        # an SMS from outside the stay (answer-only).
+        # an SMS from outside the stay (answer-only), an owner caller that
+        # isn't proven this turn, or an unverified mode=guest hint.
+        audience = authz.knowledge_audience
         try:
             memory_manager = (
                 None if is_public_audience(permissions) or is_stay_read_only(permissions)
+                or (audience.owner_caller and not audience.owner_proven)
+                or (audience.mode == "guest" and not audience.guest_verified)
                 else await get_memory_manager()
             )
             if memory_manager is not None and memory_manager.should_forget_memory(request.query):
@@ -7002,8 +7042,11 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         # outside the stay).
         memory_creation_start = time.time()
         try:
+            if authz.knowledge_audience.owner_caller:
+                logger.info("memory_creation_skipped", reason="owner_caller")
             memory_manager = (
                 None if is_public_audience(permissions) or is_stay_read_only(permissions)
+                or authz.knowledge_audience.owner_caller
                 else await get_memory_manager()
             )
             if memory_manager is not None and memory_manager.should_create_memory(request.query, answer, intent_str):
@@ -7127,6 +7170,8 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             not request.skip_semantic_cache
             and not is_public_caller(request.caller_trust)
             and addressee_kind(query_context, audience=authz.knowledge_audience) not in NAMED_ADDRESSEE_KINDS
+            and not authz.knowledge_audience.owner_caller
+            and not (authz.knowledge_audience.mode == "guest" and not authz.knowledge_audience.guest_verified)
             and not authz.degraded
             and response.answer
             and not final_state.get("is_fallback", False)
@@ -7212,7 +7257,10 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         )
 
 @app.post("/query/stream", dependencies=[Depends(require_service_caller)])
-async def process_query_stream(request: QueryRequest):
+async def process_query_stream(
+    request: QueryRequest,
+    service_authenticated: bool = Depends(service_authenticated),
+):
     """
     Process a user query with TRUE streaming response (Server-Sent Events).
 
@@ -7255,21 +7303,23 @@ async def process_query_stream(request: QueryRequest):
                         has_guest_name=bool(guest_info.get("guest_name"))
                     )
 
+            # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
+            # via the single resolution path every entry point shares. Done
+            # before the session: the session class depends on owner proof.
+            authz = await resolve_request_authorization(
+                request.mode, guest_info, caller_trust=request.caller_trust,
+                service_authenticated=service_authenticated is True,
+                sms_stay_phase=(request.context or {}).get("stay_phase"),
+            )
+            current_mode = authz.mode
+
             # Session management
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room,
-                caller_class=_session_caller_class(request),
+                caller_class=_session_caller_class(request, authz.knowledge_audience),
             )
-
-            # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
-            # via the single resolution path every entry point shares.
-            authz = await resolve_request_authorization(
-                request.mode, guest_info, caller_trust=request.caller_trust,
-                sms_stay_phase=(request.context or {}).get("stay_phase"),
-            )
-            current_mode = authz.mode
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
             # utterance path -- every entry point runs this, not just
@@ -7334,7 +7384,9 @@ async def process_query_stream(request: QueryRequest):
                     logger.info(f"History mode: full - loaded {len(conversation_history)} previous messages")
 
             # Inject persistent chat history when no live session was found
-            if request.chat_history and not conversation_history:
+            if _drop_unproven_owner_history(request, authz.knowledge_audience):
+                pass
+            elif request.chat_history and not conversation_history:
                 conversation_history = [
                     {"role": m["role"], "content": m["content"]}
                     for m in request.chat_history
@@ -7523,7 +7575,10 @@ async def process_query_stream(request: QueryRequest):
 
 
 @app.post("/query/stream/v2", dependencies=[Depends(require_service_caller)])
-async def process_query_stream_v2(request: QueryRequest):
+async def process_query_stream_v2(
+    request: QueryRequest,
+    service_authenticated: bool = Depends(service_authenticated),
+):
     """
     Process a user query with true LLM streaming and sentence buffering.
 
@@ -7573,21 +7628,23 @@ async def process_query_stream_v2(request: QueryRequest):
                         has_guest_name=bool(guest_info.get("guest_name"))
                     )
 
+            # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
+            # via the single resolution path every entry point shares. Done
+            # before the session: the session class depends on owner proof.
+            authz = await resolve_request_authorization(
+                request.mode, guest_info, caller_trust=request.caller_trust,
+                service_authenticated=service_authenticated is True,
+                sms_stay_phase=(request.context or {}).get("stay_phase"),
+            )
+            current_mode = authz.mode
+
             # Session management
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room,
-                caller_class=_session_caller_class(request),
+                caller_class=_session_caller_class(request, authz.knowledge_audience),
             )
-
-            # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
-            # via the single resolution path every entry point shares.
-            authz = await resolve_request_authorization(
-                request.mode, guest_info, caller_trust=request.caller_trust,
-                sms_stay_phase=(request.context or {}).get("stay_phase"),
-            )
-            current_mode = authz.mode
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
             # utterance path -- every entry point runs this, not just
@@ -8287,16 +8344,17 @@ async def chat_completions(request: OpenAIChatRequest):
                 if orchestrator_graph is None:
                     orchestrator_graph = create_orchestrator_graph()
 
+                # ATHENA-69 D6/D7: server-derived mode via the single
+                # resolution path every entry point shares. OpenAIChatRequest
+                # has no mode/device_id fields at all, so both args are None,
+                # and no caller_trust: never an owner caller.
+                authz = await resolve_request_authorization(None, None, service_authenticated=False)
+
                 session = await sm.get_or_create_session(
                     session_id=resolved_session.session_id,
                     user_id="openwebui",
                     zone="web"
                 )
-
-                # ATHENA-69 D6/D7: server-derived mode via the single
-                # resolution path every entry point shares. OpenAIChatRequest
-                # has no mode/device_id fields at all, so both args are None.
-                authz = await resolve_request_authorization(None, None)
 
                 # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
                 # utterance path -- every entry point runs this. This
@@ -8584,7 +8642,7 @@ async def chat_completions(request: OpenAIChatRequest):
             temperature=request.temperature,
         )
 
-        result = await process_query(query_request)
+        result = await process_query(query_request, service_authenticated=False)
 
         # Convert to OpenAI format
         response = OpenAIChatResponse(
