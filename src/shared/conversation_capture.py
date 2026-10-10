@@ -789,6 +789,7 @@ REPORT_INTERVAL_S = 60.0
 DRAIN_S = 2.0
 _FLAG_READ_TIMEOUT_S = 5.0
 _ERROR_LOG_INTERVAL_S = 60.0
+_TASK_STOP_TIMEOUT_S = 1.0
 _STICKY_TURNS = 2
 _STICKY_WINDOW_S = 300.0
 _STICKY_MAX_SESSIONS = 1024
@@ -873,7 +874,10 @@ class CaptureSink:
         self._dropped += queue.qsize() + (1 if self._inflight else 0)
         for task in self._tasks:
             task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        # Bounded, not gather(): on Python 3.11 a cancel that lands as an inner
+        # asyncio.wait_for completes can be swallowed, leaving the loop running. The
+        # loops also test ``_stopping``, so such a task exits at its next iteration.
+        await asyncio.wait(self._tasks, timeout=_TASK_STOP_TIMEOUT_S)
         self._tasks = []
         try:
             await asyncio.wait_for(self._store.close(), _POOL_CLOSE_TIMEOUT_S + 0.5)  # type: ignore[union-attr]
@@ -985,7 +989,7 @@ class CaptureSink:
     async def _flag_loop(self) -> None:
         store = self._store
         assert store is not None
-        while True:
+        while not self._stopping:
             try:
                 self._flags = await asyncio.wait_for(store.read_flags(), _FLAG_READ_TIMEOUT_S)
                 self._clear_error_on_flag_success()
@@ -1023,7 +1027,7 @@ class CaptureSink:
     async def _write_loop(self) -> None:
         store, queue = self._store, self._queue
         assert store is not None and queue is not None
-        while True:
+        while not self._stopping or not queue.empty():
             record = await queue.get()
             self._inflight = True
             try:

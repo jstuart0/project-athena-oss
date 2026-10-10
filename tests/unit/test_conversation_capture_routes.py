@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from types import SimpleNamespace
 from unittest import mock
 
@@ -34,6 +33,27 @@ STREAM_ROUTES = ["/query/stream", "/query/stream/v2", "/v1/chat/completions"]
 ALL_ROUTES = ["/query", "/query/stream", "/query/stream/v2", "/v1/chat/completions:stream", "/v1/chat/completions"]
 ROUTE_LABEL = {"/query": "query", "/query/stream": "query_stream", "/query/stream/v2": "query_stream_v2",
                "/v1/chat/completions:stream": "v1_chat_completions", "/v1/chat/completions": "v1_chat_completions"}
+
+
+
+def run_async(coro, grace=2.0):
+    """``asyncio.run`` with a bounded shutdown.
+
+    The app leaves fire-and-forget tasks behind (cache writes, analytics logs). asyncio.run
+    waits for every one of them to finish cancelling, with no limit, and on a loaded or
+    network-restricted machine one occasionally never does; here the wait is bounded.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.wait(pending, timeout=grace))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
 
 
 class Graph:
@@ -139,12 +159,20 @@ def run(scenario, *, analytics=True, debug=False):
         transport = httpx.ASGITransport(app=h.main.app)
         try:
             async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=h.service_headers()) as client:
-                await scenario(client)
+                try:
+                    await asyncio.wait_for(scenario(client), 30)
+                except asyncio.TimeoutError:
+                    import io
+
+                    out = io.StringIO()
+                    for task in asyncio.all_tasks():
+                        task.print_stack(limit=8, file=out)
+                    raise AssertionError("scenario timed out; pending tasks:\n" + out.getvalue()[-3000:])
         finally:
             await sink.stop(drain_s=2)
         return store
 
-    return asyncio.run(go())
+    return run_async(go())
 
 
 async def post(client, route, **kw):
@@ -500,7 +528,7 @@ def run_driven(route, **kw):
             await sink.stop(drain_s=2)
         return store, spy
 
-    return asyncio.run(go())
+    return run_async(go())
 
 
 @pytest.mark.parametrize("route", ["/query/stream", "/query/stream/v2", "/v1/chat/completions:stream"])
