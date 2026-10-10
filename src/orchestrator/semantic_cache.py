@@ -661,8 +661,8 @@ async def get_cached_response(
         mode: The effective mode (part of the key)
         location_override: Optional location override dict with address, latitude, longitude
         guest_id: The device-identified guest's id, if any (part of the key)
-    knowledge_digest: str,
-    interface_type: str,
+        knowledge_digest: Digest of the base-knowledge rows the caller can see (part of the key)
+        interface_type: The request's interface type (the last part of the key)
 
     Returns:
         Cached response dict if found and valid, None otherwise
