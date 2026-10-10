@@ -48,7 +48,7 @@ jobs:
       - name: Run the guards
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_local_clock_drift.py tests/unit/test_no_pii_in_logs.py tests/unit/test_trust_literal_contract.py tests/unit/test_knowledge_tiers.py tests/unit/test_admin_guest_route_callers_send_service_key.py tests/unit/test_admin_frontend_gated_fetch_auth.py tests/unit/test_admin_frontend_nginx_api_access_log.py tests/unit/test_admin_jarvis_ticket_only.py tests/unit/test_voice_automations_js_escaping.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_local_clock_drift.py tests/unit/test_no_pii_in_logs.py tests/unit/test_trust_literal_contract.py tests/unit/test_knowledge_tiers.py tests/unit/test_base_knowledge_tier_parity.py tests/unit/test_admin_guest_route_callers_send_service_key.py tests/unit/test_admin_frontend_gated_fetch_auth.py tests/unit/test_admin_frontend_nginx_api_access_log.py tests/unit/test_admin_jarvis_ticket_only.py tests/unit/test_voice_automations_js_escaping.py
 
   orchestrator-behaviour:
     name: Orchestrator behaviour tests
