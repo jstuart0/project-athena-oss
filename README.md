@@ -425,6 +425,11 @@ curl -X POST http://localhost:8001/query \
 1. Install the **Extended OpenAI Conversation** integration
 2. Set the base URL to your gateway: `http://your-athena-host:8000/v1`
 3. Voice commands are automatically routed through the full pipeline
+4. Make Athena's answers sound right when Home Assistant speaks them. Answers meant for the ear expand units ("25 miles per hour") and drop symbols. Athena only does that when it knows the answer is spoken, and a plain `/v1` caller is treated as text. Either:
+   - set the base URL to `http://your-athena-host:8000/v1/voice` (same routes, always spoken), or
+   - keep `/v1` and set `OPENAI_SPEECH_CLIENT_NETWORKS` to the Home Assistant host's address (for example `192.0.2.10/32`); behind a reverse proxy also set `TRUSTED_PROXY_CIDRS`.
+
+   The gateway logs `openai_output_channel` per request so you can confirm which rule matched. See [Spoken vs text responses](docs/CONFIGURATION.md#spoken-vs-text-responses).
 
 ## Project Structure
 
@@ -435,7 +440,6 @@ project-athena/
 │   │   ├── main.py          # Core orchestration graph
 │   │   ├── smart_home_controller.py  # HA integration
 │   │   ├── music_handler.py # Music/audio control
-│   │   ├── tts_normalizer.py # Speech normalization
 │   │   ├── complexity_detector.py    # Query complexity scoring
 │   │   ├── semantic_cache.py # Intent-aware response caching
 │   │   ├── circuit_breaker.py
@@ -457,6 +461,7 @@ project-athena/
 │   │   ├── module_registry.py # Module enable/disable system
 │   │   ├── llm_router.py    # Multi-backend LLM routing
 │   │   ├── privacy_filter.py # PII scrubbing for cloud LLMs
+│   │   ├── tts_normalizer.py # Speech normalization (src/shared/tts_normalizer.py)
 │   │   └── admin_config.py  # Admin API client
 │   ├── control_agent/       # Service watchdog (auto-restart)
 │   ├── mode_service/        # Owner/guest mode management

@@ -25,6 +25,7 @@ os.environ.setdefault("SERVICE_API_KEY", "test-key-gateway-nonstream-continuity"
 os.environ.setdefault("ADMIN_API_URL", "http://localhost:8080")
 
 import gateway.main as gw  # noqa: E402
+from shared.output_channel import OutputChannel  # noqa: E402
 import gateway.simple_commands as sc  # noqa: E402
 from gateway.conversation_limiter import NewConversationLimiter  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -102,7 +103,7 @@ def test_G1_chat_completions_nonstream_forwards_full_payload(monkeypatch, _fixed
     assert len(fake_client.captured_json["messages"]) == 4
     assert fake_client.captured_json["user"] == "ha-conv-1"
     assert fake_client.captured_json["room"] == "kitchen"
-    assert fake_client.captured_json["extra_body"] == {"room": "kitchen"}
+    assert fake_client.captured_json["extra_body"] == {"room": "kitchen", "interface_type": "text"}
 
 
 def test_G2_responses_api_nonstream_forwards_full_payload(monkeypatch, _fixed_room):
@@ -129,7 +130,7 @@ def test_G2_responses_api_nonstream_forwards_full_payload(monkeypatch, _fixed_ro
     assert len(fake_client.captured_json["messages"]) == 4
     assert fake_client.captured_json["user"] == "ha-conv-1"
     assert fake_client.captured_json["room"] == "kitchen"
-    assert fake_client.captured_json["extra_body"] == {"room": "kitchen"}
+    assert fake_client.captured_json["extra_body"] == {"room": "kitchen", "interface_type": "text"}
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +196,7 @@ def test_G3_route_to_orchestrator_scoped_to_ha_conversation_only():
     )  # raises StopIteration (failing the test) if the function is missing
     assert "async def stream_orchestrator_response" in source
     assert source.index("async def stream_orchestrator_response") < source.index(
-        "_orchestrator_openai_payload(request, device_id, stream=True)"
+        "_orchestrator_openai_payload(request, device_id, stream=True, channel=channel)"
     )
 
 
@@ -220,10 +221,10 @@ def test_G4_breaker_open_falls_back_to_ollama_never_posts(monkeypatch):
     ollama_mock = mock.AsyncMock(return_value="ollama-response")
     monkeypatch.setattr(gw, "route_to_ollama", ollama_mock)
 
-    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), device_id="kitchen"))
+    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), device_id="kitchen", channel=OutputChannel.TEXT))
 
     assert result == "ollama-response"
-    ollama_mock.assert_awaited_once()
+    ollama_mock.assert_awaited_once_with(mock.ANY, channel=OutputChannel.TEXT)
     assert fake_client.captured_path is None
 
 
@@ -232,7 +233,7 @@ def test_G5_G9_maps_content_and_word_count_usage(monkeypatch):
     fake_client = _CapturingClient(response=_fake_orchestrator_response("hi there friend"))
     monkeypatch.setattr(gw, "orchestrator_client", fake_client)
 
-    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request("hello world"), device_id="kitchen"))
+    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request("hello world"), device_id="kitchen", channel=OutputChannel.TEXT))
 
     assert result.object == "chat.completion"
     assert result.id.startswith("chatcmpl-")
@@ -254,7 +255,7 @@ def test_G7_http_status_error_502_records_failure(monkeypatch):
     monkeypatch.setattr(gw, "orchestrator_client", fake_client)
 
     with pytest.raises(gw.HTTPException) as exc_info:
-        asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), device_id="kitchen"))
+        asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), device_id="kitchen", channel=OutputChannel.TEXT))
 
     assert exc_info.value.status_code == 502
     breaker.record_failure.assert_awaited_once()
@@ -272,10 +273,10 @@ def test_G8_generic_exception_falls_back_to_ollama_records_failure(monkeypatch):
     ollama_mock = mock.AsyncMock(return_value="ollama-response")
     monkeypatch.setattr(gw, "route_to_ollama", ollama_mock)
 
-    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), device_id="kitchen"))
+    result = asyncio.run(gw.route_chat_completion_to_orchestrator(_request(), device_id="kitchen", channel=OutputChannel.TEXT))
 
     assert result == "ollama-response"
-    ollama_mock.assert_awaited_once()
+    ollama_mock.assert_awaited_once_with(mock.ANY, channel=OutputChannel.TEXT)
     breaker.record_failure.assert_awaited_once()
 
 

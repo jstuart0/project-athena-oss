@@ -187,6 +187,7 @@ to stay complete — when you add a field, add its row here too.
 | `session_max_count` | `SESSION_MAX_COUNT` | `5000` | Cap on concurrent per-conversation OpenAI-compatible sessions |
 | `new_conversation_per_minute_per_ip` | `NEW_CONVERSATION_PER_MINUTE_PER_IP` | `120` | Gateway sliding-window limit on new (first-turn) conversations per rate-limit key |
 | `trusted_proxy_cidrs` | `TRUSTED_PROXY_CIDRS` | `""` | CIDRs/hosts the new-conversation limiter trusts `X-Forwarded-For` from; empty means every caller's TCP peer is trusted directly |
+| `openai_speech_client_networks` | `OPENAI_SPEECH_CLIENT_NETWORKS` | `""` | CIDRs/addresses of OpenAI-compatible clients whose answers are spoken by a TTS that isn't Athena's; they get speech-normalized text. Empty means only the `/v1/voice` routes are spoken |
 | `new_conversation_reset_grace_seconds` | `NEW_CONVERSATION_RESET_GRACE_SECONDS` | `120` | Grace window before a first-turn fingerprint reset, to tolerate HA's truncated-ASR retry |
 | `orchestrator_ingress_auth` | `ORCHESTRATOR_INGRESS_AUTH` | `enforce` | `enforce`\|`warn`; gates the orchestrator's query/session routes behind `X-Service-Key` |
 | `music_assistant_url` | `MUSIC_ASSISTANT_URL` | `""` | Empty means Music Assistant isn't configured (no hardcoded-host fallback) |

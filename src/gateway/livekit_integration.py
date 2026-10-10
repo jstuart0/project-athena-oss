@@ -13,6 +13,7 @@ from typing import Optional, Any, Dict
 import structlog
 
 from shared.config import get_config
+from shared.output_channel import render_sink_text
 
 from gateway.livekit_service import (
     LiveKitService,
@@ -331,6 +332,8 @@ class TTSClient:
         import subprocess
         import tempfile
         import json
+
+        text = render_sink_text(text, sink="livekit")
 
         try:
             # Use curl as workaround for httpx connectivity issues on macOS

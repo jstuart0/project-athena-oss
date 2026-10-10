@@ -38,6 +38,7 @@ from admin_url import get_admin_url
 import caller_auth
 import client_throttle
 from service_key import is_header_safe, note_admin_refusal
+from tts_normalizer import normalize_for_tts
 from caller_auth import CLASS_AUTHENTICATED, Caller, resolve_caller, resolve_caller_ws, route_dependency, ws_origin_allowed
 
 # Configure logging. Guarded: structlog.configure() is process-global, and
@@ -523,7 +524,9 @@ class ChatMessage(BaseModel):
     """Chat message from user"""
     message: str
     session_id: Optional[str] = None
-    interface_type: Optional[str] = "chat"  # chat, text, or voice
+    # Accepted for old clients and ignored: jarvis-web is a chat surface and always
+    # tells the orchestrator "chat". The channel is never taken from the browser.
+    interface_type: Optional[str] = "chat"
     location: Optional[LocationOverride] = None
     source: Optional[str] = None  # analytics origin: "chatbot", "jarvis", "voice", etc.
 
@@ -828,7 +831,7 @@ async def chat(message: ChatMessage, request: Request, response: Response):
                 "mode": current_mode,
                 "room": DEFAULT_ROOM,
                 "session_id": session_id,
-                "interface_type": message.interface_type or "chat",  # chat/text prevents TTS normalization
+                "interface_type": "chat",  # pinned: a client string never picks the channel
                 "source": message.source or "jarvis",  # forward caller's source or default to "jarvis"
                 "caller_trust": caller.trust,
                 "supports_followup": True,  # ATHENA-128 D14: the chat session persists
@@ -1069,7 +1072,7 @@ async def chat_stream(message: ChatMessage, request: Request):
                 "mode": current_mode,
                 "room": DEFAULT_ROOM,
                 "session_id": orch_session_id,
-                "interface_type": message.interface_type or "chat",
+                "interface_type": "chat",  # pinned: a client string never picks the channel
                 "source": message.source or "jarvis",
                 "chat_history": chat_history_msgs if inject_history else None,
                 "caller_trust": caller.trust,
@@ -2873,12 +2876,18 @@ async def synthesize_speech(request: TTSRequest):
 
     start_time = time.time()
 
+    # The text is spoken, so it is normalized ("25mph" -> "25 miles per hour") off the
+    # event loop. It is already capped at TTS_MAX_CHARS by TTSRequest.
+    spoken = await asyncio.to_thread(normalize_for_tts, request.text)
+    if not spoken or not spoken.strip():
+        raise HTTPException(status_code=422, detail="Nothing to speak")
+
     try:
         # Use curl as workaround for httpx connectivity issues on macOS
         result = subprocess.run(
             ["curl", "-s", "-m", "30", "-X", "POST",
              "-H", "Content-Type: application/json",
-             "-d", json_module.dumps({"text": request.text}),
+             "-d", json_module.dumps({"text": spoken}),
              f"{VOICE_API_URL}/tts/synthesize"],
             capture_output=True,
             timeout=35
@@ -2894,6 +2903,7 @@ async def synthesize_speech(request: TTSRequest):
         elapsed_ms = (time.time() - start_time) * 1000
         logger.info("tts_success",
                    text_length=len(request.text),
+                   spoken_length=len(spoken),
                    duration_ms=round(elapsed_ms, 1))
 
         # Return audio as streaming response with timing header

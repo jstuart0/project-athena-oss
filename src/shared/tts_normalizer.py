@@ -8,6 +8,19 @@ Handles street names, state abbreviations, and common acronyms.
 import re
 from typing import Dict
 
+# A number that starts a unit rule. The start guard keeps every digit run to
+# one match attempt (linear time on "1" * N), and the bounded quantifiers cap
+# each attempt. A run of more than nine digits is therefore left alone.
+_NUM_START = r'(?<![\d.])'
+_NUM = _NUM_START + r'(-?\d{1,9}(?:\.\d{1,9})?)'
+_GAP = r'\s{0,3}'
+
+
+def _unit(count: str, singular: str, plural: str) -> str:
+    """Pick the unit word for a matched number: only exactly 1 / -1 is singular."""
+    return singular if count in ('1', '-1') else plural
+
+
 # Street/road abbreviations - must come AFTER a number or street name
 STREET_ABBREVIATIONS: Dict[str, str] = {
     r'\bSt\b': 'Street',
@@ -69,7 +82,6 @@ COMMON_ABBREVIATIONS: Dict[str, str] = {
     r'\bmi\b': 'miles',
     r'\bsq ft\b': 'square feet',
     r'\bmph\b': 'miles per hour',
-    r'\bkph\b': 'kilometers per hour',
 }
 
 # Directional abbreviations (for addresses)
@@ -98,6 +110,9 @@ def expand_street_abbreviations(text: str) -> str:
     return text
 
 
+_SINGLE_WORD_STATES = frozenset(name for name in STATE_ABBREVIATIONS.values() if name.isalpha())
+
+
 def expand_state_abbreviations(text: str) -> str:
     """Expand US state abbreviations."""
     # Pattern: comma + space + two-letter state code (optionally followed by ZIP)
@@ -106,6 +121,9 @@ def expand_state_abbreviations(text: str) -> str:
     # Also: "Denver CO" -> "Denver Colorado" (no comma)
 
     for abbrev, full in STATE_ABBREVIATIONS.items():
+        if abbrev not in text:
+            continue
+
         # Match state abbreviation after comma or at word boundary
         # Avoid matching in the middle of words
         pattern = rf',\s*{abbrev}\b'
@@ -119,8 +137,14 @@ def expand_state_abbreviations(text: str) -> str:
         # Match state abbreviation after city name (word + space + STATE)
         # e.g., "Denver CO" or "New York NY" -> "Denver Colorado"
         # Only match uppercase 2-letter codes after a capitalized word
+        # A word that is already a whole state name ("Maryland MD") is not a city: leaving it
+        # keeps the result stable on a second pass.
         pattern = rf'([A-Z][a-z]+)\s+{abbrev}\b'
-        text = re.sub(pattern, rf'\1, {full}', text)
+        text = re.sub(
+            pattern,
+            lambda m: m.group(0) if m.group(1) in _SINGLE_WORD_STATES else f'{m.group(1)}, {full}',
+            text,
+        )
 
     return text
 
@@ -130,6 +154,11 @@ def expand_common_abbreviations(text: str) -> str:
     for pattern, replacement in COMMON_ABBREVIATIONS.items():
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     return text
+
+
+_DIRECTION_LETTERS = {'N': 'North', 'S': 'South', 'E': 'East', 'W': 'West'}
+_STREET_SUFFIXES = r'(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln)'
+_HIGHWAYS = r'(I-\d{1,6}|Route\s{1,3}\d{1,6}|Hwy\s{1,3}\d{1,6}|Highway\s{1,3}\d{1,6})'
 
 
 def expand_directions(text: str) -> str:
@@ -143,22 +172,18 @@ def expand_directions(text: str) -> str:
     text = re.sub(r'\bSW\b(?=\s*$|\s*,|\s*\.)', 'Southwest', text)
 
     # Direction BEFORE street name: "100 N Main St" -> "100 North Main Street"
-    text = re.sub(r'(\d+\s*)N\.?(?=\s+[A-Za-z])', r'\1North ', text)
-    text = re.sub(r'(\d+\s*)S\.?(?=\s+[A-Za-z])', r'\1South ', text)
-    text = re.sub(r'(\d+\s*)E\.?(?=\s+[A-Za-z])', r'\1East ', text)
-    text = re.sub(r'(\d+\s*)W\.?(?=\s+[A-Za-z])', r'\1West ', text)
+    for letter, word in _DIRECTION_LETTERS.items():
+        if letter not in text:
+            continue
+        text = re.sub(rf'{_NUM_START}(\d{{1,9}}\s{{0,3}}){letter}\.?(?=\s+[A-Za-z])', rf'\1{word} ', text)
 
     # Direction AFTER street suffix: "Main St E" or "Main Street E"
-    text = re.sub(r'(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln)\s+N\b', r'\1 North', text, flags=re.IGNORECASE)
-    text = re.sub(r'(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln)\s+S\b', r'\1 South', text, flags=re.IGNORECASE)
-    text = re.sub(r'(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln)\s+E\b', r'\1 East', text, flags=re.IGNORECASE)
-    text = re.sub(r'(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln)\s+W\b', r'\1 West', text, flags=re.IGNORECASE)
+    for letter, word in _DIRECTION_LETTERS.items():
+        text = re.sub(rf'{_STREET_SUFFIXES}\s{{1,3}}{letter}\b', rf'\1 {word}', text, flags=re.IGNORECASE)
 
     # Highway directions: "I-95 N" or "Route 1 S"
-    text = re.sub(r'(I-\d+|Route\s+\d+|Hwy\s+\d+|Highway\s+\d+)\s+N\b', r'\1 North', text, flags=re.IGNORECASE)
-    text = re.sub(r'(I-\d+|Route\s+\d+|Hwy\s+\d+|Highway\s+\d+)\s+S\b', r'\1 South', text, flags=re.IGNORECASE)
-    text = re.sub(r'(I-\d+|Route\s+\d+|Hwy\s+\d+|Highway\s+\d+)\s+E\b', r'\1 East', text, flags=re.IGNORECASE)
-    text = re.sub(r'(I-\d+|Route\s+\d+|Hwy\s+\d+|Highway\s+\d+)\s+W\b', r'\1 West', text, flags=re.IGNORECASE)
+    for letter, word in _DIRECTION_LETTERS.items():
+        text = re.sub(rf'{_HIGHWAYS}\s{{1,3}}{letter}\b', rf'\1 {word}', text, flags=re.IGNORECASE)
 
     return text
 
@@ -241,10 +266,10 @@ def normalize_time(text: str) -> str:
         return f"{time_spoken} {phrase}"
 
     # Handle times with minutes: "10:30 AM" or "10:30AM"
-    text = re.sub(r'(\d{1,2}:\d{2})\s*(AM|PM)\b', replace_am_pm, text, flags=re.IGNORECASE)
+    text = re.sub(r'(\d{1,2}:\d{2})\s{0,3}(AM|PM)\b', replace_am_pm, text, flags=re.IGNORECASE)
 
     # Handle times without minutes: "8 AM" or "8AM"
-    text = re.sub(r'(\d{1,2})\s*(AM|PM)\b', replace_am_pm, text, flags=re.IGNORECASE)
+    text = re.sub(r'(\d{1,2})\s{0,3}(AM|PM)\b', replace_am_pm, text, flags=re.IGNORECASE)
 
     # Handle "a.m." and "p.m." formats with minutes
     def replace_am_pm_dot(match):
@@ -267,8 +292,8 @@ def normalize_time(text: str) -> str:
         phrase = "in the morning" if not is_pm else "in the afternoon"
         return f"{time_spoken} {phrase}"
 
-    text = re.sub(r'(\d{1,2}:\d{2})\s*(a\.m\.|p\.m\.)', replace_am_pm_dot, text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d{1,2})\s*(a\.m\.|p\.m\.)', replace_am_pm_dot, text, flags=re.IGNORECASE)
+    text = re.sub(r'(\d{1,2}:\d{2})\s{0,3}(a\.m\.|p\.m\.)', replace_am_pm_dot, text, flags=re.IGNORECASE)
+    text = re.sub(r'(\d{1,2})\s{0,3}(a\.m\.|p\.m\.)', replace_am_pm_dot, text, flags=re.IGNORECASE)
 
     # Convert standalone ":0X" to " oh X" for times without AM/PM
     # "12:03" -> "12 oh 3", but "12:30" stays "12:30"
@@ -361,94 +386,208 @@ def normalize_dates(text: str) -> str:
     return text
 
 
+def _counted_rule(unit_pattern: str, singular: str, plural: str, *, flags: int = 0, tail: str = ''):
+    """Build a `<number> <unit>` rewrite that agrees the unit with the number."""
+    rx = re.compile(_NUM + _GAP + unit_pattern + tail, flags)
+
+    def apply(text: str) -> str:
+        return rx.sub(lambda m: f"{m.group(1)} {_unit(m.group(1), singular, plural)}", text)
+
+    return apply
+
+
+_I = re.IGNORECASE
+
+# What may follow "45 F": punctuation, whitespace, or a symbol a later rule turns into a space.
+_SPACED_DEGREE_END = r'(?=[,.\s$€£&+@#]|$)'
+
+_TEMPERATURE_RULES = (
+    _counted_rule(r'°\s{0,3}F\b', 'degree Fahrenheit', 'degrees Fahrenheit', flags=_I),
+    _counted_rule(r'°\s{0,3}C\b', 'degree Celsius', 'degrees Celsius', flags=_I),
+    # "45 F" / "45 C" after a number, before end or punctuation ("F-150" is left alone)
+    _counted_rule(r'(?<=\s)F\b', 'degree Fahrenheit', 'degrees Fahrenheit', tail=_SPACED_DEGREE_END),
+    _counted_rule(r'(?<=\s)C\b', 'degree Celsius', 'degrees Celsius', tail=_SPACED_DEGREE_END),
+    # a bare degree sign after a number, once the °F / °C rules have run
+    _counted_rule(r'°(?![A-Za-z])', 'degree', 'degrees'),
+)
+
+_SPEED_RULES = (
+    _counted_rule(r'mph\b', 'mile per hour', 'miles per hour', flags=_I),
+    _counted_rule(r'(?:km/hr?|kmh|kph)\b', 'kilometer per hour', 'kilometers per hour', flags=_I),
+    _counted_rule(r'm/s\b', 'meter per second', 'meters per second'),
+    _counted_rule(r'kts?\b', 'knot', 'knots'),
+)
+
+_PRESSURE_RULES = (
+    _counted_rule(r'hPa\b', 'hectopascal', 'hectopascals', flags=_I),
+    _counted_rule(r'in\s{0,3}Hg\b', 'inch of mercury', 'inches of mercury', flags=_I),
+    _counted_rule(r'mbar\b', 'millibar', 'millibars', flags=_I),
+)
+
+_MEASUREMENT_RULES = (
+    # Weight
+    _counted_rule(r'lbs?\b', 'pound', 'pounds', flags=_I),
+    _counted_rule(r'oz\b', 'ounce', 'ounces', flags=_I),
+    _counted_rule(r'kg\b', 'kilogram', 'kilograms', flags=_I),
+    _counted_rule(r'g(?!\w)', 'gram', 'grams', flags=_I),
+    # Volume
+    _counted_rule(r'ml\b', 'milliliter', 'milliliters', flags=_I),
+    _counted_rule(r'L\b', 'liter', 'liters'),
+    _counted_rule(r'gal\b', 'gallon', 'gallons', flags=_I),
+    _counted_rule(r'qt\b', 'quart', 'quarts', flags=_I),
+    # Length
+    _counted_rule(r'km\b', 'kilometer', 'kilometers', flags=_I),
+    _counted_rule(r'cm\b', 'centimeter', 'centimeters', flags=_I),
+    _counted_rule(r'mm\b', 'millimeter', 'millimeters', flags=_I),
+    _counted_rule(r'mi\b', 'mile', 'miles', flags=_I),
+    _counted_rule(r'sq\s{0,3}ft\b', 'square foot', 'square feet', flags=_I),
+    _counted_rule(r'ft\b', 'foot', 'feet', flags=_I),
+    # Time
+    _counted_rule(r'hrs?\b', 'hour', 'hours', flags=_I),
+    _counted_rule(r'mins?\b', 'minute', 'minutes', flags=_I),
+)
+
+# "in" followed by one of these is a preposition ("6 feet 10 in the evening").
+_PREPOSITION_OBJECT = r'(?i:the|a|an|my|your|his|her|its|our|their|this|that|these|those)'
+_FEET_INCHES_RE = re.compile(
+    r'\b((?i:feet|foot|ft))\s{1,3}(\d{1,3}(?:\.\d{1,3})?)\s{0,3}in\b'
+    rf'(?:(\.)(?=\s|$|&)|(?!\.)(?!\s{{1,3}}{_PREPOSITION_OBJECT}\b))'
+)
+_INCH_PERIOD_RE = re.compile(_NUM + _GAP + r'in\.(?=\s|$|&)')
+_INCH_DIMENSION_RE = re.compile(_NUM + _GAP + r'in(?=\s{0,3}[x×]\s{0,3}\d)')
+_INCH_AT_END_RE = re.compile(_NUM + _GAP + r'in(?=\s*\Z)')
+# A period after "in" stays when it can end the sentence: end of text, or a
+# capital letter starts the next one.
+_SENTENCE_BOUNDARY_RE = re.compile(r'\s*\Z|\s+[A-Z]')
+
+
+def _inches(count: str) -> str:
+    return f"{count} {_unit(count, 'inch', 'inches')}"
+
+
+def _inch_period(m: 're.Match[str]') -> str:
+    keeps_period = _SENTENCE_BOUNDARY_RE.match(m.string, m.end())
+    return _inches(m.group(1)) + ('.' if keeps_period else '')
+
+
+def normalize_inches(text: str) -> str:
+    """Inches written as "in" / "in." after a number, and "5 feet 9 in"."""
+    # "in" is a common word: only expand where a number precedes and the shape is unambiguous.
+    text = _FEET_INCHES_RE.sub(
+        lambda m: f"{'feet' if m.group(1).lower() == 'ft' else m.group(1)} {_inches(m.group(2))}" + (
+            '.' if m.group(3) and _SENTENCE_BOUNDARY_RE.match(m.string, m.end()) else ''
+        ),
+        text,
+    )
+    text = _INCH_PERIOD_RE.sub(_inch_period, text)
+    text = _INCH_DIMENSION_RE.sub(lambda m: _inches(m.group(1)), text)
+    text = _INCH_AT_END_RE.sub(lambda m: _inches(m.group(1)), text)
+    return text
+
+
 def normalize_temperature(text: str) -> str:
     """Normalize temperature expressions for natural speech."""
-    # Convert "45°F" or "45 F" or "45F" to "45 degrees Fahrenheit"
-    # Convert "10°C" or "10 C" or "10C" to "10 degrees Celsius"
-
-    # Match temperature with degree symbol: 45°F, 45° F
-    text = re.sub(r'(\d+)\s*°\s*F\b', r'\1 degrees Fahrenheit', text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d+)\s*°\s*C\b', r'\1 degrees Celsius', text, flags=re.IGNORECASE)
-
-    # Match temperature without degree symbol but with space: "45 F" (after a number, before end/punctuation)
-    # Be careful not to match things like "F-150" or other uses of F
-    text = re.sub(r'(\d+)\s+F\b(?=\s*[,.\s]|$)', r'\1 degrees Fahrenheit', text)
-    text = re.sub(r'(\d+)\s+C\b(?=\s*[,.\s]|$)', r'\1 degrees Celsius', text)
+    for rule in _TEMPERATURE_RULES:
+        text = rule(text)
 
     # Match "degrees F" or "degrees C" -> expand to full word
-    text = re.sub(r'degrees\s+F\b', 'degrees Fahrenheit', text, flags=re.IGNORECASE)
-    text = re.sub(r'degrees\s+C\b', 'degrees Celsius', text, flags=re.IGNORECASE)
+    text = re.sub(r'degrees\s{1,3}F\b', 'degrees Fahrenheit', text, flags=re.IGNORECASE)
+    text = re.sub(r'degrees\s{1,3}C\b', 'degrees Celsius', text, flags=re.IGNORECASE)
 
     return text
+
+
+_PERCENT_RE = re.compile(_NUM_START + r'(\d{1,9}(?:\.\d{1,9})?)\s{0,3}%')
 
 
 def normalize_percentages(text: str) -> str:
     """Normalize percentage expressions."""
     # "50%" -> "50 percent"
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*%', r'\1 percent', text)
-    return text
+    return _PERCENT_RE.sub(r'\1 percent', text)
+
+
+_SCALE_SUFFIXES = {'k': 'thousand', 'm': 'million', 'b': 'billion', 't': 'trillion'}
+_SCALE_WORDS = ('thousand', 'million', 'billion', 'trillion')
+
+# 1-9 plain digits, or comma thousands groups ("1,000", "12,500", "1,000,000"); optional
+# cents; optional scale ("5 million", "1.5B", "300K").
+_AMOUNT = (
+    r'(\d{1,3}(?:,\d{3}){1,3}|\d{1,9})(?:\.(\d{1,2}))?'
+    r'(?:\s{1,3}(' + '|'.join(_SCALE_WORDS) + r')\b|([KMBTkmbt])(?![A-Za-z0-9]))?(?!\d)'
+)
+_DOLLARS_RE = re.compile(r'(?<![$€£])\$' + _AMOUNT, re.IGNORECASE)
+_EUROS_RE = re.compile(r'(?<![$€£])€' + _AMOUNT, re.IGNORECASE)
+_POUNDS_RE = re.compile(r'(?<![$€£])£' + _AMOUNT, re.IGNORECASE)
+_ATTACHED_AFTER = re.compile(r'[A-Za-z0-9]|[$€£#]\d')
+_ATTACHED_AMOUNT_AFTER = re.compile(r'\d|[$€£#]\d')
+
+
+def _pad(match, words: str, *, letters_after: bool = True) -> str:
+    """Space a rewritten token off a letter or digit before it, or after it a letter, digit
+    or another amount ("5$1.5", "€5€6", "#1#2"), so the words never run together."""
+    before = match.string[match.start() - 1:match.start()] if match.start() else ''
+    left = ' ' if before.isalnum() else ''
+    attached = _ATTACHED_AFTER if letters_after else _ATTACHED_AMOUNT_AFTER
+    right = ' ' if attached.match(match.string, match.end()) else ''
+    return left + words + right
+
+
+def _money_words(match, singular: str, plural: str, *, cents_unit: bool) -> str:
+    whole, cents, scale_word, scale_suffix = match.groups()
+    scale = (scale_word or _SCALE_SUFFIXES.get((scale_suffix or '').lower(), '')).lower()
+    if scale:
+        amount = f"{whole}.{cents}" if cents is not None else whole
+        return _pad(match, f"{amount} {scale} {plural}")
+    whole_value = int(whole.replace(',', ''))
+    if not cents_unit:
+        amount = f"{whole}.{cents}" if cents is not None else whole
+        return _pad(match, f"{amount} {_unit(amount, singular, plural)}")
+    cent_value = int(cents.ljust(2, '0')) if cents else 0
+    dollar_words = f"{whole} {_unit(str(whole_value), singular, plural)}"
+    cent_words = f"{cent_value} {_unit(str(cent_value), 'cent', 'cents')}"
+    if cent_value == 0:
+        return _pad(match, dollar_words)
+    if whole_value == 0:
+        return _pad(match, cent_words)
+    return _pad(match, f"{dollar_words} and {cent_words}")
 
 
 def normalize_currency(text: str) -> str:
     """Normalize currency expressions for natural speech."""
-    # Handle restaurant price ratings FIRST (before dollar amounts)
-    # "$$$$" -> "very expensive", "$$$" -> "expensive", "$$" -> "moderate", "$" -> "budget-friendly"
-    text = re.sub(r'\$\$\$\$', 'very expensive', text)
-    text = re.sub(r'\$\$\$', 'expensive', text)
-    text = re.sub(r'\$\$', 'moderately priced', text)
+    # Price ratings FIRST (before dollar amounts), only as a standalone token:
+    # "$$$$" -> "very expensive", "$$$" -> "expensive", "$$" -> "moderately priced"
+    text = re.sub(r'(?<![\w$])\${4}(?![\w$])', 'very expensive', text)
+    text = re.sub(r'(?<![\w$])\${3}(?![\w$])', 'expensive', text)
+    text = re.sub(r'(?<![\w$])\${2}(?![\w$])', 'moderately priced', text)
     # Single $ only when standalone (not before a number) for price rating
-    text = re.sub(r'(?<!\S)\$(?!\d)(?=\s|$|,|\.)', 'budget-friendly', text)
+    text = re.sub(r'(?<![^\s&])\$(?!\d)(?=\s|$|,|\.|&)', 'budget-friendly', text)
 
-    # "$10" -> "10 dollars", "$10.50" -> "10 dollars and 50 cents"
-    # Handle dollar amounts
-    def expand_dollars(match):
-        amount = match.group(1)
-        if '.' in amount:
-            dollars, cents = amount.split('.')
-            cents = cents.ljust(2, '0')[:2]  # Ensure 2 digits
-            if int(cents) == 0:
-                return f"{dollars} dollars"
-            elif int(dollars) == 0:
-                return f"{cents} cents"
-            else:
-                return f"{dollars} dollars and {cents} cents"
-        return f"{amount} dollars"
+    text = _DOLLARS_RE.sub(lambda m: _money_words(m, 'dollar', 'dollars', cents_unit=True), text)
+    text = _EUROS_RE.sub(lambda m: _money_words(m, 'euro', 'euros', cents_unit=False), text)
+    text = _POUNDS_RE.sub(lambda m: _money_words(m, 'pound', 'pounds', cents_unit=False), text)
 
-    text = re.sub(r'\$(\d+(?:\.\d{1,2})?)', expand_dollars, text)
+    return text
 
-    # Handle euro amounts
-    text = re.sub(r'€(\d+(?:\.\d{1,2})?)', r'\1 euros', text)
 
-    # Handle pound amounts
-    text = re.sub(r'£(\d+(?:\.\d{1,2})?)', r'\1 pounds', text)
+def normalize_speeds(text: str) -> str:
+    """Speeds, spaced or not: "25mph", "15 km/h", "10 m/s", "20 kts"."""
+    for rule in _SPEED_RULES:
+        text = rule(text)
+    return text
 
+
+def normalize_pressure(text: str) -> str:
+    """Barometric pressure: "1013 hPa", "29.92 inHg", "1008 mbar"."""
+    for rule in _PRESSURE_RULES:
+        text = rule(text)
     return text
 
 
 def normalize_measurements(text: str) -> str:
     """Normalize measurement units for natural speech."""
-    # Weight
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*lbs?\b', r'\1 pounds', text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*oz\b', r'\1 ounces', text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*kg\b', r'\1 kilograms', text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*g\b(?!\w)', r'\1 grams', text, flags=re.IGNORECASE)
-
-    # Volume
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*ml\b', r'\1 milliliters', text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*L\b', r'\1 liters', text)
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*gal\b', r'\1 gallons', text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*qt\b', r'\1 quarts', text, flags=re.IGNORECASE)
-
-    # Length
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*km\b', r'\1 kilometers', text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*cm\b', r'\1 centimeters', text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*mm\b', r'\1 millimeters', text, flags=re.IGNORECASE)
-    # Be careful: "in" is a common word, only match "in." with period or at end of sentence
-    # Don't match "1 in the" - that's preposition, not inches
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*in\.(?=\s|$)', r'\1 inches', text)  # "5 in." with period
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*in(?=\s*[x×]\s*\d)', r'\1 inches', text)  # "5 in x 3" dimensions
-
-    return text
+    for rule in _MEASUREMENT_RULES:
+        text = rule(text)
+    return normalize_inches(text)
 
 
 def normalize_scores(text: str) -> str:
@@ -486,21 +625,23 @@ def normalize_sports_records(text: str) -> str:
     # Pattern for records with optional spaces around dash: "4-13", "4 - 13", "4- 13"
     # These are typically team records (wins-losses) not game scores
 
-    def replace_record(match):
-        wins = match.group(1)
-        losses = match.group(2)
-        # For small numbers typical of win-loss records (0-99)
-        if int(wins) < 100 and int(losses) < 100:
-            return f"{wins} and {losses}"
-        return match.group(0)
+    # Win-loss-tie: "10-5-1" (single-digit ties keep short dates like "10-5-24" out)
+    text = re.sub(
+        r'(?<![\d-])(\d{1,2})-(\d{1,2})-(\d)(?![\d-])',
+        lambda m: f"{m.group(1)} {_unit(m.group(1), 'win', 'wins')}, "
+                  f"{m.group(2)} {_unit(m.group(2), 'loss', 'losses')} and "
+                  f"{m.group(3)} {_unit(m.group(3), 'tie', 'ties')}",
+        text,
+    )
 
-    # Match records with spaces around dash: "4 - 13", "10 - 5"
-    # This pattern specifically targets records (spaces around dash are common in formatted output)
-    text = re.sub(r'\b(\d{1,2})\s+-\s+(\d{1,2})\b', replace_record, text)
+    # Match records with spaces around dash: "4 - 13", "10 - 5". The second number is a
+    # lookahead so "2 - 2 - 1" settles in one pass (a consumed number can't start the next match).
+    text = re.sub(r'\b(\d{1,2})\s+-\s+(?=\d{1,2}\b)', r'\1 and ', text)
 
-    # Also match "record of X-Y" or "X-Y record" patterns
-    text = re.sub(r'record\s+(?:of\s+)?(\d{1,2})-(\d{1,2})',
-                  lambda m: f"record of {m.group(1)} wins and {m.group(2)} losses", text, flags=re.IGNORECASE)
+    # Also match "record of X-Y" (or "is" / "was" / "stands at" / "at") and "X-Y record" patterns
+    text = re.sub(r'record\s+(?:(of|is|was|stands\s+at|at)\s+)?(\d{1,2})-(\d{1,2})',
+                  lambda m: f"record {m.group(1) or 'of'} {m.group(2)} wins and {m.group(3)} losses",
+                  text, flags=re.IGNORECASE)
     text = re.sub(r'(\d{1,2})-(\d{1,2})\s+record',
                   lambda m: f"{m.group(1)} and {m.group(2)} record", text, flags=re.IGNORECASE)
 
@@ -510,21 +651,31 @@ def normalize_sports_records(text: str) -> str:
 def normalize_symbols(text: str) -> str:
     """Normalize common symbols for speech."""
     # "#1" -> "number 1"
-    text = re.sub(r'#(\d+)', r'number \1', text)
+    text = re.sub(
+        r'#(?=[$€£]?\d)',
+        lambda m: (' ' if m.start() and m.string[m.start() - 1].isalnum() else '') + 'number ',
+        text,
+    )
 
     # "No. 1", "no 1", "No 1" -> "number 1" (ordinal/ranking context)
     # Must be followed by a number to avoid matching "no" in other contexts
-    text = re.sub(r'\b[Nn]o\.?\s*(\d+)', r'number \1', text)
+    text = re.sub(
+        r'(?<![A-Za-z])[Nn]o\.?\s*(?=[$€£]?\d)',
+        lambda m: (' ' if m.start() and m.string[m.start() - 1].isdigit() else '') + 'number ',
+        text,
+    )
 
     # "&" -> "and"
     text = re.sub(r'\s*&\s*', ' and ', text)
 
-    # "+" between words -> "plus" (but not in phone numbers)
-    text = re.sub(r'(\w)\s*\+\s*(\w)', r'\1 plus \2', text)
-
     # "@" in non-email context -> "at"
-    # Skip if it looks like an email
+    # Skip if it looks like an email. Runs before "+" so that "@ +" settles in one pass.
     text = re.sub(r'(?<!\S)@(?=\s)', 'at ', text)
+
+    # "+" between words -> "plus" (but not in phone numbers)
+    # Lookarounds, not captures: "1 + 2 + 3" must settle in one pass.
+    # Currency, degree and percent signs count as word characters here: later rules turn them into words.
+    text = re.sub(r'(?<=[\w$€£°%.])\s*\+\s*(?=[\w$€£°%])', ' plus ', text)
 
     return text
 
@@ -676,13 +827,15 @@ def normalize_for_tts(text: str) -> str:
     text = normalize_time(text)  # AM/PM -> in the morning/afternoon/evening, :00 -> o'clock
     text = normalize_timezones(text)  # ET -> Eastern Time
     text = normalize_dates(text)  # January 06 -> January 6th
+    text = normalize_symbols(text)  # & -> and, # -> number (before every digit rule: "no.2 C" settles)
     text = normalize_temperature(text)  # 45 F -> 45 degrees Fahrenheit
     text = normalize_percentages(text)  # 50% -> 50 percent
     text = normalize_currency(text)  # $10 -> 10 dollars
+    text = normalize_speeds(text)  # 25mph -> 25 miles per hour
+    text = normalize_pressure(text)  # 1013 hPa -> 1013 hectopascals
     text = normalize_measurements(text)  # 5 lbs -> 5 pounds
     text = normalize_sports_records(text)  # 4 - 13 -> 4 and 13 (team records)
     text = normalize_scores(text)  # 28-14 -> 28 to 14 (game scores)
-    text = normalize_symbols(text)  # & -> and, # -> number
     text = normalize_ordinals(text)  # 1st -> first
     text = expand_common_abbreviations(text)
     text = expand_directions(text)
@@ -699,90 +852,3 @@ def normalize_for_tts(text: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
 
     return text
-
-
-# Quick test
-if __name__ == "__main__":
-    test_cases = [
-        "Example Diner at 3362 Example Rd, Denver, CO",
-        "Try the cafe at 4805 Example Ave, Denver, CO 80202",
-        "Dr. Smith lives at 100 N Main St, Towson, MD",
-        "The restaurant is approx. 10 mins away on Hwy 95",
-        "Located at 500 E Example St, Denver, CO 80202",
-        # Time tests
-        "The meeting is at 10:30 AM tomorrow",
-        "Store opens at 9AM and closes at 8PM",
-        "The flight departs at 6:45 PM",
-        # Temperature tests
-        "Currently 45°F with a high of 52 F",
-        "It's 10°C outside, feeling like 8 C",
-        "Temperatures will reach 75 degrees F today",
-        # Percentage tests
-        "There's a 70% chance of rain",
-        "Battery at 85%",
-        # Currency tests
-        "The meal costs $25.50",
-        "Price is $10 per person",
-        # Measurement tests
-        "The package weighs 5 lbs",
-        "Add 250ml of water",
-        "It's about 10 km away",
-        # Symbol tests
-        "Ben & Jerry's ice cream",
-        "Ranked #1 in the city",
-        # Ordinal tests
-        "This is the 1st time and 2nd attempt",
-        # Restaurant price rating tests
-        "The restaurant is rated $$ for price",
-        "This place is $$$ - expensive but worth it",
-        "Budget option: $ rating",
-        "Fine dining at $$$$ prices",
-        # ZIP code tests
-        "Located at 100 Main St, Denver, CO 80202",
-        "Address: 500 Example St, Denver, Colorado 80202",
-        "Visit us at 123 Oak Ave, Towson, MD 21204-5678",
-        # Sports score tests
-        "The Ravens won 28-14 against the Steelers",
-        "Final score was 7-3 in a defensive battle",
-        "Lakers beat the Celtics 110-98",
-        "The game ended 0-0 in regulation",
-        # Should NOT be converted (not scores)
-        "Call 410-555-1234 for reservations",  # Phone number
-        "The 2023-2024 season was great",  # Year range
-        "ZIP: 21201-5678",  # ZIP extension
-        # Sports records (win-loss with spaces around dash)
-        "The team has a 4 - 13 record this season",
-        "Currently sitting at 10 - 5 in the standings",
-        "They're 0 - 3 on the road",
-        "With a record of 15-2, they lead the division",
-        # State abbreviations without comma
-        "Denver CO is a great city",
-        "The weather in Philadelphia PA is nice",
-        "Visit New York NY this summer",
-        # Timezone abbreviations
-        "The game starts at 12:00 ET",
-        "Kickoff is at 8:30 PM EST",
-        "Meeting at 3:00 PT tomorrow",
-        "Flight departs at 7:00 CST",
-        # O'clock times
-        "Arrives at 5:00 today",
-        "Store opens at 9:00 and closes at 10:00",
-        # "No." / "no" ordinal patterns (must convert to "number")
-        "The Eagles are the no 1 seed",
-        "He is ranked No. 1 in the world",
-        "The team holds the No 2 spot",
-        "Currently no 3 in the standings",
-        # URL stripping tests
-        "Check out https://example.com/page for more info",
-        "Visit [our website](https://example.com) today",
-        "See www.example.com for details",
-        "More info at https://sports.yahoo.com/nfl/standings",
-    ]
-
-    print("TTS Normalization Tests:")
-    print("=" * 60)
-    for test in test_cases:
-        normalized = normalize_for_tts(test)
-        print(f"IN:  {test}")
-        print(f"OUT: {normalized}")
-        print("-" * 60)

@@ -71,6 +71,7 @@ data:
   # OIDC_ISSUER: ""
   # OIDC_VALIDATE_ISS: ""
   # OLLAMA_URL: ""
+  # OPENAI_SPEECH_CLIENT_NETWORKS: ""
   # ORCHESTRATOR_INGRESS_AUTH: ""
   # REDIS_URL: ""
   # SEARXNG_BASE_URL: ""
@@ -343,6 +344,16 @@ data:
   # is used directly (the gateway logs trusted_proxy_cidrs_unset once at
   # startup). Example for a flannel/kubeadm-default cluster's pod CIDR:
   # TRUSTED_PROXY_CIDRS: "10.244.0.0/16"
+
+  # OPENAI_SPEECH_CLIENT_NETWORKS: comma-separated CIDRs/addresses of
+  # OpenAI-compatible clients whose answers are spoken by a TTS that isn't
+  # Athena's (a Home Assistant conversation agent with HA-side TTS). They get
+  # speech-normalized text; every other /v1 caller gets text as written.
+  # The /v1/voice routes (/v1/voice/chat/completions, /v1/voice/responses)
+  # are always spoken, with no network rule. The client address is the one
+  # the new-conversation limiter uses, so set TRUSTED_PROXY_CIDRS behind a
+  # proxy; an entry overlapping TRUSTED_PROXY_CIDRS is ignored (ERROR logged).
+  # Example (one host): OPENAI_SPEECH_CLIENT_NETWORKS: "192.0.2.10/32"
 
   # ORCHESTRATOR_INGRESS_AUTH (D10): "enforce" (default) requires
   # X-Service-Key on the orchestrator's query/session routes; a wrong key
