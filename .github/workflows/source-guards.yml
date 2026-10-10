@@ -48,7 +48,7 @@ jobs:
       - name: Run the guards
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_local_clock_drift.py tests/unit/test_no_pii_in_logs.py tests/unit/test_trust_literal_contract.py tests/unit/test_knowledge_tiers.py tests/unit/test_base_knowledge_tier_parity.py tests/unit/test_knowledge_reader_population.py tests/unit/test_session_key_drift.py tests/unit/test_admin_guest_route_callers_send_service_key.py tests/unit/test_admin_frontend_gated_fetch_auth.py tests/unit/test_admin_frontend_nginx_api_access_log.py tests/unit/test_admin_jarvis_ticket_only.py tests/unit/test_voice_automations_js_escaping.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_local_clock_drift.py tests/unit/test_no_pii_in_logs.py tests/unit/test_trust_literal_contract.py tests/unit/test_knowledge_tiers.py tests/unit/test_base_knowledge_tier_parity.py tests/unit/test_knowledge_reader_population.py tests/unit/test_session_key_drift.py tests/unit/test_owner_session_ids.py tests/unit/test_admin_guest_route_callers_send_service_key.py tests/unit/test_admin_frontend_gated_fetch_auth.py tests/unit/test_admin_frontend_nginx_api_access_log.py tests/unit/test_admin_jarvis_ticket_only.py tests/unit/test_voice_automations_js_escaping.py
 
   orchestrator-behaviour:
     name: Orchestrator behaviour tests
@@ -104,7 +104,7 @@ jobs:
       - name: Run the behaviour tests
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_jarvis_web_speaker_name.py tests/unit/test_jarvis_web_addressee_matrix.py tests/unit/test_jarvis_web_edge_mode.py tests/unit/test_jarvis_web_caller_classes.py tests/unit/test_jarvis_web_caller_mode.py tests/unit/test_jarvis_web_relay.py tests/unit/test_edge_template_contract.py tests/unit/test_reviewed_route_callers_wire.py tests/unit/test_jarvis_web_service_key_header.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_jarvis_web_speaker_name.py tests/unit/test_jarvis_web_owner.py tests/unit/test_owner_session_ids.py tests/unit/test_jarvis_web_addressee_matrix.py tests/unit/test_jarvis_web_edge_mode.py tests/unit/test_jarvis_web_caller_classes.py tests/unit/test_jarvis_web_caller_mode.py tests/unit/test_jarvis_web_relay.py tests/unit/test_edge_template_contract.py tests/unit/test_reviewed_route_callers_wire.py tests/unit/test_jarvis_web_service_key_header.py
 
   sports-behaviour:
     name: Sports RAG date-window test

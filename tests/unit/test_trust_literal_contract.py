@@ -19,8 +19,18 @@ def _upstream_trust_values() -> set:
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "UPSTREAM_TRUST" for t in node.targets):
             assert isinstance(node.value, ast.Dict)
-            return {v.value for v in node.value.values if isinstance(v, ast.Constant)}
+            values = {v.value for v in node.value.values if isinstance(v, ast.Constant)}
+            return values | _owner_trust_value(tree)
     raise AssertionError("UPSTREAM_TRUST not found in caller_auth.py")
+
+
+def _owner_trust_value(tree) -> set:
+    """The one extra value Caller.trust can send: OWNER_TRUST (Bearer owner)."""
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "OWNER_TRUST" for t in node.targets):
+            assert isinstance(node.value, ast.Constant)
+            return {node.value.value}
+    raise AssertionError("OWNER_TRUST not found in caller_auth.py")
 
 
 def _query_request_trust_literal() -> set:
@@ -40,6 +50,6 @@ def _query_request_trust_literal() -> set:
 def test_sent_values_are_accepted():
     sent = _upstream_trust_values()
     accepted = _query_request_trust_literal()
-    assert {"web_authenticated", "web_local", "web_guest_net", "web_public"} <= sent
+    assert {"web_authenticated", "web_owner", "web_local", "web_guest_net", "web_public"} <= sent
     assert sent <= accepted
     assert "web_guest_net" in accepted

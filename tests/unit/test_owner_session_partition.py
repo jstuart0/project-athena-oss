@@ -240,3 +240,14 @@ def test_chat_completions_never_creates_an_owner_session():
     fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "chat_completions")
     for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "get_or_create_session"):
         assert "caller_class" not in {k.arg for k in call.keywords}  # default: other
+
+
+def test_a_signed_owner_id_from_jarvis_web_is_kept_across_proven_turns(rig):
+    """The id shape jarvis-web mints for an owner (own-<hex>.<mac>) is
+    recognised as owner and resumed, not re-minted, by a proven turn."""
+    jarvis_style = "own-" + "a" * 32 + "." + "b" * 24
+    first = _post(rig, "web_owner", jarvis_style)
+    assert first == jarvis_style
+    assert _post(rig, "web_owner", jarvis_style) == jarvis_style
+    saved = _run(_sm_runtime().get_session(jarvis_style))
+    assert saved.caller_class == CALLER_CLASS_OWNER and len(saved.messages) >= 4

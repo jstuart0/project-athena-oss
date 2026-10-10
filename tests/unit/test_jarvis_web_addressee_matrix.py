@@ -41,9 +41,9 @@ ROWS = [
     ("web_local", h.HOME_ENV, h.via_proxy(h.LAN), None, {}, "web_local", None),
     ("edge_member_named", EDGE_ENV, _edge_signed_in(), None, {"speaker_first_name": "Pat"}, "web_authenticated", "Pat"),
     ("edge_member_unnamed", EDGE_ENV, _edge_signed_in(name=None), None, {}, "web_authenticated", None),
-    ("bearer", h.HOME_ENV, {**h.via_proxy(h.INTERNET), "Authorization": "Bearer t"}, "owner", {}, "web_authenticated", None),
+    ("bearer", h.HOME_ENV, {**h.via_proxy(h.INTERNET), "Authorization": "Bearer t"}, "owner", {}, "web_owner", None),
     ("not_household_bearer", EDGE_ENV, _edge_signed_in(groups="visitors", Authorization="Bearer t"), "owner",
-     {}, "web_authenticated", None),
+     {}, "web_owner", None),
 ]
 
 
