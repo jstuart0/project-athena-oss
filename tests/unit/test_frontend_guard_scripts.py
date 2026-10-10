@@ -412,8 +412,8 @@ def test_callee_sink_known_instances_are_found():
     # it +20 lines above this point via the summarizeServices() extraction;
     # ATHENA-112 shifted it +41 lines before that via the enabled/disabled
     # dashboard-grouping rewrite of loadStatus; ATHENA-99 shifted it +22
-    # lines before that).
-    reveal_bucket, reveal_detail = found[("app.js", 1266)]
+    # lines before that; the apiRequest 422 message fix added +22 above it).
+    reveal_bucket, reveal_detail = found[("app.js", 1288)]
     assert reveal_bucket == "sink-escaped"
     assert reveal_detail["callee"] == "revealSecret"
 
