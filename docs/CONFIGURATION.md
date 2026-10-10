@@ -1490,6 +1490,52 @@ admin UI's External API Keys page (store keys `api-newsapiai` / `api-webz`).
 | `VOICE_CONTROL_URL` | `http://localhost:8098` | Voice control API |
 | `VOICE_API_URL` | `http://localhost:10201` | Voice API endpoint |
 
+### Spoken vs text responses
+
+An answer is formatted for the ear ("25 miles per hour", "1 degree Fahrenheit")
+only when the server knows it will be spoken. The server decides; a field in the
+client's request never does.
+
+| Where the answer goes | Spoken text |
+|-----------------------|-------------|
+| Wyoming `athena-tts` engine, LiveKit voice, jarvis-web voice playback, `/ha/conversation`, spoken automation announcements | Always. Each Athena TTS sink normalizes its input, whatever sent it |
+| `/query*` with `interface_type: voice` | Yes |
+| `/query*` with `chat` or `text` | No (text as written) |
+| `/v1/chat/completions`, `/v1/responses` | Only for a speech caller (below) |
+
+**OpenAI-compatible callers.** A Home Assistant conversation agent that uses
+its own text-to-speech sends the gateway's `/v1` routes a request that looks
+like any chat client's. The gateway classifies each request, in this order:
+
+1. **A `/v1/voice` route** (`/v1/voice/chat/completions`,
+   `/v1/voice/responses`, `/v1/voice/models`) is speech. It is the same
+   handler, credential check and response shape as its `/v1` twin; only the
+   channel differs. Point the integration's base URL at `http://<gateway>/v1/voice`.
+   `/v1/voice/models`, like `/v1/models`, is never gated by `GATEWAY_API_KEY`.
+2. **`OPENAI_SPEECH_CLIENT_NETWORKS`** (comma-separated CIDRs/addresses; empty
+   by default): a request whose client address falls inside is speech, with no
+   change to the client. The client address is the one the new-conversation
+   limiter uses: the nearest `X-Forwarded-For` hop outside `TRUSTED_PROXY_CIDRS`
+   (right to left), or the TCP peer when it is not a trusted proxy. Behind a
+   reverse proxy set `TRUSTED_PROXY_CIDRS` as well. An entry that overlaps
+   `TRUSTED_PROXY_CIDRS` is ignored, with an ERROR at startup that logs a count
+   only; a speech network with no trusted proxy logs a WARNING.
+3. **Otherwise text.** An unclassified caller gets text as written ("25 mph").
+
+Each request logs `openai_output_channel` with `channel`, `rule`
+(`voice_path`, `client_network` or `default`) and the route template, never an
+address. If a speech caller shows `rule=default`, the proxy is not delivering
+the client's address in `X-Forwarded-For`, or the network is wrong; use the
+`/v1/voice` base URL instead.
+
+The channel only changes formatting. It never feeds authorization: mode and
+permissions come from the server's own resolution.
+
+**Upgrading.** Non-stream `/v1/chat/completions` used to be formatted for
+speech by default. It is now text unless the caller uses `/v1/voice` or matches
+`OPENAI_SPEECH_CLIENT_NETWORKS`. Streaming answers from command handlers
+(lights, music, TV) are no longer normalized for a text caller.
+
 ---
 
 ## Security Settings
@@ -1531,11 +1577,15 @@ into one session. Send a genuinely per-conversation `user` — or an explicit
 `session_id`/`extra_body.session_id` matching `^explicit-[A-Za-z0-9._:-]{1,55}$`
 — to avoid this.
 
+Whether an answer on these routes is formatted for speech is a separate decision; see
+[Spoken vs text responses](#spoken-vs-text-responses).
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SESSION_MAX_COUNT` | `5000` | Cap on concurrent per-conversation sessions (in-memory fallback dict + Redis creation-time index). The oldest session (by last activity / creation time) is evicted once exceeded. |
 | `NEW_CONVERSATION_PER_MINUTE_PER_IP` | `120` | Gateway-side sliding-window limit on *new* conversations (first-turn requests with no explicit `session_id`) per rate-limit key (see `TRUSTED_PROXY_CIDRS`), applied to both `/v1/chat/completions` and `/v1/responses`. Raised from an earlier default of 30 — behind a reverse proxy every caller can share one resolved key, making a low per-source limit a whole-house limit. |
 | `TRUSTED_PROXY_CIDRS` | *(empty)* | Comma-separated CIDRs/hosts. The new-conversation limiter trusts `X-Forwarded-For`'s original-client address only when the immediate TCP peer (your reverse proxy) falls inside one of these ranges; an untrusted caller can't spoof another source's key via that header. Empty (the default) means every caller's TCP peer address is used directly — correct with no reverse proxy in front of the gateway, but a shared rate-limit bucket for everyone behind one (the gateway logs `trusted_proxy_cidrs_unset` once at startup as a nudge to set this). The header is parsed right-to-left, returning the nearest hop not in this CIDR set (falling back to the TCP peer if every hop is trusted), so a trusted proxy that appends rather than overwrites `X-Forwarded-For` doesn't let an upstream caller forge the left-most value. Example for a flannel/kubeadm-default cluster's pod CIDR: `10.244.0.0/16`. Keep this list scoped to your actual reverse-proxy subnet, not a broad cluster-wide default. |
+| `OPENAI_SPEECH_CLIENT_NETWORKS` | *(empty)* | Comma-separated CIDRs/addresses of OpenAI-compatible clients whose answers are spoken by a text-to-speech that isn't Athena's. They get speech-normalized text; every other `/v1` caller gets text as written. The `/v1/voice` routes are always spoken. Uses the same client address as the new-conversation limiter, so set `TRUSTED_PROXY_CIDRS` behind a proxy; an entry overlapping it is ignored. See [Spoken vs text responses](#spoken-vs-text-responses) |
 | `NEW_CONVERSATION_RESET_GRACE_SECONDS` | `120` | A first-turn fingerprint reset is skipped when a session under the same fingerprint was created within this many seconds — protects against Home Assistant's truncated-ASR retry path, which resends the same single-user-message opener for the same turn. |
 
 The new-conversation limiter's counters are backed by Redis (`REDIS_URL`)

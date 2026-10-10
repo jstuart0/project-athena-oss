@@ -27,6 +27,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **SMS numbers.** Bookings stored with a national (non-`+`) phone number are matched with `SMS_DEFAULT_COUNTRY_CODE` (default `1`). Set it if your guests' numbers aren't North American.
 - **Admin API docs.** `/docs`, `/redoc` and `/openapi.json` on admin-backend are served only with `DEV_MODE=true`.
 - **Log-based checks.** admin-backend no longer writes access lines, and admin-frontend's nginx writes no `/api` access line and no `/api` error line below `crit` (an unreachable admin-backend included); a check that looked for a request in either log needs another signal.
+- **Spoken vs text answers on OpenAI-compatible routes.** Non-stream `/v1/chat/completions` used to be formatted for speech by default; it is now text, like the other `/v1` routes, unless the caller uses a `/v1/voice` route or its address is in `OPENAI_SPEECH_CLIENT_NETWORKS`. A Home Assistant integration that speaks the answer with its own text-to-speech should point at `/v1/voice` or be listed in `OPENAI_SPEECH_CLIENT_NETWORKS` (behind a proxy, set `TRUSTED_PROXY_CIDRS` as well); the gateway logs `openai_output_channel` per request. See "Spoken vs text responses" in `docs/CONFIGURATION.md`.
+- **Semantic cache.** Cache keys now end with the interface type, and stored answers are raw. Entries written before the upgrade are never read again and expire on their own within 24 hours; the cache starts cold.
 
 ### Added
 
@@ -34,6 +36,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CONTROL_AGENT_CALLBACK_BASE_URL` on admin-backend: where the Control Agent's host reaches admin-backend, used as the base of the download-progress callback (see Upgrading).
 - admin-backend logs `admin_auth_rejected` when it refuses a request for its credential, and each service logs `admin_backend_refused` when admin-backend refuses one of its calls (see "Admin API authentication" in `docs/CONFIGURATION.md`).
 - CI: an admin-backend route with no credential check, and not on a reviewed list, fails the build. A new authenticated route must also carry a permission check (the existing routes that authenticate without one are frozen on a list), and the guest-data routes are pinned to their permission.
+- `OPENAI_SPEECH_CLIENT_NETWORKS`, and the `/v1/voice/chat/completions`, `/v1/voice/responses` and `/v1/voice/models` routes: the same handlers as their `/v1` twins, always spoken (see Upgrading).
+- The speech normalizer reads "mph" and "kph" next to a number, `km/h`, `m/s`, knots, `hPa`, `inHg`, `mbar`, a bare degree sign ("72°"), "5 ft 9 in" and money with a scale ("$1.5B", "$5 million", "$300K"); team records like "10-5-1" are read as wins, losses and ties.
 
 ### Changed
 
@@ -46,9 +50,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - "Open X everywhere" works when `multi_tv_commands` is on; it was always reported as disabled.
 - The Control Agent sends the service key on its download-progress callback, and only to a callback host listed in its `ALLOWED_CALLBACK_HOSTS`.
 - A tool proposal's author is set by admin-backend from the caller's credential; a `created_by` in the request is ignored.
+- Every Athena text-to-speech sink normalizes what it speaks: jarvis-web voice playback, the Wyoming `athena-tts` engine, LiveKit, Home Assistant conversation answers and spoken automation announcements. Before, only `/query` voice answers were.
+- Streaming answers from command handlers (lights, music, TV) are no longer normalized for a text caller.
+- `/query/stream` and `/query/stream/v2` honour the caller's interface type: speech is normalized, chat and text are not.
 
 ### Fixed
 
+- Spoken answers expand units on every path, not only some: "Winds 25mph" is "25 miles per hour", "15 km/h" is "15 kilometers per hour", "5 ft 9 in" is "5 feet 9 inches".
+- Singular units agree with the number: "1 mile", "1 mile per hour", "1 degree Fahrenheit", "1 hour", "1 dollar", "1 cent". "$1,000" is "1,000 dollars" (it was "1 dollars,000"), and "$0.01" is "1 cent".
+- A period after an inch abbreviation at the end of a sentence ("Rain 2 in. The game") is kept.
+- Normalizing a very long run of digits took seconds; it is now linear, and normalizing an already-normalized answer changes nothing.
 - The orchestrator can list and remove voice automations again (the admin API refused its calls). A guest turn is scoped to that guest's own automations; with no guest identity, automation requests are refused instead of reaching every stay's automations.
 - An SMS matches a booking only on the exact phone number and only for a confirmed, not-deleted stay, so a number that merely contains the guest's digits, or a blocked or cancelled booking, no longer matches.
 - The assistant's TV app list and TV feature flags load, the Room TV page shows its feature toggles, and "Discover Apple TVs" works. Those admin routes, and the public voice-interface list, were registered behind a route that answered in their place, so they had never been reachable.

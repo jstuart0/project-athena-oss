@@ -498,6 +498,16 @@ class TestF48ConfigManifestWiring:
         ):
             assert knob in text, f"{knob} not documented in manifests/athena-prod/config.yaml"
 
+    def test_prod_configmap_documents_the_speech_client_networks_knob_commented_out(self):
+        """The knob is listed as a placeholder and explained, but never set in the template."""
+        import pathlib
+        import re
+
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        text = (repo_root / "manifests" / "athena-prod" / "config.yaml").read_text()
+        assert "# OPENAI_SPEECH_CLIENT_NETWORKS" in text
+        assert not re.search(r"^\s+OPENAI_SPEECH_CLIENT_NETWORKS:", text, re.MULTILINE)
+
 
 # ---------------------------------------------------------------------------
 # C1 (ATHENA-89 P2, D2): the 5 region-configurable RAG fields default to ""
