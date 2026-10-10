@@ -280,43 +280,77 @@ _WITHHOLD_DIGITS = 6
 _WITHHOLD_SPOKEN_WORDS = 4
 
 
-def _digit_run_reason(query: str) -> Optional[str]:
-    """One scanner over digit groups and spoken-digit words.
+# Homophones that are ordinary words far more often than digits. They count as a
+# spoken digit only when next to another spoken-digit word ("one two three
+# four", "two to six seven"), never alone or next to numerals ("weather for
+# 2026", "set it to 72", "at 5 to 6").
+WEAK_DIGIT_WORDS = frozenset({"to", "for", "too", "won", "ate"})
 
-    Separators ``[\\s,.\\-/]`` (and the word "and") between tokens don't break a
-    run. The run is withheld at 6 digits in total, or at 4 spoken-digit words.
-    """
-    low = query.lower()
-    digits = words = 0
-    active = False
-    just_and = False
+_NUMERAL, _WORD, _WEAK = "numeral", "word", "weak"
+
+
+def _contiguous_runs(low: str) -> List[List[tuple]]:
+    """Runs of (kind, digit_count) tokens joined only by separators or "and"."""
+    runs: List[List[tuple]] = []
+    current: List[tuple] = []
     prev_end = 0
+    just_and = False
     for match in _TOKEN_RE.finditer(low):
         token = match.group()
-        gap = low[prev_end:match.start()] if active else ""
-        contiguous = active and _SEPARATOR_RE.fullmatch(gap) is not None
+        joined = bool(current) and _SEPARATOR_RE.fullmatch(low[prev_end:match.start()]) is not None
         prev_end = match.end()
-        if token == "and" and contiguous and not just_and:
+        if token == "and" and joined and not just_and:
             just_and = True
             continue
         if token.isdigit():
-            count, spoken = len(token), 0
+            item = (_NUMERAL, len(token))
+        elif token in WEAK_DIGIT_WORDS:
+            item = (_WEAK, 1)
         elif token in SPOKEN_DIGIT_WORDS:
-            count, spoken = 1, 1
+            item = (_WORD, 1)
         else:
-            digits = words = 0
-            active = just_and = False
+            if current:
+                runs.append(current)
+            current, just_and = [], False
             continue
-        if not contiguous:
-            digits = words = 0
-        digits += count
-        words += spoken
-        active = True
+        if not joined and current:
+            runs.append(current)
+            current = []
+        current.append(item)
         just_and = False
-        if digits >= _WITHHOLD_DIGITS:
-            return WITHHOLD_DIGIT_RUN
-        if words and digits >= _WITHHOLD_SPOKEN_WORDS:  # digits already counts the words
-            return WITHHOLD_SPOKEN_DIGITS
+    if current:
+        runs.append(current)
+    return runs
+
+
+def _split_unqualified_weak(run: List[tuple]) -> List[List[tuple]]:
+    """Drop each weak homophone with no spoken-digit word beside it, splitting the run there."""
+    pieces: List[List[tuple]] = [[]]
+    for i, (kind, count) in enumerate(run):
+        if kind == _WEAK:
+            beside = [run[j][0] for j in (i - 1, i + 1) if 0 <= j < len(run)]
+            if _WORD not in beside and _WEAK not in beside:
+                pieces.append([])
+                continue
+        pieces[-1].append((kind, count))
+    return [p for p in pieces if p]
+
+
+def _digit_run_reason(query: str) -> Optional[str]:
+    """One scanner over digit groups and spoken-digit words.
+
+    Separators ``[\\s,.\\-/_]`` (and the word "and") between tokens don't break a
+    run. A run is withheld at 6 digits in total, or at 4 in total when at
+    least one of them is a spoken word. Weak homophones count only beside
+    another spoken-digit word.
+    """
+    for run in _contiguous_runs(query.lower()):
+        for piece in _split_unqualified_weak(run):
+            total = sum(count for _, count in piece)
+            if total >= _WITHHOLD_DIGITS:
+                return WITHHOLD_DIGIT_RUN
+            if total >= _WITHHOLD_SPOKEN_WORDS and any(kind != _NUMERAL for kind, _ in piece):
+                return WITHHOLD_SPOKEN_DIGITS
     return None
 
 

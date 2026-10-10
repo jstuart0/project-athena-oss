@@ -224,6 +224,10 @@ WITHHELD_CORPUS = [
     "1 two 3 four",
     "pin 1 _ 2 _ 3 four five",
     "one, 2, three, 4",
+    "two to six seven",
+    "one two three for",
+    "ate ate ate ate",
+    "won two too four",
 ]
 
 
@@ -232,7 +236,7 @@ def test_pin_shaped_queries_are_withheld(query):
     assert cc.withhold_reason(query) is not None
 
 
-@pytest.mark.parametrize("query", ["set the lights to 40 percent", "what's the weather in 2026", "turn on the kitchen light", "play track one", "play track 4 and 5", "1234 main street", "", "what time is it"])
+@pytest.mark.parametrize("query", ["set the lights to 40 percent", "what's the weather in 2026", "turn on the kitchen light", "play track one", "play track 4 and 5", "1234 main street", "weather for 2026", "set it to 72", "remind me at 5 to 6", "to 1 2 3", "5 for 6 to 7", "for 2026 and to 2027", "", "what time is it"])
 def test_ordinary_queries_are_not_withheld(query):
     assert cc.withhold_reason(query) is None
 
