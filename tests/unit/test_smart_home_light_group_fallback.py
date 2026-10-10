@@ -179,3 +179,27 @@ def test_configured_arriving_home_uses_living_room_group_not_all(monkeypatch):
     assert len(turn_on_calls) == 1
     assert turn_on_calls[0].args[2]["entity_id"] == "light.living_room_all"
     assert "welcome home" in result.lower()
+
+
+@pytest.mark.parametrize("raw", [
+    '{"Living Room": "light.living_room_all", "OFFICE": "light.office_all"}',
+    '{"living room": "light.living_room_all", " Office ": "light.office_all"}',
+])
+@pytest.mark.parametrize("entity,query,expected", [
+    ("scene.movie_mode", "let's watch a movie", "light.living_room_all"),
+    ("script.good_morning", "good morning", "light.office_all"),
+    ("script.arriving", "i'm home", "light.living_room_all"),
+])
+def test_scene_fallback_finds_spaced_and_cased_keys(monkeypatch, raw, entity, query, expected):
+    _set_light_groups(monkeypatch, raw)
+    ha_client = _failing_ha_client()
+
+    _run_as_owner(
+        _controller()._handle_scene_intent("activate", {"entity_id": entity}, ha_client, original_query=query)
+    )
+
+    turn_on_calls = [
+        c for c in ha_client.call_service.await_args_list
+        if c.args[:2] == ("light", "turn_on")
+    ]
+    assert [c.args[2]["entity_id"] for c in turn_on_calls] == [expected]

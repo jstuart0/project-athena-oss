@@ -29,6 +29,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Log-based checks.** admin-backend no longer writes access lines, and admin-frontend's nginx writes no `/api` access line and no `/api` error line below `crit` (an unreachable admin-backend included); a check that looked for a request in either log needs another signal.
 - **Spoken vs text answers on OpenAI-compatible routes.** Non-stream `/v1/chat/completions` used to be formatted for speech by default; it is now text, like the other `/v1` routes, unless the caller uses a `/v1/voice` route or its address is in `OPENAI_SPEECH_CLIENT_NETWORKS`. A Home Assistant integration that speaks the answer with its own text-to-speech should point at `/v1/voice` or be listed in `OPENAI_SPEECH_CLIENT_NETWORKS` (behind a proxy, set `TRUSTED_PROXY_CIDRS` as well); the gateway logs `openai_output_channel` per request. See "Spoken vs text responses" in `docs/CONFIGURATION.md`.
 - **Semantic cache.** Cache keys now end with the interface type, and stored answers are raw. Entries written before the upgrade are never read again and expire on their own within 24 hours; the cache starts cold.
+- **Room light commands.** A room's lights are now chosen by whole-word, start-of-name matching, and a group is written as itself, not as every light inside it. If a room's lights used names such as `family_*`, `work_*` or `bed_*` (the old synonyms for living room, office and bedroom), or lit up through a satellite's LED ring, set `HA_LIGHT_GROUPS` for that room (or `HA_ROOM_LIGHT_EXCLUDE_ENTITIES=[]` to keep the ring). A grouped room now counts as its bulbs at the write confirmation, so a room with more than 18 bulbs needs "all" or a confirmation where one group write used to pass silently.
 
 ### Added
 
@@ -38,6 +39,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CI: an admin-backend route with no credential check, and not on a reviewed list, fails the build. A new authenticated route must also carry a permission check (the existing routes that authenticate without one are frozen on a list), and the guest-data routes are pinned to their permission.
 - `OPENAI_SPEECH_CLIENT_NETWORKS`, and the `/v1/voice/chat/completions`, `/v1/voice/responses` and `/v1/voice/models` routes: the same handlers as their `/v1` twins, always spoken (see Upgrading).
 - The speech normalizer reads "mph" and "kph" next to a number, `km/h`, `m/s`, knots, `hPa`, `inHg`, `mbar`, a bare degree sign ("72°"), "5 ft 9 in" and money with a scale ("$1.5B", "$5 million", "$300K"); team records like "10-5-1" are read as wins, losses and ties.
+- `HA_ROOM_LIGHT_EXCLUDE_ENTITIES`: JSON array of regexes for lights that a room's name must not pick up (default: status LEDs and LED rings). `[]` turns it off.
 
 ### Changed
 
@@ -53,6 +55,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Every Athena text-to-speech sink normalizes what it speaks: jarvis-web voice playback, the Wyoming `athena-tts` engine, LiveKit, Home Assistant conversation answers and spoken automation announcements. Before, only `/query` voice answers were.
 - Streaming answers from command handlers (lights, music, TV) are no longer normalized for a text caller.
 - `/query/stream` and `/query/stream/v2` honour the caller's interface type: speech is normalized, chat and text are not.
+- `HA_LIGHT_GROUPS` is now the authoritative group for room light commands and for "are the lights on", not only for the scene fallback. Keys match regardless of case, spaces or underscores.
+- Room name matching is stricter: the room's words must open the light's id or name, and the synonym table no longer maps a room to a bare word that names another room, a floor or a piece of furniture (`bed`, `work`, `family`, `primary`, `downstairs`). "Porch" and "patio" no longer reach `outside`, and "patio" no longer reaches `back` (which opens `back_door_*`); "outside" still reaches `porch` and `patio`, and "back" still reaches `patio`. Use `HA_LIGHT_GROUPS` or a room group for those.
+- The write fan-out gate counts bulbs (leaf lights), not written ids, for room, multi-room and room-group light commands, so a confirmation names the real number of lights.
+- `athena_ha_write_denied_total` also counts a room light command that drops a light the request may not use (once per such command), in addition to the guard's own denials.
 
 ### Fixed
 
@@ -67,6 +73,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An SMS matches a booking only on the exact phone number and only for a confirmed, not-deleted stay, so a number that merely contains the guest's digits, or a blocked or cancelled booking, no longer matches.
 - The assistant's TV app list and TV feature flags load, the Room TV page shows its feature toggles, and "Discover Apple TVs" works. Those admin routes, and the public voice-interface list, were registered behind a route that answered in their place, so they had never been reachable.
 - Opening a TV app is no longer reported as failed when the app opened but the profile-select press afterwards failed.
+- Room light commands write each bulb at most once: a room's nested or overlapping groups no longer produce one call per matching entity, and multi-room and room-group commands no longer write a room's nested groups twice or only the largest group.
+- A room command no longer includes a light that only mentions the room: another room's name (`master_bathroom_*` for "bathroom", `entrance_*` for "hall") or a voice satellite's status LED.
 
 ### Security
 
@@ -79,6 +87,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Calls that carry the service key to admin-backend verify its TLS certificate and don't follow redirects, and a value placed in an admin URL's path is percent-encoded, so it can't select a different route.
 - A service key that isn't plain ASCII is refused with 401 instead of a 500, and the callers of the newly gated routes never send a key that can't be an HTTP header value, so it can't end up in an HTTP client's error message there.
 - On a route that accepts the service key or a user, a wrong key is refused even when a valid user credential comes with it. An empty `X-Service-Key` header counts as no key there; a signed-in-user route refuses any `X-Service-Key` header, empty or not.
+- A guest can no longer reach a restricted light through a group that contains it: a room command replaces such a group with its permitted lights, and refuses when none are left. Known gaps, to follow up: whole-house and scene-fallback light writes still write groups as such, the gateway's single-entity fast path builds its own entity name, fan, cover, lock and media room matching still uses substring matching, and "are the lights on" answers may name a light a guest couldn't control.
 
 ---
 

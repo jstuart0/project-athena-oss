@@ -485,6 +485,14 @@ class AthenaConfig(BaseSettings):
     #   house ("all") when a specific room's group isn't configured is a
     #   house-wide regression, not a safe default.
     ha_light_groups: str = Field(default="")
+    # ha_room_light_exclude_entities: JSON array of regexes (re.search on the
+    #   entity id). A light matched only by room *name* is dropped when it
+    #   matches one, so a voice satellite's status LED or LED ring is not
+    #   treated as a room fixture. Unset uses the built-in LED-ring/status-LED
+    #   pattern; "[]" opts out entirely; a malformed value falls back to the
+    #   default. Never applied to an explicit HA_LIGHT_GROUPS entry or to a
+    #   member of a candidate group.
+    ha_room_light_exclude_entities: str = Field(default="")
     # ha_music_players: fallback room -> Music Assistant media_player
     #   entity mapping, used only when the admin API's room_audio_config
     #   table is unreachable (see src/orchestrator/music_handler.py's

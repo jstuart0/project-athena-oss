@@ -21,7 +21,7 @@ Complete reference for all configuration options in Project Athena.
 
 ## Centralized Configuration via AthenaConfig
 
-`AthenaConfig` (`src/shared/config.py`) is the canonical pydantic-settings `BaseSettings` object for Athena. It centralizes 41 env vars, starting with 11 high-leverage vars migrated in Campaign 4 (ATHENA-7) and extended by later campaigns (ATHENA-1, ATHENA-11, ATHENA-12, ATHENA-14, ATHENA-59, ATHENA-88, ATHENA-89). The remaining env vars in the codebase continue to use direct `os.getenv` and are migrated per-PR — see `CONTRIBUTING.md` for the extension pattern.
+`AthenaConfig` (`src/shared/config.py`) is the canonical pydantic-settings `BaseSettings` object for Athena. It centralizes 64 env vars, starting with 11 high-leverage vars migrated in Campaign 4 (ATHENA-7) and extended by later campaigns (ATHENA-1, ATHENA-11, ATHENA-12, ATHENA-14, ATHENA-59, ATHENA-88, ATHENA-89). The remaining env vars in the codebase continue to use direct `os.getenv` and are migrated per-PR — see `CONTRIBUTING.md` for the extension pattern.
 
 ### Reading config in code
 
@@ -1389,7 +1389,65 @@ value is ignored with a warning.
 increments the `athena_ha_write_denied_total{domain, scope_mode}` Prometheus
 counter, regardless of which entry point or node produced it — alert on a
 sustained rise if you want to notice a caller hammering a write it doesn't
-have.
+have. A room light command that drops a light the request may not use
+(see "How a room's lights are chosen") adds one increment for that command,
+plus one for every denial the guard itself raises; so a single guest command
+can count more than once.
+
+#### How a room's lights are chosen
+
+A room light command ("turn on the kitchen lights") resolves to the smallest
+set of light entities that cover that room's lights, and writes each physical
+bulb at most once.
+
+1. **`HA_LIGHT_GROUPS`.** If the room has an entry, that entity is the room.
+   Keys match regardless of case, spaces or underscores (`living room`,
+   `Living_Room`). An entry naming an entity Home Assistant doesn't report is
+   logged and ignored. The same entry answers "are the kitchen lights on".
+2. **Name matching.** Otherwise a light belongs to the room when the room's
+   words are whole words at the start of its entity id or friendly name
+   (`kitchen` matches `light.kitchen_ceiling`, not `light.master_kitchen`). A
+   requested part ("hall and nook") that has no such light falls back to a
+   whole-word match anywhere in the name, for that part only. Lights matching
+   `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` (by default an id with `led_ring` or
+   `status_led`, such as a voice satellite's ring) are left out of this tier
+   only.
+3. **Synonyms.** `hall`/`hallway`/`corridor`/`foyer`, `bath`/`bathroom`/
+   `restroom`/`washroom`, `living room`/`livingroom`/`lounge`, `office`/
+   `study`/`home_office`, `basement`/`cellar`, `garage`/`carport`,
+   `kitchen`/`kitchenette`, `dining`, `front` (also `entrance`/`entryway`),
+   `back`/`backyard`/`rear`/`patio`, `outside` (also `porch`/`outdoor`/
+   `exterior`/`patio`), `porch` (also `front_porch`/`back_porch`/`back_yard`), `master bedroom` (also `main_bedroom`/`primary_bedroom`). Saying
+   a synonym reaches its room, except that `porch` and `patio` do not reach
+   `outside`, and `patio` does not reach `back`: those two bare words open
+   other lights' names (`outside_*`, `back_door_*`), so "outside" reaches
+   `porch` and `patio` but not the other way round. Broader aliases such as `bed`, `work`, `family`,
+   `primary` or a floor name are not synonyms, because as a word that opens
+   an id they would pull in other rooms' lights; use `HA_LIGHT_GROUPS` or a
+   room group for those.
+4. **Cover.** A group that is part of another matched group is dropped, and
+   groups that overlap only partly contribute just the lights not already
+   covered, as individual lights. A cycle of groups counts as one light.
+5. **Guests.** A group containing a light the request's permissions deny is
+   replaced by its permitted lights. If nothing permitted is left, the answer
+   is the guest-mode refusal; if only some were dropped, the command runs and
+   the answer says it did part of it.
+6. **The fan-out gate** counts the bulbs a write reaches, not the ids written:
+   a room with one group of 20 bulbs counts 20, so it needs the confirmation
+   or the "all" wording that 20 individual lights would, and can exceed
+   `HA_WRITE_FANOUT_HARD_LIMIT`.
+
+Notes. Group membership and names come from Home Assistant's state list,
+cached for five minutes, so a bulb added to a group or a renamed light takes
+effect within that window. A nested group that the state list doesn't include
+(stale, or hidden from a non-admin token) can't be expanded: its members
+aren't visible, so it is permission-checked by its own id only; restrict such
+ids directly in `restricted_entities` if needed. Status answers ("are the
+kitchen lights on") read light state outside the permission guard and may name
+a light a guest couldn't control. The gateway's simple-command fast path builds
+a single entity name itself and doesn't use any of this. To debug a room, read
+the `room_lights_resolved` and `light_targets_finalized` log events (counts and
+tiers only).
 
 ### Monitoring
 
@@ -2113,7 +2171,8 @@ rather than guessing a device/room your HA instance doesn't have. See
 | `HA_TV_ENTITIES` | *(empty)* | Fallback room → Apple TV entity mapping, used only when the admin API's Room TV Config is unreachable. JSON array of `{room, media_player_entity_id, remote_entity_id}` objects, or comma-separated `room:media_player_entity_id[:remote_entity_id]` triples. |
 | `HA_MUSIC_PLAYERS` | *(empty)* | Fallback room → Music Assistant `media_player` entity mapping, used only when the admin API's room audio config is unreachable. JSON object `{room: entity_id}` or comma-separated `room:entity_id` pairs. |
 | `HA_BED_WARMER_ENTITIES` | *(empty)* | JSON object naming the 5 HA entities a Sunbeam-via-Tuya dual-zone bed-warmer/mattress-pad integration exposes (`level_left`, `level_right`, `power_main`, `power_side_a`, `power_side_b`). |
-| `HA_LIGHT_GROUPS` | *(empty)* | JSON object mapping a room name to a light-group entity ID (`{"<room>": "<light group entity>"}`), read by `smart_home_controller.py`'s scene-activation-failed fallback (dim/turn on that room's lights when the requested scene or script doesn't exist). A room with no configured group gets no fallback — turning on every light in the house when one room's group isn't configured would be a house-wide regression, not a safe default. |
+| `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | *(empty)* | JSON array of regexes (`re.search` on the entity id). A light picked for a room only by name is dropped when it matches. Unset uses the built-in pattern for an id with a `led_ring` or `status_led` word; `[]` turns the exclusion off; a malformed value falls back to the built-in pattern. Never applied to an `HA_LIGHT_GROUPS` entry or to a member of a picked group. See "How a room's lights are chosen". |
+| `HA_LIGHT_GROUPS` | *(empty)* | JSON object mapping a room name to a light-group entity ID (`{"<room>": "<light group entity>"}`). The authoritative group for room light commands and status (keys match regardless of case, spaces or underscores), and read by `smart_home_controller.py`'s scene-activation-failed fallback (dim/turn on that room's lights when the requested scene or script doesn't exist). For the scene fallback a room with no configured group gets no fallback — turning on every light in the house when one room's group isn't configured would be a house-wide regression, not a safe default. |
 
 ### jarvis-web appliance and media entities
 
