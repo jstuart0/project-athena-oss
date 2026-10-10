@@ -6,18 +6,26 @@ Supports property information, user mode context, and temporal data.
 """
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import structlog
 
 from app.database import get_db
 from app.auth.oidc import get_current_user
-from app.models import User, BaseKnowledge, SystemSetting
-from app.utils.service_auth import verify_service_or_oidc
+from app.models import AuditLog, User, BaseKnowledge, SystemSetting
+from app.utils.service_auth import require_user_permission, verify_service_or_oidc
 from shared.config import get_config
+from shared.knowledge_tiers import (
+    KNOWLEDGE_TIERS,
+    OWNER_CATEGORY,
+    OWNER_TIER,
+    WRITABLE_TIERS,
+    validate_entry_fields,
+)
 
 logger = structlog.get_logger()
 
@@ -31,6 +39,90 @@ _SETTINGS_KEY = "base_knowledge_settings"
 _VALID_TEMP_UNITS = {"F", "C"}
 _VALID_DISTANCE_UNITS = {"mi", "km"}
 _VALID_DATE_FORMATS = {"MM/DD/YYYY", "DD/MM/YYYY", "YYYY-MM-DD"}
+
+_AUDIT_RESOURCE = "base_knowledge"
+_BULK_TIER_MAX_IDS = 500
+# A bulk import is a seed bundle or a hand-built list; 500 matches bulk-tier.
+_BULK_CREATE_MAX_ENTRIES = 500
+# Generous for an instruction paragraph, small enough that one row can't
+# flood a prompt. Newlines and tabs stay legal (multi-line instructions);
+# every other control character is refused.
+_VALUE_MAX_LENGTH = 4000
+_VALUE_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# Moving a row out of Owner only, or deleting one, is owner role only.
+_DEMOTE_PERMISSION = "manage_infrastructure"
+_INT32_MAX = 2**31 - 1
+_CREATE_COLLISION_DETAIL = "An entry with this category, key and audience already exists"
+_TIER_COLLISION_DETAIL = (
+    "applies_to: another entry with this category and key already has that audience"
+)
+
+
+def _entry_audit_fields(entry: BaseKnowledge) -> Dict[str, Any]:
+    """The only fields an audit row carries about an entry: ids, tier and
+    state, never category, key, value or description."""
+    return {
+        "id": entry.id,
+        "applies_to": entry.applies_to,
+        "enabled": entry.enabled,
+    }
+
+
+def _audit(db: Session, user: User, request: Optional[Request], action: str,
+           resource_id: Optional[int], old_value: Optional[dict], new_value: Optional[dict],
+           success: bool = True, error_message: Optional[str] = None) -> None:
+    """Stage an audit row in the caller's transaction, so it commits with the
+    change it records and is rolled back with it."""
+    db.add(AuditLog(
+        user_id=user.id,
+        action=action,
+        resource_type=_AUDIT_RESOURCE,
+        resource_id=resource_id,
+        old_value=old_value,
+        new_value=new_value,
+        ip_address=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None,
+        success=success,
+        error_message=error_message,
+    ))
+
+
+def _value_problem(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if len(value) > _VALUE_MAX_LENGTH:
+        return f"value: must be at most {_VALUE_MAX_LENGTH} characters"
+    if _VALUE_CONTROL_CHAR_RE.search(value):
+        return "value: must not contain control characters"
+    return None
+
+
+def _tier_rule_violation(entry: BaseKnowledge, new_tier: str) -> Optional[str]:
+    """Judge only the tier change on a stored row. A legacy row keeps whatever
+    category/key shape it has, so the category is normalised and a malformed
+    key neutralised before the shared validator sees them."""
+    category = (entry.category or "").strip().lower()
+    if category != OWNER_CATEGORY and validate_entry_fields(category, "k", new_tier) is not None:
+        category = "c"
+    key = entry.key if validate_entry_fields("x", entry.key, new_tier) is None else "k"
+    return validate_entry_fields(category, key, new_tier)
+
+
+def _refuse_demotion(db: Session, user: User, request: Request, action: str,
+                     resource_id: Optional[int]) -> HTTPException:
+    """Record the refusal (and only it), then return the 403 to raise."""
+    db.rollback()
+    _audit(db, user, request, action, resource_id, None, None,
+           success=False, error_message="insufficient_role")
+    db.commit()
+    return HTTPException(status_code=403, detail={"error": "insufficient_role"})
+
+
+def _tier_counts(tiers: List[str]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for tier in tiers:
+        counts[tier] = counts.get(tier, 0) + 1
+    return counts
 
 
 class BaseKnowledgeSettings(BaseModel):
@@ -309,7 +401,10 @@ class BaseKnowledgeCreate(BaseModel):
     category: str  # 'property', 'location', 'user', 'temporal', 'general'
     key: str
     value: str
-    applies_to: str = 'both'  # 'guest', 'owner', 'both', 'chat'
+    # One of both/guest/household/owner (shared.knowledge_tiers). 'owner' means
+    # owner only. The default stays 'both' for API compatibility; the UI makes
+    # the caller choose.
+    applies_to: str = 'both'
     priority: int = 0
     extra_metadata: Optional[dict] = None
     enabled: bool = True
@@ -317,7 +412,11 @@ class BaseKnowledgeCreate(BaseModel):
 
 
 class BaseKnowledgeUpdate(BaseModel):
-    """Schema for updating an existing base knowledge entry."""
+    """Schema for updating an existing base knowledge entry.
+
+    category and key are not editable. applies_to is one of both/guest/
+    household/owner; 'owner' means owner only.
+    """
     value: Optional[str] = None
     applies_to: Optional[str] = None
     priority: Optional[int] = None
@@ -346,13 +445,13 @@ class BaseKnowledgeResponse(BaseModel):
 
 class BaseKnowledgeBulkCreate(BaseModel):
     """Schema for bulk creating knowledge entries."""
-    entries: List[BaseKnowledgeCreate]
+    entries: Annotated[List[BaseKnowledgeCreate], Field(max_length=_BULK_CREATE_MAX_ENTRIES)]
 
 
 @router.get("", response_model=List[BaseKnowledgeResponse])
 async def list_base_knowledge(
     category: Optional[str] = Query(None, description="Filter by category"),
-    applies_to: Optional[str] = Query(None, description="Filter by applies_to (guest/owner/both)"),
+    applies_to: Optional[str] = Query(None, description="Filter by applies_to (both/guest/household/owner)"),
     enabled: Optional[bool] = Query(None, description="Filter by enabled status"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -400,7 +499,7 @@ async def list_base_knowledge(
 @router.get("/public", response_model=List[BaseKnowledgeResponse])
 async def list_base_knowledge_public(
     category: Optional[str] = Query(None, description="Filter by category"),
-    applies_to: Optional[str] = Query(None, description="Filter by applies_to (guest/owner/both)"),
+    applies_to: Optional[str] = Query(None, description="Filter by applies_to (both/guest/household/owner)"),
     enabled: Optional[bool] = Query(None, description="Filter by enabled status"),
     db: Session = Depends(get_db),
     _authorized: bool = Depends(verify_service_or_oidc),
@@ -469,6 +568,7 @@ async def put_base_knowledge_settings(
     # before _validate_settings ever runs -- defeating the single-string
     # detail this route promises (M2). The isinstance check below is the
     # one and only body-shape gate.
+    request: Request,
     body: Any = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -487,6 +587,7 @@ async def put_base_knowledge_settings(
     validated = _validate_settings(body)
 
     try:
+        prior = _load_settings_blob(db)
         setting = db.query(SystemSetting).filter(SystemSetting.key == _SETTINGS_KEY).first()
         if setting is None:
             setting = SystemSetting(
@@ -506,6 +607,9 @@ async def put_base_knowledge_settings(
                 entry.value = location_value
                 entry.enabled = bool(location_value)
         else:
+            invalid = validate_entry_fields("location", "default_location", "both")
+            if invalid:
+                raise HTTPException(status_code=422, detail=invalid)
             db.add(BaseKnowledge(
                 category="location",
                 key="default_location",
@@ -516,6 +620,10 @@ async def put_base_knowledge_settings(
                 description="Set from Memory & Context -> Base Knowledge",
             ))
 
+        _audit(db, current_user, request, "settings_update", None, None, {
+            "changed_fields": sorted(k for k in validated if validated[k] != prior.get(k)),
+            "location_rows": len(entries) or 1,
+        })
         db.commit()
     except HTTPException:
         raise
@@ -560,9 +668,24 @@ async def get_base_knowledge(
         raise HTTPException(status_code=500, detail="Failed to retrieve base knowledge entry")
 
 
+def _find_existing(db: Session, category: str, key: str, applies_to: str) -> Optional[BaseKnowledge]:
+    """Matches the table's unique key (category, key, applies_to): the same
+    fact may exist once per audience."""
+    return db.query(BaseKnowledge).filter(
+        BaseKnowledge.category == category,
+        BaseKnowledge.key == key,
+        BaseKnowledge.applies_to == applies_to,
+    ).first()
+
+
+def _unprocessable(detail: str) -> HTTPException:
+    return HTTPException(status_code=422, detail=detail)
+
+
 @router.post("", response_model=BaseKnowledgeResponse, status_code=201)
 async def create_base_knowledge(
     entry: BaseKnowledgeCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -575,20 +698,14 @@ async def create_base_knowledge(
     if not current_user.has_permission('write:base_knowledge'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
+    invalid = validate_entry_fields(entry.category, entry.key, entry.applies_to) or _value_problem(entry.value)
+    if invalid:
+        raise _unprocessable(invalid)
+
     try:
-        # Check if entry with same category and key already exists
-        existing = db.query(BaseKnowledge).filter(
-            BaseKnowledge.category == entry.category,
-            BaseKnowledge.key == entry.key
-        ).first()
+        if _find_existing(db, entry.category, entry.key, entry.applies_to):
+            raise HTTPException(status_code=409, detail=_CREATE_COLLISION_DETAIL)
 
-        if existing:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Base knowledge entry with category '{entry.category}' and key '{entry.key}' already exists"
-            )
-
-        # Create new entry
         new_entry = BaseKnowledge(
             category=entry.category,
             key=entry.key,
@@ -601,6 +718,8 @@ async def create_base_knowledge(
         )
 
         db.add(new_entry)
+        db.flush()
+        _audit(db, current_user, request, "create", new_entry.id, None, _entry_audit_fields(new_entry))
         db.commit()
         db.refresh(new_entry)
 
@@ -613,7 +732,11 @@ async def create_base_knowledge(
         return new_entry.to_dict()
 
     except HTTPException:
+        db.rollback()
         raise
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_CREATE_COLLISION_DETAIL)
     except Exception as e:
         db.rollback()
         logger.error("failed_to_create_base_knowledge", error=str(e))
@@ -624,6 +747,7 @@ async def create_base_knowledge(
 async def update_base_knowledge(
     knowledge_id: int,
     update_data: BaseKnowledgeUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -631,7 +755,11 @@ async def update_base_knowledge(
     Update an existing base knowledge entry.
 
     Requires write permission.
-    Only provided fields will be updated.
+    Only provided fields will be updated. A changed applies_to is checked
+    against the row's own (normalised) category and key, so an owner-category
+    entry can only be moved to Owner only (owner_name and name excepted); an
+    edit that leaves the audience as it is is not re-checked. Moving a row out
+    of Owner only needs the owner role (403 insufficient_role, audited).
     """
     if not current_user.has_permission('write:base_knowledge'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
@@ -642,7 +770,21 @@ async def update_base_knowledge(
         if not entry:
             raise HTTPException(status_code=404, detail="Base knowledge entry not found")
 
-        # Update fields if provided
+        tier_changes = update_data.applies_to is not None and update_data.applies_to != entry.applies_to
+        if tier_changes and entry.applies_to == OWNER_TIER and not current_user.has_permission(_DEMOTE_PERMISSION):
+            raise _refuse_demotion(db, current_user, request, "update", entry.id)
+        invalid = _value_problem(update_data.value)
+        if not invalid and tier_changes:
+            invalid = _tier_rule_violation(entry, update_data.applies_to)
+        if invalid:
+            raise _unprocessable(invalid)
+
+        old_audit = _entry_audit_fields(entry)
+        changed_fields = [
+            name for name in ("value", "applies_to", "priority", "extra_metadata", "enabled", "description")
+            if getattr(update_data, name) is not None and getattr(update_data, name) != getattr(entry, name)
+        ]
+
         if update_data.value is not None:
             entry.value = update_data.value
         if update_data.applies_to is not None:
@@ -656,6 +798,8 @@ async def update_base_knowledge(
         if update_data.description is not None:
             entry.description = update_data.description
 
+        _audit(db, current_user, request, "update", entry.id, old_audit,
+               {**_entry_audit_fields(entry), "changed_fields": changed_fields})
         db.commit()
         db.refresh(entry)
 
@@ -668,7 +812,11 @@ async def update_base_knowledge(
         return entry.to_dict()
 
     except HTTPException:
+        db.rollback()
         raise
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_TIER_COLLISION_DETAIL)
     except Exception as e:
         db.rollback()
         logger.error("failed_to_update_base_knowledge", error=str(e), knowledge_id=knowledge_id)
@@ -678,13 +826,15 @@ async def update_base_knowledge(
 @router.delete("/{knowledge_id}", status_code=204)
 async def delete_base_knowledge(
     knowledge_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
     Delete a base knowledge entry.
 
-    Requires write permission.
+    Requires write permission; deleting an Owner only entry needs the owner
+    role (403 insufficient_role, audited as a refusal).
     """
     if not current_user.has_permission('write:base_knowledge'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
@@ -701,12 +851,17 @@ async def delete_base_knowledge(
                    category=entry.category,
                    key=entry.key)
 
+        if entry.applies_to == OWNER_TIER and not current_user.has_permission(_DEMOTE_PERMISSION):
+            raise _refuse_demotion(db, current_user, request, "delete", entry.id)
+
+        _audit(db, current_user, request, "delete", entry.id, _entry_audit_fields(entry), None)
         db.delete(entry)
         db.commit()
 
         return None
 
     except HTTPException:
+        db.rollback()
         raise
     except Exception as e:
         db.rollback()
@@ -717,6 +872,7 @@ async def delete_base_knowledge(
 @router.post("/bulk", response_model=dict, status_code=201)
 async def bulk_create_base_knowledge(
     data: BaseKnowledgeBulkCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -724,29 +880,32 @@ async def bulk_create_base_knowledge(
     Bulk create base knowledge entries.
 
     Requires write permission.
-    Creates multiple entries in a single transaction.
-    Skips entries that already exist (by category + key).
+    Every entry is validated before any row is written, then all are created
+    in a single transaction. Skips entries that already exist (by category +
+    key). A database-level collision rolls the whole request back (409).
     """
     if not current_user.has_permission('write:base_knowledge'):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    for index, entry_data in enumerate(data.entries):
+        invalid = (
+            validate_entry_fields(entry_data.category, entry_data.key, entry_data.applies_to)
+            or _value_problem(entry_data.value)
+        )
+        if invalid:
+            raise _unprocessable(f"entries[{index}].{invalid}")
 
     try:
         created_count = 0
         skipped_count = 0
         created_ids = []
+        created_tiers = []
 
         for entry_data in data.entries:
-            # Check if entry already exists
-            existing = db.query(BaseKnowledge).filter(
-                BaseKnowledge.category == entry_data.category,
-                BaseKnowledge.key == entry_data.key
-            ).first()
-
-            if existing:
+            if _find_existing(db, entry_data.category, entry_data.key, entry_data.applies_to):
                 skipped_count += 1
                 continue
 
-            # Create new entry
             new_entry = BaseKnowledge(
                 category=entry_data.category,
                 key=entry_data.key,
@@ -761,8 +920,15 @@ async def bulk_create_base_knowledge(
             db.add(new_entry)
             db.flush()  # Get the ID without committing
             created_ids.append(new_entry.id)
+            created_tiers.append(new_entry.applies_to)
             created_count += 1
 
+        _audit(db, current_user, request, "bulk_create", None, None, {
+            "created_ids": created_ids,
+            "created_count": created_count,
+            "skipped_count": skipped_count,
+            "tiers": _tier_counts(created_tiers),
+        })
         db.commit()
 
         logger.info("base_knowledge_bulk_created",
@@ -776,7 +942,88 @@ async def bulk_create_base_knowledge(
             "created_ids": created_ids
         }
 
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="entries: an entry with the same category and key already exists"
+        )
     except Exception as e:
         db.rollback()
         logger.error("failed_to_bulk_create_base_knowledge", error=str(e))
         raise HTTPException(status_code=500, detail="Failed to bulk create base knowledge entries")
+
+
+class BaseKnowledgeBulkTier(BaseModel):
+    """Schema for moving several entries to one audience."""
+    # Bounded by pydantic before any handler work. An out-of-range id or more
+    # than 500 ids gets pydantic's list-shaped 422, so the UI caps selection.
+    ids: Annotated[List[Annotated[int, Field(ge=1, le=_INT32_MAX)]], Field(max_length=_BULK_TIER_MAX_IDS)]
+    applies_to: str
+
+
+@router.post("/bulk-tier", response_model=dict)
+async def bulk_tier_base_knowledge(
+    data: BaseKnowledgeBulkTier,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_user_permission("write:base_knowledge")),
+):
+    """
+    Move the selected entries to one audience, all or nothing.
+
+    Signed-in users with write:base_knowledge only (a service key is refused).
+    Moving any Owner only row to another audience needs the owner role (403
+    insufficient_role, audited as a refusal; nothing changes). One entry that
+    breaks the owner-category rule (422) or collides with an
+    existing (category, key, audience) row (409) fails the whole request and
+    changes nothing, including the audit row.
+    """
+    if data.applies_to not in WRITABLE_TIERS:
+        raise _unprocessable("applies_to: must be one of " + ", ".join(KNOWLEDGE_TIERS))
+    if not 1 <= len(data.ids) <= _BULK_TIER_MAX_IDS:
+        raise _unprocessable(f"ids: select between 1 and {_BULK_TIER_MAX_IDS} entries")
+    if len(set(data.ids)) != len(data.ids):
+        raise _unprocessable("ids: each entry may be selected once")
+
+    try:
+        entries = db.query(BaseKnowledge).filter(BaseKnowledge.id.in_(data.ids)).all()
+        if len(entries) != len(data.ids):
+            raise HTTPException(status_code=404, detail="One or more entries were not found")
+
+        if (
+            data.applies_to != OWNER_TIER
+            and any(entry.applies_to == OWNER_TIER for entry in entries)
+            and not current_user.has_permission(_DEMOTE_PERMISSION)
+        ):
+            raise _refuse_demotion(db, current_user, request, "bulk_tier", None)
+
+        violating = sum(1 for entry in entries if _tier_rule_violation(entry, data.applies_to))
+        if violating:
+            raise _unprocessable(
+                f"applies_to: {violating} selected entries are in the owner category and must stay Owner only"
+            )
+
+        old_tiers = _tier_counts([entry.applies_to for entry in entries])
+        for entry in entries:
+            entry.applies_to = data.applies_to
+        db.flush()
+
+        _audit(db, current_user, request, "bulk_tier", None, None, {
+            "ids": sorted(data.ids),
+            "old_tiers": old_tiers,
+            "new_tier": data.applies_to,
+        })
+        db.commit()
+        return {"updated": len(entries)}
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_TIER_COLLISION_DETAIL)
+    except Exception as e:
+        db.rollback()
+        logger.error("failed_to_bulk_tier_base_knowledge", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to change the audience of the selected entries")
