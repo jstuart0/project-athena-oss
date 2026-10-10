@@ -1417,7 +1417,7 @@ bulb at most once.
    `study`/`home_office`, `basement`/`cellar`, `garage`/`carport`,
    `kitchen`/`kitchenette`, `dining`, `front` (also `entrance`/`entryway`),
    `back`/`backyard`/`rear`/`patio`, `outside` (also `porch`/`outdoor`/
-   `patio`), `master bedroom` (also `main_bedroom`/`primary_bedroom`). Saying
+   `exterior`/`patio`), `porch` (also `front_porch`/`back_porch`/`back_yard`), `master bedroom` (also `main_bedroom`/`primary_bedroom`). Saying
    a synonym reaches its room, except that `porch` and `patio` do not reach
    `outside`, and `patio` does not reach `back`: those two bare words open
    other lights' names (`outside_*`, `back_door_*`), so "outside" reaches
