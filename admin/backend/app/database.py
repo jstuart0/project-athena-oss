@@ -11,8 +11,9 @@ DEV_MODE Support:
 """
 import os
 from contextlib import contextmanager
-from typing import Generator, Optional
+from typing import Generator
 from shared.config import get_config
+from shared.conversation_capture import resolve_database_dsn
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -40,14 +41,18 @@ else:
             "postgresql://user:password@host:5432/database"
         )
 
-# Database password from environment (for security)
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-if DB_PASSWORD and "@" in DATABASE_URL:
-    # Insert password into connection string
-    # postgresql://user@host -> postgresql://user:password@host
-    parts = DATABASE_URL.split("@")
-    user_part = parts[0].split("//")[1]  # Extract user
-    DATABASE_URL = f"postgresql://{user_part}:{DB_PASSWORD}@{'@'.join(parts[1:])}"
+if not DEV_MODE:
+    # The one DSN builder (shared with the orchestrator's conversation writer):
+    # DB_PASSWORD splice, scheme normalisation. A URL it can't use (a
+    # non-Postgres scheme) is passed through unchanged, as before.
+    _resolved_dsn = resolve_database_dsn(DATABASE_URL, os.environ)
+    if _resolved_dsn.legacy_disagrees:
+        logger.warning(
+            "conversations_db_legacy_vars_ignored",
+            athena_db_vars_set=True,
+            differs_from_database_url=True,
+        )
+    DATABASE_URL = _resolved_dsn.sqlalchemy_url or DATABASE_URL
 
 # Connection pool settings
 POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))
@@ -861,77 +866,29 @@ def seed_oss_service_registry():
 
 
 # ---------------------------------------------------------------------------
-# Analytics database (read from the orchestrator's 'athena' database)
+# Conversation storage
 # ---------------------------------------------------------------------------
-# The orchestrator writes conversation rows to the analytics DB.
-# The admin backend reads those rows for the Conversations page.
-# Connection is optional — gracefully disabled when env vars are absent.
-
-_analytics_engine = None
-
-
-def _build_analytics_url() -> Optional[str]:
-    """Build the analytics database URL from ATHENA_DB_* env vars."""
-    host = os.getenv("ATHENA_DB_HOST", "")
-    port = os.getenv("ATHENA_DB_PORT", "5432")
-    name = os.getenv("ATHENA_DB_NAME", "")
-    user = os.getenv("ATHENA_DB_USER", "")
-    password = os.getenv("ATHENA_DB_PASSWORD", "")
-
-    if not (host and name and user):
-        return None
-
-    if password:
-        return f"postgresql://{user}:{password}@{host}:{port}/{name}"
-    return f"postgresql://{user}@{host}:{port}/{name}"
-
-
-def _get_analytics_engine():
-    """Return a lazily-created SQLAlchemy engine for the analytics DB."""
-    global _analytics_engine
-    if _analytics_engine is None and not DEV_MODE:
-        url = _build_analytics_url()
-        if url:
-            try:
-                _analytics_engine = create_engine(
-                    url,
-                    poolclass=QueuePool,
-                    pool_size=2,
-                    max_overflow=5,
-                    pool_recycle=POOL_RECYCLE,
-                    pool_pre_ping=True,
-                    connect_args={"client_encoding": "utf8"},
-                )
-                logger.info("analytics_db_engine_created")
-            except Exception as e:
-                logger.warning("analytics_db_engine_failed", error=str(e))
-    return _analytics_engine
+# The orchestrator writes conversation rows to the same database admin-backend
+# runs its migrations against (DATABASE_URL), and the Conversations page reads
+# them through the main engine. The old per-service database variables no longer select a database here.
 
 
 def get_analytics_db() -> Generator[Session, None, None]:
     """
-    FastAPI dependency for the analytics database session.
+    FastAPI dependency for reading conversation rows (the main database).
 
-    Raises HTTPException 503 if the analytics database is not configured.
-    Set ATHENA_DB_HOST, ATHENA_DB_NAME, ATHENA_DB_USER, ATHENA_DB_PASSWORD,
-    and ATHENA_DB_PORT environment variables to enable.
+    Raises HTTPException 503 in DEV_MODE, where the database is an in-memory
+    SQLite that has no conversation tables.
     """
     from fastapi import HTTPException
 
-    engine_instance = _get_analytics_engine()
-    if engine_instance is None:
+    if DEV_MODE:
         raise HTTPException(
             status_code=503,
-            detail="Analytics database not configured. Set ATHENA_DB_* environment variables."
+            detail="Conversation storage is not available in DEV_MODE.",
         )
 
-    session_factory = sessionmaker(
-        autocommit=False,
-        autoflush=False,
-        bind=engine_instance,
-        expire_on_commit=False,
-    )
-    db = session_factory()
+    db = SessionLocal()
     try:
         yield db
     finally:

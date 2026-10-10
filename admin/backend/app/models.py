@@ -4041,7 +4041,6 @@ class VoiceInterface(Base):
     wake_word_enabled = Column(Boolean, default=False, nullable=False)
     wake_word = Column(String(100))  # 'jarvis', 'athena', 'hey cal', custom
     continuous_conversation = Column(Boolean, default=True, nullable=False)  # Keep listening after response
-    debug_mode = Column(Boolean, default=False, nullable=False)  # Show extra info in responses
 
     # Rate Limiting
     max_requests_per_minute = Column(Integer, default=30, nullable=False)
@@ -4070,7 +4069,9 @@ class VoiceInterface(Base):
             'wake_word_enabled': self.wake_word_enabled,
             'wake_word': self.wake_word,
             'continuous_conversation': self.continuous_conversation,
-            'debug_mode': self.debug_mode,
+            # Deprecated and constant: the column stays (an older pod still maps
+            # it) but nothing reads it. Services cache this shape (admin_config).
+            'debug_mode': False,
             'max_requests_per_minute': self.max_requests_per_minute,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
