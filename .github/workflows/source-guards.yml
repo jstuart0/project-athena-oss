@@ -43,11 +43,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pip install --require-hashes -r .github/ci-requirements/unit-min/requirements.txt
+          python3 -m pip install --no-deps -e src/shared
 
       - name: Run the guards
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_local_clock_drift.py tests/unit/test_no_pii_in_logs.py tests/unit/test_trust_literal_contract.py tests/unit/test_admin_guest_route_callers_send_service_key.py tests/unit/test_admin_frontend_gated_fetch_auth.py tests/unit/test_admin_frontend_nginx_api_access_log.py tests/unit/test_admin_jarvis_ticket_only.py tests/unit/test_voice_automations_js_escaping.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_local_clock_drift.py tests/unit/test_no_pii_in_logs.py tests/unit/test_trust_literal_contract.py tests/unit/test_knowledge_tiers.py tests/unit/test_admin_guest_route_callers_send_service_key.py tests/unit/test_admin_frontend_gated_fetch_auth.py tests/unit/test_admin_frontend_nginx_api_access_log.py tests/unit/test_admin_jarvis_ticket_only.py tests/unit/test_voice_automations_js_escaping.py
 
   orchestrator-behaviour:
     name: Orchestrator behaviour tests
@@ -72,7 +73,7 @@ jobs:
       - name: Run the behaviour tests
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_helpers.py tests/unit/test_finalize.py tests/unit/test_local_time.py tests/unit/test_base_knowledge_clock.py tests/unit/test_date_extraction_local.py tests/unit/test_planning_prompt_local_date.py tests/unit/test_gateway_simple_commands_clock.py tests/unit/test_sequence_wait_local.py tests/unit/test_prompt_clock_sites.py tests/unit/test_addressee_matrix.py tests/unit/test_trust_classification.py tests/unit/test_assistant_profile_household.py tests/unit/test_semantic_cache_addressee.py tests/unit/test_base_knowledge_names.py tests/unit/test_public_caller_orchestrator.py tests/unit/test_logging_quiet_request_urls.py tests/unit/test_automation_agent_scope.py tests/unit/test_sms_stay_phase_authorization.py tests/unit/test_service_key_headers.py tests/unit/test_reviewed_route_callers_wire.py tests/unit/test_tv_launch_with_app_configs.py tests/unit/test_admin_config_service_key_validity.py tests/unit/test_admin_call_path_segments.py tests/unit/test_smart_home_admin_calls.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_helpers.py tests/unit/test_finalize.py tests/unit/test_local_time.py tests/unit/test_base_knowledge_clock.py tests/unit/test_date_extraction_local.py tests/unit/test_planning_prompt_local_date.py tests/unit/test_gateway_simple_commands_clock.py tests/unit/test_sequence_wait_local.py tests/unit/test_prompt_clock_sites.py tests/unit/test_addressee_matrix.py tests/unit/test_knowledge_tiers.py tests/unit/test_trust_classification.py tests/unit/test_assistant_profile_household.py tests/unit/test_semantic_cache_addressee.py tests/unit/test_base_knowledge_names.py tests/unit/test_public_caller_orchestrator.py tests/unit/test_logging_quiet_request_urls.py tests/unit/test_automation_agent_scope.py tests/unit/test_sms_stay_phase_authorization.py tests/unit/test_service_key_headers.py tests/unit/test_reviewed_route_callers_wire.py tests/unit/test_tv_launch_with_app_configs.py tests/unit/test_admin_config_service_key_validity.py tests/unit/test_admin_call_path_segments.py tests/unit/test_smart_home_admin_calls.py
 
       # The sports case needs feedparser, which only the sports image
       # carries; the sports-behaviour job runs it.
