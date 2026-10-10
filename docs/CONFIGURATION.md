@@ -1639,6 +1639,12 @@ admin UI's External API Keys page (store keys `api-newsapiai` / `api-webz`).
 
 ## Voice Services
 
+### Quick replies and short answers
+
+- **Quick replies.** Greetings, thanks, "what time is it", "what's the date" and short acknowledgements ("got it", "never mind") are answered at once with no model call, on every query route. They are never answered while the assistant is waiting for a reply to a question it asked, and scene phrases ("good morning", "goodnight") and bare yes/no replies are never treated as quick replies. With `ha_intent_prerouting` on, the gateway skips its classifier for these phrases and forwards them to the orchestrator.
+- **Short answers.** An answer from the model is "too short" only when it is empty, or shorter than the minimum (Assistant settings, "Minimum length for an unfinished answer", default 10 characters) and not a finished sentence. "Done." and "Yes!" stand; "Ok" does not. Deterministic answers are never checked, and a short finished answer no longer triggers the web-search fallback (`min_response_length` follows the same rule).
+- **Overheard fragments (off by default).** `guardrails.voice_response.ambient_fragment_gate` (Assistant settings guardrails; default `false`) answers a spoken, low-confidence fragment with "Sorry, I didn't catch that." instead of running tool selection. It applies to voice only and never to commands, questions, yes/no or "the first one" style replies, media words, first-person statements, safety words ("help", "fire", "911", ...), or while a question is open. Turn it on only after trying it in your house.
+
 ### Wyoming Protocol (STT/TTS)
 
 | Variable | Default | Description |

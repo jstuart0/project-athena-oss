@@ -121,6 +121,9 @@ DATE_PHRASES = frozenset({
     "current date", "what day is it", "what is the date", "what day is it today",
 })
 
+# What the opt-in ambient-fragment gate says for an overheard spoken fragment.
+AMBIENT_REPLY = "Sorry, I didn't catch that."
+
 THANKS_REPLY = "You're welcome."
 ACK_REPLY = "Okay."
 

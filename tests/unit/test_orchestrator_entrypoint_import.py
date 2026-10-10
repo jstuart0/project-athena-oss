@@ -109,3 +109,56 @@ def test_jarvis_web_backend_entrypoint_imports_cleanly():
         {},
     )
     _assert_clean_import(result, "jarvis-web backend (apps/jarvis-web/Dockerfile)")
+
+
+# (orchestrator.helpers is not listed: importing it first is a known, pre-existing
+# partial-init cycle that its own docstring documents; production never does.)
+# Each orchestrator module that sits on an import cycle's edge must import
+# cleanly when it is the FIRST thing a fresh interpreter imports. Unit tests
+# import `orchestrator.nodes` first and hide exactly this class of bug.
+FIRST_IMPORTS = [
+    "orchestrator.fast_path",
+    "orchestrator.nodes.finalize",
+    "orchestrator.main",
+]
+
+
+def _run_first_import(module: str):
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        str(p) for p in [STUB_DIR, REPO_ROOT / "src" / "orchestrator", REPO_ROOT / "src"]
+    )
+    env.update({
+        "SERVICE_API_KEY": "test-key-entrypoint-import",
+        "DEV_MODE": "true",
+        "ADMIN_API_URL": "http://localhost:8080",
+    })
+    return subprocess.run(
+        [sys.executable, "-c", f"import {module}"],
+        cwd=str(REPO_ROOT / "src" / "orchestrator"),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+
+
+def test_orchestrator_modules_import_cleanly_in_any_first_position():
+    assert len(FIRST_IMPORTS) >= 3 and "orchestrator.fast_path" in FIRST_IMPORTS
+    for module in FIRST_IMPORTS:
+        _assert_clean_import(_run_first_import(module), f"`import {module}` as the first import")
+
+
+def test_the_first_import_check_detects_a_cycle(tmp_path):
+    """Positive control: a module that imports itself back through a partial
+    package fails the same way."""
+    pkg = tmp_path / "cyc"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("from cyc import a\n")
+    (pkg / "a.py").write_text("from cyc import b\n")
+    (pkg / "b.py").write_text("from cyc.a import missing_name\n")
+    result = subprocess.run(
+        [sys.executable, "-c", "import cyc.b"],
+        env={**os.environ, "PYTHONPATH": str(tmp_path)}, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0

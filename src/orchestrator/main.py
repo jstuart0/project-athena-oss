@@ -168,7 +168,15 @@ from orchestrator.mode_permission import (
     resolve_request_authorization,
 )
 from orchestrator.write_fanout import caller_fingerprint as compute_caller_fingerprint
-from orchestrator.fast_path import FastPathReply, fast_path_open_question, fast_path_reply, last_assistant_text
+from orchestrator.fast_path import (
+    FastPathReply,
+    ambient_fragment_applies,
+    fast_path_open_question,
+    fast_path_reply,
+    last_assistant_text,
+    register_pattern_classifier,
+)
+from shared.fast_path_vocab import AMBIENT_REPLY
 from orchestrator.helpers import (
     get_feature_config,
     get_automation_system_mode,
@@ -504,6 +512,7 @@ from orchestrator.metrics import (
     fast_path_answered_total,
     fast_path_deferred_total,
     fast_path_seconds,
+    ambient_fragment_gated_total,
 )
 
 # Tool schema cache (OPTIMIZATION: Cache tool schemas to avoid regeneration)
@@ -3677,6 +3686,9 @@ def _pattern_based_classification(query: str, return_confidence: bool = False):
 
 
 
+register_pattern_classifier(_pattern_based_classification)
+
+
 async def execute_tools_parallel(
     tool_calls: List[Dict[str, Any]],
     guest_mode: bool = False,
@@ -6029,6 +6041,12 @@ async def route_after_classify(state: OrchestratorState) -> str:
     if state.intent == IntentCategory.TV_CONTROL:
         logger.info("Routing to route_tv node (TV Control)")
         return "route_tv"
+
+    # A spoken low-information fragment skips tool selection: finalize answers it.
+    if await ambient_fragment_applies(state):
+        ambient_fragment_gated_total.labels(route="graph").inc()
+        logger.info("ambient_fragment_gated", route="graph", query_len=len(state.query))
+        return "finalize"
 
     # Phase 5: Check if tool calling should be triggered after classification
     tool_calling_result = await should_use_tool_calling(state, trigger_context="classify")
@@ -8446,6 +8464,13 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
     if state.intent == IntentCategory.NOTIFICATION_PREF:
         # Notification preferences - the node gates and writes itself
         state = await notification_pref_node(state)
+        return state
+
+    # A spoken low-information fragment skips tool selection.
+    if await ambient_fragment_applies(state):
+        ambient_fragment_gated_total.labels(route="stream").inc()
+        logger.info("ambient_fragment_gated", route="stream", query_len=len(state.query))
+        state.answer = AMBIENT_REPLY
         return state
 
     # Check for tool calling (Phase 2 services)

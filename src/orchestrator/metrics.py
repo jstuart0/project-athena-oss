@@ -124,6 +124,12 @@ fast_path_deferred_total = Counter(
     ['route', 'reason']  # reason: pending_confirmation|awaiting_context|open_question|context_unreadable
 )
 
+ambient_fragment_gated_total = Counter(
+    'athena_ambient_fragment_gated_total',
+    'Spoken low-information fragments answered without tool selection',
+    ['route']  # route: graph|stream
+)
+
 fast_path_seconds = Histogram(
     'athena_fast_path_seconds',
     'Handler start to fast-path answer, by route',

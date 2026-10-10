@@ -672,6 +672,30 @@ def enhance_query_with_year(query: str) -> str:
     return query
 
 
+_SHORT_ANSWER_CLOSERS = "\"')]}\u201d\u2019\u00bb"
+_SHORT_ANSWER_TERMINATORS = ".!?\u2026"
+
+
+def answer_is_too_short(answer: Optional[str], min_chars: int) -> bool:
+    """True when an LLM answer is too short to stand as an answer.
+
+    Empty after strip is always too short. Otherwise an answer shorter than
+    `min_chars` is too short unless it ends in a sentence terminator (after any
+    closing quote or bracket) and has a letter or digit in it: "Done." and
+    'He said "no."' stand, "Ok" and "..." don't. At or above `min_chars` it
+    always stands. Deterministic answers (`state.skip_synthesis`) are exempt at
+    the call sites, not here.
+    """
+    text = (answer or "").strip()
+    if not text:
+        return True
+    if len(text) >= min_chars:
+        return False
+    core = text.rstrip(_SHORT_ANSWER_CLOSERS)
+    terminated = bool(core) and core[-1] in _SHORT_ANSWER_TERMINATORS and any(c.isalnum() for c in core)
+    return not terminated
+
+
 def detect_insufficient_response(response: str, config: Dict[str, Any]) -> Optional[str]:
     """
     Detect if LLM response indicates it couldn't find the requested information.
@@ -683,12 +707,12 @@ def detect_insufficient_response(response: str, config: Dict[str, Any]) -> Optio
     Returns:
         The matched pattern if found, None otherwise
     """
-    if not response:
+    if not response or not response.strip():
         return "empty_response"
 
-    # Check minimum response length
+    # Check minimum response length (a short, finished sentence stands)
     min_length = config.get("min_response_length", 10)
-    if len(response) < min_length:
+    if answer_is_too_short(response, min_length):
         return "response_too_short"
 
     patterns = config.get("detection_patterns", [
@@ -920,6 +944,9 @@ async def maybe_post_synthesis_fallback(state: 'Any') -> bool:
     Returns:
         True if fallback was triggered and succeeded, False otherwise
     """
+    # A deterministic answer ("Okay.", a templated status line) is the answer.
+    if getattr(state, "skip_synthesis", False):
+        return False
     if not web_search_allowed(state):
         return False
     # A refusal is the answer; a web search must never route around it.

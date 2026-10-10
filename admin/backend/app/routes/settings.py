@@ -76,6 +76,9 @@ DEFAULT_ASSISTANT_PROFILE_CONFIG: Dict[str, Any] = {
             "min_response_chars": 10,
             "max_response_chars": 2000,
         },
+        "voice_response": {
+            "ambient_fragment_gate": False,
+        },
     },
 }
 

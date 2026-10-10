@@ -90,7 +90,21 @@ DEFAULT_GUARDRAILS: Dict[str, Any] = {
         "min_response_chars": 10,
         "max_response_chars": 2000,
     },
+    "voice_response": {
+        "ambient_fragment_gate": False,
+    },
 }
+
+
+def ambient_fragment_gate_enabled(guardrails: Optional[Dict[str, Any]]) -> bool:
+    """The `voice_response.ambient_fragment_gate` switch, default OFF. Only an
+    explicit true (or the string "true"/"1"/"on"/"yes") turns it on; anything
+    missing, null or unreadable leaves it off."""
+    section = (guardrails or {}).get("voice_response")
+    value = section.get("ambient_fragment_gate", False) if isinstance(section, dict) else False
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "on", "yes")
+    return value is True
 
 
 def _merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
