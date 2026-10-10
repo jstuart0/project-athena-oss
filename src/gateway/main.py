@@ -1925,58 +1925,68 @@ async def stream_responses_api(
 
     OpenAI Responses API streaming requires specific events in order:
     1. response.created - Initial response creation
-    2. response.output_item.added - Output item (message) being added
-    3. response.content_part.added - Content part being added
-    4. response.output_text.delta - Text deltas as they arrive
-    5. response.output_text.done - Text generation complete
-    6. response.content_part.done - Content part complete
-    7. response.output_item.done - Output item complete
-    8. response.done - Response complete
+    2. response.in_progress
+    3. response.output_item.added - Output item (message) being added
+    4. response.content_part.added - Content part being added
+    5. response.output_text.delta - Text deltas as they arrive
+    6. response.output_text.done - Text generation complete
+    7. response.content_part.done - Content part complete
+    8. response.output_item.done - Output item complete
+    9. response.completed - Response complete
+
+    Every event carries a running sequence_number, and the objects carry the
+    fields the OpenAI client models require (item status, annotations,
+    logprobs, the response's model/tools), so a typed client parses the stream.
     """
     import uuid
     response_id = f"resp_{uuid.uuid4().hex[:24]}"
     item_id = f"item_{uuid.uuid4().hex[:16]}"
     content_idx = 0
     full_text = ""
+    created_at = time.time()
+    sequence = 0
+
+    def _event(payload: Dict[str, Any]) -> str:
+        nonlocal sequence
+        payload["sequence_number"] = sequence
+        sequence += 1
+        return f"data: {json.dumps(payload)}\n\n"
+
+    def _response_object(status: str, output: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": status,
+            "model": request.model,
+            "output": output,
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+    def _text_part(text: str) -> Dict[str, Any]:
+        return {"type": "output_text", "text": text, "annotations": []}
+
+    def _message_item(status: str, content: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {"id": item_id, "type": "message", "role": "assistant", "status": status, "content": content}
 
     try:
-        # 1. Send response.created event first (REQUIRED by OpenAI SDK)
-        created_event = {
-            "type": "response.created",
-            "response": {
-                "id": response_id,
-                "object": "response",
-                "status": "in_progress",
-                "output": []
-            }
-        }
-        yield f"data: {json.dumps(created_event)}\n\n"
+        # 1-2. response.created, then response.in_progress (REQUIRED by OpenAI SDK)
+        yield _event({"type": "response.created", "response": _response_object("in_progress", [])})
+        yield _event({"type": "response.in_progress", "response": _response_object("in_progress", [])})
 
-        # 2. Send output item added event
-        item_added_event = {
-            "type": "response.output_item.added",
-            "output_index": 0,
-            "item": {
-                "id": item_id,
-                "type": "message",
-                "role": "assistant",
-                "content": []
-            }
-        }
-        yield f"data: {json.dumps(item_added_event)}\n\n"
+        # 3. Send output item added event
+        yield _event({"type": "response.output_item.added", "output_index": 0, "item": _message_item("in_progress", [])})
 
-        # 3. Send content part added event
-        content_added_event = {
+        # 4. Send content part added event
+        yield _event({
             "type": "response.content_part.added",
             "item_id": item_id,
             "output_index": 0,
             "content_index": content_idx,
-            "part": {
-                "type": "output_text",
-                "text": ""
-            }
-        }
-        yield f"data: {json.dumps(content_added_event)}\n\n"
+            "part": _text_part(""),
+        })
 
         # 4. TRUE PARALLEL: Start orchestrator request FIRST (background task),
         # then send acknowledgment while orchestrator is processing
@@ -2076,81 +2086,50 @@ async def stream_responses_api(
                         content = delta.get("content", "")
                         if content:
                             full_text += content
-                            delta_event = {
+                            yield _event({
                                 "type": "response.output_text.delta",
                                 "item_id": item_id,
                                 "output_index": 0,
                                 "content_index": content_idx,
-                                "delta": content
-                            }
-                            yield f"data: {json.dumps(delta_event)}\n\n"
+                                "delta": content,
+                                "logprobs": [],
+                            })
                     except json.JSONDecodeError:
                         pass  # Skip malformed chunks
 
         # Ensure background task is complete
         await orchestrator_task
 
-        # 5. Send output_text.done event
-        text_done_event = {
+        # 6. Send output_text.done event
+        yield _event({
             "type": "response.output_text.done",
             "item_id": item_id,
             "output_index": 0,
             "content_index": content_idx,
-            "text": full_text
-        }
-        yield f"data: {json.dumps(text_done_event)}\n\n"
+            "text": full_text,
+            "logprobs": [],
+        })
 
-        # 6. Send content_part.done event
-        content_done_event = {
+        # 7. Send content_part.done event
+        yield _event({
             "type": "response.content_part.done",
             "item_id": item_id,
             "output_index": 0,
             "content_index": content_idx,
-            "part": {
-                "type": "output_text",
-                "text": full_text
-            }
-        }
-        yield f"data: {json.dumps(content_done_event)}\n\n"
+            "part": _text_part(full_text),
+        })
 
-        # 7. Send output_item.done event
-        item_done_event = {
-            "type": "response.output_item.done",
-            "output_index": 0,
-            "item": {
-                "id": item_id,
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": full_text}]
-            }
-        }
-        yield f"data: {json.dumps(item_done_event)}\n\n"
+        # 8. Send output_item.done event
+        final_item = _message_item("completed", [_text_part(full_text)])
+        yield _event({"type": "response.output_item.done", "output_index": 0, "item": final_item})
 
-        # 8. Send response.done event (final event)
-        done_event = {
-            "type": "response.done",
-            "response": {
-                "id": response_id,
-                "object": "response",
-                "status": "completed",
-                "output": [{
-                    "id": item_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": full_text}]
-                }]
-            }
-        }
-        yield f"data: {json.dumps(done_event)}\n\n"
+        # 9. Send response.completed event (final event)
+        yield _event({"type": "response.completed", "response": _response_object("completed", [final_item])})
 
     except Exception as e:
         logger.error(f"Responses API streaming error: {e}", exc_info=True)
         # Send error event
-        error_event = {
-            "type": "error",
-            "error": {"message": str(e), "type": "server_error"}
-        }
-        yield f"data: {json.dumps(error_event)}\n\n"
+        yield _event({"type": "error", "code": "server_error", "message": str(e), "param": None})
 
 
 @app.get("/health")

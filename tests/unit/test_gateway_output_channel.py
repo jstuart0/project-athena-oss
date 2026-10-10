@@ -8,10 +8,10 @@ speech-normalized text when the forwarded `extra_body.interface_type` is
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -320,7 +320,7 @@ def test_voice_alias_has_the_same_status_headers_and_shape(client, orchestrator,
         voice_kinds = [json.loads(e).get("type", json.loads(e).get("object")) if e != "[DONE]" else e for e in _events(voice)]
         assert plain_kinds == voice_kinds
         if kind == "responses":
-            assert voice_kinds[0] == "response.created" and voice_kinds[-1] == "response.done"
+            assert voice_kinds[0] == "response.created" and voice_kinds[-1] == "response.completed"
         else:
             assert voice_kinds[-1] == "[DONE]"
     else:
@@ -338,6 +338,34 @@ def test_voice_responses_stream_deltas_and_done_text_are_the_spoken_form(client,
 def test_plain_responses_stream_keeps_the_written_form(client, orchestrator):
     deltas, done = _stream_texts("responses", _post(client, "responses", True))
     assert deltas == done == RAW
+
+
+# --- the Responses stream parses with the OpenAI client's typed event models -------------------
+
+CANONICAL_RESPONSES_EVENTS = [
+    "response.created", "response.in_progress", "response.output_item.added",
+    "response.content_part.added", "response.output_text.delta", "response.output_text.delta",
+    "response.output_text.done", "response.content_part.done", "response.output_item.done",
+    "response.completed",
+]
+
+
+@pytest.mark.parametrize("voice", [False, True], ids=["v1", "v1_voice"])
+def test_responses_stream_parses_with_the_openai_typed_event_models(client, orchestrator, voice):
+    from openai.types.responses import ResponseCompletedEvent, ResponseStreamEvent, ResponseTextDeltaEvent
+    from pydantic import TypeAdapter
+
+    adapter = TypeAdapter(ResponseStreamEvent)
+    raw = [json.loads(e) for e in _events(_post(client, "responses", True, voice=voice))]
+    typed = [adapter.validate_python(e) for e in raw]  # raises on a missing or mistyped field
+    assert [e.type for e in typed] == CANONICAL_RESPONSES_EVENTS
+    assert [e.sequence_number for e in typed] == list(range(len(typed)))
+    assert isinstance(typed[-1], ResponseCompletedEvent)
+    assert typed[-1].response.status == "completed"
+    assert typed[-1].response.output[0].status == "completed"
+    assert typed[-1].response.output[0].content[0].text == (SPOKEN if voice else RAW)
+    deltas = [e for e in typed if isinstance(e, ResponseTextDeltaEvent)]
+    assert "".join(d.delta for d in deltas) == (SPOKEN if voice else RAW)
 
 
 # --- (j) models ---------------------------------------------------------------------------
@@ -468,25 +496,29 @@ def test_ha_conversation_speaks_the_rendered_text_on_every_return(monkeypatch, h
     assert _ha_speech(monkeypatch, ha, case) == SPOKEN
 
 
-def _load_unavailable_free_wyoming_bridge(monkeypatch) -> ModuleType:
-    """gateway.wyoming_bridge defines its handler only when the `wyoming`
-    package imports; stub just enough of it to load a private copy."""
-    class _Handler:
-        def __init__(self, *args, **kwargs):
-            pass
+def _real_wyoming_bridge() -> ModuleType:
+    """gateway.wyoming_bridge imported against the real `wyoming` package.
 
-    stubs = {}
-    for name in ("wyoming", "wyoming.server", "wyoming.event", "wyoming.audio", "wyoming.asr",
-                 "wyoming.tts", "wyoming.info", "wyoming.handle"):
-        stubs[name] = mock.MagicMock(name=name)
-    stubs["wyoming.handle"].AsyncEventHandler = _Handler
-    for name, module in stubs.items():
-        monkeypatch.setitem(sys.modules, name, module)
-    spec = importlib.util.spec_from_file_location("gateway_wyoming_bridge_private", REPO_ROOT / "src/gateway/wyoming_bridge.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.WYOMING_AVAILABLE
+    The package is optional (not in the production gateway image) but is in the
+    behaviour tests' locked requirements, so CI exercises the real import."""
+    pytest.importorskip("wyoming")
+    import gateway.wyoming_bridge as module
+
     return module
+
+
+def test_the_wyoming_package_is_in_the_locked_test_requirements():
+    """Guards the real-package tests above from being skipped everywhere."""
+    lock = (REPO_ROOT / "src/orchestrator/requirements-test.txt").read_text()
+    assert re.search(r"^wyoming==", lock, re.MULTILINE)
+
+
+def test_the_wyoming_bridge_imports_against_the_real_package():
+    module = _real_wyoming_bridge()
+    from wyoming.server import AsyncEventHandler
+
+    assert module.WYOMING_AVAILABLE is True
+    assert issubclass(module.AthenaWyomingHandler, AsyncEventHandler)
 
 
 class _TtsClient:
@@ -507,7 +539,7 @@ class _TtsClient:
 
 
 def _run_wyoming_synthesize(monkeypatch, text):
-    module = _load_unavailable_free_wyoming_bridge(monkeypatch)
+    module = _real_wyoming_bridge()
     monkeypatch.setattr(module, "EVENTS_AVAILABLE", False)
     monkeypatch.setattr(module.httpx, "AsyncClient", _TtsClient)
     handler = SimpleNamespace(

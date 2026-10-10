@@ -232,6 +232,21 @@ RANGE_CASES = [
 
 assert len(RANGE_CASES) >= 6
 
+# --- Team records are not scores -------------------------------------------------
+
+RECORD_CASES = [
+    ("The record is 4-13", "The record is 4 wins and 13 losses"),
+    ("Their record was 10-5-1", "Their record was 10 wins, 5 losses and 1 tie"),
+    ("The record stands at 4-13.", "The record stands at 4 wins and 13 losses."),
+    ("Their record at 9-8", "Their record at 9 wins and 8 losses"),
+    ("The record of 4-13", "The record of 4 wins and 13 losses"),
+    ("record 4-13", "record of 4 wins and 13 losses"),
+    ("a 4-13 record", "a 4 and 13 record"),
+    ("They won 28-14", "They won 28 to 14"),
+    ("10-5-1", "10 wins, 5 losses and 1 tie"),
+]
+assert len(RECORD_CASES) >= 9
+
 # --- Punctuation survives -------------------------------------------------------
 
 PUNCTUATION_CASES = [
@@ -309,6 +324,7 @@ GROUPS = {
     "urls": URL_CASES,
     "time": TIME_CASES,
     "settle": SETTLE_CASES,
+    "records": RECORD_CASES,
 }
 
 # Every input and every expected output, deduplicated, in a stable order.
@@ -426,6 +442,11 @@ def test_time_current_style_is_pinned(src, expected):
     assert n(src) == expected
 
 
+@pytest.mark.parametrize("src,expected", RECORD_CASES, ids=_ids(RECORD_CASES))
+def test_records_read_as_records_not_scores(src, expected):
+    assert n(src) == expected
+
+
 @pytest.mark.parametrize("src,expected", SETTLE_CASES, ids=_ids(SETTLE_CASES))
 def test_inputs_that_needed_two_passes_settle_in_one(src, expected):
     assert n(src) == expected
@@ -439,7 +460,7 @@ def test_empty_and_none_pass_through():
 def test_group_floors_and_named_members_exist():
     floors = {
         "units": 120, "gaps": 15, "false_positives": 22, "plurals": 25, "decimals": 8,
-        "currency": 35, "ranges": 6, "punctuation": 12, "urls": 4, "time": 6, "settle": 18,
+        "currency": 35, "ranges": 6, "punctuation": 12, "urls": 4, "time": 6, "settle": 18, "records": 9,
     }
     for name, floor in floors.items():
         assert len(GROUPS[name]) >= floor, name

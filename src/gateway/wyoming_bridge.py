@@ -61,17 +61,16 @@ def orchestrator_answer_text(result: Dict[str, Any]) -> str:
 
 # Check if wyoming is available
 try:
-    from wyoming.server import AsyncServer
+    from wyoming.server import AsyncServer, AsyncEventHandler
     from wyoming.event import Event
     from wyoming.audio import AudioChunk, AudioStart, AudioStop
     from wyoming.asr import Transcribe, Transcript
     from wyoming.tts import Synthesize, SynthesizeVoice
     from wyoming.info import Info, AsrModel, TtsVoice, Describe, Attribution
-    from wyoming.handle import AsyncEventHandler
     WYOMING_AVAILABLE = True
 except ImportError:
     WYOMING_AVAILABLE = False
-    logger.warning("wyoming package not installed - Wyoming bridge disabled")
+    logger.warning("wyoming package not installed - Wyoming bridge disabled (optional; pip install wyoming)")
 
 
 # Try to import event system

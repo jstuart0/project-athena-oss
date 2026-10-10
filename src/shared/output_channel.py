@@ -48,16 +48,17 @@ def render_for_channel(text: Optional[str], channel: OutputChannel) -> Optional[
     """Text for a TEXT channel is returned as is; for SPEECH it is normalized.
 
     SPEECH input is capped at SPEECH_SINK_MAX_CHARS first, so no caller can hand
-    the normalizer an unbounded string. Never raises: on error the input comes
-    back and the log names the exception class only, never the text.
+    the normalizer an unbounded string. Never raises: on error the capped input
+    comes back (never more than the cap) and the log names the exception class only, never the text.
     """
     if channel is not OutputChannel.SPEECH or not text:
         return text
+    capped = text[:SPEECH_SINK_MAX_CHARS]
     try:
-        return normalize_for_tts(text[:SPEECH_SINK_MAX_CHARS])
+        return normalize_for_tts(capped)
     except Exception as exc:
         logger.error("tts_normalization_failed", extra={"error": type(exc).__name__})
-        return text
+        return capped
 
 
 def render_sink_text(text: Optional[str], *, sink: str) -> Optional[str]:

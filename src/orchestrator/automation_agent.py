@@ -23,7 +23,7 @@ import structlog
 from shared.assistant_profile import build_automation_system_prompt
 from shared.local_time import local_now
 from shared.logging_config import payload_keys
-from shared.output_channel import OutputChannel, render_for_channel
+from shared.output_channel import render_sink_text
 from orchestrator.utils.constants import DEFAULT_CITY
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # AutomationAgent.__init__ (not at module scope) -- see the identical note
@@ -1355,7 +1355,7 @@ class AutomationAgent:
             if target in ["tts", "all"]:
                 # Use TTS to announce: spoken text is normalized (the push below stays as written)
                 media_player = f"media_player.{room}"
-                spoken_message = render_for_channel(message, OutputChannel.SPEECH)
+                spoken_message = render_sink_text(message, sink="automation")
                 await self.ha_client.call_service(
                     "tts",
                     "speak",

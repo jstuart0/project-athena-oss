@@ -988,10 +988,12 @@ Configure RAG services via Admin UI → Settings → API Keys:
 ### 5. Test the System
 
 ```bash
-# Send a test query
+# Send a test query. "interface_type" is the channel: "chat" returns text as
+# written ("25 mph"); "voice" returns text prepared for speech ("25 miles per
+# hour"). Leaving it out means "voice".
 curl -X POST http://localhost:8001/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "What is the weather like today?", "room": "living_room"}'
+  -d '{"query": "What is the weather like today?", "room": "living_room", "interface_type": "chat"}'
 ```
 
 ---

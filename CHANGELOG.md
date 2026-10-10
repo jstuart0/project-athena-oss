@@ -58,6 +58,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Spoken answers expand units on every path, not only some: "Winds 25mph" is "25 miles per hour", "15 km/h" is "15 kilometers per hour", "5 ft 9 in" is "5 feet 9 inches".
 - Singular units agree with the number: "1 mile", "1 mile per hour", "1 degree Fahrenheit", "1 hour", "1 dollar", "1 cent". "$1,000" is "1,000 dollars" (it was "1 dollars,000"), and "$0.01" is "1 cent".
+- The Wyoming bridge imported its event handler from a module that does not define it, so it could not start even with the `wyoming` package installed. It is optional and not in the gateway image; the behaviour tests now import it against the real package.
+- `/v1/responses` streams use the current event sequence (`response.in_progress` added, `response.completed` instead of `response.done`) and carry `sequence_number`, item `status`, `annotations` and `logprobs`, so typed OpenAI clients parse them.
+- "The record is 4-13" (also "was", "stands at") is read as a record, not as a score.
 - A period after an inch abbreviation at the end of a sentence ("Rain 2 in. The game") is kept.
 - Normalizing a very long run of digits took seconds; it is now linear, and normalizing an already-normalized answer changes nothing.
 - The orchestrator can list and remove voice automations again (the admin API refused its calls). A guest turn is scoped to that guest's own automations; with no guest identity, automation requests are refused instead of reaching every stay's automations.

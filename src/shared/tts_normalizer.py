@@ -638,9 +638,10 @@ def normalize_sports_records(text: str) -> str:
     # lookahead so "2 - 2 - 1" settles in one pass (a consumed number can't start the next match).
     text = re.sub(r'\b(\d{1,2})\s+-\s+(?=\d{1,2}\b)', r'\1 and ', text)
 
-    # Also match "record of X-Y" or "X-Y record" patterns
-    text = re.sub(r'record\s+(?:of\s+)?(\d{1,2})-(\d{1,2})',
-                  lambda m: f"record of {m.group(1)} wins and {m.group(2)} losses", text, flags=re.IGNORECASE)
+    # Also match "record of X-Y" (or "is" / "was" / "stands at" / "at") and "X-Y record" patterns
+    text = re.sub(r'record\s+(?:(of|is|was|stands\s+at|at)\s+)?(\d{1,2})-(\d{1,2})',
+                  lambda m: f"record {m.group(1) or 'of'} {m.group(2)} wins and {m.group(3)} losses",
+                  text, flags=re.IGNORECASE)
     text = re.sub(r'(\d{1,2})-(\d{1,2})\s+record',
                   lambda m: f"{m.group(1)} and {m.group(2)} record", text, flags=re.IGNORECASE)
 

@@ -1531,6 +1531,11 @@ the client's address in `X-Forwarded-For`, or the network is wrong; use the
 The channel only changes formatting. It never feeds authorization: mode and
 permissions come from the server's own resolution.
 
+**Wyoming.** The Wyoming bridge (`python -m gateway.wyoming_bridge`) is an optional
+component that runs on its own; it needs the `wyoming` package (`pip install wyoming`),
+which the gateway image does not include. Where it runs, text Home Assistant sends
+it to synthesize is normalized for speech before it reaches the TTS engine.
+
 **Upgrading.** Non-stream `/v1/chat/completions` used to be formatted for
 speech by default. It is now text unless the caller uses `/v1/voice` or matches
 `OPENAI_SPEECH_CLIENT_NETWORKS`. Streaming answers from command handlers

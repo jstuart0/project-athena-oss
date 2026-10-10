@@ -118,6 +118,16 @@ def test_speech_input_is_capped_before_the_normalizer(monkeypatch):
     assert seen == [5000]
 
 
+def test_the_fallback_after_a_normalizer_error_is_still_capped(monkeypatch):
+    def boom(text):
+        raise ValueError(text)
+
+    monkeypatch.setattr(oc, "normalize_for_tts", boom)
+    long_text = "a" * (oc.SPEECH_SINK_MAX_CHARS + 500)
+    assert render_for_channel(long_text, SPEECH) == "a" * oc.SPEECH_SINK_MAX_CHARS
+    assert render_for_channel(long_text, TEXT) == long_text, "text is never capped"
+
+
 def test_render_never_raises_and_logs_the_class_name_only(monkeypatch, caplog):
     secret = "the secret answer 12 mph"
 
