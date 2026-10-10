@@ -89,7 +89,7 @@ class User(Base):
     )
 
     ROLE_PERMISSIONS = {
-        'owner': {'read', 'write', 'delete', 'manage_users', 'manage_secrets', 'view_audit', 'manage_infrastructure'},
+        'owner': {'read', 'write', 'delete', 'manage_users', 'manage_secrets', 'view_audit', 'manage_infrastructure', 'view_conversation_text'},
         'operator': {'read', 'write', 'view_audit'},
         'viewer': {'read:dashboard', 'read:alerts'},
         'support': {'read:dashboard', 'read:alerts', 'read:analytics', 'view_audit'},
