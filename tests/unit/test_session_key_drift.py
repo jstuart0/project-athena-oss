@@ -12,7 +12,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ROOTS = ("src", "apps", "admin/backend/app")
 MODULE = "src/orchestrator/session_keys.py"
-NAMESPACES = ("athena:session", "athena:owner_session", "athena:context", "athena:owner_context")
+NAMESPACES = (
+    "athena:session", "athena:owner_session", "athena:guest_session",
+    "athena:context", "athena:owner_context", "athena:guest_context",
+)
 # Not valid Python 3 today; reads no session keys.
 UNPARSABLE = {"src/jetson/athena_lite_llm.py"}
 CONTEXT_KEY_CALL_SITES = {

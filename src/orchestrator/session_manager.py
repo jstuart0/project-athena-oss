@@ -16,12 +16,14 @@ import structlog
 
 from orchestrator.config_loader import get_config
 from orchestrator.session_keys import (  # noqa: F401  (re-exported: callers import these from here)
+    CALLER_CLASS_GUEST,
     CALLER_CLASS_OTHER,
     CALLER_CLASS_OWNER,
     CALLER_CLASS_PUBLIC,
     OAI_SESSION_INDEX_KEY,
     OWNER_SESSION_PREFIX,
     PUBLIC_SESSION_PREFIX,
+    guest_session_id,
     new_session_id,
     session_storage_key,
     usable_session_id,
@@ -230,9 +232,11 @@ class ConversationSession:
         session.metadata = data.get("metadata", {})
         stored_class = data.get("caller_class")
         # Fail closed: an unknown class is "other", which by the id-prefix rule
-        # can never resume an own- or pub- id.
+        # can never resume an own-, gst- or pub- id.
         session.caller_class = (
-            stored_class if stored_class in (CALLER_CLASS_PUBLIC, CALLER_CLASS_OWNER) else CALLER_CLASS_OTHER
+            stored_class
+            if stored_class in (CALLER_CLASS_PUBLIC, CALLER_CLASS_OWNER, CALLER_CLASS_GUEST)
+            else CALLER_CLASS_OTHER
         )
         return session
 
@@ -398,7 +402,8 @@ class SessionManager:
             user_id: Optional user identifier
             zone: Optional zone identifier
             caller_class: "public" (anonymous embed caller), "owner" (a
-                server-proven owner) or "other"
+                server-proven owner), "guest" (a guest-audience turn) or "other"
+                (the household)
 
         Returns:
             ConversationSession instance
@@ -415,6 +420,8 @@ class SessionManager:
         adopted by a caller that isn't owner-class, even after the session
         expired or was evicted.
         """
+        if session_id and caller_class == CALLER_CLASS_GUEST:
+            session_id = guest_session_id(session_id)
         if session_id:
             session = await self.get_session(session_id)
             if session and session.caller_class != caller_class:

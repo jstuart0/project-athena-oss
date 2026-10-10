@@ -126,7 +126,7 @@ def test_during_a_stay_the_owner_uses_ordinary_ids(monkeypatch):
     h.configure()
     h.install_role("owner")
     sid = _chat(h.client(), _owner_headers()).json()["session_id"]
-    assert not sid.startswith("own-")
+    assert not sid.startswith("own-") and sid.startswith("gst-")
     assert out.orchestrator_bodies()[-1]["caller_trust"] == "web_owner"  # still an owner caller; the orchestrator decides proof
 
 
@@ -152,7 +152,8 @@ def test_history_identity_key_is_a_derived_36_char_value_only_for_the_owner():
     assert key == main._history_identity_key(cookie, _caller(True))
     assert key != main._history_identity_key("other-cookie", _caller(True))
     assert main._history_identity_key(cookie, _caller(False)) == cookie
-    assert main._history_identity_key(cookie, _caller(True, mode="guest")) == cookie  # stay: ordinary thread
+    stay = main._history_identity_key(cookie, _caller(True, mode="guest"))  # a stay: the guest-mode thread
+    assert stay.startswith("g") and len(stay) == 36 and stay not in (cookie, key)
 
 
 def test_restore_clear_and_stream_use_the_derived_identity(out, monkeypatch):
@@ -249,7 +250,8 @@ def test_a_failed_guest_lookup_uses_the_ordinary_thread(monkeypatch):
     caller = _caller(True)
     token = main._mode_lookup_failed.set(True)
     try:
-        assert main._history_identity_key("cookie", caller) == "cookie"
+        failed = main._history_identity_key("cookie", caller)
+        assert failed.startswith("g") and failed != "cookie"  # unknown reads as the narrowest audience
         assert main._owner_history(caller) is False
     finally:
         main._mode_lookup_failed.reset(token)
@@ -278,3 +280,99 @@ def test_bearer_decision_cache_lifetime_by_role(monkeypatch, role, ttl):
     clock["now"] += 2
     resolve()
     assert len(calls) == 2, "re-checked once the lifetime passed"
+
+
+# --- the household / guest boundary on the web ----------------------------------------
+
+class _FakeThreads:
+    """An in-memory persistent-chat store keyed like the real tables: identity
+    key -> one active thread of (user, assistant) turns."""
+
+    def __init__(self, monkeypatch):
+        self.threads = {}
+        monkeypatch.setattr(main, "get_persistent_sessions_config", mock.AsyncMock(return_value={
+            "cookie_name": "jarvis_uid", "session_ttl_days": 30, "cookie_secure": False, "max_restored_turns": 20}))
+        monkeypatch.setattr(main, "get_engine", mock.AsyncMock(return_value=object()))
+        monkeypatch.setattr(main, "get_or_create_identity", self.identity)
+        monkeypatch.setattr(main, "get_or_create_active_thread", self.thread)
+        monkeypatch.setattr(main, "load_chat_history", self.history)
+        monkeypatch.setattr(main, "save_exchange", self.save)
+        monkeypatch.setattr(main, "_safe_db_exec", mock.AsyncMock())
+
+    async def identity(self, key, ttl):
+        return key
+
+    async def thread(self, identity_id):
+        t = self.threads.setdefault(identity_id, {"id": identity_id, "turns": [], "live": None})
+        return {"id": t["id"], "is_new": not t["turns"], "turn_count": len(t["turns"]),
+                "current_orch_session_id": t["live"]}
+
+    async def history(self, thread_id, max_turns):
+        out = []
+        for user, assistant in self.threads[thread_id]["turns"]:
+            out += [{"role": "user", "content": user}, {"role": "assistant", "content": assistant}]
+        return out
+
+    async def save(self, thread_id, turn_number, user_content, assistant_content, orch_session_id):
+        self.threads[thread_id]["turns"].append((user_content, assistant_content or ""))
+        self.threads[thread_id]["live"] = orch_session_id
+
+
+def _stream(client, headers, **body):
+    resp = client.post("/api/chat/stream", json={"message": "SECRET HOUSEHOLD TURN", **body}, headers=headers)
+    assert resp.status_code == 200
+    return resp
+
+
+def _last_history(out):
+    return out.orchestrator_bodies()[-1].get("chat_history")
+
+
+@pytest.mark.parametrize("first,second", [("owner", "guest"), ("guest", "owner")], ids=["stay_begins", "stay_ends"])
+def test_a_mode_flip_never_restores_or_injects_the_other_audiences_thread(monkeypatch, first, second):
+    out = h.install_outbound(monkeypatch)
+    h.configure()
+    h.install_role("operator")  # signed in, not the owner role: household vs guest is the only axis
+    store = _FakeThreads(monkeypatch)
+    client = h.client()
+    client.cookies.set("jarvis_uid", "cookie-abc")
+    guest = {"has_guest": True, "guest_name": "Gina Guest", "id": 7}
+
+    def phase(mode):
+        out.guest = guest if mode == "guest" else None
+
+    phase(first)
+    for _ in range(2):
+        _stream(client, _owner_headers())
+    assert len(next(iter(store.threads.values()))["turns"]) == 2
+    first_threads = set(store.threads)
+
+    phase(second)
+    restored = client.get("/api/session/restore", headers=_owner_headers()).json()
+    assert restored["restored"] is False
+    _stream(client, _owner_headers())
+    assert not _last_history(out), "the other audience's turns were injected"
+    assert set(store.threads) - first_threads, "the new audience got its own thread"
+    for t in store.threads.values():
+        assert len(t["turns"]) in (1, 2)
+
+    phase(first)  # and back: the original thread is still its own
+    restored = client.get("/api/session/restore", headers=_owner_headers()).json()
+    assert restored["restored"] is True and len(restored["messages"]) == 4
+
+
+def test_web_ids_follow_the_audience_class(monkeypatch):
+    out = h.install_outbound(monkeypatch)
+    h.configure()
+    h.install_role("operator")
+    client = h.client()
+    household = _chat(client, _owner_headers()).json()["session_id"]
+    assert not household.startswith(("own-", "gst-"))
+    out.guest = {"has_guest": True, "guest_name": "Gina Guest", "id": 7}
+    guest = _chat(client, _owner_headers(), session_id=household).json()["session_id"]
+    assert guest.startswith("gst-") and guest != household
+    assert KEYS.id_class(guest) == KEYS.CALLER_CLASS_GUEST
+    assert _chat(client, _owner_headers(), session_id=guest).json()["session_id"] == guest  # guest continuity
+    out.guest = None
+    back = _chat(client, _owner_headers(), session_id=guest).json()["session_id"]
+    assert back != guest and not back.startswith("gst-")  # the stale guest id is replaced

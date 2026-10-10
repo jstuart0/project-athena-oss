@@ -757,7 +757,7 @@ def _session_mac(session_part: str, browser_key: str) -> str:
     return hmac.new(_CHAT_SESSION_KEY, f"{session_part}\x00{browser_key}".encode(), hashlib.sha256).hexdigest()[:24]
 
 
-_SESSION_PART_RE = re.compile(r"(own-)?[0-9a-f]{32}")
+_SESSION_PART_RE = re.compile(r"(own-|gst-)?[0-9a-f]{32}")
 
 
 # An owner conversation's ids start with "own-". The orchestrator reads the
@@ -765,6 +765,12 @@ _SESSION_PART_RE = re.compile(r"(own-)?[0-9a-f]{32}")
 # rule, pinned by tests/unit/test_owner_session_ids.py), so an owner id is kept
 # for a proven owner and never adopted by anyone else.
 OWNER_SESSION_PREFIX = "own-"
+# A guest-mode conversation's ids start "gst-", the same rule on the orchestrator
+# side (orchestrator/session_keys.py), so a stay starting or ending never hands
+# one audience the other's conversation.
+GUEST_SESSION_PREFIX = "gst-"
+CLASS_OWNER, CLASS_GUEST, CLASS_HOUSEHOLD = "owner", "guest", "household"
+_PREFIX_BY_CLASS = {CLASS_OWNER: OWNER_SESSION_PREFIX, CLASS_GUEST: GUEST_SESSION_PREFIX, CLASS_HOUSEHOLD: ""}
 
 
 def _owner_history(caller: Caller) -> bool:
@@ -779,8 +785,27 @@ def _owner_history(caller: Caller) -> bool:
     )
 
 
-def _new_session_id(browser_key: str, owner: bool = False) -> str:
-    part = f"{OWNER_SESSION_PREFIX if owner else ''}{uuid.uuid4().hex}"
+def _audience_class(caller: Caller) -> str:
+    """Which conversation this turn belongs to: the owner's own, a guest-mode
+    one, or the household's. A failed guest lookup reads as guest (the
+    narrowest), never as the household."""
+    if _owner_history(caller):
+        return CLASS_OWNER
+    if caller.mode == "guest" or _mode_lookup_failed.get():
+        return CLASS_GUEST
+    return CLASS_HOUSEHOLD
+
+
+def _part_class(part: str) -> str:
+    if part.startswith(OWNER_SESSION_PREFIX):
+        return CLASS_OWNER
+    if part.startswith(GUEST_SESSION_PREFIX):
+        return CLASS_GUEST
+    return CLASS_HOUSEHOLD
+
+
+def _new_session_id(browser_key: str, audience_class: str = CLASS_HOUSEHOLD) -> str:
+    part = f"{_PREFIX_BY_CLASS[audience_class]}{uuid.uuid4().hex}"
     return f"{part}.{_session_mac(part, browser_key)}"
 
 
@@ -789,11 +814,16 @@ def _history_identity_key(cookie_id: str, caller: Caller) -> str:
     HMAC of the cookie, never the raw cookie, so signing out, or using the
     same browser from the home network, never restores or injects it, and a
     cookie value can't be forged into it without SERVICE_API_KEY. 36
-    characters: it fits web_browser_identities.cookie_id (VARCHAR(36))."""
-    if not _owner_history(caller):
+    characters: it fits web_browser_identities.cookie_id (VARCHAR(36)).
+    A guest-mode caller likewise gets its own derived key ("g" + 35 hex), so a
+    browser never restores a household thread during a stay, nor the guest's
+    thread after it. Only the household uses the raw cookie."""
+    audience = _audience_class(caller)
+    if audience == CLASS_HOUSEHOLD:
         return cookie_id
-    digest = hmac.new(_CHAT_SESSION_KEY, f"owner-thread|{cookie_id}".encode(), hashlib.sha256).hexdigest()
-    return "o" + digest[:35]
+    label, prefix = ("owner-thread", "o") if audience == CLASS_OWNER else ("guest-thread", "g")
+    digest = hmac.new(_CHAT_SESSION_KEY, f"{label}|{cookie_id}".encode(), hashlib.sha256).hexdigest()
+    return prefix + digest[:35]
 
 
 def _bound_session_id(presented: Optional[str], request: Request, caller: Caller) -> tuple:
@@ -815,17 +845,17 @@ def _bound_session_id(presented: Optional[str], request: Request, caller: Caller
     new_key = None
     if not browser_key:
         browser_key = new_key = secrets.token_urlsafe(24)
-    owner = _owner_history(caller)
+    audience = _audience_class(caller)
     if presented and "." in presented:
         part, mac = presented.rsplit(".", 1)
         if _SESSION_PART_RE.fullmatch(part) and hmac.compare_digest(mac, _session_mac(part, browser_key)):
-            if part.startswith(OWNER_SESSION_PREFIX) == owner:
+            if _part_class(part) == audience:
                 return presented, new_key
-            logger.info("chat_session_id_wrong_class", action="fresh_session", owner=owner)
-            return _new_session_id(browser_key, owner), new_key
+            logger.info("chat_session_id_wrong_class", action="fresh_session", audience=audience)
+            return _new_session_id(browser_key, audience), new_key
     if presented:
         logger.info("chat_session_id_not_bound_to_browser", action="fresh_session")
-    return _new_session_id(browser_key, owner), new_key
+    return _new_session_id(browser_key, audience), new_key
 
 
 def _set_chat_key_cookie(response: Response, request: Request, value: Optional[str]) -> None:
@@ -1108,7 +1138,7 @@ async def chat_stream(message: ChatMessage, request: Request):
                 max_turns = config.get("max_restored_turns", 20)
                 chat_history_msgs = await load_chat_history(thread_id, max_turns)
                 inject_history = True
-                orch_session_id = _new_session_id(stream_browser_key, _owner_history(caller))
+                orch_session_id = _new_session_id(stream_browser_key, _audience_class(caller))
 
     async def generate():
         buffer = []

@@ -55,6 +55,15 @@ def test_owner_sessions_are_invisible_to_a_process_that_only_knows_the_old_names
     assert keys.context_storage_key(owner) != old_context
 
 
+def test_guest_sessions_are_invisible_to_a_process_that_only_knows_the_old_namespaces():
+    from orchestrator import session_keys as keys
+
+    guest = keys.new_session_id(keys.CALLER_CLASS_GUEST)
+    assert guest.startswith("gst-")
+    assert keys.session_storage_key(guest) != "athena:session:" + guest
+    assert keys.context_storage_key(guest) != "athena:context:" + guest
+
+
 def test_every_ordinary_and_public_key_is_unchanged_for_old_pods():
     from orchestrator import session_keys as keys
 

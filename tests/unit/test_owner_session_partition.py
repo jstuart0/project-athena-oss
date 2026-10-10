@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from . import _public_audience_harness as h
 from orchestrator import session_keys
 from orchestrator.session_manager import (
+    CALLER_CLASS_GUEST,
     CALLER_CLASS_OTHER,
     CALLER_CLASS_OWNER,
     CALLER_CLASS_PUBLIC,
@@ -21,13 +22,13 @@ from orchestrator.session_manager import (
     SessionManager,
 )
 
-CLASSES = [CALLER_CLASS_OWNER, CALLER_CLASS_OTHER, CALLER_CLASS_PUBLIC]
+CLASSES = [CALLER_CLASS_OWNER, CALLER_CLASS_OTHER, CALLER_CLASS_PUBLIC, CALLER_CLASS_GUEST]
 
 
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     h.reset_runtime()
-    h.patch_conversation_config(monkeypatch)
+    h.patch_conversation_config(monkeypatch, enabled=True)  # history actually loads
     yield
     h.reset_runtime()
 
@@ -50,6 +51,10 @@ def test_class_crossing_mints_a_fresh_session(stored, caller):
     again = _run(sm.get_or_create_session(session_id=first.session_id, caller_class=caller))
     if stored == caller:
         assert again.session_id == first.session_id
+    elif caller == CALLER_CLASS_GUEST and stored == CALLER_CLASS_OTHER:
+        assert again.session_id == "gst-" + first.session_id  # derived, so a fixed-id caller keeps a conversation
+        assert again.caller_class == CALLER_CLASS_GUEST
+        assert _run(sm.get_session(first.session_id)).caller_class == stored
     else:
         assert again.session_id != first.session_id
         assert again.caller_class == caller
@@ -165,7 +170,7 @@ def rig(monkeypatch):
     monkeypatch.setattr(h.main, "orchestrator_graph", graph)
     monkeypatch.setattr(h.main, "get_cached_response", mock.AsyncMock(return_value=None))
     monkeypatch.setattr(h.main, "cache_response", mock.AsyncMock())
-    return SimpleNamespace(client=TestClient(h.main.app), graph=graph)
+    return SimpleNamespace(client=TestClient(h.main.app), graph=graph, admin=admin)
 
 
 def _post(rig, trust, session_id=None, headers=True):
@@ -189,8 +194,9 @@ def test_a_proven_turn_resumes_its_session_and_everyone_else_gets_a_fresh_one(ri
     saved = _run(_sm_runtime().get_session(first))
     assert saved.caller_class == CALLER_CLASS_OWNER and any("S_OWNER" in m["content"] for m in saved.messages)
     assert _post(rig, "web_owner", first) == first  # positive control
+    assert len(rig.graph.states[-1].conversation_history) >= 2, "positive control: a resumed session loads its turns"
     rig.graph.states.clear()
-    for trust, headers in (("web_local", True), ("household", True), ("web_owner", False)):
+    for trust, headers in (("web_local", True), ("household", True), ("web_owner", False)):  # all household-class
         other = _post(rig, trust, first, headers=headers)
         assert other != first and not other.startswith("own-")
         assert rig.graph.states[-1].conversation_history == [], trust
@@ -238,8 +244,11 @@ def test_chat_completions_never_creates_an_owner_session():
 
     tree = ast.parse(h.MAIN_PY.read_text(encoding="utf-8"))
     fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "chat_completions")
+    source = h.MAIN_PY.read_text(encoding="utf-8")
     for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "get_or_create_session"):
-        assert "caller_class" not in {k.arg for k in call.keywords}  # default: other
+        kw = {k.arg: ast.get_source_segment(source, k.value) for k in call.keywords}
+        # no caller_trust on this route, so the audience can never be an owner
+        assert kw["caller_class"] == "_audience_session_class(authz.knowledge_audience)"
 
 
 def test_a_signed_owner_id_from_jarvis_web_is_kept_across_proven_turns(rig):
@@ -251,3 +260,67 @@ def test_a_signed_owner_id_from_jarvis_web_is_kept_across_proven_turns(rig):
     assert _post(rig, "web_owner", jarvis_style) == jarvis_style
     saved = _run(_sm_runtime().get_session(jarvis_style))
     assert saved.caller_class == CALLER_CLASS_OWNER and len(saved.messages) >= 4
+
+
+# --- the household / guest boundary (a stay starting or ending) ----------------------
+
+def _history(rig):
+    return rig.graph.states[-1].conversation_history
+
+
+def test_a_stay_starting_gives_the_guest_a_fresh_conversation_on_the_same_session_id(rig):
+    satellite = "sat-living-room"
+    assert _post(rig, "household", satellite) == satellite
+    assert _post(rig, "household", satellite) == satellite
+    assert len(_history(rig)) >= 2, "positive control: the household conversation resumes"
+
+    h.install_mode_client(server_mode="guest")  # a stay begins
+    rig.graph.states.clear()
+    guest_sid = _post(rig, "household", satellite)
+    assert guest_sid == "gst-" + satellite
+    assert _history(rig) == [] and rig.graph.states[-1].history_summary == ""
+    saved = _run(_sm_runtime().get_session(guest_sid))
+    assert saved.caller_class == CALLER_CLASS_GUEST
+    # the guest keeps a conversation of their own across turns
+    assert _post(rig, "household", satellite) == guest_sid
+    assert len(_history(rig)) >= 2
+
+
+def test_a_stay_ending_gives_the_household_a_fresh_conversation_and_never_the_guests(rig):
+    satellite = "sat-kitchen"
+    h.install_mode_client(server_mode="guest")
+    guest_sid = _post(rig, "household", satellite)
+    _post(rig, "household", satellite)
+    assert len(_history(rig)) >= 2
+
+    h.install_mode_client(server_mode="owner")  # the stay ends
+    rig.graph.states.clear()
+    assert _post(rig, "household", satellite) == satellite  # the household id has no history of its own
+    assert _history(rig) == []
+    # a caller that adopted the guest id and presents it after the stay gets a fresh session
+    again = _post(rig, "household", guest_sid)
+    assert again != guest_sid and not again.startswith("gst-") and _history(rig) == []
+
+
+def test_a_device_matched_stay_is_a_guest_session_but_a_mode_hint_is_not(rig):
+    rig.admin.get_user_session_by_device = mock.AsyncMock(return_value={"guest_id": 9, "guest_name": "Gina Guest"})
+    body = {"query": "hi", "interface_type": "chat", "caller_trust": "household", "session_id": "dev-sat", "device_id": "dev1"}
+    resp = rig.client.post("/query", json=body, headers=h.service_headers())
+    assert resp.json()["session_id"] == "gst-dev-sat"
+
+    rig.admin.get_user_session_by_device = mock.AsyncMock(return_value=None)
+    body = {"query": "hi", "interface_type": "chat", "caller_trust": "household", "session_id": "hint-sat", "mode": "guest"}
+    resp = rig.client.post("/query", json=body, headers=h.service_headers())
+    assert resp.json()["session_id"] == "hint-sat"  # a client hint doesn't make a guest conversation
+
+
+def test_guest_ids_are_not_adopted_by_other_classes():
+    from orchestrator import session_keys as keys
+
+    assert keys.id_class("gst-x") == CALLER_CLASS_GUEST
+    assert keys.guest_session_id("x") == "gst-x" and keys.guest_session_id("gst-x") == "gst-x"
+    assert not keys.guest_session_id("own-x").startswith("own-") and not keys.guest_session_id("pub-x").startswith("pub-")
+    for cls in (CALLER_CLASS_OTHER, CALLER_CLASS_OWNER, CALLER_CLASS_PUBLIC):
+        assert keys.usable_session_id("gst-x", cls) != "gst-x"
+    assert keys.session_storage_key("gst-x") == "athena:guest_session:gst-x"
+    assert keys.context_storage_key("gst-x") == "athena:guest_context:gst-x"

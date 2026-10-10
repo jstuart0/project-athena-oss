@@ -58,6 +58,7 @@ from orchestrator.search_providers.result_fusion import ResultFusion
 
 # Session manager imports
 from orchestrator.session_manager import (
+    CALLER_CLASS_GUEST,
     CALLER_CLASS_OTHER,
     CALLER_CLASS_OWNER,
     CALLER_CLASS_PUBLIC,
@@ -6310,12 +6311,25 @@ class QueryRequest(BaseModel):
     )
 
 
+def _audience_session_class(audience: KnowledgeAudience) -> str:
+    """The session class a server-built audience belongs to: owner only for a
+    server-proven owner, guest only for the server's own guest mode or a
+    device-matched stay (never a client's mode=guest hint), the public
+    audience, else the household. A conversation is never resumed across
+    classes, so a stay starting never hands a guest the household's turns."""
+    if audience.public:
+        return CALLER_CLASS_PUBLIC
+    if audience.owner_proven:
+        return CALLER_CLASS_OWNER
+    if audience.mode == "guest" and audience.guest_verified:
+        return CALLER_CLASS_GUEST
+    return CALLER_CLASS_OTHER
+
+
 def _session_caller_class(request: "QueryRequest", audience: KnowledgeAudience) -> str:
-    """The session class: owner only for a server-proven owner, so an owner
-    session is never resumed (or written to) by anyone who isn't one."""
     if is_public_caller(request.caller_trust):
         return CALLER_CLASS_PUBLIC
-    return CALLER_CLASS_OWNER if audience.owner_proven else CALLER_CLASS_OTHER
+    return _audience_session_class(audience)
 
 
 def _drop_unproven_owner_history(request: "QueryRequest", audience: KnowledgeAudience) -> bool:
@@ -8370,7 +8384,8 @@ async def chat_completions(request: OpenAIChatRequest):
                 session = await sm.get_or_create_session(
                     session_id=resolved_session.session_id,
                     user_id="openwebui",
-                    zone="web"
+                    zone="web",
+                    caller_class=_audience_session_class(authz.knowledge_audience),
                 )
 
                 # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/

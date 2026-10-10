@@ -805,6 +805,25 @@ stored value (the legacy `chat`) is never rendered; the admin page shows it as
   see. Operators with write access can read and retype Owner-only entries, but
   moving one to another audience or deleting one needs the owner role (403
   `insufficient_role`); every write is audited by id, audience and field name.
+- **Household and guest conversations never cross.** A stay starting or ending
+  never hands one audience the other's conversation. Guest-audience turns (the
+  server's own guest mode, or a guest matched to the caller's device) use their
+  own session class (ids start `gst-`, stored under `athena:guest_session:` and
+  `athena:guest_context:`); a caller that keeps one session id, such as a voice
+  satellite or an SMS number, gets one conversation per audience. jarvis-web
+  likewise keeps a separate persistent chat thread for guest-mode callers, so a
+  browser never restores a household thread during a stay or the guest's after
+  it. A client's own `mode=guest` hint doesn't start a guest conversation.
+- **Already-built history is not scrubbed.** When you narrow an entry (re-tier,
+  disable, delete or edit it), new prompts and cache keys stop using the old
+  text within about 5 seconds, but a live household conversation that already
+  quotes it keeps its turns and summary until it expires. A session is kept for
+  one hour (`session_ttl_seconds`) and is resumed only within 30 minutes of its
+  last turn (`timeout_seconds`); persistent web threads follow
+  `session_ttl_days`. After narrowing something sensitive, end the conversations
+  that may hold it: delete a session with `DELETE /sessions/{session_id}` on the
+  orchestrator (service key required), use Start Fresh in Jarvis web, or wait
+  out the one-hour expiry.
 - **Directions.** The directions service's default origin, used when a request
   gives none, comes from Everyone entries only. An address stored as Everyone is
   therefore sent to the directions provider as the origin for any caller,

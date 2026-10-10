@@ -37,6 +37,18 @@ def test_both_images_use_the_same_owner_prefix_and_the_prefix_means_owner():
     assert keys.id_class("abc.def") == keys.CALLER_CLASS_OTHER
 
 
+def test_both_images_use_the_same_guest_prefix_and_namespaces():
+    assert _constant(ORCH, "GUEST_SESSION_PREFIX") == _constant(JARVIS, "GUEST_SESSION_PREFIX") == "gst-"
+    keys = _keys()
+    assert keys.id_class("gst-abc.def") == keys.CALLER_CLASS_GUEST
+    assert keys.session_storage_key("gst-x").startswith("athena:guest_session:")
+    assert keys.context_storage_key("gst-x").startswith("athena:guest_context:")
+    # jarvis-web mints a guest id the orchestrator keeps for a guest and refuses to anyone else
+    signed = "gst-" + "a" * 32 + "." + "b" * 24
+    assert keys.usable_session_id(signed, keys.CALLER_CLASS_GUEST) == signed
+    assert keys.usable_session_id(signed, keys.CALLER_CLASS_OTHER) != signed
+
+
 def test_the_owner_prefix_selects_the_owner_namespaces():
     keys = _keys()
     sid = _constant(ORCH, "OWNER_SESSION_PREFIX") + "x"
