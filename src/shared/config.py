@@ -360,6 +360,17 @@ class AthenaConfig(BaseSettings):
     # left-most value. Keep this scoped to the actual reverse-proxy
     # subnet, not a broad cluster-wide default.
     trusted_proxy_cidrs: str = Field(default="")
+    # openai_speech_client_networks: comma-separated CIDRs/addresses of OpenAI-
+    # compatible clients (/v1/chat/completions, /v1/responses) whose answers are
+    # spoken by a TTS that isn't Athena's, e.g. a Home Assistant conversation
+    # agent with HA-side TTS. Such a caller gets speech-normalized text ("25
+    # miles per hour"); every other caller gets text as written. The client
+    # address is the one the new-conversation limiter uses (nearest
+    # X-Forwarded-For hop outside trusted_proxy_cidrs), so set
+    # trusted_proxy_cidrs too when the gateway sits behind a proxy. An entry
+    # that overlaps trusted_proxy_cidrs is ignored with an ERROR. Empty
+    # (default): no network rule; the /v1/voice routes still select speech.
+    openai_speech_client_networks: str = Field(default="")
     # new_conversation_reset_grace_seconds: F38 (codex r2 Medium) — a
     # first-turn fingerprint reset is skipped when a session under the same
     # fingerprint was created within this many seconds. HA's known truncated
