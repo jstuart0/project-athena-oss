@@ -97,6 +97,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.admin_url import get_admin_url
 from shared.config import get_config
+from shared.output_channel import render_sink_text
 from shared.service_key import note_admin_refusal, service_key_headers
 
 # Configuration
@@ -618,6 +619,9 @@ if WYOMING_AVAILABLE:
         async def _synthesize(self, text: str):
             """Synthesize speech using configured TTS engine with cancellation support."""
             session_id = self.session_id or str(uuid.uuid4())
+
+            # Anything HA sends for synthesis is spoken: normalize and cap it here (idempotent).
+            text = render_sink_text(text, sink="wyoming")
 
             # Store current response for interruption context
             self.current_response = text

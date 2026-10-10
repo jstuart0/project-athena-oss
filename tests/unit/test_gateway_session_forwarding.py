@@ -25,6 +25,7 @@ os.environ.setdefault("SERVICE_API_KEY", "test-key-gateway-session-forwarding")
 os.environ.setdefault("ADMIN_API_URL", "http://localhost:8080")
 
 import gateway.main as gw  # noqa: E402
+from shared.output_channel import OutputChannel  # noqa: E402
 from gateway.conversation_limiter import (  # noqa: E402
     NewConversationLimiter,
     RedisNewConversationLimiter,
@@ -84,7 +85,7 @@ def test_stream_payload_forwards_identity(monkeypatch):
     )
 
     async def _run():
-        async for _ in gw.stream_orchestrator_response(request, device_id="kitchen"):
+        async for _ in gw.stream_orchestrator_response(request, device_id="kitchen", channel=OutputChannel.TEXT):
             pass
 
     asyncio.run(_run())
@@ -93,7 +94,7 @@ def test_stream_payload_forwards_identity(monkeypatch):
     assert payload["user"] == "u1"
     assert payload["session_id"] == "explicit-a"
     assert payload["room"] == "kitchen"
-    assert payload["extra_body"] == {"room": "kitchen"}
+    assert payload["extra_body"] == {"room": "kitchen", "interface_type": "text"}
 
 
 def test_stream_payload_omits_unset_identity(monkeypatch):
@@ -108,7 +109,7 @@ def test_stream_payload_omits_unset_identity(monkeypatch):
     )
 
     async def _run():
-        async for _ in gw.stream_orchestrator_response(request, device_id=None):
+        async for _ in gw.stream_orchestrator_response(request, device_id=None, channel=OutputChannel.TEXT):
             pass
 
     asyncio.run(_run())

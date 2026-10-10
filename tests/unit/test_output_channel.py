@@ -328,8 +328,12 @@ TTS_SINKS = {
     "apps/jarvis-web/backend/main.py::synthesize_speech",
     "src/orchestrator/automation_agent.py::AutomationAgent._send_notification",
 }
-# Sinks that render today; Phase 4 adds the gateway sinks, Phase 5 jarvis-web.
-RENDERING_SINKS: set = {"src/orchestrator/automation_agent.py::AutomationAgent._send_notification"}
+# Sinks that render today; Phase 5 adds jarvis-web.
+RENDERING_SINKS: set = {
+    "src/orchestrator/automation_agent.py::AutomationAgent._send_notification",
+    "src/gateway/wyoming_bridge.py::AthenaWyomingHandler._synthesize",
+    "src/gateway/livekit_integration.py::TTSClient.synthesize",
+}
 # admin diagnostics (admin/backend/app/routes/voice_tests.py) are out of scope: not an Athena answer.
 MUST_NOT_IMPORT_SEAM = [
     "src/orchestrator/mode_permission.py",
@@ -427,7 +431,7 @@ def _is_sink(function):
 
 def _calls_a_renderer(function):
     return any(
-        isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", None)) in {"render_for_channel", "normalize_for_tts"}
+        isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", None)) in {"render_for_channel", "render_sink_text", "normalize_for_tts"}
         for n in ast.walk(function)
     )
 

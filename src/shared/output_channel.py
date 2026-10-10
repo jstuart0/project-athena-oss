@@ -60,6 +60,28 @@ def render_for_channel(text: Optional[str], channel: OutputChannel) -> Optional[
         return text
 
 
+def render_sink_text(text: Optional[str], *, sink: str) -> Optional[str]:
+    """What an Athena TTS sink hands to its engine: SPEECH rendering, capped.
+
+    The sink knows its output is spoken, whatever channel the answer was
+    produced for; rendering is idempotent, so text already rendered upstream
+    passes through unchanged. Logs lengths only, never the text.
+    """
+    if not text:
+        return text
+    spoken = render_for_channel(text, OutputChannel.SPEECH)
+    logger.info(
+        "speech_sink_rendered",
+        extra={
+            "sink": sink,
+            "text_length": len(text),
+            "spoken_length": len(spoken),
+            "truncated": len(text) > SPEECH_SINK_MAX_CHARS,
+        },
+    )
+    return spoken
+
+
 def render_answer(text: Optional[str], interface_type: Optional[str]) -> Optional[str]:
     return render_for_channel(text, channel_for_interface_type(interface_type))
 
@@ -86,19 +108,24 @@ def renders_spoken_answer(handler):
 
 
 def without_networks_overlapping(
-    speech_networks: Sequence[IPNetwork], trusted_proxies: Sequence[IPNetwork]
+    speech_networks: Sequence[IPNetwork],
+    trusted_proxies: Sequence[IPNetwork],
+    *,
+    log_error: bool = True,
 ) -> Tuple[Tuple[IPNetwork, ...], int]:
     """Drop speech networks that overlap a trusted proxy network; return (kept, dropped count).
 
     A proxy is never a speech client, and with no forwarded address a trusted
-    peer would otherwise resolve to itself. Logs the count only, never an address.
+    peer would otherwise resolve to itself. Logs the count only, never an
+    address; a caller that logs through its own configured logger passes
+    ``log_error=False`` and reports the returned count.
     """
     kept = tuple(
         net for net in speech_networks
         if not any(net.version == proxy.version and net.overlaps(proxy) for proxy in trusted_proxies)
     )
     dropped = len(speech_networks) - len(kept)
-    if dropped:
+    if dropped and log_error:
         logger.error("openai_speech_networks_overlap_trusted_proxies", extra={"count": dropped})
     return kept, dropped
 
