@@ -293,11 +293,15 @@ def real_admin_client(rows=None):
 
     def _handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/base-knowledge/public":
+            if client.fail_fetch:
+                return httpx.Response(503, json={})
             return httpx.Response(200, json=served)
         return httpx.Response(404, json={})
 
     client = AdminConfigClient(admin_url="http://admin-backend:8080", api_key="test-key-public-audience")
     client.client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+    client.served = served  # tests narrow or edit rows in place
+    client.fail_fetch = False
     # The real client needs the stubs the fake admin has for the non-knowledge calls.
     client.get_user_session_by_device = mock.AsyncMock(return_value=None)
     client.get_tool_calling_settings = mock.AsyncMock(return_value={

@@ -4,6 +4,7 @@ Base Knowledge Utilities
 Provides functions to format and inject base knowledge context into LLM prompts.
 Handles dynamic placeholders like {dynamic:current_date} and {dynamic:current_time}.
 """
+import hashlib
 import os
 from typing import List, Dict, Any, Optional
 import structlog
@@ -267,6 +268,37 @@ async def load_visible_knowledge(admin_client, *, audience: KnowledgeAudience) -
         return []
     return sorted((e for e in (entries or []) if entry_visible(e, tiers)),
                   key=lambda e: e.get("priority", 0), reverse=True)
+
+
+def knowledge_digest(entries: List[Dict[str, Any]]) -> str:
+    """A short digest of exactly the rows an audience can see.
+
+    Order-independent. It covers each row's identity, audience, state, last
+    update and a hash of its value, so narrowing a row (re-tier, disable,
+    delete) or editing its value changes the digest. The semantic cache puts
+    it in every key, so an answer derived from knowledge that has since
+    changed is never replayed.
+    """
+    parts = sorted(
+        "|".join((
+            str(e.get("id")), str(e.get("category")), str(e.get("key")), str(e.get("applies_to")),
+            str(e.get("enabled")), str(e.get("priority")), str(e.get("updated_at")),
+            hashlib.sha256(str(e.get("value")).encode("utf-8")).hexdigest()[:16],
+        ))
+        for e in entries
+    )
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+async def knowledge_cache_digest(admin_client, *, audience: KnowledgeAudience) -> Optional[str]:
+    """The digest of the rows ``audience`` can see, or None when they could not
+    be loaded (the caller then skips the semantic cache entirely)."""
+    entries = await load_visible_knowledge(admin_client, audience=audience)
+    if not audience.visible_tiers():
+        return knowledge_digest([])
+    if getattr(admin_client, "base_knowledge_fetch_ok", True) is False:
+        return None
+    return knowledge_digest(entries)
 
 
 async def get_knowledge_context_for_user(admin_client, *, audience: KnowledgeAudience) -> str:

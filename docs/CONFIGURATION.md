@@ -785,7 +785,14 @@ stored value (the legacy `chat`) is never rendered; the admin page shows it as
   including an explicit "remember ..." (add memories on the admin Memories
   page). Owner-scope memories are household-level: they're heard by everyone at
   home, and admin-created memories follow that. Cache keys carry a `kv2` version
-  segment; the old keys are simply never read again.
+  segment (the old keys are simply never read again) and a digest of exactly the
+  entries the caller's audience can see, so editing, disabling, deleting or
+  narrowing an entry changes every key derived from it and an answer built on
+  the old text is never replayed. If the entries can't be loaded, the cache is
+  skipped for that request. Each service reuses the fetched entry list for at
+  most 5 seconds, so a narrowing reaches prompts and cache keys within about
+  that long (plus the orchestrator's usual request time); a reply already being
+  generated when you save may still use the old text.
 - **Conversations.** A proven owner's conversation is its own session class
   (ids start `own-`, stored under `athena:owner_session:` and
   `athena:owner_context:`), and jarvis-web keeps the owner's chat thread under a

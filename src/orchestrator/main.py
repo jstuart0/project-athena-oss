@@ -44,7 +44,7 @@ from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
 from shared.admin_config import get_admin_client
 from shared.assistant_profile import build_core_assistant_prompt
-from shared.base_knowledge_utils import build_knowledge_context, extract_home_address, get_knowledge_context_for_user, load_visible_knowledge
+from shared.base_knowledge_utils import build_knowledge_context, extract_home_address, get_knowledge_context_for_user, knowledge_cache_digest, load_visible_knowledge
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import register_exception_handlers, RateLimitError, ServiceUnavailableError
 from shared.config import get_config
@@ -6381,6 +6381,10 @@ async def process_query(
 
     # Initialize timing tracker for granular execution time tracking
     timing_tracker = TimingTracker()
+    # Digest of the base-knowledge rows this request's audience can see; part of
+    # every semantic-cache key. None means "not computed or could not load":
+    # the cache is neither read nor written.
+    cache_knowledge_digest: Optional[str] = None
 
     try:
         # Multi-guest identification: Look up user by device fingerprint
@@ -6658,7 +6662,17 @@ async def process_query(
             # A mode=guest hint in an owner-mode house is mode_guest by key but
             # not a real guest: it must not read what a real stay wrote.
             unverified_guest = authz.knowledge_audience.mode == "guest" and not authz.knowledge_audience.guest_verified
-            if request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee or authz.degraded or owner_caller or unverified_guest:
+            cache_blocked = (
+                request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee
+                or authz.degraded or owner_caller or unverified_guest
+            )
+            if not cache_blocked:
+                # Same filtered rows the prompt uses; a failed load disables the
+                # cache for this request (read and write) instead of keying on "no rows".
+                cache_knowledge_digest = await knowledge_cache_digest(
+                    get_admin_client(), audience=authz.knowledge_audience
+                )
+            if cache_blocked or cache_knowledge_digest is None:
                 cached_response = None
             else:
                 cached_response = await get_cached_response(
@@ -6667,6 +6681,7 @@ async def process_query(
                     mode=current_mode,
                     location_override=location_override,
                     guest_id=_cache_guest_id(guest_info),
+                    knowledge_digest=cache_knowledge_digest,
                 )
 
             # Skip cache if strong intent doesn't match cached intent
@@ -7170,6 +7185,7 @@ async def process_query(
             not request.skip_semantic_cache
             and not is_public_caller(request.caller_trust)
             and addressee_kind(query_context, audience=authz.knowledge_audience) not in NAMED_ADDRESSEE_KINDS
+            and cache_knowledge_digest is not None
             and not authz.knowledge_audience.owner_caller
             and not (authz.knowledge_audience.mode == "guest" and not authz.knowledge_audience.guest_verified)
             and not authz.degraded
@@ -7192,6 +7208,7 @@ async def process_query(
                         mode=current_mode,
                         location_override=cache_location_override,
                         guest_id=_cache_guest_id(guest_info),
+                        knowledge_digest=cache_knowledge_digest,
                     )
                 )
             except Exception as cache_err:

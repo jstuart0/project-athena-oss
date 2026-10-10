@@ -34,6 +34,7 @@ ALLOWED = {
     ("src/shared/base_knowledge_utils.py", "<module>", "build_knowledge_context"),  # __main__ demo
     ("src/shared/base_knowledge_utils.py", "get_knowledge_context_for_user", "build_knowledge_context"),
     ("src/shared/base_knowledge_utils.py", "get_knowledge_context_for_user", "load_visible_knowledge"),
+    ("src/shared/base_knowledge_utils.py", "knowledge_cache_digest", "load_visible_knowledge"),  # cache key digest
     ("src/shared/base_knowledge_utils.py", "load_visible_knowledge", "get_base_knowledge"),
 }
 

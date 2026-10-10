@@ -15,6 +15,11 @@ from shared.config import get_config as _get_athena_config  # local async get_co
 from shared.service_key import SERVICE_KEY_VARIABLE, is_header_safe, note_admin_refusal
 from shared.knowledge_tiers import entry_visible
 
+# How long the raw base-knowledge list is reused. Five seconds bounds how long a
+# narrowed row can still be served from this process, at a cost of at most one
+# GET per five seconds.
+BASE_KNOWLEDGE_CACHE_TTL_SECONDS = 5.0
+
 logger = structlog.get_logger()
 
 CallerMode = Literal["owner", "guest"]
@@ -121,6 +126,15 @@ class AdminConfigClient:
         # Base knowledge cache
         self._base_knowledge_cache: Optional[List[Dict[str, Any]]] = None
         self._base_knowledge_cache_time = 0.0
+        # Base knowledge decides what an answer may contain, so it is cached
+        # far shorter than the other config: a row narrowed in the admin page
+        # (re-tiered, disabled, deleted, edited) reaches the prompts and the
+        # cache digest within this many seconds. A refresh is one small GET per
+        # window per process.
+        self._base_knowledge_cache_ttl = BASE_KNOWLEDGE_CACHE_TTL_SECONDS
+        # False when the last base-knowledge fetch failed (the readers then see
+        # an empty list; the semantic cache must not treat that as "no rows").
+        self.base_knowledge_fetch_ok = True
 
         # Component model assignment cache
         self._component_model_cache: Dict[str, Dict[str, Any]] = {}
@@ -948,8 +962,9 @@ class AdminConfigClient:
             Returns empty list if API unavailable
         """
         # Check cache
-        if self._base_knowledge_cache and (time.time() - self._base_knowledge_cache_time < self._cache_ttl):
+        if self._base_knowledge_cache and (time.time() - self._base_knowledge_cache_time < self._base_knowledge_cache_ttl):
             knowledge = self._base_knowledge_cache
+            self.base_knowledge_fetch_ok = True
         else:
             # Fetch from API. D44/P3: this route now requires
             # X-Service-Key or an admin session -- self.client's default
@@ -970,6 +985,7 @@ class AdminConfigClient:
                     # Cache successful result
                     self._base_knowledge_cache = knowledge
                     self._base_knowledge_cache_time = time.time()
+                    self.base_knowledge_fetch_ok = True
 
                     logger.info(
                         "base_knowledge_loaded_from_db",
@@ -980,6 +996,7 @@ class AdminConfigClient:
                         "base_knowledge_fetch_failed",
                         status_code=response.status_code
                     )
+                    self.base_knowledge_fetch_ok = False
                     return []
 
             except Exception as e:
@@ -988,6 +1005,7 @@ class AdminConfigClient:
                     error=str(e),
                     admin_url=self.admin_url
                 )
+                self.base_knowledge_fetch_ok = False
                 return []
 
         filtered = [k for k in knowledge if entry_visible(k, tiers)]

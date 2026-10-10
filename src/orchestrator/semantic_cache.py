@@ -583,6 +583,8 @@ def get_cache_key(
     mode: str = None,
     location_override: dict = None,
     guest_id: Optional[Any] = None,
+    *,
+    knowledge_digest: str,
 ) -> str:
     """Generate cache key with optional mode/guest/location context.
 
@@ -608,6 +610,9 @@ def get_cache_key(
     key_parts.append(query_hash)
 
     key_parts.append(CACHE_KEY_VERSION)
+    # Digest of exactly the base-knowledge rows this audience can see: any change
+    # to them rotates every derived key, so a narrowed row's answers can't replay.
+    key_parts.append(f"kb_{knowledge_digest}")
     key_parts.append(f"mode_{mode or 'unknown'}")
     if guest_id is not None and str(guest_id) != "":
         key_parts.append(f"guest:{guest_id}")
@@ -634,6 +639,8 @@ async def get_cached_response(
     mode: str = None,
     location_override: dict = None,
     guest_id: Optional[Any] = None,
+    *,
+    knowledge_digest: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Check cache for a semantically similar query.
@@ -644,6 +651,7 @@ async def get_cached_response(
         mode: The effective mode (part of the key)
         location_override: Optional location override dict with address, latitude, longitude
         guest_id: The device-identified guest's id, if any (part of the key)
+        knowledge_digest: Digest of the base-knowledge rows the caller can see (part of the key)
 
     Returns:
         Cached response dict if found and valid, None otherwise
@@ -655,7 +663,9 @@ async def get_cached_response(
         logger.debug("semantic_cache_skip", category=category, reason="not_cacheable")
         return None
 
-    cache_key = get_cache_key(normalized_query, query, room, mode, location_override, guest_id)
+    cache_key = get_cache_key(
+        normalized_query, query, room, mode, location_override, guest_id, knowledge_digest=knowledge_digest
+    )
     cache = get_cache_client()
 
     try:
@@ -684,6 +694,8 @@ async def cache_response(
     mode: str = None,
     location_override: dict = None,
     guest_id: Optional[Any] = None,
+    *,
+    knowledge_digest: str,
 ) -> bool:
     """
     Cache a query response with appropriate TTL based on intent category.
@@ -695,6 +707,7 @@ async def cache_response(
         mode: The effective mode (part of the key)
         location_override: Optional location override dict with address, latitude, longitude
         guest_id: The device-identified guest's id, if any (part of the key)
+        knowledge_digest: Digest of the base-knowledge rows the caller can see (part of the key)
 
     Returns:
         True if cached successfully, False otherwise
@@ -707,7 +720,9 @@ async def cache_response(
 
     # Get TTL for this category
     ttl = CACHE_TTL_CONFIG.get(category, CACHE_TTL_CONFIG["general"])
-    cache_key = get_cache_key(normalized_query, query, room, mode, location_override, guest_id)
+    cache_key = get_cache_key(
+        normalized_query, query, room, mode, location_override, guest_id, knowledge_digest=knowledge_digest
+    )
     cache = get_cache_client()
 
     try:
