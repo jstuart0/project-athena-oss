@@ -435,7 +435,6 @@ project-athena/
 │   │   ├── main.py          # Core orchestration graph
 │   │   ├── smart_home_controller.py  # HA integration
 │   │   ├── music_handler.py # Music/audio control
-│   │   ├── tts_normalizer.py # Speech normalization
 │   │   ├── complexity_detector.py    # Query complexity scoring
 │   │   ├── semantic_cache.py # Intent-aware response caching
 │   │   ├── circuit_breaker.py
@@ -457,6 +456,7 @@ project-athena/
 │   │   ├── module_registry.py # Module enable/disable system
 │   │   ├── llm_router.py    # Multi-backend LLM routing
 │   │   ├── privacy_filter.py # PII scrubbing for cloud LLMs
+│   │   ├── tts_normalizer.py # Speech normalization (src/shared/tts_normalizer.py)
 │   │   └── admin_config.py  # Admin API client
 │   ├── control_agent/       # Service watchdog (auto-restart)
 │   ├── mode_service/        # Owner/guest mode management

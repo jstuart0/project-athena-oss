@@ -65,7 +65,7 @@ from orchestrator.session_manager import (
 )
 from orchestrator.config_loader import get_config
 from orchestrator.timing import TimingTracker
-from orchestrator.tts_normalizer import normalize_for_tts
+from shared.tts_normalizer import normalize_for_tts
 
 from orchestrator.search_providers.intent_classifier import IntentClassifier
 
