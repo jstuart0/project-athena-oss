@@ -346,10 +346,15 @@ def test_bulk_tier_service_key_is_401(owner_client, db):
 
 
 def test_bulk_tier_route_carries_the_write_permission():
-    from app.utils.service_auth import require_user_permission  # noqa: F401
-    route = next(r for r in app.routes if isinstance(r, APIRoute) and r.path == BULK_TIER_URL)
-    perms = [getattr(d.call, "required_permission", None) for d in route.dependant.dependencies]
-    assert "write:base_knowledge" in perms
+    """Walk the app the way FastAPI serves it (0.141 keeps included routers as
+    wrappers, so a flat app.routes scan finds nothing) and read the permission
+    from wherever the dependency tree records it."""
+    from shared.route_walk import dependency_calls, iter_api_routes
+
+    walked = [w for w in iter_api_routes(app) if w.path == BULK_TIER_URL and "POST" in w.methods]
+    assert len(walked) == 1, "floor: exactly one POST bulk-tier route is served"
+    permissions = [getattr(call, "required_permission", None) for call in dependency_calls(walked[0])]
+    assert "write:base_knowledge" in permissions
 
 
 # ---- audit ----------------------------------------------------------------
