@@ -200,7 +200,8 @@ to stay complete — when you add a field, add its row here too.
 | `ha_satellite_room_map` | `HA_SATELLITE_ROOM_MAP` | `""` | Voice PE `assist_satellite` entity → room map (takes priority over the generic friendly-name parse) |
 | `ha_tv_entities` | `HA_TV_ENTITIES` | `""` | Fallback room → Apple TV entity map, used only when the admin API is unreachable |
 | `ha_bed_warmer_entities` | `HA_BED_WARMER_ENTITIES` | `""` | Entity ids for a Sunbeam-via-Tuya bed-warmer integration |
-| `ha_light_groups` | `HA_LIGHT_GROUPS` | `""` | Room → light-group entity map, read only by the scene-activation-failed fallback (per room; empty means no fallback for that room, never house-wide) |
+| `ha_light_groups` | `HA_LIGHT_GROUPS` | `""` | Room → light-group entity map: the authoritative group for room light commands and status, and the scene-activation-failed fallback (keys match regardless of case, spaces or underscores; a room with no entry is resolved by name, and gets no scene fallback) |
+| `ha_room_light_exclude_entities` | `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | `""` | JSON array of regexes (`re.search` on the entity id); a light picked for a room only by name is dropped when it matches. Unset = built-in LED-ring/status-LED pattern, `"[]"` = off |
 | `ha_music_players` | `HA_MUSIC_PLAYERS` | `""` | Fallback room → Music Assistant entity map, used only when the admin API is unreachable |
 | `ha_permission_fallback_restricted_entities` | `HA_PERMISSION_FALLBACK_RESTRICTED_ENTITIES` | `""` | Entity-id regex patterns applied as the "degraded" permission set when the mode service is unreachable or rejecting (ATHENA-69 D4); empty string means "use the built-in default list", explicit `[]` means an outage grants unrestricted HA writes |
 | `guest_baseline_restricted_entities` | `GUEST_BASELINE_RESTRICTED_ENTITIES` | `""` | Floor unioned into every guest's `restricted_entities` regardless of admin config (D8); always unioned in, never replaced |
