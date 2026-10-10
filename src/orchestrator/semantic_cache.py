@@ -17,6 +17,11 @@ from shared.cache import get_cache_client
 from orchestrator.utils.constants import DEFAULT_CITY
 import structlog
 
+# Bumped when what a cached answer may contain changes. Sits right before the
+# mode_ segment so the "athena_semantic:{category}_*" invalidation prefix still
+# matches; segments appended after the location (e.g. iface_) stay last.
+CACHE_KEY_VERSION = "kv2"
+
 logger = structlog.get_logger(__name__)
 
 
@@ -602,6 +607,7 @@ def get_cache_key(
     query_hash = hashlib.md5(raw_query.lower().strip().encode()).hexdigest()[:8]
     key_parts.append(query_hash)
 
+    key_parts.append(CACHE_KEY_VERSION)
     key_parts.append(f"mode_{mode or 'unknown'}")
     if guest_id is not None and str(guest_id) != "":
         key_parts.append(f"guest:{guest_id}")

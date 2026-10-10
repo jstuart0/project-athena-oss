@@ -44,7 +44,7 @@ from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
 from shared.admin_config import get_admin_client
 from shared.assistant_profile import build_core_assistant_prompt
-from shared.base_knowledge_utils import get_knowledge_context_for_user, get_home_address_for_user
+from shared.base_knowledge_utils import build_knowledge_context, extract_home_address, get_knowledge_context_for_user, load_visible_knowledge
 from shared.tracing import RequestTracingMiddleware, get_tracing_headers
 from shared.errors import register_exception_handlers, RateLimitError, ServiceUnavailableError
 from shared.config import get_config
@@ -4806,8 +4806,10 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
             if not is_public_audience(state.permissions):
                 admin_client = get_admin_client()
                 user_mode = _tool_user_mode
-                knowledge_context = await get_knowledge_context_for_user(
-                    admin_client, user_mode, degraded=state.mode_degraded,
+                visible_knowledge = await load_visible_knowledge(admin_client, audience=state.knowledge_audience)
+                knowledge_context = (
+                    build_knowledge_context(visible_knowledge, audience=state.knowledge_audience)
+                    if visible_knowledge else ""
                 )
                 if knowledge_context:
                     system_content += f"\n{knowledge_context}"
@@ -4815,7 +4817,7 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
                     logger.info(f"Base knowledge context injected for mode={user_mode} in tool_call")
 
                 # Get permanent home address (for "directions from home" type queries)
-                home_address = await get_home_address_for_user(admin_client, user_mode)
+                home_address = extract_home_address(visible_knowledge)
                 search_location = home_address  # Default search location to home
                 logger.info("home_address_resolved", address_set=bool(home_address))
 
@@ -6577,6 +6579,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             history_summary=history_summary,  # Summarized context for summarized mode
             permissions=permissions,  # Phase 2: Include permissions for entity checks
             mode_degraded=authz.degraded,
+            knowledge_audience=authz.knowledge_audience,
             interface_type=request.interface_type,  # SMS Integration: Pass interface type for response formatting
             context=query_context,  # SMS Integration + Multi-guest: Pass context (phone_number, calendar_event_id, guest_name, etc.)
             memory_context=memory_context,  # Memory augmentation: Relevant memories for LLM context
@@ -6618,7 +6621,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
             # signed-in member) are never read from or written to the cache.
             # A degraded mode service resolves to owner, whose answers can
             # carry owner facts: never cached either.
-            named_addressee = addressee_kind(query_context, current_mode, authz.degraded) in NAMED_ADDRESSEE_KINDS
+            named_addressee = addressee_kind(query_context, audience=authz.knowledge_audience) in NAMED_ADDRESSEE_KINDS
             if request.skip_semantic_cache or is_public_caller(request.caller_trust) or named_addressee or authz.degraded:
                 cached_response = None
             else:
@@ -7123,7 +7126,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
         should_cache = (
             not request.skip_semantic_cache
             and not is_public_caller(request.caller_trust)
-            and addressee_kind(query_context, current_mode, authz.degraded) not in NAMED_ADDRESSEE_KINDS
+            and addressee_kind(query_context, audience=authz.knowledge_audience) not in NAMED_ADDRESSEE_KINDS
             and not authz.degraded
             and response.answer
             and not final_state.get("is_fallback", False)
@@ -7352,6 +7355,7 @@ async def process_query_stream(request: QueryRequest):
                 room=request.room,
                 permissions=authz.permissions,
                 mode_degraded=authz.degraded,
+                knowledge_audience=authz.knowledge_audience,
                 conversation_history=conversation_history,
                 history_summary=history_summary,
                 session_id=session.session_id,
@@ -7611,6 +7615,7 @@ async def process_query_stream_v2(request: QueryRequest):
                 history_summary="",
                 permissions=authz.permissions,
                 mode_degraded=authz.degraded,
+                knowledge_audience=authz.knowledge_audience,
                 interface_type=request.interface_type,
                 context=build_query_context(
                     request, guest_info, server_mode=authz.server_mode, degraded=authz.degraded,
@@ -8097,9 +8102,8 @@ Response:"""
     try:
         if not is_public_audience(state.permissions):
             admin_client = get_admin_client()
-            user_mode = state.mode if state.mode else "guest"
             knowledge_context = await get_knowledge_context_for_user(
-                admin_client, user_mode, degraded=state.mode_degraded,
+                admin_client, audience=state.knowledge_audience,
             )
             if knowledge_context:
                 system_context += knowledge_context
@@ -8369,6 +8373,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     room=room,
                     permissions=authz.permissions,
                     mode_degraded=authz.degraded,
+                    knowledge_audience=authz.knowledge_audience,
                     conversation_history=conversation_history,
                     history_summary=history_summary,
                     session_id=session.session_id,

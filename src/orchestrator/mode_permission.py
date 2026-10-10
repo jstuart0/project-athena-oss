@@ -41,6 +41,7 @@ import structlog
 from orchestrator.metrics import ha_write_denied_total, intent_gate_refused_total
 from orchestrator.state import IntentCategory
 from shared.config import get_config
+from shared.knowledge_tiers import KnowledgeAudience
 from shared.guest_policy import apply_guest_baseline, baseline_allowed_domains, guest_baseline, parse_json_array_env
 
 logger = structlog.get_logger(__name__)
@@ -1592,6 +1593,19 @@ class RequestAuthorization:
     degraded: bool
     escalation_ignored: bool
     mode_info: Dict[str, Any]
+    knowledge_audience: KnowledgeAudience
+
+
+def _knowledge_audience(effective_mode: str, degraded: bool, public: bool) -> KnowledgeAudience:
+    """The base-knowledge audience for a resolved request. A mode other than
+    owner/guest (the mode service answered something unexpected) is treated as
+    unknown and sees nothing. Nobody is an owner caller yet: owner proof arrives
+    with the web_owner trust value."""
+    if effective_mode not in ("owner", "guest"):
+        return KnowledgeAudience.UNRESOLVED
+    return KnowledgeAudience(
+        mode=effective_mode, degraded=degraded, public=public, owner_caller=False, owner_proven=False
+    )
 
 
 async def resolve_request_authorization(
@@ -1650,6 +1664,7 @@ async def resolve_request_authorization(
             degraded=degraded,
             escalation_ignored=escalation_ignored,
             mode_info=mode_info,
+            knowledge_audience=_knowledge_audience("guest", degraded, public=True),
         )
 
     effective_mode = "guest" if (guest_info or request_mode == "guest" or server_mode == "guest") else server_mode
@@ -1684,4 +1699,5 @@ async def resolve_request_authorization(
         degraded=degraded,
         escalation_ignored=escalation_ignored,
         mode_info=mode_info,
+        knowledge_audience=_knowledge_audience(effective_mode, degraded, public=False),
     )

@@ -13,6 +13,7 @@ import structlog
 from shared.admin_url import get_admin_url, path_segment
 from shared.config import get_config as _get_athena_config  # local async get_config(key) below shadows this name; alias to keep both available
 from shared.service_key import SERVICE_KEY_VARIABLE, is_header_safe, note_admin_refusal
+from shared.knowledge_tiers import entry_visible
 
 logger = structlog.get_logger()
 
@@ -932,12 +933,14 @@ class AdminConfigClient:
             logger.warning("escalation_state_update_error", error=str(e))
         return False
 
-    async def get_base_knowledge(self, applies_to: str = "both", enabled_only: bool = True) -> List[Dict[str, Any]]:
+    async def get_base_knowledge(self, *, tiers: frozenset, enabled_only: bool = True) -> List[Dict[str, Any]]:
         """
         Fetch base knowledge entries from Admin API with caching.
 
         Args:
-            applies_to: Filter by applies_to ('guest', 'owner', 'both')
+            tiers: The audiences the caller may see (``KnowledgeAudience.visible_tiers()``).
+                Required: an entry is returned only when its ``applies_to`` is
+                a str in this set, so an empty set returns nothing.
             enabled_only: If True, only return enabled entries
 
         Returns:
@@ -987,11 +990,7 @@ class AdminConfigClient:
                 )
                 return []
 
-        # Filter by applies_to (include 'both' + specific mode)
-        filtered = [
-            k for k in knowledge
-            if k.get("applies_to") == "both" or k.get("applies_to") == applies_to
-        ]
+        filtered = [k for k in knowledge if entry_visible(k, tiers)]
 
         # Sort by priority (highest first)
         filtered.sort(key=lambda x: x.get("priority", 0), reverse=True)

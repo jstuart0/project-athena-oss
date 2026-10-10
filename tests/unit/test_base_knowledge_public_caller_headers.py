@@ -92,7 +92,7 @@ async def test_C1_admin_config_get_base_knowledge_sends_service_key(monkeypatch)
     client = admin_config_module.AdminConfigClient(
         admin_url="http://admin-backend:8080", api_key="test-service-key-p3b"
     )
-    result = await client.get_base_knowledge()
+    result = await client.get_base_knowledge(tiers=frozenset({"both"}))
     assert result == []
 
     public_requests = transport.public_requests()
@@ -301,8 +301,8 @@ async def test_C3_service_api_key_empty_warning_logged_once_across_two_calls(mon
     )
 
     client = admin_config_module.AdminConfigClient(admin_url="http://admin-backend:8080", api_key="")
-    await client.get_base_knowledge()
-    await client.get_base_knowledge()
+    await client.get_base_knowledge(tiers=frozenset({"both"}))
+    await client.get_base_knowledge(tiers=frozenset({"both"}))
 
     empty_key_warnings = [c for c in warning_calls if c[0] and c[0][0] == "service_api_key_empty"]
     assert len(empty_key_warnings) == 1

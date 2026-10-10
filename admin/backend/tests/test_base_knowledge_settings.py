@@ -639,6 +639,7 @@ def test_S1_sanitization_accepts_clean_international_text(owner_client, city_val
 
 def test_S2_rendered_prompt_context_has_exactly_one_default_location_line(owner_client, db):
     from shared.base_knowledge_utils import build_knowledge_context
+    from shared.knowledge_tiers import KnowledgeAudience
 
     resp = owner_client.put(SETTINGS_URL, json=DENVER_PAYLOAD)
     assert resp.status_code == 200
@@ -647,7 +648,10 @@ def test_S2_rendered_prompt_context_has_exactly_one_default_location_line(owner_
     assert len(rows) == 1
     entries = [row.to_dict() for row in rows]
 
-    context = build_knowledge_context(entries, "guest", degraded=False)
+    context = build_knowledge_context(
+        entries,
+        audience=KnowledgeAudience(mode="guest", degraded=False, public=False, owner_caller=False, owner_proven=False),
+    )
     assert context.count("Default Location:") == 1
     assert "Denver, CO" in context
 

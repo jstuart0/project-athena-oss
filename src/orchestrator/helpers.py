@@ -65,6 +65,8 @@ from orchestrator.urls import (
     WEBSEARCH_SERVICE_URL,
 )
 from shared.admin_config import get_admin_client
+from shared.base_knowledge_utils import extract_owner_name, load_visible_knowledge
+from shared.knowledge_tiers import KnowledgeAudience
 from shared.local_time import local_now, local_today
 from shared.assistant_profile import clean_guest_name, get_assistant_profile
 from shared.service_registry import get_service_url as registry_get_service_url
@@ -728,7 +730,7 @@ PUBLIC_CONTEXT_KEYS = frozenset({"location_override"})
 REQUEST_GUEST_NAME_TRUST = frozenset({"web_guest_net", "sms"})
 DEVICE_GUEST_NAME_TRUST: frozenset = frozenset()  # voice/device naming: a follow-up
 SPEAKER_NAME_TRUST = "web_authenticated"
-NAMED_ADDRESSEE_KINDS = frozenset({"guest", "household"})
+NAMED_ADDRESSEE_KINDS = frozenset({"guest", "household", "owner"})
 _SPEAKER_NAME_MAX_LENGTH = 32
 _SPEAKER_NAME_PUNCTUATION = frozenset(".-'")
 
@@ -819,18 +821,20 @@ def build_query_context(
     return context
 
 
-def addressee_kind(context: Optional[Dict[str, Any]], mode: Optional[str], degraded: bool) -> Optional[str]:
+def addressee_kind(context: Optional[Dict[str, Any]], *, audience: KnowledgeAudience) -> Optional[str]:
     """Who the prompt addresses: "owner", "guest", "household" or None.
 
-    Pure. None whenever the mode service is degraded (never "owner"). The
-    semantic cache and resolve_addressee both ask this, so they can't
-    disagree about which answers carry a caller's name.
+    Pure. None for the public audience and whenever the mode service is
+    degraded. "owner" only for a server-proven owner; any other owner-mode
+    caller is addressed by nobody. The semantic cache and resolve_addressee
+    both ask this, so they can't disagree about which answers carry a
+    caller's name.
     """
-    if degraded:
+    if audience.public or audience.degraded:
         return None
-    if mode == "owner":
-        return "owner"
-    if mode != "guest":
+    if audience.mode == "owner":
+        return "owner" if audience.owner_proven else None
+    if audience.mode != "guest":
         return None
     context = context or {}
     if context.get("speaker_first_name"):
@@ -856,12 +860,9 @@ class Addressee(NamedTuple):
 NO_ADDRESSEE = Addressee(None, None)
 
 
-async def _owner_name(admin_client: Any) -> Optional[str]:
+async def _owner_name(admin_client: Any, *, audience: KnowledgeAudience) -> Optional[str]:
     try:
-        entries = await admin_client.get_base_knowledge(applies_to="owner", enabled_only=True)
-        for entry in (entries or []):
-            if entry.get("category") in ("owner", "user") and entry.get("key") in ("owner_name", "name"):
-                return (entry.get("value") or "").strip() or None
+        return extract_owner_name(await load_visible_knowledge(admin_client, audience=audience))
     except Exception as e:
         logger.warning("addressee_owner_name_failed", error=str(e))
     return None
@@ -879,9 +880,10 @@ async def resolve_addressee(state: Any, admin_client: Any) -> Addressee:
     if is_public_audience(getattr(state, "permissions", None)):
         return NO_ADDRESSEE
     context = getattr(state, "context", None) or {}
-    kind = addressee_kind(context, getattr(state, "mode", None), bool(getattr(state, "mode_degraded", False)))
+    audience = getattr(state, "knowledge_audience", KnowledgeAudience.UNRESOLVED)
+    kind = addressee_kind(context, audience=audience)
     if kind == "owner":
-        return Addressee("owner", await _owner_name(admin_client))
+        return Addressee("owner", await _owner_name(admin_client, audience=audience))
     if kind == "household":
         return Addressee("household", clean_speaker_first_name(context.get("speaker_first_name")))
     if kind == "guest":

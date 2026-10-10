@@ -5,9 +5,10 @@ Provides functions to format and inject base knowledge context into LLM prompts.
 Handles dynamic placeholders like {dynamic:current_date} and {dynamic:current_time}.
 """
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import structlog
 from shared.config import get_config
+from shared.knowledge_tiers import OWNER_CATEGORY, OWNER_NAME_KEYS, KnowledgeAudience, entry_visible
 from shared.local_time import local_now
 
 logger = structlog.get_logger()
@@ -66,33 +67,50 @@ def _warn_guest_name_row(entry: Dict[str, Any]) -> None:
     logger.warning("base_knowledge_static_guest_name_ignored", row_id=row_id)
 
 
-def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], user_mode: str, *, degraded: bool) -> str:
+def _category(entry: Dict[str, Any]) -> str:
+    """The entry's category, trimmed and lower-cased, so a legacy row stored
+    as ' Owner ' is still treated as the owner category."""
+    return str(entry.get("category") or "general").strip().lower()
+
+
+def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], *, audience: KnowledgeAudience) -> str:
     """
     Build formatted context string from base knowledge entries.
 
-    Entries should already be filtered by applies_to and sorted by priority.
+    Every entry is re-checked against ``audience.visible_tiers()`` (defense
+    in depth: the loader already filtered), then sorted into the prompt.
 
     Names and owner facts: a static ``guest_name`` is never rendered (the
     addressed guest comes from the live stay, per caller). Every other
-    user/owner key containing "name" (``owner_name``/``name`` render as the
-    property owner's name), and every ``owner``-category row, render only
-    in owner mode with a trustworthy mode service: when the mode service is
-    degraded, nobody is named or framed as the owner.
+    user/owner key containing "name", and ``owner_name``/``name`` themselves,
+    render only in owner mode with a trustworthy mode service. Every
+    other ``owner``-category row renders only for a proven owner
+    (``audience.owner_proven``), whatever tier it is stored under.
 
     Args:
         knowledge_entries: List of knowledge entries from Admin API
-        user_mode: The request's effective mode ('owner' or 'guest')
-        degraded: The mode service was degraded for this request
+        audience: Who the prompt is for, as proven by the server
 
     Returns:
         Formatted context string ready for injection into system prompt
     """
+    tiers = audience.visible_tiers()
+    owner_facts = audience.mode == "owner" and not audience.degraded
+    knowledge_entries = [
+        e for e in (knowledge_entries or [])
+        if entry_visible(e, tiers)
+        and not (
+            _category(e) == OWNER_CATEGORY
+            and e.get("key") not in OWNER_NAME_KEYS
+            and not audience.owner_proven
+        )
+    ]
     if not knowledge_entries:
         return ""
 
     # Separate instruction entries from regular context entries
-    instruction_entries = [e for e in knowledge_entries if e.get("category") == "instruction"]
-    context_entries = [e for e in knowledge_entries if e.get("category") != "instruction"]
+    instruction_entries = [e for e in knowledge_entries if _category(e) == "instruction"]
+    context_entries = [e for e in knowledge_entries if _category(e) != "instruction"]
 
     context_lines = []
 
@@ -114,7 +132,7 @@ def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], user_mode: 
             resolved_value = resolve_dynamic_value(value)
 
             # Format based on category
-            category = entry.get("category", "general")
+            category = _category(entry)
 
             if category == "property":
                 context_lines.append(f"• Property: {resolved_value}")
@@ -126,7 +144,6 @@ def build_knowledge_context(knowledge_entries: List[Dict[str, Any]], user_mode: 
                     context_lines.append(f"• Location: {resolved_value}")
             elif category in ("user", "owner"):
                 key = entry.get("key", "")
-                owner_facts = user_mode == "owner" and not degraded
                 if key == "guest_name":
                     _warn_guest_name_row(entry)
                 elif (category == "owner" or "name" in key) and not owner_facts:
@@ -213,69 +230,66 @@ def extract_home_address(knowledge_entries: List[Dict[str, Any]]) -> str:
     return _DEFAULT_LOCATION
 
 
-async def get_home_address_for_user(admin_client, user_mode: str = "guest") -> str:
+def extract_owner_name(knowledge_entries: List[Dict[str, Any]]) -> Optional[str]:
+    """The owner's name from already-filtered entries.
+
+    Among ``owner``/``user``-category rows with a key in ``OWNER_NAME_KEYS``
+    the tier order is owner > household > both, then priority (highest
+    first), so a more specific audience wins over a general one.
     """
-    Fetch the home address for a specific user mode.
+    tier_rank = {"owner": 0, "household": 1, "both": 2}
+    candidates = [
+        e for e in (knowledge_entries or [])
+        if _category(e) in ("owner", "user")
+        and e.get("key") in OWNER_NAME_KEYS
+        and e.get("applies_to") in tier_rank
+        and (e.get("value") or "").strip()
+    ]
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda e: (tier_rank[e["applies_to"]], -(e.get("priority") or 0)))
+    return best["value"].strip()
 
-    Used for proximity queries like "near me" or "closest to my house".
 
-    Args:
-        admin_client: AdminConfigClient instance
-        user_mode: User mode ('guest', 'owner', 'both')
+async def load_visible_knowledge(admin_client, *, audience: KnowledgeAudience) -> List[Dict[str, Any]]:
+    """Enabled entries the audience may see, highest priority first.
 
-    Returns:
-        Home address string for location-based queries
+    An audience that sees no tier returns [] without a fetch; a failed fetch
+    returns [] too.
     """
+    tiers = audience.visible_tiers()
+    if not tiers:
+        return []
     try:
-        knowledge_entries = await admin_client.get_base_knowledge(
-            applies_to=user_mode,
-            enabled_only=True
-        )
-
-        if not knowledge_entries:
-            logger.info("no_base_knowledge_for_home_address", user_mode=user_mode)
-            return _DEFAULT_LOCATION
-
-        return extract_home_address(knowledge_entries)
-
+        entries = await admin_client.get_base_knowledge(tiers=tiers, enabled_only=True)
     except Exception as e:
-        logger.error(
-            "failed_to_get_home_address",
-            user_mode=user_mode,
-            error=str(e)
-        )
-        return _DEFAULT_LOCATION
+        logger.error("failed_to_load_base_knowledge", error=str(e))
+        return []
+    return sorted((e for e in (entries or []) if entry_visible(e, tiers)),
+                  key=lambda e: e.get("priority", 0), reverse=True)
 
 
-async def get_knowledge_context_for_user(admin_client, user_mode: str = "guest", *, degraded: bool) -> str:
+async def get_knowledge_context_for_user(admin_client, *, audience: KnowledgeAudience) -> str:
     """
-    Fetch and format base knowledge context for a specific user mode.
+    Fetch and format base knowledge context for one audience.
 
     Args:
         admin_client: AdminConfigClient instance
-        user_mode: User mode ('guest', 'owner', 'both')
-        degraded: The mode service was degraded (no names, no owner rows)
+        audience: Who the prompt is for (see KnowledgeAudience)
 
     Returns:
         Formatted context string ready for system prompt injection
     """
     try:
-        # Fetch knowledge entries filtered by user mode
-        knowledge_entries = await admin_client.get_base_knowledge(
-            applies_to=user_mode,
-            enabled_only=True
-        )
-
+        knowledge_entries = await load_visible_knowledge(admin_client, audience=audience)
         if not knowledge_entries:
-            logger.info("no_base_knowledge_entries_found", user_mode=user_mode)
+            logger.info("no_base_knowledge_entries_found")
             return ""
 
-        # Build formatted context
-        context = build_knowledge_context(knowledge_entries, user_mode, degraded=degraded)
+        context = build_knowledge_context(knowledge_entries, audience=audience)
 
         logger.info(
             "knowledge_context_generated",
-            user_mode=user_mode,
             entry_count=len(knowledge_entries),
             context_length=len(context)
         )
@@ -283,11 +297,7 @@ async def get_knowledge_context_for_user(admin_client, user_mode: str = "guest",
         return context
 
     except Exception as e:
-        logger.error(
-            "failed_to_build_knowledge_context",
-            user_mode=user_mode,
-            error=str(e)
-        )
+        logger.error("failed_to_build_knowledge_context", error=str(e))
         return ""
 
 
@@ -336,5 +346,8 @@ if __name__ == "__main__":
     ]
 
     print("\nTesting context building:")
-    context = build_knowledge_context(test_knowledge, "owner", degraded=False)
+    context = build_knowledge_context(
+        [{**k, "applies_to": "both"} for k in test_knowledge],
+        audience=KnowledgeAudience(mode="owner", degraded=False, public=False, owner_caller=False, owner_proven=False),
+    )
     print(context)

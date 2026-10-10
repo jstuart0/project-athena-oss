@@ -396,3 +396,33 @@ def test_M6_get_mcp_security_public_no_row_clean_defaults(client, db):
     resp = client.get("/api/mcp-security/public")
     assert resp.status_code == 200
     assert resp.json()["allowed_domains"] == ["localhost", "127.0.0.1"]
+
+
+class _RecordingConn(_FakeAsyncpgConn):
+    def __init__(self):
+        self.queries: list[str] = []
+
+    async def fetchrow(self, query, *_args, **_kwargs):
+        self.queries.append(query)
+        return None
+
+
+@pytest.mark.asyncio
+async def test_internal_base_knowledge_reads_only_everyone_rows(monkeypatch):
+    """Both internal single-row base_knowledge reads are tier-blind otherwise:
+    they must pick from enabled 'both' rows, never an owner/household/guest one."""
+    conn = _RecordingConn()
+
+    async def _fake_conn():
+        return conn
+
+    monkeypatch.setattr(internal_module, "get_admin_db_connection", _fake_conn)
+    monkeypatch.setattr(internal_module, "get_athena_db_connection", _fake_conn)
+
+    await internal_module.get_base_knowledge()
+    await internal_module.get_all_config()
+
+    knowledge_queries = [q for q in conn.queries if "FROM base_knowledge" in q]
+    assert len(knowledge_queries) == 2
+    for query in knowledge_queries:
+        assert "applies_to = 'both'" in query and "enabled" in query

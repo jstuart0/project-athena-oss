@@ -198,7 +198,9 @@ class CapturingLLM:
 
 def patch_tool_call_dependencies(monkeypatch, *, admin=None, tools=None, executor_results=None):
     """Wire tool_call_node's collaborators to fakes. Returns
-    (admin, execute_mock, knowledge_mock, home_mock)."""
+    (admin, execute_mock, knowledge_mock, home_mock). ``knowledge_mock`` is the
+    streaming/synthesize context fetcher; tool_call_node loads through
+    main.load_visible_knowledge instead."""
     admin = admin or fake_admin_client()
     schemas = [tool_schema(n) for n in (tools or ALL_TOOL_NAMES)]
     monkeypatch.setattr(main, "get_admin_client", lambda: admin)
@@ -208,9 +210,18 @@ def patch_tool_call_dependencies(monkeypatch, *, admin=None, tools=None, executo
     monkeypatch.setattr(main, "tool_config_cache", {"guest_tools": [], "owner_tools": []})
     monkeypatch.setattr(main, "build_core_assistant_prompt", mock.AsyncMock(side_effect=_core_prompt))
     knowledge = mock.AsyncMock(return_value=KNOWLEDGE)
-    home = mock.AsyncMock(return_value=HOME_STREET)
+    entries = [{"category": "property", "key": "address", "value": HOME_STREET, "applies_to": "both"}]
+
+    async def _load_visible(admin_client, *, audience):
+        await knowledge()  # one await counter for every knowledge fetch path
+        return entries
+
+    visible = mock.AsyncMock(side_effect=_load_visible)
+    home = mock.Mock(return_value=HOME_STREET)
     monkeypatch.setattr(main, "get_knowledge_context_for_user", knowledge)
-    monkeypatch.setattr(main, "get_home_address_for_user", home)
+    monkeypatch.setattr(main, "load_visible_knowledge", visible)
+    monkeypatch.setattr(main, "build_knowledge_context", mock.Mock(return_value=KNOWLEDGE))
+    monkeypatch.setattr(main, "extract_home_address", home)
     monkeypatch.setattr(synthesize_module, "get_knowledge_context_for_user", knowledge)
     monkeypatch.setattr(synthesize_module, "build_core_assistant_prompt", mock.AsyncMock(side_effect=_core_prompt))
     monkeypatch.setattr(synthesize_module, "get_admin_client", lambda: admin)
@@ -253,3 +264,94 @@ def make_state(*, permissions: dict, mode: str = "guest", intent=IntentCategory.
         context=context or {},
         session_id=None,
     )
+
+
+# --- real base-knowledge readers over a mocked admin API ---------------------
+
+S_BOTH, S_GUEST, S_HOUSEHOLD, S_OWNER = "S_BOTH", "S_GUEST", "S_HOUSEHOLD", "S_OWNER"
+S_OWNERCAT_BOTH, S_CHAT = "S_OWNERCAT_BOTH", "S_CHAT"
+OWNER_NAME = "Olive Owner"
+
+TIER_ROWS = [
+    {"id": 1, "category": "property", "key": "t_both", "value": S_BOTH, "applies_to": "both", "priority": 5, "enabled": True},
+    {"id": 2, "category": "property", "key": "t_guest", "value": S_GUEST, "applies_to": "guest", "priority": 4, "enabled": True},
+    {"id": 3, "category": "property", "key": "t_household", "value": S_HOUSEHOLD, "applies_to": "household", "priority": 3, "enabled": True},
+    {"id": 4, "category": "property", "key": "t_owner", "value": S_OWNER, "applies_to": "owner", "priority": 2, "enabled": True},
+    {"id": 5, "category": "owner", "key": "employer", "value": S_OWNERCAT_BOTH, "applies_to": "both", "priority": 1, "enabled": True},
+    {"id": 6, "category": "property", "key": "t_chat", "value": S_CHAT, "applies_to": "chat", "priority": 1, "enabled": True},
+    {"id": 7, "category": "owner", "key": "owner_name", "value": OWNER_NAME, "applies_to": "owner", "priority": 9, "enabled": True},
+]
+
+
+def real_admin_client(rows=None):
+    """A real AdminConfigClient whose HTTP layer is a MockTransport serving
+    ``rows`` from /api/base-knowledge/public. Every other call gets a 404."""
+    import httpx
+    from shared.admin_config import AdminConfigClient
+
+    served = [dict(r) for r in (TIER_ROWS if rows is None else rows)]
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/base-knowledge/public":
+            return httpx.Response(200, json=served)
+        return httpx.Response(404, json={})
+
+    client = AdminConfigClient(admin_url="http://admin-backend:8080", api_key="test-key-public-audience")
+    client.client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+    # The real client needs the stubs the fake admin has for the non-knowledge calls.
+    client.get_user_session_by_device = mock.AsyncMock(return_value=None)
+    client.get_tool_calling_settings = mock.AsyncMock(return_value={
+        "enabled": True, "max_parallel_tools": 3, "tool_call_timeout_seconds": 30,
+    })
+    client.get_enabled_tools = mock.AsyncMock(return_value=[])
+    return client
+
+
+def use_real_knowledge_readers(monkeypatch, admin):
+    """Undo the tool-call harness's knowledge fakes so the real readers run
+    against ``admin``, with the assistant profile at its defaults."""
+    from shared import assistant_profile, base_knowledge_utils
+
+    patch_tool_call_dependencies(monkeypatch, admin=admin)
+    for module in (main, synthesize_module):
+        monkeypatch.setattr(module, "build_core_assistant_prompt", assistant_profile.build_core_assistant_prompt)
+        monkeypatch.setattr(module, "get_knowledge_context_for_user", base_knowledge_utils.get_knowledge_context_for_user)
+    for name in ("load_visible_knowledge", "build_knowledge_context", "extract_home_address"):
+        monkeypatch.setattr(main, name, getattr(base_knowledge_utils, name))
+    monkeypatch.setattr(assistant_profile, "get_assistant_profile",
+                        mock.AsyncMock(return_value=dict(assistant_profile.DEFAULT_ASSISTANT_PROFILE)))
+    monkeypatch.setattr(assistant_profile, "get_guardrails",
+                        mock.AsyncMock(return_value=dict(assistant_profile.DEFAULT_GUARDRAILS)))
+    monkeypatch.setattr(synthesize_module, "get_component_config",
+                        mock.AsyncMock(return_value={"model_name": "m", "backend_type": "ollama"}))
+    monkeypatch.setattr(synthesize_module, "store_conversation_context", mock.AsyncMock(), raising=False)
+
+
+def audience(mode, *, degraded=False, public=False, proven=False):
+    from shared.knowledge_tiers import KnowledgeAudience
+
+    return KnowledgeAudience(mode=mode, degraded=degraded, public=public, owner_caller=proven, owner_proven=proven)
+
+
+def prompts_for(state) -> dict:
+    """The system prompt each of the three builders produces for ``state``."""
+    import asyncio
+
+    out = {}
+    llm = CapturingLLM()
+    _runtime.set_llm_router(llm)
+    asyncio.run(main.tool_call_node(state.model_copy(deep=True)))
+    out["tool_call_node"] = llm.text()
+
+    llm = CapturingLLM()
+    _runtime.set_llm_router(llm)
+    synth_state = state.model_copy(deep=True)
+    synth_state.retrieved_data = {"weather": {"current": {"temp": 70}}}
+    asyncio.run(synthesize_module.synthesize_node(synth_state))
+    out["synthesize_node"] = llm.text()
+
+    stream_state = state.model_copy(deep=True)
+    stream_state.retrieved_data = {"weather": {"current": {"temp": 70}}}
+    built = asyncio.run(main.build_synthesis_prompt_for_streaming(stream_state))
+    out["build_synthesis_prompt_for_streaming"] = "\n".join(str(part) for part in built if part)
+    return out

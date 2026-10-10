@@ -140,3 +140,32 @@ def test_primed_household_answer_never_reaches_named_callers(client, monkeypatch
     answer, graph = _ask(client, monkeypatch, ROW_2, "SECOND")
     assert answer == "HOUSEHOLD ANSWER"
     assert graph.calls == 0
+
+
+# --- cache key shape (D8) ----------------------------------------------------
+
+def _key(**kw):
+    return semantic_cache.get_cache_key("weather_current", QUERY, **kw)
+
+
+def test_key_version_segment_sits_right_before_mode():
+    parts = _key(mode="owner", guest_id=7, location_override={"address": "1 Main"}).split(":")
+    assert parts[0] == "athena_semantic"
+    assert parts[parts.index("kv2") + 1] == "mode_owner"
+    assert parts.index("kv2") == parts.index("mode_owner") - 1
+    assert semantic_cache.CACHE_KEY_VERSION == "kv2"
+
+
+def test_a_later_interface_segment_stays_last():
+    # The speech campaign appends iface_<type> after everything else; the
+    # version segment must still precede mode_ and the location segment.
+    parts = (_key(mode="guest", guest_id=3, location_override={"address": "1 Main"}) + ":iface_voice").split(":")
+    assert parts[-1] == "iface_voice"
+    assert parts.index("kv2") < parts.index("mode_guest") < next(i for i, p in enumerate(parts) if p.startswith("loc_"))
+
+
+def test_invalidation_prefix_still_matches_a_new_key():
+    import fnmatch
+
+    key = semantic_cache.get_cache_key("weather_current", QUERY, mode="owner")
+    assert fnmatch.fnmatch(key, "athena_semantic:weather_*")
