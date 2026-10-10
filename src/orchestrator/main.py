@@ -148,6 +148,8 @@ from orchestrator.self_building_tools import (
 
 # Runtime context accessor (Phase 4.2 — sole singleton read/write path)
 from orchestrator.nodes import _runtime
+from orchestrator import turn_capture
+from shared import conversation_capture as contract_capture
 from orchestrator.nodes import finalize_node, intent_refused_node, notification_pref_node, retrieve_node, route_control_node, route_info_node, route_music_node, route_tv_node, send_sms_node, synthesize_node, validate_node
 
 # Helpers extracted to helpers.py (Phase 2.1, ATHENA-10)
@@ -1292,6 +1294,13 @@ async def lifespan(app: FastAPI):
     _runtime.set_session_manager(session_manager)
     logger.info("Session manager initialized")
 
+    # Conversation capture sink: built as a local first (R2-H1), then registered.
+    # It drops everything until Analytics Mode is on, and is unconfigured (and
+    # says so on /health) without a Postgres DATABASE_URL.
+    capture_sink = turn_capture.create_sink(_shared_config.get_config().database_url)
+    _runtime.set_turn_capture(capture_sink)
+    capture_sink.start()
+
     # Initialize parallel search engine
     parallel_search_engine = await ParallelSearchEngine.from_environment()
     _runtime.set_parallel_search_engine(parallel_search_engine)
@@ -1375,6 +1384,14 @@ async def lifespan(app: FastAPI):
     # Atomic replacement of the 8 explicit if-close lines; avoids double-close window.
     # admin_client is a per-call client (not a runtime singleton) — closed explicitly.
     logger.info("Shutting down Orchestrator service")
+    # Order: drain background work (if this build has it), stop capture, close
+    # the clients. After the voice-latency campaign merges, _runtime exposes
+    # drain_background(); it must run BEFORE capture_sink.stop so turns that
+    # background work finishes still reach the sink.
+    _drain_background = getattr(_runtime, "drain_background", None)
+    if _drain_background is not None:
+        await _drain_background()
+    await capture_sink.stop(drain_s=contract_capture.DRAIN_S)
     if admin_client:
         await admin_client.close()
     await _runtime.close_all()
@@ -8879,6 +8896,16 @@ async def health_check(detailed: bool = False):
     except Exception as e:
         health["components"]["home_assistant"] = False
         logger.warning("health_check: home_assistant probe failed", exc_info=e)
+
+    # Conversation capture: configured and writer state only (no text, no DSN).
+    # Informational: a capture problem never makes the orchestrator unhealthy.
+    _capture = _runtime.get_turn_capture()
+    if _capture is not None:
+        _capture_status = _capture.status()
+        health["components"]["conversation_capture"] = {
+            "configured": _capture_status["configured"],
+            "writer_state": _capture_status["writer_state"],
+        }
 
     # Check LLM Router (supports Ollama, MLX, etc.)
     try:

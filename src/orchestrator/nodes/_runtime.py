@@ -51,6 +51,8 @@ class RuntimeContext:
     tv_handler: Optional[Any] = None
     follow_me_service: Optional[Any] = None
     intent_classifier: Optional[Any] = None
+    # Conversation capture sink (optional: not in _REQUIRED_SINGLETONS)
+    turn_capture: Optional[Any] = None
     # 5 caches (Dict[str, Any] — populated at runtime; tests may pre-populate)
     component_model_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     orch_feature_flag_cache: Dict[str, Any] = field(default_factory=dict)
@@ -226,6 +228,14 @@ def get_intent_classifier() -> Optional[Any]:
     if _ctx.intent_classifier is None and _strict_warn_in_test_mode:
         warnings.warn("intent_classifier read before lifespan initialization", RuntimeWarning, stacklevel=2)
     return _ctx.intent_classifier
+
+
+def set_turn_capture(c: Any) -> None:
+    _ctx.turn_capture = c
+
+def get_turn_capture() -> Optional[Any]:
+    # optional by design (capture is off or unconfigured on many installs); no strict warning
+    return _ctx.turn_capture
 
 
 # ---------------------------------------------------------------------------
