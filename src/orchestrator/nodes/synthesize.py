@@ -12,6 +12,9 @@ import structlog
 from orchestrator.nodes._runtime import get_llm_router
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.helpers import (
+    answer_max_tokens,
+    finish_spoken_answer,
+    is_long_form_turn,
     holds_foreign_pending,
     _direct_general_info_response,
     get_component_config,
@@ -187,6 +190,7 @@ Response:"""
         system_context = await build_core_assistant_prompt(
             include_voice_formatting=state.interface_type != "chat",
             interface_type=state.interface_type,
+            long_form=is_long_form_turn(state.intent, state.query),
             **addressee.prompt_kwargs(),
         ) + "\n"
 
@@ -289,10 +293,14 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
                 interface=state.interface_type
             )
 
+        synthesis_max_tokens = await answer_max_tokens(
+            state.interface_type, None, long_form=is_long_form_turn(state.intent, state.query)
+        )
         result = await llm_router.generate(
             model=synthesis_model,
             prompt=full_prompt,
             temperature=state.temperature,
+            max_tokens=synthesis_max_tokens,
             system_prompt=synthesis_system_prompt,
             request_id=state.request_id,
             session_id=state.session_id,
@@ -302,7 +310,9 @@ CONVERSATION CONTEXT (use this to resolve references like "my", "the", "that", p
             stage="synthesize"
         )
 
-        state.answer = result.get("response", "")
+        state.answer = finish_spoken_answer(
+            result.get("response", ""), state.interface_type, result, synthesis_max_tokens, stage="synthesize"
+        )
 
         # Capture token metrics for frontend display
         llm_duration = time.time() - llm_start_time

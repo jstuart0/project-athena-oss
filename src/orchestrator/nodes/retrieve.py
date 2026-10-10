@@ -22,6 +22,7 @@ from orchestrator.nodes._runtime import (
     get_parallel_search_engine,
     get_result_fusion,
 )
+from orchestrator.model_safe_errors import RAGToolError, model_safe_error
 from orchestrator.rag_validator import validator, ValidationResult
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.urls import WEBSEARCH_SERVICE_URL
@@ -230,7 +231,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                             )
 
                         if not response.success:
-                            raise Exception(response.error or f"{service_name} service call failed")
+                            raise RAGToolError(response, f"{service_name} service call failed")
 
                         weather_data = response.data
 
@@ -283,7 +284,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                     response = await rag_client.get("airports", f"/airports/{airport}")
 
                     if not response.success:
-                        raise Exception(response.error or "Airports service call failed")
+                        raise RAGToolError(response, "Airports service call failed")
 
                     airports_data = response.data
 
@@ -341,7 +342,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                         params={"query": team}
                     )
                     if not search_response.success:
-                        raise Exception(search_response.error or "Sports team search failed")
+                        raise RAGToolError(search_response, "Sports team search failed")
 
                     search_data = search_response.data
 
@@ -538,7 +539,7 @@ async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
                         error_msg = search_response.error or "Unknown error"
                         logger.warning(f"WebSearch: Service returned error: {error_msg}")
                         state.retrieved_data = {}
-                        state.data_source = f"LLM knowledge (websearch error: {error_msg})"
+                        state.data_source = f"LLM knowledge (websearch error: {model_safe_error(error_msg, status_code=search_response.status_code)})"
 
                 except Exception as e:
                     logger.error(f"WebSearch: Exception occurred: {e}", exc_info=True)

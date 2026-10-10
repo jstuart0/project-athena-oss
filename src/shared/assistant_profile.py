@@ -17,6 +17,7 @@ from copy import deepcopy
 from typing import Any, Dict, Optional
 
 from shared.admin_config import get_admin_client
+from shared.output_channel import OutputChannel, channel_for_interface_type
 
 
 DEFAULT_ASSISTANT_PROFILE: Dict[str, Any] = {
@@ -90,7 +91,72 @@ DEFAULT_GUARDRAILS: Dict[str, Any] = {
         "min_response_chars": 10,
         "max_response_chars": 2000,
     },
+    "voice_response": {
+        "max_sentences": 3,
+        "max_tokens": 200,
+        "max_tokens_long": 600,
+        "ambient_fragment_gate": False,
+    },
 }
+
+VOICE_MAX_TOKENS_RANGE = (32, 1024)
+VOICE_MAX_TOKENS_LONG_RANGE = (64, 2048)
+VOICE_MAX_SENTENCES_RANGE = (1, 10)
+
+
+def _clamped_int(value: Any, default: int, bounds: tuple) -> int:
+    """`value` as an int inside `bounds`. Numbers and numeric strings are
+    clamped; None, NaN, infinity, booleans and anything non-numeric give
+    `default`."""
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number or number in (float("inf"), float("-inf")):
+        return default
+    return max(bounds[0], min(bounds[1], int(number)))
+
+
+def clamp_voice_response(section: Any) -> Dict[str, Any]:
+    """The `voice_response` guardrail with every value forced into range.
+    A missing or malformed section gives the defaults."""
+    defaults = DEFAULT_GUARDRAILS["voice_response"]
+    section = section if isinstance(section, dict) else {}
+    max_tokens = _clamped_int(section.get("max_tokens"), defaults["max_tokens"], VOICE_MAX_TOKENS_RANGE)
+    max_tokens_long = _clamped_int(
+        section.get("max_tokens_long"), defaults["max_tokens_long"], VOICE_MAX_TOKENS_LONG_RANGE
+    )
+    return {
+        "max_sentences": _clamped_int(section.get("max_sentences"), defaults["max_sentences"], VOICE_MAX_SENTENCES_RANGE),
+        "max_tokens": max_tokens,
+        # A long-form answer is never given less room than an ordinary one.
+        "max_tokens_long": max(max_tokens_long, max_tokens),
+        "ambient_fragment_gate": ambient_fragment_gate_enabled({"voice_response": section}),
+    }
+
+
+async def get_voice_response_limits() -> Dict[str, Any]:
+    """The active spoken-answer limits (`max_sentences`, `max_tokens`,
+    `ambient_fragment_gate`), clamped at read time so a hand-edited or stale
+    stored value can never leave the range."""
+    try:
+        guardrails = await get_guardrails()
+    except Exception:
+        guardrails = DEFAULT_GUARDRAILS
+    return clamp_voice_response((guardrails or {}).get("voice_response"))
+
+
+def ambient_fragment_gate_enabled(guardrails: Optional[Dict[str, Any]]) -> bool:
+    """The `voice_response.ambient_fragment_gate` switch, default OFF. Only an
+    explicit true (or the string "true"/"1"/"on"/"yes") turns it on; anything
+    missing, null or unreadable leaves it off."""
+    section = (guardrails or {}).get("voice_response")
+    value = section.get("ambient_fragment_gate", False) if isinstance(section, dict) else False
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "on", "yes")
+    return value is True
 
 
 def _merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,8 +237,12 @@ async def build_core_assistant_prompt(
     owner_name: Optional[str] = None,
     interface_type: Optional[str] = None,
     household_first_name: Optional[str] = None,
+    long_form: bool = False,
 ) -> str:
     """Build the canonical assistant persona/system prompt.
+
+    `long_form` marks a recipe, directions, itinerary or step-by-step turn: its
+    spoken answer is allowed to run past the short-answer sentence limit.
 
     At most one of owner_name / guest_name / household_first_name is
     expected (resolve_addressee guarantees it). The guest's and a household
@@ -218,6 +288,14 @@ async def build_core_assistant_prompt(
     elif include_voice_formatting:
         lines.extend(["", "Voice-friendly formatting:"])
         lines.extend(f"- {item}" for item in guardrails["voice_formatting"])
+
+    if channel_for_interface_type(interface_type) is OutputChannel.SPEECH:
+        max_sentences = clamp_voice_response(guardrails.get("voice_response"))["max_sentences"]
+        if long_form:
+            spoken_limit = "This answer may run longer than usual, but keep every sentence short and speakable. No lists, headings or markdown."
+        else:
+            spoken_limit = f"Keep spoken answers to at most {max_sentences} short sentences. No lists, headings or markdown."
+        lines.extend(["", spoken_limit])
 
     lines.extend([
         "",

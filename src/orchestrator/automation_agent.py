@@ -24,6 +24,7 @@ from shared.assistant_profile import build_automation_system_prompt
 from shared.local_time import local_now
 from shared.logging_config import payload_keys
 from shared.output_channel import render_sink_text
+from orchestrator.model_safe_errors import model_safe_error, scrub_tool_result
 from orchestrator.utils.constants import DEFAULT_CITY
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # AutomationAgent.__init__ (not at module scope) -- see the identical note
@@ -452,6 +453,7 @@ class AutomationAgent:
         room = context.get("room", "office")
         session_id = context.get("session_id")
         guest_name = context.get("guest_name")
+        interface_type = context.get("interface_type")
 
         # Build system prompt with context
         system_prompt = await self._build_system_prompt(mode, room, guest_name)
@@ -472,7 +474,7 @@ class AutomationAgent:
 
             try:
                 # Get LLM response with tool calling
-                response = await self._call_llm_with_tools(messages, model)
+                response = await self._call_llm_with_tools(messages, model, interface_type)
 
                 # Check for tool calls
                 tool_calls = response.get("tool_calls", [])
@@ -515,12 +517,12 @@ class AutomationAgent:
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.get("id", f"call_{iteration}"),
-                        "content": str(result)
+                        "content": json.dumps(scrub_tool_result(result)) if isinstance(result, (dict, list)) else str(result)
                     })
 
             except Exception as e:
                 logger.error(f"AutomationAgent error in iteration {iteration}: {e}")
-                return f"I encountered an error: {str(e)}"
+                return "Sorry, something went wrong with that request."
 
         # Safety fallback
         logger.warning(f"AutomationAgent hit max iterations ({max_iterations})")
@@ -534,8 +536,13 @@ class AutomationAgent:
         prompt = await build_automation_system_prompt(mode, room, guest_name)
         return f"{prompt}\nCurrent Time:\n- Time: {current_time}\n- Date: {current_date}"
 
-    async def _call_llm_with_tools(self, messages: List[Dict], model: str) -> Dict:
-        """Call LLM with tool definitions."""
+    async def _call_llm_with_tools(self, messages: List[Dict], model: str, interface_type: Optional[str] = None) -> Dict:
+        """Call LLM with tool definitions. A spoken turn is capped by the voice
+        limit but never below the room a tool call's JSON needs; a direct
+        spoken reply that hit the cap is trimmed to its last complete sentence."""
+        # Imported at call time: orchestrator.helpers imports the nodes package, which imports this module.
+        from orchestrator.helpers import answer_max_tokens, finish_spoken_answer
+
         try:
             # Use the LLM router's chat_with_tools method if available
             if hasattr(self.llm, 'chat_with_tools'):
@@ -550,15 +557,21 @@ class AutomationAgent:
             # Convert messages to a prompt string
             prompt = self._messages_to_prompt(messages)
 
+            max_tokens = await answer_max_tokens(interface_type, 2000, tool_calling=True)
             response = await self.llm.generate(
                 model=model,
                 prompt=prompt,
                 temperature=0.1,
-                max_tokens=2000
+                max_tokens=max_tokens
             )
 
             # Parse tool calls from response
-            return self._parse_tool_calls_from_text(response.get('response', ''))
+            parsed = self._parse_tool_calls_from_text(response.get('response', ''))
+            if not parsed.get("tool_calls") and parsed.get("content"):
+                parsed["content"] = finish_spoken_answer(
+                    parsed["content"], interface_type, response, max_tokens, stage="automation_agent"
+                )
+            return parsed
 
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
@@ -751,7 +764,7 @@ class AutomationAgent:
 
         except Exception as e:
             logger.error(f"Tool execution error ({name}): {e}")
-            return f"Error executing {name}: {str(e)}"
+            return f"Error executing {name}: {model_safe_error(e)}"
 
     async def _exec_ha_service(self, args: Dict, context: Dict) -> str:
         """Execute immediate HA service call."""
@@ -788,7 +801,7 @@ class AutomationAgent:
             return f"Called {domain}.{service} on {entity_id}"
         except Exception as e:
             logger.error(f"HA service call failed: {e}")
-            return f"Failed to call {domain}.{service}: {str(e)}"
+            return f"Failed to call {domain}.{service}: {model_safe_error(e)}"
 
     async def _create_automation(self, args: Dict, context: Dict) -> str:
         """Create automation in HA and optionally store in admin backend."""
@@ -831,7 +844,7 @@ class AutomationAgent:
 
         except Exception as e:
             logger.error(f"Failed to create automation: {e}")
-            return f"Failed to create automation: {str(e)}"
+            return f"Failed to create automation: {model_safe_error(e)}"
 
     def _build_ha_automation(self, automation_id: str, args: Dict) -> Dict:
         """Convert tool args to HA automation format."""
@@ -1334,7 +1347,7 @@ class AutomationAgent:
 
         except Exception as e:
             logger.error(f"Failed to get entity state: {e}")
-            return f"Error getting state: {str(e)}"
+            return f"Error getting state: {model_safe_error(e)}"
 
     async def _send_notification(self, args: Dict, context: Dict) -> str:
         """Send a notification via TTS, mobile push, or flashing lights."""
@@ -1393,7 +1406,7 @@ class AutomationAgent:
 
         except Exception as e:
             logger.error(f"Failed to send notification: {e}")
-            return f"Notification failed: {str(e)}"
+            return f"Notification failed: {model_safe_error(e)}"
 
     async def _flash_lights(self, entity_id: str, count: int = 3, color: Optional[List[int]] = None):
         """Flash lights as a visual notification."""

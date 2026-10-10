@@ -11,6 +11,7 @@ import time
 from orchestrator.nodes._runtime import get_llm_router
 from orchestrator.state import OrchestratorState, IntentCategory
 from orchestrator.helpers import (
+    answer_is_too_short,
     get_component_config,
     _component_system_prompt,
 )
@@ -57,7 +58,10 @@ async def validate_node(state: OrchestratorState) -> OrchestratorState:
 
     # Layer 1: Basic validation
     basic_start = time.time()
-    if not state.answer or len(state.answer) < min_response_chars:
+    # A deterministic answer ("Okay.") is the answer however short; an LLM
+    # answer is too short only by the rule in answer_is_too_short.
+    deterministic = bool(state.skip_synthesis and (state.answer or "").strip())
+    if not state.answer or (not deterministic and answer_is_too_short(state.answer, min_response_chars)):
         state.validation_passed = False
         state.validation_reason = "Response too short"
         logger.warning(f"Validation failed: {state.validation_reason}")

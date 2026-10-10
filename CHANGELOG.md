@@ -11,6 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrading
 
+- **Voice response (optional).** Spoken answers are now capped (200 tokens, 600 for recipes and directions) and end on a full sentence. Tune or loosen this under Assistant settings, "Voice response". The "didn't catch that" reply for unclear speech is off until you turn it on.
 - **Owner-only entries go quiet until you re-tier them.** In Base Knowledge, "Owner only" now means only the owner signed in to Jarvis web with the admin `owner` account; every existing `owner` entry is Owner only after the upgrade, so voice, SMS and the home network stop hearing them. Use the banner on the Base Knowledge page ("Show Owner-only entries", then "Move N to Household") to move the shareable ones to the new Household audience (anyone at home when no stay is active). `both` and `guest` entries are unchanged, and entries with a legacy audience such as `chat` show as "Unknown" and stay unrendered until you pick one. Voice "what's my name" no longer answers with the owner's name. Cached answers are keyed under a new `kv2` version plus a digest of the entries the caller can see, so the old cache keys are orphaned and expire, and an answer built from an entry you later edit, disable, delete or narrow is no longer replayed. Services now reuse the entry list for 5 seconds instead of 60.
 - **Jarvis web chats restart once.** The signature on jarvis-web's chat session ids changed (and ids now carry the conversation's audience), so every open Jarvis web conversation starts fresh at the roll; the persistent chat threads of a browser in guest mode move to a separate thread.
 - **Rollout order for the audience change.** Every consumer must run the new code before any owner-private entry is written under Owner only: admin-backend and admin-frontend first, then the orchestrator and directions RAG, then jarvis-web. A mixed state fails closed (an older orchestrator ignores Household entries; a newer orchestrator with an older jarvis-web has no owner proof). Roll back jarvis-web first, then the orchestrator.
@@ -36,6 +37,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Assistant settings, "Voice response": spoken-answer limits, the longer limit for step-by-step answers, and an opt-in "didn't catch that" reply for unclear speech picked up from the room (off by default).
+- `prompt_tokens` on `POST /api/llm-backends/metrics` and in `GET /api/llm-backends/metrics` (optional; older writers omit it).
 - `SMS_DEFAULT_COUNTRY_CODE` and `TWILIO_ALLOW_UNSIGNED` (see Upgrading).
 - `CONTROL_AGENT_CALLBACK_BASE_URL` on admin-backend: where the Control Agent's host reaches admin-backend, used as the base of the download-progress callback (see Upgrading).
 - admin-backend logs `admin_auth_rejected` when it refuses a request for its credential, and each service logs `admin_backend_refused` when admin-backend refuses one of its calls (see "Admin API authentication" in `docs/CONFIGURATION.md`).
@@ -46,6 +49,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Trivial voice turns (greetings, thanks, "what time is it", "what's the date", "got it", "never mind") are answered instantly with no model call, on every route and in the gateway's pre-router. They are not answered while the assistant is waiting for an answer to a question it asked, and scene phrases ("good morning", "goodnight") and bare yes/no replies are untouched.
+- Spoken answers are length-capped and end on a complete sentence; recipes, directions and itineraries get a longer cap. Tune "Voice response" in Assistant settings. Text and chat answers are unchanged.
+- A short, finished answer ("Done.", "Yes!") is no longer retried or sent to a web search. The "Min Response Chars" field is now "Minimum length for an unfinished answer (characters)".
+- Backend error text is never spoken, streamed or returned: the assistant says what kind of failure it was, streaming clients get a fixed message, and failing routes answer `internal_error`.
+- `/v1/chat/completions` reports the real token usage of the turn; LLM metric rows record prompt tokens, including streamed answers. The gateway passes the orchestrator's usage through.
+- A streaming `/v1/chat/completions` request that sends `stream_options: {"include_usage": true}` gets the OpenAI-style final usage chunk (empty `choices`) before `data: [DONE]`, through the gateway too; without the option the stream is unchanged.
+- A failing `/query` or `/v1/chat/completions` answers 500 `internal_error request_id=<id>` (the `X-Request-ID` of the request) instead of the exception text.
+- Saving the Assistant profile no longer resets settings the form does not show.
 - Base Knowledge has four audiences: Everyone, Guests only, Household and Owner only. Owner only reaches only a proven owner (see "Who hears a base-knowledge entry" in `docs/CONFIGURATION.md`); `owner`-category entries other than `owner_name` and `name` need that proof too.
 - The directions default origin uses Everyone entries only: an address stored as Owner only, Household or Guests only is no longer the default origin.
 - Base Knowledge writes reject unknown audiences and invalid category or key names (422), refuse over-long values or control characters, and return 409 on a duplicate or a colliding re-tier. Moving an entry out of Owner only, or deleting one, needs the owner role. Every write is audited, and `POST /api/base-knowledge/bulk-tier` moves entries in bulk.

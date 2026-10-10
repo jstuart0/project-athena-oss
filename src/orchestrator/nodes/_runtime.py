@@ -13,10 +13,11 @@ recreates the god-object boundary.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Awaitable, Dict, List, Optional, Set, TYPE_CHECKING
 
 if TYPE_CHECKING:
     # Forward-only imports to avoid circularity with orchestrator.main
@@ -64,6 +65,12 @@ class RuntimeContext:
 # _ctx is private; readers use is_ready() / missing_required() instead.
 _ctx: RuntimeContext = RuntimeContext()
 _strict_warn_in_test_mode: bool = False
+
+# Off-the-response-path work (e.g. fast-path session persistence). A bare
+# create_task can be garbage-collected mid-flight and is cut off at shutdown,
+# so tasks are retained here and drained, bounded, first thing in close_all().
+BACKGROUND_DRAIN_TIMEOUT_SECONDS = 2.0
+_background_tasks: Set["asyncio.Task[Any]"] = set()
 
 # Required singletons: only the 6 unconditionally-initialized singletons.
 # HA-conditioned singletons (ha_client, entity_manager, smart_controller,
@@ -283,12 +290,46 @@ def reset_for_test() -> None:
     global _ctx, _strict_warn_in_test_mode
     _ctx = RuntimeContext()
     _strict_warn_in_test_mode = False
+    _background_tasks.clear()
 
 
 def enable_strict_test_mode() -> None:
     """In tests, reading an uninitialized slot issues a RuntimeWarning."""
     global _strict_warn_in_test_mode
     _strict_warn_in_test_mode = True
+
+
+# ---------------------------------------------------------------------------
+# Background work (retained, drained at shutdown)
+# ---------------------------------------------------------------------------
+
+def _background_task_done(task: "asyncio.Task[Any]") -> None:
+    _background_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("background_task_failed error_class=%s", type(task.exception()).__name__)
+
+
+def spawn_background(coro: Awaitable[Any]) -> "asyncio.Task[Any]":
+    """Run `coro` off the response path. The task is held until it finishes
+    and drained (bounded) by close_all()."""
+    task = asyncio.ensure_future(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_task_done)
+    return task
+
+
+async def drain_background() -> None:
+    """Wait up to BACKGROUND_DRAIN_TIMEOUT_SECONDS for retained tasks, then
+    cancel what is left and log how many were abandoned."""
+    pending = set(_background_tasks)
+    if not pending:
+        return
+    _, unfinished = await asyncio.wait(pending, timeout=BACKGROUND_DRAIN_TIMEOUT_SECONDS)
+    if unfinished:
+        for task in unfinished:
+            task.cancel()
+        await asyncio.gather(*unfinished, return_exceptions=True)
+        logger.warning("background_tasks_abandoned count=%d", len(unfinished))
 
 
 # ---------------------------------------------------------------------------
@@ -314,13 +355,15 @@ async def close_all() -> None:
       - rag_client.close()                 (orchestrator.rag_client)
       - mode_client.aclose()               (httpx.AsyncClient convention)
       - parallel_search_engine.close_all() (orchestrator.search_providers.parallel_search)
+      - llm_router.close()                 (shared.llm_router: drains pending metric
+                                            tasks for up to 2 s, then closes its HTTP client)
 
     Clients in the close_order that have NO close method (silently skipped):
       - ha_client  — HomeAssistantClient has no close(); its underlying
                      httpx.AsyncClient is leaked at shutdown (pre-existing
                      OSS behavior; tracked separately).
-      - llm_router — LLMRouter has no close() method (pre-existing).
     """
+    await drain_background()
     close_order = (
         "ha_client",
         "llm_router",

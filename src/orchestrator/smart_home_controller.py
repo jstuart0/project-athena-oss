@@ -2635,7 +2635,7 @@ Return ONLY valid JSON."""
                     return "I couldn't determine the current temperature setting."
             except Exception as e:
                 logger.error(f"Failed to increase temperature: {e}")
-                return f"I couldn't adjust the thermostat. Error: {e}"
+                return "I couldn't adjust the thermostat."
 
         if action == 'decrease_temperature':
             # User wants it cooler - decrease by 2 degrees
@@ -2666,7 +2666,7 @@ Return ONLY valid JSON."""
                     return "I couldn't determine the current temperature setting."
             except Exception as e:
                 logger.error(f"Failed to decrease temperature: {e}")
-                return f"I couldn't adjust the thermostat. Error: {e}"
+                return "I couldn't adjust the thermostat."
 
         if action == 'set_temperature':
             temp = parameters.get('temperature')
@@ -5242,4 +5242,4 @@ Return ONLY the JSON, no other text."""
 
         except Exception as e:
             logger.error(f"Motion control error: {e}", exc_info=True)
-            return f"I had trouble updating the motion settings. Please try again."
+            return "I had trouble updating the motion settings. Please try again."

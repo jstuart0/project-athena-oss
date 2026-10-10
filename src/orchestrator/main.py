@@ -9,6 +9,7 @@ LangGraph-based state machine that coordinates between:
 - Response validation
 """
 
+import structlog
 import os
 
 # Load environment variables from .env file BEFORE any other imports
@@ -68,6 +69,7 @@ from orchestrator.session_manager import (
 from orchestrator.config_loader import get_config
 from shared.knowledge_tiers import KnowledgeAudience
 from orchestrator.timing import TimingTracker
+from shared.fast_path_vocab import SCENE_OVERRIDE_PHRASES, SCENE_TRIGGER_PHRASES
 from shared.output_channel import OutputChannel, channel_for_interface_type, render_answer, renders_spoken_answer
 
 from orchestrator.search_providers.intent_classifier import IntentClassifier
@@ -167,8 +169,29 @@ from orchestrator.mode_permission import (
     resolve_request_authorization,
 )
 from orchestrator.write_fanout import caller_fingerprint as compute_caller_fingerprint
+from orchestrator.fast_path import (
+    FastPathReply,
+    ambient_fragment_applies,
+    fast_path_open_question,
+    fast_path_reply,
+    last_assistant_text,
+    register_pattern_classifier,
+)
+from orchestrator.model_safe_errors import (
+    RAGToolError,
+    log_safe,
+    make_user_safe,
+    model_safe_error,
+    scrub_tool_result,
+    tool_error_result,
+)
+from shared.fast_path_vocab import AMBIENT_REPLY
+from shared.llm_router import current_usage, llm_usage_scope, with_llm_usage_scope, with_llm_usage_scope_stream
 from orchestrator.helpers import (
+    answer_max_tokens,
+    finish_spoken_answer,
     get_feature_config,
+    is_long_form_turn,
     get_automation_system_mode,
     get_post_synthesis_fallback_config,
     enhance_query_with_year,
@@ -432,8 +455,9 @@ async def handle_tool_creation_request(
         )
 
         if not result.get("success"):
+            logger.warning("tool_definition_generation_failed", has_error_text=bool(result.get("error")))
             return {
-                "answer": f"I couldn't generate a tool definition: {result.get('error', 'Unknown error')}. Please try describing what you need more specifically.",
+                "answer": "I couldn't generate a tool definition. Please try describing what you need more specifically.",
                 "intent": "tool_creation",
                 "success": False
             }
@@ -479,8 +503,9 @@ async def handle_tool_creation_request(
             if error_code == "FEATURE_DISABLED":
                 return None  # Let the normal flow handle it
 
+            logger.warning("tool_proposal_rejected", error_code=error_code, has_error_text=bool(error_msg))
             return {
-                "answer": f"I couldn't submit the tool proposal: {error_msg}",
+                "answer": "I couldn't submit the tool proposal.",
                 "intent": "tool_creation",
                 "success": False
             }
@@ -488,10 +513,13 @@ async def handle_tool_creation_request(
     except Exception as e:
         logger.error("tool_creation_failed", error=str(e))
         return {
-            "answer": f"An error occurred while creating the tool: {str(e)}",
+            "answer": "Sorry, something went wrong while creating the tool.",
             "intent": "tool_creation",
             "success": False
         }
+
+# What a streaming client is told when the stream fails; the cause goes to the log by class only.
+STREAM_ERROR_MESSAGE = "Sorry, something went wrong."
 
 # Metrics — declarations moved to orchestrator.metrics (Phase 1.2)
 from orchestrator.metrics import (
@@ -499,6 +527,10 @@ from orchestrator.metrics import (
     request_duration,
     node_duration,
     tool_call_breakdown,
+    fast_path_answered_total,
+    fast_path_deferred_total,
+    fast_path_seconds,
+    ambient_fragment_gated_total,
 )
 
 # Tool schema cache (OPTIMIZATION: Cache tool schemas to avoid regeneration)
@@ -1487,13 +1519,17 @@ async def handle_query_with_bypass(
         # Generate with cloud LLM
         llm_router = _runtime.get_llm_router()
 
+        bypass_interface = getattr(state, "interface_type", None)
+        bypass_max_tokens = await answer_max_tokens(
+            bypass_interface, bypass_config.get('max_tokens', 1024), long_form=is_long_form_turn(intent, query)
+        )
         bypass_start = time.time()
         response = await llm_router.generate(
             model=model,
             prompt=query,
             system_prompt=system_prompt,
             temperature=bypass_config.get('temperature', 0.7),
-            max_tokens=bypass_config.get('max_tokens', 1024),
+            max_tokens=bypass_max_tokens,
             metadata={
                 'intent': intent,
                 'bypass': True,
@@ -1510,7 +1546,9 @@ async def handle_query_with_bypass(
                 state.timing_tracker.record_llm_call(
                     "service_bypass", model, tokens, int(bypass_duration * 1000), "cloud_bypass"
                 )
-            return response['response']
+            return finish_spoken_answer(
+                response['response'], bypass_interface, response, bypass_max_tokens, stage="service_bypass"
+            )
 
     except Exception as e:
         logger.error("service_bypass_failed", intent=intent, error=str(e))
@@ -2585,19 +2623,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
     # FAST PATH: Scene and routine commands
     # These are special phrases that trigger specific scenes/scripts in HA
-    scene_patterns = [
-        "movie mode", "movie time", "watch a movie",
-        "good night", "goodnight", "bedtime", "night mode", "time for bed",
-        "good morning", "morning mode", "wake up",
-        "i am leaving", "i'm leaving", "im leaving", "goodbye", "leaving home", "heading out",
-        "i am home", "i'm home", "im home", "i'm back", "im back", "home now",
-        "romantic mode", "date night",
-        "relax mode", "chill mode",
-        "party mode", "party time",
-        # Round 17: romantic scene patterns
-        "vibes for my girl", "my girl comes over", "girlfriend coming",
-        "romantic vibes", "vibes for when", "set the mood"
-    ]
+    scene_patterns = SCENE_TRIGGER_PHRASES
     # Exclude planning/help/question queries from scene triggers - "help me plan a date night" is NOT lighting control
     # Also exclude conversational follow-ups like "something romantic but also fun"
     planning_exclusions = ["help me", "plan a", "plan my", "planning", "ideas for", "suggestions for",
@@ -2970,12 +2996,7 @@ Respond in JSON format:
                     state.confidence = 0.9  # High confidence for color requests
                 # Round 16: Override MUSIC_PLAY for scene/vibe patterns
                 else:
-                    scene_patterns = ["party vibes", "party vibe", "party mode", "party time",
-                                     "movie mode", "movie time", "chill mode", "relax mode",
-                                     "romantic mode", "date night", "set the mood",
-                                     # Round 17: romantic scene patterns
-                                     "vibes for my girl", "my girl comes over", "girlfriend coming",
-                                     "romantic vibes", "vibes for when"]
+                    scene_patterns = SCENE_OVERRIDE_PHRASES
                     # Exclude planning/help queries from scene triggers
                     planning_excl = ["help me", "plan a", "plan my", "planning", "ideas for",
                                     "something ", "but also", "is that", "is it possible",
@@ -3369,19 +3390,7 @@ def _pattern_based_classification(query: str, return_confidence: bool = False):
 
     # SCENE/ROUTINE patterns - these should go to CONTROL not STREAMING
     # Must be checked BEFORE streaming patterns since "movie mode" contains "movie"
-    scene_patterns = [
-        "movie mode", "movie time", "watch a movie",  # Note: specific phrases, not just "movie"
-        "good night", "goodnight", "bedtime", "night mode", "time for bed",
-        "good morning", "morning mode", "wake up",
-        "i am leaving", "i'm leaving", "im leaving", "goodbye", "leaving home", "heading out",
-        "i am home", "i'm home", "im home", "i'm back", "im back", "home now",
-        "romantic mode", "date night",
-        "relax mode", "chill mode",
-        "party mode", "party time",
-        # Round 17: romantic scene patterns
-        "vibes for my girl", "my girl comes over", "girlfriend coming",
-        "romantic vibes", "vibes for when", "set the mood"
-    ]
+    scene_patterns = SCENE_TRIGGER_PHRASES
     # Exclude planning/help/question queries from scene triggers
     planning_exclusions_scene = ["help me", "plan a", "plan my", "planning", "ideas for", "suggestions for",
                           "what should", "where should", "recommend", "what to do",
@@ -3701,6 +3710,9 @@ def _pattern_based_classification(query: str, return_confidence: bool = False):
 
 
 
+register_pattern_classifier(_pattern_based_classification)
+
+
 async def execute_tools_parallel(
     tool_calls: List[Dict[str, Any]],
     guest_mode: bool = False,
@@ -3845,7 +3857,7 @@ async def execute_tools_parallel(
 
             if not service_url:
                 logger.error(f"No service URL found for tool: {function_name}")
-                return (tool_call_id, {"error": f"Tool {function_name} not configured"})
+                return (tool_call_id, tool_error_result(f"Tool {function_name} not configured"))
 
             # Special handling for get_sports_scores (requires two-step flow)
             if function_name == "get_sports_scores":
@@ -3869,7 +3881,7 @@ async def execute_tools_parallel(
                         params=search_params
                     )
                     if not search_response.success:
-                        raise Exception(search_response.error or "Sports team search failed")
+                        raise RAGToolError(search_response, "Sports team search failed")
 
                     search_data = search_response.data
 
@@ -3899,7 +3911,8 @@ async def execute_tools_parallel(
                             guest_mode=guest_mode
                         ))
                         logger.warning(f"No teams found for query: {team_name}")
-                        return (tool_call_id, {"error": f"No teams found matching '{team_name}'"})
+                        no_teams = f"No teams found matching '{team_name}'"
+                        return (tool_call_id, tool_error_result(make_user_safe(no_teams, 404) or no_teams))
 
                     team_id = teams[0]["idTeam"]
                     team_full_name = teams[0].get("strTeam", team_name)
@@ -3980,8 +3993,8 @@ async def execute_tools_parallel(
                         error_message=error_msg,
                         guest_mode=guest_mode
                     ))
-                    logger.error(f"Sports API failed: {e}")
-                    return (tool_call_id, {"error": error_msg})
+                    logger.error("sports_api_failed", **log_safe(e))
+                    return (tool_call_id, tool_error_result(e))
 
             # Special handling for get_sports_standings (league-wide rankings)
             if function_name == "get_sports_standings":
@@ -3999,7 +4012,7 @@ async def execute_tools_parallel(
                     )
 
                     if not standings_response.success:
-                        raise Exception(standings_response.error or "Standings fetch failed")
+                        raise RAGToolError(standings_response, "Standings fetch failed")
 
                     standings_data = standings_response.data
 
@@ -4025,8 +4038,8 @@ async def execute_tools_parallel(
                         error_message=error_msg,
                         guest_mode=guest_mode
                     ))
-                    logger.error(f"Standings API failed: {e}")
-                    return (tool_call_id, {"error": error_msg})
+                    logger.error("standings_api_failed", **log_safe(e))
+                    return (tool_call_id, tool_error_result(e))
 
             # Special handling for search_events (parallel Ticketmaster + SerpAPI + SeatGeek + Community)
             if function_name == "search_events":
@@ -4045,7 +4058,7 @@ async def execute_tools_parallel(
                             return data
                     except Exception as e:
                         logger.warning(f"Ticketmaster events failed: {e}")
-                        return {"events": [], "error": str(e)}
+                        return {"events": [], "error": model_safe_error(e)}
 
                 async def call_serpapi(args: dict) -> dict:
                     """Call SerpAPI events API."""
@@ -4098,7 +4111,7 @@ async def execute_tools_parallel(
                             return data
                     except Exception as e:
                         logger.warning(f"SerpAPI events failed: {e}")
-                        return {"events": [], "error": str(e)}
+                        return {"events": [], "error": model_safe_error(e)}
 
                 async def call_seatgeek(args: dict) -> dict:
                     """Call SeatGeek events API."""
@@ -4165,7 +4178,7 @@ async def execute_tools_parallel(
                             return data
                     except Exception as e:
                         logger.warning(f"SeatGeek events failed: {e}")
-                        return {"events": [], "error": str(e)}
+                        return {"events": [], "error": model_safe_error(e)}
 
                 async def call_community_events(args: dict) -> dict:
                     """Call Community Events API (scraped local events)."""
@@ -4209,7 +4222,7 @@ async def execute_tools_parallel(
                             return data
                     except Exception as e:
                         logger.warning(f"Community Events failed: {e}")
-                        return {"events": [], "error": str(e)}
+                        return {"events": [], "error": model_safe_error(e)}
 
                 # Call all four APIs in parallel
                 ticketmaster_task = asyncio.create_task(call_ticketmaster(arguments))
@@ -4223,13 +4236,13 @@ async def execute_tools_parallel(
 
                 # Handle exceptions
                 if isinstance(ticketmaster_result, Exception):
-                    ticketmaster_result = {"events": [], "error": str(ticketmaster_result)}
+                    ticketmaster_result = {"events": [], "error": model_safe_error(ticketmaster_result)}
                 if isinstance(serpapi_result, Exception):
-                    serpapi_result = {"events": [], "error": str(serpapi_result)}
+                    serpapi_result = {"events": [], "error": model_safe_error(serpapi_result)}
                 if isinstance(seatgeek_result, Exception):
-                    seatgeek_result = {"events": [], "error": str(seatgeek_result)}
+                    seatgeek_result = {"events": [], "error": model_safe_error(seatgeek_result)}
                 if isinstance(community_result, Exception):
-                    community_result = {"events": [], "error": str(community_result)}
+                    community_result = {"events": [], "error": model_safe_error(community_result)}
 
                 # Merge results from all sources
                 all_events = []
@@ -4453,7 +4466,7 @@ async def execute_tools_parallel(
                 response = await rag.post(rag_service_name, endpoint, json=arguments)
 
             if not response.success:
-                raise Exception(response.error or f"Tool {function_name} call failed")
+                raise RAGToolError(response, f"Tool {function_name} call failed")
 
             result_data = response.data
 
@@ -4505,8 +4518,8 @@ async def execute_tools_parallel(
             except Exception as metrics_err:
                 logger.warning(f"Failed to record tool metrics: {metrics_err}")
 
-            logger.error(f"Tool {function_name} failed: {e}", exc_info=True)
-            return (tool_call_id, {"error": error_msg})
+            logger.error("tool_failed", tool=function_name, **log_safe(e), exc_info=True)
+            return (tool_call_id, tool_error_result(e))
 
     # Execute all tools in parallel
     tasks = [execute_single_tool(tc) for tc in tool_calls]
@@ -4798,6 +4811,8 @@ async def tool_call_node(state: OrchestratorState) -> OrchestratorState:
 
         system_content = await build_core_assistant_prompt(
             include_voice_formatting=True,
+            interface_type="voice" if channel_for_interface_type(getattr(state, "interface_type", None)) is OutputChannel.SPEECH else None,
+            long_form=is_long_form_turn(state.intent, state.query),
             **addressee.prompt_kwargs(),
         ) + "\n"
         home_address = DEFAULT_LOCATION  # Permanent home address (for "directions from home")
@@ -5053,11 +5068,13 @@ If the user is asking to repeat, search again, or modify the previous request, u
                          "another story", "different story", "new story"]
         is_story_query = any(p in query_lower for p in story_patterns)
 
-        if is_continue_query and getattr(state, 'interface_type', 'voice') != 'voice':
+        selection_interface = getattr(state, 'interface_type', 'voice')
+        selection_is_text = channel_for_interface_type(selection_interface) is not OutputChannel.SPEECH
+        if is_continue_query and selection_is_text:
             # Continuation requests always get extended tokens
             max_tokens = 500  # Good length for continuing any truncated response
             logger.info("Continue request detected, using extended max_tokens=500")
-        elif is_story_query and getattr(state, 'interface_type', 'voice') != 'voice':
+        elif is_story_query and selection_is_text:
             max_tokens = 2000  # Extended limit for stories on non-voice interfaces
             logger.info("Story query detected in tool_call phase, using extended max_tokens=2000")
 
@@ -5101,7 +5118,11 @@ If the user is asking to repeat, search again, or modify the previous request, u
 
         logger.info(f"Calling LLM for tool selection: model={llm_model}, backend={llm_backend}, complexity={complexity}")
 
-        # Call LLM with tools
+        # Call LLM with tools. A spoken turn is capped by the voice limit, but
+        # never below the room a tool call's JSON needs.
+        max_tokens = await answer_max_tokens(
+            selection_interface, max_tokens, tool_calling=True, long_form=is_long_form_turn(state.intent, state.query)
+        )
         llm_call_start = time.time()
         llm_response = await llm.generate_with_tools(
             model=llm_model,
@@ -5299,7 +5320,9 @@ If the user is asking to repeat, search again, or modify the previous request, u
             # LLM didn't want to call any tools, use its direct response
             content = llm_response.get("content", "")
             if content:
-                state.answer = content
+                state.answer = finish_spoken_answer(
+                    content, selection_interface, llm_response, max_tokens, stage="tool_selection"
+                )
                 state.data_source = f"LLM ({llm_model}) - no tools needed"
                 # Capture token metrics from direct LLM response
                 state.llm_tokens = llm_response.get("eval_count", 0)
@@ -5372,11 +5395,15 @@ Provide a helpful answer:"""
                                 synthesis_config = await get_component_config("response_synthesis")
                                 synthesis_model = synthesis_config["model_name"]
                                 fallback_start = time.time()
+                                fallback_max_tokens = await answer_max_tokens(
+                                    selection_interface, None, long_form=is_long_form_turn(state.intent, state.query)
+                                )
                                 synthesis_result = await llm.generate(
                                     model=synthesis_model,
                                     prompt=synthesis_prompt,
                                     temperature=0.7,
                                     system_prompt=_component_system_prompt(synthesis_config),
+                                    max_tokens=fallback_max_tokens,
                                     request_id=state.request_id,
                                     session_id=state.session_id,
                                     stage="fallback_synthesis"
@@ -5390,7 +5417,10 @@ Provide a helpful answer:"""
                                         "fallback_synthesis", synthesis_model, tokens, int(fallback_duration * 1000), "synthesis"
                                     )
 
-                                state.answer = synthesis_result.get("response", "")
+                                state.answer = finish_spoken_answer(
+                                    synthesis_result.get("response", ""), selection_interface, synthesis_result,
+                                    fallback_max_tokens, stage="fallback_synthesis",
+                                )
                                 state.data_source = f"Web Search Fallback ({state.data_source})"
                                 logger.info("Web search fallback synthesis completed")
                             except Exception as synth_err:
@@ -5521,7 +5551,9 @@ Provide a helpful answer:"""
 
             # Check if tool returned an error
             if isinstance(result, dict) and "error" in result:
-                failed_tools.append((tool_call_id, function_name, result.get("error", "Unknown error")))
+                # error_msg below is later embedded in data the model reads, so it is made safe here;
+                # a UserSafeText (a vetted 4xx detail) passes unchanged.
+                failed_tools.append((tool_call_id, function_name, model_safe_error(result.get("error"))))
                 logger.warning(f"Tool '{function_name}' failed: {result.get('error')}")
 
         # If any tools failed, try web search fallback (if enabled for that tool)
@@ -5607,7 +5639,7 @@ Provide a helpful answer:"""
                         tool_results[tool_call_id] = {
                             "error": error_msg,
                             "fallback_attempted": True,
-                            "fallback_error": str(e)
+                            "fallback_error": model_safe_error(e)
                         }
 
         # ADDITIONAL FALLBACK: Check for empty/irrelevant results (not just errors)
@@ -5741,7 +5773,7 @@ Provide a helpful answer:"""
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call_id,
-                "content": json.dumps(result)
+                "content": json.dumps(scrub_tool_result(result))
             })
 
         # HYBRID APPROACH: Use quantized 14b for synthesis (quality matters)
@@ -5837,6 +5869,10 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
         # Call LLM again to synthesize final response
         logger.info("Calling LLM to synthesize final response from tool results")
 
+        synthesis_max_tokens = await answer_max_tokens(
+            interface_type, synthesis_max_tokens,
+            long_form=is_planning_query or is_long_form_turn(state.intent, state.query),
+        )
         synthesis_start_time = time.time()
         final_response = await llm.generate_with_tools(
             model=synthesis_model,
@@ -5862,7 +5898,10 @@ IMPORTANT: Use the exact event information provided above. Do NOT change the con
             )
 
         # Extract final answer
-        state.answer = final_response.get("content", "I couldn't generate a response from the tool results.")
+        state.answer = finish_spoken_answer(
+            final_response.get("content", "I couldn't generate a response from the tool results."),
+            interface_type, final_response, synthesis_max_tokens, stage="tool_synthesis",
+        )
 
         # Check if response was truncated due to token limit
         finish_reason = final_response.get("finish_reason", "stop")
@@ -6053,6 +6092,12 @@ async def route_after_classify(state: OrchestratorState) -> str:
     if state.intent == IntentCategory.TV_CONTROL:
         logger.info("Routing to route_tv node (TV Control)")
         return "route_tv"
+
+    # A spoken low-information fragment skips tool selection: finalize answers it.
+    if await ambient_fragment_applies(state):
+        ambient_fragment_gated_total.labels(route="graph").inc()
+        logger.info("ambient_fragment_gated", route="graph", query_len=len(state.query))
+        return "finalize"
 
     # Phase 5: Check if tool calling should be triggered after classification
     tool_calling_result = await should_use_tool_calling(state, trigger_context="classify")
@@ -6367,6 +6412,77 @@ def _request_caller_fingerprint(request: "QueryRequest", permissions_mode: Optio
     )
 
 
+async def _fast_path_turn(
+    query: str,
+    *,
+    permissions: Optional[Dict[str, Any]],
+    session: Any,
+    session_id: str,
+    route: str,
+    room: Optional[str],
+    mode: str,
+    request_id: str,
+    handler_start: float,
+    authz_ms: Optional[int] = None,
+    session_ms: Optional[int] = None,
+) -> Optional[FastPathReply]:
+    """The deterministic answer for a trivial turn, or None to run the pipeline.
+
+    Runs after authorization, the session and the owner-PIN check on every
+    query route. Defers (None) when permissions are missing, the intent gate
+    would refuse a general-info turn, or the session has an open question.
+    Touches no HA, memory, cache or knowledge and calls no model.
+    """
+    if permissions is None:
+        return None
+    reply = fast_path_reply(query)
+    if reply is None:
+        return None
+    if intent_gate_refusal(IntentCategory.GENERAL_INFO, permissions):
+        return None
+    context_start = time.perf_counter()
+    reason = await fast_path_open_question(session_id, last_assistant_text(session))
+    context_ms = int((time.perf_counter() - context_start) * 1000)
+    if reason:
+        fast_path_deferred_total.labels(route=route, reason=reason).inc()
+        logger.info("fast_path_deferred", route=route, reason=reason, context_ms=context_ms)
+        return None
+    fast_path_seconds.labels(route=route).observe(time.perf_counter() - handler_start)
+    fast_path_answered_total.labels(route=route, kind=reply.kind).inc()
+    logger.info(
+        "fast_path_answered",
+        kind=reply.kind,
+        route=route,
+        query_len=len(query),
+        authz_ms=authz_ms,
+        session_ms=session_ms,
+        context_ms=context_ms,
+    )
+    _runtime.spawn_background(record_intent_metric(
+        intent=IntentCategory.GENERAL_INFO.value,
+        confidence=1.0,
+        raw_query=query,
+        session_id=session_id,
+        mode=mode,
+        room=room or "",
+        request_id=request_id,
+        processing_time_ms=int((time.perf_counter() - handler_start) * 1000),
+        complexity="simple",
+        admin_api_url=ADMIN_API_URL,
+    ))
+    return reply
+
+
+async def _persist_fast_path_messages(session_id: str, query: str, reply: FastPathReply) -> None:
+    """The user turn and the raw reply, in order. Awaited before the response
+    is complete, so a fast follow-up (or a client that disconnects right after
+    the answer) never misses the turn. The assistant message is tagged so the
+    next turn doesn't read its question as open."""
+    sm = _runtime.get_session_manager()
+    await sm.add_message(session_id=session_id, role="user", content=query, metadata={"intent": "general_info"})
+    await sm.add_message(session_id=session_id, role="assistant", content=reply.text, metadata={"fast_path": reply.kind})
+
+
 class QueryResponse(BaseModel):
     """Response model for query endpoint."""
     answer: str = Field(..., description="Generated response")
@@ -6386,6 +6502,7 @@ class QueryResponse(BaseModel):
 
 @app.post("/query", response_model=QueryResponse, dependencies=[Depends(require_service_caller)])
 @renders_spoken_answer
+@with_llm_usage_scope
 async def process_query(
     request: QueryRequest,
     service_authenticated: bool = Depends(service_authenticated),
@@ -6393,6 +6510,7 @@ async def process_query(
     """
     Process a user query through the orchestrator state machine.
     """
+    handler_start = time.perf_counter()
     global orchestrator_graph
 
     # Initialize graph if needed
@@ -6438,6 +6556,7 @@ async def process_query(
         # the single resolution path for every entry point. request.mode is
         # a narrowing hint only; it can never escalate above the server's
         # own mode.
+        authz_start = time.perf_counter()
         with timing_tracker.track("pre_graph", "mode_determination"):
             authz = await resolve_request_authorization(
                 request.mode, guest_info, caller_trust=request.caller_trust,
@@ -6455,8 +6574,10 @@ async def process_query(
                 degraded=authz.degraded,
                 escalation_ignored=authz.escalation_ignored,
             )
+        authz_ms = int((time.perf_counter() - authz_start) * 1000)
 
         # Session management: get or create session
+        session_start = time.perf_counter()
         with timing_tracker.track("pre_graph", "session_management"):
             logger.info(
                 "session_request_received",
@@ -6470,6 +6591,7 @@ async def process_query(
                 zone=request.room,
                 caller_class=_session_caller_class(request, authz.knowledge_audience),
             )
+        session_ms = int((time.perf_counter() - session_start) * 1000)
 
         logger.info(f"Processing query in session {session.session_id}")
 
@@ -6499,6 +6621,36 @@ async def process_query(
                         "refused_reason": outcome.refused_reason,
                     }
                 )
+
+        # Trivial turns (greetings, thanks, time, date) are answered without a
+        # model unless the session has an open question.
+        fast_path_request_id = hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8]
+        with timing_tracker.track("pre_graph", "fast_path"):
+            fast = await _fast_path_turn(
+                request.query,
+                permissions=permissions,
+                session=session,
+                session_id=session.session_id,
+                route="query",
+                room=request.room,
+                mode=current_mode,
+                request_id=fast_path_request_id,
+                handler_start=handler_start,
+                authz_ms=authz_ms,
+                session_ms=session_ms,
+            )
+        if fast is not None:
+            await _persist_fast_path_messages(session.session_id, request.query, fast)
+            return QueryResponse(
+                answer=fast.text,
+                intent="general_info",
+                confidence=1.0,
+                citations=[],
+                request_id=fast_path_request_id,
+                session_id=session.session_id,
+                processing_time=time.perf_counter() - handler_start,
+                metadata={"fast_path": fast.kind},
+            )
 
         # Get conversation history for LLM context
         async with timing_tracker.track_async("pre_graph", "history_loading"):
@@ -7291,10 +7443,7 @@ async def process_query(
                 error=str(e)
             )
 
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to process query: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=_internal_error_detail())
 
 @app.post("/query/stream", dependencies=[Depends(require_service_caller)])
 async def process_query_stream(
@@ -7312,6 +7461,9 @@ async def process_query_stream(
     - Stage 2: Tool execution results
     - Stage 3: Final answer (TRUE streaming - tokens as generated)
     """
+    handler_start = time.perf_counter()
+
+    @with_llm_usage_scope_stream
     async def event_generator():
         sm = _runtime.get_session_manager()
         llm = _runtime.get_llm_router()
@@ -7346,20 +7498,24 @@ async def process_query_stream(
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares. Done
             # before the session: the session class depends on owner proof.
+            authz_start = time.perf_counter()
             authz = await resolve_request_authorization(
                 request.mode, guest_info, caller_trust=request.caller_trust,
                 service_authenticated=service_authenticated is True,
                 sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
+            authz_ms = int((time.perf_counter() - authz_start) * 1000)
 
             # Session management
+            session_start = time.perf_counter()
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room,
                 caller_class=_session_caller_class(request, authz.knowledge_audience),
             )
+            session_ms = int((time.perf_counter() - session_start) * 1000)
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
             # utterance path -- every entry point runs this, not just
@@ -7370,6 +7526,27 @@ async def process_query_stream(
             outcome = await handle_owner_mode_utterance(request.query, request.caller_trust, request.room)
             if outcome is not None:
                 yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': render_answer(outcome.message, request.interface_type)})}\n\n"
+                yield f"data: {json.dumps({'stage': 'complete', 'processing_time': time.time() - start_time, 'tool_exec_time': 0, 'llm_time': 0, 'tokens': 0})}\n\n"
+                return
+
+            # Trivial turns are answered without a model unless the session
+            # has an open question.
+            fast = await _fast_path_turn(
+                request.query,
+                permissions=authz.permissions,
+                session=session,
+                session_id=session.session_id,
+                route="query_stream",
+                room=request.room,
+                mode=current_mode,
+                request_id=hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8],
+                handler_start=handler_start,
+                authz_ms=authz_ms,
+                session_ms=session_ms,
+            )
+            if fast is not None:
+                yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': render_answer(fast.text, request.interface_type)})}\n\n"
+                await _persist_fast_path_messages(session.session_id, request.query, fast)
                 yield f"data: {json.dumps({'stage': 'complete', 'processing_time': time.time() - start_time, 'tool_exec_time': 0, 'llm_time': 0, 'tokens': 0})}\n\n"
                 return
 
@@ -7506,7 +7683,11 @@ async def process_query_stream(
 
                 # Use per-intent max_tokens from component config, same as synthesize_node.
                 synthesis_config = await get_component_config("response_synthesis")
-                max_tokens = (synthesis_config or {}).get("max_tokens") or 2048
+                max_tokens = await answer_max_tokens(
+                    request.interface_type, (synthesis_config or {}).get("max_tokens") or 2048,
+                    long_form=is_long_form_turn(state.intent, request.query),
+                )
+                stream_final = {}
 
                 logger.info(
                     "streaming_llm_started",
@@ -7523,7 +7704,10 @@ async def process_query_stream(
                         prompt=full_prompt,
                         system_prompt=synthesis_system_prompt,
                         temperature=request.temperature or 0.7,
-                        max_tokens=max_tokens
+                        max_tokens=max_tokens,
+                        stage="stream_synthesis",
+                        request_id=request_id,
+                        session_id=session.session_id,
                     ):
                         token = chunk.get("token", "")
                         if token:
@@ -7542,6 +7726,7 @@ async def process_query_stream(
                             if not speak_answer:
                                 yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': token})}\n\n"
                         if chunk.get("done", False):
+                            stream_final = chunk
                             stream_completed = True
                             break
                 except asyncio.CancelledError:
@@ -7550,7 +7735,10 @@ async def process_query_stream(
                 except Exception as e:
                     logger.error("streaming_error", request_id=request_id, tokens_emitted=token_count, error=str(e))
 
-                full_answer = _strip_hallucinated_continuation("".join(response_tokens))
+                full_answer = finish_spoken_answer(
+                    _strip_hallucinated_continuation("".join(response_tokens)),
+                    request.interface_type, stream_final, max_tokens, stage="stream_synthesis",
+                )
                 if not full_answer:
                     full_answer = "I'm not sure how to help with that. Could you rephrase your question?"
                     yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': full_answer})}\n\n"
@@ -7607,8 +7795,8 @@ async def process_query_stream(
             yield f"data: {json.dumps({'stage': 'complete', 'processing_time': processing_time, 'tool_exec_time': tool_exec_time, 'llm_time': llm_time, 'tokens': token_count})}\n\n"
 
         except Exception as e:
-            logger.error(f"Streaming error: {e}", exc_info=True)
-            yield f"data: {json.dumps({'stage': 'error', 'message': str(e)})}\n\n"
+            logger.error("streaming_error", **log_safe(e))
+            yield f"data: {json.dumps({'stage': 'error', 'message': STREAM_ERROR_MESSAGE})}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -7641,6 +7829,9 @@ async def process_query_stream_v2(
     - {stage: 'streaming', sentence_num: 2, sentence: 'Second sentence.', is_final: false}
     - {stage: 'complete', total_sentences: 2, full_response: '...', processing_time: 1.5}
     """
+    handler_start = time.perf_counter()
+
+    @with_llm_usage_scope_stream
     async def sentence_event_generator():
         sm = _runtime.get_session_manager()
         llm = _runtime.get_llm_router()
@@ -7678,20 +7869,24 @@ async def process_query_stream_v2(
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares. Done
             # before the session: the session class depends on owner proof.
+            authz_start = time.perf_counter()
             authz = await resolve_request_authorization(
                 request.mode, guest_info, caller_trust=request.caller_trust,
                 service_authenticated=service_authenticated is True,
                 sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
+            authz_ms = int((time.perf_counter() - authz_start) * 1000)
 
             # Session management
+            session_start = time.perf_counter()
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room,
                 caller_class=_session_caller_class(request, authz.knowledge_audience),
             )
+            session_ms = int((time.perf_counter() - session_start) * 1000)
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
             # utterance path -- every entry point runs this, not just
@@ -7703,6 +7898,29 @@ async def process_query_stream_v2(
             if outcome is not None:
                 yield f"data: {json.dumps({'stage': 'streaming', 'sentence_num': 1, 'sentence': render_answer(outcome.message, request.interface_type), 'is_final': True})}\n\n"
                 yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': 1, 'full_response': render_answer(outcome.message, request.interface_type), 'intent': 'mode_override', 'processing_time': time.time() - start_time})}\n\n"
+                return
+
+            # Trivial turns are answered without a model unless the session
+            # has an open question.
+            fast = await _fast_path_turn(
+                request.query,
+                permissions=authz.permissions,
+                session=session,
+                session_id=session.session_id,
+                route="query_stream_v2",
+                room=request.room,
+                mode=current_mode,
+                request_id=hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8],
+                handler_start=handler_start,
+                authz_ms=authz_ms,
+                session_ms=session_ms,
+            )
+            if fast is not None:
+                spoken_fast = render_answer(fast.text, request.interface_type)
+                yield f"data: {json.dumps({'stage': 'classified', 'intent': 'general_info'})}\n\n"
+                yield f"data: {json.dumps({'stage': 'streaming', 'sentence_num': 1, 'sentence': spoken_fast, 'is_final': True})}\n\n"
+                await _persist_fast_path_messages(session.session_id, request.query, fast)
+                yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': 1, 'full_response': spoken_fast, 'intent': 'general_info', 'processing_time': time.time() - start_time})}\n\n"
                 return
 
             # Run orchestrator up to LLM synthesis point
@@ -7798,8 +8016,8 @@ async def process_query_stream_v2(
             )
 
         except Exception as e:
-            logger.error(f"Stream v2 error: {e}", exc_info=True)
-            yield f"data: {json.dumps({'stage': 'error', 'message': str(e)})}\n\n"
+            logger.error("stream_v2_error", **log_safe(e))
+            yield f"data: {json.dumps({'stage': 'error', 'message': STREAM_ERROR_MESSAGE})}\n\n"
 
     return StreamingResponse(
         sentence_event_generator(),
@@ -7816,6 +8034,27 @@ async def process_query_stream_v2(
 # OpenAI-Compatible API Endpoints (for Home Assistant integration)
 # ============================================================================
 
+def _internal_error_detail() -> str:
+    """The body of a 500: `internal_error` and the request id (the X-Request-ID the tracing middleware
+    bound), so an operator can find the logged cause. Never the exception text."""
+    request_id = structlog.contextvars.get_contextvars().get("request_id") or "unknown"
+    return f"internal_error request_id={request_id}"
+
+
+def _stream_usage_line(request: "OpenAIChatRequest", chunk_id: str) -> str:
+    """The OpenAI `stream_options.include_usage` chunk: empty `choices` and the turn's usage, sent
+    just before `[DONE]` and only when the caller asked for it (an empty string otherwise)."""
+    if (request.stream_options or {}).get("include_usage") is not True:
+        return ""
+    usage = current_usage()
+    prompt, completion = (usage.prompt_tokens, usage.completion_tokens) if usage else (0, 0)
+    chunk = {
+        "id": chunk_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": request.model,
+        "choices": [], "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion},
+    }
+    return f"data: {json.dumps(chunk)}\n\n"
+
+
 class OpenAIChatMessage(BaseModel):
     """OpenAI chat message format."""
     role: str
@@ -7828,6 +8067,8 @@ class OpenAIChatRequest(BaseModel):
     temperature: float = 0.7
     max_tokens: Optional[int] = None
     stream: bool = False  # Enable streaming responses
+    # OpenAI: {"include_usage": true} asks for a final chunk with empty `choices` and the usage.
+    stream_options: Optional[Dict[str, Any]] = None
     extra_body: Optional[Dict[str, Any]] = None  # Extra context (room, interface_type)
     # ATHENA-88 / F88: per-conversation session identity, forwarded by the
     # gateway. All optional so pre-existing callers keep working unchanged.
@@ -8201,6 +8442,7 @@ Response:"""
     system_context = await build_core_assistant_prompt(
         include_voice_formatting=state.interface_type != "chat",
         interface_type=state.interface_type,
+        long_form=is_long_form_turn(state.intent, state.query),
         **addressee.prompt_kwargs(),
     ) + "\n"
 
@@ -8310,6 +8552,13 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
         state = await notification_pref_node(state)
         return state
 
+    # A spoken low-information fragment skips tool selection.
+    if await ambient_fragment_applies(state):
+        ambient_fragment_gated_total.labels(route="stream").inc()
+        logger.info("ambient_fragment_gated", route="stream", query_len=len(state.query))
+        state.answer = AMBIENT_REPLY
+        return state
+
     # Check for tool calling (Phase 2 services)
     tool_calling_result = await should_use_tool_calling(state, trigger_context="classify")
 
@@ -8345,6 +8594,7 @@ async def chat_completions(request: OpenAIChatRequest):
     OpenAI-compatible chat completions endpoint with streaming support.
     Wraps the orchestrator's /query endpoint for Home Assistant and Open WebUI compatibility.
     """
+    handler_start = time.perf_counter()
     try:
         # Extract the last user message
         user_message = None
@@ -8372,7 +8622,9 @@ async def chat_completions(request: OpenAIChatRequest):
         # The audience (and so the session class) comes first: the first-turn
         # reset, the OpenAI index/cap and the session itself must all use the
         # one class-qualified id (a guest-mode conversation is stored as gst-<id>).
+        authz_start = time.perf_counter()
         authz = await resolve_request_authorization(None, None, service_authenticated=False)
+        authz_ms = int((time.perf_counter() - authz_start) * 1000)
         session_class = _audience_session_class(authz.knowledge_audience)
         resolved_session = resolved_session._replace(
             session_id=class_qualified_id(resolved_session.session_id, session_class)
@@ -8401,6 +8653,7 @@ async def chat_completions(request: OpenAIChatRequest):
 
         # If streaming is requested, use SSE format
         if request.stream:
+            @with_llm_usage_scope_stream
             async def openai_stream_generator():
                 # Initialize state and run orchestrator
                 llm = _runtime.get_llm_router()
@@ -8411,12 +8664,14 @@ async def chat_completions(request: OpenAIChatRequest):
                 # authz (resolved above, before the session id was prepared):
                 # OpenAIChatRequest has no mode/device_id fields at all and no
                 # caller_trust, so it is never an owner caller.
+                session_start = time.perf_counter()
                 session = await sm.get_or_create_session(
                     session_id=resolved_session.session_id,
                     user_id="openwebui",
                     zone="web",
                     caller_class=session_class,
                 )
+                session_ms = int((time.perf_counter() - session_start) * 1000)
 
                 # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
                 # utterance path -- every entry point runs this. This
@@ -8432,6 +8687,31 @@ async def chat_completions(request: OpenAIChatRequest):
                     pin_request_id = hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8]
                     yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': render_answer(outcome.message, interface_type)}, 'finish_reason': None}]})}\n\n"
                     yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                    yield _stream_usage_line(request, pin_request_id)
+                    yield "data: [DONE]\n\n"
+                    return
+
+                # Trivial turns are answered without a model unless the
+                # session has an open question.
+                fast_id = hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8]
+                fast = await _fast_path_turn(
+                    user_message,
+                    permissions=authz.permissions,
+                    session=session,
+                    session_id=session.session_id,
+                    route="v1_stream",
+                    room=request.room or (request.extra_body or {}).get("room"),
+                    mode=authz.mode,
+                    request_id=fast_id,
+                    handler_start=handler_start,
+                    authz_ms=authz_ms,
+                    session_ms=session_ms,
+                )
+                if fast is not None:
+                    yield f"data: {json.dumps({'id': fast_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': render_answer(fast.text, interface_type)}, 'finish_reason': None}]})}\n\n"
+                    yield f"data: {json.dumps({'id': fast_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                    await _persist_fast_path_messages(session.session_id, user_message, fast)
+                    yield _stream_usage_line(request, fast_id)
                     yield "data: [DONE]\n\n"
                     return
 
@@ -8574,12 +8854,19 @@ async def chat_completions(request: OpenAIChatRequest):
                     # For text/chat: stream tokens directly (original behavior)
                     is_voice = channel_for_interface_type(interface_type) is OutputChannel.SPEECH
 
+                    v1_max_tokens = await answer_max_tokens(
+                        interface_type, 2048, long_form=is_long_form_turn(state.intent, user_message)
+                    )
+                    v1_stream_final = {}
                     async for chunk in llm.generate_stream(
                         model=synthesis_model,
                         prompt=full_prompt,
                         system_prompt=synthesis_system_prompt,
                         temperature=state.temperature,
-                        max_tokens=2048
+                        max_tokens=v1_max_tokens,
+                        stage="stream_synthesis",
+                        request_id=state.request_id,
+                        session_id=session.session_id,
                     ):
                         token = chunk.get("token", "")
                         if token:
@@ -8603,6 +8890,7 @@ async def chat_completions(request: OpenAIChatRequest):
 
                         # Check if done
                         if chunk.get("done", False):
+                            v1_stream_final = chunk
                             break
 
                     stream_duration = time.time() - start_time
@@ -8610,7 +8898,12 @@ async def chat_completions(request: OpenAIChatRequest):
                     # For voice interface: normalize and stream the complete response
                     if is_voice and response_tokens:
                         full_response = "".join(response_tokens)
-                        normalized_response = render_answer(full_response, interface_type)
+                        normalized_response = render_answer(
+                            finish_spoken_answer(
+                                full_response, interface_type, v1_stream_final, v1_max_tokens, stage="stream_synthesis"
+                            ),
+                            interface_type,
+                        )
                         logger.info(
                             "tts_normalization_applied",
                             request_id=state.request_id,
@@ -8676,6 +8969,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     }]
                 }
                 yield f"data: {json.dumps(final_chunk)}\n\n"
+                yield _stream_usage_line(request, initial_state.request_id)
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
@@ -8702,7 +8996,10 @@ async def chat_completions(request: OpenAIChatRequest):
             interface_type=interface_type,
         )
 
-        result = await process_query(query_request, service_authenticated=False)
+        # process_query opens its own usage scope; inside this one it reuses it, so
+        # the totals are visible here.
+        with llm_usage_scope() as usage:
+            result = await process_query(query_request, service_authenticated=False)
 
         # Convert to OpenAI format
         response = OpenAIChatResponse(
@@ -8718,17 +9015,17 @@ async def chat_completions(request: OpenAIChatRequest):
                 "finish_reason": "stop"
             }],
             usage={
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens,
             }
         )
 
         return response
 
     except Exception as e:
-        logger.error(f"Error in chat completions: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("chat_completions_error", **log_safe(e))
+        raise HTTPException(status_code=500, detail=_internal_error_detail())
 
 
 # ============================================================================
@@ -8918,7 +9215,7 @@ async def health_check(detailed: bool = False):
 
     except Exception as e:
         logger.error(f"Failed to get resilience status: {e}")
-        health["resilience"] = {"error": str(e)}
+        health["resilience"] = {"error": "internal_error"}
         health["components"]["circuit_breakers"] = True  # Don't fail on resilience check errors
 
     # Only check RAG services if detailed=true (for manual debugging, not k8s probes)
@@ -9142,7 +9439,7 @@ async def resilience_status():
         }
     except Exception as e:
         logger.error(f"Failed to get resilience status: {e}")
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": "internal_error"}
 
 
 @app.post("/admin/reset-circuit-breaker/{service_name}", dependencies=[Depends(require_service_caller)])

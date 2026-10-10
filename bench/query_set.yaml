@@ -183,7 +183,7 @@ queries:
     expected_tools: []
     expected_component: null
 
-  # INTERCEPTED: "Thanks, that's all" → "thanks" is in the direct map
+  # INTERCEPTED: "Thanks" / "That's all" → exact entries in shared.fast_path_vocab.REPLIES
   - id: notool_05
     query: "Can you explain how photosynthesis works?"
     expected_tools: []
@@ -199,7 +199,8 @@ queries:
     expected_tools: []
     expected_component: null
 
+  # INTERCEPTED: "Never mind" → normalizes to "never mind" (fast-path acknowledgement)
   - id: notool_08
-    query: "Never mind"
+    query: "Forget that, never mind the last question"
     expected_tools: []
     expected_component: null

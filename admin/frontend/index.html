@@ -2206,27 +2206,27 @@
                     <div class="bg-dark-card rounded-lg p-6 space-y-6">
                         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Assistant Name</label>
+                                <label for="assistant-name" class="block text-sm font-medium text-gray-400 mb-2">Assistant Name</label>
                                 <input type="text" id="assistant-name" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Project Name</label>
+                                <label for="assistant-project-name" class="block text-sm font-medium text-gray-400 mb-2">Project Name</label>
                                 <input type="text" id="assistant-project-name" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Identity</label>
+                                <label for="assistant-identity" class="block text-sm font-medium text-gray-400 mb-2">Identity</label>
                                 <input type="text" id="assistant-identity" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
                             </div>
                         </div>
 
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Persona Traits</label>
+                                <label for="assistant-persona-traits" class="block text-sm font-medium text-gray-400 mb-2">Persona Traits</label>
                                 <textarea id="assistant-persona-traits" rows="6" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"></textarea>
                                 <p class="text-xs text-gray-500 mt-2">One line per trait.</p>
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Communication Style</label>
+                                <label for="assistant-communication-style" class="block text-sm font-medium text-gray-400 mb-2">Communication Style</label>
                                 <textarea id="assistant-communication-style" rows="6" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"></textarea>
                                 <p class="text-xs text-gray-500 mt-2">One line per instruction.</p>
                             </div>
@@ -2234,41 +2234,73 @@
 
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Accuracy Guardrails</label>
+                                <label for="assistant-accuracy-guardrails" class="block text-sm font-medium text-gray-400 mb-2">Accuracy Guardrails</label>
                                 <textarea id="assistant-accuracy-guardrails" rows="6" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"></textarea>
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Ambiguity Examples</label>
+                                <label for="assistant-ambiguity-examples" class="block text-sm font-medium text-gray-400 mb-2">Ambiguity Examples</label>
                                 <textarea id="assistant-ambiguity-examples" rows="6" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"></textarea>
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Sensitive Topic Policy</label>
+                                <label for="assistant-sensitive-topic-policy" class="block text-sm font-medium text-gray-400 mb-2">Sensitive Topic Policy</label>
                                 <textarea id="assistant-sensitive-topic-policy" rows="6" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"></textarea>
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Voice Formatting Rules</label>
+                                <label for="assistant-voice-formatting" class="block text-sm font-medium text-gray-400 mb-2">Voice Formatting Rules</label>
                                 <textarea id="assistant-voice-formatting" rows="6" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white"></textarea>
                             </div>
                         </div>
 
                         <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Simple Response Tone</label>
+                                <label for="assistant-simple-tone" class="block text-sm font-medium text-gray-400 mb-2">Simple responses: tone</label>
                                 <input type="text" id="assistant-simple-tone" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Max Simple Sentences</label>
-                                <input type="number" id="assistant-simple-max-sentences" min="1" max="10" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
+                                <label for="assistant-simple-max-sentences" class="block text-sm font-medium text-gray-400 mb-2">Simple responses: max sentences</label>
+                                <input type="number" id="assistant-simple-max-sentences" min="1" max="10" step="1" required aria-describedby="assistant-simple-max-sentences-help" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
+                                <p id="assistant-simple-max-sentences-help" class="text-xs text-gray-500 mt-1">For short chat-style replies. Spoken answers have their own limit, below.</p>
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Min Response Chars</label>
-                                <input type="number" id="assistant-min-response-chars" min="1" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
+                                <label for="assistant-min-response-chars" class="block text-sm font-medium text-gray-400 mb-2">Minimum length for an unfinished answer (characters)</label>
+                                <input type="number" id="assistant-min-response-chars" min="1" step="1" required aria-describedby="assistant-min-response-chars-help" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
+                                <p id="assistant-min-response-chars-help" class="text-xs text-gray-500 mt-1">A shorter answer that does not end like a sentence is retried. Short, finished answers such as "Done." are fine.</p>
                             </div>
                             <div>
-                                <label class="block text-sm font-medium text-gray-400 mb-2">Max Response Chars</label>
-                                <input type="number" id="assistant-max-response-chars" min="1" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
+                                <label for="assistant-max-response-chars" class="block text-sm font-medium text-gray-400 mb-2">Max response length (characters)</label>
+                                <input type="number" id="assistant-max-response-chars" min="1" step="1" required class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
                             </div>
                         </div>
+
+                        <fieldset class="border border-gray-700 rounded-lg p-4">
+                            <legend class="px-2 text-sm font-semibold text-white">Voice response</legend>
+                            <p class="text-xs text-gray-500 mb-3">How long a spoken answer may be. Text and chat answers are not limited by these.</p>
+                            <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+                                <div>
+                                    <label for="assistant-voice-max-sentences" class="block text-sm font-medium text-gray-400 mb-2">Spoken answers: max sentences</label>
+                                    <input type="number" id="assistant-voice-max-sentences" min="1" max="10" step="1" required aria-describedby="assistant-voice-max-sentences-help" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
+                                    <p id="assistant-voice-max-sentences-help" class="text-xs text-gray-500 mt-1">1 to 10. Asked of the model in its instructions; a request, not a hard stop. Separate from the simple-response limit above.</p>
+                                </div>
+                                <div>
+                                    <label for="assistant-voice-max-tokens" class="block text-sm font-medium text-gray-400 mb-2">Spoken answers: length limit (tokens)</label>
+                                    <input type="number" id="assistant-voice-max-tokens" min="32" max="1024" step="1" required aria-describedby="assistant-voice-max-tokens-help" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
+                                    <p id="assistant-voice-max-tokens-help" class="text-xs text-gray-500 mt-1">32 to 1024. A token is about &frac34; of a word, so 200 is roughly 150 words, 20&ndash;30 seconds of speech. An answer cut off here ends on its last full sentence.</p>
+                                </div>
+                                <div>
+                                    <label for="assistant-voice-max-tokens-long" class="block text-sm font-medium text-gray-400 mb-2">Recipes, directions, itineraries: length limit (tokens)</label>
+                                    <input type="number" id="assistant-voice-max-tokens-long" min="64" max="2048" step="1" required aria-describedby="assistant-voice-max-tokens-long-help" class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white">
+                                    <p id="assistant-voice-max-tokens-long-help" class="text-xs text-gray-500 mt-1">64 to 2048, and not below the limit on the left. Used for step-by-step answers; 600 is roughly 450 words, 60&ndash;90 seconds.</p>
+                                </div>
+                                <div>
+                                    <span class="block text-sm font-medium text-gray-400 mb-2">Overheard fragments</span>
+                                    <label for="assistant-ambient-fragment-gate" class="flex items-center gap-2 text-sm text-gray-300">
+                                        <input type="checkbox" id="assistant-ambient-fragment-gate" aria-describedby="assistant-ambient-fragment-gate-help" class="rounded">
+                                        Say "Sorry, I didn't catch that." to unclear speech
+                                    </label>
+                                    <p id="assistant-ambient-fragment-gate-help" class="text-xs text-gray-500 mt-1">Off by default. When on, speech picked up from the room that is not a question, a command or a yes/no (for example half a conversation in the next room) gets that reply instead of a slow guess. Voice only. Never applied to commands, questions, yes/no replies, or words like &quot;help&quot; and &quot;fire&quot;. Try it for a day before relying on it.</p>
+                                </div>
+                            </div>
+                        </fieldset>
 
                         <div class="flex items-center justify-between">
                             <div id="assistant-profile-status" class="text-sm text-gray-400"></div>
@@ -5005,7 +5037,7 @@
     <script src="/integrations.js?v=20260927"></script>
     <script src="/keyboard.js?v=20260108"></script>
 
-    <script src="/app.js?v=20261010"></script>
+    <script src="/app.js?v=20261011"></script>
     <script src="/crud-extensions.js?v=20260913"></script>
     <script src="/conversation.js?v=20260913"></script>
     <script src="/routing.js?v=20260913"></script>

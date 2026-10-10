@@ -1,0 +1,19 @@
+{
+  "text": "Hello there.",
+  "usage_metadata": {
+    "prompt_token_count": 321,
+    "candidates_token_count": 12
+  },
+  "candidates": [
+    {
+      "finish_reason": "STOP",
+      "content": {
+        "parts": [
+          {
+            "text": "Hello there."
+          }
+        ]
+      }
+    }
+  ]
+}
