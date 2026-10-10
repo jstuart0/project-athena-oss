@@ -1089,9 +1089,11 @@ async def save_privacy_settings(
     """
     Save privacy settings — enables or disables analytics mode.
 
-    When analytics_mode_enabled is True, the orchestrator begins persisting
-    conversation transcripts to the database. Changes take effect within ~60
-    seconds (orchestrator polls with a 60-second TTL cache).
+    When analytics_mode_enabled is True, the orchestrator persists answered
+    turns (see /api/conversations/capture for the full capture state). Turning
+    it off takes effect at once, because the orchestrator's write statement
+    checks this flag itself; turning it on takes effect within about 30 seconds
+    (the orchestrator refreshes its cached copy of the flag every 30 s).
 
     Requires write permission.
     """
@@ -1128,7 +1130,7 @@ async def save_privacy_settings(
             "status": "success",
             "message": (
                 f"Analytics mode {'enabled' if settings.analytics_mode_enabled else 'disabled'}. "
-                "Changes take effect within ~60 seconds."
+                "Turning it off takes effect at once; turning it on takes effect within about 30 seconds."
             )
         }
 
@@ -1142,8 +1144,11 @@ async def save_privacy_settings(
 @router.get("/privacy/public")
 async def get_analytics_mode_public(db: Session = Depends(get_db)):
     """
-    Public endpoint for the orchestrator to fetch the analytics_mode_enabled flag.
-    No authentication required — read-only, no sensitive data.
+    Public, read-only endpoint exposing only the analytics_mode_enabled flag.
+
+    The orchestrator no longer calls it: it reads the flag from the database
+    directly (inside its write statement). Kept for older orchestrator images
+    during a rolling update. No authentication required; no sensitive data.
     """
     try:
         setting = db.query(SystemSetting).filter(

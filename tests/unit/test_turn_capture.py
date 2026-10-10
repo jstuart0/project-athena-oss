@@ -697,3 +697,60 @@ def test_a_second_cancellation_during_stream_close_cannot_skip_the_submit(sink):
 
     asyncio.run(run())
     assert [r.outcome for r in sink.records] == ["incomplete"]
+
+
+def test_a_failure_after_the_answer_keeps_the_answered_outcome_and_the_answer():
+    """Pinned: the user already has their answer, so a later failure (usually the session save)
+    records only its class name; the outcome stays answered."""
+    recording = RecordingSink()
+    capture = bound(tc.TurnCapture("query_stream", recording))
+    capture.answered("the delivered answer")
+    capture.failed(RuntimeError(f"session save broke {SECRET}"))
+    capture.submit()
+    rec = recording.records[0]
+    assert (rec.outcome, rec.response_text, rec.error_message) == ("answered", "the delivered answer", "RuntimeError")
+    assert SECRET not in repr(rec)
+
+
+def test_a_failure_before_the_answer_is_an_error():
+    recording = RecordingSink()
+    capture = bound(tc.TurnCapture("query_stream", recording))
+    capture.failed(ValueError("x"))
+    capture.answered("too late to count")
+    capture.submit()
+    assert (recording.records[0].outcome, recording.records[0].error_message) == ("error", "ValueError")
+
+
+def test_refusals_are_marked_by_the_call_or_by_the_state_error():
+    recording = RecordingSink()
+    explicit = bound(tc.TurnCapture("query", recording))
+    explicit.answered("No.")
+    explicit.refused()
+    explicit.submit()
+    from_state = bound(tc.TurnCapture("query", recording))
+    from_state.observe(State(error="permission_denied", answer="Not allowed."))
+    from_state.answered("Not allowed.")
+    from_state.submit()
+    assert [r.outcome for r in recording.records] == ["refused", "refused"]
+
+
+def test_error_text_is_digit_redacted_for_a_normal_turn_through_the_sink():
+    """The writer redacts error_message too (not only withheld turns drop it)."""
+    async def run():
+        store = InMemoryCaptureStore()
+        sink = cc.CaptureSink(store, flag_ttl=0.01)
+        sink.start()
+        for _ in range(100):
+            if sink._flags is not None:
+                break
+            await asyncio.sleep(0.005)
+        capture = bound(tc.TurnCapture("query", sink))
+        capture.observe(State(error="lookup failed for account 99887766 and 5521"))
+        capture.answered("ok")
+        capture.submit()
+        await sink.stop(drain_s=1)
+        return store.written[0]
+
+    rec = asyncio.run(run())
+    assert "99887766" not in rec.error_message and "5521" not in rec.error_message
+    assert rec.error_message.startswith("lookup failed for account")

@@ -17,6 +17,12 @@ Binding rules:
 * ``bind`` withholds the whole row for PIN-shaped queries and digit-redacts the
   rest; the writer sanitises again (``shared.conversation_capture``).
 
+Not captured: a request that fails before ``bind`` (the guest lookup, request
+authorization or session creation raising, or ``/v1/chat/completions``
+answering 400 for "no user message"). Nothing is bound yet, so nothing is stored;
+there is no content-free marker for these. They are logged by the route as
+before.
+
 Import rule (R2-C3): this module never imports ``orchestrator.main``.
 """
 from __future__ import annotations
@@ -49,6 +55,7 @@ ROUTE_MARKER = "__athena_capture_route__"
 OUTCOME_ANSWERED = "answered"
 OUTCOME_NO_ANSWER = "no_answer"
 OUTCOME_ERROR = "error"
+OUTCOME_REFUSED = "refused"
 OUTCOME_INCOMPLETE = "incomplete"
 
 _ERROR_STATE_MAX_CHARS = contract.ERROR_MAX_CHARS
@@ -118,6 +125,8 @@ class TurnCapture:
         self._outcome: Optional[str] = None
         self._error_class: Optional[str] = None
         self._cache_hit = False
+        self._refused = False
+        self._stream_completed: Optional[bool] = None
         self._observed: Dict[str, Any] = {}
         self._detail: Dict[str, Any] = {}
 
@@ -229,6 +238,8 @@ class TurnCapture:
             if isinstance(data_source, str) and data_source not in tools:
                 tools.append(data_source)
             error = _field(state, "error")
+            if error == "permission_denied":
+                self._refused = True
             self._observed = {
                 "request_id": _field(state, "request_id"),
                 "intent": _label(_field(state, "intent")),
@@ -255,21 +266,37 @@ class TurnCapture:
         except Exception as exc:
             logger.warning("turn_capture_observe_failed", extra={"error_type": type(exc).__name__})
 
-    def answered(self, text: Optional[str], *, outcome: str = OUTCOME_ANSWERED, cache_hit: bool = False) -> None:
-        """Record the final raw (unrendered) answer. The first call wins."""
-        if self._withheld_marker or self._answered:
+    def answered(self, text: Optional[str], *, outcome: str = OUTCOME_ANSWERED, cache_hit: bool = False,
+                 stream_completed: Optional[bool] = None) -> None:
+        """Record the final raw (unrendered) answer. The first call wins.
+
+        ``stream_completed=False`` marks an answer the stream cut short (kept in
+        ``debug_detail`` for tuning).
+        """
+        if self._withheld_marker or self._answered or self._outcome == OUTCOME_ERROR:
             return
+        self._stream_completed = stream_completed
         self._answered = True
         self._answer = text if isinstance(text, str) else None
         self._outcome = outcome
         self._cache_hit = bool(cache_hit)
 
+    def refused(self) -> None:
+        """The intent gate (or a permission check) refused this turn; the answer is the refusal text."""
+        self._refused = True
+
     def failed(self, exc: BaseException) -> None:
-        """The turn raised: the outcome is ``error`` and only the class name is kept."""
-        if self._withheld_marker or self._outcome == OUTCOME_ERROR:
+        """The turn raised. Only the class name is kept.
+
+        Before an answer: the outcome is ``error``. After ``answered()`` the user
+        already has their answer (a later failure is typically the session save),
+        so the outcome and the answer stand and the class goes to ``error_message``.
+        """
+        if self._withheld_marker or self._error_class is not None:
             return
-        self._outcome = OUTCOME_ERROR
         self._error_class = type(exc).__name__
+        if not self._answered:
+            self._outcome = OUTCOME_ERROR
 
     # -- submission --------------------------------------------------------
 
@@ -288,11 +315,13 @@ class TurnCapture:
         outcome = self._outcome or (OUTCOME_ANSWERED if self._answer else OUTCOME_INCOMPLETE)
         if self._outcome == OUTCOME_ANSWERED and not self._answer:
             outcome = OUTCOME_NO_ANSWER
+        elif self._refused and outcome == OUTCOME_ANSWERED:
+            outcome = OUTCOME_REFUSED
         observed = {} if marker else self._observed
         error = None if self._withheld else (self._error_class or observed.get("error"))
         detail = None if marker else dict(self._detail, cache_hit=self._cache_hit)
-        if detail is not None and outcome in (OUTCOME_INCOMPLETE, OUTCOME_ANSWERED, OUTCOME_NO_ANSWER):
-            detail["stream_completed"] = outcome != OUTCOME_INCOMPLETE
+        if detail is not None and outcome in (OUTCOME_INCOMPLETE, OUTCOME_ANSWERED, OUTCOME_NO_ANSWER, OUTCOME_REFUSED):
+            detail["stream_completed"] = (outcome != OUTCOME_INCOMPLETE) if self._stream_completed is None else self._stream_completed
         elapsed_ms = int((time.monotonic() - self._started) * 1000)
         return contract.CaptureRecord(
             session_id=self._labels["session_id"],
