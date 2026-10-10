@@ -320,19 +320,23 @@ def test_no_overlap_keeps_everything_and_logs_nothing(caplog):
 
 # --- Drift guards (expected sets move per phase; end state in Phase 5) -----------------------
 
-# Phase 5 adds the jarvis-web importers.
-EXPECTED_NORMALIZER_IMPORTERS = {"src/shared/output_channel.py"}
+EXPECTED_NORMALIZER_IMPORTERS = {
+    "src/shared/output_channel.py",
+    "apps/jarvis-web/backend/main.py",
+    "apps/jarvis-web/backend/tts_normalizer.py",
+}
 TTS_SINKS = {
     "src/gateway/wyoming_bridge.py::AthenaWyomingHandler._synthesize",
     "src/gateway/livekit_integration.py::TTSClient.synthesize",
     "apps/jarvis-web/backend/main.py::synthesize_speech",
     "src/orchestrator/automation_agent.py::AutomationAgent._send_notification",
 }
-# Sinks that render today; Phase 5 adds jarvis-web.
+# Every sink renders: this is the end state.
 RENDERING_SINKS: set = {
     "src/orchestrator/automation_agent.py::AutomationAgent._send_notification",
     "src/gateway/wyoming_bridge.py::AthenaWyomingHandler._synthesize",
     "src/gateway/livekit_integration.py::TTSClient.synthesize",
+    "apps/jarvis-web/backend/main.py::synthesize_speech",
 }
 # admin diagnostics (admin/backend/app/routes/voice_tests.py) are out of scope: not an Athena answer.
 MUST_NOT_IMPORT_SEAM = [
@@ -395,7 +399,11 @@ def test_files_the_scans_skip_are_the_known_unparseable_ones_and_name_nothing_gu
 def test_normalizer_importers_are_exactly_the_expected_set():
     importers = {
         _relative(p) for p in _python_files()
-        if p.name != "tts_normalizer.py" and _imports_name(ast.parse(p.read_text()), "normalize_for_tts")
+        if _relative(p) != "src/shared/tts_normalizer.py"
+        and (
+            _imports_name(ast.parse(p.read_text()), "normalize_for_tts")
+            or _imports_module(ast.parse(p.read_text()), "tts_normalizer")
+        )
     }
     assert importers == EXPECTED_NORMALIZER_IMPORTERS
 
@@ -430,8 +438,9 @@ def _is_sink(function):
 
 
 def _calls_a_renderer(function):
+    """A renderer is called, or handed to a thread (``asyncio.to_thread(normalize_for_tts, ...)``)."""
     return any(
-        isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", None)) in {"render_for_channel", "render_sink_text", "normalize_for_tts"}
+        isinstance(n, ast.Name) and n.id in {"render_for_channel", "render_sink_text", "normalize_for_tts"}
         for n in ast.walk(function)
     )
 

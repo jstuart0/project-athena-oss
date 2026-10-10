@@ -103,7 +103,7 @@ jobs:
       - name: Run the behaviour tests
         shell: bash
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests/unit/test_jarvis_web_speaker_name.py tests/unit/test_jarvis_web_addressee_matrix.py tests/unit/test_jarvis_web_edge_mode.py tests/unit/test_jarvis_web_caller_classes.py tests/unit/test_jarvis_web_caller_mode.py tests/unit/test_jarvis_web_relay.py tests/unit/test_edge_template_contract.py tests/unit/test_reviewed_route_callers_wire.py tests/unit/test_jarvis_web_service_key_header.py
+          python3 -m pytest -q -p no:cacheprovider tests/unit/test_jarvis_web_speaker_name.py tests/unit/test_jarvis_web_addressee_matrix.py tests/unit/test_jarvis_web_edge_mode.py tests/unit/test_jarvis_web_caller_classes.py tests/unit/test_jarvis_web_caller_mode.py tests/unit/test_jarvis_web_relay.py tests/unit/test_edge_template_contract.py tests/unit/test_reviewed_route_callers_wire.py tests/unit/test_jarvis_web_service_key_header.py tests/unit/test_jarvis_web_tts_normalization.py
 
   sports-behaviour:
     name: Sports RAG date-window test

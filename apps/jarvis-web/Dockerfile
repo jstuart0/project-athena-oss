@@ -69,6 +69,8 @@ COPY src/shared/admin_url.py /app/backend/admin_url.py
 COPY src/shared/client_throttle.py /app/backend/client_throttle.py
 # Shared refusal log for admin-backend calls; overwrites the local-dev shim.
 COPY src/shared/service_key.py /app/backend/service_key.py
+# Shared speech normalizer for /api/voice/synthesize; overwrites the local-dev shim.
+COPY src/shared/tts_normalizer.py /app/backend/tts_normalizer.py
 COPY apps/jarvis-web/frontend/ /app/frontend/
 
 # Set working directory to backend
