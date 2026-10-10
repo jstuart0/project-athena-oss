@@ -152,6 +152,8 @@ JWT_SECRET=jwtsecret...
 | `ATHENA_DB_USER` | `athena` | Database user |
 | `ATHENA_DB_PASSWORD` | *required* | Database password |
 
+`ATHENA_DB_*` and `DATABASE_URL` below describe the same database for most installs. **Conversation capture does not need `ATHENA_DB_*`**: the orchestrator and admin-backend both use `DATABASE_URL` (see [Conversation capture](#conversation-capture)); `ATHENA_DB_*` is only a fallback when `DATABASE_URL` is empty.
+
 **Full Connection String (alternative):**
 ```bash
 DATABASE_URL=postgresql://athena:password@localhost:5432/athena
@@ -802,7 +804,7 @@ stored value (the legacy `chat`) is never rendered; the admin page shows it as
   owner's history, and the owner loses continuity for that turn. Owner turns are
   still recorded by conversation analytics, where admins can view them; the
   audience controls what the assistant says to whom, not what administrators can
-  see. Operators with write access can read and retype Owner-only entries, but
+  see. What administrators can read is described in [Conversation capture](#conversation-capture). Operators with write access can read and retype Owner-only entries, but
   moving one to another audience or deleting one needs the owner role (403
   `insufficient_role`); every write is audited by id, audience and field name.
 - **Household and guest conversations never cross.** A stay starting or ending
@@ -2148,6 +2150,75 @@ worked Denver example, including a feed with an optional `bounds` box.
 - **`bounds` is exclusive.** A GTFS feed's optional `bounds` box (`min_lat`/`max_lat`/`min_lon`/`max_lon`) filters stops with a strict `<` comparison on every edge — a stop exactly on a boundary value is excluded, not included.
 - **`allow_private` residual.** Both feed and event-source fetches go through the shared SSRF guard (`shared.url_safety.safe_get`) with, by default, no private hosts allowed on any hop. Setting `allow_private: true` on one feed/source exempts only that entry's own hostname — on every hop, not just the first. That means the named host resolving to a different private address later (DNS rebinding) or redirecting to itself at a private address are both accepted as operator trust for that one host; a redirect to any *other* private host is still blocked. This is stricter than the CONTRIBUTING.md Class 3 exemption, deliberately — these fetch third-party content, and a hijacked upstream redirect shouldn't reach cluster-internal addresses.
 - **The maintainer-leak CI gate has documented non-goals** — it deliberately doesn't catch a team/place name that doesn't contain the configured home city, a bare latitude with no longitude, or a Linux `/home/<user>` path (only `/Users/…` is ruled). Run `python3 scripts/check-maintainer-leaks.py --help` for the full list before assuming an example value is automatically safe.
+
+---
+
+## Conversation capture
+
+With **Analytics Mode** on (Settings → Privacy), Athena stores what is said to it and its answers in this install's own database, so you can review and tune it on the Conversations page. Nothing is sent anywhere else, and telemetry never includes any of it.
+
+### What is stored
+
+Every answered turn on `/query`, `/query/stream`, `/query/stream/v2` and `/v1/chat/completions` (so Home Assistant, Wyoming, LiveKit, Jarvis web, SMS and the website chat are all covered) is stored from anyone who talks to the assistant, including guests and website visitors.
+
+| Level | What |
+|---|---|
+| Always (Analytics Mode on) | the question and the answer, the route and channel (spoken or text), who was talking (owner, guest, household or unverified, website visitor), the outcome (answered, no answer, error, cut off, refused, withheld), room, the server's mode, intent, confidence, and the response time |
+| With **Debug detail** also on | the model, tools used, token counts, validation result, node timings, complexity, an error class, and a small fixed set of flags (cache hit, the caller trust tier, whether the owner was proven, and similar) |
+
+No guest id, guest or speaker name, device id or fingerprint is stored. A guest may say their own name in a conversation, so captured text can contain names; it is visible to owners only.
+
+Owner and guest turns are always in separate conversations: a conversation never takes a turn from a different class of caller. SMS session ids are an HMAC of the phone number, shown truncated to their first 12 characters.
+
+### PIN protection and redaction
+
+- An owner-PIN utterance is never stored as text. Each one leaves a single marker row (withheld, no content), and the next two turns of that session are withheld as well.
+- A query that looks like a PIN or code is withheld whole: the words pin, passcode, code or password next to a number, a run of 6 or more digits, or spoken digits ("one two three four five six"; "to", "for" and similar count only next to another spoken digit).
+- In everything else that is stored, any run of 4 or more digits (years, addresses, amounts included) is replaced by `[number]`. That is deliberate; it costs some tuning detail and keeps PINs and codes out of storage.
+- The earlier messages of a `/v1/chat/completions` request are never stored, only the final user message.
+
+### Who can read it
+
+The text (questions, answers, error text and debug strings) needs the owner-only `view_conversation_text` permission. Operators see the metadata (counts, labels, timings) with "Text hidden: owner only". Every response that carries text writes one `conversation_text_viewed` audit entry: who, which page or filter, how many rows, never the text. Shortening retention and deleting conversations need the owner role.
+
+A request that fails before the turn is understood (the caller can't be identified, the session can't be created, or `/v1/chat/completions` has no user message) is not captured.
+
+### Retention and purge
+
+Conversations are kept for **30 days** by default (1 to 3650; there is no "forever"). Set it under Settings → Privacy. The stored value is read strictly: if it is missing or invalid nothing is deleted and the Conversations banner says so.
+
+- **Automatic**: admin-backend deletes expired turns every 6 hours (first run 5 minutes after it starts, skipped in `DEV_MODE`), whether or not Analytics Mode is on. Expired data is deleted even after capture is turned off.
+- **Manual** (owner): "Delete conversations older than N days now", or "Delete all conversations…" with a typed confirmation. Both run under the lease `conversation_capture.purge.lock`, so replicas never purge at once, and each purge is audited (started, finished, failed or interrupted, with counts only).
+
+Turning Analytics Mode off stops capture at once and keeps what is stored until it expires or is purged. Turning it on takes effect within about 30 seconds.
+
+### Which database
+
+The orchestrator writes to, and admin-backend reads from, the database named by `DATABASE_URL` (the one `alembic upgrade head` runs against). `ATHENA_DB_*` is used only when `DATABASE_URL` is empty. If both are set and point at different databases, both services log `conversations_db_legacy_vars_ignored` and use `DATABASE_URL`.
+
+**Upgrading:** conversations captured earlier in a database that `ATHENA_DB_*` pointed at are not migrated. Check that `ATHENA_DB_*` and `DATABASE_URL` name the same database before upgrading (print only the host and database name); if they differ, decide whether to copy the old rows or let them go. Run `alembic upgrade head` on admin-backend (revision `064`) before the orchestrator restarts; an orchestrator that runs first drops its turns (counted, never affecting a response) until the columns exist.
+
+### Status on the Conversations page
+
+| Banner | Meaning |
+|---|---|
+| Capture is off | Analytics Mode is off; stored rows remain until they expire |
+| no orchestrator has reported in | on, but no orchestrator has written a status: check its `DATABASE_URL` |
+| hasn't reported for a few minutes | on, but the last report is older than 3 minutes |
+| failing to write conversations | on, and the latest error is newer than the latest success |
+| on and working | on, and every reporting replica is healthy |
+
+Debug detail does not switch itself off: the banner shows "Debug detail ON since <date>" for as long as it is on.
+
+### Settings
+
+| Setting | Where | Default |
+|---|---|---|
+| Analytics Mode (`analytics_mode_enabled`) | Settings → Privacy | off |
+| Debug detail (`conversation_debug_mode_enabled`) | Settings → Privacy (needs Analytics Mode) | off |
+| Keep conversations for (`conversation_retention_days`) | Settings → Privacy | 30 days |
+
+`ATHENA_DEBUG_MODE` no longer captures conversations; it only controls log-file verbosity.
 
 ---
 
