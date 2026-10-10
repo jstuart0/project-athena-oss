@@ -1410,6 +1410,44 @@ def sequence_refusal_message(decision: HAWriteDecision, scope: "PermissionScope"
 # PermissionEnforcingHAClient (D1, D20)
 # ---------------------------------------------------------------------------
 
+def _record_denial(
+    scope: PermissionScope, domain: str, service: str, targets: Iterable[str], reason: str
+) -> None:
+    targets = tuple(targets)
+    scope.denials.append(HADenial(domain=domain, service=service, targets=targets, reason=reason))
+    logger.warning(
+        "ha_write_denied",
+        domain=domain,
+        service=service,
+        targets=list(targets),
+        scope_mode=scope.mode,
+        permissions_mode=scope.permissions.get("mode"),
+        reason=reason,
+        request_id=scope.request_id,
+        session_id=scope.session_id,
+    )
+    ha_write_denied_total.labels(domain=domain, scope_mode=scope.mode).inc()
+
+
+def record_precheck_denial(
+    scope: Optional[PermissionScope],
+    domain: str,
+    service: str,
+    targets: Iterable[str],
+    reason: str = "entity_or_domain_denied",
+) -> None:
+    """Record a denial a caller found before dispatch, without halting the scope.
+
+    Same record, log line and ``ha_write_denied_total`` increment as the
+    guard's own denial, but the scope stays open and nothing is raised: the
+    caller drops the denied targets and still writes the permitted ones, which
+    a halted scope would refuse. A ``None`` scope is a no-op.
+    """
+    if scope is None:
+        return
+    _record_denial(scope, domain, service, targets, reason)
+
+
 class PermissionEnforcingHAClient:
     """Wraps a HomeAssistantClient (or any compatible object) and
     authorizes every write against the current request's PermissionScope
@@ -1463,20 +1501,8 @@ class PermissionEnforcingHAClient:
         return scope
 
     def _deny(self, scope: PermissionScope, domain: str, service: str, targets: Tuple[str, ...], reason: str) -> None:
-        scope.denials.append(HADenial(domain=domain, service=service, targets=tuple(targets), reason=reason))
         scope.halted = True
-        logger.warning(
-            "ha_write_denied",
-            domain=domain,
-            service=service,
-            targets=list(targets),
-            scope_mode=scope.mode,
-            permissions_mode=scope.permissions.get("mode"),
-            reason=reason,
-            request_id=scope.request_id,
-            session_id=scope.session_id,
-        )
-        ha_write_denied_total.labels(domain=domain, scope_mode=scope.mode).inc()
+        _record_denial(scope, domain, service, targets, reason)
         raise HAWritePermissionDenied(f"{domain}.{service} denied ({reason})")
 
     async def call_service(

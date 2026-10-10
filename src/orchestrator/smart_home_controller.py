@@ -6,8 +6,9 @@ import asyncio
 import contextlib
 import json
 import random
-from typing import Dict, List, Optional, Tuple
-from .ha_entity_manager import HAEntityManager
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
+from .ha_entity_manager import HAEntityManager, _tokens, cover_light_targets, expand_light_leaves
 from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
@@ -143,12 +144,17 @@ _light_groups_warned = False
 def _get_light_groups() -> Dict[str, str]:
     """room -> light-group entity ID, from HA_LIGHT_GROUPS (DC17 item 1).
 
-    Used only by the scene-activation-failed fallback below: dim/turn on
-    a SPECIFIC room's lights when the requested scene/script doesn't
-    exist. Empty/unset means a room with no configured group gets no
-    fallback at all -- turning on "all" lights house-wide when one room's
-    group isn't configured is a house-wide regression, not a safe
-    default."""
+    Keys are normalized once here (case, spaces and underscores are
+    equivalent: ``"Living Room"`` -> ``"living_room"``), so every reader
+    looks a room up with its ``"_".join(_tokens(room))`` form.
+
+    The owner's authoritative group for a room: room light commands resolve
+    through it first (``_resolve_room_lights``), and the scene-activation-
+    failed fallback below uses it to dim/turn on a SPECIFIC room's lights
+    when the requested scene/script doesn't exist. Empty/unset means a room
+    with no configured group gets no scene fallback at all -- turning on
+    "all" lights house-wide when one room's group isn't configured is a
+    house-wide regression, not a safe default."""
     global _light_groups_cache, _light_groups_warned
     if _light_groups_cache is not None:
         return _light_groups_cache
@@ -159,7 +165,7 @@ def _get_light_groups() -> Dict[str, str]:
     raw = get_config().ha_light_groups
     if not raw:
         if not _light_groups_warned:
-            logger.info("ha_light_groups_unset_no_scene_fallback_configured")
+            logger.info("ha_light_groups_unset")
             _light_groups_warned = True
         _light_groups_cache = {}
         return _light_groups_cache
@@ -168,7 +174,7 @@ def _get_light_groups() -> Dict[str, str]:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
             raise ValueError("HA_LIGHT_GROUPS must be a JSON object")
-        _light_groups_cache = {str(k).lower(): str(v) for k, v in parsed.items()}
+        _light_groups_cache = {"_".join(_tokens(str(k))): str(v) for k, v in parsed.items()}
     except Exception as e:
         # structlog's logger accepts arbitrary kwargs (error=...); the
         # stdlib logging.Logger this used to be does not -- passing one
@@ -177,6 +183,24 @@ def _get_light_groups() -> Dict[str, str]:
         logger.warning("ha_light_groups_invalid_json", error=str(e))
         _light_groups_cache = {}
     return _light_groups_cache
+
+
+@dataclass(frozen=True)
+class LightTargets:
+    """What a room light command writes and what its fan-out gate counts.
+
+    ``write_ids`` are the entity ids to write, ``gate_ids`` the physical
+    lights beneath them. ``denied_all`` means permissions emptied a non-empty
+    request; ``denied_any`` that something was dropped, named in ``denied_ids``.
+    Nothing is recorded on the scope until the caller calls
+    ``_record_light_denials``: a fan-out confirmation prompt writes nothing and
+    must not be replaced by a partial refusal.
+    """
+    write_ids: Tuple[str, ...]
+    gate_ids: Tuple[str, ...]
+    denied_any: bool
+    denied_all: bool
+    denied_ids: Tuple[str, ...] = ()
 
 
 class SmartHomeController:
@@ -2094,6 +2118,103 @@ Return ONLY valid JSON."""
                 room, action, target_scope, parameters, intent, ha_client, original_query
             ))
 
+    async def _resolve_room_lights(self, room: str) -> List[Dict]:
+        """A room's light entities: the owner's HA_LIGHT_GROUPS entry first,
+        else the entity manager's name resolution. Every match carries the
+        manager's five keys."""
+        import structlog
+        logger = structlog.get_logger(__name__)
+
+        key = "_".join(_tokens(room))
+        entity_id = _get_light_groups().get(key) if key else None
+        if entity_id:
+            entity = (await self.entity_manager.get_entities()).get(entity_id)
+            if entity is not None:
+                attrs = entity.get('attributes') or {}
+                raw_members = attrs.get('entity_id')
+                members = list(raw_members) if isinstance(raw_members, list) else []
+                logger.info("room_lights_resolved", source="configured", targets=1)
+                return [{
+                    'entity_id': entity_id,
+                    'friendly_name': attrs.get('friendly_name', entity_id),
+                    'members': members,
+                    'state': entity.get('state'),
+                    'type': 'group' if members else 'individual',
+                }]
+            logger.warning("ha_light_groups_entity_missing")
+        return await self.entity_manager.find_lights_by_room(room)
+
+    async def _finalize_light_targets(
+        self,
+        matches: Sequence[Dict],
+        *,
+        ids: Optional[Sequence[str]] = None,
+        per_light: bool,
+    ) -> LightTargets:
+        """The one step between room resolution and the fan-out gate.
+
+        Drops what the request's permissions deny (degrading a group that
+        hides a denied light to its permitted lights), covers what is left so
+        no physical light is written twice, and reports the lights beneath it
+        for the gate to count.
+        """
+        import structlog
+        from orchestrator.mode_permission import check_entity_permission, current_ha_scope
+        logger = structlog.get_logger(__name__)
+
+        entities = await self.entity_manager.get_entities()
+        extra_members = {m['entity_id']: m['members'] for m in matches if m.get('members')}
+        requested = list(dict.fromkeys(
+            ids if ids is not None else [m['entity_id'] for m in matches]
+        ))
+        scope = current_ha_scope()
+
+        targets: List[str] = []
+        denied: set = set()
+        degraded = 0
+        leaves = expand_light_leaves(requested, entities, extra_members)
+        for target in requested:
+            if scope is None:
+                targets.append(target)
+                continue
+            if not check_entity_permission(target, scope.permissions):
+                denied.add(target)
+                continue
+            denied_leaves = {
+                leaf for leaf in leaves[target]
+                if not check_entity_permission(leaf, scope.permissions)
+            }
+            if denied_leaves:
+                degraded += 1
+                denied |= denied_leaves
+                targets.extend(sorted(leaves[target] - denied_leaves))
+            else:
+                targets.append(target)
+
+        covered = cover_light_targets(targets, entities, (), extra_members)
+        covered_leaves = expand_light_leaves(covered, entities, extra_members)
+        gate_ids = tuple(sorted({leaf for c in covered for leaf in covered_leaves[c]}))
+        write_ids = gate_ids if per_light else tuple(covered)
+        denied_all = bool(requested) and not write_ids
+        logger.info(
+            "light_targets_finalized",
+            targets=len(requested),
+            leaves=len(gate_ids),
+            degraded=degraded,
+            denied_all=denied_all,
+        )
+        return LightTargets(write_ids, gate_ids, bool(denied), denied_all, tuple(sorted(denied)))
+
+    @staticmethod
+    def _record_light_denials(lt: LightTargets, service: str) -> None:
+        """Record what _finalize_light_targets dropped, once the command is
+        going ahead (writes follow) or is refused outright."""
+        from orchestrator.mode_permission import current_ha_scope, record_precheck_denial
+        if lt.denied_ids:
+            record_precheck_denial(
+                current_ha_scope(), "light", service, lt.denied_ids, "entity_or_domain_denied"
+            )
+
     async def _dispatch_light_or_room_command(
         self, room: Optional[str], action: str, target_scope: str, parameters: Dict,
         intent: Dict, ha_client, original_query: str = None,
@@ -2134,7 +2255,7 @@ Return ONLY valid JSON."""
             )
 
         # Find lights for the room
-        light_matches = await self.entity_manager.find_lights_by_room(room)
+        light_matches = await self._resolve_room_lights(room)
 
         if not light_matches:
             return f"I couldn't find any lights for {room}."
@@ -2179,16 +2300,29 @@ Return ONLY valid JSON."""
                 # Work with the group
                 target_lights = [light_group['entity_id']]
 
+        from . import write_fanout
+        from orchestrator.mode_permission import current_ha_scope, permission_refusal_message
+        _fanout_service = "turn_off" if action == "turn_off" else "turn_on"
+        lt = await self._finalize_light_targets(
+            light_matches,
+            ids=target_lights,
+            per_light=(action == "set_color" or target_scope in ("all_individual", "individual_lights")),
+        )
+        if lt.denied_all:
+            self._record_light_denials(lt, _fanout_service)
+            return permission_refusal_message(("light",), current_ha_scope())
+        target_lights = list(lt.write_ids)
+
         # ATHENA-128 4.3: gate before any task list is built. Every branch
         # below (turn_on/turn_off/set_color, all sub-branches) writes the
-        # same finalized target_lights set.
-        from . import write_fanout
-        _fanout_service = "turn_off" if action == "turn_off" else "turn_on"
+        # same finalized target_lights set; the gate counts the lights
+        # beneath it.
         _fanout_prompt = write_fanout.gate(
-            "light", _fanout_service, tuple(target_lights), original_query, room=room,
+            "light", _fanout_service, lt.gate_ids, original_query, room=room,
         )
         if _fanout_prompt:
             return _fanout_prompt
+        self._record_light_denials(lt, _fanout_service)
 
         # Execute action based on type
         # Use brief responses suitable for voice output
@@ -3859,25 +3993,41 @@ Do NOT mention rooms that have no current or recent motion."""
             lights_on = []
             room_lower = (room or '').lower()
 
-            for entity_id, state_data in lights.items():
-                if state_data.get('state') == 'on':
-                    friendly_name = state_data.get('attributes', {}).get('friendly_name', entity_id.split('.')[-1].replace('_', ' '))
-                    entity_lower = entity_id.lower()
-                    friendly_lower = friendly_name.lower()
+            def _friendly(entity_id: str, state_data: Dict) -> str:
+                return state_data.get('attributes', {}).get(
+                    'friendly_name', entity_id.split('.')[-1].replace('_', ' '))
 
-                    # If room specified, filter by room
-                    if room:
-                        # Room matching - check both entity_id and friendly_name
-                        room_variations = [room_lower]
-                        if room_lower == 'upstairs':
-                            room_variations.extend(['second floor', '2nd floor', 'alpha', 'beta', 'master'])
-                        elif room_lower == 'downstairs':
-                            room_variations.extend(['first floor', '1st floor', 'living', 'kitchen', 'dining'])
+            if not room:
+                lights_on = [
+                    _friendly(entity_id, state_data)
+                    for entity_id, state_data in lights.items()
+                    if state_data.get('state') == 'on'
+                ]
+            else:
+                room_variations = [room]
+                if room_lower == 'upstairs':
+                    room_variations.extend(['second floor', '2nd floor', 'alpha', 'beta', 'master'])
+                elif room_lower == 'downstairs':
+                    room_variations.extend(['first floor', '1st floor', 'living', 'kitchen', 'dining'])
 
-                        if any(r in entity_lower or r in friendly_lower for r in room_variations):
-                            lights_on.append(friendly_name)
-                    else:
-                        lights_on.append(friendly_name)
+                # Same tiers as a write: the owner's configured group, else
+                # name matching. The answer lists the physical lights beneath
+                # the matches, never the groups or ids that are not lights.
+                matches = []
+                for variation in room_variations:
+                    matches.extend(await self._resolve_room_lights(variation))
+                extra_members = {m['entity_id']: m['members'] for m in matches if m.get('members')}
+                match_ids = list(dict.fromkeys(m['entity_id'] for m in matches))
+                leaf_sets = expand_light_leaves(match_ids, all_entities, extra_members)
+                room_leaves = sorted({leaf for leaf_set in leaf_sets.values() for leaf in leaf_set})
+                for leaf in room_leaves:
+                    state_data = all_entities.get(leaf)
+                    if state_data is None or isinstance(
+                        (state_data.get('attributes') or {}).get('entity_id'), list
+                    ):
+                        continue
+                    if state_data.get('state') == 'on':
+                        lights_on.append(_friendly(leaf, state_data))
 
             if not lights_on:
                 if room:
@@ -4590,57 +4740,44 @@ Do NOT mention rooms that have no current or recent motion."""
 
         logger.info(f"Executing multi-room command: action={action}, rooms={rooms}")
 
-        # ATHENA-128 4.3: resolve every room's members first (no task
-        # building yet), gate once, then build all_tasks.
+        # ATHENA-128 4.3: resolve every room first (no task building yet),
+        # finalize all rooms' lights together so a bulb two rooms share is
+        # written once, gate once, then build all_tasks.
+        from . import write_fanout
+        from orchestrator.mode_permission import current_ha_scope, permission_refusal_message
         resolved_rooms = []
         for room_name in rooms:
-            # Find lights for this room
-            light_matches = await self.entity_manager.find_lights_by_room(room_name)
+            light_matches = await self._resolve_room_lights(room_name)
 
             if not light_matches:
                 logger.warning(f"No lights found for room {room_name} in multi-room command")
                 continue
 
-            # Get the primary light group for this room (largest group)
-            light_matches_sorted = sorted(
-                light_matches,
-                key=lambda x: len(x.get('members', [])),
-                reverse=True
-            )
-            light_group = light_matches_sorted[0]
-            members = light_group.get('members', [])
-            group_name = light_group.get('friendly_name', room_name)
+            primary = max(light_matches, key=lambda x: len(x.get('members', [])))
+            resolved_rooms.append((primary.get('friendly_name', room_name), light_matches))
 
-            if not members:
-                # If no members, use the group entity itself
-                members = [light_group.get('entity_id')]
-
-            resolved_rooms.append((group_name, members))
-
-        from . import write_fanout
         _multi_room_service = "turn_off" if action == "turn_off" else "turn_on"
-        _all_members = tuple(m for _, members in resolved_rooms for m in members)
+        lt = await self._finalize_light_targets(
+            [m for _, matches in resolved_rooms for m in matches],
+            per_light=True,
+        )
+        if lt.denied_all:
+            self._record_light_denials(lt, _multi_room_service)
+            return permission_refusal_message(("light",), current_ha_scope())
         _multi_room_prompt = write_fanout.gate(
-            "light", _multi_room_service, _all_members, original_query, scope_hint=("multi_room", rooms),
+            "light", _multi_room_service, lt.gate_ids, original_query, scope_hint=("multi_room", rooms),
         )
         if _multi_room_prompt:
             return _multi_room_prompt
+        self._record_light_denials(lt, _multi_room_service)
 
-        # Collect all lights to control from all rooms
         all_tasks = []
-        all_light_names = []
-        total_count = 0
-
-        for group_name, members in resolved_rooms:
-            # Queue up tasks for this room
-            for light in members:
-                if action == "turn_on":
-                    all_tasks.append(ha_client.call_service("light", "turn_on", {"entity_id": light}))
-                elif action == "turn_off":
-                    all_tasks.append(ha_client.call_service("light", "turn_off", {"entity_id": light}))
-
-            all_light_names.append(group_name)
-            total_count += len(members)
+        all_light_names = [group_name for group_name, _ in resolved_rooms]
+        for light in lt.write_ids:
+            if action == "turn_on":
+                all_tasks.append(ha_client.call_service("light", "turn_on", {"entity_id": light}))
+            elif action == "turn_off":
+                all_tasks.append(ha_client.call_service("light", "turn_off", {"entity_id": light}))
 
         # Execute all tasks in parallel. return_exceptions=True (ATHENA-69
         # Pass H2, xander delta review, Medium): a per-entity guest denial
@@ -4706,96 +4843,88 @@ Do NOT mention rooms that have no current or recent motion."""
         is_christmas = 'christmas' in query_lower or ('red' in query_lower and 'green' in query_lower)
 
         # Step 1: Find lights for all rooms in parallel
-        async def get_room_lights(member):
+        async def get_room_matches(member):
             room_name = member.get('room_name')
             if not room_name:
-                return None
-            light_matches = await self.entity_manager.find_lights_by_room(room_name)
+                return []
+            light_matches = await self._resolve_room_lights(room_name)
             if not light_matches:
                 logger.warning(f"No lights found for room {room_name} in group {group_name}")
-                return None
-            # Sort and get primary group
-            light_matches_sorted = sorted(
-                light_matches,
-                key=lambda x: len(x.get('members', [])),
-                reverse=True
-            )
-            light_group = light_matches_sorted[0]
-            members_lights = light_group.get('members', [])
-            if not members_lights:
-                members_lights = [light_group.get('entity_id')]
-            return members_lights
+            return light_matches
 
-        # Get all room lights in parallel
-        room_lights_results = await asyncio.gather(*[get_room_lights(m) for m in members])
+        room_matches = await asyncio.gather(*[get_room_matches(m) for m in members])
 
-        # ATHENA-128 4.3: gate once, after resolution and before any task
-        # is built.
+        # ATHENA-128 4.3: finalize every room's lights together (a bulb two
+        # rooms share is written once), then gate once, after resolution and
+        # before any task is built.
         from . import write_fanout
+        from orchestrator.mode_permission import current_ha_scope, permission_refusal_message
         _room_group_service = "turn_off" if action == "turn_off" else "turn_on"
-        _room_group_members = tuple(
-            light for members_lights in room_lights_results if members_lights for light in members_lights
+        lt = await self._finalize_light_targets(
+            [m for matches in room_matches for m in matches],
+            per_light=True,
         )
+        if lt.denied_all:
+            self._record_light_denials(lt, _room_group_service)
+            return permission_refusal_message(("light",), current_ha_scope())
         _room_group_prompt = write_fanout.gate(
-            "light", _room_group_service, _room_group_members, original_query,
+            "light", _room_group_service, lt.gate_ids, original_query,
             scope_hint=("room_group", group_name),
         )
         if _room_group_prompt:
             return _room_group_prompt
+        self._record_light_denials(lt, _room_group_service)
 
         # Step 2: Collect all HA tasks
         tasks = []
         light_index = 0  # Global index for color cycling
 
-        for members_lights in room_lights_results:
-            if not members_lights:
-                continue
+        members_lights = list(lt.write_ids)
+        if action == "turn_on":
+            for light in members_lights:
+                tasks.append(ha_client.call_service("light", "turn_on", {"entity_id": light}))
 
-            if action == "turn_on":
+        elif action == "turn_off":
+            for light in members_lights:
+                tasks.append(ha_client.call_service("light", "turn_off", {"entity_id": light}))
+
+        elif action == "set_color":
+            if is_christmas:
+                # Christmas theme: alternating red and green
+                red_hue, red_sat = 0, 100
+                green_hue, green_sat = 120, 100
+
                 for light in members_lights:
-                    tasks.append(ha_client.call_service("light", "turn_on", {"entity_id": light}))
-
-            elif action == "turn_off":
-                for light in members_lights:
-                    tasks.append(ha_client.call_service("light", "turn_off", {"entity_id": light}))
-
-            elif action == "set_color":
-                if is_christmas:
-                    # Christmas theme: alternating red and green
-                    red_hue, red_sat = 0, 100
-                    green_hue, green_sat = 120, 100
-
-                    for light in members_lights:
-                        if light_index % 2 == 0:
-                            tasks.append(ha_client.call_service(
-                                "light", "turn_on",
-                                {"entity_id": light, "hs_color": [red_hue, red_sat], "brightness": 255}
-                            ))
-                        else:
-                            tasks.append(ha_client.call_service(
-                                "light", "turn_on",
-                                {"entity_id": light, "hs_color": [green_hue, green_sat], "brightness": 255}
-                            ))
-                        light_index += 1
-
-                elif hs_colors:
-                    # Use provided colors, cycling through them
-                    for light in members_lights:
-                        color_idx = light_index % len(hs_colors)
-                        hue, sat = hs_colors[color_idx]
+                    if light_index % 2 == 0:
                         tasks.append(ha_client.call_service(
                             "light", "turn_on",
-                            {"entity_id": light, "hs_color": [hue, sat], "brightness": 255}
+                            {"entity_id": light, "hs_color": [red_hue, red_sat], "brightness": 255}
                         ))
-                        light_index += 1
-
-                else:
-                    # Default to white if no colors specified
-                    for light in members_lights:
+                    else:
                         tasks.append(ha_client.call_service(
                             "light", "turn_on",
-                            {"entity_id": light, "brightness": 255}
+                            {"entity_id": light, "hs_color": [green_hue, green_sat], "brightness": 255}
                         ))
+                    light_index += 1
+
+            elif hs_colors:
+                # Use provided colors, cycling through them
+                for light in members_lights:
+                    color_idx = light_index % len(hs_colors)
+                    hue, sat = hs_colors[color_idx]
+                    tasks.append(ha_client.call_service(
+                        "light", "turn_on",
+                        {"entity_id": light, "hs_color": [hue, sat], "brightness": 255}
+                    ))
+                    light_index += 1
+
+            else:
+                # Default to white if no colors specified
+                for light in members_lights:
+                    tasks.append(ha_client.call_service(
+                        "light", "turn_on",
+                        {"entity_id": light, "brightness": 255}
+                    ))
 
         # Execute all HA API calls in parallel. return_exceptions=True
         # (ATHENA-69 Pass H): a per-entity guest denial (HAWritePermissionDenied)
