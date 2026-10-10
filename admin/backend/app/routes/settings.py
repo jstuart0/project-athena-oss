@@ -1065,9 +1065,9 @@ async def get_privacy_settings(
             enabled = setting.value.lower() in ("true", "1", "yes")
 
         description = (
-            "Analytics mode is enabled. All conversations are persisted to the database."
+            "Analytics mode is on. Answered turns are stored in this install's database."
             if enabled
-            else "Analytics mode is disabled. No conversation content is persisted."
+            else "Analytics mode is off. While it is off, no new conversation text is stored; existing conversations stay until they expire or you purge them."
         )
 
         return PrivacySettingsResponse(analytics_mode_enabled=enabled, description=description)
@@ -1076,7 +1076,7 @@ async def get_privacy_settings(
         logger.error("failed_to_get_privacy_settings", error=str(e))
         return PrivacySettingsResponse(
             analytics_mode_enabled=False,
-            description="Analytics mode is disabled (error reading setting)."
+            description="The Analytics Mode setting couldn't be read."
         )
 
 

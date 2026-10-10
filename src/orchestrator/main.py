@@ -6690,7 +6690,7 @@ async def process_query(
                 session_id=session.session_id,
                 interface=request.interface_type or "unknown",
                 metadata={
-                    "query_preview": request.query[:50],
+                    "query_len": len(request.query),
                     "mode": current_mode,
                     "room": request.room
                 }
@@ -7026,7 +7026,7 @@ async def process_query(
                 event_type="query_intent",
                 metadata={
                     "intent": intent_str,
-                    "query": request.query,
+                    "query_len": len(request.query),
                     "confidence": final_state.get("confidence"),
                     "has_rag_service": has_rag_service,
                     "system_mapping": system_mapping,

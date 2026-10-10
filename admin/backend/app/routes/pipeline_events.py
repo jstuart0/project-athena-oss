@@ -294,7 +294,9 @@ async def emit_pipeline_event(
     """
     try:
         from app.routes.websocket import broadcast_to_admin_jarvis
+        from app.utils.conversation_text import strip_conversation_text
 
+        data = strip_conversation_text(data or {})
         event = PipelineEvent(
             event_type=event_type,
             session_id=session_id,

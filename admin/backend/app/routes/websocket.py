@@ -312,8 +312,13 @@ async def broadcast_to_admin_jarvis(event: dict):
     """
     Broadcast an event to all connected Admin Jarvis clients.
 
-    This is called by the event emitter to push events to the UI.
+    This is called by the event emitter to push events to the UI. The live feed
+    carries no conversation text: text keys are stripped from the event's data.
     """
+    from app.utils.conversation_text import strip_conversation_text
+
+    if isinstance(event, dict) and isinstance(event.get("data"), dict):
+        event = {**event, "data": strip_conversation_text(event["data"])}
     await ws_manager.broadcast(event)
 
 

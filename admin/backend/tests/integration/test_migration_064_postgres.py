@@ -199,3 +199,31 @@ def test_readers_and_writers_are_not_blocked_while_the_indexes_build():
         stop.set()
         thread.join()
         db.drop()
+
+
+def test_a_concurrent_index_build_waiting_on_an_old_transaction_times_out_instead_of_hanging(old_shape):
+    """lock_timeout is set inside the autocommit block. CREATE INDEX CONCURRENTLY waits for every
+    older snapshot in the database; with one held open (it touches no lock the ALTERs need) the
+    build fails fast, about 5 s, rather than waiting forever, and succeeds once the snapshot ends."""
+    import time
+
+    from sqlalchemy import exc, text
+
+    db = old_shape
+    blocker = db.engine.connect()
+    blocker.execute(text("BEGIN ISOLATION LEVEL REPEATABLE READ"))
+    blocker.execute(text("SELECT count(*) FROM system_settings"))
+    begun = time.perf_counter()
+    try:
+        with pytest.raises(exc.DBAPIError) as caught:
+            run_migration(db.engine, M064, "upgrade")
+        elapsed = time.perf_counter() - begun
+    finally:
+        blocker.execute(text("ROLLBACK"))
+        blocker.close()
+    assert "lock timeout" in str(caught.value).lower() or "lock_timeout" in str(caught.value).lower()
+    assert elapsed < 20, elapsed
+    run_migration(db.engine, M064, "upgrade")  # an invalid index from the failed build is cleared and rebuilt
+    assert INDEXES <= _indexes(db)
+    assert db.scalar("SELECT bool_and(indisvalid) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+                     "WHERE c.relname IN ('idx_conversations_class_started_m', 'idx_conversations_started_id_m')") is True

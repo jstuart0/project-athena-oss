@@ -2210,6 +2210,20 @@ The orchestrator writes to, and admin-backend reads from, the database named by 
 
 Debug detail does not switch itself off: the banner shows "Debug detail ON since <date>" for as long as it is on.
 
+### The older analytics log carries no text
+
+The `conversation_analytics` table (intent events behind the Dashboard traffic numbers and the Query Analytics page) and the Admin Jarvis live feed carry **no conversation text**: the orchestrator sends the query's length, intent, confidence and timings only, and admin-backend drops any query or answer text an older orchestrator still sends before it stores or broadcasts anything. Query Analytics shows lengths where it used to show the query.
+
+Rows written by earlier versions may still hold the query text in their `metadata` (keys `query`, `query_preview`), whatever Analytics Mode said. They are not deleted and are not shown anywhere. To clear the text and keep the counts, run this against admin-backend's database:
+
+```sql
+UPDATE conversation_analytics
+SET metadata = metadata - 'query' - 'query_preview' - 'query_text'
+WHERE metadata ?| array['query', 'query_preview', 'query_text'];
+```
+
+(`DELETE FROM conversation_analytics;` removes the rows entirely, which resets those dashboard counts.)
+
 ### Settings
 
 | Setting | Where | Default |

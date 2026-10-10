@@ -81,10 +81,17 @@ def upgrade() -> None:
     if _has_table(conn, "conversations"):
         with op.get_context().autocommit_block():
             conn = op.get_bind()
-            _drop_invalid_index(conn, CLASS_INDEX)
-            _drop_invalid_index(conn, KEYSET_INDEX)
-            conn.execute(text(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {CLASS_INDEX} ON conversations (session_class, started_at)"))
-            conn.execute(text(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {KEYSET_INDEX} ON conversations (started_at DESC, id DESC)"))
+            # The transaction-local SET LOCAL above ended with the commit that
+            # starts this block, so the wait for older transactions is bounded
+            # here, per session, and reset afterwards.
+            conn.execute(text("SET lock_timeout = '5s'"))
+            try:
+                _drop_invalid_index(conn, CLASS_INDEX)
+                _drop_invalid_index(conn, KEYSET_INDEX)
+                conn.execute(text(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {CLASS_INDEX} ON conversations (session_class, started_at)"))
+                conn.execute(text(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {KEYSET_INDEX} ON conversations (started_at DESC, id DESC)"))
+            finally:
+                conn.execute(text("RESET lock_timeout"))
 
 
 def downgrade() -> None:

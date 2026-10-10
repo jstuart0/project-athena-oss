@@ -590,6 +590,6 @@ async def emit_response_ready(
     emitter = EventEmitterFactory.get()
     if emitter:
         await emitter.emit(EventType.RESPONSE_READY, session_id, {
-            'response_preview': response_text[:100],
+            'response_len': len(response_text),
             'total_duration_ms': total_duration_ms,
         }, interface)

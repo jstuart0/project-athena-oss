@@ -21,6 +21,7 @@ from ._capture_fakes import InMemoryCaptureStore
 from orchestrator import turn_capture as tc
 from orchestrator.session_keys import id_class
 from shared import conversation_capture as cc
+from shared.knowledge_tiers import KnowledgeAudience
 
 QUERY = "what's the weather in Anytown today"
 RAW = "Winds 25mph, gusts 15 km/h."
@@ -180,14 +181,19 @@ def test_each_route_records_exactly_one_turn_with_server_derived_labels(rt, rout
 
 
 @pytest.mark.parametrize("route", ALL_ROUTES)
-def test_analytics_off_means_zero_records_and_the_debug_env_var_changes_nothing(rt, monkeypatch, route):
-    monkeypatch.setenv("ATHENA_DEBUG_MODE", "true")
-
+def test_analytics_off_means_zero_records(rt, route):
     async def scenario(client):
         assert (await post(client, route)).status_code == 200
 
     store = run(scenario, analytics=False)
     assert store.turns == [] and store.written == []
+
+
+def test_nothing_in_capture_reads_the_debug_env_var():
+    """ATHENA_DEBUG_MODE only means log-file verbosity. Capture is decided by the database flags
+    inside the writer statement; no capture code reads the variable (the drift test pins main.py)."""
+    for path in (h.ORCH_DIR / "main.py", h.ORCH_DIR / "turn_capture.py", h.REPO_ROOT / "src" / "shared" / "conversation_capture.py"):
+        assert "ATHENA_DEBUG_MODE" not in path.read_text(), path.name
 
 
 @pytest.mark.parametrize("route", ALL_ROUTES)
@@ -575,3 +581,47 @@ def test_a_token_streamed_answer_is_recorded_raw(rt, route):
 
     rec = one(run(scenario))
     assert rec.response_text == RAW and rec.outcome == "answered"
+
+
+# ---------------------------------------------------------------------------
+# The legacy analytics log and the live event feed carry no conversation text
+# ---------------------------------------------------------------------------
+
+def test_the_orchestrator_sends_no_query_text_to_the_legacy_analytics_log_or_the_event_feed(rt):
+    logged, emitted = [], []
+
+    async def log_event(session_id, event_type, metadata=None):
+        logged.append((event_type, metadata))
+
+    async def session_start(*args, **kwargs):
+        emitted.append(kwargs.get("metadata"))
+
+    settings = {"enabled": False, "use_context": False, "history_mode": "full", "max_llm_history_messages": 10}
+    fake_config = SimpleNamespace(get_conversation_settings=mock.AsyncMock(return_value=settings), log_analytics_event=log_event)
+    rt.monkeypatch.setattr(h.main, "get_config", mock.AsyncMock(return_value=fake_config))
+    rt.monkeypatch.setattr(h.main, "EVENTS_AVAILABLE", True)
+    rt.monkeypatch.setattr(h.main, "emit_session_start", session_start, raising=False)
+    rt.monkeypatch.setattr(h.main, "emit_session_end", mock.AsyncMock(), raising=False)
+    rt.monkeypatch.setattr(h.main, "emit_response_ready", mock.AsyncMock(), raising=False)
+
+    async def scenario(client):
+        assert (await post(client, "/query", query="a distinctive private question about the garage")).status_code == 200
+        await asyncio.sleep(0.1)  # the analytics log is a fire-and-forget task
+
+    run(scenario)
+    intent_events = [m for t, m in logged if t == "query_intent"]
+    assert intent_events, "the query_intent analytics event is still sent"
+    for metadata in intent_events + emitted:
+        assert "query" not in metadata and "query_preview" not in metadata
+        assert "garage" not in json.dumps(metadata)
+    assert intent_events[0]["query_len"] == len("a distinctive private question about the garage")
+    assert emitted and emitted[0]["query_len"] == intent_events[0]["query_len"]
+
+
+def test_the_response_ready_event_carries_a_length_not_a_preview():
+    import inspect
+
+    from shared import events
+
+    source = inspect.getsource(events.emit_response_ready)
+    assert "response_preview" not in source and "response_len" in source
