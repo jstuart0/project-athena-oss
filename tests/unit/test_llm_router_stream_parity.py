@@ -65,7 +65,8 @@ async def _consume_stream(gen):
 
 
 def _make_router() -> LLMRouter:
-    return LLMRouter(admin_url="http://admin.test")
+    # These tests are about the request payload; metric rows are covered in test_llm_prompt_tokens.py.
+    return LLMRouter(admin_url="http://admin.test", persist_metrics=False)
 
 
 OLLAMA_OPTIONS = {"num_ctx": 8192, "top_k": None}

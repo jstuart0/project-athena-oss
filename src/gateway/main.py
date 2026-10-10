@@ -913,7 +913,8 @@ async def _log_metric_to_db(
     user_id: Optional[str] = None,
     zone: Optional[str] = None,
     intent: Optional[str] = None,
-    source: Optional[str] = None
+    source: Optional[str] = None,
+    prompt_tokens: Optional[int] = None,
 ):
     """
     Log LLM performance metric to admin database (fire-and-forget).
@@ -931,6 +932,7 @@ async def _log_metric_to_db(
         zone: Optional zone/location
         intent: Optional intent classification
         source: Optional source service (gateway, orchestrator, etc.)
+        prompt_tokens: Prompt tokens the backend reported (None when it reported none; 0 stays 0)
 
     Note:
         Failures are logged but don't raise exceptions to avoid
@@ -948,6 +950,7 @@ async def _log_metric_to_db(
             "latency_seconds": latency_seconds,
             "tokens": tokens,
             "tokens_per_second": tokens_per_second,
+            "prompt_tokens": prompt_tokens,
             "request_id": request_id,
             "session_id": session_id,
             "user_id": user_id,
@@ -1396,6 +1399,7 @@ async def route_to_ollama(
         with request_duration.labels(endpoint="ollama").time():
             response_text = ""
             eval_count = 0
+            prompt_eval_count = None
             final_chunk = {}
             async for chunk in ollama_client.chat(
                 model=ollama_model,
@@ -1407,6 +1411,7 @@ async def route_to_ollama(
                 if chunk.get("done"):
                     response_text = chunk.get("message", {}).get("content", "")
                     eval_count = chunk.get("eval_count", 0)
+                    prompt_eval_count = chunk.get("prompt_eval_count")
                     final_chunk = chunk
                     break
 
@@ -1433,7 +1438,8 @@ async def route_to_ollama(
             user_id=user_id,
             zone=device_id,
             intent=None,
-            source="gateway"
+            source="gateway",
+            prompt_tokens=prompt_eval_count if isinstance(prompt_eval_count, int) and not isinstance(prompt_eval_count, bool) else None,
         ))
 
         # Format as OpenAI response
@@ -1547,6 +1553,17 @@ def _orchestrator_openai_payload(
     return payload
 
 
+def _orchestrator_usage(usage: Any) -> Optional[Dict[str, int]]:
+    """The orchestrator's own `usage`, when it sent real integer counts (the
+    orchestrator counts every LLM call of the turn); None means "estimate"."""
+    if not isinstance(usage, dict):
+        return None
+    keys = ("prompt_tokens", "completion_tokens", "total_tokens")
+    if not all(isinstance(usage.get(k), int) and not isinstance(usage.get(k), bool) for k in keys):
+        return None
+    return {k: usage[k] for k in keys}
+
+
 async def route_chat_completion_to_orchestrator(
     request: ChatCompletionRequest, device_id: Optional[str] = None, *, channel: OutputChannel
 ) -> ChatCompletionResponse:
@@ -1602,7 +1619,7 @@ async def route_chat_completion_to_orchestrator(
                     finish_reason="stop"
                 )
             ],
-            usage={
+            usage=_orchestrator_usage(result.get("usage")) or {
                 "prompt_tokens": len(user_message.split()),
                 "completion_tokens": len(content.split()),
                 "total_tokens": len(user_message.split()) + len(content.split())

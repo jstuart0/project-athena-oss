@@ -177,6 +177,7 @@ from orchestrator.fast_path import (
     register_pattern_classifier,
 )
 from shared.fast_path_vocab import AMBIENT_REPLY
+from shared.llm_router import llm_usage_scope, with_llm_usage_scope, with_llm_usage_scope_stream
 from orchestrator.helpers import (
     answer_max_tokens,
     finish_spoken_answer,
@@ -6484,6 +6485,7 @@ class QueryResponse(BaseModel):
 
 @app.post("/query", response_model=QueryResponse, dependencies=[Depends(require_service_caller)])
 @renders_spoken_answer
+@with_llm_usage_scope
 async def process_query(
     request: QueryRequest,
     service_authenticated: bool = Depends(service_authenticated),
@@ -7447,6 +7449,7 @@ async def process_query_stream(
     """
     handler_start = time.perf_counter()
 
+    @with_llm_usage_scope_stream
     async def event_generator():
         sm = _runtime.get_session_manager()
         llm = _runtime.get_llm_router()
@@ -7687,7 +7690,10 @@ async def process_query_stream(
                         prompt=full_prompt,
                         system_prompt=synthesis_system_prompt,
                         temperature=request.temperature or 0.7,
-                        max_tokens=max_tokens
+                        max_tokens=max_tokens,
+                        stage="stream_synthesis",
+                        request_id=request_id,
+                        session_id=session.session_id,
                     ):
                         token = chunk.get("token", "")
                         if token:
@@ -7811,6 +7817,7 @@ async def process_query_stream_v2(
     """
     handler_start = time.perf_counter()
 
+    @with_llm_usage_scope_stream
     async def sentence_event_generator():
         sm = _runtime.get_session_manager()
         llm = _runtime.get_llm_router()
@@ -8609,6 +8616,7 @@ async def chat_completions(request: OpenAIChatRequest):
 
         # If streaming is requested, use SSE format
         if request.stream:
+            @with_llm_usage_scope_stream
             async def openai_stream_generator():
                 # Initialize state and run orchestrator
                 llm = _runtime.get_llm_router()
@@ -8816,7 +8824,10 @@ async def chat_completions(request: OpenAIChatRequest):
                         prompt=full_prompt,
                         system_prompt=synthesis_system_prompt,
                         temperature=state.temperature,
-                        max_tokens=v1_max_tokens
+                        max_tokens=v1_max_tokens,
+                        stage="stream_synthesis",
+                        request_id=state.request_id,
+                        session_id=session.session_id,
                     ):
                         token = chunk.get("token", "")
                         if token:
@@ -8945,7 +8956,10 @@ async def chat_completions(request: OpenAIChatRequest):
             interface_type=interface_type,
         )
 
-        result = await process_query(query_request, service_authenticated=False)
+        # process_query opens its own usage scope; inside this one it reuses it, so
+        # the totals are visible here.
+        with llm_usage_scope() as usage:
+            result = await process_query(query_request, service_authenticated=False)
 
         # Convert to OpenAI format
         response = OpenAIChatResponse(
@@ -8961,9 +8975,9 @@ async def chat_completions(request: OpenAIChatRequest):
                 "finish_reason": "stop"
             }],
             usage={
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens,
             }
         )
 

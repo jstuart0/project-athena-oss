@@ -1,0 +1,16 @@
+{
+  "timestamp": 1700000000.5,
+  "model": "m",
+  "backend": "ollama",
+  "latency_seconds": 1.25,
+  "tokens": 12,
+  "tokens_per_second": 9.6,
+  "prompt_tokens": 321,
+  "request_id": "req-1",
+  "session_id": "sess-1",
+  "user_id": null,
+  "zone": null,
+  "intent": null,
+  "source": "orchestrator",
+  "stage": "synthesize"
+}

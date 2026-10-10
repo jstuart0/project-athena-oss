@@ -181,11 +181,15 @@ async def stream_with_sentence_buffering(
     """
     buffer = SentenceBuffer()
 
+    # Unused module (no caller). It is not an answer path the voice cap or the
+    # prompt-token accounting was wired for; the stage label only keeps its
+    # metric row identifiable if someone starts using it.
     token_stream = llm_router.generate_stream(
         model=model,
         prompt=prompt,
         temperature=temperature,
-        max_tokens=max_tokens
+        max_tokens=max_tokens,
+        stage="sentence_buffer",
     )
 
     sentence_num = 0

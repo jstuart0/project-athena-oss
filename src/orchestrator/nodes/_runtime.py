@@ -355,12 +355,13 @@ async def close_all() -> None:
       - rag_client.close()                 (orchestrator.rag_client)
       - mode_client.aclose()               (httpx.AsyncClient convention)
       - parallel_search_engine.close_all() (orchestrator.search_providers.parallel_search)
+      - llm_router.close()                 (shared.llm_router: drains pending metric
+                                            tasks for up to 2 s, then closes its HTTP client)
 
     Clients in the close_order that have NO close method (silently skipped):
       - ha_client  — HomeAssistantClient has no close(); its underlying
                      httpx.AsyncClient is leaked at shutdown (pre-existing
                      OSS behavior; tracked separately).
-      - llm_router — LLMRouter has no close() method (pre-existing).
     """
     await drain_background()
     close_order = (

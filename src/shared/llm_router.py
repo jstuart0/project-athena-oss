@@ -8,8 +8,12 @@ fallback.
 Open Source Compatible - No vendor lock-in.
 """
 import asyncio
+import contextvars
+import functools
 import httpx
 import time
+from contextlib import aclosing, contextmanager
+from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
 from enum import Enum
 from collections import deque
@@ -23,6 +27,112 @@ from shared.service_key import note_admin_refusal, service_key_headers
 logger = structlog.get_logger()
 
 import re as _re
+
+# How long close() waits for fire-and-forget metric tasks before cancelling them.
+BACKGROUND_DRAIN_TIMEOUT_SECONDS = 2.0
+
+
+# --- per-request token usage ------------------------------------------------------------------
+
+
+@dataclass
+class LLMUsage:
+    """Tokens the LLM calls of one request have used so far. A backend that
+    reports no count adds 0."""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    calls: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
+_USAGE: "contextvars.ContextVar[Optional[LLMUsage]]" = contextvars.ContextVar("llm_usage", default=None)
+
+
+@contextmanager
+def llm_usage_scope():
+    """Accumulate the token usage of every LLM call made inside the block.
+
+    Reuse-if-active: when a scope is already open this yields that same
+    accumulator and changes nothing on exit, so the outermost opener sees every
+    call. The opener that created the accumulator restores the variable on exit
+    only if the active accumulator is still its own; a generator finalized in a
+    foreign context (a cancelled stream) therefore never erases or replaces
+    another request's accumulator. Concurrent requests never share a scope.
+    """
+    existing = _USAGE.get()
+    if existing is not None:
+        yield existing
+        return
+    usage = LLMUsage()
+    token = _USAGE.set(usage)
+    try:
+        yield usage
+    finally:
+        if _USAGE.get() is usage:
+            try:
+                _USAGE.reset(token)
+            except ValueError:
+                # The token belongs to another context: put back what it recorded.
+                _USAGE.set(None if token.old_value is contextvars.Token.MISSING else token.old_value)
+
+
+def current_usage() -> Optional[LLMUsage]:
+    """The open scope's accumulator, or None outside a scope."""
+    return _USAGE.get()
+
+
+def with_llm_usage_scope(handler):
+    """Run an async handler inside `llm_usage_scope()`."""
+    @functools.wraps(handler)
+    async def wrapper(*args, **kwargs):
+        with llm_usage_scope():
+            return await handler(*args, **kwargs)
+
+    return wrapper
+
+
+def with_llm_usage_scope_stream(generator_function):
+    """Run an async generator inside `llm_usage_scope()`, opened when iteration
+    begins (inside the generator's own task), not when the response object is
+    built. The inner generator is closed with this one, so a cancelled stream
+    finalizes cleanly."""
+    @functools.wraps(generator_function)
+    async def wrapper(*args, **kwargs):
+        with llm_usage_scope():
+            async with aclosing(generator_function(*args, **kwargs)) as inner:
+                async for item in inner:
+                    yield item
+
+    return wrapper
+
+
+def _count_or_none(value: Any) -> Optional[int]:
+    """A backend-reported count as an int. A reported 0 stays 0; absent or
+    non-numeric is None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _add_usage(prompt_tokens: Any, completion_tokens: Any) -> None:
+    usage = _USAGE.get()
+    if usage is None:
+        return
+    usage.prompt_tokens += _count_or_none(prompt_tokens) or 0
+    usage.completion_tokens += _count_or_none(completion_tokens) or 0
+    usage.calls += 1
+
+
+def _anthropic_prompt_tokens(usage: Any) -> Optional[int]:
+    """Tokens the model actually processed: input plus cache reads plus cache
+    writes (each missing field counts 0). None when the response has no usage."""
+    if usage is None:
+        return None
+    return sum(
+        _count_or_none(getattr(usage, name, 0)) or 0
+        for name in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    )
 
 _THINK_TAG_PATTERN = _re.compile(r"<think>.*?</think>", _re.DOTALL | _re.IGNORECASE)
 
@@ -255,6 +365,10 @@ class LLMRouter:
         # Performance metrics storage (rolling window)
         self._metrics_window_size = metrics_window_size
         self._metrics: deque = deque(maxlen=metrics_window_size)
+
+        # Fire-and-forget metric/usage tasks, held until done so none is garbage
+        # collected mid-flight; close() drains them (bounded).
+        self._pending_tasks: set = set()
 
         # Model configuration cache (separate from backend config)
         self._model_config_cache: Dict[str, Dict[str, Any]] = {}
@@ -585,7 +699,7 @@ class LLMRouter:
 
             # Track metrics if response was generated
             if response:
-                tokens = response.get("eval_count", 0)
+                tokens = response.get("eval_count") or 0
                 tokens_per_sec = tokens / duration if duration > 0 and tokens > 0 else 0
 
                 metric = {
@@ -595,6 +709,7 @@ class LLMRouter:
                     "latency_seconds": duration,
                     "tokens": tokens,
                     "tokens_per_second": tokens_per_sec,
+                    "prompt_tokens": _count_or_none(response.get("prompt_eval_count")),
                     "request_id": request_id,
                     "session_id": session_id,
                     "user_id": user_id,
@@ -602,11 +717,11 @@ class LLMRouter:
                     "intent": intent
                 }
                 self._metrics.append(metric)
+                _add_usage(response.get("prompt_eval_count"), response.get("eval_count") or response.get("output_tokens"))
 
                 # Persist metric to database asynchronously
-                import asyncio
                 stage = kwargs.get("stage")
-                asyncio.create_task(self._persist_metric(metric, source="orchestrator", stage=stage))
+                self._spawn(self._persist_metric(metric, source="orchestrator", stage=stage))
 
                 logger.info(
                     "llm_request_completed",
@@ -757,7 +872,9 @@ class LLMRouter:
                         "model": model,
                         "content": msg.get("content", ""),
                         "finish_reason": choice.get("finish_reason", "stop"),
-                        "stop_reason": normalize_stop_reason(choice.get("finish_reason", "stop"))
+                        "stop_reason": normalize_stop_reason(choice.get("finish_reason", "stop")),
+                        "prompt_eval_count": _count_or_none((data.get("usage") or {}).get("prompt_tokens")),
+                        "eval_count": _count_or_none((data.get("usage") or {}).get("completion_tokens")),
                     }
             else:
                 raise ValueError(f"Unsupported backend for tool calling: {backend}")
@@ -771,7 +888,7 @@ class LLMRouter:
             if response:
                 # For tool calling, we estimate tokens from the response
                 # Ollama returns eval_count, OpenAI doesn't directly provide this
-                tokens = response.get("eval_count", 0)
+                tokens = response.get("eval_count") or 0
                 if tokens == 0 and "content" in response:
                     # Rough estimate: ~4 chars per token
                     tokens = len(response.get("content", "")) // 4
@@ -784,6 +901,7 @@ class LLMRouter:
                     "latency_seconds": duration,
                     "tokens": tokens,
                     "tokens_per_second": tokens_per_sec,
+                    "prompt_tokens": _count_or_none(response.get("prompt_eval_count")),
                     "request_id": request_id,
                     "session_id": kwargs.get("session_id"),
                     "user_id": kwargs.get("user_id"),
@@ -791,11 +909,11 @@ class LLMRouter:
                     "intent": kwargs.get("intent")
                 }
                 self._metrics.append(metric)
+                _add_usage(response.get("prompt_eval_count"), response.get("eval_count"))
 
                 # Persist metric to database asynchronously
-                import asyncio
                 stage = kwargs.get("stage", "tool_calling")
-                asyncio.create_task(self._persist_metric(metric, source="tool_calling", stage=stage))
+                self._spawn(self._persist_metric(metric, source="tool_calling", stage=stage))
 
             logger.info(
                 "tool_calling_request_completed",
@@ -873,7 +991,9 @@ class LLMRouter:
                 "backend": "openai",
                 "model": model,
                 "finish_reason": choice.finish_reason,
-                "stop_reason": normalize_stop_reason(choice.finish_reason)
+                "stop_reason": normalize_stop_reason(choice.finish_reason),
+                "prompt_eval_count": _count_or_none(getattr(getattr(response, "usage", None), "prompt_tokens", None)),
+                "eval_count": _count_or_none(getattr(getattr(response, "usage", None), "completion_tokens", None)),
             }
 
             # Check if tool calls were made
@@ -966,7 +1086,9 @@ class LLMRouter:
                 "backend": "anthropic",
                 "model": model,
                 "finish_reason": response.stop_reason,
-                "stop_reason": normalize_stop_reason(response.stop_reason)
+                "stop_reason": normalize_stop_reason(response.stop_reason),
+                "prompt_eval_count": _anthropic_prompt_tokens(getattr(response, "usage", None)),
+                "eval_count": _count_or_none(getattr(getattr(response, "usage", None), "output_tokens", None)),
             }
 
             # Check for tool use blocks
@@ -1061,7 +1183,9 @@ class LLMRouter:
                 "backend": "google",
                 "model": model,
                 "finish_reason": _google_finish_reason(response) or "unknown",
-                "stop_reason": normalize_stop_reason(_google_finish_reason(response))
+                "stop_reason": normalize_stop_reason(_google_finish_reason(response)),
+                "prompt_eval_count": _count_or_none(getattr(getattr(response, "usage_metadata", None), "prompt_token_count", None)),
+                "eval_count": _count_or_none(getattr(getattr(response, "usage_metadata", None), "candidates_token_count", None)),
             }
 
             # Check for function calls
@@ -1181,6 +1305,7 @@ class LLMRouter:
                 "done": data.get("done", True),
                 "eval_count": data.get("eval_count", 0),
                 "total_duration": data.get("total_duration", 0),
+                "prompt_eval_count": _count_or_none(data.get("prompt_eval_count")),
                 "stop_reason": normalize_stop_reason(data.get("done_reason"))
             }
 
@@ -1301,6 +1426,7 @@ class LLMRouter:
                 "done": data.get("done", True),
                 "total_duration": data.get("total_duration"),
                 "eval_count": data.get("eval_count"),
+                "prompt_eval_count": _count_or_none(data.get("prompt_eval_count")),
                 "stop_reason": normalize_stop_reason(data.get("done_reason"))
             }
 
@@ -1379,6 +1505,7 @@ class LLMRouter:
                                 "done": True,
                                 "total_duration": data.get("total_duration"),
                                 "eval_count": data.get("eval_count"),
+                                "prompt_eval_count": _count_or_none(data.get("prompt_eval_count")),
                                 "stop_reason": normalize_stop_reason(data.get("done_reason")),
                                 "model": model,
                                 "backend": "ollama"
@@ -1397,10 +1524,104 @@ class LLMRouter:
         max_tokens: int = 2048,
         timeout: Optional[int] = None,
         backend: Optional[BackendType] = None,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        *,
+        stage: Optional[str] = None,
+        request_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ):
         """
-        Generate response with streaming (yields tokens as generated).
+        Generate response with streaming (yields tokens as generated), and record
+        one metric row for the call.
+
+        The row is recorded when the final chunk arrives, or, if the consumer
+        stops early (a client disconnect, a cancellation), from this generator's
+        `finally`. Either way it is exactly one row, written by a task that is
+        not awaited, so a cancelled stream never blocks on it. The token usage
+        also goes to the open `llm_usage_scope`.
+
+        Args are those of `_stream_backend`; `stage`, `request_id` and
+        `session_id` label the metric row.
+        """
+        start_time = time.time()
+        token_chunks = 0
+        final: Dict[str, Any] = {}
+        recorded = False
+        # The backend this call resolved to, filled in before the first token, so
+        # a row written when the consumer stops early still names its backend.
+        resolved: Dict[str, Any] = {}
+
+        def record() -> None:
+            nonlocal recorded
+            if recorded:
+                return
+            recorded = True
+            self._record_stream_metric(
+                model=model, start_time=start_time, token_chunks=token_chunks, final=final,
+                backend=final.get("backend") or resolved.get("backend"),
+                stage=stage, request_id=request_id, session_id=session_id,
+            )
+
+        try:
+            async for chunk in self._stream_backend(
+                model, prompt, temperature, max_tokens, timeout, backend, system_prompt, resolved=resolved
+            ):
+                if chunk.get("token"):
+                    token_chunks += 1
+                if chunk.get("done"):
+                    final = chunk
+                    record()
+                yield chunk
+        finally:
+            record()
+
+    def _record_stream_metric(
+        self,
+        *,
+        model: str,
+        start_time: float,
+        token_chunks: int,
+        final: Dict[str, Any],
+        backend: Optional[str],
+        stage: Optional[str],
+        request_id: Optional[str],
+        session_id: Optional[str],
+    ) -> None:
+        duration = time.time() - start_time
+        tokens = _count_or_none(final.get("eval_count")) or token_chunks
+        metric = {
+            "timestamp": start_time,
+            "model": model,
+            "backend": backend or "unknown",
+            "latency_seconds": duration,
+            "tokens": tokens,
+            "tokens_per_second": tokens / duration if duration > 0 and tokens > 0 else 0,
+            "prompt_tokens": _count_or_none(final.get("prompt_eval_count")),
+            "request_id": request_id,
+            "session_id": session_id,
+            "user_id": None,
+            "zone": None,
+            "intent": None,
+        }
+        self._metrics.append(metric)
+        _add_usage(final.get("prompt_eval_count"), final.get("eval_count") or token_chunks)
+        self._spawn(self._persist_metric(metric, source="orchestrator", stage=stage))
+
+    async def _stream_backend(
+        self,
+        model: str,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        timeout: Optional[int] = None,
+        backend: Optional[BackendType] = None,
+        system_prompt: Optional[str] = None,
+        resolved: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Stream tokens from the configured backend (yields tokens as generated).
+        `resolved`, when given, receives the backend this call routes to before
+        the first token is produced.
 
         This is used for the streaming pipeline to reduce time-to-first-token.
 
@@ -1419,6 +1640,8 @@ class LLMRouter:
         backend_config = await self._get_backend_config(model)
         endpoint_url = backend_config["endpoint_url"]
         backend_type = backend or backend_config["backend_type"]
+        if resolved is not None:
+            resolved["backend"] = backend_type.value if hasattr(backend_type, "value") else str(backend_type)
 
         # Get model configuration (for Ollama options, timeout, etc.)
         model_config = await self._get_model_config(model)
@@ -1501,7 +1724,7 @@ class LLMRouter:
                 "model": model,
                 "backend": "google",
                 "eval_count": result.get("output_tokens", 0),
-                "prompt_eval_count": result.get("input_tokens", 0),
+                "prompt_eval_count": result.get("prompt_eval_count"),
                 "stop_reason": result.get("stop_reason")
             }
 
@@ -1578,6 +1801,7 @@ class LLMRouter:
                     payload[key] = value
 
         mlx_finish_reason = None
+        mlx_usage: Dict[str, Any] = {}
         try:
             async with httpx.AsyncClient(base_url=endpoint_url, timeout=timeout) as client:
                 async with client.stream("POST", "/v1/chat/completions", json=payload) as response:
@@ -1588,11 +1812,14 @@ class LLMRouter:
                         payload_str = line[6:].strip()
                         if payload_str == "[DONE]":
                             yield {"token": "", "done": True, "model": model, "backend": "mlx",
-                                   "stop_reason": normalize_stop_reason(mlx_finish_reason)}
+                                   "stop_reason": normalize_stop_reason(mlx_finish_reason),
+                                   "prompt_eval_count": _count_or_none(mlx_usage.get("prompt_tokens")),
+                                   "eval_count": _count_or_none(mlx_usage.get("completion_tokens"))}
                             return
                         try:
                             chunk = _json.loads(payload_str)
                             mlx_finish_reason = chunk.get("choices", [{}])[0].get("finish_reason") or mlx_finish_reason
+                            mlx_usage = chunk.get("usage") or mlx_usage
                             delta = chunk.get("choices", [{}])[0].get("delta", {})
                             token = delta.get("content", "")
                             if token:
@@ -1675,7 +1902,8 @@ class LLMRouter:
                 "model": model,
                 "done": True,
                 "total_duration": None,  # MLX doesn't provide this
-                "eval_count": data.get("usage", {}).get("completion_tokens"),
+                "eval_count": _count_or_none((data.get("usage") or {}).get("completion_tokens")),
+                "prompt_eval_count": _count_or_none((data.get("usage") or {}).get("prompt_tokens")),
                 "stop_reason": normalize_stop_reason(choice.get("finish_reason"))
             }
 
@@ -1918,8 +2146,7 @@ class LLMRouter:
                 response["latency_ms"] = latency_ms
 
                 # Persist cloud usage to database
-                import asyncio
-                asyncio.create_task(self._track_cloud_usage(
+                self._spawn(self._track_cloud_usage(
                     provider=provider,
                     model=model,
                     input_tokens=input_tokens,
@@ -1991,6 +2218,7 @@ class LLMRouter:
                 "done": True,
                 "input_tokens": usage.prompt_tokens if usage else 0,
                 "output_tokens": usage.completion_tokens if usage else 0,
+                "prompt_eval_count": _count_or_none(usage.prompt_tokens) if usage else None,
                 "finish_reason": choice.finish_reason,
                 "stop_reason": normalize_stop_reason(choice.finish_reason)
             }
@@ -2041,8 +2269,9 @@ class LLMRouter:
                 "backend": "anthropic",
                 "model": model,
                 "done": True,
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
+                "input_tokens": response.usage.input_tokens if response.usage else 0,
+                "output_tokens": response.usage.output_tokens if response.usage else 0,
+                "prompt_eval_count": _anthropic_prompt_tokens(response.usage),
                 "finish_reason": response.stop_reason,
                 "stop_reason": normalize_stop_reason(response.stop_reason)
             }
@@ -2102,6 +2331,7 @@ class LLMRouter:
                 "done": True,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "prompt_eval_count": _count_or_none(usage_metadata.prompt_token_count) if usage_metadata else None,
                 "finish_reason": _google_finish_reason(response) or "unknown",
                 "stop_reason": normalize_stop_reason(_google_finish_reason(response))
             }
@@ -2204,6 +2434,7 @@ class LLMRouter:
         first_token_time = None
         input_tokens = 0
         output_tokens = 0
+        usage_seen = False
         finish_reason = None
 
         try:
@@ -2219,6 +2450,7 @@ class LLMRouter:
             async for chunk in stream:
                 # Check for usage metadata in final chunk
                 if hasattr(chunk, 'usage') and chunk.usage:
+                    usage_seen = True
                     input_tokens = chunk.usage.prompt_tokens or 0
                     output_tokens = chunk.usage.completion_tokens or 0
 
@@ -2264,7 +2496,7 @@ class LLMRouter:
                 "model": model,
                 "backend": "openai",
                 "eval_count": output_tokens,
-                "prompt_eval_count": input_tokens,
+                "prompt_eval_count": input_tokens if usage_seen else None,
                 "stop_reason": normalize_stop_reason(finish_reason),
                 "total_duration": int(duration * 1e9)
             }
@@ -2303,6 +2535,7 @@ class LLMRouter:
         first_token_time = None
         input_tokens = 0
         output_tokens = 0
+        prompt_total = None
         stop_reason = None
 
         try:
@@ -2318,6 +2551,7 @@ class LLMRouter:
                         # Capture input token count from message start
                         if hasattr(event, 'message') and hasattr(event.message, 'usage'):
                             input_tokens = event.message.usage.input_tokens
+                            prompt_total = _anthropic_prompt_tokens(event.message.usage)
 
                     elif event.type == "content_block_delta":
                         if first_token_time is None:
@@ -2365,7 +2599,7 @@ class LLMRouter:
                 "model": model,
                 "backend": "anthropic",
                 "eval_count": output_tokens,
-                "prompt_eval_count": input_tokens,
+                "prompt_eval_count": prompt_total,
                 "stop_reason": normalize_stop_reason(stop_reason),
                 "total_duration": int(duration * 1e9)
             }
@@ -2625,8 +2859,31 @@ class LLMRouter:
             "window_size": self._metrics_window_size
         }
 
+    def _spawn(self, coro) -> "asyncio.Task":
+        """Run a fire-and-forget coroutine (metric persistence). The task is held
+        in `_pending_tasks` until it finishes, so it can't be garbage collected
+        mid-flight, and close() drains it."""
+        task = asyncio.ensure_future(coro)
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+        return task
+
+    async def _drain_pending(self) -> None:
+        """Wait up to BACKGROUND_DRAIN_TIMEOUT_SECONDS for pending tasks, then
+        cancel the rest and log how many were abandoned."""
+        pending = set(self._pending_tasks)
+        if not pending:
+            return
+        _, unfinished = await asyncio.wait(pending, timeout=BACKGROUND_DRAIN_TIMEOUT_SECONDS)
+        if unfinished:
+            for task in unfinished:
+                task.cancel()
+            await asyncio.gather(*unfinished, return_exceptions=True)
+            logger.warning("background_tasks_abandoned", count=len(unfinished))
+
     async def close(self):
-        """Close HTTP client."""
+        """Drain pending metric tasks (bounded), then close the HTTP client."""
+        await self._drain_pending()
         await self.client.aclose()
 
 

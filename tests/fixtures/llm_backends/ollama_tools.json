@@ -1,0 +1,11 @@
+{
+  "message": {
+    "role": "assistant",
+    "content": "Hello there."
+  },
+  "done": true,
+  "done_reason": "stop",
+  "eval_count": 12,
+  "prompt_eval_count": 321,
+  "total_duration": 1000
+}

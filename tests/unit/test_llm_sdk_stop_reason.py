@@ -26,7 +26,7 @@ CAP = 200
 
 
 def _router(monkeypatch, backend):
-    router = object.__new__(llm_router.LLMRouter)
+    router = llm_router.LLMRouter(admin_url="http://admin.test", persist_metrics=False)
     monkeypatch.setattr(router, "_get_backend_config", mock.AsyncMock(
         return_value={"endpoint_url": None, "backend_type": backend, "model_id": "m"}))
     monkeypatch.setattr(router, "_get_model_config", mock.AsyncMock(return_value={}))
