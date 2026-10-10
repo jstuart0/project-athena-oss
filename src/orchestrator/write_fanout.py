@@ -8,8 +8,8 @@ and session can carry a follow-up, D14/D16) or an exact rewording
 (everyone else) instead of executing.
 
 R2-C3: imports `utterance_kind`, `metrics`, `shared.config`,
-`mode_permission` (`noun_for_domains`, `current_ha_scope`) and the context
-detector's yes/no vocabulary -- never `orchestrator.main`.
+`mode_permission` (`noun_for_domains`, `current_ha_scope`) and the shared
+yes/no vocabulary (`shared.fast_path_vocab`) -- never `orchestrator.main`.
 """
 from __future__ import annotations
 
@@ -19,12 +19,10 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence, Tuple
 
 from shared.config import get_config
-from orchestrator.context.detector import (
-    AFFIRMATION_WORDS,
-    GRATITUDE_WORDS,
-    NEGATION_WORDS,
-    POLITE_SUFFIX_WORDS,
-    PROCEED_PHRASES,
+from shared.fast_path_vocab import (  # noqa: F401  (re-exported: the vocabulary's old home)
+    BARE_AFFIRMATION_RE,
+    BARE_NEGATION_RE,
+    normalize_reply,
 )
 from orchestrator.metrics import ha_write_fanout_confirm_total
 from orchestrator.mode_permission import current_ha_scope, noun_for_domains
@@ -48,30 +46,10 @@ class FanoutBlock:
 _SCOPE_CUE_RE = re.compile(r"\b(?:all|every|everything|whole|entire|house)\b", re.IGNORECASE)
 
 
-def _alternation(words: Iterable[str]) -> str:
-    return "|".join(re.escape(w) for w in words)
+# 5.3 rules 4/5, matched against normalize_reply() output; the patterns and
+# the normalization live in shared.fast_path_vocab, which the deterministic
+# fast path must also exclude.
 
-
-# 5.3 rules 4/5, matched against normalize_reply() output, built from the
-# context detector's yes/no vocabulary. Anything with more content than
-# these ("yes, just the desk lamp") is a new utterance, never a
-# confirmation.
-BARE_AFFIRMATION_RE = re.compile(
-    rf"^(?:{_alternation(AFFIRMATION_WORDS)})"
-    rf"(?:\s+(?:{_alternation(POLITE_SUFFIX_WORDS + PROCEED_PHRASES)}))?$"
-    rf"|^(?:{_alternation(PROCEED_PHRASES)})$"
-)
-BARE_NEGATION_RE = re.compile(
-    rf"^(?:{_alternation(NEGATION_WORDS)})(?:\s+(?:{_alternation(GRATITUDE_WORDS)}))?$"
-)
-
-
-def normalize_reply(query: Optional[str]) -> str:
-    """5.3 rule 0: lowercase, strip trailing punctuation, remove commas,
-    collapse whitespace -- STT emits "Yes, please." for a bare yes."""
-    q = (query or "").strip().lower()
-    q = q.rstrip(".!?").replace(",", "")  # rstrip: linear on any input
-    return re.sub(r"\s+", " ", q).strip()
 
 _VERB_FOR_SERVICE = {
     "create": "create",

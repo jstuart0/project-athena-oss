@@ -28,6 +28,7 @@ from starlette.responses import Response
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from shared.fast_path_vocab import is_fast_path_candidate
 from shared.logging_config import configure_logging, payload_keys
 from shared.config import get_config as _get_athena_config  # local async get_config() route below shadows this name
 from shared.ollama_client import OllamaClient
@@ -95,6 +96,11 @@ request_duration = Histogram(
     'gateway_request_duration_seconds',
     'Request duration in seconds',
     ['endpoint']
+)
+
+prerouting_skipped_total = Counter(
+    'gateway_prerouting_skipped_total',
+    'ha_intent_prerouting skipped for a deterministic fast-path candidate'
 )
 
 # Voice pipeline timing metrics (for Prometheus/Grafana monitoring)
@@ -1724,9 +1730,9 @@ async def chat_completions(
         room = await _detect_room_from_active_satellite("unknown")
         logger.info(f"Detected room from satellite: {room}")
 
-        # Route based on query type (LLM or keyword-based, controlled by feature flag)
-        # Check routing BEFORE streaming decision
-        route_to_orch = await is_athena_query(request.messages)
+        # Log-only routing hint: every request goes to the orchestrator, so the
+        # keyword match is all this needs (no LLM call ahead of the orchestrator).
+        route_to_orch = is_athena_query_keywords(request.messages)
 
         # Handle streaming - ALWAYS use orchestrator for tool support
         if request.stream:
@@ -2814,6 +2820,14 @@ async def ha_conversation(request: HAConversationRequest):
 
         # Check if intent pre-routing is enabled
         prerouting_enabled = await get_feature_flag("ha_intent_prerouting", default=False)
+
+        # The orchestrator answers these deterministically (or defers to its
+        # full pipeline), so the classifier and the simple-intent LLM add
+        # latency and nothing else.
+        if prerouting_enabled and is_fast_path_candidate(request.text):
+            prerouting_skipped_total.inc()
+            logger.info("prerouting_skipped", reason="fast_path_candidate")
+            prerouting_enabled = False
 
         if prerouting_enabled:
             # Classify intent using lightweight model

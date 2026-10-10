@@ -629,14 +629,16 @@ def detect_location_correction(query: str) -> Dict[str, Any]:
 # untouched.
 # ============================================================================
 
-# Public: orchestrator.write_fanout builds its bare-confirmation regexes
-# from these, so the anaphora tag and the confirmation reply share one
-# vocabulary.
-AFFIRMATION_WORDS = ("yes", "yeah", "yep", "yup", "ok", "okay", "sure")
-NEGATION_WORDS = ("no", "nope", "nah")
-GRATITUDE_WORDS = ("thanks", "thank you")
-POLITE_SUFFIX_WORDS = ("please",) + GRATITUDE_WORDS
-PROCEED_PHRASES = ("do it", "go ahead")
+# Public: the confirmation vocabulary lives in shared.fast_path_vocab (the
+# deterministic fast path must exclude it too) and is re-exported here, so the
+# anaphora tag, the confirmation reply and the fast path share one source.
+from shared.fast_path_vocab import (  # noqa: E402,F401
+    AFFIRMATION_WORDS,
+    GRATITUDE_WORDS,
+    NEGATION_WORDS,
+    POLITE_SUFFIX_WORDS,
+    PROCEED_PHRASES,
+)
 
 _YES_NO_BASE_WORDS = AFFIRMATION_WORDS + NEGATION_WORDS
 _YES_NO_STANDALONE_WORDS = ("any", "anything", "whatever")

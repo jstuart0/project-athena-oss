@@ -68,6 +68,7 @@ from orchestrator.session_manager import (
 from orchestrator.config_loader import get_config
 from shared.knowledge_tiers import KnowledgeAudience
 from orchestrator.timing import TimingTracker
+from shared.fast_path_vocab import SCENE_OVERRIDE_PHRASES, SCENE_TRIGGER_PHRASES
 from shared.output_channel import OutputChannel, channel_for_interface_type, render_answer, renders_spoken_answer
 
 from orchestrator.search_providers.intent_classifier import IntentClassifier
@@ -167,6 +168,7 @@ from orchestrator.mode_permission import (
     resolve_request_authorization,
 )
 from orchestrator.write_fanout import caller_fingerprint as compute_caller_fingerprint
+from orchestrator.fast_path import FastPathReply, fast_path_open_question, fast_path_reply, last_assistant_text
 from orchestrator.helpers import (
     get_feature_config,
     get_automation_system_mode,
@@ -499,6 +501,9 @@ from orchestrator.metrics import (
     request_duration,
     node_duration,
     tool_call_breakdown,
+    fast_path_answered_total,
+    fast_path_deferred_total,
+    fast_path_seconds,
 )
 
 # Tool schema cache (OPTIMIZATION: Cache tool schemas to avoid regeneration)
@@ -2585,19 +2590,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
     # FAST PATH: Scene and routine commands
     # These are special phrases that trigger specific scenes/scripts in HA
-    scene_patterns = [
-        "movie mode", "movie time", "watch a movie",
-        "good night", "goodnight", "bedtime", "night mode", "time for bed",
-        "good morning", "morning mode", "wake up",
-        "i am leaving", "i'm leaving", "im leaving", "goodbye", "leaving home", "heading out",
-        "i am home", "i'm home", "im home", "i'm back", "im back", "home now",
-        "romantic mode", "date night",
-        "relax mode", "chill mode",
-        "party mode", "party time",
-        # Round 17: romantic scene patterns
-        "vibes for my girl", "my girl comes over", "girlfriend coming",
-        "romantic vibes", "vibes for when", "set the mood"
-    ]
+    scene_patterns = SCENE_TRIGGER_PHRASES
     # Exclude planning/help/question queries from scene triggers - "help me plan a date night" is NOT lighting control
     # Also exclude conversational follow-ups like "something romantic but also fun"
     planning_exclusions = ["help me", "plan a", "plan my", "planning", "ideas for", "suggestions for",
@@ -2970,12 +2963,7 @@ Respond in JSON format:
                     state.confidence = 0.9  # High confidence for color requests
                 # Round 16: Override MUSIC_PLAY for scene/vibe patterns
                 else:
-                    scene_patterns = ["party vibes", "party vibe", "party mode", "party time",
-                                     "movie mode", "movie time", "chill mode", "relax mode",
-                                     "romantic mode", "date night", "set the mood",
-                                     # Round 17: romantic scene patterns
-                                     "vibes for my girl", "my girl comes over", "girlfriend coming",
-                                     "romantic vibes", "vibes for when"]
+                    scene_patterns = SCENE_OVERRIDE_PHRASES
                     # Exclude planning/help queries from scene triggers
                     planning_excl = ["help me", "plan a", "plan my", "planning", "ideas for",
                                     "something ", "but also", "is that", "is it possible",
@@ -3369,19 +3357,7 @@ def _pattern_based_classification(query: str, return_confidence: bool = False):
 
     # SCENE/ROUTINE patterns - these should go to CONTROL not STREAMING
     # Must be checked BEFORE streaming patterns since "movie mode" contains "movie"
-    scene_patterns = [
-        "movie mode", "movie time", "watch a movie",  # Note: specific phrases, not just "movie"
-        "good night", "goodnight", "bedtime", "night mode", "time for bed",
-        "good morning", "morning mode", "wake up",
-        "i am leaving", "i'm leaving", "im leaving", "goodbye", "leaving home", "heading out",
-        "i am home", "i'm home", "im home", "i'm back", "im back", "home now",
-        "romantic mode", "date night",
-        "relax mode", "chill mode",
-        "party mode", "party time",
-        # Round 17: romantic scene patterns
-        "vibes for my girl", "my girl comes over", "girlfriend coming",
-        "romantic vibes", "vibes for when", "set the mood"
-    ]
+    scene_patterns = SCENE_TRIGGER_PHRASES
     # Exclude planning/help/question queries from scene triggers
     planning_exclusions_scene = ["help me", "plan a", "plan my", "planning", "ideas for", "suggestions for",
                           "what should", "where should", "recommend", "what to do",
@@ -6367,6 +6343,77 @@ def _request_caller_fingerprint(request: "QueryRequest", permissions_mode: Optio
     )
 
 
+async def _fast_path_turn(
+    query: str,
+    *,
+    permissions: Optional[Dict[str, Any]],
+    session: Any,
+    session_id: str,
+    route: str,
+    room: Optional[str],
+    mode: str,
+    request_id: str,
+    handler_start: float,
+    authz_ms: Optional[int] = None,
+    session_ms: Optional[int] = None,
+) -> Optional[FastPathReply]:
+    """The deterministic answer for a trivial turn, or None to run the pipeline.
+
+    Runs after authorization, the session and the owner-PIN check on every
+    query route. Defers (None) when permissions are missing, the intent gate
+    would refuse a general-info turn, or the session has an open question.
+    Touches no HA, memory, cache or knowledge and calls no model.
+    """
+    if permissions is None:
+        return None
+    reply = fast_path_reply(query)
+    if reply is None:
+        return None
+    if intent_gate_refusal(IntentCategory.GENERAL_INFO, permissions):
+        return None
+    context_start = time.perf_counter()
+    reason = await fast_path_open_question(session_id, last_assistant_text(session))
+    context_ms = int((time.perf_counter() - context_start) * 1000)
+    if reason:
+        fast_path_deferred_total.labels(route=route, reason=reason).inc()
+        logger.info("fast_path_deferred", route=route, reason=reason, context_ms=context_ms)
+        return None
+    fast_path_seconds.labels(route=route).observe(time.perf_counter() - handler_start)
+    fast_path_answered_total.labels(route=route, kind=reply.kind).inc()
+    logger.info(
+        "fast_path_answered",
+        kind=reply.kind,
+        route=route,
+        query_len=len(query),
+        authz_ms=authz_ms,
+        session_ms=session_ms,
+        context_ms=context_ms,
+    )
+    _runtime.spawn_background(record_intent_metric(
+        intent=IntentCategory.GENERAL_INFO.value,
+        confidence=1.0,
+        raw_query=query,
+        session_id=session_id,
+        mode=mode,
+        room=room or "",
+        request_id=request_id,
+        processing_time_ms=int((time.perf_counter() - handler_start) * 1000),
+        complexity="simple",
+        admin_api_url=ADMIN_API_URL,
+    ))
+    return reply
+
+
+async def _persist_fast_path_messages(session_id: str, query: str, reply: FastPathReply) -> None:
+    """The user turn and the raw reply, in order. Awaited before the response
+    is complete, so a fast follow-up (or a client that disconnects right after
+    the answer) never misses the turn. The assistant message is tagged so the
+    next turn doesn't read its question as open."""
+    sm = _runtime.get_session_manager()
+    await sm.add_message(session_id=session_id, role="user", content=query, metadata={"intent": "general_info"})
+    await sm.add_message(session_id=session_id, role="assistant", content=reply.text, metadata={"fast_path": reply.kind})
+
+
 class QueryResponse(BaseModel):
     """Response model for query endpoint."""
     answer: str = Field(..., description="Generated response")
@@ -6393,6 +6440,7 @@ async def process_query(
     """
     Process a user query through the orchestrator state machine.
     """
+    handler_start = time.perf_counter()
     global orchestrator_graph
 
     # Initialize graph if needed
@@ -6438,6 +6486,7 @@ async def process_query(
         # the single resolution path for every entry point. request.mode is
         # a narrowing hint only; it can never escalate above the server's
         # own mode.
+        authz_start = time.perf_counter()
         with timing_tracker.track("pre_graph", "mode_determination"):
             authz = await resolve_request_authorization(
                 request.mode, guest_info, caller_trust=request.caller_trust,
@@ -6455,8 +6504,10 @@ async def process_query(
                 degraded=authz.degraded,
                 escalation_ignored=authz.escalation_ignored,
             )
+        authz_ms = int((time.perf_counter() - authz_start) * 1000)
 
         # Session management: get or create session
+        session_start = time.perf_counter()
         with timing_tracker.track("pre_graph", "session_management"):
             logger.info(
                 "session_request_received",
@@ -6470,6 +6521,7 @@ async def process_query(
                 zone=request.room,
                 caller_class=_session_caller_class(request, authz.knowledge_audience),
             )
+        session_ms = int((time.perf_counter() - session_start) * 1000)
 
         logger.info(f"Processing query in session {session.session_id}")
 
@@ -6499,6 +6551,36 @@ async def process_query(
                         "refused_reason": outcome.refused_reason,
                     }
                 )
+
+        # Trivial turns (greetings, thanks, time, date) are answered without a
+        # model unless the session has an open question.
+        fast_path_request_id = hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8]
+        with timing_tracker.track("pre_graph", "fast_path"):
+            fast = await _fast_path_turn(
+                request.query,
+                permissions=permissions,
+                session=session,
+                session_id=session.session_id,
+                route="query",
+                room=request.room,
+                mode=current_mode,
+                request_id=fast_path_request_id,
+                handler_start=handler_start,
+                authz_ms=authz_ms,
+                session_ms=session_ms,
+            )
+        if fast is not None:
+            await _persist_fast_path_messages(session.session_id, request.query, fast)
+            return QueryResponse(
+                answer=fast.text,
+                intent="general_info",
+                confidence=1.0,
+                citations=[],
+                request_id=fast_path_request_id,
+                session_id=session.session_id,
+                processing_time=time.perf_counter() - handler_start,
+                metadata={"fast_path": fast.kind},
+            )
 
         # Get conversation history for LLM context
         async with timing_tracker.track_async("pre_graph", "history_loading"):
@@ -7312,6 +7394,8 @@ async def process_query_stream(
     - Stage 2: Tool execution results
     - Stage 3: Final answer (TRUE streaming - tokens as generated)
     """
+    handler_start = time.perf_counter()
+
     async def event_generator():
         sm = _runtime.get_session_manager()
         llm = _runtime.get_llm_router()
@@ -7346,20 +7430,24 @@ async def process_query_stream(
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares. Done
             # before the session: the session class depends on owner proof.
+            authz_start = time.perf_counter()
             authz = await resolve_request_authorization(
                 request.mode, guest_info, caller_trust=request.caller_trust,
                 service_authenticated=service_authenticated is True,
                 sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
+            authz_ms = int((time.perf_counter() - authz_start) * 1000)
 
             # Session management
+            session_start = time.perf_counter()
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room,
                 caller_class=_session_caller_class(request, authz.knowledge_audience),
             )
+            session_ms = int((time.perf_counter() - session_start) * 1000)
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
             # utterance path -- every entry point runs this, not just
@@ -7370,6 +7458,27 @@ async def process_query_stream(
             outcome = await handle_owner_mode_utterance(request.query, request.caller_trust, request.room)
             if outcome is not None:
                 yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': render_answer(outcome.message, request.interface_type)})}\n\n"
+                yield f"data: {json.dumps({'stage': 'complete', 'processing_time': time.time() - start_time, 'tool_exec_time': 0, 'llm_time': 0, 'tokens': 0})}\n\n"
+                return
+
+            # Trivial turns are answered without a model unless the session
+            # has an open question.
+            fast = await _fast_path_turn(
+                request.query,
+                permissions=authz.permissions,
+                session=session,
+                session_id=session.session_id,
+                route="query_stream",
+                room=request.room,
+                mode=current_mode,
+                request_id=hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8],
+                handler_start=handler_start,
+                authz_ms=authz_ms,
+                session_ms=session_ms,
+            )
+            if fast is not None:
+                yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': render_answer(fast.text, request.interface_type)})}\n\n"
+                await _persist_fast_path_messages(session.session_id, request.query, fast)
                 yield f"data: {json.dumps({'stage': 'complete', 'processing_time': time.time() - start_time, 'tool_exec_time': 0, 'llm_time': 0, 'tokens': 0})}\n\n"
                 return
 
@@ -7641,6 +7750,8 @@ async def process_query_stream_v2(
     - {stage: 'streaming', sentence_num: 2, sentence: 'Second sentence.', is_final: false}
     - {stage: 'complete', total_sentences: 2, full_response: '...', processing_time: 1.5}
     """
+    handler_start = time.perf_counter()
+
     async def sentence_event_generator():
         sm = _runtime.get_session_manager()
         llm = _runtime.get_llm_router()
@@ -7678,20 +7789,24 @@ async def process_query_stream_v2(
             # Get mode and permissions (ATHENA-69 D6/D7): server-derived,
             # via the single resolution path every entry point shares. Done
             # before the session: the session class depends on owner proof.
+            authz_start = time.perf_counter()
             authz = await resolve_request_authorization(
                 request.mode, guest_info, caller_trust=request.caller_trust,
                 service_authenticated=service_authenticated is True,
                 sms_stay_phase=(request.context or {}).get("stay_phase"),
             )
             current_mode = authz.mode
+            authz_ms = int((time.perf_counter() - authz_start) * 1000)
 
             # Session management
+            session_start = time.perf_counter()
             session = await sm.get_or_create_session(
                 session_id=request.session_id,
                 user_id=user_id,
                 zone=request.room,
                 caller_class=_session_caller_class(request, authz.knowledge_audience),
             )
+            session_ms = int((time.perf_counter() - session_start) * 1000)
 
             # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
             # utterance path -- every entry point runs this, not just
@@ -7703,6 +7818,29 @@ async def process_query_stream_v2(
             if outcome is not None:
                 yield f"data: {json.dumps({'stage': 'streaming', 'sentence_num': 1, 'sentence': render_answer(outcome.message, request.interface_type), 'is_final': True})}\n\n"
                 yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': 1, 'full_response': render_answer(outcome.message, request.interface_type), 'intent': 'mode_override', 'processing_time': time.time() - start_time})}\n\n"
+                return
+
+            # Trivial turns are answered without a model unless the session
+            # has an open question.
+            fast = await _fast_path_turn(
+                request.query,
+                permissions=authz.permissions,
+                session=session,
+                session_id=session.session_id,
+                route="query_stream_v2",
+                room=request.room,
+                mode=current_mode,
+                request_id=hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8],
+                handler_start=handler_start,
+                authz_ms=authz_ms,
+                session_ms=session_ms,
+            )
+            if fast is not None:
+                spoken_fast = render_answer(fast.text, request.interface_type)
+                yield f"data: {json.dumps({'stage': 'classified', 'intent': 'general_info'})}\n\n"
+                yield f"data: {json.dumps({'stage': 'streaming', 'sentence_num': 1, 'sentence': spoken_fast, 'is_final': True})}\n\n"
+                await _persist_fast_path_messages(session.session_id, request.query, fast)
+                yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': 1, 'full_response': spoken_fast, 'intent': 'general_info', 'processing_time': time.time() - start_time})}\n\n"
                 return
 
             # Run orchestrator up to LLM synthesis point
@@ -8345,6 +8483,7 @@ async def chat_completions(request: OpenAIChatRequest):
     OpenAI-compatible chat completions endpoint with streaming support.
     Wraps the orchestrator's /query endpoint for Home Assistant and Open WebUI compatibility.
     """
+    handler_start = time.perf_counter()
     try:
         # Extract the last user message
         user_message = None
@@ -8372,7 +8511,9 @@ async def chat_completions(request: OpenAIChatRequest):
         # The audience (and so the session class) comes first: the first-turn
         # reset, the OpenAI index/cap and the session itself must all use the
         # one class-qualified id (a guest-mode conversation is stored as gst-<id>).
+        authz_start = time.perf_counter()
         authz = await resolve_request_authorization(None, None, service_authenticated=False)
+        authz_ms = int((time.perf_counter() - authz_start) * 1000)
         session_class = _audience_session_class(authz.knowledge_audience)
         resolved_session = resolved_session._replace(
             session_id=class_qualified_id(resolved_session.session_id, session_class)
@@ -8411,12 +8552,14 @@ async def chat_completions(request: OpenAIChatRequest):
                 # authz (resolved above, before the session id was prepared):
                 # OpenAIChatRequest has no mode/device_id fields at all and no
                 # caller_trust, so it is never an owner caller.
+                session_start = time.perf_counter()
                 session = await sm.get_or_create_session(
                     session_id=resolved_session.session_id,
                     user_id="openwebui",
                     zone="web",
                     caller_class=session_class,
                 )
+                session_ms = int((time.perf_counter() - session_start) * 1000)
 
                 # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/
                 # utterance path -- every entry point runs this. This
@@ -8432,6 +8575,29 @@ async def chat_completions(request: OpenAIChatRequest):
                     pin_request_id = hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8]
                     yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': render_answer(outcome.message, interface_type)}, 'finish_reason': None}]})}\n\n"
                     yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
+                # Trivial turns are answered without a model unless the
+                # session has an open question.
+                fast_id = hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8]
+                fast = await _fast_path_turn(
+                    user_message,
+                    permissions=authz.permissions,
+                    session=session,
+                    session_id=session.session_id,
+                    route="v1_stream",
+                    room=request.room or (request.extra_body or {}).get("room"),
+                    mode=authz.mode,
+                    request_id=fast_id,
+                    handler_start=handler_start,
+                    authz_ms=authz_ms,
+                    session_ms=session_ms,
+                )
+                if fast is not None:
+                    yield f"data: {json.dumps({'id': fast_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': render_answer(fast.text, interface_type)}, 'finish_reason': None}]})}\n\n"
+                    yield f"data: {json.dumps({'id': fast_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                    await _persist_fast_path_messages(session.session_id, user_message, fast)
                     yield "data: [DONE]\n\n"
                     return
 

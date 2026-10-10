@@ -107,3 +107,26 @@ intent_gate_refused_total = Counter(
     'Requests refused by the intent gate before any routing',
     ['audience', 'intent']  # audience: public|guest|degraded|<mode>
 )
+
+# ---------------------------------------------------------------------------
+# Deterministic fast path (no model for trivial turns)
+# ---------------------------------------------------------------------------
+
+fast_path_answered_total = Counter(
+    'athena_fast_path_answered_total',
+    'Turns answered by the deterministic fast path with no model call',
+    ['route', 'kind']  # kind: greeting|smalltalk|thanks|farewell|ack|time|date
+)
+
+fast_path_deferred_total = Counter(
+    'athena_fast_path_deferred_total',
+    'Fast-path candidates sent to the full pipeline because the session has an open question',
+    ['route', 'reason']  # reason: pending_confirmation|awaiting_context|open_question|context_unreadable
+)
+
+fast_path_seconds = Histogram(
+    'athena_fast_path_seconds',
+    'Handler start to fast-path answer, by route',
+    ['route'],
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.5]
+)

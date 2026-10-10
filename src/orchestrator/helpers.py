@@ -68,6 +68,7 @@ from orchestrator.urls import (
 from shared.admin_config import get_admin_client
 from shared.base_knowledge_utils import extract_owner_name, load_visible_knowledge
 from shared.knowledge_tiers import KnowledgeAudience
+from shared.fast_path_vocab import normalize as normalize_fast_path_query, reply_for as fast_path_reply_for
 from shared.local_time import local_now, local_today
 from shared.assistant_profile import clean_guest_name, get_assistant_profile
 from shared.service_registry import get_service_url as registry_get_service_url
@@ -1641,53 +1642,13 @@ Summary:"""
 
 def _normalized_general_info_query(query: str) -> str:
     """Lowercase query with punctuation removed for low-latency fast-path matching."""
-    return re.sub(r"[^a-z0-9\s]", "", (query or "").lower()).strip()
+    return normalize_fast_path_query(query)
 
 
 def _direct_general_info_response(query: str) -> Optional[str]:
     """Return deterministic responses for trivial chat and local time/date requests."""
-    normalized = _normalized_general_info_query(query)
-    if not normalized:
-        return None
-
-    direct_responses = {
-        "hello": "Hello. How can I help?",
-        "hi": "Hi. How can I help?",
-        "hey": "Hey. How can I help?",
-        "good morning": "Good morning. How can I help?",
-        "good afternoon": "Good afternoon. How can I help?",
-        "good evening": "Good evening. How can I help?",
-        "how are you": "I'm doing well. How can I help?",
-        "hows it going": "I'm here and ready to help.",
-        "thanks": "You're welcome.",
-        "thank you": "You're welcome.",
-        "bye": "Good night.",
-        "goodbye": "Goodbye.",
-        "see you": "See you later.",
-    }
-    if normalized in direct_responses:
-        return direct_responses[normalized]
-
-    if normalized in {
-        "what time is it",
-        "whats the time",
-        "what is the time",
-        "current time",
-        "tell me the time",
-    }:
-        return f"It's {local_now().strftime('%-I:%M %p')}."
-
-    if normalized in {
-        "what date is it",
-        "whats the date",
-        "what is todays date",
-        "whats todays date",
-        "current date",
-        "what day is it",
-    }:
-        return f"Today is {local_now().strftime('%A, %B %-d, %Y')}."
-
-    return None
+    reply = fast_path_reply_for(query, local_now())
+    return reply[1] if reply else None
 
 
 def _is_structural_paragraph(para: str) -> bool:
