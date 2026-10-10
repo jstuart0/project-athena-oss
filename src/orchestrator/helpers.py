@@ -48,7 +48,7 @@ from shared.logging_config import configure_logging
 from orchestrator.context.storage import clear_conversation_context
 from orchestrator.mode_permission import SIGNED_IN_TRUST, is_public_audience, is_public_caller
 from orchestrator.nodes import _runtime
-from orchestrator.session_keys import context_storage_key
+from orchestrator.session_keys import context_storage_key, id_class
 from orchestrator.state import ConversationContext
 from orchestrator.urls import (
     AIRPORTS_SERVICE_URL,
@@ -287,7 +287,7 @@ def log_continuation_decision(state: Any, session_id: str) -> None:
             "continuation_decision",
             decision=decision_dict.get("decision"),
             reason=decision_dict.get("reason"),
-            session_prefix=session_id[:12] if session_id else "",
+            session_class=id_class(session_id),
         )
     except Exception:
         logger.warning("continuation_decision_log_failed", exc_info=True)
@@ -401,7 +401,7 @@ async def prepare_openai_session(
         if within_grace:
             logger.info(
                 "openai_session_reset_skipped_grace_window",
-                session_id=resolved.session_id,
+                session_class=id_class(resolved.session_id),
                 age_seconds=age_seconds,
             )
         else:

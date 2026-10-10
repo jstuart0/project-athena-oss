@@ -96,10 +96,15 @@ def class_qualified_id(session_id: str, caller_class: str) -> str:
     capped under. Every path that handles a caller-supplied id before (or
     instead of) ``get_or_create_session`` goes through this, so the id can't
     diverge between the first-turn reset, the OpenAI index and the session
-    itself. Only the guest class re-labels a presented id (see guest_session_id).
+    itself. The guest class re-labels a presented id (see guest_session_id);
+    the owner and public classes keep an id that already carries their prefix
+    and otherwise get a fresh one (usable_session_id), so a caller can never
+    be handed, or index, an id of another class.
     """
     if caller_class == CALLER_CLASS_GUEST:
         return guest_session_id(session_id)
+    if caller_class in (CALLER_CLASS_OWNER, CALLER_CLASS_PUBLIC):
+        return usable_session_id(session_id, caller_class)
     return session_id
 
 

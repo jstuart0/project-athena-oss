@@ -497,3 +497,29 @@ def test_openai_streaming_branch_uses_the_same_qualified_id(oai, monkeypatch):
         pass
     assert seen and all(i.startswith("gst-oai-") for i in seen)
     assert set(oai.redis.zset) <= {i for i in seen}
+
+
+@pytest.mark.parametrize("cls,prefix,namespace", [
+    (CALLER_CLASS_OWNER, "own-", "athena:owner_session:"),
+    (CALLER_CLASS_PUBLIC, "pub-", "athena:session:pub-"),
+])
+def test_the_openai_path_never_splits_the_id_for_owner_or_public_classes(oai, monkeypatch, cls, prefix, namespace):
+    """chat_completions can't resolve these today (no caller_trust); if it ever
+    did, prepare, the index and the stored session must still agree."""
+    monkeypatch.setattr(h.main, "_audience_session_class", lambda audience: cls)
+    _oai(oai)
+    (key,) = _session_keys(oai.redis)
+    assert key.startswith(namespace), key
+    stored_id = key.split(":", 2)[2]
+    assert stored_id.startswith(prefix)
+    assert set(oai.redis.zset) == {stored_id}
+
+
+def test_class_qualified_id_never_returns_an_id_of_another_class():
+    from orchestrator import session_keys as keys
+
+    for presented in ("plain", "gst-x", "own-x", "pub-x"):
+        for cls in (CALLER_CLASS_OWNER, CALLER_CLASS_PUBLIC, CALLER_CLASS_GUEST, CALLER_CLASS_OTHER):
+            qualified = keys.class_qualified_id(presented, cls)
+            if cls != CALLER_CLASS_OTHER or keys.id_class(presented) == CALLER_CLASS_OTHER:
+                assert keys.id_class(qualified) == cls, (presented, cls, qualified)

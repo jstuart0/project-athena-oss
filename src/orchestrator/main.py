@@ -8380,7 +8380,7 @@ async def chat_completions(request: OpenAIChatRequest):
             "openai_session_resolved",
             source=resolved_session.source,
             first_turn=resolved_session.is_first_turn,
-            session_prefix=resolved_session.session_id[:12],
+            session_class=id_class(resolved_session.session_id),
             identity_kind=resolved_session.identity_kind,
         )
 

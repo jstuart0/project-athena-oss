@@ -25,6 +25,7 @@ from orchestrator.session_keys import (  # noqa: F401  (re-exported: callers imp
     PUBLIC_SESSION_PREFIX,
     class_qualified_id,
     guest_session_id,
+    id_class,
     new_session_id,
     session_storage_key,
     usable_session_id,
@@ -428,7 +429,7 @@ class SessionManager:
             if session and session.caller_class != caller_class:
                 logger.warning(
                     "session_audience_mismatch_refused",
-                    session_id=session_id,
+                    session_class=id_class(session_id),
                     caller_public=caller_class == CALLER_CLASS_PUBLIC,
                     caller_class=caller_class,
                 )
