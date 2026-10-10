@@ -19,8 +19,7 @@ HTML = (FRONTEND / "index.html").read_text(encoding="utf-8")
 # returns a constant or escaped string) or be a ternary of string literals on a
 # local boolean.
 ALLOWED = re.compile(
-    r"^\s*(escapeHtml|Number|getCategoryColor|getAppliesToColor|priorityClass|descriptionHtml"
-    r"|statusClass|statusLabel|toggleTarget|toggleClass|toggleLabel)\("
+    r"^\s*(escapeHtml|Number|getCategoryColor|getAppliesToColor|priorityClass|descriptionHtml)\("
     r"|^\s*(enabled|isInstruction)\s*\?\s*'[^'$`]*'\s*:\s*'[^'$`]*'\s*$"
 )
 ROW_TEMPLATE = re.compile(r"knowledge\.map\(\s*entry\s*=>\s*`(.*?)`\s*\)\.join", re.S)

@@ -129,8 +129,8 @@ function renderBaseKnowledge(knowledge) {
                             </span>
                         </td>
                         <td>
-                            <span class="px-2 py-1 text-xs rounded-full ${statusClass(entry)}">
-                                ${statusLabel(entry)}
+                            <span class="px-2 py-1 text-xs rounded-full ${Number(entry.enabled) ? 'bg-green-900/30 text-green-400' : 'bg-gray-700 text-gray-400'}">
+                                ${Number(entry.enabled) ? '✓ Enabled' : '✗ Disabled'}
                             </span>
                         </td>
                         <td>
@@ -139,9 +139,9 @@ function renderBaseKnowledge(knowledge) {
                                         class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition-colors">
                                     Edit
                                 </button>
-                                <button type="button" data-kb-action="toggle" data-kb-id="${escapeHtml(String(entry.id))}" data-kb-enable="${toggleTarget(entry)}"
-                                        class="px-3 py-1 ${toggleClass(entry)} text-white rounded text-sm transition-colors">
-                                    ${toggleLabel(entry)}
+                                <button type="button" data-kb-action="toggle" data-kb-id="${escapeHtml(String(entry.id))}" data-kb-enable="${Number(entry.enabled) ? 'false' : 'true'}"
+                                        class="px-3 py-1 ${Number(entry.enabled) ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'} text-white rounded text-sm transition-colors">
+                                    ${Number(entry.enabled) ? 'Disable' : 'Enable'}
                                 </button>
                                 <button type="button" data-kb-action="delete" data-kb-id="${escapeHtml(String(entry.id))}"
                                         class="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-sm transition-colors">
@@ -161,7 +161,8 @@ function renderBaseKnowledge(knowledge) {
     updateSelectionToolbar();
 }
 
-// Row-template helpers: each returns a constant string or escaped markup.
+// Row-template helpers: each returns a constant string or escaped markup. (The
+// enabled/disabled switches are inline `Number(entry.enabled) ? 'a' : 'b'` constants.)
 function tierLabel(tier) {
     return Object.prototype.hasOwnProperty.call(TIER_LABELS, tier) ? TIER_LABELS[tier] : 'Unknown: ' + tier;
 }
@@ -175,26 +176,6 @@ function descriptionHtml(entry) {
     return entry.description
         ? '<div class="text-xs text-gray-500 mt-1">' + escapeHtml(entry.description) + '</div>'
         : '';
-}
-
-function statusClass(entry) {
-    return entry.enabled ? 'bg-green-900/30 text-green-400' : 'bg-gray-700 text-gray-400';
-}
-
-function statusLabel(entry) {
-    return entry.enabled ? '✓ Enabled' : '✗ Disabled';
-}
-
-function toggleTarget(entry) {
-    return entry.enabled ? 'false' : 'true';
-}
-
-function toggleClass(entry) {
-    return entry.enabled ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700';
-}
-
-function toggleLabel(entry) {
-    return entry.enabled ? 'Disable' : 'Enable';
 }
 
 // ============================================================================
