@@ -144,6 +144,10 @@ _light_groups_warned = False
 def _get_light_groups() -> Dict[str, str]:
     """room -> light-group entity ID, from HA_LIGHT_GROUPS (DC17 item 1).
 
+    Keys are normalized once here (case, spaces and underscores are
+    equivalent: ``"Living Room"`` -> ``"living_room"``), so every reader
+    looks a room up with its ``"_".join(_tokens(room))`` form.
+
     The owner's authoritative group for a room: room light commands resolve
     through it first (``_resolve_room_lights``), and the scene-activation-
     failed fallback below uses it to dim/turn on a SPECIFIC room's lights
@@ -170,7 +174,7 @@ def _get_light_groups() -> Dict[str, str]:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
             raise ValueError("HA_LIGHT_GROUPS must be a JSON object")
-        _light_groups_cache = {str(k).lower(): str(v) for k, v in parsed.items()}
+        _light_groups_cache = {"_".join(_tokens(str(k))): str(v) for k, v in parsed.items()}
     except Exception as e:
         # structlog's logger accepts arbitrary kwargs (error=...); the
         # stdlib logging.Logger this used to be does not -- passing one
@@ -2122,8 +2126,7 @@ Return ONLY valid JSON."""
         logger = structlog.get_logger(__name__)
 
         key = "_".join(_tokens(room))
-        configured = {"_".join(_tokens(k)): v for k, v in _get_light_groups().items()}
-        entity_id = configured.get(key) if key else None
+        entity_id = _get_light_groups().get(key) if key else None
         if entity_id:
             entity = (await self.entity_manager.get_entities()).get(entity_id)
             if entity is not None:

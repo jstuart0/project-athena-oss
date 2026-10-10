@@ -60,7 +60,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The assistant's TV app list and TV feature flags load, the Room TV page shows its feature toggles, and "Discover Apple TVs" works. Those admin routes, and the public voice-interface list, were registered behind a route that answered in their place, so they had never been reachable.
 - Opening a TV app is no longer reported as failed when the app opened but the profile-select press afterwards failed.
 - Room light commands write each bulb at most once: a room's nested or overlapping groups no longer produce one call per matching entity, and multi-room and room-group commands no longer write a room's nested groups twice or only the largest group.
-- A room command no longer includes a light that only mentions the room: another room's name (`master_bathroom_*` for "bathroom", `hallway_*` for "hall") or a voice satellite's status LED.
+- A room command no longer includes a light that only mentions the room: another room's name (`master_bathroom_*` for "bathroom", `entrance_*` for "hall") or a voice satellite's status LED.
 
 ### Security
 
