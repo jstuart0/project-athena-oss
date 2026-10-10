@@ -1480,8 +1480,16 @@ async def stream_response(request: ChatCompletionRequest) -> AsyncIterator[str]:
         yield "data: [DONE]\n\n"
 
     except Exception as e:
-        logger.error(f"Streaming error: {e}", exc_info=True)
-        yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+        logger.error("ollama_stream_error", error=type(e).__name__, exc_info=True)
+        yield _stream_error_line()
+
+STREAM_ERROR_MESSAGE = "The request could not be completed."
+
+
+def _stream_error_line() -> str:
+    """An SSE error line for a failed stream: generic text, never the exception's."""
+    return f"data: {json.dumps({'error': STREAM_ERROR_MESSAGE})}\n\n"
+
 
 def _orchestrator_openai_payload(
     request: ChatCompletionRequest, device_id: Optional[str] = None, *, stream: bool, channel: OutputChannel
@@ -1620,8 +1628,8 @@ async def stream_orchestrator_response(
                     yield f"{line}\n\n"
 
     except Exception as e:
-        logger.error(f"Orchestrator streaming error: {e}", exc_info=True)
-        yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+        logger.error("orchestrator_stream_error", error=type(e).__name__, exc_info=True)
+        yield _stream_error_line()
 
 async def _check_new_conversation_limit(
     client_host: str,
@@ -1966,7 +1974,7 @@ async def stream_responses_api(
         }
 
     def _text_part(text: str) -> Dict[str, Any]:
-        return {"type": "output_text", "text": text, "annotations": []}
+        return {"type": "output_text", "text": text, "annotations": [], "logprobs": []}
 
     def _message_item(status: str, content: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {"id": item_id, "type": "message", "role": "assistant", "status": status, "content": content}
@@ -2127,9 +2135,9 @@ async def stream_responses_api(
         yield _event({"type": "response.completed", "response": _response_object("completed", [final_item])})
 
     except Exception as e:
-        logger.error(f"Responses API streaming error: {e}", exc_info=True)
-        # Send error event
-        yield _event({"type": "error", "code": "server_error", "message": str(e), "param": None})
+        logger.error("responses_stream_error", error=type(e).__name__, exc_info=True)
+        # Send error event: a generic message, never the exception text
+        yield _event({"type": "error", "code": "server_error", "message": STREAM_ERROR_MESSAGE, "param": None})
 
 
 @app.get("/health")

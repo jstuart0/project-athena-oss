@@ -361,11 +361,56 @@ def test_responses_stream_parses_with_the_openai_typed_event_models(client, orch
     assert [e.type for e in typed] == CANONICAL_RESPONSES_EVENTS
     assert [e.sequence_number for e in typed] == list(range(len(typed)))
     assert isinstance(typed[-1], ResponseCompletedEvent)
+    parts = [e.part for e in typed if e.type in ("response.content_part.added", "response.content_part.done")]
+    parts.append(typed[-1].response.output[0].content[0])
+    assert all(p.logprobs == [] and p.annotations == [] for p in parts)
     assert typed[-1].response.status == "completed"
     assert typed[-1].response.output[0].status == "completed"
     assert typed[-1].response.output[0].content[0].text == (SPOKEN if voice else RAW)
     deltas = [e for e in typed if isinstance(e, ResponseTextDeltaEvent)]
     assert "".join(d.delta for d in deltas) == (SPOKEN if voice else RAW)
+
+
+# --- a failed stream never returns the exception's text ------------------------------------
+
+
+class _BrokenStream:
+    async def __aenter__(self):
+        raise RuntimeError("secret-internal-detail")
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def test_a_failed_orchestrator_stream_returns_a_generic_error(client, orchestrator, monkeypatch):
+    monkeypatch.setattr(orchestrator, "stream", lambda *a, **k: _BrokenStream(), raising=False)
+    log = mock.MagicMock()
+    monkeypatch.setattr(gw, "logger", log)
+    resp = _post(client, "chat", True)
+    assert resp.status_code == 200
+    assert "secret-internal-detail" not in resp.text
+    assert gw.STREAM_ERROR_MESSAGE in resp.text
+    assert [c for c in log.error.call_args_list if c.kwargs.get("error") == "RuntimeError"], "class logged server-side"
+
+
+def test_the_responses_stream_error_event_is_generic_and_well_formed(client, orchestrator, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("secret-internal-detail")
+
+    monkeypatch.setattr(gw.asyncio, "create_task", boom)
+    log = mock.MagicMock()
+    monkeypatch.setattr(gw, "logger", log)
+    resp = _post(client, "responses", True)
+    assert "secret-internal-detail" not in resp.text
+    last = json.loads(_events(resp)[-1])
+    assert last == {"type": "error", "code": "server_error", "message": gw.STREAM_ERROR_MESSAGE,
+                    "param": None, "sequence_number": last["sequence_number"]}
+    assert [c for c in log.error.call_args_list if c.kwargs.get("error") == "RuntimeError"]
+
+
+def test_the_ollama_stream_error_line_is_generic():
+    assert "secret" not in gw._stream_error_line()
+    assert json.loads(gw._stream_error_line()[6:]) == {"error": gw.STREAM_ERROR_MESSAGE}
 
 
 # --- (j) models ---------------------------------------------------------------------------

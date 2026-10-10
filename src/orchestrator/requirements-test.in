@@ -9,8 +9,8 @@ pytest-asyncio==1.4.0
 # The gateway's optional Wyoming bridge (gateway/wyoming_bridge.py) is not in
 # the production gateway image; the behaviour tests install the real package
 # so its import contract is checked against it, not a stub.
-wyoming>=1.5
+wyoming==1.10.2
 
 # Typed event models for the gateway's /v1/responses stream: the test parses
 # what the gateway emits with the client SDK Home Assistant's integrations use.
-openai>=1.60
+openai==3.28.0
