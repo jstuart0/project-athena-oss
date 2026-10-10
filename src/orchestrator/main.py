@@ -514,7 +514,7 @@ tool_config_cache: Dict[str, List[Dict[str, Any]]] = {}
 # Forward import — main consolidated import is at line 609 but
 # get_conversation_context's type annotation at line 493 needs it earlier.
 from orchestrator.state import ConversationContext  # noqa: E402
-from orchestrator.session_keys import context_storage_key, id_class  # noqa: E402
+from orchestrator.session_keys import class_qualified_id, context_storage_key, id_class  # noqa: E402
 
 # ConversationContext now imported from orchestrator.state (via IntentCategory/ModelTier import block above)
 # Note: CONTEXT_REF_PATTERNS, ROOM_INDICATORS, and detect_context_reference
@@ -8361,6 +8361,14 @@ async def chat_completions(request: OpenAIChatRequest):
             secret=session_hmac_secret(_shared_config.get_config()),
         )
         sm = _runtime.get_session_manager()
+        # The audience (and so the session class) comes first: the first-turn
+        # reset, the OpenAI index/cap and the session itself must all use the
+        # one class-qualified id (a guest-mode conversation is stored as gst-<id>).
+        authz = await resolve_request_authorization(None, None, service_authenticated=False)
+        session_class = _audience_session_class(authz.knowledge_audience)
+        resolved_session = resolved_session._replace(
+            session_id=class_qualified_id(resolved_session.session_id, session_class)
+        )
         await prepare_openai_session(
             resolved_session,
             sm,
@@ -8385,17 +8393,14 @@ async def chat_completions(request: OpenAIChatRequest):
                 if orchestrator_graph is None:
                     orchestrator_graph = create_orchestrator_graph()
 
-                # ATHENA-69 D6/D7: server-derived mode via the single
-                # resolution path every entry point shares. OpenAIChatRequest
-                # has no mode/device_id fields at all, so both args are None,
-                # and no caller_trust: never an owner caller.
-                authz = await resolve_request_authorization(None, None, service_authenticated=False)
-
+                # authz (resolved above, before the session id was prepared):
+                # OpenAIChatRequest has no mode/device_id fields at all and no
+                # caller_trust, so it is never an owner caller.
                 session = await sm.get_or_create_session(
                     session_id=resolved_session.session_id,
                     user_id="openwebui",
                     zone="web",
-                    caller_class=_audience_session_class(authz.knowledge_audience),
+                    caller_class=session_class,
                 )
 
                 # Phase 4 (ATHENA-69 D16/D24, Pass H): the owner-PIN voice/

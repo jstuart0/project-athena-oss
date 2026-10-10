@@ -134,6 +134,16 @@ class _FakeRedis:
     async def close(self):
         pass
 
+    async def eval(self, script, numkeys, key, score, member, max_count):
+        zset = self.__dict__.setdefault("zset", {})
+        zset[member] = float(score)
+        evicted = []
+        while len(zset) > int(max_count):
+            oldest = min(zset, key=zset.get)
+            del zset[oldest]
+            evicted.append(oldest)
+        return evicted
+
 
 def test_owner_session_lives_in_its_own_redis_namespace_and_is_invisible_to_a_plain_reader():
     sm = _sm()
@@ -248,7 +258,11 @@ def test_chat_completions_never_creates_an_owner_session():
     for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "get_or_create_session"):
         kw = {k.arg: ast.get_source_segment(source, k.value) for k in call.keywords}
         # no caller_trust on this route, so the audience can never be an owner
-        assert kw["caller_class"] == "_audience_session_class(authz.knowledge_audience)"
+        assert kw["caller_class"] == "session_class"
+    assigns = [n for n in ast.walk(fn) if isinstance(n, ast.Assign) and any(getattr(t, "id", None) == "session_class" for t in n.targets)]
+    assert [ast.get_source_segment(source, n.value) for n in assigns] == ["_audience_session_class(authz.knowledge_audience)"]
+    authz_calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "resolve_request_authorization"]
+    assert len(authz_calls) == 1, "one authorization, before the session id is prepared"
 
 
 def test_a_signed_owner_id_from_jarvis_web_is_kept_across_proven_turns(rig):
@@ -362,3 +376,124 @@ def test_chat_history_is_accepted_when_the_classes_agree(rig, server, session_id
 def test_chat_history_is_dropped_for_an_owner_id_when_the_owner_is_not_proven(rig):
     h.install_mode_client(server_mode="guest")
     assert _post_history(rig, "own-" + "a" * 32 + "." + "b" * 24, trust="web_owner") == []
+
+
+# --- OpenAI-compatible route: one class-qualified id end to end -----------------------
+
+OPENER = "turn on the hallway lights please"
+
+
+def _oai(rig, content=OPENER, stream=False, **extra):
+    body = {"model": "m", "messages": [{"role": "user", "content": content}], "stream": stream, **extra}
+    resp = rig.client.post("/v1/chat/completions", json=body, headers=h.service_headers())
+    assert resp.status_code == 200, resp.text
+    return resp
+
+
+@pytest.fixture
+def oai(rig, monkeypatch):
+    redis = _FakeRedis()
+    _sm_runtime().redis_client = redis
+    monkeypatch.setenv("NEW_CONVERSATION_RESET_GRACE_SECONDS", "0")
+    sm = _sm_runtime()
+    real_register = sm.register_bounded_session
+
+    async def _small_cap(session_id, max_count):  # the configured minimum is 100; use 2 to keep the test small
+        return await real_register(session_id, 2)
+
+    monkeypatch.setattr(sm, "register_bounded_session", _small_cap)
+    h.shared_config._clear_cache_for_tests()
+    rig.redis = redis
+    yield rig
+    h.shared_config._clear_cache_for_tests()
+
+
+def _session_keys(redis):
+    return {k for k in redis.store}
+
+
+def test_a_guest_mode_openai_conversation_is_stored_and_indexed_under_the_guest_id(oai):
+    h.install_mode_client(server_mode="guest")
+    _oai(oai)
+    keys = _session_keys(oai.redis)
+    assert len(keys) == 1
+    (key,) = keys
+    assert key.startswith("athena:guest_session:gst-oai-"), key
+    guest_id = key.split(":", 2)[2]
+    assert set(oai.redis.zset) == {guest_id}, "the OpenAI index holds the id the session is stored under"
+
+
+def test_a_fresh_guest_conversation_with_the_same_opener_gets_no_stale_history(oai):
+    h.install_mode_client(server_mode="guest")
+    _oai(oai)
+    guest_id = next(iter(_session_keys(oai.redis))).split(":", 2)[2]
+    saved = _run(_sm_runtime().get_session(guest_id))
+    assert len(saved.messages) >= 2
+    # a new conversation with the same opener: the first-turn reset must hit the guest-qualified keys
+    oai.graph.states.clear()
+    _oai(oai)
+    assert oai.graph.states[-1].conversation_history == [], "the stale guest history was resumed"
+    again = _run(_sm_runtime().get_session(guest_id))
+    assert len(again.messages) == 2, "reset cleared the old turns, the new conversation has its own"
+
+
+def test_the_reset_clears_the_guest_context_key(oai):
+    h.install_mode_client(server_mode="guest")
+    _oai(oai)
+    guest_id = next(iter(_session_keys(oai.redis))).split(":", 2)[2]
+    from orchestrator import session_keys
+
+    class _Cache:
+        def __init__(self):
+            self.deleted = []
+            self.client = self
+
+        async def delete(self, key):
+            self.deleted.append(key)
+
+        async def get(self, key):
+            return None
+
+    cache = _Cache()
+    h._runtime.set_cache_client(cache)
+    _oai(oai)
+    assert session_keys.context_storage_key(guest_id) in cache.deleted
+    assert all(not k.startswith("athena:context:oai-") for k in cache.deleted)
+
+
+def test_the_openai_cap_counts_and_evicts_guest_sessions(oai):
+    h.install_mode_client(server_mode="guest")
+    for i in range(4):
+        _oai(oai, content=f"distinct opener number {i} for the cap")
+    assert len(oai.redis.zset) == 2, "the index is capped at SESSION_MAX_COUNT"
+    live = {k.split(":", 2)[2] for k in _session_keys(oai.redis)}
+    assert live == set(oai.redis.zset), "evicted guest sessions were deleted, not orphaned"
+    assert all(i.startswith("gst-oai-") for i in live)
+
+
+@pytest.mark.parametrize("server", ["owner"])
+def test_household_openai_ids_are_unchanged(oai, server):
+    h.install_mode_client(server_mode=server)
+    _oai(oai)
+    (key,) = _session_keys(oai.redis)
+    assert key.startswith("athena:session:oai-"), key
+    guest_free = next(iter(oai.redis.zset))
+    assert guest_free.startswith("oai-") and not guest_free.startswith("gst-")
+
+
+def test_openai_streaming_branch_uses_the_same_qualified_id(oai, monkeypatch):
+    h.install_mode_client(server_mode="guest")
+    seen = []
+    real = _sm_runtime().get_or_create_session
+
+    async def _spy(session_id=None, **kw):
+        seen.append(session_id)
+        return await real(session_id=session_id, **kw)
+
+    monkeypatch.setattr(_sm_runtime(), "get_or_create_session", _spy)
+    try:
+        _oai(oai, stream=True)
+    except Exception:
+        pass
+    assert seen and all(i.startswith("gst-oai-") for i in seen)
+    assert set(oai.redis.zset) <= {i for i in seen}

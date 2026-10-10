@@ -23,6 +23,7 @@ from orchestrator.session_keys import (  # noqa: F401  (re-exported: callers imp
     OAI_SESSION_INDEX_KEY,
     OWNER_SESSION_PREFIX,
     PUBLIC_SESSION_PREFIX,
+    class_qualified_id,
     guest_session_id,
     new_session_id,
     session_storage_key,
@@ -420,8 +421,8 @@ class SessionManager:
         adopted by a caller that isn't owner-class, even after the session
         expired or was evicted.
         """
-        if session_id and caller_class == CALLER_CLASS_GUEST:
-            session_id = guest_session_id(session_id)
+        if session_id:
+            session_id = class_qualified_id(session_id, caller_class)
         if session_id:
             session = await self.get_session(session_id)
             if session and session.caller_class != caller_class:
