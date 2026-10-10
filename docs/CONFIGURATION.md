@@ -1416,9 +1416,12 @@ bulb at most once.
    `restroom`/`washroom`, `living room`/`livingroom`/`lounge`, `office`/
    `study`/`home_office`, `basement`/`cellar`, `garage`/`carport`,
    `kitchen`/`kitchenette`, `dining`, `front` (also `entrance`/`entryway`),
-   `back`/`backyard`/`rear`/`patio`, `outside` (also `porch`/`outdoor`),
-   `master bedroom` (also `main_bedroom`/`primary_bedroom`). Saying a
-   synonym reaches its room. Broader aliases such as `bed`, `work`, `family`,
+   `back`/`backyard`/`rear`/`patio`, `outside` (also `porch`/`outdoor`/
+   `patio`), `master bedroom` (also `main_bedroom`/`primary_bedroom`). Saying
+   a synonym reaches its room, except that `porch` and `patio` do not reach
+   `outside`, and `patio` does not reach `back`: those two bare words open
+   other lights' names (`outside_*`, `back_door_*`), so "outside" reaches
+   `porch` and `patio` but not the other way round. Broader aliases such as `bed`, `work`, `family`,
    `primary` or a floor name are not synonyms, because as a word that opens
    an id they would pull in other rooms' lights; use `HA_LIGHT_GROUPS` or a
    room group for those.

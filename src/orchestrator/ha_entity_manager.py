@@ -45,6 +45,11 @@ ROOM_SYNONYMS = {
 # (light.<device>_led_ring), which is a device indicator and not a room fixture.
 DEFAULT_ROOM_LIGHT_EXCLUDE_PATTERNS = [r"(?:^|[._])(?:led_ring|status_led)(?:_|$)"]
 
+# (key, synonym) pairs that only work forward: saying the key reaches the
+# synonym, but saying the synonym must not reach the key, because the key is a
+# bare word that opens other lights' names (outside_*, back_door_*).
+FORWARD_ONLY_SYNONYMS = {('outside', 'porch'), ('outside', 'patio'), ('back', 'patio')}
+
 _ROOM_PART_SPLIT = re.compile(r'\s+and\s+|\s*,\s*|\s*/\s*|\s+or\s+')
 _TOKEN_SPLIT = re.compile(r'[\W_]+')
 _LEADING_FILLER = ('the',)
@@ -81,7 +86,10 @@ def _room_parts(room: str) -> List[frozenset]:
             syn_toks = [_tokens(s) for s in synonyms]
             if part == key_toks:
                 phrases.update(syn_toks)
-            elif part in syn_toks and part[:len(key_toks)] != key_toks:
+            elif part[:len(key_toks)] != key_toks and any(
+                _tokens(syn) == part and (key, syn) not in FORWARD_ONLY_SYNONYMS
+                for syn in synonyms
+            ):
                 # Saying a synonym reaches its key, unless the key is a bare
                 # prefix of what was said ("master bedroom" must not reach
                 # "master", which also anchors master_bathroom_*).

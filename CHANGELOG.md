@@ -49,7 +49,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The Control Agent sends the service key on its download-progress callback, and only to a callback host listed in its `ALLOWED_CALLBACK_HOSTS`.
 - A tool proposal's author is set by admin-backend from the caller's credential; a `created_by` in the request is ignored.
 - `HA_LIGHT_GROUPS` is now the authoritative group for room light commands and for "are the lights on", not only for the scene fallback. Keys match regardless of case, spaces or underscores.
-- Room name matching is stricter: the room's words must open the light's id or name, and the synonym table no longer maps a room to a bare word that names another room, a floor or a piece of furniture (`bed`, `work`, `family`, `primary`, `downstairs`, `outdoor`/`outside` for porch). Use `HA_LIGHT_GROUPS` or a room group for those.
+- Room name matching is stricter: the room's words must open the light's id or name, and the synonym table no longer maps a room to a bare word that names another room, a floor or a piece of furniture (`bed`, `work`, `family`, `primary`, `downstairs`). "Porch" and "patio" no longer reach `outside`, and "patio" no longer reaches `back` (which opens `back_door_*`); "outside" still reaches `porch` and `patio`, and "back" still reaches `patio`. Use `HA_LIGHT_GROUPS` or a room group for those.
 - The write fan-out gate counts bulbs (leaf lights), not written ids, for room, multi-room and room-group light commands, so a confirmation names the real number of lights.
 - `athena_ha_write_denied_total` also counts a room light command that drops a light the request may not use (once per such command), in addition to the guard's own denials.
 

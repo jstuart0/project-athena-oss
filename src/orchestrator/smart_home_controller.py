@@ -2150,7 +2150,6 @@ Return ONLY valid JSON."""
         *,
         ids: Optional[Sequence[str]] = None,
         per_light: bool,
-        service: str = "turn_on",
     ) -> LightTargets:
         """The one step between room resolution and the fan-out gate.
 
@@ -2308,7 +2307,6 @@ Return ONLY valid JSON."""
             light_matches,
             ids=target_lights,
             per_light=(action == "set_color" or target_scope in ("all_individual", "individual_lights")),
-            service=_fanout_service,
         )
         if lt.denied_all:
             self._record_light_denials(lt, _fanout_service)
@@ -4762,7 +4760,6 @@ Do NOT mention rooms that have no current or recent motion."""
         lt = await self._finalize_light_targets(
             [m for _, matches in resolved_rooms for m in matches],
             per_light=True,
-            service=_multi_room_service,
         )
         if lt.denied_all:
             self._record_light_denials(lt, _multi_room_service)
@@ -4866,7 +4863,6 @@ Do NOT mention rooms that have no current or recent motion."""
         lt = await self._finalize_light_targets(
             [m for matches in room_matches for m in matches],
             per_light=True,
-            service=_room_group_service,
         )
         if lt.denied_all:
             self._record_light_denials(lt, _room_group_service)
