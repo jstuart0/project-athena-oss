@@ -124,12 +124,15 @@ def clamp_voice_response(section: Any) -> Dict[str, Any]:
     A missing or malformed section gives the defaults."""
     defaults = DEFAULT_GUARDRAILS["voice_response"]
     section = section if isinstance(section, dict) else {}
+    max_tokens = _clamped_int(section.get("max_tokens"), defaults["max_tokens"], VOICE_MAX_TOKENS_RANGE)
+    max_tokens_long = _clamped_int(
+        section.get("max_tokens_long"), defaults["max_tokens_long"], VOICE_MAX_TOKENS_LONG_RANGE
+    )
     return {
         "max_sentences": _clamped_int(section.get("max_sentences"), defaults["max_sentences"], VOICE_MAX_SENTENCES_RANGE),
-        "max_tokens": _clamped_int(section.get("max_tokens"), defaults["max_tokens"], VOICE_MAX_TOKENS_RANGE),
-        "max_tokens_long": _clamped_int(
-            section.get("max_tokens_long"), defaults["max_tokens_long"], VOICE_MAX_TOKENS_LONG_RANGE
-        ),
+        "max_tokens": max_tokens,
+        # A long-form answer is never given less room than an ordinary one.
+        "max_tokens_long": max(max_tokens_long, max_tokens),
         "ambient_fragment_gate": ambient_fragment_gate_enabled({"voice_response": section}),
     }
 

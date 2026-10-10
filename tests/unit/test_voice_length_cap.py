@@ -322,7 +322,7 @@ def test_text_and_uncut_answers_are_returned_untouched():
     ("900", 900), (None, 600), (float("nan"), 600), (1, 64), (99999, 2048), ("abc", 600), (True, 600), (64, 64), (2048, 2048),
 ])
 def test_max_tokens_long_is_clamped_and_tolerant(value, expected):
-    assert ap.clamp_voice_response({"max_tokens_long": value})["max_tokens_long"] == expected
+    assert ap.clamp_voice_response({"max_tokens": 32, "max_tokens_long": value})["max_tokens_long"] == expected
 
 
 def test_the_defaults_and_ranges_for_long_form():
@@ -413,3 +413,10 @@ def test_a_closed_think_block_then_a_cut_off_answer():
 def test_an_unclosed_think_block_in_an_uncut_answer_is_left_alone():
     text = "Real answer. <think>musing"
     assert _finish(text, "voice", {"stop_reason": "stop"}, 200, stage="t") == text
+
+
+def test_a_long_limit_below_the_short_one_is_raised_to_it():
+    voice = ap.clamp_voice_response({"max_tokens": 900, "max_tokens_long": 300})
+    assert (voice["max_tokens"], voice["max_tokens_long"]) == (900, 900)
+    voice = ap.clamp_voice_response({"max_tokens": 200, "max_tokens_long": 600})
+    assert (voice["max_tokens"], voice["max_tokens_long"]) == (200, 600)

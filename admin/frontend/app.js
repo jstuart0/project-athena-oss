@@ -2363,6 +2363,7 @@ async function loadAssistantProfileSettings() {
         document.getElementById('assistant-voice-max-tokens').value = config.guardrails?.voice_response?.max_tokens ?? 200;
         document.getElementById('assistant-voice-max-tokens-long').value = config.guardrails?.voice_response?.max_tokens_long ?? 600;
         document.getElementById('assistant-ambient-fragment-gate').checked = config.guardrails?.voice_response?.ambient_fragment_gate === true;
+        wireAssistantFieldValidation();
         document.getElementById('assistant-profile-status').textContent = 'Assistant profile loaded';
         document.getElementById('assistant-profile-status').className = 'text-sm text-green-400';
     } catch (error) {
@@ -2375,7 +2376,87 @@ async function loadAssistantProfileSettings() {
     }
 }
 
+// Field-level checks for the numeric Assistant-profile inputs, before anything is sent: the browser's own
+// range messages, plus the two rules it cannot know (the long spoken limit may not be below the short one;
+// the minimum response length may not exceed the maximum).
+const ASSISTANT_NUMBER_FIELD_IDS = [
+    'assistant-simple-max-sentences',
+    'assistant-min-response-chars',
+    'assistant-max-response-chars',
+    'assistant-voice-max-sentences',
+    'assistant-voice-max-tokens',
+    'assistant-voice-max-tokens-long',
+];
+
+function markAssistantFieldValidity(field, invalid) {
+    field.setAttribute('aria-invalid', invalid ? 'true' : 'false');
+    field.classList.toggle('border-red-500', invalid);
+    field.classList.toggle('border-gray-700', !invalid);
+}
+
+function applyAssistantCrossFieldRules() {
+    const intValue = id => parseInt(document.getElementById(id).value, 10);
+    const tokens = intValue('assistant-voice-max-tokens');
+    const longTokens = intValue('assistant-voice-max-tokens-long');
+    document.getElementById('assistant-voice-max-tokens-long').setCustomValidity(
+        Number.isFinite(tokens) && Number.isFinite(longTokens) && longTokens < tokens
+            ? `Must be at least the spoken answer limit (${tokens}).`
+            : ''
+    );
+    const minChars = intValue('assistant-min-response-chars');
+    const maxChars = intValue('assistant-max-response-chars');
+    document.getElementById('assistant-min-response-chars').setCustomValidity(
+        Number.isFinite(minChars) && Number.isFinite(maxChars) && minChars > maxChars
+            ? `Must not be more than the maximum response length (${maxChars}).`
+            : ''
+    );
+}
+
+function validateAssistantNumberFields() {
+    applyAssistantCrossFieldRules();
+    let firstInvalid = null;
+    for (const id of ASSISTANT_NUMBER_FIELD_IDS) {
+        const field = document.getElementById(id);
+        const invalid = !field.checkValidity();
+        markAssistantFieldValidity(field, invalid);
+        if (invalid && !firstInvalid) firstInvalid = field;
+    }
+    if (firstInvalid) {
+        firstInvalid.reportValidity();
+        const status = document.getElementById('assistant-profile-status');
+        status.textContent = firstInvalid.validationMessage;
+        status.className = 'text-sm text-red-400';
+        return false;
+    }
+    return true;
+}
+
+// Editing a field clears its error: the red border, aria-invalid, the custom message and the status line.
+function wireAssistantFieldValidation() {
+    for (const id of ASSISTANT_NUMBER_FIELD_IDS) {
+        const field = document.getElementById(id);
+        if (field.dataset.validationWired) continue;
+        field.dataset.validationWired = 'true';
+        field.addEventListener('input', () => {
+            field.setCustomValidity('');
+            applyAssistantCrossFieldRules();
+            for (const other of ASSISTANT_NUMBER_FIELD_IDS) {
+                const el = document.getElementById(other);
+                if (el.checkValidity()) markAssistantFieldValidity(el, false);
+            }
+            if (ASSISTANT_NUMBER_FIELD_IDS.every(other => document.getElementById(other).checkValidity())) {
+                const status = document.getElementById('assistant-profile-status');
+                status.textContent = '';
+                status.className = 'text-sm text-gray-400';
+            }
+        });
+    }
+}
+
 async function saveAssistantProfileSettings() {
+    if (!validateAssistantNumberFields()) {
+        return;
+    }
     try {
         const payload = {
             assistant_name: document.getElementById('assistant-name').value.trim(),

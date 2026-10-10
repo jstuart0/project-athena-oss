@@ -176,6 +176,14 @@ from orchestrator.fast_path import (
     last_assistant_text,
     register_pattern_classifier,
 )
+from orchestrator.model_safe_errors import (
+    RAGToolError,
+    log_safe,
+    make_user_safe,
+    model_safe_error,
+    scrub_tool_result,
+    tool_error_result,
+)
 from shared.fast_path_vocab import AMBIENT_REPLY
 from shared.llm_router import llm_usage_scope, with_llm_usage_scope, with_llm_usage_scope_stream
 from orchestrator.helpers import (
@@ -446,8 +454,9 @@ async def handle_tool_creation_request(
         )
 
         if not result.get("success"):
+            logger.warning("tool_definition_generation_failed", has_error_text=bool(result.get("error")))
             return {
-                "answer": f"I couldn't generate a tool definition: {result.get('error', 'Unknown error')}. Please try describing what you need more specifically.",
+                "answer": "I couldn't generate a tool definition. Please try describing what you need more specifically.",
                 "intent": "tool_creation",
                 "success": False
             }
@@ -493,8 +502,9 @@ async def handle_tool_creation_request(
             if error_code == "FEATURE_DISABLED":
                 return None  # Let the normal flow handle it
 
+            logger.warning("tool_proposal_rejected", error_code=error_code, has_error_text=bool(error_msg))
             return {
-                "answer": f"I couldn't submit the tool proposal: {error_msg}",
+                "answer": "I couldn't submit the tool proposal.",
                 "intent": "tool_creation",
                 "success": False
             }
@@ -502,10 +512,13 @@ async def handle_tool_creation_request(
     except Exception as e:
         logger.error("tool_creation_failed", error=str(e))
         return {
-            "answer": f"An error occurred while creating the tool: {str(e)}",
+            "answer": "Sorry, something went wrong while creating the tool.",
             "intent": "tool_creation",
             "success": False
         }
+
+# What a streaming client is told when the stream fails; the cause goes to the log by class only.
+STREAM_ERROR_MESSAGE = "Sorry, something went wrong."
 
 # Metrics — declarations moved to orchestrator.metrics (Phase 1.2)
 from orchestrator.metrics import (
@@ -3843,7 +3856,7 @@ async def execute_tools_parallel(
 
             if not service_url:
                 logger.error(f"No service URL found for tool: {function_name}")
-                return (tool_call_id, {"error": f"Tool {function_name} not configured"})
+                return (tool_call_id, tool_error_result(f"Tool {function_name} not configured"))
 
             # Special handling for get_sports_scores (requires two-step flow)
             if function_name == "get_sports_scores":
@@ -3867,7 +3880,7 @@ async def execute_tools_parallel(
                         params=search_params
                     )
                     if not search_response.success:
-                        raise Exception(search_response.error or "Sports team search failed")
+                        raise RAGToolError(search_response, "Sports team search failed")
 
                     search_data = search_response.data
 
@@ -3897,7 +3910,8 @@ async def execute_tools_parallel(
                             guest_mode=guest_mode
                         ))
                         logger.warning(f"No teams found for query: {team_name}")
-                        return (tool_call_id, {"error": f"No teams found matching '{team_name}'"})
+                        no_teams = f"No teams found matching '{team_name}'"
+                        return (tool_call_id, tool_error_result(make_user_safe(no_teams, 404) or no_teams))
 
                     team_id = teams[0]["idTeam"]
                     team_full_name = teams[0].get("strTeam", team_name)
@@ -3978,8 +3992,8 @@ async def execute_tools_parallel(
                         error_message=error_msg,
                         guest_mode=guest_mode
                     ))
-                    logger.error(f"Sports API failed: {e}")
-                    return (tool_call_id, {"error": error_msg})
+                    logger.error("sports_api_failed", **log_safe(e))
+                    return (tool_call_id, tool_error_result(e))
 
             # Special handling for get_sports_standings (league-wide rankings)
             if function_name == "get_sports_standings":
@@ -3997,7 +4011,7 @@ async def execute_tools_parallel(
                     )
 
                     if not standings_response.success:
-                        raise Exception(standings_response.error or "Standings fetch failed")
+                        raise RAGToolError(standings_response, "Standings fetch failed")
 
                     standings_data = standings_response.data
 
@@ -4023,8 +4037,8 @@ async def execute_tools_parallel(
                         error_message=error_msg,
                         guest_mode=guest_mode
                     ))
-                    logger.error(f"Standings API failed: {e}")
-                    return (tool_call_id, {"error": error_msg})
+                    logger.error("standings_api_failed", **log_safe(e))
+                    return (tool_call_id, tool_error_result(e))
 
             # Special handling for search_events (parallel Ticketmaster + SerpAPI + SeatGeek + Community)
             if function_name == "search_events":
@@ -4043,7 +4057,7 @@ async def execute_tools_parallel(
                             return data
                     except Exception as e:
                         logger.warning(f"Ticketmaster events failed: {e}")
-                        return {"events": [], "error": str(e)}
+                        return {"events": [], "error": model_safe_error(e)}
 
                 async def call_serpapi(args: dict) -> dict:
                     """Call SerpAPI events API."""
@@ -4096,7 +4110,7 @@ async def execute_tools_parallel(
                             return data
                     except Exception as e:
                         logger.warning(f"SerpAPI events failed: {e}")
-                        return {"events": [], "error": str(e)}
+                        return {"events": [], "error": model_safe_error(e)}
 
                 async def call_seatgeek(args: dict) -> dict:
                     """Call SeatGeek events API."""
@@ -4163,7 +4177,7 @@ async def execute_tools_parallel(
                             return data
                     except Exception as e:
                         logger.warning(f"SeatGeek events failed: {e}")
-                        return {"events": [], "error": str(e)}
+                        return {"events": [], "error": model_safe_error(e)}
 
                 async def call_community_events(args: dict) -> dict:
                     """Call Community Events API (scraped local events)."""
@@ -4207,7 +4221,7 @@ async def execute_tools_parallel(
                             return data
                     except Exception as e:
                         logger.warning(f"Community Events failed: {e}")
-                        return {"events": [], "error": str(e)}
+                        return {"events": [], "error": model_safe_error(e)}
 
                 # Call all four APIs in parallel
                 ticketmaster_task = asyncio.create_task(call_ticketmaster(arguments))
@@ -4221,13 +4235,13 @@ async def execute_tools_parallel(
 
                 # Handle exceptions
                 if isinstance(ticketmaster_result, Exception):
-                    ticketmaster_result = {"events": [], "error": str(ticketmaster_result)}
+                    ticketmaster_result = {"events": [], "error": model_safe_error(ticketmaster_result)}
                 if isinstance(serpapi_result, Exception):
-                    serpapi_result = {"events": [], "error": str(serpapi_result)}
+                    serpapi_result = {"events": [], "error": model_safe_error(serpapi_result)}
                 if isinstance(seatgeek_result, Exception):
-                    seatgeek_result = {"events": [], "error": str(seatgeek_result)}
+                    seatgeek_result = {"events": [], "error": model_safe_error(seatgeek_result)}
                 if isinstance(community_result, Exception):
-                    community_result = {"events": [], "error": str(community_result)}
+                    community_result = {"events": [], "error": model_safe_error(community_result)}
 
                 # Merge results from all sources
                 all_events = []
@@ -4451,7 +4465,7 @@ async def execute_tools_parallel(
                 response = await rag.post(rag_service_name, endpoint, json=arguments)
 
             if not response.success:
-                raise Exception(response.error or f"Tool {function_name} call failed")
+                raise RAGToolError(response, f"Tool {function_name} call failed")
 
             result_data = response.data
 
@@ -4503,8 +4517,8 @@ async def execute_tools_parallel(
             except Exception as metrics_err:
                 logger.warning(f"Failed to record tool metrics: {metrics_err}")
 
-            logger.error(f"Tool {function_name} failed: {e}", exc_info=True)
-            return (tool_call_id, {"error": error_msg})
+            logger.error("tool_failed", tool=function_name, **log_safe(e), exc_info=True)
+            return (tool_call_id, tool_error_result(e))
 
     # Execute all tools in parallel
     tasks = [execute_single_tool(tc) for tc in tool_calls]
@@ -5536,7 +5550,9 @@ Provide a helpful answer:"""
 
             # Check if tool returned an error
             if isinstance(result, dict) and "error" in result:
-                failed_tools.append((tool_call_id, function_name, result.get("error", "Unknown error")))
+                # error_msg below is later embedded in data the model reads, so it is made safe here;
+                # a UserSafeText (a vetted 4xx detail) passes unchanged.
+                failed_tools.append((tool_call_id, function_name, model_safe_error(result.get("error"))))
                 logger.warning(f"Tool '{function_name}' failed: {result.get('error')}")
 
         # If any tools failed, try web search fallback (if enabled for that tool)
@@ -5622,7 +5638,7 @@ Provide a helpful answer:"""
                         tool_results[tool_call_id] = {
                             "error": error_msg,
                             "fallback_attempted": True,
-                            "fallback_error": str(e)
+                            "fallback_error": model_safe_error(e)
                         }
 
         # ADDITIONAL FALLBACK: Check for empty/irrelevant results (not just errors)
@@ -5756,7 +5772,7 @@ Provide a helpful answer:"""
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call_id,
-                "content": json.dumps(result)
+                "content": json.dumps(scrub_tool_result(result))
             })
 
         # HYBRID APPROACH: Use quantized 14b for synthesis (quality matters)
@@ -7426,10 +7442,7 @@ async def process_query(
                 error=str(e)
             )
 
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to process query: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail="internal_error")
 
 @app.post("/query/stream", dependencies=[Depends(require_service_caller)])
 async def process_query_stream(
@@ -7781,8 +7794,8 @@ async def process_query_stream(
             yield f"data: {json.dumps({'stage': 'complete', 'processing_time': processing_time, 'tool_exec_time': tool_exec_time, 'llm_time': llm_time, 'tokens': token_count})}\n\n"
 
         except Exception as e:
-            logger.error(f"Streaming error: {e}", exc_info=True)
-            yield f"data: {json.dumps({'stage': 'error', 'message': str(e)})}\n\n"
+            logger.error("streaming_error", **log_safe(e))
+            yield f"data: {json.dumps({'stage': 'error', 'message': STREAM_ERROR_MESSAGE})}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -8002,8 +8015,8 @@ async def process_query_stream_v2(
             )
 
         except Exception as e:
-            logger.error(f"Stream v2 error: {e}", exc_info=True)
-            yield f"data: {json.dumps({'stage': 'error', 'message': str(e)})}\n\n"
+            logger.error("stream_v2_error", **log_safe(e))
+            yield f"data: {json.dumps({'stage': 'error', 'message': STREAM_ERROR_MESSAGE})}\n\n"
 
     return StreamingResponse(
         sentence_event_generator(),
@@ -8984,8 +8997,8 @@ async def chat_completions(request: OpenAIChatRequest):
         return response
 
     except Exception as e:
-        logger.error(f"Error in chat completions: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("chat_completions_error", **log_safe(e))
+        raise HTTPException(status_code=500, detail="internal_error")
 
 
 # ============================================================================
@@ -9175,7 +9188,7 @@ async def health_check(detailed: bool = False):
 
     except Exception as e:
         logger.error(f"Failed to get resilience status: {e}")
-        health["resilience"] = {"error": str(e)}
+        health["resilience"] = {"error": "internal_error"}
         health["components"]["circuit_breakers"] = True  # Don't fail on resilience check errors
 
     # Only check RAG services if detailed=true (for manual debugging, not k8s probes)
@@ -9399,7 +9412,7 @@ async def resilience_status():
         }
     except Exception as e:
         logger.error(f"Failed to get resilience status: {e}")
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": "internal_error"}
 
 
 @app.post("/admin/reset-circuit-breaker/{service_name}", dependencies=[Depends(require_service_caller)])

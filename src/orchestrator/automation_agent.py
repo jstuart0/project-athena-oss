@@ -24,6 +24,7 @@ from shared.assistant_profile import build_automation_system_prompt
 from shared.local_time import local_now
 from shared.logging_config import payload_keys
 from shared.output_channel import render_sink_text
+from orchestrator.model_safe_errors import model_safe_error, scrub_tool_result
 from orchestrator.utils.constants import DEFAULT_CITY
 # ATHENA-69: orchestrator.mode_permission is imported lazily inside
 # AutomationAgent.__init__ (not at module scope) -- see the identical note
@@ -516,12 +517,12 @@ class AutomationAgent:
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.get("id", f"call_{iteration}"),
-                        "content": str(result)
+                        "content": json.dumps(scrub_tool_result(result)) if isinstance(result, (dict, list)) else str(result)
                     })
 
             except Exception as e:
                 logger.error(f"AutomationAgent error in iteration {iteration}: {e}")
-                return f"I encountered an error: {str(e)}"
+                return "Sorry, something went wrong with that request."
 
         # Safety fallback
         logger.warning(f"AutomationAgent hit max iterations ({max_iterations})")
@@ -763,7 +764,7 @@ class AutomationAgent:
 
         except Exception as e:
             logger.error(f"Tool execution error ({name}): {e}")
-            return f"Error executing {name}: {str(e)}"
+            return f"Error executing {name}: {model_safe_error(e)}"
 
     async def _exec_ha_service(self, args: Dict, context: Dict) -> str:
         """Execute immediate HA service call."""
@@ -800,7 +801,7 @@ class AutomationAgent:
             return f"Called {domain}.{service} on {entity_id}"
         except Exception as e:
             logger.error(f"HA service call failed: {e}")
-            return f"Failed to call {domain}.{service}: {str(e)}"
+            return f"Failed to call {domain}.{service}: {model_safe_error(e)}"
 
     async def _create_automation(self, args: Dict, context: Dict) -> str:
         """Create automation in HA and optionally store in admin backend."""
@@ -843,7 +844,7 @@ class AutomationAgent:
 
         except Exception as e:
             logger.error(f"Failed to create automation: {e}")
-            return f"Failed to create automation: {str(e)}"
+            return f"Failed to create automation: {model_safe_error(e)}"
 
     def _build_ha_automation(self, automation_id: str, args: Dict) -> Dict:
         """Convert tool args to HA automation format."""
@@ -1346,7 +1347,7 @@ class AutomationAgent:
 
         except Exception as e:
             logger.error(f"Failed to get entity state: {e}")
-            return f"Error getting state: {str(e)}"
+            return f"Error getting state: {model_safe_error(e)}"
 
     async def _send_notification(self, args: Dict, context: Dict) -> str:
         """Send a notification via TTS, mobile push, or flashing lights."""
@@ -1405,7 +1406,7 @@ class AutomationAgent:
 
         except Exception as e:
             logger.error(f"Failed to send notification: {e}")
-            return f"Notification failed: {str(e)}"
+            return f"Notification failed: {model_safe_error(e)}"
 
     async def _flash_lights(self, entity_id: str, count: int = 3, color: Optional[List[int]] = None):
         """Flash lights as a visual notification."""
