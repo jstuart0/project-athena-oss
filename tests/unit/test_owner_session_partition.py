@@ -324,3 +324,41 @@ def test_guest_ids_are_not_adopted_by_other_classes():
         assert keys.usable_session_id("gst-x", cls) != "gst-x"
     assert keys.session_storage_key("gst-x") == "athena:guest_session:gst-x"
     assert keys.context_storage_key("gst-x") == "athena:guest_context:gst-x"
+
+
+# --- client chat_history must agree with the server's audience ------------------------
+
+HISTORY = [{"role": "user", "content": "EARLIER USER TURN"}, {"role": "assistant", "content": "EARLIER ANSWER"}]
+
+
+def _post_history(rig, session_id, trust="household", headers=True):
+    body = {"query": "what's the weather", "interface_type": "chat", "caller_trust": trust,
+            "session_id": session_id, "chat_history": HISTORY}
+    resp = rig.client.post("/query", json=body, headers=h.service_headers() if headers else {})
+    assert resp.status_code == 200, resp.text
+    return [m["content"] for m in rig.graph.states[-1].conversation_history]
+
+
+def test_chat_history_is_dropped_when_the_client_thinks_household_and_the_server_says_guest(rig):
+    h.install_mode_client(server_mode="guest")  # a stay began; jarvis-web still sent a household id
+    assert _post_history(rig, "a" * 32 + "." + "b" * 24) == []
+
+
+def test_chat_history_is_dropped_when_the_client_thinks_guest_and_the_server_says_household(rig):
+    h.install_mode_client(server_mode="owner")  # the stay ended; jarvis-web still sent a guest id
+    assert _post_history(rig, "gst-" + "a" * 32 + "." + "b" * 24) == []
+
+
+@pytest.mark.parametrize("server,session_id,trust", [
+    ("owner", "a" * 32 + "." + "b" * 24, "household"),
+    ("guest", "gst-" + "a" * 32 + "." + "b" * 24, "household"),
+    ("owner", "own-" + "a" * 32 + "." + "b" * 24, "web_owner"),
+], ids=["household", "guest", "proven_owner"])
+def test_chat_history_is_accepted_when_the_classes_agree(rig, server, session_id, trust):
+    h.install_mode_client(server_mode=server)
+    assert _post_history(rig, session_id, trust=trust) == ["EARLIER USER TURN", "EARLIER ANSWER"]
+
+
+def test_chat_history_is_dropped_for_an_owner_id_when_the_owner_is_not_proven(rig):
+    h.install_mode_client(server_mode="guest")
+    assert _post_history(rig, "own-" + "a" * 32 + "." + "b" * 24, trust="web_owner") == []

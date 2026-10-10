@@ -514,7 +514,7 @@ tool_config_cache: Dict[str, List[Dict[str, Any]]] = {}
 # Forward import — main consolidated import is at line 609 but
 # get_conversation_context's type annotation at line 493 needs it earlier.
 from orchestrator.state import ConversationContext  # noqa: E402
-from orchestrator.session_keys import context_storage_key  # noqa: E402
+from orchestrator.session_keys import context_storage_key, id_class  # noqa: E402
 
 # ConversationContext now imported from orchestrator.state (via IntentCategory/ModelTier import block above)
 # Note: CONTEXT_REF_PATTERNS, ROOM_INDICATORS, and detect_context_reference
@@ -6333,14 +6333,24 @@ def _session_caller_class(request: "QueryRequest", audience: KnowledgeAudience) 
 
 
 def _drop_unproven_owner_history(request: "QueryRequest", audience: KnowledgeAudience) -> bool:
-    """True when request.chat_history must be ignored: an owner caller that is
-    not proven this turn (a stay, a degraded mode service) could be handed the
-    owner's own thread by a client whose view of the house disagrees with
-    ours, and its answer must not rest on owner conversation."""
-    if not (audience.owner_caller and not audience.owner_proven):
+    """True when request.chat_history must be ignored.
+
+    The client (jarvis-web) builds chat_history from a persistent thread it
+    chose using its own view of the house. It is accepted only when the class
+    of the session id it presents (own-/gst-/plain) is the class this server
+    just derived from the KnowledgeAudience; any disagreement (a stay starting
+    or ending between the two views, an owner who is not proven this turn)
+    drops it, so the race fails closed. Counts only are logged.
+    """
+    if not request.chat_history:
         return False
-    if request.chat_history:
-        logger.info("chat_history_dropped", reason="owner_unproven", turns=len(request.chat_history))
+    if id_class(request.session_id) == _audience_session_class(audience):
+        return False
+    logger.info(
+        "chat_history_dropped",
+        reason="owner_unproven" if audience.owner_caller and not audience.owner_proven else "session_class_mismatch",
+        turns=len(request.chat_history),
+    )
     return True
 
 
