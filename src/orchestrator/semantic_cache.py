@@ -578,8 +578,16 @@ def get_cache_key(
     mode: str = None,
     location_override: dict = None,
     guest_id: Optional[Any] = None,
+    *,
+    interface_type: str,
 ) -> str:
     """Generate cache key with optional mode/guest/location context.
+
+    ``interface_type`` is always the LAST segment (``iface_<value>``): a voice
+    answer is phrased for the ear and a chat answer for the screen, so one is
+    never replayed as the other. Stored answers are raw; rendering for speech
+    happens on the way out, after the cache. Category invalidation matches the
+    ``athena_semantic:{category}_*`` prefix, which this suffix doesn't touch.
 
     Audience partition: the key carries the effective mode and, for a
     device-identified guest, ``guest:<id>``, so an owner's answer is never
@@ -619,6 +627,8 @@ def get_cache_key(
             lon = round(location_override["longitude"], 2)
             key_parts.append(f"loc_{lat}_{lon}")
 
+    key_parts.append(f"iface_{interface_type}")
+
     return ":".join(key_parts)
 
 
@@ -628,6 +638,8 @@ async def get_cached_response(
     mode: str = None,
     location_override: dict = None,
     guest_id: Optional[Any] = None,
+    *,
+    interface_type: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Check cache for a semantically similar query.
@@ -638,6 +650,7 @@ async def get_cached_response(
         mode: The effective mode (part of the key)
         location_override: Optional location override dict with address, latitude, longitude
         guest_id: The device-identified guest's id, if any (part of the key)
+        interface_type: The request's interface type (the last part of the key)
 
     Returns:
         Cached response dict if found and valid, None otherwise
@@ -649,7 +662,7 @@ async def get_cached_response(
         logger.debug("semantic_cache_skip", category=category, reason="not_cacheable")
         return None
 
-    cache_key = get_cache_key(normalized_query, query, room, mode, location_override, guest_id)
+    cache_key = get_cache_key(normalized_query, query, room, mode, location_override, guest_id, interface_type=interface_type)
     cache = get_cache_client()
 
     try:
@@ -678,6 +691,8 @@ async def cache_response(
     mode: str = None,
     location_override: dict = None,
     guest_id: Optional[Any] = None,
+    *,
+    interface_type: str,
 ) -> bool:
     """
     Cache a query response with appropriate TTL based on intent category.
@@ -689,6 +704,7 @@ async def cache_response(
         mode: The effective mode (part of the key)
         location_override: Optional location override dict with address, latitude, longitude
         guest_id: The device-identified guest's id, if any (part of the key)
+        interface_type: The request's interface type (the last part of the key)
 
     Returns:
         True if cached successfully, False otherwise
@@ -701,7 +717,7 @@ async def cache_response(
 
     # Get TTL for this category
     ttl = CACHE_TTL_CONFIG.get(category, CACHE_TTL_CONFIG["general"])
-    cache_key = get_cache_key(normalized_query, query, room, mode, location_override, guest_id)
+    cache_key = get_cache_key(normalized_query, query, room, mode, location_override, guest_id, interface_type=interface_type)
     cache = get_cache_client()
 
     try:

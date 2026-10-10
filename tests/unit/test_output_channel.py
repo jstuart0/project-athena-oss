@@ -7,6 +7,7 @@ from __future__ import annotations
 import ast
 import inspect
 import logging
+import sys
 from pathlib import Path
 from typing import get_args
 
@@ -33,6 +34,9 @@ from shared.output_channel import (
 from .test_tts_normalizer import CORPUS
 
 REPO = Path(__file__).resolve().parents[2]
+# `orchestrator` is not an installed package (only `shared` is): reach it the way the sibling tests do.
+if str(REPO / "src") not in sys.path:
+    sys.path.insert(0, str(REPO / "src"))
 SPEECH, TEXT = OutputChannel.SPEECH, OutputChannel.TEXT
 
 
@@ -316,16 +320,16 @@ def test_no_overlap_keeps_everything_and_logs_nothing(caplog):
 
 # --- Drift guards (expected sets move per phase; end state in Phase 5) -----------------------
 
-# Phase 3 removes main.py; Phase 5 adds the jarvis-web importers.
-EXPECTED_NORMALIZER_IMPORTERS = {"src/orchestrator/main.py", "src/shared/output_channel.py"}
+# Phase 5 adds the jarvis-web importers.
+EXPECTED_NORMALIZER_IMPORTERS = {"src/shared/output_channel.py"}
 TTS_SINKS = {
     "src/gateway/wyoming_bridge.py::AthenaWyomingHandler._synthesize",
     "src/gateway/livekit_integration.py::TTSClient.synthesize",
     "apps/jarvis-web/backend/main.py::synthesize_speech",
     "src/orchestrator/automation_agent.py::AutomationAgent._send_notification",
 }
-# Sinks that render today; Phase 3 adds automation_agent, Phase 4 the gateway sinks, Phase 5 jarvis-web.
-RENDERING_SINKS: set = set()
+# Sinks that render today; Phase 4 adds the gateway sinks, Phase 5 jarvis-web.
+RENDERING_SINKS: set = {"src/orchestrator/automation_agent.py::AutomationAgent._send_notification"}
 # admin diagnostics (admin/backend/app/routes/voice_tests.py) are out of scope: not an Athena answer.
 MUST_NOT_IMPORT_SEAM = [
     "src/orchestrator/mode_permission.py",

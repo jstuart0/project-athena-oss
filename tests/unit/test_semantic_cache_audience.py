@@ -133,10 +133,10 @@ def test_public_never_writes_cache(client, monkeypatch, cache):
 
 
 def test_owner_and_guest_keys_differ():
-    owner = semantic_cache.get_cache_key("weather_current", QUERY, mode="owner")
-    guest = semantic_cache.get_cache_key("weather_current", QUERY, mode="guest")
-    guest7 = semantic_cache.get_cache_key("weather_current", QUERY, mode="guest", guest_id=7)
-    guest8 = semantic_cache.get_cache_key("weather_current", QUERY, mode="guest", guest_id=8)
+    owner = semantic_cache.get_cache_key("weather_current", QUERY, mode="owner", interface_type="chat")
+    guest = semantic_cache.get_cache_key("weather_current", QUERY, mode="guest", interface_type="chat")
+    guest7 = semantic_cache.get_cache_key("weather_current", QUERY, mode="guest", guest_id=7, interface_type="chat")
+    guest8 = semantic_cache.get_cache_key("weather_current", QUERY, mode="guest", guest_id=8, interface_type="chat")
     assert len({owner, guest, guest7, guest8}) == 4
 
 

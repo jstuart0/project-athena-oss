@@ -22,7 +22,7 @@ import asyncio
 import subprocess
 import signal
 import re
-from typing import Dict, Any, Optional, List, Literal, Tuple
+from typing import Dict, Any, Optional, List, Literal, Tuple, get_args
 from contextlib import asynccontextmanager
 from enum import Enum
 
@@ -65,7 +65,7 @@ from orchestrator.session_manager import (
 )
 from orchestrator.config_loader import get_config
 from orchestrator.timing import TimingTracker
-from shared.tts_normalizer import normalize_for_tts
+from shared.output_channel import OutputChannel, channel_for_interface_type, render_answer, renders_spoken_answer
 
 from orchestrator.search_providers.intent_classifier import IntentClassifier
 
@@ -6337,6 +6337,7 @@ class QueryResponse(BaseModel):
     sms_content_type: Optional[str] = Field(None, description="Type of detected SMS content")
 
 @app.post("/query", response_model=QueryResponse, dependencies=[Depends(require_service_caller)])
+@renders_spoken_answer
 async def process_query(request: QueryRequest) -> QueryResponse:
     """
     Process a user query through the orchestrator state machine.
@@ -6628,6 +6629,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                     mode=current_mode,
                     location_override=location_override,
                     guest_id=_cache_guest_id(guest_info),
+                    interface_type=request.interface_type,
                 )
 
             # Skip cache if strong intent doesn't match cached intent
@@ -7066,10 +7068,6 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                 success=True
             )
 
-        # Normalize text for TTS (expand abbreviations for voice output)
-        if request.interface_type == "voice":
-            answer = normalize_for_tts(answer)
-
         # Build the response object
         # Include browser_playback in metadata if present (for Jarvis Web music playback)
         response_metadata = {
@@ -7144,6 +7142,7 @@ async def process_query(request: QueryRequest) -> QueryResponse:
                         mode=current_mode,
                         location_override=cache_location_override,
                         guest_id=_cache_guest_id(guest_info),
+                        interface_type=request.interface_type,
                     )
                 )
             except Exception as cache_err:
@@ -7276,7 +7275,7 @@ async def process_query_stream(request: QueryRequest):
             # consumption or mode-service call.
             outcome = await handle_owner_mode_utterance(request.query, request.caller_trust, request.room)
             if outcome is not None:
-                yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': outcome.message})}\n\n"
+                yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': render_answer(outcome.message, request.interface_type)})}\n\n"
                 yield f"data: {json.dumps({'stage': 'complete', 'processing_time': time.time() - start_time, 'tool_exec_time': 0, 'llm_time': 0, 'tokens': 0})}\n\n"
                 return
 
@@ -7388,14 +7387,17 @@ async def process_query_stream(request: QueryRequest):
             full_answer = ""
             token_count = 0
             stream_completed = False
+            speak_answer = channel_for_interface_type(request.interface_type) is OutputChannel.SPEECH
 
             if state.answer:
                 # Pre-computed answer: control/music/TV/SMS handlers, or tool_call_node synthesis.
                 # tool_call_node does multi-step LLM internally — can't stream those tokens yet.
                 full_answer = _strip_hallucinated_continuation(state.answer)
+                # Sessions keep the raw answer; the client gets the channel's rendering.
+                streamed_answer = render_answer(full_answer, request.interface_type)
                 CHUNK_SIZE = 20
-                for i in range(0, len(full_answer), CHUNK_SIZE):
-                    chunk = full_answer[i:i + CHUNK_SIZE]
+                for i in range(0, len(streamed_answer), CHUNK_SIZE):
+                    chunk = streamed_answer[i:i + CHUNK_SIZE]
                     token_count += 1
                     yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': chunk})}\n\n"
                 stream_completed = True
@@ -7440,7 +7442,8 @@ async def process_query_stream(request: QueryRequest):
                                 break
                             token_count += 1
                             response_tokens.append(token)
-                            yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': token})}\n\n"
+                            if not speak_answer:
+                                yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': token})}\n\n"
                         if chunk.get("done", False):
                             stream_completed = True
                             break
@@ -7455,6 +7458,9 @@ async def process_query_stream(request: QueryRequest):
                     full_answer = "I'm not sure how to help with that. Could you rephrase your question?"
                     yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': full_answer})}\n\n"
                     stream_completed = True
+                elif speak_answer:
+                    # Speech is normalized as a whole, so it is sent once, at the end.
+                    yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': render_answer(full_answer, request.interface_type)})}\n\n"
 
             llm_time = time.time() - llm_start_time
 
@@ -7593,8 +7599,8 @@ async def process_query_stream_v2(request: QueryRequest):
             # consumption or mode-service call.
             outcome = await handle_owner_mode_utterance(request.query, request.caller_trust, request.room)
             if outcome is not None:
-                yield f"data: {json.dumps({'stage': 'streaming', 'sentence_num': 1, 'sentence': outcome.message, 'is_final': True})}\n\n"
-                yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': 1, 'full_response': outcome.message, 'intent': 'mode_override', 'processing_time': time.time() - start_time})}\n\n"
+                yield f"data: {json.dumps({'stage': 'streaming', 'sentence_num': 1, 'sentence': render_answer(outcome.message, request.interface_type), 'is_final': True})}\n\n"
+                yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': 1, 'full_response': render_answer(outcome.message, request.interface_type), 'intent': 'mode_override', 'processing_time': time.time() - start_time})}\n\n"
                 return
 
             # Run orchestrator up to LLM synthesis point
@@ -7643,11 +7649,13 @@ async def process_query_stream_v2(request: QueryRequest):
                 yield f"data: {json.dumps({'stage': 'error', 'message': 'No response generated'})}\n\n"
                 return
 
-            # Stream answer sentence by sentence
+            # Stream answer sentence by sentence. The session keeps `answer` raw;
+            # the client gets the channel's rendering, normalized before the split.
+            spoken_answer = render_answer(answer, request.interface_type)
             sentences = []
             buffer = ""
 
-            for char in answer:
+            for char in spoken_answer:
                 buffer += char
 
                 # Check for sentence boundary
@@ -7664,7 +7672,7 @@ async def process_query_stream_v2(request: QueryRequest):
 
             # Stage 4: Complete
             processing_time = time.time() - start_time
-            yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': len(sentences), 'full_response': answer, 'intent': intent_str, 'processing_time': processing_time})}\n\n"
+            yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': len(sentences), 'full_response': spoken_answer, 'intent': intent_str, 'processing_time': processing_time})}\n\n"
 
             # Persist session to Redis so context carries across requests and pods
             await sm.add_message(
@@ -8274,6 +8282,13 @@ async def chat_completions(request: OpenAIChatRequest):
             identity_kind=resolved_session.identity_kind,
         )
 
+        # The channel is decided once, from the gateway's interface_type: an
+        # unknown value is text, never speech.
+        interface_type = (request.extra_body or {}).get("interface_type", "text")
+        if interface_type not in get_args(QueryRequest.model_fields["interface_type"].annotation):
+            logger.warning("openai_interface_type_invalid")
+            interface_type = "text"
+
         # If streaming is requested, use SSE format
         if request.stream:
             async def openai_stream_generator():
@@ -8306,7 +8321,7 @@ async def chat_completions(request: OpenAIChatRequest):
                 outcome = await handle_owner_mode_utterance(user_message, None, None)
                 if outcome is not None:
                     pin_request_id = hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8]
-                    yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': outcome.message}, 'finish_reason': None}]})}\n\n"
+                    yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': render_answer(outcome.message, interface_type)}, 'finish_reason': None}]})}\n\n"
                     yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
                     yield "data: [DONE]\n\n"
                     return
@@ -8358,10 +8373,9 @@ async def chat_completions(request: OpenAIChatRequest):
 
                 start_time = time.time()
 
-                # Extract room and interface_type from extra_body (passed from gateway)
+                # Extract room from extra_body (passed from gateway); interface_type was resolved above
                 extra_body = request.extra_body or {}
                 room = extra_body.get("room", "web")
-                interface_type = extra_body.get("interface_type", "text")  # Default to text for backward compat
 
                 initial_state = OrchestratorState(
                     query=user_message,
@@ -8403,12 +8417,10 @@ async def chat_completions(request: OpenAIChatRequest):
                         request_id=state.request_id,
                         intent=state.intent.value if state.intent else "unknown"
                     )
-                    answer = state.answer
-                    # Apply TTS normalization (expand abbreviations, zip codes, etc.)
-                    answer = normalize_for_tts(answer)
-                    words = answer.split()
-                    for i, word in enumerate(words):
-                        chunk = word + (" " if i < len(words) - 1 else "")
+                    # Handler answers follow the caller's channel: speech is
+                    # normalized, text is sent as written. The session keeps the raw answer.
+                    answer = render_answer(state.answer, interface_type)
+                    for chunk in re.findall(r"\S+\s*|\s+", answer):
                         chunk_data = {
                             "id": initial_state.request_id,
                             "object": "chat.completion.chunk",
@@ -8450,7 +8462,7 @@ async def chat_completions(request: OpenAIChatRequest):
 
                     # For voice interface: buffer all tokens first, then normalize and stream
                     # For text/chat: stream tokens directly (original behavior)
-                    is_voice = interface_type == "voice"
+                    is_voice = channel_for_interface_type(interface_type) is OutputChannel.SPEECH
 
                     async for chunk in llm.generate_stream(
                         model=synthesis_model,
@@ -8488,7 +8500,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     # For voice interface: normalize and stream the complete response
                     if is_voice and response_tokens:
                         full_response = "".join(response_tokens)
-                        normalized_response = normalize_for_tts(full_response)
+                        normalized_response = render_answer(full_response, interface_type)
                         logger.info(
                             "tts_normalization_applied",
                             request_id=state.request_id,
@@ -8577,6 +8589,7 @@ async def chat_completions(request: OpenAIChatRequest):
             session_id=resolved_session.session_id,
             room=(request.room or (request.extra_body or {}).get("room") or "unknown"),
             temperature=request.temperature,
+            interface_type=interface_type,
         )
 
         result = await process_query(query_request)
