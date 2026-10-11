@@ -125,6 +125,15 @@ def _redacted(samples) -> list:
     return [q for q in cleaned if q]
 
 
+DISPLAY_NAME_MAX_CHARS = 100  # the column allows 200
+DESCRIPTION_MAX_CHARS = 500
+
+
+def _label(value, limit: int):
+    """A generated label as stored: runs of 4 or more digits replaced, capped, ``None`` if empty."""
+    return redact_digits(str(value))[:limit] if value else None
+
+
 def _may_read_text(user) -> bool:
     return bool(user) and not isinstance(user, str) and user.has_permission(capture.VIEW_TEXT_PERMISSION)
 
@@ -190,8 +199,8 @@ async def create_emerging_intent_internal(
     # Create new
     intent = EmergingIntent(
         canonical_name=data.canonical_name,
-        display_name=data.display_name or data.canonical_name.replace("_", " ").title(),
-        description=data.description,
+        display_name=_label(data.display_name or data.canonical_name.replace("_", " ").title(), DISPLAY_NAME_MAX_CHARS),
+        description=_label(data.description, DESCRIPTION_MAX_CHARS),
         embedding=data.embedding,
         suggested_category=data.suggested_category,
         suggested_api_sources=data.suggested_api_sources,

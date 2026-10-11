@@ -167,3 +167,73 @@ def test_emerging_intent_calls_send_no_sample_when_there_is_none(monkeypatch):
     asyncio.run(idisc.increment_intent_count(3, "a sample", "http://a"))
     assert posted[0][1]["sample_queries"] == [] and posted[1][1]["sample_queries"] == ["weather in [number]"]
     assert posted[2][1] == {} and posted[3][1] == {"sample_query": "a sample"}
+
+
+# ---------------------------------------------------------------------------
+# Generated labels: withheld turns get no intent; labels are redacted and capped
+# ---------------------------------------------------------------------------
+
+class SpyEmbedder:
+    def __init__(self):
+        self.inputs = []
+
+    def embed_intent(self, name, description):
+        self.inputs.append((name, description))
+        return [0.1, 0.2]
+
+
+def _wire_discovery(monkeypatch, novel):
+    calls = {"generate": 0, "created": []}
+
+    async def generate(query, llm):
+        calls["generate"] += 1
+        return novel
+
+    async def embedder():
+        calls["embedder"] = SpyEmbedder()
+        return calls["embedder"]
+
+    async def similar(embedding, url, threshold=0.8):
+        return None
+
+    async def create(**kwargs):
+        calls["created"].append(kwargs)
+        return 7
+
+    monkeypatch.setattr(idisc, "generate_novel_intent", generate)
+    monkeypatch.setattr(idisc, "get_embedder", embedder)
+    monkeypatch.setattr(idisc, "find_similar_emerging_intent", similar)
+    monkeypatch.setattr(idisc, "create_emerging_intent", create)
+    return calls
+
+
+@pytest.mark.parametrize("query", ["switch to owner mode", "pin one two three four five six", "my code is 123456"])
+def test_a_withheld_turn_never_reaches_the_model_and_creates_no_intent(monkeypatch, query):
+    calls = _wire_discovery(monkeypatch, {"canonical_name": "x", "display_name": "X", "description": "d"})
+    result = asyncio.run(idisc.discover_intent(query, "unknown", 0.1, object(), "http://a"))
+    assert result.is_novel is False and result.emerging_intent_id is None
+    assert calls["generate"] == 0 and calls["created"] == []
+
+
+def test_analytics_mode_off_does_not_stop_discovery_but_sends_no_sample(monkeypatch):
+    novel = {"canonical_name": "garage_plan", "display_name": "Garage plan for 20261", "description": "wants 5551234567 " + "x" * 600}
+    calls = _wire_discovery(monkeypatch, novel)
+    _runtime.set_turn_capture(FakeSink(False))
+    result = asyncio.run(idisc.discover_intent("tell me about the garage plan", "unknown", 0.1, object(), "http://a"))
+    assert result.is_novel and result.emerging_intent_id == 7 and calls["generate"] == 1
+    created = calls["created"][0]
+    assert created["sample_query"] is None
+    assert created["display_name"] == "Garage plan for [number]"
+    assert "[number]" in created["description"] and "5551234567" not in created["description"]
+    assert len(created["description"]) <= idisc.LABEL_MAX_CHARS["description"]
+
+
+def test_the_embedding_input_uses_the_redacted_description(monkeypatch):
+    calls = _wire_discovery(monkeypatch, {"canonical_name": "call_back", "display_name": "Call back", "description": "call 5551234567 later"})
+    asyncio.run(idisc.discover_intent("please call me back", "unknown", 0.1, object(), "http://a"))
+    assert calls["embedder"].inputs == [("call_back", "call [number] later")]
+
+
+def test_labels_are_capped():
+    assert len(idisc._clean_label("a" * 900, 100)) == 100
+    assert idisc._clean_label(None, 100) == ""

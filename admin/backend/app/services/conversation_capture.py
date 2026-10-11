@@ -478,7 +478,8 @@ async def _retention_loop() -> None:
 
 
 def start_retention_loop() -> None:
-    """Start the daily purge. Skipped in DEV_MODE; runs whether or not Analytics Mode is on."""
+    """Start the retention purge: every 6 hours, first run 5 minutes after startup. Skipped in
+    DEV_MODE; runs whether or not Analytics Mode is on."""
     global _task
     if DEV_MODE:
         return

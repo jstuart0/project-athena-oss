@@ -329,6 +329,23 @@ def discovery_sample(query: str) -> Optional[str]:
     return capture.redact_digits(query[:SAMPLE_MAX_CHARS])
 
 
+LABEL_MAX_CHARS = {"display_name": 100, "description": 500}
+
+
+def _clean_label(text: Optional[str], limit: int) -> str:
+    """A generated label with runs of 4 or more digits replaced, capped at ``limit`` characters."""
+    from shared import conversation_capture as capture
+
+    return (capture.redact_digits(text or "") or "")[:limit]
+
+
+def _query_withheld(query: str) -> bool:
+    from orchestrator.mode_permission import detect_owner_mode_command
+    from shared import conversation_capture as capture
+
+    return capture.withhold_reason(query, detect_owner_mode_command) is not None
+
+
 def query_hash(raw_query: str) -> Optional[str]:
     """HMAC-SHA256 of the lower-cased query, keyed on SERVICE_API_KEY with its own domain.
 
@@ -524,6 +541,17 @@ async def discover_intent(
             confidence_boost=0.0
         )
 
+    # A PIN-shaped turn is never sent to the model that names intents, and creates none.
+    # Analytics Mode being off does not stop discovery: a category label is not a transcript.
+    if _query_withheld(query):
+        logger.info("intent_discovery_skipped", reason="withheld", query_len=len(query))
+        return IntentDiscoveryResult(
+            is_novel=False,
+            canonical_name=None,
+            emerging_intent_id=None,
+            confidence_boost=0.0
+        )
+
     # Generate canonical intent name via LLM
     novel_intent = await generate_novel_intent(query, llm_router)
 
@@ -538,10 +566,9 @@ async def discover_intent(
 
     # Generate embedding
     embedder = await get_embedder()
-    embedding = embedder.embed_intent(
-        novel_intent["canonical_name"],
-        novel_intent.get("description", "")
-    )
+    display_name = _clean_label(novel_intent.get("display_name", novel_intent["canonical_name"]), LABEL_MAX_CHARS["display_name"])
+    description = _clean_label(novel_intent.get("description", ""), LABEL_MAX_CHARS["description"])
+    embedding = embedder.embed_intent(novel_intent["canonical_name"], description)
 
     # Search for similar existing novel intent
     similar = await find_similar_emerging_intent(
@@ -568,8 +595,8 @@ async def discover_intent(
         # Create new novel intent
         intent_id = await create_emerging_intent(
             canonical_name=novel_intent["canonical_name"],
-            display_name=novel_intent.get("display_name", novel_intent["canonical_name"]),
-            description=novel_intent.get("description", ""),
+            display_name=display_name,
+            description=description,
             embedding=embedding,
             suggested_category=novel_intent.get("suggested_category", "other"),
             suggested_api_sources=novel_intent.get("suggested_api_sources", []),

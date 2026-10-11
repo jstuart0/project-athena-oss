@@ -183,3 +183,19 @@ def test_the_analytics_log_docstring_does_not_claim_it_needs_no_authentication()
 
     assert "No authentication required" not in internal.log_analytics_event.__doc__
     assert "X-Service-Key" in internal.log_analytics_event.__doc__
+
+
+def test_labels_are_redacted_and_capped_when_an_intent_is_created(client, db):
+    resp = client.post("/api/internal/emerging-intents", headers=KEY, json={
+        "canonical_name": "label_test", "display_name": "Plan for 20261 " + "N" * 300,
+        "description": "she said call 5551234567 " + "d" * 700})
+    assert resp.status_code == 200
+    row = db.query(EmergingIntent).filter(EmergingIntent.canonical_name == "label_test").one()
+    assert row.display_name.startswith("Plan for [number]") and len(row.display_name) == 100
+    assert "5551234567" not in row.description and len(row.description) == 500
+
+
+def test_a_missing_display_name_falls_back_to_the_canonical_name_and_an_empty_description_stays_empty(client, db):
+    client.post("/api/internal/emerging-intents", headers=KEY, json={"canonical_name": "plain_name", "description": ""})
+    row = db.query(EmergingIntent).filter(EmergingIntent.canonical_name == "plain_name").one()
+    assert row.display_name == "Plain Name" and row.description is None
