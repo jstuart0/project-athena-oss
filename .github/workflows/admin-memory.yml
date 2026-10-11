@@ -14,6 +14,10 @@ on:
       - "admin/backend/app/utils/service_auth.py"
       - "admin/backend/app/utils/url_validators.py"
       - "admin/backend/app/models.py"
+      - "admin/backend/main.py"
+      - "admin/backend/app/utils/exit_guard.py"
+      - "admin/backend/tests/test_exit_guard.py"
+      - "admin/backend/tests/test_security_hardening.py"
       - "admin/backend/app/database.py"
       - "admin/backend/alembic/versions/062_*"
       - "admin/backend/alembic/versions/064_*"
@@ -48,6 +52,10 @@ on:
       - "admin/backend/app/utils/service_auth.py"
       - "admin/backend/app/utils/url_validators.py"
       - "admin/backend/app/models.py"
+      - "admin/backend/main.py"
+      - "admin/backend/app/utils/exit_guard.py"
+      - "admin/backend/tests/test_exit_guard.py"
+      - "admin/backend/tests/test_security_hardening.py"
       - "admin/backend/app/database.py"
       - "admin/backend/alembic/versions/062_*"
       - "admin/backend/alembic/versions/064_*"
@@ -121,7 +129,7 @@ jobs:
 
       - name: Module-scoped TestClient starts no maintenance
         working-directory: admin/backend
-        run: python -m pytest tests/test_security_hardening.py -q
+        run: python -m pytest tests/test_security_hardening.py tests/test_exit_guard.py -q
 
   integration:
     name: real Qdrant ${{ matrix.expected }} + Postgres 16

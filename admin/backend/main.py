@@ -5,6 +5,7 @@ Provides REST API for monitoring and managing Athena services.
 Deploys to Kubernetes.
 """
 
+import asyncio
 import logging
 import os
 import httpx
@@ -30,6 +31,7 @@ from shared import __version__ as ATHENA_VERSION
 from shared.config import get_config
 from app.services.calendar_sync import start_background_sync, stop_background_sync
 from app.services import conversation_capture, memory_vectors, telemetry
+from app.utils import exit_guard
 from app.services.health_poller import start_health_polling, stop_health_polling
 from app.auth.oidc import (
     oauth,
@@ -429,6 +431,11 @@ async def _warn_if_ollama_url_ssrf_blocked() -> None:
 async def startup_event():
     """Initialize database and verify connections on startup."""
     logger.info("athena_admin_startup", version=ATHENA_VERSION, dev_mode=DEV_MODE)
+
+    # If this process ends without running shutdown_event (a script that only starts the app,
+    # a crash), stop the background loops before the interpreter finalizes, so none of them
+    # is logging from a daemon thread while stdout is being flushed (see app/utils/exit_guard.py).
+    exit_guard.stop_loop_tasks_at_exit(asyncio.get_running_loop())
 
     # Campaign 3 / ATHENA-14 — Phase 4 will add atomic UPDATE...RETURNING for lockout
     # (failed_login_count increment). Pre-placed at startup so the SQLite version
