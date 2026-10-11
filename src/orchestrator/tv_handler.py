@@ -20,6 +20,7 @@ import structlog
 from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 
+from orchestrator.model_safe_errors import model_safe_error
 from shared.ha_client import HomeAssistantClient
 from shared.admin_config import AdminConfigClient
 from shared.admin_url import get_admin_url
@@ -438,7 +439,7 @@ class AppleTVHandler:
             return {
                 "success": False,
                 "message": f"Failed to launch {app_name}. Please try again.",
-                "error": str(e)
+                "error": model_safe_error(e)
             }
 
     async def _press_profile_select(
@@ -595,7 +596,7 @@ class AppleTVHandler:
             return {
                 "success": False,
                 "message": f"Failed to turn {action} the TV.",
-                "error": str(e)
+                "error": model_safe_error(e)
             }
 
     async def handle_navigate(
@@ -650,7 +651,7 @@ class AppleTVHandler:
             return {
                 "success": False,
                 "message": "Navigation command failed.",
-                "error": str(e)
+                "error": model_safe_error(e)
             }
 
     async def handle_playback(
@@ -701,7 +702,7 @@ class AppleTVHandler:
             return {
                 "success": False,
                 "message": "Playback command failed.",
-                "error": str(e)
+                "error": model_safe_error(e)
             }
 
     async def handle_youtube_video(
@@ -755,7 +756,7 @@ class AppleTVHandler:
             return {
                 "success": False,
                 "message": "Failed to play YouTube video.",
-                "error": str(e)
+                "error": model_safe_error(e)
             }
 
 

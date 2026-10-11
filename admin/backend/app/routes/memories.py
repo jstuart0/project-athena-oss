@@ -970,7 +970,7 @@ async def internal_create_memory(
     except Exception as e:
         db.rollback()
         logger.error("internal_create_failed", error=str(e))
-        return {"created": False, "reason": str(e)}
+        return {"created": False, "reason": "internal_error"}
 
     vector_stored = await run_in_threadpool(memory_vectors.store_vector, memory_vectors.snapshot(memory))
 

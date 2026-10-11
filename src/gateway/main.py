@@ -28,6 +28,7 @@ from starlette.responses import Response
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from shared.fast_path_vocab import is_fast_path_candidate
 from shared.logging_config import configure_logging, payload_keys
 from shared.config import get_config as _get_athena_config  # local async get_config() route below shadows this name
 from shared.ollama_client import OllamaClient
@@ -47,12 +48,16 @@ from gateway.intent_prerouter import classify_intent, handle_simple_intent
 from gateway.circuit_breaker import CircuitBreaker, CircuitState
 from gateway.rate_limiter import TokenBucketRateLimiter
 from shared.client_throttle import invalid_network_entries, parse_networks, read_forwarded_for
+from shared.assistant_profile import get_voice_response_limits
 from shared.output_channel import (
     OutputChannel,
+    answer_hit_cap,
     classify_openai_caller,
     interface_type_for_channel,
     render_for_channel,
     render_sink_text,
+    speech_max_tokens,
+    trim_to_complete_sentence,
     without_networks_overlapping,
 )
 from gateway.conversation_limiter import (
@@ -95,6 +100,11 @@ request_duration = Histogram(
     'gateway_request_duration_seconds',
     'Request duration in seconds',
     ['endpoint']
+)
+
+prerouting_skipped_total = Counter(
+    'gateway_prerouting_skipped_total',
+    'ha_intent_prerouting skipped for a deterministic fast-path candidate'
 )
 
 # Voice pipeline timing metrics (for Prometheus/Grafana monitoring)
@@ -707,6 +717,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: float = Field(1.0, ge=0, le=1, description="Top-p sampling")
     n: int = Field(1, ge=1, le=10, description="Number of completions")
     stream: bool = Field(False, description="Stream response")
+    stream_options: Optional[Dict[str, Any]] = Field(None, description="OpenAI stream options (include_usage)")
     stop: Optional[List[str]] = Field(None, description="Stop sequences")
     max_tokens: Optional[int] = Field(None, description="Max tokens to generate")
     presence_penalty: float = Field(0, ge=-2, le=2)
@@ -903,7 +914,8 @@ async def _log_metric_to_db(
     user_id: Optional[str] = None,
     zone: Optional[str] = None,
     intent: Optional[str] = None,
-    source: Optional[str] = None
+    source: Optional[str] = None,
+    prompt_tokens: Optional[int] = None,
 ):
     """
     Log LLM performance metric to admin database (fire-and-forget).
@@ -921,6 +933,7 @@ async def _log_metric_to_db(
         zone: Optional zone/location
         intent: Optional intent classification
         source: Optional source service (gateway, orchestrator, etc.)
+        prompt_tokens: Prompt tokens the backend reported (None when it reported none; 0 stays 0)
 
     Note:
         Failures are logged but don't raise exceptions to avoid
@@ -938,6 +951,7 @@ async def _log_metric_to_db(
             "latency_seconds": latency_seconds,
             "tokens": tokens,
             "tokens_per_second": tokens_per_second,
+            "prompt_tokens": prompt_tokens,
             "request_id": request_id,
             "session_id": session_id,
             "user_id": user_id,
@@ -1377,21 +1391,33 @@ async def route_to_ollama(
             for msg in request.messages
         ]
 
+        # A spoken fallback answer is capped by the voice limit, like the orchestrator's.
+        num_predict = speech_max_tokens(channel, None, (await get_voice_response_limits())["max_tokens"]) \
+            if channel is OutputChannel.SPEECH else None
+        chat_kwargs = {"num_predict": num_predict} if num_predict is not None else {}
+
         # Call Ollama
         with request_duration.labels(endpoint="ollama").time():
             response_text = ""
             eval_count = 0
+            prompt_eval_count = None
+            final_chunk = {}
             async for chunk in ollama_client.chat(
                 model=ollama_model,
                 messages=messages,
                 temperature=request.temperature,
-                stream=False
+                stream=False,
+                **chat_kwargs
             ):
                 if chunk.get("done"):
                     response_text = chunk.get("message", {}).get("content", "")
                     eval_count = chunk.get("eval_count", 0)
+                    prompt_eval_count = chunk.get("prompt_eval_count")
+                    final_chunk = chunk
                     break
 
+        if num_predict is not None and answer_hit_cap(final_chunk, num_predict):
+            response_text = trim_to_complete_sentence(response_text)
         response_text = render_for_channel(response_text, channel)
 
         # Calculate metrics
@@ -1413,7 +1439,8 @@ async def route_to_ollama(
             user_id=user_id,
             zone=device_id,
             intent=None,
-            source="gateway"
+            source="gateway",
+            prompt_tokens=prompt_eval_count if isinstance(prompt_eval_count, int) and not isinstance(prompt_eval_count, bool) else None,
         ))
 
         # Format as OpenAI response
@@ -1518,6 +1545,8 @@ def _orchestrator_openai_payload(
     }
     # ATHENA-88 / F88: forward identity top-level too, omitting unset
     # values (never send them as None or "").
+    if stream and (request.stream_options or {}).get("include_usage") is True:
+        payload["stream_options"] = {"include_usage": True}
     if request.user is not None:
         payload["user"] = request.user
     if request.session_id is not None:
@@ -1525,6 +1554,17 @@ def _orchestrator_openai_payload(
     if device_id is not None:
         payload["room"] = device_id
     return payload
+
+
+def _orchestrator_usage(usage: Any) -> Optional[Dict[str, int]]:
+    """The orchestrator's own `usage`, when it sent real integer counts (the
+    orchestrator counts every LLM call of the turn); None means "estimate"."""
+    if not isinstance(usage, dict):
+        return None
+    keys = ("prompt_tokens", "completion_tokens", "total_tokens")
+    if not all(isinstance(usage.get(k), int) and not isinstance(usage.get(k), bool) for k in keys):
+        return None
+    return {k: usage[k] for k in keys}
 
 
 async def route_chat_completion_to_orchestrator(
@@ -1582,7 +1622,7 @@ async def route_chat_completion_to_orchestrator(
                     finish_reason="stop"
                 )
             ],
-            usage={
+            usage=_orchestrator_usage(result.get("usage")) or {
                 "prompt_tokens": len(user_message.split()),
                 "completion_tokens": len(content.split()),
                 "total_tokens": len(user_message.split()) + len(content.split())
@@ -1724,9 +1764,9 @@ async def chat_completions(
         room = await _detect_room_from_active_satellite("unknown")
         logger.info(f"Detected room from satellite: {room}")
 
-        # Route based on query type (LLM or keyword-based, controlled by feature flag)
-        # Check routing BEFORE streaming decision
-        route_to_orch = await is_athena_query(request.messages)
+        # Log-only routing hint: every request goes to the orchestrator, so the
+        # keyword match is all this needs (no LLM call ahead of the orchestrator).
+        route_to_orch = is_athena_query_keywords(request.messages)
 
         # Handle streaming - ALWAYS use orchestrator for tool support
         if request.stream:
@@ -2814,6 +2854,14 @@ async def ha_conversation(request: HAConversationRequest):
 
         # Check if intent pre-routing is enabled
         prerouting_enabled = await get_feature_flag("ha_intent_prerouting", default=False)
+
+        # The orchestrator answers these deterministically (or defers to its
+        # full pipeline), so the classifier and the simple-intent LLM add
+        # latency and nothing else.
+        if prerouting_enabled and is_fast_path_candidate(request.text):
+            prerouting_skipped_total.inc()
+            logger.info("prerouting_skipped", reason="fast_path_candidate")
+            prerouting_enabled = False
 
         if prerouting_enabled:
             # Classify intent using lightweight model

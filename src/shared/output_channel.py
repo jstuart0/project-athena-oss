@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import functools
 import logging
+import re as _re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal, Optional, Sequence, Tuple
+from typing import Any, Literal, Mapping, Optional, Sequence, Tuple
 
 from shared.client_throttle import (
     IPNetwork,
@@ -42,6 +43,108 @@ def channel_for_interface_type(interface_type: Optional[str]) -> OutputChannel:
 
 def interface_type_for_channel(channel: OutputChannel) -> Literal["voice", "text"]:
     return "voice" if channel is OutputChannel.SPEECH else "text"
+
+
+# --- length cap -------------------------------------------------------------------
+
+# Within this many tokens of the cap, a backend that reports no stop reason is
+# assumed to have been cut off.
+CAP_HIT_TOKEN_MARGIN = 5
+
+_LENGTH_STOPS = frozenset({"length", "max_tokens", "max_output_tokens"})
+_NATURAL_STOPS = frozenset({
+    "stop", "end_turn", "stop_sequence", "tool_calls", "tool_use", "function_call", "eos", "complete", "completed",
+})
+
+
+def speech_max_tokens(channel: OutputChannel, requested: Optional[int], cap: int) -> Optional[int]:
+    """The token limit for one answer-producing call: for speech, the smaller
+    of what the site asked for and the voice cap (the cap when it asked for
+    nothing); for text, exactly what the site asked for."""
+    if channel is OutputChannel.SPEECH:
+        return min(requested, cap) if requested else cap
+    return requested
+
+
+def normalize_stop_reason(raw: Any) -> Optional[str]:
+    """`length` when a backend says it hit its token limit, `stop` when it
+    finished on its own, None when it said nothing usable.
+
+    Covers Ollama `done_reason`, OpenAI/MLX `finish_reason`, Anthropic
+    `stop_reason` and Google `finish_reason` (`MAX_TOKENS`).
+    """
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    if value in _LENGTH_STOPS:
+        return "length"
+    if value in _NATURAL_STOPS:
+        return "stop"
+    return None
+
+
+def answer_hit_cap(result: Optional[Mapping[str, Any]], cap: Optional[int]) -> bool:
+    """Whether a backend result (or stream-final chunk) was cut off by the cap.
+
+    A reported stop reason decides. With none reported, a token count within
+    CAP_HIT_TOKEN_MARGIN of the cap counts as a cut-off. Never raises.
+    """
+    try:
+        result = result or {}
+        for key in ("stop_reason", "done_reason", "finish_reason"):
+            reason = normalize_stop_reason(result.get(key))
+            if reason is not None:
+                return reason == "length"
+        if not cap:
+            return False
+        for key in ("eval_count", "output_tokens", "tokens"):
+            tokens = result.get(key)
+            if isinstance(tokens, (int, float)) and not isinstance(tokens, bool) and tokens > 0:
+                return tokens >= cap - CAP_HIT_TOKEN_MARGIN
+        return False
+    except Exception:
+        return False
+
+
+_SENTENCE_TERMINATORS = ".!?\u2026"
+_CLOSERS = "\"')]}\u201d\u2019\u00bb"
+_ABBREVIATIONS = frozenset({"e.g.", "i.e.", "dr.", "mr.", "mrs.", "ms.", "st.", "vs.", "etc."})
+_LIST_ORDINAL_RE = _re.compile(r"(?:^|\n)[ \t]*\d+\.$")
+
+
+def _is_sentence_end(text: str, i: int) -> bool:
+    """Whether the terminator at text[i] ends a sentence: followed by the end,
+    whitespace, a closing quote/bracket or another terminator; and not a
+    list ordinal ("1."), an abbreviation ("Dr.") or a decimal point."""
+    ch = text[i]
+    nxt = text[i + 1] if i + 1 < len(text) else ""
+    if nxt and not (nxt.isspace() or nxt in _CLOSERS or nxt in _SENTENCE_TERMINATORS):
+        return False
+    if ch != ".":
+        return True
+    start = max(text.rfind(" ", 0, i), text.rfind("\n", 0, i)) + 1
+    if text[start:i + 1].lower() in _ABBREVIATIONS:
+        return False
+    return not _LIST_ORDINAL_RE.search(text[: i + 1])
+
+
+def trim_to_complete_sentence(text: Optional[str]) -> str:
+    """Cut a cut-off answer after its last complete sentence.
+
+    A terminator that is a decimal point, an abbreviation (e.g. i.e. Dr. Mr.
+    Mrs. Ms. St. vs. etc.) or a list ordinal at line start doesn't count; a
+    closing quote or bracket after a terminator stays; an ellipsis counts. With
+    no terminator at all (or empty input) the text comes back unchanged.
+    """
+    if not text:
+        return text or ""
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] in _SENTENCE_TERMINATORS and _is_sentence_end(text, i):
+            end = i + 1
+            while end < len(text) and text[end] in _CLOSERS:
+                end += 1
+            return text[:end]
+    return text
 
 
 def render_for_channel(text: Optional[str], channel: OutputChannel) -> Optional[str]:

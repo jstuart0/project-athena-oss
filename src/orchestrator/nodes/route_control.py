@@ -724,6 +724,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                         "guest_name": state.context.get("guest_name"),
                         "guest_id": state.context.get("guest_id"),
                         "guest_stay_id": state.context.get("guest_stay_id"),
+                        "interface_type": state.interface_type,
                     }
 
                     # Execute via automation agent (D2: surface any denial

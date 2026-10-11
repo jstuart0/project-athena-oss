@@ -42,6 +42,7 @@ from orchestrator.rate_limiter import (
     RateLimitExceeded,
 )
 from orchestrator.http_pool import get_http_pool
+from orchestrator.model_safe_errors import UserSafeText, make_user_safe
 from orchestrator.utils.constants import RAG_SERVICE_URL_MAP
 from shared.admin_url import get_admin_url
 from shared.config import get_config
@@ -116,6 +117,9 @@ class RAGResponse:
     error: Optional[str] = None
     status_code: Optional[int] = None
     service_name: Optional[str] = None
+    # The service's 4xx detail, when it passed `make_user_safe`. `error` keeps the raw
+    # text for logs and metrics; only this field may reach a model prompt.
+    user_detail: Optional[UserSafeText] = None
 
 
 class RAGClientError(Exception):
@@ -430,7 +434,8 @@ class RAGClient:
                     success=False,
                     error=error_message,
                     status_code=response.status_code,
-                    service_name=service_name
+                    service_name=service_name,
+                    user_detail=make_user_safe(error_detail, response.status_code) if isinstance(error_detail, str) else None,
                 )
 
         except asyncio.TimeoutError:

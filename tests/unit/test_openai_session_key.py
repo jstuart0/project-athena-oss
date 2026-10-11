@@ -642,7 +642,8 @@ class _FakeLLMRouterForStreaming:
     {"token": str, "done": bool} chunks.
     """
 
-    async def generate_stream(self, model, prompt, system_prompt, temperature, max_tokens):
+    async def generate_stream(self, model, prompt, system_prompt=None, temperature=0.7, max_tokens=2048, *,
+                              stage=None, request_id=None, session_id=None, **kwargs):
         for token in ("Hello", " there", "!"):
             yield {"token": token, "done": False}
         yield {"token": "", "done": True}

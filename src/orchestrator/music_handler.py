@@ -1173,7 +1173,7 @@ class MusicHandler:
             )
             # Release the account on failure
             self.account_pool.release_room(target_room)
-            return f"Sorry, I couldn't play that. {str(e)}"
+            return "Sorry, I couldn't play that."
 
     async def handle_control(
         self,
@@ -1234,7 +1234,7 @@ class MusicHandler:
                     return "No music is playing in the house right now."
             except Exception as e:
                 logger.error(f"Error checking house-wide music: {e}")
-                return f"I couldn't check what's playing in the house. Error: {str(e)}"
+                return "I couldn't check what's playing in the house."
 
         target_room = self._normalize_room(room)
         entity_id = await self._get_entity_for_room(target_room)
@@ -1288,7 +1288,7 @@ class MusicHandler:
                         return f"I couldn't find the music player for {target_room.replace('_', ' ')}."
                 except Exception as e:
                     logger.error(f"Error getting now playing: {e}")
-                    return f"I couldn't check what's playing. Error: {str(e)}"
+                    return "I couldn't check what's playing."
 
             if action == "volume_set" and volume_level is not None:
                 await self.ha.call_service(
@@ -1366,7 +1366,7 @@ class MusicHandler:
                 action=action,
                 room=target_room
             )
-            return f"Sorry, I couldn't {action}. {str(e)}"
+            return f"Sorry, I couldn't {action}."
 
     async def handle_queue(
         self,
@@ -1468,7 +1468,7 @@ class MusicHandler:
                 action=action,
                 room=target_room
             )
-            return f"Sorry, I couldn't {action} the queue. {str(e)}"
+            return f"Sorry, I couldn't {action} the queue."
 
     async def handle_transfer(
         self,
@@ -1537,7 +1537,7 @@ class MusicHandler:
                 from_room=source,
                 to_room=target
             )
-            return f"Sorry, I couldn't transfer the music. {str(e)}"
+            return "Sorry, I couldn't transfer the music."
 
     async def handle_room_group_play(
         self,
@@ -1599,7 +1599,7 @@ class MusicHandler:
             account = self.account_pool.get_account_for_room(group_key)
             if not account:
                 active = self.account_pool.get_active_rooms()
-                return f"Both Spotify accounts are in use. Stop music first."
+                return "Both Spotify accounts are in use. Stop music first."
 
             # Handle genre conversion (random artist selection)
             if media_type == "genre":
@@ -1654,7 +1654,7 @@ class MusicHandler:
             )
             # Release account on failure
             self.account_pool.release_room(f"group:{group_name}")
-            return f"Sorry, I couldn't play to {group_name}. {str(e)}"
+            return f"Sorry, I couldn't play to {group_name}."
 
     async def handle_everywhere_except(
         self,
@@ -1772,7 +1772,7 @@ class MusicHandler:
                 excluded=excluded_rooms
             )
             self.account_pool.release_room("group:everywhere")
-            return f"Sorry, I couldn't start playback. {str(e)}"
+            return "Sorry, I couldn't start playback."
 
     async def handle_room_specific_pause(self, room: str) -> str:
         """
@@ -1822,7 +1822,7 @@ class MusicHandler:
 
         except Exception as e:
             logger.error("room_specific_pause_failed", room=target_room, error=str(e))
-            return f"Sorry, I couldn't pause in {room}. {str(e)}"
+            return f"Sorry, I couldn't pause in {room}."
 
     async def handle_room_specific_resume(self, room: str) -> str:
         """
@@ -1872,7 +1872,7 @@ class MusicHandler:
 
         except Exception as e:
             logger.error("room_specific_resume_failed", room=target_room, error=str(e))
-            return f"Sorry, I couldn't resume in {room}. {str(e)}"
+            return f"Sorry, I couldn't resume in {room}."
 
 
 # Singleton instance

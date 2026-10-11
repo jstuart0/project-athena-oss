@@ -98,6 +98,7 @@ class LLMMetricCreate(BaseModel):
     latency_seconds: float = Field(..., description="Total request latency in seconds")
     tokens: int = Field(..., description="Number of tokens generated")
     tokens_per_second: float = Field(..., description="Token generation speed")
+    prompt_tokens: Optional[int] = Field(None, ge=0, description="Prompt tokens the backend reported; omit (NULL) when it reported none, 0 when it reported 0")
     request_id: Optional[str] = Field(None, description="Optional request ID for tracking")
     session_id: Optional[str] = Field(None, description="Optional session ID for conversation tracking")
     user_id: Optional[str] = Field(None, description="Optional user ID")
@@ -313,6 +314,7 @@ class LLMMetricResponse(BaseModel):
     latency_seconds: float
     tokens_generated: int
     tokens_per_second: float
+    prompt_tokens: Optional[int] = None
     request_id: Optional[str] = None
     session_id: Optional[str] = None
     user_id: Optional[str] = None
@@ -378,6 +380,7 @@ async def get_metrics(
             latency_seconds=m.latency_seconds,
             tokens_generated=m.tokens_generated,
             tokens_per_second=m.tokens_per_second,
+            prompt_tokens=m.prompt_tokens,
             request_id=m.request_id,
             session_id=m.session_id,
             user_id=m.user_id,
@@ -412,6 +415,7 @@ async def create_metric(
             latency_seconds=metric.latency_seconds,
             tokens_generated=metric.tokens,
             tokens_per_second=metric.tokens_per_second,
+            prompt_tokens=metric.prompt_tokens,
             request_id=metric.request_id,
             session_id=metric.session_id,
             user_id=metric.user_id,

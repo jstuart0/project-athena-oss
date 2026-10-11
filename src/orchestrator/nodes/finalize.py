@@ -10,6 +10,7 @@ import time
 import structlog
 
 from orchestrator.nodes._runtime import get_cache_client
+from shared.fast_path_vocab import AMBIENT_REPLY
 from orchestrator.state import OrchestratorState
 from orchestrator.helpers import (
     maybe_post_synthesis_fallback,
@@ -128,8 +129,14 @@ async def finalize_node(state: OrchestratorState) -> OrchestratorState:
             error=state.error,
             request_id=state.request_id
         )
-        state.answer = "I'm not sure how to help with that. Could you rephrase your question?"
-        state.is_fallback = True
+        # Call-time import: orchestrator.fast_path imports orchestrator.nodes at load.
+        from orchestrator.fast_path import ambient_fragment_applies
+
+        if await ambient_fragment_applies(state):
+            state.answer = AMBIENT_REPLY
+        else:
+            state.answer = "I'm not sure how to help with that. Could you rephrase your question?"
+            state.is_fallback = True
 
     # Strip any hallucinated role-continuation text (e.g. "\nUser:", "\nHuman:")
     state.answer = _strip_hallucinated_continuation(state.answer)

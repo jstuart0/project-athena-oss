@@ -49,8 +49,7 @@ def _get_all_tool_names() -> List[str]:
 def _is_direct_response_interceptable(query: str) -> bool:
     """Return True iff helpers.py:_direct_general_info_response returns non-None.
 
-    Imports the live predicate first.  Falls back to a local replica
-    (source: helpers.py:1046 + 1051–1108).
+    Imports the live predicate first.  Falls back to the shared table.
     """
     try:
         from orchestrator.helpers import _direct_general_info_response
@@ -58,39 +57,10 @@ def _is_direct_response_interceptable(query: str) -> bool:
     except ImportError:
         pass
 
-    # Local replica — source: helpers.py:1046 (normalization) + 1051–1108 (map)
-    def _normalize(q: str) -> str:
-        return re.sub(r"[^a-z0-9\s]", "", (q or "").lower()).strip()
-
-    normalized = _normalize(query)
-    if not normalized:
-        return False
-
-    _DIRECT_MAP = {
-        "hello", "hi", "hey",
-        "good morning", "good afternoon", "good evening",
-        "how are you", "hows it going",
-        "thanks", "thank you",
-        "bye", "goodbye", "see you",
-    }
-    if normalized in _DIRECT_MAP:
-        return True
-
-    _TIME_MAP = {
-        "what time is it", "whats the time", "what is the time",
-        "current time", "tell me the time",
-    }
-    if normalized in _TIME_MAP:
-        return True
-
-    _DATE_MAP = {
-        "what date is it", "whats the date", "what is todays date",
-        "whats todays date", "current date", "what day is it",
-    }
-    if normalized in _DATE_MAP:
-        return True
-
-    return False
+    # Fallback when orchestrator.helpers can't be imported: the same shared
+    # table the orchestrator and gateway use (shared.fast_path_vocab).
+    from shared.fast_path_vocab import is_fast_path_candidate
+    return is_fast_path_candidate(query)
 
 
 # ---------------------------------------------------------------------------

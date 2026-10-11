@@ -658,3 +658,32 @@ def test_the_response_ready_event_carries_a_length_not_a_preview():
 
     source = inspect.getsource(events.emit_response_ready)
     assert "response_preview" not in source and "response_len" in source
+
+
+# ---------------------------------------------------------------------------
+# The deterministic fast path: bound above it, answered through it
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("route", ALL_ROUTES)
+def test_a_fast_path_answer_is_captured_on_every_route(rt, route):
+    async def scenario(client):
+        resp = await post(client, route, query="thank you")
+        assert resp.status_code == 200
+
+    store = run(scenario)
+    rec = one(store)
+    assert rec.route == ROUTE_LABEL[route] and rec.outcome == "answered"
+    assert rec.query_text == "thank you" and rec.response_text, "the fast path's reply is the stored answer"
+    assert rt.graph.calls == 0, "the full pipeline did not run"
+    assert rec.session_class == id_class(rec.session_id) and rec.channel == "speech"
+
+
+@pytest.mark.parametrize("route", ALL_ROUTES)
+def test_a_pin_utterance_beats_the_fast_path_and_leaves_only_the_marker(rt, route):
+    rt.pin_for(match="thank you")
+
+    async def scenario(client):
+        assert (await post(client, route, query="thank you")).status_code == 200
+
+    rec = one(run(scenario))
+    assert rec.text_withheld and rec.outcome == "withheld" and rec.query_text == ""
