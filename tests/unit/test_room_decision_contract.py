@@ -156,3 +156,29 @@ def test_the_executor_hands_the_decision_to_execute_intent():
 def test_the_speaker_room_default_is_applied_in_one_place():
     text = SOURCE.read_text()
     assert len(re.findall(r"device_room not in", text)) == 1, "only the out-of-scope motion prompt remains"
+
+
+def test_the_scope_cue_compares_whole_words_not_substrings():
+    from orchestrator import write_fanout
+
+    cue = write_fanout._has_explicit_scope_cue
+    assert cue("turn on the garden lights", ("room_group", "den")) is False
+    assert cue("turn on the den lights", ("room_group", "den")) is True
+    assert cue("turn on the living room lights", ("room_group", "living_room")) is True
+    assert cue("lights in the garden and the study", ("multi_room", ["den", "study"])) is False
+    assert cue("lights in the den and the study", ("multi_room", ["den", "study"])) is True
+
+
+def test_the_replay_reads_the_first_turn_words_not_the_replys(monkeypatch):
+    chat = Chat(monkeypatch)
+    seen = []
+    real = chat.rig.controller.execute_intent
+
+    async def spy(intent, ha_client, original_query=None, **kw):
+        seen.append(original_query)
+        return await real(intent, ha_client, original_query=original_query, **kw)
+
+    monkeypatch.setattr(chat.rig.controller, "execute_intent", spy)
+    chat.turn("turn on the bathroom lights")
+    chat.turn("north")
+    assert seen == ["turn on the bathroom lights", "turn on the bathroom lights"], seen

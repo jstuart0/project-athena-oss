@@ -385,3 +385,71 @@ def test_the_trusted_voice_flag_reaches_the_turn_only_from_a_service_key_caller(
 
 def test_the_gateway_payload_carries_trusted_voice_only_when_set():
     assert "trusted_voice" not in _gateway_body(stream=False, voice_device_id=None)["extra_body"]
+
+
+# ---------------------------------------------------------------------------
+# Security review: the /query trusted flag, and the classify shortcut's asker
+# ---------------------------------------------------------------------------
+
+def _turn_trusted_voice_from(source: str):
+    """The real _turn_trusted_voice, compiled alone (importing the orchestrator
+    entry point isn't needed to exercise a two-line rule)."""
+    import contextvars
+    from types import SimpleNamespace
+
+    func = _function(ast.parse(source), "_turn_trusted_voice")
+    func.decorator_list = []
+    module = ast.Module(body=[func], type_ignores=[])
+    vouched = contextvars.ContextVar("vouched", default=False)
+    scope = {"_vouched_trusted_voice": vouched, "QueryRequest": object}
+    exec(compile(ast.fix_missing_locations(module), "<turn_trusted_voice>", "exec"), scope)
+    return scope["_turn_trusted_voice"], vouched, SimpleNamespace
+
+
+def test_the_query_trusted_flag_counts_only_from_a_service_key_caller():
+    turn_trusted_voice, vouched, ns = _turn_trusted_voice_from(ORCH_MAIN.read_text())
+    flagged = ns(trusted_voice=True)
+    assert turn_trusted_voice(flagged, True) is True
+    assert turn_trusted_voice(flagged, False) is False, "no service key: the body field is not believed"
+    assert turn_trusted_voice(ns(trusted_voice=False), True) is False
+    assert turn_trusted_voice(ns(trusted_voice=None), True) is False
+    token = vouched.set(True)
+    try:
+        assert turn_trusted_voice(ns(trusted_voice=False), False) is True, "chat_completions already vouched"
+    finally:
+        vouched.reset(token)
+
+
+def classify_shortcut_requires_the_asker(source: str) -> list:
+    """The classify_node shortcut for a room-choice reply must compare the
+    pending's fingerprint with the turn's caller_fingerprint."""
+    func = _function(ast.parse(source), "classify_node")
+    problems = []
+    found = 0
+    for node in ast.walk(func):
+        if not isinstance(node, ast.If):
+            continue
+        calls = [c for c in ast.walk(node.test) if isinstance(c, ast.Call)
+                 and isinstance(c.func, ast.Attribute) and c.func.attr == "reply_fits"]
+        if not calls:
+            continue
+        found += 1
+        compares_caller = any(
+            isinstance(n, ast.Attribute) and n.attr == "caller_fingerprint" for n in ast.walk(node.test)
+        )
+        if not compares_caller:
+            problems.append("the room-choice shortcut doesn't compare the asker's fingerprint")
+    if found != 1:
+        problems.append(f"expected one room-choice shortcut, found {found}")
+    return problems
+
+
+def test_the_classify_shortcut_for_a_room_choice_reply_is_for_the_asker_only():
+    assert classify_shortcut_requires_the_asker(ORCH_MAIN.read_text()) == []
+    planted = '''
+async def classify_node(state):
+    asked = state.prev_context.get("awaiting_room_choice")
+    if isinstance(asked, dict) and room_choice.reply_fits(asked, state.query, d, is_question=False):
+        state.intent = 1
+'''
+    assert classify_shortcut_requires_the_asker(planted)

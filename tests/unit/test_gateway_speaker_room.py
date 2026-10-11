@@ -500,8 +500,9 @@ def test_no_marker_and_a_good_marker_are_not_rejected():
 def test_the_negative_cache_is_pruned_and_capped():
     sr.reset_for_test()
     for i in range(sr.UNKNOWN_CACHE_MAX + 50):
-        sr._remember_unknown(f"{i:032x}", now=1000.0 + i)
-    assert len(sr._unknown_until) <= sr.UNKNOWN_CACHE_MAX
+        sr._remember_unknown(f"{i:032x}", now=1000.0)
+    assert len(sr._unknown_until) == sr.UNKNOWN_CACHE_MAX, "nothing has expired, so the cap evicts"
+    assert f"{sr.UNKNOWN_CACHE_MAX + 49:032x}" in sr._unknown_until, "the newest id is kept"
     far = 1000.0 + sr.NEGATIVE_CACHE_SECONDS * 10
     sr._remember_unknown("e" * 32, now=far)
     assert len(sr._unknown_until) < sr.UNKNOWN_CACHE_MAX / 2, "expired entries are dropped once the cap is reached"

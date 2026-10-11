@@ -651,8 +651,6 @@ async def _resolve_pending_room_choice(
     state.prev_context = None
     chosen = outcome.room
     intent = dict(pending.get("intent") or {})
-    for key in ("decided_room", "decided_rooms", "decided_excluded", "room_label"):
-        intent.pop(key, None)
     smart_controller._set_decided(intent, chosen.key, chosen.label)
     first_turn_query = pending.get("query") or ""
     await _execute_and_record(
