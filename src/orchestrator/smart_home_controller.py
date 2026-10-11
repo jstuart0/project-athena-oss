@@ -18,7 +18,7 @@ from shared.admin_url import get_admin_url
 from shared.config import get_config
 from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
-from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance
+from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance, is_indoor_temperature_question
 from shared.ha_registry import room_key
 
 
@@ -1264,7 +1264,7 @@ class SmartHomeController:
             'indoor temp', 'inside temp', 'temp in here', 'how hot is it in here',
             'how cold is it in here', 'what is the temp in here'
         ]
-        is_thermostat = any(p in query_lower for p in thermostat_patterns)
+        is_thermostat = any(p in query_lower for p in thermostat_patterns) or is_indoor_temperature_question(query_lower)
         # Also check for temperature setting pattern
         # Flexible regex: allow text between verb and number (e.g., "set the temperature to 72")
         temp_match = re.search(r'(?:set|heat|cool|thermostat).*?(?:to\s+)?(\d+)\s*(?:degrees)?', query_lower)
@@ -1967,7 +1967,7 @@ Return ONLY valid JSON."""
 
             # Handle climate/thermostat queries
             if device_type == 'climate':
-                return _finish(await self._handle_climate_intent(action, parameters, original_query, ha_client))
+                return _finish(await self._handle_climate_intent(action, parameters, original_query, ha_client, room=room))
 
             # Handle appliance queries (oven, fridge, freezer) -- read-only, no ha_client write
             if device_type in ['oven', 'fridge', 'freezer', 'appliance']:
@@ -2069,6 +2069,20 @@ Return ONLY valid JSON."""
         from orchestrator.nodes import _runtime
         registry = _runtime.get_ha_registry()
         return registry.current() if registry is not None else None
+
+    def _area_entities(self, room: Optional[str], domain: str, all_entities: Dict) -> Optional[List[str]]:
+        """The ids of one domain in the room's registry area that Home
+        Assistant also reports; [] when the room is an area with none. None
+        when the room isn't an area (no registry, or a name no area has), so
+        the caller falls back to matching names."""
+        snapshot = self._registry_snapshot()
+        key = room_key(room or "")
+        if snapshot is None or not key:
+            return None
+        area = snapshot.area_by_key(key) or next(iter(snapshot.areas_by_alias(room)), None)
+        if area is None:
+            return None
+        return [eid for eid in snapshot.entities_in(area.area_id, domain) if eid in all_entities]
 
     def _spoken_room(self, room: Optional[str]) -> str:
         """How a room is said aloud: the directory's label (an area's name,
@@ -2713,7 +2727,9 @@ Return ONLY valid JSON."""
 
         return "I understood your request but couldn't execute it."
 
-    async def _handle_climate_intent(self, action: str, parameters: Dict, original_query: str = None, ha_client = None) -> str:
+    async def _handle_climate_intent(
+        self, action: str, parameters: Dict, original_query: str = None, ha_client = None, room: Optional[str] = None,
+    ) -> str:
         """Handle climate/thermostat queries and control"""
         from orchestrator.mode_permission import ensure_permission_enforcing
         ha_client = ensure_permission_enforcing(ha_client)
@@ -2722,9 +2738,6 @@ Return ONLY valid JSON."""
 
         # Get climate state from entity manager
         climate_state = await self.entity_manager.get_climate_state()
-
-        if not climate_state:
-            return "I couldn't find a thermostat to check."
 
         query_lower = (original_query or "").lower()
 
@@ -2740,6 +2753,14 @@ Return ONLY valid JSON."""
         if not is_status_query and not has_set_command:
             if "what is it set to" in query_lower or "what's it set to" in query_lower:
                 is_status_query = True
+
+        if (is_status_query or action in ['get_status', 'check', 'read']) and room and is_indoor_temperature_question(original_query):
+            reading = await self._room_temperature_reply(room)
+            if reading:
+                return reading
+
+        if not climate_state:
+            return "I couldn't find a thermostat to check."
 
         if is_status_query or action in ['get_status', 'check', 'read']:
             # Return current thermostat status
@@ -2868,6 +2889,21 @@ Return ONLY valid JSON."""
                     return f"I couldn't change the thermostat, but it's currently set to {current_target}°F."
 
         return f"The thermostat is currently set to {current_target}°F in {climate_state.get('state')} mode."
+
+    async def _room_temperature_reply(self, room: str) -> Optional[str]:
+        """The temperature in the room's area from its own sensor
+        (device_class temperature), or None when the area has none."""
+        entities = await self.entity_manager.get_entities()
+        for entity_id in self._area_entities(room, 'sensor', entities) or ():
+            attrs = (entities.get(entity_id) or {}).get('attributes') or {}
+            if attrs.get('device_class') != 'temperature':
+                continue
+            try:
+                value = float((entities.get(entity_id) or {}).get('state'))
+            except (TypeError, ValueError):
+                continue
+            return f"It's {value:g}{attrs.get('unit_of_measurement') or ''} in the {self._spoken_room(room)}."
+        return None
 
     async def _handle_appliance_intent(self, device_type: str, action: str, parameters: Dict, original_query: str = None) -> str:
         """Handle kitchen appliance queries (oven, fridge, freezer)"""
@@ -4249,11 +4285,14 @@ Do NOT mention rooms that have no current or recent motion."""
             room_lower = (room or "").lower()
             room_spoken = room_lower.replace("_", " ")
             matched = []
+            in_area = self._area_entities(room, domain, entities) if room else None
             for entity_id, state_data in entities.items():
+                if in_area is not None and entity_id not in in_area:
+                    continue
                 friendly_name = state_data.get("attributes", {}).get(
                     "friendly_name", entity_id.split(".")[-1].replace("_", " ")
                 )
-                if room:
+                if room and in_area is None:
                     entity_lower = entity_id.lower()
                     friendly_lower = friendly_name.lower()
                     if (room_lower not in entity_lower and room_lower not in friendly_lower
@@ -4400,11 +4439,15 @@ Do NOT mention rooms that have no current or recent motion."""
             if not fans:
                 return "I couldn't find any fans in the home automation system."
 
-            # Filter by room if specified
+            # Filter by room if specified: an area's own fans when the room is
+            # an area, else the name match below.
             target_fans = []
             query_lower = (original_query or "").lower()
+            in_area = self._area_entities(room, 'fan', fans) if room else None
+            if in_area is not None:
+                target_fans = [(eid, fans[eid]) for eid in in_area]
 
-            for entity_id, state_data in fans.items():
+            for entity_id, state_data in (fans.items() if in_area is None else ()):
                 friendly_name = state_data.get('attributes', {}).get('friendly_name', entity_id).lower()
                 entity_lower = entity_id.lower()
 

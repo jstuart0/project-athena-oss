@@ -216,6 +216,19 @@ _BULK_REPORT_DEVICE = {
 }
 
 
+_NO_SPEAKER_ROOM = ("", "unknown", "guest")
+_ASKS_ABOUT_THE_HOUSE_RE = re.compile(r"\b(?:house|home|anywhere|everywhere|whole|entire)\b")
+
+
+def _bulk_report_is_for_the_house(query: str, speaker_room: Optional[str]) -> bool:
+    """A lights report is house-wide only when the speaker's room is unknown
+    or the wording asks about the house; otherwise a room-less question is
+    about the room the speaker is in (decided by the controller)."""
+    if (speaker_room or "").lower() in _NO_SPEAKER_ROOM:
+        return True
+    return bool(_ASKS_ABOUT_THE_HOUSE_RE.search((query or "").lower()))
+
+
 def _bulk_report_matches(query_type: Optional[str], device_type: Optional[str]) -> bool:
     report_device = _BULK_REPORT_DEVICE.get(query_type or "")
     if report_device is None:
@@ -842,6 +855,10 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 and not uk.needs_referent
                 and detect_status_query_type(state.query)
                 and _bulk_report_matches(detect_status_query_type(state.query), uk.device_type)
+                and (
+                    _BULK_REPORT_DEVICE.get(detect_status_query_type(state.query) or "") != "light"
+                    or _bulk_report_is_for_the_house(state.query, state.room)
+                )
             )
 
         if status_bulk_config.get("enabled", True) and bulk_eligible:
@@ -911,7 +928,10 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 session_id=state.session_id,
                 read_only=(uk.kind == UtteranceKind.STATE_QUESTION),
                 utterance=real_uk,
-                trusted_voice=state.trusted_voice,
+                # "All the lights" reaching every area is for a caller the
+                # server vouches for: a trusted voice device, or a proven
+                # owner (signed in with a valid service key, owner mode).
+                trusted_voice=state.trusted_voice or state.knowledge_audience.owner_proven,
             ) as scope:
                 # The CONTROL intent was already checked at the node's top,
                 # against the same normalized permissions this scope holds.

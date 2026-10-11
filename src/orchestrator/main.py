@@ -44,6 +44,7 @@ from shared.logging_config import configure_logging, payload_keys
 from shared.ha_client import HomeAssistantClient
 from shared.ha_registry import create_registry
 from orchestrator import room_choice, room_context
+from orchestrator.utterance_kind import is_indoor_temperature_question
 from orchestrator.utterance_kind import UtteranceKind, classify_utterance
 from orchestrator.room_directory import RoomDirectoryProvider, current_directory
 from shared.llm_router import get_llm_router
@@ -3003,8 +3004,15 @@ Respond in JSON format:
             pattern_intent, pattern_confidence = _pattern_based_classification(state.query, return_confidence=True)
             logger.info(f"DEBUG pattern classification: query_len={len(state.query)}, pattern_intent={pattern_intent.value}, pattern_confidence={pattern_confidence}")
 
+            # "Is it cold in here" is the thermostat or a room sensor, never the
+            # weather service, whatever the pattern classifier said.
+            if state.intent == IntentCategory.WEATHER and is_indoor_temperature_question(state.query):
+                logger.info("indoor_temperature_override", from_intent="weather")
+                state.intent = IntentCategory.CONTROL
+                state.confidence = 0.9
+                state.entities = {**(state.entities or {}), "device_type": "climate", "action": "get_status"}
             # If LLM returns "unknown", use pattern-based fallback
-            if state.intent == IntentCategory.UNKNOWN:
+            elif state.intent == IntentCategory.UNKNOWN:
                 if pattern_intent != IntentCategory.GENERAL_INFO or pattern_confidence >= 0.8:
                     logger.info(f"LLM returned unknown, pattern-based fallback: {pattern_intent} (confidence: {pattern_confidence})")
                     state.intent = pattern_intent

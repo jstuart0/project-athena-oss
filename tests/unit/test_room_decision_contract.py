@@ -182,3 +182,51 @@ def test_the_replay_reads_the_first_turn_words_not_the_replys(monkeypatch):
     chat.turn("turn on the bathroom lights")
     chat.turn("north")
     assert seen == ["turn on the bathroom lights", "turn on the bathroom lights"], seen
+
+
+# ---------------------------------------------------------------------------
+# "All the lights" for a proven owner
+# ---------------------------------------------------------------------------
+
+def _audience(**kw):
+    from shared.knowledge_tiers import KnowledgeAudience
+
+    fields = dict(mode="owner", degraded=False, public=False, owner_caller=True, owner_proven=True)
+    fields.update(kw)
+    return KnowledgeAudience(**fields)
+
+
+def _all_lights(chat, **state_kw):
+    audience = state_kw.pop("audience", None)
+    state = chat.state("turn off all the lights", **state_kw)
+    if audience is not None:
+        state.knowledge_audience = audience
+    with chat.patched():
+        return asyncio.run(rch.route_control_node(state))
+
+
+ALL_LAMPS = {f"light.{k}_lamp_{i}" for k, n in rch.LAMPS.items() for i in range(n)}
+
+
+def test_a_proven_owner_without_a_trusted_device_reaches_every_area(monkeypatch):
+    chat = Chat(monkeypatch)
+    _all_lights(chat, trusted_voice=False, audience=_audience())
+    assert set(chat.written) == ALL_LAMPS
+
+
+def test_a_trusted_device_alone_still_reaches_every_area(monkeypatch):
+    chat = Chat(monkeypatch)
+    _all_lights(chat, trusted_voice=True)
+    assert set(chat.written) == ALL_LAMPS
+
+
+@pytest.mark.parametrize("audience", [
+    None,
+    _audience(owner_proven=False),                       # a signed-in owner whose mode isn't proven
+    _audience(owner_caller=False, owner_proven=False),   # household, PIN override, web_local ...
+    _audience(mode="guest", owner_caller=False, owner_proven=False),
+])
+def test_an_untrusted_caller_who_is_not_a_proven_owner_gets_the_groups_only(monkeypatch, audience):
+    chat = Chat(monkeypatch)
+    _all_lights(chat, trusted_voice=False, audience=audience)
+    assert not (set(chat.written) & ALL_LAMPS), "no group is configured, so nothing area-wide goes"
