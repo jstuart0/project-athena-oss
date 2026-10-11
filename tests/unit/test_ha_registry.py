@@ -649,3 +649,24 @@ def test_the_unassigned_lights_flag_and_networks_read_their_variables(monkeypatc
     cfg = _config(monkeypatch, HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS="true", HA_DEVICE_CLIENT_NETWORKS="192.0.2.5/32")
     assert cfg.ha_whole_house_unassigned_lights is True
     assert cfg.ha_device_client_networks == "192.0.2.5/32"
+
+
+def test_a_forced_refresh_outside_the_interval_still_counts_against_the_forced_limit():
+    fetcher = FakeFetcher()
+    clock = Clock()
+    reg = registry(fetcher, clock, ttl=300, min_refresh_interval=60)
+
+    async def go():
+        await reg.ensure(1)
+        assert fetcher.calls == 1
+        clock.now += 61
+        await reg.ensure(1, refresh=True)
+        assert fetcher.calls == 2, "a forced refresh past the interval runs"
+        clock.now += 1
+        await reg.ensure(1, refresh=True)
+        assert fetcher.calls == 2, "a second forced refresh 1 s later is rate-limited"
+        clock.now += hr.FORCED_REFRESH_MIN_INTERVAL + 1
+        await reg.ensure(1, refresh=True)
+        assert fetcher.calls == 3
+
+    run(go())

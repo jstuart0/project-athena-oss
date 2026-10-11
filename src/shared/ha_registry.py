@@ -547,17 +547,16 @@ class HARegistry:
             return
         now = self._monotonic()
         within_interval = self._last_attempt is not None and now - self._last_attempt < self._min_refresh_interval
-        if within_interval:
-            if not forced or (
-                self._last_forced is not None and now - self._last_forced < FORCED_REFRESH_MIN_INTERVAL
-            ):
-                return
-            self._last_forced = now
+        recently_forced = self._last_forced is not None and now - self._last_forced < FORCED_REFRESH_MIN_INTERVAL
+        if within_interval and (not forced or recently_forced):
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
         self._last_attempt = now
+        if forced:
+            self._last_forced = now
         self._task = loop.create_task(self._refresh())
 
     def request_refresh(self, *, force: bool = False) -> None:
