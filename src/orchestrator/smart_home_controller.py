@@ -8,6 +8,7 @@ import json
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
+from . import room_context
 from .ha_entity_manager import HAEntityManager, _tokens, cover_light_targets, expand_light_leaves
 from .sequence_executor import has_sequence_timing
 from shared.admin_config import get_admin_client
@@ -16,6 +17,7 @@ from shared.config import get_config
 from shared.local_time import local_now
 from shared.service_key import note_admin_refusal, service_key_headers
 from .utterance_kind import UtteranceClassification, UtteranceKind, classify_utterance
+from shared.ha_registry import room_key
 
 
 _jarvis_key_warned = False
@@ -571,8 +573,11 @@ class SmartHomeController:
             ('lights off everywhere', 'turn_off'),
             ('lights on everywhere', 'turn_on'),
         ]
-        # Only use whole_house fast path if NO exclusion keywords present
-        if not has_exclusion_keywords:
+        # Only use whole_house fast path if NO exclusion keywords present, and
+        # only when the wording really asks for the whole house: "turn off all
+        # the lights in the galley" contains "turn off all the lights" and
+        # names a room, so it falls through to the room path.
+        if not has_exclusion_keywords and self._explicit_whole_house(query_lower) is not None:
             for pattern, action in whole_house_light_patterns:
                 if pattern in query_lower:
                     logger.info(f"Fast path whole house lights: pattern='{pattern}', action={action}")
@@ -796,13 +801,7 @@ class SmartHomeController:
         ]
         if any(p in query_lower for p in light_status_patterns):
             # This is a status query, route to get_status action
-            room = None
-            if 'upstairs' in query_lower:
-                room = 'upstairs'
-            elif 'downstairs' in query_lower:
-                room = 'downstairs'
-            elif 'basement' in query_lower:
-                room = 'basement'
+            room = self._single_room(query_lower)
             logger.info(f"Fast path light STATUS query: room={room}")
             return {
                 "device_type": "light",
@@ -824,23 +823,11 @@ class SmartHomeController:
         # Round 12: Check for exclusion keywords - don't use fast path if exclusion present
         has_exclusion_in_query = any(p in query_lower for p in ['except', 'but not', 'not the', 'excluding', ' but '])
         if any(p in query_lower for p in turn_off_phrases) and not has_exclusion_in_query:
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-            logger.info(f"Fast path 'lights out' or 'kill lights': room={final_room}")
+            room_fields = self._room_fields(query_lower)
+            logger.info(f"Fast path 'lights out' or 'kill lights': room={room_fields.get('room')}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "turn_off",
                 "target_scope": "group",
                 "parameters": {},
@@ -857,27 +844,15 @@ class SmartHomeController:
                           'flip the light', 'flip the',  # Round 15: "flip the porch light"
                           'get it lit', 'get the', 'lemme get']  # Round 16: "yo lemme get the kitchen lit"
         if any(p in query_lower for p in turn_on_phrases):
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
+            room_fields = self._room_fields(query_lower)
             # For "just a little light" or "on low" set low brightness
             params = {}
             if 'little light' in query_lower or 'a little light' in query_lower or 'on low' in query_lower:
                 params = {"brightness": 30}  # Low brightness for "just a little light" or "on low"
-            logger.info(f"Fast path turn ON phrase: room={final_room} params={params}")
+            logger.info(f"Fast path turn ON phrase: room={room_fields.get('room')} params={params}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "turn_on",
                 "target_scope": "group",
                 "parameters": params,
@@ -894,46 +869,22 @@ class SmartHomeController:
         is_thermostat_context = any(t in query_lower for t in thermostat_exclusions)
 
         if any(p in query_lower for p in implicit_brighter) and not is_thermostat_context:
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-            logger.info(f"Fast path implicit brightness INCREASE: room={final_room} for query_len={len(query)}")
+            room_fields = self._room_fields(query_lower)
+            logger.info(f"Fast path implicit brightness INCREASE: room={room_fields.get('room')} for query_len={len(query)}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "increase",  # Use "increase" to match execute_intent handler
                 "target_scope": "group",
                 "parameters": {},
                 "color_description": None
             }
         elif any(p in query_lower for p in implicit_dimmer):
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-            logger.info(f"Fast path implicit brightness DECREASE: room={final_room} for query_len={len(query)}")
+            room_fields = self._room_fields(query_lower)
+            logger.info(f"Fast path implicit brightness DECREASE: room={room_fields.get('room')} for query_len={len(query)}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "decrease",  # Use "decrease" to match execute_intent handler
                 "target_scope": "group",
                 "parameters": {},
@@ -941,136 +892,36 @@ class SmartHomeController:
             }
 
         if (is_turn_on or is_turn_off) and not has_color:
-            # Extract room from query using pattern matching
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-
-            # MULTI-ROOM DETECTION: Check for "room1 and room2" patterns
-            # e.g., "turn on kitchen and living room lights"
             import re
-            multi_room_matches = []
-            for room in room_names:
-                if room in query_lower:
-                    multi_room_matches.append(room)
-
-            # Check if multiple rooms are joined by "and"
-            if len(multi_room_matches) >= 2 and ' and ' in query_lower:
-                # Verify rooms are actually connected by "and" (not separate phrases)
-                # Build a pattern to check: room1...and...room2
-                connected = False
-                for i, room1 in enumerate(multi_room_matches):
-                    for room2 in multi_room_matches[i+1:]:
-                        # Check if "and" appears between the two rooms
-                        pattern1 = f"{re.escape(room1)}.*\\s+and\\s+.*{re.escape(room2)}"
-                        pattern2 = f"{re.escape(room2)}.*\\s+and\\s+.*{re.escape(room1)}"
-                        if re.search(pattern1, query_lower) or re.search(pattern2, query_lower):
-                            connected = True
-                            break
-                    if connected:
-                        break
-
-                if connected:
-                    action = "turn_on" if is_turn_on else "turn_off"
-                    # Return multi-room intent with list of rooms
-                    logger.info(f"Fast path MULTI-ROOM: action={action}, rooms={multi_room_matches}")
-                    return {
-                        "device_type": "light",
-                        "room": "multi_room",  # Special marker
-                        "rooms": multi_room_matches,  # List of rooms to control
-                        "action": action,
-                        "target_scope": "group",
-                        "parameters": {},
-                        "color_description": None
-                    }
+            action = "turn_on" if is_turn_on else "turn_off"
+            directory = self._directory()
 
             # SPECIAL CASE: "leave X on but turn off the rest" pattern
             # This is an inverted exclusion where the excluded room is mentioned FIRST
             leave_on_pattern = re.search(r'leave\s+(the\s+)?(\w+(?:\s+\w+)?)\s+(?:light(?:s)?|on)\s+(?:on\s+)?(?:but|and)\s+turn\s+off', query_lower)
             if leave_on_pattern:
-                excluded_room_candidate = leave_on_pattern.group(2).strip()
-                logger.info(f"'Leave X on but turn off' pattern detected: candidate='{excluded_room_candidate}'")
-                # Find matching room
-                for room in room_names:
-                    if room in excluded_room_candidate or excluded_room_candidate in room:
-                        logger.info(f"Leave-on exclusion: turning off all EXCEPT '{room}'")
-                        return {
-                            "device_type": "light",
-                            "room": "whole_house",
-                            "excluded_rooms": [room],
-                            "action": "turn_off",
-                            "target_scope": "group",
-                            "parameters": {},
-                            "color_description": None
-                        }
-
-            # Check for exclusion patterns: "except X", "but not X", "not the X", "everything but X"
-            has_exclusion = any(p in query_lower for p in ['except', 'but not', 'not the', 'excluding'])
-            # Also check "everything but" or "all lights but" patterns
-            if not has_exclusion:
-                has_exclusion = bool(re.search(r'(everything|all\s+(the\s+)?lights?)\s+but\s+', query_lower))
-            # Round 17: Added "every" and "every light" patterns
-            has_all = 'all' in query_lower or 'everything' in query_lower or 'everywhere' in query_lower or 'every light' in query_lower or 'every room' in query_lower
-
-            if has_exclusion and has_all:
-                # Extract excluded rooms (rooms mentioned after "except", "but not", etc.)
-                excluded_rooms = []
-                # Find rooms after exclusion keywords
-                exclusion_patterns = [
-                    r'except\s+(the\s+)?(\w+\s*\w*)',
-                    r'but not\s+(the\s+)?(\w+\s*\w*)',
-                    r'not the\s+(\w+\s*\w*)',
-                    r'excluding\s+(the\s+)?(\w+\s*\w*)',
-                    r'(?:everything|all\s+(?:the\s+)?lights?)\s+but\s+(the\s+)?(\w+\s*\w*)'  # "everything but X" or "all lights but X"
-                ]
-                logger.info(f"Exclusion detection: query_lower_len={len(query_lower)}, has_exclusion={has_exclusion}, has_all={has_all}")
-                for pattern in exclusion_patterns:
-                    match = re.search(pattern, query_lower)
-                    if match:
-                        # Get the last group (the room name)
-                        potential_room = match.group(match.lastindex).strip()
-                        logger.info(f"Exclusion pattern match: pattern='{pattern}', potential_room='{potential_room}'")
-                        # Validate it's a known room
-                        for room in room_names:
-                            if room in potential_room or potential_room in room:
-                                excluded_rooms.append(room)
-                                logger.info(f"Exclusion room found: '{room}'")
-                                break
-
-                logger.info(f"Total excluded_rooms: {excluded_rooms}")
-                if excluded_rooms:
-                    action = "turn_on" if is_turn_on else "turn_off"
-                    logger.info(f"Fast path with exclusion: action={action}, room=whole_house, excluded={excluded_rooms}")
+                excluded = room_context.find_room_mention(leave_on_pattern.group(2).strip(), directory)
+                if excluded.kind != "none":
+                    kept = [c.key for c in excluded.candidates] if excluded.kind != "exact" else [excluded.candidates[0].key]
+                    logger.info(f"Leave-on exclusion: turning off all except {len(kept)} room(s)")
                     return {
                         "device_type": "light",
                         "room": "whole_house",
-                        "excluded_rooms": excluded_rooms,
-                        "action": action,
+                        "excluded_rooms": kept,
+                        "action": "turn_off",
                         "target_scope": "group",
                         "parameters": {},
                         "color_description": None
                     }
 
-            # Normal room extraction (no exclusion, single room)
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-
-            # Use device room as fallback if no room in query
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-
-            action = "turn_on" if is_turn_on else "turn_off"
-            logger.info(f"Fast path extract_intent: action={action}, room={final_room} for query_len={len(query)}")
+            # Normal path: the wording and the rooms said decide (whole house,
+            # several rooms joined by "and", one room, or none).
+            room_fields = self._room_fields(query_lower)
+            logger.info(f"Fast path extract_intent: action={action}, room={room_fields.get('room')} for query_len={len(query)}")
 
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": action,
                 "target_scope": "group",
                 "parameters": {},
@@ -1114,28 +965,12 @@ class SmartHomeController:
         # Check for ambient color keywords - use these as fast path to avoid LLM misinterpretation
         for ambient_name, color_config in ambient_color_commands.items():
             if ambient_name in query_lower:
-                # Extract room if present
-                room_names = [
-                    'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                    'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                    'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                    'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                    'first floor', 'second floor', 'downstairs', 'upstairs', 'whole house'
-                ]
-                extracted_room = None
-                for room in room_names:
-                    if room in query_lower:
-                        extracted_room = room
-                        break
-
-                # If "all" or no room specified, use whole_house for ambient effects
-                if 'all' in query_lower or extracted_room is None:
-                    extracted_room = 'whole_house'
-
-                logger.info(f"Fast path ambient color: {ambient_name} -> room={extracted_room}")
+                # The room said, or the whole house only when the wording asks for it
+                room_fields = self._room_fields(query_lower)
+                logger.info(f"Fast path ambient color: {ambient_name} -> room={room_fields.get('room')}")
                 return {
                     "device_type": "light",
-                    "room": extracted_room,
+                    **room_fields,
                     "action": "set_color",
                     "target_scope": "all_individual",
                     "parameters": {"hs_colors": color_config['hs_colors']},
@@ -1186,25 +1021,12 @@ class SmartHomeController:
                 hue, sat = 200, 30  # Cool white
 
             # Extract room if present
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
+            room_fields = self._room_fields(query_lower)
 
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-
-            logger.info(f"Fast path light color temp: {target_color} -> room={final_room}")
+            logger.info(f"Fast path light color temp: {target_color} -> room={room_fields.get('room')}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "set_color",
                 "target_scope": "all_individual",
                 "parameters": {"hs_colors": [[hue, sat], [hue, sat], [hue, sat]]},
@@ -1222,25 +1044,12 @@ class SmartHomeController:
         if color_match:
             color_name, (hue, sat) = color_match
             # Extract room if present
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
+            room_fields = self._room_fields(query_lower)
 
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
-
-            logger.info(f"Fast path basic color: {color_name} -> room={final_room}")
+            logger.info(f"Fast path basic color: {color_name} -> room={room_fields.get('room')}")
             return {
                 "device_type": "light",
-                "room": final_room,
+                **room_fields,
                 "action": "set_color",
                 "target_scope": "all_individual",
                 "parameters": {"hs_colors": [[hue, sat], [hue, sat], [hue, sat]]},
@@ -1337,26 +1146,13 @@ class SmartHomeController:
 
         if brightness_match:
             # Extract room if present
-            room_names = [
-                'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-                'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-                'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-                'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-                'first floor', 'second floor', 'downstairs', 'upstairs'
-            ]
-            extracted_room = None
-            for room in room_names:
-                if room in query_lower:
-                    extracted_room = room
-                    break
-
-            final_room = extracted_room or (device_room if device_room and device_room not in ["unknown", "guest"] else None)
+            room_fields = self._room_fields(query_lower)
 
             if isinstance(brightness_match, int):
-                logger.info(f"Fast path brightness: {brightness_match}/255 -> room={final_room}")
+                logger.info(f"Fast path brightness: {brightness_match}/255 -> room={room_fields.get('room')}")
                 return {
                     "device_type": "light",
-                    "room": final_room,
+                    **room_fields,
                     "action": "set_brightness",
                     "target_scope": "group",
                     "parameters": {"brightness": brightness_match},
@@ -1364,10 +1160,10 @@ class SmartHomeController:
                 }
             else:
                 action = "increase" if brightness_match == "increase" else "decrease"
-                logger.info(f"Fast path brightness: {action} -> room={final_room}")
+                logger.info(f"Fast path brightness: {action} -> room={room_fields.get('room')}")
                 return {
                     "device_type": "light",
-                    "room": final_room,
+                    **room_fields,
                     "action": action,
                     "target_scope": "group",
                     "parameters": {"brightness_step": 50},  # ~20% change
@@ -1440,11 +1236,8 @@ class SmartHomeController:
                 "color_description": None
             }
 
-        # Build room context hint if device room is provided
-        room_context = ""
-        if device_room and device_room not in ["unknown", "guest"]:
-            room_context = f"\nDevice location: The user is speaking from the {device_room}. If no room is specified in the query, use \"{device_room}\" as the room."
-
+        # The model is told nothing about where the speaker is: a room it
+        # returns must be one the utterance names (see ground_intent_rooms).
         # Build conversation context for follow-ups and corrections
         conversation_context = ""
         if prev_query and prev_response:
@@ -1475,7 +1268,7 @@ For example, if the previous action was on "bed_warmer" and user says "level 2",
         intent_prompt = f"""Extract the smart home control intent from this query. Return ONLY valid JSON.
 {conversation_context}
 Query: "{query}"
-Number of lights to control: {light_count}{room_context}
+Number of lights to control: {light_count}
 
 Return JSON with this structure:
 {{
@@ -1597,6 +1390,7 @@ Return ONLY the JSON, no other text."""
                 text = text.split('```')[1].split('```')[0].strip()
 
             intent = json.loads(text)
+            self._ground_intent_rooms(intent, query)
             # 3.3(b): post-LLM coercion. A STATE_QUESTION never leaves this
             # function with a write action, even if the LLM (or a hostile
             # one) returned one -- this is the coercion path referent
@@ -1878,42 +1672,74 @@ Return ONLY valid JSON."""
                 }]
             }
 
+    def _directory(self):
+        """The deployment's room directory, or None (generic room words only)."""
+        from .room_directory import current_directory
+        return current_directory()
+
+    def _explicit_whole_house(self, query: str):
+        return room_context.explicit_whole_house(query, self._directory())
+
+    def _room_fields(self, query: str) -> Dict:
+        """The room part of an intent, from what the utterance says and
+        nothing else: the whole house (with exclusions) only for whole-house
+        wording, several rooms joined by "and", one room, or ``room: None``.
+        The speaker's room is not applied here."""
+        directory = self._directory()
+        whole = room_context.explicit_whole_house(query, directory)
+        if whole is not None:
+            fields: Dict = {"room": "whole_house"}
+            if whole.excluded:
+                fields["excluded_rooms"] = [ref.key for ref in whole.excluded]
+            return fields
+        joined = room_context.joined_room_mentions(query, directory)
+        if joined:
+            rooms = list(dict.fromkeys(key for m in joined for key in room_context.room_values(m)))
+            return {"room": "multi_room", "rooms": rooms}
+        values = room_context.room_values(room_context.find_room_mention(query, directory))
+        if len(values) > 1:
+            return {"room": "multi_room", "rooms": list(values)}
+        return {"room": values[0] if values else None}
+
+    def _single_room(self, query: str) -> Optional[str]:
+        """The one room an utterance names, for a status answer, or None."""
+        values = room_context.room_values(room_context.find_room_mention(query, self._directory()))
+        return values[0] if values else None
+
+    def _ground_intent_rooms(self, intent: Dict, query: str) -> None:
+        """Keep a model's room and exclusions only where the utterance names
+        them (whole tokens); ``whole_house`` only for whole-house wording."""
+        directory = self._directory()
+        room = intent.get("room")
+        if isinstance(room, str):
+            grounded = room_context.ground_llm_room(room, query, directory)
+            if grounded != room_key(room) and grounded != room:
+                import logging
+                logging.getLogger(__name__).info("llm_room_ungrounded")
+            intent["room"] = grounded
+        elif room is not None:
+            intent["room"] = None
+        excluded = intent.get("excluded_rooms")
+        if isinstance(excluded, list):
+            kept = [g for g in (room_context.ground_llm_room(r, query, directory) for r in excluded if isinstance(r, str)) if g]
+            intent["excluded_rooms"] = kept or None
+        if intent.get("room") != "whole_house":
+            intent.pop("excluded_rooms", None)
+
     def _extract_room_from_query(self, query: str) -> Optional[str]:
-        """Fallback room extraction from query using regex patterns"""
+        """Fallback room extraction when the intent named none: the whole
+        house for whole-house wording, else a room the directory (or the
+        generic room words) knows, else a room-shaped phrase."""
         import re
         query_lower = query.lower()
 
-        # Check for whole-house patterns FIRST
-        whole_house_patterns = [
-            'whole house', 'entire house', 'all the lights', 'all lights',
-            'every room', 'all rooms', 'everywhere', 'the house',
-            'throughout the house', 'in the house',
-            # Added patterns for "everything" and "all lights on/off"
-            'everything off', 'turn everything', 'everything on',
-            'all lights on', 'all lights off', 'lights on all', 'lights off all',
-            # Round 17: "every light" patterns
-            'every light', 'on every light'
-        ]
-        for pattern in whole_house_patterns:
-            if pattern in query_lower:
-                return 'whole_house'  # Special marker for whole-house control
+        whole = self._explicit_whole_house(query_lower)
+        if whole is not None:
+            return 'whole_house'
 
-        # Known room names to match against
-        known_rooms = [
-            'office', 'kitchen', 'bedroom', 'living room', 'livingroom', 'bathroom',
-            'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-            'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-            'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta',
-            # Room group names and aliases
-            'first floor', '1st floor', 'main floor', 'ground floor', 'downstairs',
-            'second floor', '2nd floor', 'upstairs', 'upper floor',
-            'lower level', 'cellar'
-        ]
-
-        # First, try to find a known room name directly in the query
-        for room in known_rooms:
-            if room in query_lower:
-                return room
+        values = room_context.room_values(room_context.find_room_mention(query_lower, self._directory()))
+        if values:
+            return values[0]
 
         # Patterns to match room names in queries
         patterns = [
@@ -2939,16 +2765,16 @@ Return ONLY valid JSON."""
 
                         # Extract room from entity_id or friendly_name
                         room = None
-                        room_names = ['office', 'kitchen', 'bedroom', 'master', 'living', 'bath', 'basement', 'garage', 'porch', 'front', 'back']
+                        sensor_room_tokens = ['office', 'kitchen', 'bedroom', 'master', 'living', 'bath', 'basement', 'garage', 'porch', 'front', 'back']
                         # Try entity_id first
                         entity_lower = entity_id.lower()
-                        for room_name in room_names:
+                        for room_name in sensor_room_tokens:
                             if room_name in entity_lower:
                                 room = room_name
                                 break
                         if not room:
                             # Try friendly name
-                            for room_name in room_names:
+                            for room_name in sensor_room_tokens:
                                 if room_name in friendly_name.lower():
                                     room = room_name
                                     break
@@ -3991,7 +3817,6 @@ Do NOT mention rooms that have no current or recent motion."""
 
             # Filter by room if specified
             lights_on = []
-            room_lower = (room or '').lower()
 
             def _friendly(entity_id: str, state_data: Dict) -> str:
                 return state_data.get('attributes', {}).get(
@@ -4004,11 +3829,18 @@ Do NOT mention rooms that have no current or recent motion."""
                     if state_data.get('state') == 'on'
                 ]
             else:
+                # A floor or other group of rooms comes from the admin room
+                # groups, never from a list of this house's room names.
                 room_variations = [room]
-                if room_lower == 'upstairs':
-                    room_variations.extend(['second floor', '2nd floor', 'alpha', 'beta', 'master'])
-                elif room_lower == 'downstairs':
-                    room_variations.extend(['first floor', '1st floor', 'living', 'kitchen', 'dining'])
+                try:
+                    room_group = await get_admin_client().resolve_room_group(room)
+                except Exception:
+                    room_group = None
+                if room_group:
+                    room_variations = [
+                        member.get('room_name') for member in room_group.get('members') or []
+                        if member.get('room_name')
+                    ] or room_variations
 
                 # Same tiers as a write: the owner's configured group, else
                 # name matching. The answer lists the physical lights beneath
@@ -4031,7 +3863,7 @@ Do NOT mention rooms that have no current or recent motion."""
 
             if not lights_on:
                 if room:
-                    return f"No lights are currently on in the {room}."
+                    return f"No lights are currently on in the {room.replace('_', ' ')}."
                 else:
                     return "No lights are currently on anywhere in the house."
 
@@ -4070,6 +3902,7 @@ Do NOT mention rooms that have no current or recent motion."""
                 return f"I couldn't find any {nouns} in the home automation system."
 
             room_lower = (room or "").lower()
+            room_spoken = room_lower.replace("_", " ")
             matched = []
             for entity_id, state_data in entities.items():
                 friendly_name = state_data.get("attributes", {}).get(
@@ -4078,7 +3911,8 @@ Do NOT mention rooms that have no current or recent motion."""
                 if room:
                     entity_lower = entity_id.lower()
                     friendly_lower = friendly_name.lower()
-                    if room_lower not in entity_lower and room_lower not in friendly_lower:
+                    if (room_lower not in entity_lower and room_lower not in friendly_lower
+                            and room_spoken not in friendly_lower):
                         continue
                 matched.append((friendly_name, state_data.get("state", "unknown")))
 
