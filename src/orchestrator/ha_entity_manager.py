@@ -4,7 +4,6 @@ Dynamically fetches and caches HA entities for intelligent device control
 """
 import asyncio
 import re
-import unicodedata
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
@@ -13,6 +12,7 @@ import structlog
 
 from shared.config import get_config
 from shared.guest_policy import parse_json_array_env
+from shared.ha_registry import tokens
 
 logger = structlog.get_logger(__name__)
 
@@ -51,15 +51,12 @@ DEFAULT_ROOM_LIGHT_EXCLUDE_PATTERNS = [r"(?:^|[._])(?:led_ring|status_led)(?:_|$
 FORWARD_ONLY_SYNONYMS = {('outside', 'porch'), ('outside', 'patio'), ('back', 'patio')}
 
 _ROOM_PART_SPLIT = re.compile(r'\s+and\s+|\s*,\s*|\s*/\s*|\s+or\s+')
-_TOKEN_SPLIT = re.compile(r'[\W_]+')
 _LEADING_FILLER = ('the',)
 _TRAILING_FILLER = ('light', 'lights', 'lamp', 'lamps')
 
-
-def _tokens(s: str) -> tuple:
-    """Unicode-normalised, case-folded word tokens; NFC and NFD forms agree."""
-    folded = unicodedata.normalize("NFKC", s or "").casefold()
-    return tuple(t for t in _TOKEN_SPLIT.split(folded) if t)
+# The one tokenizer lives in shared.ha_registry; this name stays for callers
+# that already import it from here.
+_tokens = tokens
 
 
 def _split_room(room: str) -> List[tuple]:

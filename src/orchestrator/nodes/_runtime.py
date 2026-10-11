@@ -54,6 +54,9 @@ class RuntimeContext:
     intent_classifier: Optional[Any] = None
     # Conversation capture sink (optional: not in _REQUIRED_SINGLETONS)
     turn_capture: Optional[Any] = None
+    # Home Assistant area registry (optional: not in _REQUIRED_SINGLETONS; a
+    # deployment with no HA token or HA_AREAS=off gets a disabled registry)
+    ha_registry: Optional[Any] = None
     # 5 caches (Dict[str, Any] — populated at runtime; tests may pre-populate)
     component_model_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     orch_feature_flag_cache: Dict[str, Any] = field(default_factory=dict)
@@ -237,6 +240,13 @@ def get_intent_classifier() -> Optional[Any]:
     return _ctx.intent_classifier
 
 
+def set_ha_registry(c: Any) -> None:
+    _ctx.ha_registry = c
+
+def get_ha_registry() -> Optional[Any]:
+    return _ctx.ha_registry
+
+
 def set_turn_capture(c: Any) -> None:
     _ctx.turn_capture = c
 
@@ -360,6 +370,8 @@ async def close_all() -> None:
     shared.admin_config and is closed explicitly in lifespan if present.
 
     Clients that ARE closed by close_all():
+      - ha_registry.close()                (shared.ha_registry: cancels an
+                                            in-flight registry fetch)
       - cache_client.close()               (shared.cache)
       - session_manager.close()            (orchestrator.session_manager)
       - rag_client.close()                 (orchestrator.rag_client)
@@ -375,6 +387,7 @@ async def close_all() -> None:
     """
     await drain_background()
     close_order = (
+        "ha_registry",
         "ha_client",
         "llm_router",
         "cache_client",

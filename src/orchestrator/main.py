@@ -41,6 +41,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.logging_config import configure_logging, payload_keys
 from shared.ha_client import HomeAssistantClient
+from shared.ha_registry import create_registry
 from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
 from shared.admin_config import get_admin_client
@@ -1321,6 +1322,19 @@ async def lifespan(app: FastAPI):
 
     cache_client = CacheClient()
     _runtime.set_cache_client(cache_client)
+
+    # Home Assistant area registry: read-only, fetched in the background (a
+    # slow or unreachable HA never delays startup). Disabled without an HA
+    # token or with HA_AREAS=off. Built as a local first (R2-H1).
+    ha_registry = create_registry(
+        ha_url=ha_url,
+        ha_token=ha_token,
+        mode=_shared_config.get_config().ha_areas,
+        service_api_key=_SERVICE_API_KEY,
+        redis=getattr(cache_client, "client", None),
+    )
+    _runtime.set_ha_registry(ha_registry)
+    await ha_registry.start()
 
     # Initialize session manager
     session_manager = await get_session_manager()
@@ -9039,6 +9053,10 @@ async def health_check(detailed: bool = False):
     except Exception as e:
         health["components"]["home_assistant"] = False
         logger.warning("health_check: home_assistant probe failed", exc_info=e)
+
+    # Area registry state only (never counts or names).
+    _registry = _runtime.get_ha_registry()
+    health["components"]["ha_registry"] = _registry.state if _registry is not None else "disabled"
 
     # Conversation capture: configured and writer state only (no text, no DSN).
     # Informational: a capture problem never makes the orchestrator unhealthy.

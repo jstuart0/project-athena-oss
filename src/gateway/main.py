@@ -31,6 +31,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.fast_path_vocab import is_fast_path_candidate
 from shared.logging_config import configure_logging, payload_keys
 from shared.config import get_config as _get_athena_config  # local async get_config() route below shadows this name
+from shared.ha_registry import HARegistry, create_registry
 from shared.ollama_client import OllamaClient
 from shared.admin_config import get_admin_client
 from shared.admin_url import get_admin_url
@@ -147,6 +148,7 @@ device_session_mgr: Optional[DeviceSessionManager] = None
 admin_client = None  # Admin API client for configuration
 metric_client: Optional[httpx.AsyncClient] = None  # Shared client for metric logging
 ha_client: Optional[httpx.AsyncClient] = None  # Shared client for Home Assistant API
+ha_registry: Optional[HARegistry] = None  # Read-only Home Assistant area registry (shared.ha_registry)
 orchestrator_timeout: float = 120.0  # Resolved at startup from DB config; audit bob:5
 
 # Gateway configuration (loaded from database)
@@ -407,7 +409,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
     global orchestrator_client, ollama_client, device_session_mgr, admin_client, gateway_config
     global orchestrator_circuit_breaker, global_rate_limiter
-    global metric_client, ha_client
+    global metric_client, ha_client, ha_registry
     global orchestrator_timeout
     global new_conversation_limiter, new_conversation_limiter_redis_client
 
@@ -532,6 +534,19 @@ async def lifespan(app: FastAPI):
             backend="in-memory",
         )
 
+    # Home Assistant area registry: read-only, fetched in the background so a
+    # slow or unreachable HA never delays startup. Disabled without an HA token
+    # or with HA_AREAS=off. Built as a local, then assigned.
+    local_registry = create_registry(
+        ha_url=os.getenv("HA_URL"),
+        ha_token=os.getenv("HA_TOKEN"),
+        mode=_get_athena_config().ha_areas,
+        service_api_key=_get_athena_config().service_api_key,
+        redis=new_conversation_limiter_redis_client,
+    )
+    await local_registry.start()
+    ha_registry = local_registry
+
     # Check orchestrator health
     try:
         response = await orchestrator_client.get("/health")
@@ -571,6 +586,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"LiveKit shutdown error: {e}")
 
+    if ha_registry:
+        await ha_registry.close()
     if new_conversation_limiter_redis_client:
         await new_conversation_limiter_redis_client.aclose()
     if device_session_mgr:
@@ -2186,7 +2203,8 @@ async def health_check():
     health = {
         "status": "healthy",
         "service": "gateway",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "ha_registry": ha_registry.state if ha_registry else "disabled",
     }
 
     # Check orchestrator

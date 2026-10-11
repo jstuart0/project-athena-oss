@@ -57,7 +57,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import Callable, Dict, Mapping, Optional
+from typing import Callable, Dict, Literal, Mapping, Optional
 
 from dotenv import dotenv_values
 
@@ -493,6 +493,26 @@ class AthenaConfig(BaseSettings):
     #   default. Never applied to an explicit HA_LIGHT_GROUPS entry or to a
     #   member of a candidate group.
     ha_room_light_exclude_entities: str = Field(default="")
+    # ha_areas: "auto" (default) reads Home Assistant's area, device and
+    #   entity registries over its WebSocket API (read-only, in the
+    #   background) so a satellite's room and a room's lights come from
+    #   HA's own areas. "off" never connects; rooms then come only from
+    #   HA_SATELLITE_ROOM_MAP, HA_LIGHT_GROUPS and admin room groups. Any
+    #   other value logs an ERROR and reads "off".
+    ha_areas: Literal["auto", "off"] = Field(default="auto")
+    # ha_device_client_networks: comma-separated CIDRs/addresses of clients
+    #   whose Home Assistant device id (the `athena_device_id:` prompt line
+    #   or /ha/conversation's device_id) the gateway trusts for the speaker's
+    #   room and for follow-ups, in addition to any request that presented
+    #   the gateway's own API key. Resolved like openai_speech_client_networks
+    #   (nearest X-Forwarded-For hop outside trusted_proxy_cidrs); an entry
+    #   overlapping trusted_proxy_cidrs is ignored with an ERROR. Empty
+    #   (default): no network rule, so an unauthenticated device id is ignored.
+    ha_device_client_networks: str = Field(default="")
+    # ha_whole_house_unassigned_lights: true lets "all the lights" also write
+    #   lights that have no Home Assistant area. Default false: a light with
+    #   no area is never reached by a whole-house command.
+    ha_whole_house_unassigned_lights: bool = Field(default=False)
     # ha_music_players: fallback room -> Music Assistant media_player
     #   entity mapping, used only when the admin API's room_audio_config
     #   table is unreachable (see src/orchestrator/music_handler.py's
@@ -626,6 +646,19 @@ class AthenaConfig(BaseSettings):
             len(value),
         )
         return "1"
+
+    @field_validator("ha_areas", mode="before")
+    @classmethod
+    def _validate_ha_areas(cls, v: object) -> str:
+        value = v.strip().lower() if isinstance(v, str) else ""
+        if value in ("", "auto"):
+            return "auto"
+        if value != "off":
+            logger.error(
+                "ha_areas_invalid: HA_AREAS must be 'auto' or 'off' (got %d characters); using off",
+                len(value),
+            )
+        return "off"
 
     @model_validator(mode="after")
     def _validate_fanout_limits(self) -> "AthenaConfig":
