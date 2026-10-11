@@ -3601,7 +3601,6 @@ class IntentMetric(Base):
             'complexity': self.complexity,
             'is_novel': self.is_novel,
             'emerging_intent_id': self.emerging_intent_id,
-            'raw_query': self.raw_query,
             'session_id': self.session_id,
             'mode': self.mode,
             'room': self.room,
