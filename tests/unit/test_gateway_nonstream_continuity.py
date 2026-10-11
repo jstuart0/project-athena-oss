@@ -197,7 +197,7 @@ def test_G3_route_to_orchestrator_scoped_to_ha_conversation_only():
     )  # raises StopIteration (failing the test) if the function is missing
     assert "async def stream_orchestrator_response" in source
     assert source.index("async def stream_orchestrator_response") < source.index(
-        "_orchestrator_openai_payload(\n            request, room, stream=True, channel=channel, voice_device_id=voice_device_id\n        )"
+        "_orchestrator_openai_payload(\n            request, room, stream=True, channel=channel, voice_device_id=voice_device_id,\n            trusted_voice=trusted_voice,\n        )"
     )
 
 

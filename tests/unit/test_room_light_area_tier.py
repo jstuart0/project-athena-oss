@@ -205,11 +205,11 @@ class Rig:
 
         self.controller._finalize_light_targets = spy_finalize
 
-    def run(self, intent, query, perms=None, mode="owner"):
+    def run(self, intent, query, perms=None, mode="owner", trusted_voice=True):
         perms = perms or {"mode": "owner"}
 
         async def go():
-            with mp.ha_permission_scope(perms, mode=mode, utterance=classify_utterance(query)):
+            with mp.ha_permission_scope(perms, mode=mode, utterance=classify_utterance(query), trusted_voice=trusted_voice):
                 return await self.controller.execute_intent(intent, self.raw, query)
 
         return asyncio.run(go())
@@ -369,6 +369,20 @@ def test_all_the_lights_except_a_room_leaves_that_room_alone_and_says_so(monkeyp
     assert not set(rig.written) & GALLEY_LEAVES
     assert "light.study_lamp" in rig.written
     assert answer == "Turned off all the lights except the galley."
+
+
+def test_an_owner_the_gateway_did_not_vouch_for_gets_the_light_groups_only(monkeypatch):
+    rig = Rig(monkeypatch, attic_state="on", groups='{"study": "light.study_lamp"}',
+              exclude='["(?:^|[._])(?:led_ring|status_led)(?:_|$)"]')
+    rig.run(light("whole_house"), "turn off all the lights", trusted_voice=False)
+    assert "light.north_lamp" not in rig.written and "light.attic_a" not in rig.written
+    assert rig.written, "the groups' leaves still go"
+
+
+def test_the_unassigned_flag_is_owner_only(monkeypatch):
+    rig = Rig(monkeypatch, attic_state="on", unassigned=True, groups='{"study": "light.study_lamp"}')
+    rig.run(light("whole_house"), "turn on all the lights", guest(allowed_intents=["control"]), "guest")
+    assert "light.loose_lamp" not in rig.written
 
 
 def test_an_unassigned_light_is_left_out_unless_the_flag_is_set(monkeypatch):
@@ -569,15 +583,18 @@ WRITERS = ("_dispatch_light_or_room_command", "_execute_multi_room_command",
 def test_every_writer_calls_finalizer(monkeypatch):
     group = {"display_name": "Upper", "name": "upper", "members": [{"room_name": "study"}, {"room_name": "hall"}]}
     rig = Rig(monkeypatch, attic_state="on", resolve_group=group)
-    rig.run(light("study"), "turn on the study lights")
-    single = len(rig.finalize_calls)
-    rig.run(light("multi_room", rooms=["study", "hall"]), "turn on the study and hall lights")
-    multi = len(rig.finalize_calls)
-    rig.run(light("whole_house"), "turn on all the lights")
-    whole = len(rig.finalize_calls)
-    rig.run(light("upper"), "turn on the upper lights")
-    grouped = len(rig.finalize_calls)
-    assert [single, multi, whole, grouped] == [1, 2, 3, 4], "each of the four writers finalized once"
+    gates = []
+    for intent, query in [
+        (light("study"), "turn on the study lights"),
+        (light("multi_room", rooms=["study", "hall"]), "turn on the study and hall lights"),
+        (light("whole_house"), "turn on all the lights"),
+        (light("upper"), "turn on the upper lights"),
+    ]:
+        before = len(rig.gate_calls)
+        rig.run(intent, query)
+        gates.append(len(rig.gate_calls) - before)
+    assert gates == [1, 1, 1, 1], "each of the four writers finalized and reached the gate once"
+    assert len(rig.finalize_calls) >= 4
 
 
 def test_every_writer_has_a_finalizer_call_before_its_service_calls():

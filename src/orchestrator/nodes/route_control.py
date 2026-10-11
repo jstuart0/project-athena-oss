@@ -622,6 +622,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                 session_id=state.session_id,
                 read_only=(uk.kind == UtteranceKind.STATE_QUESTION),
                 utterance=real_uk,
+                trusted_voice=state.trusted_voice,
             ) as scope:
                 # The CONTROL intent was already checked at the node's top,
                 # against the same normalized permissions this scope holds.

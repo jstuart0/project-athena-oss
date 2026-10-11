@@ -644,18 +644,34 @@ async def _read_assist_satellite_states() -> List[Dict[str, Any]]:
     return [s for s in resp.json() if str(s.get("entity_id", "")).startswith("assist_satellite.")]
 
 
+def _is_trusted_voice(raw_request: Request) -> bool:
+    """Whether this request is a trusted voice caller (see gateway.speaker_room):
+    its device id may be believed, and an owner-mode "all the lights" from it
+    may reach every area's lamps."""
+    return speaker_room.trusted_voice_caller(
+        raw_request,
+        api_key=API_KEY,
+        device_networks=_DEVICE_CLIENT_NETWORKS,
+        trusted_proxies=_TRUSTED_PROXY_NETWORKS,
+    )
+
+
+def _believed_device_id(raw_request: Request, device_id: Optional[str]) -> Optional[str]:
+    """The device id only when a trusted voice caller sent a well-formed one.
+    Everything keyed on a device (its room, its follow-up fingerprint, its
+    session) uses this, never the raw id."""
+    if device_id and speaker_room.DEVICE_ID_RE.fullmatch(device_id) and _is_trusted_voice(raw_request):
+        return device_id
+    return None
+
+
 async def _speaker_room_for_request(raw_request: Request, *, device_id: Optional[str]) -> tuple:
     """(room key or "unknown", the device id when it was believed).
 
     A device id counts only from a trusted voice caller (see
     gateway.speaker_room); the second value is what may be forwarded to the
     orchestrator as voice_device_id."""
-    trusted = speaker_room.trusted_voice_caller(
-        raw_request,
-        api_key=API_KEY,
-        device_networks=_DEVICE_CLIENT_NETWORKS,
-        trusted_proxies=_TRUSTED_PROXY_NETWORKS,
-    )
+    trusted = _is_trusted_voice(raw_request)
     resolved = await speaker_room.resolve_speaker_room(
         device_id=device_id,
         trusted=trusted,
@@ -1272,6 +1288,7 @@ async def route_to_orchestrator(
     return_session_id: bool = False,
     voice_device_id: Optional[str] = None,
     supports_followup: bool = False,
+    trusted_voice: bool = False,
 ) -> Union[ChatCompletionResponse, tuple]:
     """
     Route request to Athena orchestrator.
@@ -1337,8 +1354,12 @@ async def route_to_orchestrator(
 
             # ATHENA-128 D14: a literal, set only for callers that opt in --
             # never derived from an inbound request field.
-            if supports_followup:
+            # ... and only for a device the gateway believed: a follow-up
+            # needs a fingerprint, which needs a trusted device id.
+            if supports_followup and voice_device_id:
                 payload["supports_followup"] = True
+            if trusted_voice:
+                payload["trusted_voice"] = True
             # A caller-fingerprint input only. Never sent as device_id: that
             # field is the orchestrator's guest-session lookup key.
             if voice_device_id:
@@ -1562,6 +1583,7 @@ def _orchestrator_openai_payload(
     stream: bool,
     channel: OutputChannel,
     voice_device_id: Optional[str] = None,
+    trusted_voice: bool = False,
 ) -> dict:
     """Build the OpenAI-shaped payload the orchestrator's
     /v1/chat/completions expects. Shared by the streaming
@@ -1590,6 +1612,10 @@ def _orchestrator_openai_payload(
     if voice_device_id:
         payload["extra_body"]["voice_device_id"] = voice_device_id
         payload["extra_body"]["supports_followup"] = True
+    # Server-derived: set only for a trusted voice caller. The orchestrator
+    # reads it only from a service-key caller.
+    if trusted_voice:
+        payload["extra_body"]["trusted_voice"] = True
     # ATHENA-88 / F88: forward identity top-level too, omitting unset
     # values (never send them as None or "").
     if stream and (request.stream_options or {}).get("include_usage") is True:
@@ -1620,6 +1646,7 @@ async def route_chat_completion_to_orchestrator(
     *,
     channel: OutputChannel,
     voice_device_id: Optional[str] = None,
+    trusted_voice: bool = False,
 ) -> ChatCompletionResponse:
     """F97 non-streaming path (D1-B): forwards the full OpenAI payload (not
     just the last user message) to the orchestrator's /v1/chat/completions,
@@ -1647,7 +1674,8 @@ async def route_chat_completion_to_orchestrator(
             user_message = msg.content
 
     payload = _orchestrator_openai_payload(
-        request, room, stream=False, channel=channel, voice_device_id=voice_device_id
+        request, room, stream=False, channel=channel, voice_device_id=voice_device_id,
+        trusted_voice=trusted_voice,
     )
 
     try:
@@ -1700,13 +1728,15 @@ async def stream_orchestrator_response(
     *,
     channel: OutputChannel,
     voice_device_id: Optional[str] = None,
+    trusted_voice: bool = False,
 ) -> AsyncIterator[str]:
     """Stream response from orchestrator's OpenAI-compatible endpoint."""
     try:
         # Forward streaming request to orchestrator's /v1/chat/completions endpoint
         # Note: room context passed via extra_body for orchestrator to use
         payload = _orchestrator_openai_payload(
-            request, room, stream=True, channel=channel, voice_device_id=voice_device_id
+            request, room, stream=True, channel=channel, voice_device_id=voice_device_id,
+            trusted_voice=trusted_voice,
         )
 
         # Stream from orchestrator using the same timeout as non-streaming path (audit bob:5)
@@ -1821,6 +1851,7 @@ async def chat_completions(
         marker_device_id, cleaned_messages, _ = speaker_room.extract_device_marker(request.messages)
         request = request.model_copy(update={"messages": cleaned_messages})
         room, voice_device_id = await _speaker_room_for_request(raw_request, device_id=marker_device_id)
+        trusted_voice = _is_trusted_voice(raw_request)
 
         # Log-only routing hint: every request goes to the orchestrator, so the
         # keyword match is all this needs (no LLM call ahead of the orchestrator).
@@ -1836,7 +1867,10 @@ async def chat_completions(
 
             # Always stream from orchestrator to ensure tools are available
             return StreamingResponse(
-                stream_orchestrator_response(request, room=room, channel=channel, voice_device_id=voice_device_id),
+                stream_orchestrator_response(
+                    request, room=room, channel=channel, voice_device_id=voice_device_id,
+                    trusted_voice=trusted_voice,
+                ),
                 media_type="text/event-stream"
             )
 
@@ -1849,7 +1883,8 @@ async def chat_completions(
 
         # Always use orchestrator so tools are available, pass room for context
         response = await route_chat_completion_to_orchestrator(
-            request, room=room, channel=channel, voice_device_id=voice_device_id
+            request, room=room, channel=channel, voice_device_id=voice_device_id,
+            trusted_voice=trusted_voice,
         )
 
         request_counter.labels(endpoint="chat_completions", status="success").inc()
@@ -1978,19 +2013,24 @@ async def responses_api(
         marker_device_id, cleaned_messages, _ = speaker_room.extract_device_marker(chat_request.messages)
         chat_request = chat_request.model_copy(update={"messages": cleaned_messages})
         room, voice_device_id = await _speaker_room_for_request(raw_request, device_id=marker_device_id)
+        trusted_voice = _is_trusted_voice(raw_request)
 
         # Handle streaming
         if request.stream:
             request_counter.labels(endpoint="responses_api", status="streaming").inc()
             # For streaming, we need to convert the SSE format
             return StreamingResponse(
-                stream_responses_api(chat_request, room, channel=channel, voice_device_id=voice_device_id),
+                stream_responses_api(
+                    chat_request, room, channel=channel, voice_device_id=voice_device_id,
+                    trusted_voice=trusted_voice,
+                ),
                 media_type="text/event-stream"
             )
 
         # Non-streaming: route to orchestrator
         response = await route_chat_completion_to_orchestrator(
-            chat_request, room=room, channel=channel, voice_device_id=voice_device_id
+            chat_request, room=room, channel=channel, voice_device_id=voice_device_id,
+            trusted_voice=trusted_voice,
         )
 
         # Convert ChatCompletionResponse to ResponsesAPIResponse
@@ -2030,7 +2070,8 @@ async def responses_api(
 
 
 async def stream_responses_api(
-    request: ChatCompletionRequest, room: str, *, channel: OutputChannel, voice_device_id: Optional[str] = None
+    request: ChatCompletionRequest, room: str, *, channel: OutputChannel, voice_device_id: Optional[str] = None,
+    trusted_voice: bool = False,
 ) -> AsyncIterator[str]:
     """Stream responses in Responses API format.
 
@@ -2116,7 +2157,8 @@ async def stream_responses_api(
                 logger.info(f"ACK_TIMING: Orchestrator task STARTED at {time_module.time() - ack_start_time:.3f}s")
                 first_chunk = True
                 async for chunk in stream_orchestrator_response(
-                    request, room=room, channel=channel, voice_device_id=voice_device_id
+                    request, room=room, channel=channel, voice_device_id=voice_device_id,
+                    trusted_voice=trusted_voice,
                 ):
                     if first_chunk:
                         logger.info(f"ACK_TIMING: First orchestrator chunk at {time_module.time() - ack_start_time:.3f}s")
@@ -2684,6 +2726,13 @@ def _ha_response_payload(speech_text: str, language: str) -> Dict[str, Any]:
     }
 
 
+async def _session_for_device(believed_device_id: Optional[str]) -> Optional[str]:
+    """The conversation session of a believed device; none for anyone else."""
+    if not believed_device_id:
+        return None
+    return await device_session_mgr.get_session_for_device(believed_device_id)
+
+
 @app.post("/ha/conversation", response_model=HAConversationResponse)
 async def ha_conversation(request: HAConversationRequest, raw_request: Request):
     """
@@ -2714,20 +2763,25 @@ async def ha_conversation(request: HAConversationRequest, raw_request: Request):
     try:
         device_id = request.device_id or "unknown"
 
+        # Everything keyed on the device (room, fingerprint, session) uses
+        # the id only when a trusted voice caller sent it.
+        believed_device_id = _believed_device_id(raw_request, request.device_id)
+        trusted_voice = _is_trusted_voice(raw_request)
+
         # Check if parallel initialization is enabled
         parallel_enabled = await get_feature_flag("ha_parallel_init", default=False)
 
         if parallel_enabled:
             # Run room detection and session lookup in parallel
             room_task = _speaker_room_for_request(raw_request, device_id=request.device_id)
-            session_task = device_session_mgr.get_session_for_device(device_id)
+            session_task = _session_for_device(believed_device_id)
 
             (room, _), existing_session_id = await asyncio.gather(room_task, session_task)
             logger.debug(f"Parallel init completed: room={room}, session={existing_session_id}")
         else:
             # Original sequential logic
             room, _ = await _speaker_room_for_request(raw_request, device_id=request.device_id)
-            existing_session_id = await device_session_mgr.get_session_for_device(device_id)
+            existing_session_id = await _session_for_device(believed_device_id)
 
         logger.info("ha_conversation_request", room_known=room != "unknown", query_len=len(request.text))
 
@@ -2812,16 +2866,18 @@ async def ha_conversation(request: HAConversationRequest, raw_request: Request):
                 device_id=room,  # Use mapped room name for audio routing
                 session_id=existing_session_id,
                 return_session_id=True,
-                voice_device_id=request.device_id,
+                voice_device_id=believed_device_id,
                 supports_followup=True,
+                trusted_voice=trusted_voice,
             )
 
         # Extract answer from chat response
         answer = chat_response.choices[0].message.content if chat_response.choices else "I couldn't process that request."
 
         # Update device session mapping with the orchestrator's session_id
-        await device_session_mgr.update_session_for_device(device_id, orchestrator_session_id)
-        logger.info(f"Updated session mapping: device {device_id} → session {orchestrator_session_id}")
+        if believed_device_id:
+            await device_session_mgr.update_session_for_device(believed_device_id, orchestrator_session_id)
+            logger.info("ha_conversation_session_mapped")
 
         # Rule: If the response contains a question mark OR a follow-up phrase, continue listening
         # This ensures the system waits for a response when it asks a question

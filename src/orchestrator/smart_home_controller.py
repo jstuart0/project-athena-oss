@@ -4527,6 +4527,14 @@ Do NOT mention rooms that have no current or recent motion."""
         return None
 
     @staticmethod
+    def _trusted_voice_scope() -> bool:
+        """Whether the gateway judged this request a trusted voice caller
+        (a direct call outside a request counts as one)."""
+        from orchestrator.mode_permission import current_ha_scope
+        scope = current_ha_scope()
+        return scope is None or scope.trusted_voice is True
+
+    @staticmethod
     def _audience_is_owner() -> bool:
         """Whether the request is an owner-mode, non-public one. No scope at
         all (a direct call outside a request) counts as owner; a system scope
@@ -4567,7 +4575,12 @@ Do NOT mention rooms that have no current or recent motion."""
 
         rooms: List[list] = []
         owner = self._audience_is_owner()
-        if owner and snapshot is not None:
+        # Every area's lamps only for an owner the gateway vouched for as a
+        # trusted voice caller; any other owner-mode caller (an unauthenticated
+        # request in a default install) gets the light groups, as with no
+        # registry.
+        area_wide = owner and snapshot is not None and self._trusted_voice_scope()
+        if area_wide:
             for area in snapshot.areas:
                 if area.key in excluded:
                     continue
@@ -4603,7 +4616,7 @@ Do NOT mention rooms that have no current or recent motion."""
             if not any(rooms):
                 return None, "ask"
 
-        if get_config().ha_whole_house_unassigned_lights is True and snapshot is not None:
+        if owner and get_config().ha_whole_house_unassigned_lights is True and snapshot is not None:
             loose = sorted(
                 eid for eid, ent in entities.items()
                 if eid.startswith('light.') and not isinstance(((ent or {}).get('attributes') or {}).get('entity_id'), list)

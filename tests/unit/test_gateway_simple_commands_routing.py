@@ -79,7 +79,7 @@ def rig(monkeypatch):
     monkeypatch.setattr(gw.httpx, "AsyncClient", RecordingClient)
     monkeypatch.setenv("HA_URL", "http://ha.invalid:8123")
     monkeypatch.setenv("HA_TOKEN", "token-for-tests")
-    return SimpleNamespace(http=http, orchestrate=orchestrate, client=TestClient(gw.app))
+    return SimpleNamespace(http=http, orchestrate=orchestrate, sessions=sessions, client=TestClient(gw.app))
 
 
 @pytest.mark.parametrize("text", DEVICE_COMMANDS)
@@ -101,3 +101,50 @@ def test_the_time_is_still_answered_by_the_gateway_with_no_ha_call(rig):
 
 def test_the_population_floor():
     assert len(DEVICE_COMMANDS) == 3
+
+
+VICTIM = "ab" * 16
+
+
+def test_an_untrusted_caller_with_a_victims_device_id_gets_no_session_no_fingerprint_no_follow_up(rig):
+    resp = rig.client.post("/ha/conversation", json={"text": "turn on the lights", "device_id": VICTIM, "language": "en"})
+    assert resp.status_code == 200, resp.text
+    rig.sessions.get_session_for_device.assert_not_awaited()
+    rig.sessions.update_session_for_device.assert_not_awaited()
+    kwargs = rig.orchestrate.await_args.kwargs
+    assert kwargs["voice_device_id"] is None and kwargs["trusted_voice"] is False
+
+
+def test_a_trusted_caller_gets_its_session_and_a_follow_up(rig, monkeypatch):
+    monkeypatch.setattr(gw, "API_KEY", "gateway-secret-for-tests")
+    resp = rig.client.post(
+        "/ha/conversation", json={"text": "turn on the lights", "device_id": VICTIM, "language": "en"},
+        headers={"Authorization": "Bearer gateway-secret-for-tests"},
+    )
+    assert resp.status_code == 200, resp.text
+    rig.sessions.get_session_for_device.assert_awaited_once_with(VICTIM)
+    kwargs = rig.orchestrate.await_args.kwargs
+    assert kwargs["voice_device_id"] == VICTIM and kwargs["trusted_voice"] is True
+    rig.sessions.update_session_for_device.assert_awaited_once()
+
+
+def test_the_orchestrator_payload_has_no_follow_up_without_a_believed_device(monkeypatch):
+    posted = []
+
+    class Client:
+        async def post(self, path, json=None, **kwargs):
+            posted.append(json)
+            resp = mock.MagicMock()
+            resp.raise_for_status = mock.MagicMock()
+            resp.json.return_value = {"answer": "ok", "session_id": "s"}
+            return resp
+
+    monkeypatch.setattr(gw, "orchestrator_client", Client())
+    monkeypatch.setattr(gw, "orchestrator_circuit_breaker", None)
+    request = gw.ChatCompletionRequest(model="m", messages=[gw.ChatMessage(role="user", content="hi")])
+    import asyncio
+
+    asyncio.run(gw.route_to_orchestrator(request, supports_followup=True, voice_device_id=None))
+    asyncio.run(gw.route_to_orchestrator(request, supports_followup=True, voice_device_id=VICTIM, trusted_voice=True))
+    assert "supports_followup" not in posted[0] and "voice_device_id" not in posted[0] and "trusted_voice" not in posted[0]
+    assert posted[1]["supports_followup"] is True and posted[1]["voice_device_id"] == VICTIM and posted[1]["trusted_voice"] is True

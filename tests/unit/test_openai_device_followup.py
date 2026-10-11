@@ -154,7 +154,7 @@ def orchestrator_reads_follow_up_keys_only_when_service_authenticated(source: st
             for child in node.orelse:
                 walk(child, guarded)
             return
-        if isinstance(node, ast.Constant) and node.value in ("voice_device_id", "supports_followup") and not guarded:
+        if isinstance(node, ast.Constant) and node.value in ("voice_device_id", "supports_followup", "trusted_voice") and not guarded:
             problems.append(f"{node.value!r} read outside `if service_authenticated is True`")
         for child in ast.iter_child_nodes(node):
             walk(child, guarded)
@@ -280,7 +280,7 @@ def harness(monkeypatch):
     return h, seen
 
 
-def _gateway_body(*, stream, voice_device_id):
+def _gateway_body(*, stream, voice_device_id, trusted_voice=False):
     sys.modules.setdefault("prometheus_client", mock.MagicMock())
     import gateway.main as gw
     from shared.output_channel import OutputChannel
@@ -291,6 +291,7 @@ def _gateway_body(*, stream, voice_device_id):
     )
     return gw._orchestrator_openai_payload(
         request, "study", stream=stream, channel=OutputChannel.SPEECH, voice_device_id=voice_device_id,
+        trusted_voice=trusted_voice,
     )
 
 
@@ -361,3 +362,26 @@ def test_the_follow_up_flag_without_a_device_is_ignored(harness):
     response = _post(h, body, h.service_headers())
     assert response.status_code == 200, response.text
     assert seen["queries"][-1].supports_followup is False
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_the_trusted_voice_flag_reaches_the_turn_only_from_a_service_key_caller(harness, stream):
+    h, seen = harness
+    body = _rewrite_session(_gateway_body(stream=stream, voice_device_id=None, trusted_voice=True))
+    assert body["extra_body"]["trusted_voice"] is True
+    response = _post(h, body, h.service_headers())
+    assert response.status_code == 200, response.text
+    flagged = seen["states"][-1] if stream else seen["queries"][-1]
+    assert flagged.trusted_voice is True
+
+    with mock.patch.dict(os.environ, {"ORCHESTRATOR_INGRESS_AUTH": "warn"}):
+        h.shared_config._clear_cache_for_tests()
+        response = _post(h, _rewrite_session(body), {})
+    h.shared_config._clear_cache_for_tests()
+    assert response.status_code == 200, response.text
+    unflagged = seen["states"][-1] if stream else seen["queries"][-1]
+    assert unflagged.trusted_voice is False
+
+
+def test_the_gateway_payload_carries_trusted_voice_only_when_set():
+    assert "trusted_voice" not in _gateway_body(stream=False, voice_device_id=None)["extra_body"]

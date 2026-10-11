@@ -840,7 +840,9 @@ class TestOrchestratorQueryCallersTagSupportsFollowup:
         value = followup_sites[0][1]["supports_followup"]
         assert isinstance(value, ast.Constant) and value.value is True
         voice = followup_sites[0][1].get("voice_device_id")
-        assert voice is not None and ast.unparse(voice) == "request.device_id"
+        assert voice is not None and ast.unparse(voice) == "believed_device_id", (
+            "the raw, unauthenticated device id is never forwarded; only the one a trusted caller sent"
+        )
 
     def test_gateway_sends_voice_device_id_never_device_id(self):
         """The HA device id is a fingerprint input only. Sent as the

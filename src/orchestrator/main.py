@@ -6392,6 +6392,13 @@ class QueryRequest(BaseModel):
             "never for the device_id guest-session lookup."
         ),
     )
+    trusted_voice: bool = Field(
+        False,
+        description=(
+            "Set by the gateway for a caller it judged a trusted voice caller. Read only from a "
+            "service-key caller; a client body value is ignored."
+        ),
+    )
 
 
 def _audience_session_class(audience: KnowledgeAudience) -> str:
@@ -6851,6 +6858,7 @@ async def process_query(
             entities=initial_entities,  # Include location from request
             interruption_context=request.interruption_context,  # Barge-in: Pass interruption context for natural acknowledgment
             supports_followup=request.supports_followup,
+                trusted_voice=request.trusted_voice is True and service_authenticated is True,
             caller_fingerprint=_request_caller_fingerprint(
                 request, permissions.get("mode")
             ),
@@ -7648,6 +7656,7 @@ async def process_query_stream(
                 temperature=request.temperature,
                 interface_type=request.interface_type,
                 supports_followup=request.supports_followup,
+                trusted_voice=request.trusted_voice is True and service_authenticated is True,
                 caller_fingerprint=_request_caller_fingerprint(
                     request, authz.permissions.get("mode")
                 ),
@@ -7976,6 +7985,7 @@ async def process_query_stream_v2(
                 memory_context="",
                 timing_tracker=timing_tracker,
                 supports_followup=request.supports_followup,
+                trusted_voice=request.trusted_voice is True and service_authenticated is True,
                 caller_fingerprint=_request_caller_fingerprint(
                     request, authz.permissions.get("mode")
                 ),
@@ -8487,7 +8497,9 @@ async def chat_completions(
         # a device to fingerprint.
         voice_device_id = None
         supports_followup = False
+        trusted_voice = False
         if service_authenticated is True:
+            trusted_voice = (request.extra_body or {}).get("trusted_voice") is True
             body_device_id = (request.extra_body or {}).get("voice_device_id")
             if isinstance(body_device_id, str) and re.fullmatch(r"[0-9a-f]{32}", body_device_id):
                 voice_device_id = body_device_id
@@ -8673,6 +8685,7 @@ async def chat_completions(
                     # A follow-up surface only for a device the gateway
                     # believed (service-key caller); otherwise none (D14).
                     supports_followup=supports_followup,
+                    trusted_voice=trusted_voice,
                     caller_fingerprint=compute_caller_fingerprint(
                         None, voice_device_id, room, authz.permissions.get("mode")
                     ),
@@ -8894,12 +8907,13 @@ async def chat_completions(
             interface_type=interface_type,
             voice_device_id=voice_device_id,
             supports_followup=supports_followup,
+            trusted_voice=trusted_voice,
         )
 
         # process_query opens its own usage scope; inside this one it reuses it, so
         # the totals are visible here.
         with llm_usage_scope() as usage:
-            result = await process_query(query_request, service_authenticated=False)
+            result = await process_query(query_request, service_authenticated=service_authenticated)
 
         # Convert to OpenAI format
         response = OpenAIChatResponse(
