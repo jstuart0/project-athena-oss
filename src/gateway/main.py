@@ -705,7 +705,7 @@ async def send_satellite_announcement(room: str, message: str) -> bool:
     # Map room to satellite entity
     satellite_entity = _get_room_to_satellite_map().get(room.lower())
     if not satellite_entity:
-        logger.warning(f"No satellite mapping for room: {room}")
+        logger.warning("No satellite mapping for the requested room")
         return False
 
     try:
@@ -2777,7 +2777,7 @@ async def ha_conversation(request: HAConversationRequest, raw_request: Request):
             session_task = _session_for_device(believed_device_id)
 
             (room, _), existing_session_id = await asyncio.gather(room_task, session_task)
-            logger.debug(f"Parallel init completed: room={room}, session={existing_session_id}")
+            logger.debug(f"Parallel init completed: room_known={room != 'unknown'}")
         else:
             # Original sequential logic
             room, _ = await _speaker_room_for_request(raw_request, device_id=request.device_id)

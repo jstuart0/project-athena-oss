@@ -435,7 +435,7 @@ class SmartHomeController:
             else:
                 room = 'front_door'  # Default to front door
 
-            logger.info(f"Fast path lock command: action={action}, room={room}")
+            logger.info(f"Fast path lock command: action={action}, has_room={bool(room)}")
             return {
                 "device_type": "lock",
                 "room": room,
@@ -517,7 +517,7 @@ class SmartHomeController:
                 room = 'master_bedroom'
             elif 'office' in query_lower:
                 room = 'office'
-            logger.info(f"Fast path fan command: action={action}, room={room}")
+            logger.info(f"Fast path fan command: action={action}, has_room={bool(room)}")
             return {
                 "device_type": "fan",
                 "room": room,
@@ -870,7 +870,7 @@ class SmartHomeController:
         if any(p in query_lower for p in light_status_patterns):
             # This is a status query, route to get_status action
             room = self._single_room(query_lower)
-            logger.info(f"Fast path light STATUS query: room={room}")
+            logger.info(f"Fast path light STATUS query: has_room={bool(room)}")
             return {
                 "device_type": "light",
                 "room": room,
@@ -892,7 +892,7 @@ class SmartHomeController:
         has_exclusion_in_query = any(p in query_lower for p in ['except', 'but not', 'not the', 'excluding', ' but '])
         if any(p in query_lower for p in turn_off_phrases) and not has_exclusion_in_query:
             room_fields = self._room_fields(query_lower, whole_house=True, multi=True)
-            logger.info(f"Fast path 'lights out' or 'kill lights': room={room_fields.get('room')}")
+            logger.info(f"Fast path 'lights out' or 'kill lights': has_room={bool(room_fields.get('room'))}")
             return {
                 "device_type": "light",
                 **room_fields,
@@ -917,7 +917,7 @@ class SmartHomeController:
             params = {}
             if 'little light' in query_lower or 'a little light' in query_lower or 'on low' in query_lower:
                 params = {"brightness": 30}  # Low brightness for "just a little light" or "on low"
-            logger.info(f"Fast path turn ON phrase: room={room_fields.get('room')} params={params}")
+            logger.info(f"Fast path turn ON phrase: has_room={bool(room_fields.get('room'))} params={params}")
             return {
                 "device_type": "light",
                 **room_fields,
@@ -938,7 +938,7 @@ class SmartHomeController:
 
         if any(p in query_lower for p in implicit_brighter) and not is_thermostat_context:
             room_fields = self._room_fields(query_lower, whole_house=False, multi=False)
-            logger.info(f"Fast path implicit brightness INCREASE: room={room_fields.get('room')} for query_len={len(query)}")
+            logger.info(f"Fast path implicit brightness INCREASE: has_room={bool(room_fields.get('room'))} for query_len={len(query)}")
             return {
                 "device_type": "light",
                 **room_fields,
@@ -949,7 +949,7 @@ class SmartHomeController:
             }
         elif any(p in query_lower for p in implicit_dimmer):
             room_fields = self._room_fields(query_lower, whole_house=False, multi=False)
-            logger.info(f"Fast path implicit brightness DECREASE: room={room_fields.get('room')} for query_len={len(query)}")
+            logger.info(f"Fast path implicit brightness DECREASE: has_room={bool(room_fields.get('room'))} for query_len={len(query)}")
             return {
                 "device_type": "light",
                 **room_fields,
@@ -985,7 +985,7 @@ class SmartHomeController:
             # Normal path: the wording and the rooms said decide (whole house,
             # several rooms joined by "and", one room, or none).
             room_fields = self._room_fields(query_lower, whole_house=True, multi=True)
-            logger.info(f"Fast path extract_intent: action={action}, room={room_fields.get('room')} for query_len={len(query)}")
+            logger.info(f"Fast path extract_intent: action={action}, has_room={bool(room_fields.get('room'))} for query_len={len(query)}")
 
             return {
                 "device_type": "light",
@@ -1035,7 +1035,7 @@ class SmartHomeController:
             if ambient_name in query_lower:
                 # The room said, or the whole house only when the wording asks for it
                 room_fields = self._room_fields(query_lower, whole_house=True, multi=False)
-                logger.info(f"Fast path ambient color: {ambient_name} -> room={room_fields.get('room')}")
+                logger.info(f"Fast path ambient color: {ambient_name} -> has_room={bool(room_fields.get('room'))}")
                 return {
                     "device_type": "light",
                     **room_fields,
@@ -1091,7 +1091,7 @@ class SmartHomeController:
             # Extract room if present
             room_fields = self._room_fields(query_lower, whole_house=True, multi=False)
 
-            logger.info(f"Fast path light color temp: {target_color} -> room={room_fields.get('room')}")
+            logger.info(f"Fast path light color temp: {target_color} -> has_room={bool(room_fields.get('room'))}")
             return {
                 "device_type": "light",
                 **room_fields,
@@ -1114,7 +1114,7 @@ class SmartHomeController:
             # Extract room if present
             room_fields = self._room_fields(query_lower, whole_house=True, multi=False)
 
-            logger.info(f"Fast path basic color: {color_name} -> room={room_fields.get('room')}")
+            logger.info(f"Fast path basic color: {color_name} -> has_room={bool(room_fields.get('room'))}")
             return {
                 "device_type": "light",
                 **room_fields,
@@ -1217,7 +1217,7 @@ class SmartHomeController:
             room_fields = self._room_fields(query_lower, whole_house=False, multi=False)
 
             if isinstance(brightness_match, int):
-                logger.info(f"Fast path brightness: {brightness_match}/255 -> room={room_fields.get('room')}")
+                logger.info(f"Fast path brightness: {brightness_match}/255 -> has_room={bool(room_fields.get('room'))}")
                 return {
                     "device_type": "light",
                     **room_fields,
@@ -1228,7 +1228,7 @@ class SmartHomeController:
                 }
             else:
                 action = "increase" if brightness_match == "increase" else "decrease"
-                logger.info(f"Fast path brightness: {action} -> room={room_fields.get('room')}")
+                logger.info(f"Fast path brightness: {action} -> has_room={bool(room_fields.get('room'))}")
                 return {
                     "device_type": "light",
                     **room_fields,
@@ -3072,8 +3072,7 @@ Return ONLY valid JSON."""
 
             # Log if we excluded any stuck sensors
             if stuck_sensors:
-                stuck_rooms = [s['room'] for s in stuck_sensors]
-                logger.warning(f"Excluded {len(stuck_sensors)} stuck sensors from occupancy: {stuck_rooms}")
+                logger.warning(f"Excluded {len(stuck_sensors)} stuck sensors from occupancy")
 
             # Step 2: Fetch house layout from admin API
             house_layout = await self._get_house_layout()
@@ -3185,9 +3184,9 @@ Return ONLY valid JSON."""
                             'last_changed': state.get('last_changed'),
                             'friendly_name': friendly_name
                         })
-                        logger.debug(f"Motion sensor: {entity_id} -> room: {room}, state: {state.get('state')}")
+                        logger.debug(f"Motion sensor: {entity_id} -> state: {state.get('state')}")
 
-            logger.info(f"Found {len(motion_sensors)} motion sensors: {[s['room'] for s in motion_sensors]}")
+            logger.info(f"Found {len(motion_sensors)} motion sensors")
             return motion_sensors
 
         except Exception as e:
@@ -3358,7 +3357,7 @@ Return ONLY valid JSON."""
                         occ['deprioritized'] = True
                         occupancy_deprioritized.append(occ)
                         logger.debug(
-                            f"Deprioritized occupancy sensor in {room}: {occ['entity_id']} "
+                            f"Deprioritized occupancy sensor: {occ['entity_id']} "
                             f"(mmWave presence sensor is authority)"
                         )
 
@@ -3371,7 +3370,7 @@ Return ONLY valid JSON."""
                             pir['likely_false_positive'] = True
                             pir_false_positives.append(pir)
                             logger.info(
-                                f"PIR false positive detected in {room}: {pir['entity_id']} triggered "
+                                f"PIR false positive detected: {pir['entity_id']} triggered "
                                 f"but presence sensor shows no one present"
                             )
                         else:
@@ -3670,7 +3669,7 @@ Return ONLY valid JSON."""
                         })
 
             except Exception as e:
-                logger.warning(f"Error parsing motion timestamp for {room}: {e}")
+                logger.warning(f"Error parsing motion timestamp: {type(e).__name__}")
 
         if is_last_motion_query:
             # Sort by most recent motion
@@ -3777,7 +3776,7 @@ Return ONLY valid JSON."""
                         room_states[room] = {'state': state, 'seconds_ago': seconds_ago}
 
             except Exception as e:
-                logger.warning(f"Error parsing timestamp for {room}: {e}")
+                logger.warning(f"Error parsing timestamp: {type(e).__name__}")
                 if room not in room_states:
                     room_states[room] = {'state': state, 'seconds_ago': float('inf')}
 
@@ -4997,7 +4996,7 @@ Do NOT mention rooms that have no current or recent motion."""
 
         if action not in MULTI_ROOM_ACTIONS:
             return SEVERAL_ROOMS_UNSUPPORTED
-        logger.info(f"Executing multi-room command: action={action}, rooms={rooms}")
+        logger.info(f"Executing multi-room command: action={action}, room_count={len(rooms)}")
 
         # ATHENA-128 4.3: resolve every room first (no task building yet),
         # finalize all rooms' lights together so a bulb two rooms share is
@@ -5010,7 +5009,7 @@ Do NOT mention rooms that have no current or recent motion."""
             light_matches = await self._resolve_room_lights(room_name)
 
             if not light_matches:
-                logger.warning(f"No lights found for room {room_name} in multi-room command")
+                logger.warning("No lights found for one room in multi-room command")
                 continue
 
             primary = max(light_matches, key=lambda x: len(x.get('members', [])))
@@ -5064,7 +5063,7 @@ Do NOT mention rooms that have no current or recent motion."""
                 logger.error(
                     "multi_room_command_partial_failure",
                     action=action,
-                    rooms=rooms,
+                    room_count=len(rooms),
                     error_count=len(unexpected_errors),
                     sample_error=str(unexpected_errors[0]),
                 )
@@ -5110,7 +5109,7 @@ Do NOT mention rooms that have no current or recent motion."""
                 return []
             light_matches = await self._resolve_room_lights(room_name)
             if not light_matches:
-                logger.warning(f"No lights found for room {room_name} in group {group_name}")
+                logger.warning(f"No lights found for one room in group (members={len(members)})")
             return light_matches
 
         room_matches = await asyncio.gather(*[get_room_matches(m) for m in members])

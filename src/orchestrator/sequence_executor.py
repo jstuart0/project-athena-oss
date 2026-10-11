@@ -326,7 +326,7 @@ class SequenceExecutor:
         room = target.get('room')
         entity_id = target.get('entity_id')
 
-        logger.info(f"Executing step {step_num}/{total_steps}: {action} on {device_type} in {room or entity_id}")
+        logger.info(f"Executing step {step_num}/{total_steps}: {action} on {device_type} (has_room={bool(room)})")
 
         if entity_id:
             # Direct entity control: gated on its own target like every

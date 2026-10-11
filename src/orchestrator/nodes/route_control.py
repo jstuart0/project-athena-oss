@@ -987,7 +987,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                             "state_question_write_blocked",
                             query_len=len(state.query),
                             device_type=uk.device_type,
-                            room=uk.room,
+                            has_room=bool(uk.room),
                             request_id=state.request_id,
                             session_id=state.session_id,
                         )
@@ -1151,7 +1151,7 @@ async def route_control_node(state: OrchestratorState) -> OrchestratorState:
                     else:
                         state.answer = prev_response or "I performed the action you requested."
 
-                    logger.info(f"Inquiry follow-up answered from context: room={prev_room}, action={prev_action}")
+                    logger.info(f"Inquiry follow-up answered from context: action={prev_action}")
                     state.node_timings["route_control"] = time.time() - start
                     return state
 

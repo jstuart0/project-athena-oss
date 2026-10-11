@@ -588,7 +588,7 @@ class HARegistry:
         self._state = STATE_OK
         logger.info("ha_registry_refreshed", **snapshot.counts())
         for key, area_ids in snapshot.collisions:
-            logger.warning("ha_registry_area_name_collision", area_ids=list(area_ids))
+            logger.warning("ha_registry_area_name_collision", area_count=len(area_ids))
 
     async def _latch_refused(self) -> None:
         self._state = STATE_REFUSED
