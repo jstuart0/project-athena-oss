@@ -1,0 +1,4 @@
+# jarvis-web's main.py imports sqlalchemy; the orchestrator image doesn't carry it.
+# tests/unit/test_ha_permission_wiring.py::TestJarvisWebRoutesClassified loads that
+# module inside the orchestrator-behaviour job. Versions match apps/jarvis-web/backend/requirements.txt.
+sqlalchemy==2.0.52
