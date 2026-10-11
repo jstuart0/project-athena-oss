@@ -211,3 +211,20 @@ def test_a_stalled_store_with_a_full_queue_counts_overflow_and_stops_within_the_
     assert elapsed < 1.0 + 3.0
     assert status["dropped"] >= outcomes.count(cc.RESULT_QUEUE_FULL) + 4
     assert db.scalar("SELECT count(*) FROM conversation_turns") == 0
+
+
+def test_stop_writes_a_final_status_row_even_when_the_report_interval_is_long(db):
+    db.set_flag(cc.ANALYTICS_KEY, True)
+
+    async def run():
+        sink = await started(db, report_interval=3600)
+        await asyncio.sleep(0.2)  # the first periodic report has been sent
+        sink.enqueue(rec())
+        await drained(sink, 1, db)
+        await sink.stop()
+
+    asyncio.run(run())
+    import json
+
+    row = db.rows("SELECT value FROM system_settings WHERE key = :k", k=cc.writer_status_key("sinktest"))[0]
+    assert json.loads(row["value"])["last_ok_at"], "the final report carries the last successful write"

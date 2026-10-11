@@ -635,6 +635,7 @@ RESULT_PARTITION_MISMATCH = "partition_mismatch"
 RESULT_FAILED = "failed"
 RESULT_QUEUE_FULL = "dropped_queue_full"
 RESULT_UNCONFIGURED = "unconfigured"
+RESULT_SHUTTING_DOWN = "shutting_down"
 RESULT_QUEUED = "queued"
 
 
@@ -721,16 +722,21 @@ class AsyncpgCaptureStore:
         self._replica = replica
         self._pool: Any = None
         self._lock: Optional[asyncio.Lock] = None
+        self._closed = False
 
     def __repr__(self) -> str:
         return f"AsyncpgCaptureStore(replica={self._replica!r})"
 
     async def open(self) -> Any:
+        if self._closed:
+            raise RuntimeError("capture store is closed")
         if self._pool is not None:
             return self._pool
         if self._lock is None:
             self._lock = asyncio.Lock()
         async with self._lock:
+            if self._closed:
+                raise RuntimeError("capture store is closed")
             if self._pool is None:
                 import asyncpg
 
@@ -770,6 +776,7 @@ class AsyncpgCaptureStore:
         )
 
     async def close(self) -> None:
+        self._closed = True
         pool, self._pool = self._pool, None
         if pool is None:
             return
@@ -790,6 +797,7 @@ DRAIN_S = 2.0
 _FLAG_READ_TIMEOUT_S = 5.0
 _ERROR_LOG_INTERVAL_S = 60.0
 _TASK_STOP_TIMEOUT_S = 1.0
+_FINAL_REPORT_TIMEOUT_S = 1.0
 _STICKY_TURNS = 2
 _STICKY_WINDOW_S = 300.0
 _STICKY_MAX_SESSIONS = 1024
@@ -879,6 +887,13 @@ class CaptureSink:
         # loops also test ``_stopping``, so such a task exits at its next iteration.
         await asyncio.wait(self._tasks, timeout=_TASK_STOP_TIMEOUT_S)
         self._tasks = []
+        # One last status report, so the admin page sees the final dropped count rather than
+        # the one from up to a minute ago (best effort, time-boxed).
+        if self._flags is not None and self._flags.analytics:
+            try:
+                await asyncio.wait_for(self._store.report(self._report_payload()), _FINAL_REPORT_TIMEOUT_S)  # type: ignore[union-attr]
+            except BaseException as exc:
+                self._log_failure("conversation_capture_final_report_failed", exc, force=True)
         try:
             await asyncio.wait_for(self._store.close(), _POOL_CLOSE_TIMEOUT_S + 0.5)  # type: ignore[union-attr]
         except BaseException as exc:
@@ -889,7 +904,11 @@ class CaptureSink:
     def enqueue(self, record: CaptureRecord) -> str:
         """Hand over one turn; returns the ``RESULT_*`` outcome. Never raises."""
         try:
-            if self._store is None or self._stopping or not self._started:
+            if self._stopping:
+                # A turn that finishes while the service is stopping is lost, and counted as such.
+                self._dropped += 1
+                return self._emit(RESULT_SHUTTING_DOWN)
+            if self._store is None or not self._started:
                 return self._emit(RESULT_UNCONFIGURED)
             flags = self._flags
             if flags is None or not flags.analytics:

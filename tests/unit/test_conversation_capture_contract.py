@@ -587,3 +587,69 @@ def test_the_producer_carries_withholding_to_the_next_two_turns_of_a_session():
     marker, f1, f2, f3, other = asyncio.run(run())
     assert [r.text_withheld for r in (marker, f1, f2, f3, other)] == [True, True, True, False, False]
     assert f3.query_text == "third turn" and other.query_text == "other session"
+
+
+# ---------------------------------------------------------------------------
+# Shutdown behaviour
+# ---------------------------------------------------------------------------
+
+def test_a_turn_that_arrives_while_stopping_is_counted_as_shutting_down_not_unconfigured():
+    async def run():
+        results = []
+        store = FakeStore()
+        sink = cc.CaptureSink(store, on_result=results.append)
+        await _ready(sink)
+        stopper = asyncio.create_task(sink.stop(drain_s=0.2))
+        await asyncio.sleep(0)  # stop() has begun
+        outcome = sink.enqueue(_record())
+        await stopper
+        late = sink.enqueue(_record())
+        return outcome, late, results, sink.status()
+
+    outcome, late, results, status = asyncio.run(run())
+    assert outcome == late == cc.RESULT_SHUTTING_DOWN != cc.RESULT_UNCONFIGURED
+    assert cc.RESULT_SHUTTING_DOWN in results and cc.RESULT_UNCONFIGURED not in results
+    assert status["dropped"] == 2 and status["configured"] is True
+
+
+def test_stop_sends_a_final_report_with_the_final_counts():
+    async def run():
+        gate = asyncio.Event()
+        store = FakeStore(block=gate)
+        sink = cc.CaptureSink(store, report_interval=3600, flag_ttl=60, queue_max=4)
+        await _ready(sink)
+        for _ in range(3):
+            sink.enqueue(_record())
+        await asyncio.sleep(0.02)
+        before = len(store.reports)
+        await sink.stop(drain_s=0.1)  # the store is stalled, so the queued turns are counted dropped
+        return before, store.reports
+
+    before, reports = asyncio.run(run())
+    assert len(reports) == before + 1
+    assert reports[-1]["dropped"] == 3 and set(reports[-1]) == {"last_ok_at", "last_error_at", "last_error_class", "dropped"}
+
+
+def test_a_final_report_is_not_sent_while_analytics_is_off():
+    async def run():
+        store = FakeStore(analytics=False)
+        sink = cc.CaptureSink(store, report_interval=0)
+        await _ready(sink)
+        await sink.stop(drain_s=0.1)
+        return store.reports
+
+    assert asyncio.run(run()) == []
+
+
+def test_the_asyncpg_store_refuses_to_reopen_after_close():
+    async def run():
+        store = cc.AsyncpgCaptureStore("postgresql://u:pw@127.0.0.1:1/db", replica="r")
+        await store.close()
+        with pytest.raises(RuntimeError):
+            await store.open()
+        with pytest.raises(RuntimeError):
+            await store.read_flags()
+        with pytest.raises(RuntimeError):
+            await store.write(_record())
+
+    asyncio.run(run())

@@ -116,7 +116,7 @@ conversation_capture_total = Counter(
     'athena_conversation_capture_total',
     'Conversation capture outcomes, one per answered turn handed to the capture sink',
     ['result']
-    # result: written|disabled|dropped_queue_full|partition_mismatch|failed|unconfigured
+    # result: written|disabled|dropped_queue_full|partition_mismatch|failed|unconfigured|shutting_down
 )
 
 # ---------------------------------------------------------------------------
