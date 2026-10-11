@@ -177,6 +177,23 @@ def test_leave_one_on_and_turn_off_the_rest_excludes_that_room():
     assert got["room"] == "whole_house" and got["excluded_rooms"] == ["galley"], got
 
 
+def test_brightness_commands_name_one_room_because_their_writers_handle_only_one():
+    """The multi-room and whole-house writers turn lights on and off (and the
+    whole-house writer sets colours). A brightness change to several rooms
+    would write nothing and say it was done, so it keeps the first room."""
+    use(HOUSE_A)
+    got = extract("dim the galley and the study lights to 40%")
+    assert got["room"] == "galley" and got["action"] == "set_brightness", got
+    assert extract("dim all the lights to 40%")["room"] is None
+    assert extract("make the galley and study lights brighter")["room"] == "galley"
+
+
+def test_colour_commands_take_the_whole_house_but_not_several_rooms():
+    use(HOUSE_A)
+    assert extract("make all the lights blue")["room"] == "whole_house"
+    assert extract("make the galley and study lights blue")["room"] == "galley"
+
+
 def test_colour_commands_use_the_same_whole_house_rule():
     use(HOUSE_A)
     assert extract("make all the lights blue", device_room="study")["room"] == "whole_house"

@@ -823,7 +823,7 @@ class SmartHomeController:
         # Round 12: Check for exclusion keywords - don't use fast path if exclusion present
         has_exclusion_in_query = any(p in query_lower for p in ['except', 'but not', 'not the', 'excluding', ' but '])
         if any(p in query_lower for p in turn_off_phrases) and not has_exclusion_in_query:
-            room_fields = self._room_fields(query_lower)
+            room_fields = self._room_fields(query_lower, whole_house=True, multi=True)
             logger.info(f"Fast path 'lights out' or 'kill lights': room={room_fields.get('room')}")
             return {
                 "device_type": "light",
@@ -844,7 +844,7 @@ class SmartHomeController:
                           'flip the light', 'flip the',  # Round 15: "flip the porch light"
                           'get it lit', 'get the', 'lemme get']  # Round 16: "yo lemme get the kitchen lit"
         if any(p in query_lower for p in turn_on_phrases):
-            room_fields = self._room_fields(query_lower)
+            room_fields = self._room_fields(query_lower, whole_house=True, multi=True)
             # For "just a little light" or "on low" set low brightness
             params = {}
             if 'little light' in query_lower or 'a little light' in query_lower or 'on low' in query_lower:
@@ -869,7 +869,7 @@ class SmartHomeController:
         is_thermostat_context = any(t in query_lower for t in thermostat_exclusions)
 
         if any(p in query_lower for p in implicit_brighter) and not is_thermostat_context:
-            room_fields = self._room_fields(query_lower)
+            room_fields = self._room_fields(query_lower, whole_house=False, multi=False)
             logger.info(f"Fast path implicit brightness INCREASE: room={room_fields.get('room')} for query_len={len(query)}")
             return {
                 "device_type": "light",
@@ -880,7 +880,7 @@ class SmartHomeController:
                 "color_description": None
             }
         elif any(p in query_lower for p in implicit_dimmer):
-            room_fields = self._room_fields(query_lower)
+            room_fields = self._room_fields(query_lower, whole_house=False, multi=False)
             logger.info(f"Fast path implicit brightness DECREASE: room={room_fields.get('room')} for query_len={len(query)}")
             return {
                 "device_type": "light",
@@ -916,7 +916,7 @@ class SmartHomeController:
 
             # Normal path: the wording and the rooms said decide (whole house,
             # several rooms joined by "and", one room, or none).
-            room_fields = self._room_fields(query_lower)
+            room_fields = self._room_fields(query_lower, whole_house=True, multi=True)
             logger.info(f"Fast path extract_intent: action={action}, room={room_fields.get('room')} for query_len={len(query)}")
 
             return {
@@ -966,7 +966,7 @@ class SmartHomeController:
         for ambient_name, color_config in ambient_color_commands.items():
             if ambient_name in query_lower:
                 # The room said, or the whole house only when the wording asks for it
-                room_fields = self._room_fields(query_lower)
+                room_fields = self._room_fields(query_lower, whole_house=True, multi=False)
                 logger.info(f"Fast path ambient color: {ambient_name} -> room={room_fields.get('room')}")
                 return {
                     "device_type": "light",
@@ -1021,7 +1021,7 @@ class SmartHomeController:
                 hue, sat = 200, 30  # Cool white
 
             # Extract room if present
-            room_fields = self._room_fields(query_lower)
+            room_fields = self._room_fields(query_lower, whole_house=True, multi=False)
 
             logger.info(f"Fast path light color temp: {target_color} -> room={room_fields.get('room')}")
             return {
@@ -1044,7 +1044,7 @@ class SmartHomeController:
         if color_match:
             color_name, (hue, sat) = color_match
             # Extract room if present
-            room_fields = self._room_fields(query_lower)
+            room_fields = self._room_fields(query_lower, whole_house=True, multi=False)
 
             logger.info(f"Fast path basic color: {color_name} -> room={room_fields.get('room')}")
             return {
@@ -1146,7 +1146,7 @@ class SmartHomeController:
 
         if brightness_match:
             # Extract room if present
-            room_fields = self._room_fields(query_lower)
+            room_fields = self._room_fields(query_lower, whole_house=False, multi=False)
 
             if isinstance(brightness_match, int):
                 logger.info(f"Fast path brightness: {brightness_match}/255 -> room={room_fields.get('room')}")
@@ -1680,26 +1680,33 @@ Return ONLY valid JSON."""
     def _explicit_whole_house(self, query: str):
         return room_context.explicit_whole_house(query, self._directory())
 
-    def _room_fields(self, query: str) -> Dict:
+    def _room_fields(self, query: str, *, whole_house: bool, multi: bool) -> Dict:
         """The room part of an intent, from what the utterance says and
-        nothing else: the whole house (with exclusions) only for whole-house
-        wording, several rooms joined by "and", one room, or ``room: None``.
-        The speaker's room is not applied here."""
+        nothing else; the speaker's room is not applied here.
+
+        ``whole_house``: whole-house wording gives ``room: whole_house`` (with
+        ``excluded_rooms``). ``multi``: rooms joined by "and" and plural
+        phrases give ``room: multi_room``. Each is passed only by the commands
+        whose writer handles it (the multi-room writer turns lights on and
+        off; the whole-house writer also sets colours); otherwise the first
+        room named is used, as before.
+        """
         directory = self._directory()
-        whole = room_context.explicit_whole_house(query, directory)
-        if whole is not None:
-            fields: Dict = {"room": "whole_house"}
-            if whole.excluded:
-                fields["excluded_rooms"] = [ref.key for ref in whole.excluded]
-            return fields
+        if whole_house:
+            whole = room_context.explicit_whole_house(query, directory)
+            if whole is not None:
+                fields: Dict = {"room": "whole_house"}
+                if whole.excluded:
+                    fields["excluded_rooms"] = [ref.key for ref in whole.excluded]
+                return fields
         joined = room_context.joined_room_mentions(query, directory)
         if joined:
             rooms = list(dict.fromkeys(key for m in joined for key in room_context.room_values(m)))
+        else:
+            rooms = list(room_context.room_values(room_context.find_room_mention(query, directory)))
+        if multi and len(rooms) > 1:
             return {"room": "multi_room", "rooms": rooms}
-        values = room_context.room_values(room_context.find_room_mention(query, directory))
-        if len(values) > 1:
-            return {"room": "multi_room", "rooms": list(values)}
-        return {"room": values[0] if values else None}
+        return {"room": rooms[0] if rooms else None}
 
     def _single_room(self, query: str) -> Optional[str]:
         """The one room an utterance names, for a status answer, or None."""
