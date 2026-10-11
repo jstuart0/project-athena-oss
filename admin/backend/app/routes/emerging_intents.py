@@ -7,6 +7,8 @@ Provides endpoints for managing discovered/novel intents:
 """
 
 from typing import List, Optional
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
@@ -19,6 +21,7 @@ from app.utils.service_auth import require_service_or_user_permission
 from app.auth.oidc import get_current_user
 from app.models import User, EmergingIntent, IntentMetric
 from app.services import conversation_capture as capture
+from shared.conversation_capture import redact_digits
 
 logger = structlog.get_logger()
 
@@ -115,6 +118,13 @@ def _shaped(intent: EmergingIntent, visible: bool) -> dict:
     return data
 
 
+def _redacted(samples) -> list:
+    """Defense in depth: whatever a (possibly older) orchestrator sends, runs of 4 or more
+    digits never reach a stored sample, and an empty one is dropped."""
+    cleaned = [redact_digits(str(q)[:500]) for q in (samples or []) if isinstance(q, str)]
+    return [q for q in cleaned if q]
+
+
 def _may_read_text(user) -> bool:
     return bool(user) and not isinstance(user, str) and user.has_permission(capture.VIEW_TEXT_PERMISSION)
 
@@ -167,8 +177,8 @@ async def create_emerging_intent_internal(
         existing.occurrence_count += 1
         existing.last_seen = func.now()
         if data.sample_queries:
-            current_samples = existing.sample_queries or []
-            for query in data.sample_queries:
+            current_samples = list(existing.sample_queries or [])  # a copy, so the JSON column sees the change
+            for query in _redacted(data.sample_queries):
                 if query not in current_samples and len(current_samples) < 10:
                     current_samples.append(query)
             existing.sample_queries = current_samples
@@ -185,7 +195,7 @@ async def create_emerging_intent_internal(
         embedding=data.embedding,
         suggested_category=data.suggested_category,
         suggested_api_sources=data.suggested_api_sources,
-        sample_queries=data.sample_queries or []
+        sample_queries=_redacted(data.sample_queries)
     )
 
     db.add(intent)
@@ -214,10 +224,11 @@ async def increment_intent_count_internal(
     intent.last_seen = func.now()
 
     # Add sample query if provided and not duplicate
-    if data.sample_query:
-        current_samples = intent.sample_queries or []
-        if data.sample_query not in current_samples and len(current_samples) < 10:
-            current_samples.append(data.sample_query)
+    sample = (_redacted([data.sample_query]) or [None])[0] if data.sample_query else None
+    if sample:
+        current_samples = list(intent.sample_queries or [])
+        if sample not in current_samples and len(current_samples) < 10:
+            current_samples.append(sample)
             intent.sample_queries = current_samples
 
     db.commit()
@@ -267,7 +278,8 @@ async def list_emerging_intents(
     status: Optional[str] = Query(None, description="Filter by status"),
     min_count: int = Query(1, description="Minimum occurrence count"),
     category: Optional[str] = Query(None, description="Filter by category"),
-    sort_by: str = Query("occurrence_count", description="Sort field"),
+    sort_by: Literal["occurrence_count", "first_seen", "last_seen", "created_at", "canonical_name", "status"] = Query(
+        "occurrence_count", description="Sort field"),
     sort_order: str = Query("desc", description="Sort order (asc/desc)"),
     limit: int = Query(50, description="Max results"),
     offset: int = Query(0, description="Offset for pagination"),
@@ -289,7 +301,7 @@ async def list_emerging_intents(
         query = query.filter(EmergingIntent.suggested_category == category)
 
     # Apply sorting
-    sort_column = getattr(EmergingIntent, sort_by, EmergingIntent.occurrence_count)
+    sort_column = getattr(EmergingIntent, sort_by)
     if sort_order == "desc":
         query = query.order_by(desc(sort_column))
     else:

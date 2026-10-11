@@ -950,6 +950,11 @@ class CaptureSink:
             self._sticky.pop(next(iter(self._sticky)))
         self._sticky[session] = (_STICKY_TURNS, now + _STICKY_WINDOW_S)
 
+    def analytics_enabled(self) -> bool:
+        """The cached Analytics Mode flag: False when unconfigured, not started, or unknown."""
+        flags = self._flags
+        return bool(self._store is not None and self._started and not self._stopping and flags is not None and flags.analytics)
+
     def _emit(self, result: str) -> str:
         if self._on_result is not None:
             try:

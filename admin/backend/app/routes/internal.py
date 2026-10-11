@@ -794,17 +794,17 @@ async def log_analytics_event(event: AnalyticsEventRequest) -> Dict[str, Any]:
     This endpoint is used by the orchestrator to log intent classification
     and other analytics events to the database for later analysis.
 
-    No authentication required - internal service-to-service call.
+    A service-to-service call: the router requires ``X-Service-Key``.
 
-    Carries no conversation text: query/answer keys in the metadata are dropped
-    (a query's length is kept) before the row is stored or broadcast.
+    Carries no conversation text: only allowlisted fields of the metadata (names, flags,
+    numbers and lengths) are stored or broadcast; a query's length is kept.
     """
     from app.routes.websocket import broadcast_to_admin_jarvis
-    from app.utils.conversation_text import strip_conversation_text
+    from app.utils.conversation_text import sanitize_analytics_metadata
     import time
 
     # Whatever an (older) orchestrator sends, no conversation text is stored or broadcast.
-    metadata = strip_conversation_text(event.metadata, event.event_type)
+    metadata = sanitize_analytics_metadata(event.metadata)
 
     conn = None
     try:

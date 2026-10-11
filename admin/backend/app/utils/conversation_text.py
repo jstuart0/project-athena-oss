@@ -172,3 +172,62 @@ def sanitize_event(event: Any) -> Any:
     clean = {k: v for k, v in event.items() if k in _EVENT_FIELDS and k != "data"}
     clean["data"] = sanitize_event_data(event.get("event_type"), event.get("data"))
     return clean
+
+
+# ---------------------------------------------------------------------------
+# conversation_analytics metadata: an allowlist as well
+# ---------------------------------------------------------------------------
+
+_ANALYTICS_LABELS = frozenset({
+    "intent", "system_mapping", "user_id", "room", "zone", "mode", "status", "interface", "model", "tool_name",
+    "stage", "reason", "decision", "category", "kind", "source",
+})
+_ANALYTICS_FLAGS = frozenset({
+    "has_rag_service", "is_novel", "success", "is_followup", "triggered", "resolved", "requires_clarification",
+})
+_ANALYTICS_NUMBERS = frozenset({"confidence", "similarity", "tokens", "count", "turn_count", "latency_ms", "duration_ms"})
+
+
+def sanitize_analytics_metadata(metadata: Any) -> Optional[dict]:
+    """The allowlisted form of a ``conversation_analytics`` event's metadata.
+
+    Names, flags and numbers only. Text-bearing fields become lengths (an ``error`` string keeps
+    its truthiness as ``error: true`` plus ``error_len``, which the error-rate report reads).
+    Applied when an event is stored and again when rows are read, so rows written by earlier
+    versions never show their old text.
+    """
+    if metadata is None:
+        return None
+    if isinstance(metadata, str):
+        import json
+
+        try:
+            metadata = json.loads(metadata)
+        except ValueError:
+            return {}
+    if not isinstance(metadata, dict):
+        return {}
+    clean: dict = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str):
+            continue
+        if key == "error":
+            if value:
+                clean["error"] = True
+                measured = _measure(value)
+                if measured is not None:
+                    clean["error_len"] = measured
+        elif key in _MEASURED:
+            measured = _measure(value)
+            if measured is not None and _MEASURED[key] not in metadata:
+                clean[_MEASURED[key]] = measured
+        elif key.endswith(_SAFE_SUFFIXES) or key in _ANALYTICS_NUMBERS:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                clean[key] = value
+        elif key in _ANALYTICS_FLAGS:
+            if isinstance(value, bool):
+                clean[key] = value
+        elif key in _ANALYTICS_LABELS:
+            if isinstance(value, str) and _SAFE_LABEL.match(value):
+                clean[key] = value
+    return clean

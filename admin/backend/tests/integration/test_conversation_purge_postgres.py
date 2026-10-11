@@ -218,3 +218,39 @@ def test_a_turn_a_writer_adds_during_the_sweep_survives(db, factory):
     assert turn_ids(db) == {"t-new"}
     assert conv_ids(db) == {"c-race"}
     assert db.scalar("SELECT turn_count FROM conversations WHERE id = 'c-race'") == 2
+
+
+def _emerging_intents(db):
+    with db.engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE emerging_intents (id SERIAL PRIMARY KEY, canonical_name VARCHAR(100), "
+            "sample_queries JSON, occurrence_count INTEGER DEFAULT 1, last_seen TIMESTAMPTZ DEFAULT now())")
+        conn.exec_driver_sql(
+            "INSERT INTO emerging_intents (canonical_name, sample_queries, last_seen) VALUES "
+            "('old', '[\"what i said\"]', NOW() - interval '40 days'),"
+            "('fresh', '[\"said today\"]', NOW() - interval '1 day'),"
+            "('empty', '[]', NOW() - interval '90 days'),"
+            "('nullish', NULL, NOW() - interval '90 days')")
+
+
+def _samples(db):
+    return {r["canonical_name"]: r["sample_queries"] for r in db.rows("SELECT canonical_name, sample_queries FROM emerging_intents")}
+
+
+def test_expired_purge_clears_old_sample_queries_and_keeps_fresh_ones_and_the_intents(db, factory):
+    _emerging_intents(db)
+    capture.purge(factory, "expired")
+    samples = _samples(db)
+    assert samples["old"] == [] and samples["fresh"] == ["said today"]
+    assert set(samples) == {"old", "fresh", "empty", "nullish"}, "the intents and their counters stay"
+
+
+def test_purge_all_clears_every_sample_query(db, factory):
+    _emerging_intents(db)
+    capture.purge(factory, "all")
+    assert _samples(db)["fresh"] == [] and _samples(db)["old"] == []
+
+
+def test_a_purge_without_the_emerging_intents_table_still_works(db, factory):
+    add_turn(db, "t1", "c1", "interval '40 days'")
+    assert capture.purge(factory, "expired").turns == 1

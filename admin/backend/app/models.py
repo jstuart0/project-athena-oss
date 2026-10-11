@@ -1186,9 +1186,15 @@ class ConversationAnalytics(Base):
             'id': self.id,
             'session_id': self.session_id,
             'event_type': self.event_type,
-            'metadata': self.event_metadata,
+            'metadata': self._safe_metadata(),
             'timestamp': self.timestamp.isoformat() if self.timestamp else None,
         }
+
+    def _safe_metadata(self):
+        """Rows written by earlier versions may hold query text; reads return the allowlisted form."""
+        from app.utils.conversation_text import sanitize_analytics_metadata
+
+        return sanitize_analytics_metadata(self.event_metadata)
 
 
 class LLMBackend(Base):

@@ -122,6 +122,22 @@ WHERE id IN (
 )
 """
 
+EMERGING_INTENTS_EXIST_SQL = "SELECT to_regclass('emerging_intents') IS NOT NULL"
+
+# The Emerging Intents page keeps up to 10 example queries per intent. They are what people
+# said, so they expire with the conversations: cleared on rows not seen within the window
+# (every row for a purge of everything). The intent itself and its counters stay.
+CLEAR_EXPIRED_SAMPLES_SQL = """
+UPDATE emerging_intents SET sample_queries = '[]'::json
+WHERE last_seen < NOW() - make_interval(days => :days)
+  AND sample_queries::text NOT IN ('[]', 'null')
+"""
+
+CLEAR_ALL_SAMPLES_SQL = """
+UPDATE emerging_intents SET sample_queries = '[]'::json
+WHERE sample_queries::text NOT IN ('[]', 'null')
+"""
+
 DELETE_STALE_WRITER_STATUS_SQL = """
 DELETE FROM system_settings
 WHERE key LIKE :prefix
@@ -405,6 +421,18 @@ def purge(session_factory: SessionFactory, scope: str, *, batch_size: int = PURG
                 setattr(result, counter, getattr(result, counter) + deleted)
                 if deleted < batch_size:
                     break
+        if not renew(session_factory, lease, ttl=PURGE_LEASE_TTL_S):
+            result.aborted = ABORTED_LEASE_LOST
+            return result
+        with session_factory() as session:
+            if session.execute(text(EMERGING_INTENTS_EXIST_SQL)).scalar():
+                cleared = session.execute(
+                    text(CLEAR_EXPIRED_SAMPLES_SQL if scope == "expired" else CLEAR_ALL_SAMPLES_SQL),
+                    {"days": days} if scope == "expired" else {},
+                ).rowcount or 0
+                if cleared:
+                    logger.info("emerging_intent_samples_cleared", scope=scope, intents=cleared)
+            session.commit()
         with session_factory() as session:
             session.execute(text(DELETE_STALE_WRITER_STATUS_SQL), {"prefix": contract.WRITER_STATUS_KEY + ".%"})
             session.commit()
