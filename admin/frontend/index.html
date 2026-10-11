@@ -2325,18 +2325,47 @@
                 <!-- Privacy Section -->
                 <div class="mb-8">
                     <h3 class="text-lg font-semibold text-white mb-4">Privacy &amp; Analytics</h3>
-                    <div class="bg-dark-card rounded-lg p-6">
+                    <div class="bg-dark-card rounded-lg p-6 space-y-6">
                         <div class="flex items-center justify-between">
                             <div>
-                                <p class="text-white font-medium">Analytics Mode</p>
-                                <p class="text-sm text-gray-400 mt-1">When enabled, all conversations are persisted to the database for review and quality evaluation.</p>
+                                <p class="text-white font-medium" id="analytics-mode-title">Analytics Mode</p>
+                                <p id="analytics-mode-desc" class="text-sm text-gray-400 mt-1">When on, Athena stores everything said to it and its answers, from anyone who talks to it, including guests and website visitors, in this install's database. Owners can read them on the Conversations page. They're deleted after the retention period below.</p>
                                 <div id="analytics-mode-status" class="mt-2 text-xs text-gray-500"></div>
                             </div>
                             <label class="relative inline-flex items-center cursor-pointer ml-4">
-                                <input type="checkbox" id="analytics-mode-toggle" class="sr-only peer" onchange="saveAnalyticsMode(this.checked)">
-                                <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                <input type="checkbox" id="analytics-mode-toggle" role="switch" aria-checked="false" aria-labelledby="analytics-mode-title" aria-describedby="analytics-mode-desc" class="sr-only peer" onchange="saveAnalyticsMode(this.checked)">
+                                <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-blue-400 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
                             </label>
                             <span id="analytics-mode-label" class="text-xs text-gray-500 ml-2">Off</span>
+                        </div>
+
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-white font-medium" id="debug-detail-title">Debug detail</p>
+                                <p id="debug-detail-desc" class="text-sm text-gray-400 mt-1">Also store tuning detail with each captured turn: the model used, tools, timings and validation results. Needs Analytics Mode.</p>
+                                <div id="debug-detail-status" class="mt-2 text-xs text-gray-500"></div>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer ml-4">
+                                <input type="checkbox" id="debug-detail-toggle" role="switch" aria-checked="false" aria-labelledby="debug-detail-title" aria-describedby="debug-detail-desc debug-detail-status" class="sr-only peer" disabled onchange="saveDebugDetail(this.checked)">
+                                <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-blue-400 peer-disabled:opacity-50 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                            <span id="debug-detail-label" class="text-xs text-gray-500 ml-2">Off</span>
+                        </div>
+
+                        <div>
+                            <label for="retention-days-input" class="text-white font-medium">Keep conversations for</label>
+                            <div class="flex items-center gap-3 mt-2">
+                                <input type="number" id="retention-days-input" min="1" max="3650" step="1" inputmode="numeric"
+                                    aria-describedby="retention-help"
+                                    oninput="onRetentionInput()"
+                                    class="w-28 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+                                <span class="text-sm text-gray-400">days</span>
+                                <button id="retention-save-btn" onclick="saveRetention()" disabled
+                                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400">
+                                    Save
+                                </button>
+                            </div>
+                            <p id="retention-help" class="text-xs text-gray-500 mt-2">Between 1 and 3650 days. Older conversations are deleted automatically.</p>
                         </div>
                     </div>
                 </div>
@@ -5037,7 +5066,7 @@
     <script src="/integrations.js?v=20260927"></script>
     <script src="/keyboard.js?v=20260108"></script>
 
-    <script src="/app.js?v=20261011"></script>
+    <script src="/app.js?v=20261013"></script>
     <script src="/crud-extensions.js?v=20260913"></script>
     <script src="/conversation.js?v=20260913"></script>
     <script src="/routing.js?v=20260913"></script>
@@ -5063,7 +5092,7 @@
     <script src="/calendar-sources.js?v=20260929-cal3"></script>
     <script src="/memory-management.js?v=20260929c"></script>
     <script src="/directions-settings.js?v=20260927"></script>
-    <script src="/emerging-intents.js?v=20260913"></script>
+    <script src="/emerging-intents.js?v=20261013"></script>
     <script src="/music-config.js?v=20260913"></script>
     <script src="/room-audio.js?v=20260913"></script>
     <script src="/room-tv.js?v=20260913"></script>
@@ -5077,7 +5106,7 @@
     <script src="/presets.js?v=20260913"></script>
     <script src="/voice-automations.js?v=20261002"></script>
     <script src="/alerts.js?v=20261003"></script>
-    <script src="/conversations.js?v=20260913"></script>
+    <script src="/conversations.js?v=20261012"></script>
     <script src="/telemetry.js?v=20261001"></script>
     <script src="/escape-html.js?v=20260913"></script>
 </body>

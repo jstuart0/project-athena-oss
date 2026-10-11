@@ -89,7 +89,7 @@ class User(Base):
     )
 
     ROLE_PERMISSIONS = {
-        'owner': {'read', 'write', 'delete', 'manage_users', 'manage_secrets', 'view_audit', 'manage_infrastructure'},
+        'owner': {'read', 'write', 'delete', 'manage_users', 'manage_secrets', 'view_audit', 'manage_infrastructure', 'view_conversation_text'},
         'operator': {'read', 'write', 'view_audit'},
         'viewer': {'read:dashboard', 'read:alerts'},
         'support': {'read:dashboard', 'read:alerts', 'read:analytics', 'view_audit'},
@@ -1186,9 +1186,15 @@ class ConversationAnalytics(Base):
             'id': self.id,
             'session_id': self.session_id,
             'event_type': self.event_type,
-            'metadata': self.event_metadata,
+            'metadata': self._safe_metadata(),
             'timestamp': self.timestamp.isoformat() if self.timestamp else None,
         }
+
+    def _safe_metadata(self):
+        """Rows written by earlier versions may hold query text; reads return the allowlisted form."""
+        from app.utils.conversation_text import sanitize_analytics_metadata
+
+        return sanitize_analytics_metadata(self.event_metadata)
 
 
 class LLMBackend(Base):
@@ -3601,7 +3607,6 @@ class IntentMetric(Base):
             'complexity': self.complexity,
             'is_novel': self.is_novel,
             'emerging_intent_id': self.emerging_intent_id,
-            'raw_query': self.raw_query,
             'session_id': self.session_id,
             'mode': self.mode,
             'room': self.room,
@@ -4041,7 +4046,6 @@ class VoiceInterface(Base):
     wake_word_enabled = Column(Boolean, default=False, nullable=False)
     wake_word = Column(String(100))  # 'jarvis', 'athena', 'hey cal', custom
     continuous_conversation = Column(Boolean, default=True, nullable=False)  # Keep listening after response
-    debug_mode = Column(Boolean, default=False, nullable=False)  # Show extra info in responses
 
     # Rate Limiting
     max_requests_per_minute = Column(Integer, default=30, nullable=False)
@@ -4070,7 +4074,9 @@ class VoiceInterface(Base):
             'wake_word_enabled': self.wake_word_enabled,
             'wake_word': self.wake_word,
             'continuous_conversation': self.continuous_conversation,
-            'debug_mode': self.debug_mode,
+            # Deprecated and constant: the column stays (an older pod still maps
+            # it) but nothing reads it. Services cache this shape (admin_config).
+            'debug_mode': False,
             'max_requests_per_minute': self.max_requests_per_minute,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,

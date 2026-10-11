@@ -794,10 +794,17 @@ async def log_analytics_event(event: AnalyticsEventRequest) -> Dict[str, Any]:
     This endpoint is used by the orchestrator to log intent classification
     and other analytics events to the database for later analysis.
 
-    No authentication required - internal service-to-service call.
+    A service-to-service call: the router requires ``X-Service-Key``.
+
+    Carries no conversation text: only allowlisted fields of the metadata (names, flags,
+    numbers and lengths) are stored or broadcast; a query's length is kept.
     """
     from app.routes.websocket import broadcast_to_admin_jarvis
+    from app.utils.conversation_text import sanitize_analytics_metadata
     import time
+
+    # Whatever an (older) orchestrator sends, no conversation text is stored or broadcast.
+    metadata = sanitize_analytics_metadata(event.metadata)
 
     conn = None
     try:
@@ -806,7 +813,7 @@ async def log_analytics_event(event: AnalyticsEventRequest) -> Dict[str, Any]:
         await conn.execute("""
             INSERT INTO conversation_analytics (session_id, event_type, metadata, timestamp)
             VALUES ($1, $2, $3, $4)
-        """, event.session_id, event.event_type, json.dumps(event.metadata) if event.metadata else None, datetime.utcnow())
+        """, event.session_id, event.event_type, json.dumps(metadata) if metadata else None, datetime.utcnow())
 
         logger.info(
             "analytics_event_logged",
@@ -819,7 +826,7 @@ async def log_analytics_event(event: AnalyticsEventRequest) -> Dict[str, Any]:
             await broadcast_to_admin_jarvis({
                 "event_type": event.event_type,
                 "session_id": event.session_id,
-                "data": event.metadata or {},
+                "data": metadata or {},
                 "timestamp": time.time()
             })
             logger.debug("analytics_event_broadcast", event_type=event.event_type)

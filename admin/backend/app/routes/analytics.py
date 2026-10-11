@@ -44,7 +44,8 @@ class IntentAnalyticsResponse(BaseModel):
 class QueryLogEntry(BaseModel):
     """Individual query log entry."""
     intent: str
-    query: str
+    query: str = ""  # always empty: logs carry no conversation text
+    query_len: Optional[int] = None
     has_rag_service: bool
     system_mapping: str
     user_id: Optional[str]
@@ -219,7 +220,7 @@ async def get_query_logs(
 
             parsed_logs.append(QueryLogEntry(
                 intent=intent,
-                query=metadata.get("query", ""),
+                query_len=metadata.get("query_len") if metadata.get("query_len") is not None else (len(metadata["query"]) if isinstance(metadata.get("query"), str) else None),
                 has_rag_service=has_rag_service,
                 system_mapping=metadata.get("system_mapping", "general"),
                 user_id=metadata.get("user_id"),

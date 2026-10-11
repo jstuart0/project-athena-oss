@@ -7,7 +7,9 @@ Provides endpoints for managing discovered/novel intents:
 """
 
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 from pydantic import BaseModel, Field
@@ -18,6 +20,8 @@ from app.database import get_db
 from app.utils.service_auth import require_service_or_user_permission
 from app.auth.oidc import get_current_user
 from app.models import User, EmergingIntent, IntentMetric
+from app.services import conversation_capture as capture
+from shared.conversation_capture import redact_digits
 
 logger = structlog.get_logger()
 
@@ -49,7 +53,8 @@ class EmergingIntentResponse(BaseModel):
     occurrence_count: int = 0
     first_seen: Optional[str] = None
     last_seen: Optional[str] = None
-    sample_queries: Optional[List[str]] = None
+    sample_queries: Optional[List[str]] = None  # null unless the caller may read conversation text
+    text_visible: bool = False
     suggested_category: Optional[str] = None
     suggested_api_sources: Optional[List[str]] = None
     status: str = "discovered"
@@ -71,8 +76,9 @@ class IntentMetricCreate(BaseModel):
     complexity: Optional[str] = "simple"
     is_novel: bool = False
     emerging_intent_id: Optional[int] = None
-    raw_query: Optional[str] = None
+    raw_query: Optional[str] = None  # accepted from older orchestrators, never stored
     query_hash: Optional[str] = None
+    query_len: Optional[int] = None
     session_id: Optional[str] = None
     mode: Optional[str] = None
     room: Optional[str] = None
@@ -101,20 +107,55 @@ class MergeRequest(BaseModel):
     target_id: int = Field(..., description="ID of intent to merge into")
 
 
+def _shaped(intent: EmergingIntent, visible: bool) -> dict:
+    """The response dict. Sample queries are what people said, so they follow the conversation
+    text rule: only an owner (``view_conversation_text``) receives them, everyone else gets
+    ``sample_queries: null`` and ``text_visible: false``, the shape the Conversations routes use."""
+    data = intent.to_dict()
+    data["text_visible"] = visible
+    if not visible:
+        data["sample_queries"] = None
+    return data
+
+
+def _redacted(samples) -> list:
+    """Defense in depth: whatever a (possibly older) orchestrator sends, runs of 4 or more
+    digits never reach a stored sample, and an empty one is dropped."""
+    cleaned = [redact_digits(str(q)[:500]) for q in (samples or []) if isinstance(q, str)]
+    return [q for q in cleaned if q]
+
+
+DISPLAY_NAME_MAX_CHARS = 100  # the column allows 200
+DESCRIPTION_MAX_CHARS = 500
+
+
+def _label(value, limit: int):
+    """A generated label as stored: runs of 4 or more digits replaced, capped, ``None`` if empty."""
+    return redact_digits(str(value))[:limit] if value else None
+
+
+def _may_read_text(user) -> bool:
+    return bool(user) and not isinstance(user, str) and user.has_permission(capture.VIEW_TEXT_PERMISSION)
+
+
 # =============================================================================
 # Internal API Endpoints (service key or signed-in user - for Orchestrator)
 # =============================================================================
 
 @router.get("/api/internal/emerging-intents", response_model=List[EmergingIntentResponse], dependencies=[Depends(require_service_or_user_permission("read"))])
 async def list_emerging_intents_internal(
+    request: Request,
     status: Optional[str] = Query(None, description="Comma-separated statuses to filter"),
     db: Session = Depends(get_db)
 ):
     """
     List emerging intents (internal endpoint for orchestrator).
 
-    Used by orchestrator to find similar intents for clustering.
+    Used by orchestrator to find similar intents for clustering. Sample queries are
+    withheld from a service caller; a signed-in user sees them only with
+    ``view_conversation_text``.
     """
+    visible = _may_read_text(getattr(request.state, "auth_user", None))
     query = db.query(EmergingIntent)
 
     if status:
@@ -122,7 +163,9 @@ async def list_emerging_intents_internal(
         query = query.filter(EmergingIntent.status.in_(statuses))
 
     intents = query.all()
-    return [intent.to_dict() for intent in intents]
+    if visible:
+        capture.audit_text_read(db, request.state.auth_user, "GET /api/internal/emerging-intents", returned_rows=len(intents))
+    return [_shaped(intent, visible) for intent in intents]
 
 
 @router.post("/api/internal/emerging-intents", response_model=EmergingIntentResponse, dependencies=[Depends(require_service_or_user_permission("write"))])
@@ -143,25 +186,25 @@ async def create_emerging_intent_internal(
         existing.occurrence_count += 1
         existing.last_seen = func.now()
         if data.sample_queries:
-            current_samples = existing.sample_queries or []
-            for query in data.sample_queries:
+            current_samples = list(existing.sample_queries or [])  # a copy, so the JSON column sees the change
+            for query in _redacted(data.sample_queries):
                 if query not in current_samples and len(current_samples) < 10:
                     current_samples.append(query)
             existing.sample_queries = current_samples
         db.commit()
         db.refresh(existing)
         logger.info("emerging_intent_updated", id=existing.id, canonical_name=existing.canonical_name)
-        return existing.to_dict()
+        return _shaped(existing, False)
 
     # Create new
     intent = EmergingIntent(
         canonical_name=data.canonical_name,
-        display_name=data.display_name or data.canonical_name.replace("_", " ").title(),
-        description=data.description,
+        display_name=_label(data.display_name or data.canonical_name.replace("_", " ").title(), DISPLAY_NAME_MAX_CHARS),
+        description=_label(data.description, DESCRIPTION_MAX_CHARS),
         embedding=data.embedding,
         suggested_category=data.suggested_category,
         suggested_api_sources=data.suggested_api_sources,
-        sample_queries=data.sample_queries or []
+        sample_queries=_redacted(data.sample_queries)
     )
 
     db.add(intent)
@@ -169,7 +212,7 @@ async def create_emerging_intent_internal(
     db.refresh(intent)
 
     logger.info("emerging_intent_created", id=intent.id, canonical_name=intent.canonical_name)
-    return intent.to_dict()
+    return _shaped(intent, False)
 
 
 @router.post("/api/internal/emerging-intents/{intent_id}/increment", dependencies=[Depends(require_service_or_user_permission("write"))])
@@ -190,10 +233,11 @@ async def increment_intent_count_internal(
     intent.last_seen = func.now()
 
     # Add sample query if provided and not duplicate
-    if data.sample_query:
-        current_samples = intent.sample_queries or []
-        if data.sample_query not in current_samples and len(current_samples) < 10:
-            current_samples.append(data.sample_query)
+    sample = (_redacted([data.sample_query]) or [None])[0] if data.sample_query else None
+    if sample:
+        current_samples = list(intent.sample_queries or [])
+        if sample not in current_samples and len(current_samples) < 10:
+            current_samples.append(sample)
             intent.sample_queries = current_samples
 
     db.commit()
@@ -219,7 +263,7 @@ async def record_intent_metric_internal(
         complexity=data.complexity,
         is_novel=data.is_novel,
         emerging_intent_id=data.emerging_intent_id,
-        raw_query=data.raw_query,
+        raw_query=None,  # query text is not kept; the hash and length remain
         query_hash=data.query_hash,
         session_id=data.session_id,
         mode=data.mode,
@@ -243,7 +287,8 @@ async def list_emerging_intents(
     status: Optional[str] = Query(None, description="Filter by status"),
     min_count: int = Query(1, description="Minimum occurrence count"),
     category: Optional[str] = Query(None, description="Filter by category"),
-    sort_by: str = Query("occurrence_count", description="Sort field"),
+    sort_by: Literal["occurrence_count", "first_seen", "last_seen", "created_at", "canonical_name", "status"] = Query(
+        "occurrence_count", description="Sort field"),
     sort_order: str = Query("desc", description="Sort order (asc/desc)"),
     limit: int = Query(50, description="Max results"),
     offset: int = Query(0, description="Offset for pagination"),
@@ -265,7 +310,7 @@ async def list_emerging_intents(
         query = query.filter(EmergingIntent.suggested_category == category)
 
     # Apply sorting
-    sort_column = getattr(EmergingIntent, sort_by, EmergingIntent.occurrence_count)
+    sort_column = getattr(EmergingIntent, sort_by)
     if sort_order == "desc":
         query = query.order_by(desc(sort_column))
     else:
@@ -275,7 +320,10 @@ async def list_emerging_intents(
     query = query.offset(offset).limit(limit)
 
     intents = query.all()
-    return [intent.to_dict() for intent in intents]
+    visible = _may_read_text(current_user)
+    if visible:
+        capture.audit_text_read(db, current_user, "GET /api/emerging-intents", returned_rows=len(intents))
+    return [_shaped(intent, visible) for intent in intents]
 
 
 # Stats endpoint MUST come before {intent_id} route to avoid being caught by the parameter
@@ -332,7 +380,10 @@ async def get_emerging_intent(
     if not intent:
         raise HTTPException(status_code=404, detail="Emerging intent not found")
 
-    return intent.to_dict()
+    visible = _may_read_text(current_user)
+    if visible:
+        capture.audit_text_read(db, current_user, "GET /api/emerging-intents/{intent_id}", returned_rows=1)
+    return _shaped(intent, visible)
 
 
 @router.post("/api/emerging-intents/{intent_id}/promote")

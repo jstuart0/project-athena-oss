@@ -444,7 +444,7 @@ async def emit_stt_complete(
     emitter = EventEmitterFactory.get()
     if emitter:
         await emitter.emit(EventType.STT_COMPLETE, session_id, {
-            'text': text,
+            'text_len': len(text),
             'engine': engine,
             'duration_ms': duration_ms,
         }, interface)
@@ -590,6 +590,6 @@ async def emit_response_ready(
     emitter = EventEmitterFactory.get()
     if emitter:
         await emitter.emit(EventType.RESPONSE_READY, session_id, {
-            'response_preview': response_text[:100],
+            'response_len': len(response_text),
             'total_duration_ms': total_duration_ms,
         }, interface)

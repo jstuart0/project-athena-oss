@@ -231,7 +231,7 @@ function renderIntentRow(intent) {
                 <div class="font-medium text-white">${escapeHtml(intent.display_name || intent.canonical_name)}</div>
                 <div class="text-xs text-gray-500 font-mono">${escapeHtml(intent.canonical_name)}</div>
                 <div class="text-xs text-gray-400 mt-1">${escapeHtml(intent.description || '')}</div>
-                ${intent.sample_queries && intent.sample_queries.length > 0 ? `
+                ${intent.text_visible === false ? '<div class="mt-2 text-xs italic text-gray-500">Sample queries: Text hidden: owner only</div>' : intent.sample_queries && intent.sample_queries.length > 0 ? `
                     <details class="mt-2">
                         <summary class="text-xs text-purple-400 cursor-pointer">Sample queries (${intent.sample_queries.length})</summary>
                         <ul class="mt-1 text-xs text-gray-400 list-disc list-inside">

@@ -27,6 +27,7 @@ FRONTEND = REPO_ROOT / "admin" / "frontend"
 POPULATION_TEST = REPO_ROOT / "admin" / "backend" / "tests" / "test_route_auth_population.py"
 
 GATED_PREFIXES = (
+    "/api/conversations",
     "/api/guests",
     "/api/user-sessions",
     "/api/room-groups",

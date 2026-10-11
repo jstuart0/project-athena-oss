@@ -109,10 +109,10 @@ class LiveKitIntegration:
 
             # Emit event for Admin Jarvis
             await self._emit_event("query_received", session_id, {
-                "query": transcript,
+                "query_len": len(transcript),
                 "interface": interface,
                 "room": room,
-                "interruption_context": interruption_context
+                "interrupted": interruption_context is not None
             })
 
             # Build request payload
@@ -154,7 +154,7 @@ class LiveKitIntegration:
 
             # Emit response event
             await self._emit_event("response_generated", session_id, {
-                "response": answer,
+                "response_len": len(answer),
                 "intent": result.get("intent"),
                 "tools_used": result.get("tools_used", [])
             })
@@ -164,11 +164,11 @@ class LiveKitIntegration:
         except Exception as e:
             logger.error("livekit_query_error",
                         session_id=session_id,
-                        error=str(e))
+                        error_type=type(e).__name__)
 
             await self._emit_event("error", session_id, {
-                "error": str(e),
-                "query": transcript
+                "error_type": type(e).__name__,
+                "query_len": len(transcript)
             })
 
             return "I encountered an error processing your request. Please try again."

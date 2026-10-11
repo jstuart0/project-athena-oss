@@ -61,7 +61,6 @@ class VoiceInterfaceCreate(BaseModel):
     wake_word_enabled: bool = False
     wake_word: Optional[str] = None
     continuous_conversation: bool = True
-    debug_mode: bool = False
 
     # Rate limiting
     max_requests_per_minute: int = 30
@@ -82,7 +81,6 @@ class VoiceInterfaceUpdate(BaseModel):
     wake_word_enabled: Optional[bool] = None
     wake_word: Optional[str] = None
     continuous_conversation: Optional[bool] = None
-    debug_mode: Optional[bool] = None
 
     max_requests_per_minute: Optional[int] = None
 
@@ -101,7 +99,7 @@ class VoiceInterfaceResponse(BaseModel):
     wake_word_enabled: bool
     wake_word: Optional[str]
     continuous_conversation: bool
-    debug_mode: bool
+    debug_mode: bool = False  # Deprecated: always false; nothing reads it.
     max_requests_per_minute: int
     created_at: Optional[str]
     updated_at: Optional[str]
@@ -187,7 +185,6 @@ async def create_voice_interface(
         wake_word_enabled=data.wake_word_enabled,
         wake_word=data.wake_word,
         continuous_conversation=data.continuous_conversation,
-        debug_mode=data.debug_mode,
         max_requests_per_minute=data.max_requests_per_minute,
     )
 
@@ -430,7 +427,7 @@ async def get_interface_full_config(
             "wake_word_enabled": interface.wake_word_enabled,
             "wake_word": interface.wake_word,
             "continuous_conversation": interface.continuous_conversation,
-            "debug_mode": interface.debug_mode,
+            "debug_mode": False,  # deprecated, constant; cached whole by shared/admin_config
         }
     }
 

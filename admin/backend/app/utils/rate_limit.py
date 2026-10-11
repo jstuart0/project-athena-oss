@@ -69,7 +69,8 @@ logger = structlog.get_logger()
 LIMITER_ACTIVE: bool = False
 
 
-async def _enforce(request: Request, response: Response, *, times: int, window_ms: int, budget: str) -> None:
+async def _enforce(request: Request, response: Response, *, times: int, window_ms: int, budget: str,
+                   subject: str = "") -> None:
     """Reimplementation of fastapi_limiter.depends.RateLimiter.__call__'s
     Lua-script check that never touches request.app.routes (see module
     docstring for why). Raises via FastAPILimiter.http_callback (default:
@@ -83,7 +84,7 @@ async def _enforce(request: Request, response: Response, *, times: int, window_m
     # path params) — so /services/a/check and /services/b/check share one
     # bucket instead of each path param value minting a fresh one (D3).
     route_id = f"{route_path}:{request.method}" if route_path else f"__unrouted__:{request.method}"
-    key = f"{FastAPILimiter.prefix}:{rate_key}:{budget}:{route_id}"
+    key = f"{FastAPILimiter.prefix}:{rate_key}:{budget}:{route_id}" + (f":{subject}" if subject else "")
     try:
         try:
             pexpire = await redis_conn.evalsha(FastAPILimiter.lua_sha, 1, key, str(times), str(window_ms))
@@ -170,3 +171,20 @@ async def service_control_rate_limit_dep(request: Request, response: Response) -
     if limit <= 0:
         return
     await _enforce(request, response, times=limit, window_ms=60000, budget="service_control")
+
+
+CONVERSATION_PURGE_PER_MINUTE = 5
+
+
+async def conversation_purge_rate_limit(request: Request, response: Response, subject: str = "") -> None:
+    """Dedicated 'conversation_purge' budget (5/min) for POST /api/conversations/purge.
+
+    Called from the audited purge guard so a refused attempt can be audited
+    before the 429 is raised. ``subject`` (the user id) joins the key, so
+    admins behind one ingress address don't share a bucket. No-ops when the limiter isn't active (DEV_MODE,
+    Redis down), like the other budgets here.
+    """
+    if not LIMITER_ACTIVE:
+        return
+    await _enforce(request, response, times=CONVERSATION_PURGE_PER_MINUTE, window_ms=60000, budget="conversation_purge",
+                   subject=subject)

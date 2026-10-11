@@ -14,6 +14,7 @@ When the classifier has low confidence:
 import os
 import json
 import hashlib
+import hmac
 import asyncio
 from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
@@ -305,6 +306,63 @@ async def find_similar_emerging_intent(
         return None
 
 
+SAMPLE_MAX_CHARS = 200
+_QUERY_HASH_DOMAIN = b"athena:intent-metric:query-hash:v1:"
+
+
+def discovery_sample(query: str) -> Optional[str]:
+    """The sample query to send with an emerging intent, or ``None``.
+
+    A sample is what a person said, so it follows the capture rules: none while Analytics
+    Mode is off (or capture isn't configured), none for a PIN-shaped query, otherwise the
+    query with runs of 4 or more digits replaced.
+    """
+    from orchestrator.mode_permission import detect_owner_mode_command
+    from orchestrator.nodes import _runtime
+    from shared import conversation_capture as capture
+
+    sink = _runtime.get_turn_capture()
+    if sink is None or not sink.analytics_enabled():
+        return None
+    if capture.withhold_reason(query, detect_owner_mode_command) is not None:
+        return None
+    return capture.redact_digits(query[:SAMPLE_MAX_CHARS])
+
+
+LABEL_MAX_CHARS = {"display_name": 100, "description": 500}
+
+
+def _clean_label(text: Optional[str], limit: int) -> str:
+    """A generated label with runs of 4 or more digits replaced, capped at ``limit`` characters."""
+    from shared import conversation_capture as capture
+
+    return (capture.redact_digits(text or "") or "")[:limit]
+
+
+def _query_withheld(query: str) -> bool:
+    from orchestrator.mode_permission import detect_owner_mode_command
+    from shared import conversation_capture as capture
+
+    return capture.withhold_reason(query, detect_owner_mode_command) is not None
+
+
+def query_hash(raw_query: str) -> Optional[str]:
+    """HMAC-SHA256 of the lower-cased query, keyed on SERVICE_API_KEY with its own domain.
+
+    Not an unkeyed digest: a plain MD5 of a short phrase can be matched by guessing. ``None``
+    when the PIN rules withhold the query or no key is configured. Nothing reads the hash
+    for deduplication; it only groups identical phrasings in the metrics.
+    """
+    from orchestrator.mode_permission import detect_owner_mode_command
+    from shared import conversation_capture as capture
+
+    key = get_config().service_api_key
+    if not key or capture.withhold_reason(raw_query, detect_owner_mode_command) is not None:
+        return None
+    message = _QUERY_HASH_DOMAIN + raw_query.lower().strip().encode("utf-8")
+    return hmac.new(key.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
 async def create_emerging_intent(
     canonical_name: str,
     display_name: str,
@@ -312,7 +370,7 @@ async def create_emerging_intent(
     embedding: List[float],
     suggested_category: str,
     suggested_api_sources: List[str],
-    sample_query: str,
+    sample_query: Optional[str],
     admin_api_url: str
 ) -> Optional[int]:
     """Create a new emerging intent record."""
@@ -329,7 +387,7 @@ async def create_emerging_intent(
                     "embedding": embedding,
                     "suggested_category": suggested_category,
                     "suggested_api_sources": suggested_api_sources,
-                    "sample_queries": [sample_query]
+                    "sample_queries": [sample_query] if sample_query else []
                 }
             )
 
@@ -352,7 +410,7 @@ async def create_emerging_intent(
 
 async def increment_intent_count(
     intent_id: int,
-    sample_query: str,
+    sample_query: Optional[str],
     admin_api_url: str
 ) -> bool:
     """Increment occurrence count and add sample query."""
@@ -361,7 +419,7 @@ async def increment_intent_count(
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{admin_api_url}/api/internal/emerging-intents/{intent_id}/increment",
-                json={"sample_query": sample_query},
+                json={"sample_query": sample_query} if sample_query else {},
                 headers={"X-Service-Key": key} if key else None,
             )
 
@@ -397,7 +455,7 @@ async def record_intent_metric(
         return False
 
     try:
-        query_hash = hashlib.md5(raw_query.lower().encode()).hexdigest()
+        hashed = query_hash(raw_query)
 
         key = get_config().service_api_key
         async with httpx.AsyncClient(timeout=2.0) as client:
@@ -410,8 +468,8 @@ async def record_intent_metric(
                     "complexity": complexity,
                     "is_novel": is_novel,
                     "emerging_intent_id": emerging_intent_id,
-                    "raw_query": raw_query,
-                    "query_hash": query_hash,
+                    "query_hash": hashed,
+                    "query_len": len(raw_query),
                     "session_id": session_id,
                     "mode": mode,
                     "room": room,
@@ -483,6 +541,17 @@ async def discover_intent(
             confidence_boost=0.0
         )
 
+    # A PIN-shaped turn is never sent to the model that names intents, and creates none.
+    # Analytics Mode being off does not stop discovery: a category label is not a transcript.
+    if _query_withheld(query):
+        logger.info("intent_discovery_skipped", reason="withheld", query_len=len(query))
+        return IntentDiscoveryResult(
+            is_novel=False,
+            canonical_name=None,
+            emerging_intent_id=None,
+            confidence_boost=0.0
+        )
+
     # Generate canonical intent name via LLM
     novel_intent = await generate_novel_intent(query, llm_router)
 
@@ -497,10 +566,9 @@ async def discover_intent(
 
     # Generate embedding
     embedder = await get_embedder()
-    embedding = embedder.embed_intent(
-        novel_intent["canonical_name"],
-        novel_intent.get("description", "")
-    )
+    display_name = _clean_label(novel_intent.get("display_name", novel_intent["canonical_name"]), LABEL_MAX_CHARS["display_name"])
+    description = _clean_label(novel_intent.get("description", ""), LABEL_MAX_CHARS["description"])
+    embedding = embedder.embed_intent(novel_intent["canonical_name"], description)
 
     # Search for similar existing novel intent
     similar = await find_similar_emerging_intent(
@@ -511,7 +579,7 @@ async def discover_intent(
 
     if similar:
         # Cluster with existing intent
-        await increment_intent_count(similar["id"], query, admin_api_url)
+        await increment_intent_count(similar["id"], discovery_sample(query), admin_api_url)
 
         logger.info("intent_clustered",
                    canonical_name=similar["canonical_name"],
@@ -527,12 +595,12 @@ async def discover_intent(
         # Create new novel intent
         intent_id = await create_emerging_intent(
             canonical_name=novel_intent["canonical_name"],
-            display_name=novel_intent.get("display_name", novel_intent["canonical_name"]),
-            description=novel_intent.get("description", ""),
+            display_name=display_name,
+            description=description,
             embedding=embedding,
             suggested_category=novel_intent.get("suggested_category", "other"),
             suggested_api_sources=novel_intent.get("suggested_api_sources", []),
-            sample_query=query,
+            sample_query=discovery_sample(query),
             admin_api_url=admin_api_url
         )
 

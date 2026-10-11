@@ -577,10 +577,32 @@ async function apiRequest(endpoint, options = {}) {
 
     if (!response.ok) {
         const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
-        throw new Error(error.detail || `HTTP ${response.status}`);
+        const failure = new Error(formatApiErrorDetail(error.detail, response.status));
+        failure.status = response.status;
+        throw failure;
     }
 
     return response.json();
+}
+
+/**
+ * A readable message from a FastAPI error body. `detail` is a string for
+ * HTTPException, but a list of {loc, msg, ...} entries for a 422 validation
+ * error (which `new Error(detail)` turned into "[object Object]"): each entry
+ * becomes "<last loc segment>: <msg>".
+ */
+function formatApiErrorDetail(detail, status) {
+    if (typeof detail === 'string' && detail) return detail;
+    if (Array.isArray(detail)) {
+        const parts = detail.map((entry) => {
+            const msg = entry && entry.msg ? String(entry.msg) : '';
+            const loc = entry && Array.isArray(entry.loc) && entry.loc.length ? String(entry.loc[entry.loc.length - 1]) : '';
+            return loc && msg ? `${loc}: ${msg}` : msg;
+        }).filter(Boolean);
+        if (parts.length) return parts.join('; ');
+    }
+    if (detail && typeof detail === 'object' && typeof detail.message === 'string' && detail.message) return detail.message;
+    return `HTTP ${status}`;
 }
 
 // ============================================================================
@@ -2276,12 +2298,123 @@ function showError(message) {
     }, 5000);
 }
 
+/**
+ * The one toast helper for capture and Conversations messages. It has its own
+ * name because other scripts redeclare the global showError(containerId, message)
+ * and showSuccess later in load order, which silently drops a plain message.
+ * Uses the Athena toast component, falling back to showNotification.
+ */
+function showCaptureToast(message, type) {
+    const kind = type === 'success' ? 'success' : 'error';
+    const toast = window.Athena && window.Athena.components && window.Athena.components.Toast;
+    if (toast && typeof toast[kind] === 'function') return toast[kind](message);
+    if (typeof showNotification === 'function') return showNotification(message, kind);
+    console.warn('[capture] no toast available; dropped:', kind, message);
+}
+
 // ============================================================================
 // SETTINGS TAB - Service Registry
 // ============================================================================
 
 async function loadSettings() {
     await Promise.all([loadOIDCSettings(), loadAssistantProfileSettings(), loadServices(), loadAnalyticsModeToggle()]);
+}
+
+const ANALYTICS_STATUS_ON = 'Analytics mode is on: answered turns are being captured.';
+const ANALYTICS_STATUS_OFF = 'Analytics mode is off: nothing new is being captured. Stored conversations are kept until they expire.';
+
+// The server's last-known capture settings; the controls revert to these on a failed save.
+let captureSettings = null;
+
+function renderAnalyticsToggle(enabled) {
+    const toggle = document.getElementById('analytics-mode-toggle');
+    const label = document.getElementById('analytics-mode-label');
+    const status = document.getElementById('analytics-mode-status');
+    if (toggle) {
+        toggle.checked = enabled;
+        toggle.setAttribute('aria-checked', String(enabled));
+    }
+    if (label) label.textContent = enabled ? 'On' : 'Off';
+    if (status) status.textContent = enabled ? ANALYTICS_STATUS_ON : ANALYTICS_STATUS_OFF;
+    renderDebugDetailControls(enabled);
+}
+
+function captureRetentionInvalid() {
+    return !!captureSettings && (captureSettings.retention_state === 'retention_invalid' || !captureSettings.retention_days);
+}
+
+function renderDebugDetailControls(analyticsOn) {
+    const toggle = document.getElementById('debug-detail-toggle');
+    const label = document.getElementById('debug-detail-label');
+    const status = document.getElementById('debug-detail-status');
+    if (!toggle) return;
+    const debugOn = !!(captureSettings && captureSettings.debug_enabled);
+    const invalid = captureRetentionInvalid();
+    toggle.checked = debugOn;
+    toggle.setAttribute('aria-checked', String(debugOn));
+    toggle.disabled = !analyticsOn || !captureSettings || invalid;
+    if (label) label.textContent = debugOn ? 'On' : 'Off';
+    if (!status) return;
+    if (!analyticsOn) {
+        status.textContent = 'Turn on Analytics Mode first.';
+    } else if (captureSettings && invalid) {
+        status.textContent = 'Set a retention period first.';
+    } else if (debugOn && captureSettings.debug_enabled_since) {
+        status.textContent = `Debug detail ON since ${new Date(captureSettings.debug_enabled_since).toLocaleDateString()}.`;
+    } else {
+        status.textContent = '';
+    }
+}
+
+function renderRetentionControls() {
+    const input = document.getElementById('retention-days-input');
+    if (!input || !captureSettings) return;
+    input.value = captureSettings.retention_days === null || captureSettings.retention_days === undefined ? '' : String(captureSettings.retention_days);
+    input.disabled = false;
+    onRetentionInput();
+}
+
+function retentionInputValue() {
+    const input = document.getElementById('retention-days-input');
+    const raw = input ? input.value.trim() : '';
+    if (!/^[0-9]{1,4}$/.test(raw)) return null;
+    const days = parseInt(raw, 10);
+    return days >= 1 && days <= 3650 ? days : null;
+}
+
+function onRetentionInput() {
+    const save = document.getElementById('retention-save-btn');
+    const help = document.getElementById('retention-help');
+    if (!save || !help || !captureSettings) return;
+    const days = retentionInputValue();
+    const stored = captureSettings.retention_days;
+    const lowering = days !== null && (stored === null || stored === undefined || days < stored);
+    const canLower = typeof hasPermission === 'function' && hasPermission('delete');
+    let message = 'Between 1 and 3650 days. Older conversations are deleted automatically.';
+    let disabled = days === null || days === stored;
+    if (days === null) {
+        message = 'Enter a whole number of days from 1 to 3650.';
+    } else if (lowering && !canLower) {
+        message = 'Only an owner can shorten retention.';
+        disabled = true;
+    }
+    help.textContent = message;
+    save.disabled = disabled;
+}
+
+async function loadCaptureSettings(analyticsOn) {
+    try {
+        captureSettings = await apiRequest('/api/conversations/capture');
+    } catch (e) {
+        // Not allowed to read capture state (or unavailable): leave the controls off.
+        captureSettings = null;
+        const input = document.getElementById('retention-days-input');
+        if (input) input.disabled = true;
+        const save = document.getElementById('retention-save-btn');
+        if (save) save.disabled = true;
+    }
+    renderDebugDetailControls(analyticsOn);
+    renderRetentionControls();
 }
 
 async function loadAnalyticsModeToggle() {
@@ -2293,20 +2426,15 @@ async function loadAnalyticsModeToggle() {
         if (!resp.ok) return;
         const data = await resp.json();
         const enabled = !!data.analytics_mode_enabled;
-        const toggle = document.getElementById('analytics-mode-toggle');
-        const label = document.getElementById('analytics-mode-label');
-        const status = document.getElementById('analytics-mode-status');
-        if (toggle) toggle.checked = enabled;
-        if (label) label.textContent = enabled ? 'On' : 'Off';
-        if (status) status.textContent = enabled
-            ? 'Analytics mode is active — conversation turns are being captured.'
-            : 'Analytics mode is off — no data is being captured.';
+        renderAnalyticsToggle(enabled);
+        await loadCaptureSettings(enabled);
     } catch (e) {
         console.warn('[Analytics] Failed to load analytics mode setting:', e);
     }
 }
 
 async function saveAnalyticsMode(enabled) {
+    const revert = () => renderAnalyticsToggle(!enabled);
     try {
         const API_BASE = window.location.origin;
         const token = authToken || localStorage.getItem('auth_token');
@@ -2319,27 +2447,83 @@ async function saveAnalyticsMode(enabled) {
             headers,
             body: JSON.stringify({ analytics_mode_enabled: enabled }),
         });
-        const label = document.getElementById('analytics-mode-label');
-        const status = document.getElementById('analytics-mode-status');
         if (resp.ok) {
-            if (label) label.textContent = enabled ? 'On' : 'Off';
-            if (status) status.textContent = enabled
-                ? 'Analytics mode is active — conversation turns are being captured.'
-                : 'Analytics mode is off — no data is being captured.';
-            if (typeof showSuccess === 'function') {
-                showSuccess(`Analytics mode ${enabled ? 'enabled' : 'disabled'}.`);
-            }
+            renderAnalyticsToggle(enabled);
+            showCaptureToast(enabled
+                ? 'Analytics mode turned on.'
+                : 'Analytics mode turned off. Stored conversations are kept until they expire.', 'success');
         } else {
-            if (typeof showError === 'function') {
-                showError('Failed to save analytics mode setting.');
-            }
-            const toggle = document.getElementById('analytics-mode-toggle');
-            if (toggle) toggle.checked = !enabled;
-            if (label) label.textContent = !enabled ? 'On' : 'Off';
+            revert();
+            showCaptureToast('Couldn’t save the Analytics Mode setting. Nothing was changed.', 'error');
         }
     } catch (e) {
         console.warn('[Analytics] Failed to save analytics mode:', e);
+        revert();
+        showCaptureToast('Couldn’t save the Analytics Mode setting. Nothing was changed.', 'error');
     }
+}
+
+/** PUT both capture fields; on any failure put every control back to the server's values. */
+async function putCaptureSettings(debugEnabled, retentionDays) {
+    try {
+        captureSettings = await apiRequest('/api/conversations/capture', {
+            method: 'PUT',
+            body: JSON.stringify({ debug_enabled: debugEnabled, retention_days: retentionDays }),
+        });
+        showCaptureToast('Capture settings saved.', 'success');
+    } catch (e) {
+        showCaptureToast(captureSaveFailureMessage(e), 'error');
+        await loadCaptureSettings(!!document.getElementById('analytics-mode-toggle')?.checked);
+        return false;
+    }
+    renderDebugDetailControls(!!document.getElementById('analytics-mode-toggle')?.checked);
+    renderRetentionControls();
+    return true;
+}
+
+/** Fixed messages by status; a server string never becomes the message. */
+function captureSaveFailureMessage(error) {
+    if (error && error.status === 422) return 'Enter a whole number of days from 1 to 3650.';
+    if (error && error.status === 403) return 'Only an owner can shorten retention.';
+    return 'Couldn’t save capture settings. Nothing was changed.';
+}
+
+async function saveDebugDetail(enabled) {
+    // Never send a made-up retention: with no valid stored value the switch is disabled,
+    // and a fallback lower than the operator's value would start deleting data.
+    if (!captureSettings || captureRetentionInvalid()) {
+        renderDebugDetailControls(!!document.getElementById('analytics-mode-toggle')?.checked);
+        return;
+    }
+    await putCaptureSettings(enabled, captureSettings.retention_days);
+}
+
+async function saveRetention() {
+    const days = retentionInputValue();
+    if (days === null || !captureSettings) return;
+    const stored = captureSettings.retention_days;
+    const lowering = stored === null || stored === undefined || days < stored;
+    if (lowering && !(typeof hasPermission === 'function' && hasPermission('delete'))) return;
+    if (lowering) {
+        let count = null;
+        try {
+            count = (await apiRequest(`/api/conversations/capture?preview_retention=${encodeURIComponent(days)}`)).preview_delete_turns;
+        } catch (e) { /* the confirm says the count is unknown */ }
+        const known = Number.isFinite(count);
+        const message = known
+            ? `Keeping conversations for ${days} days deletes ${count} stored turns. It can’t be undone.`
+            : `Keeping conversations for ${days} days deletes every older stored turn. It can’t be undone.`;
+        const confirmed = await showServiceConfirmModal({
+            title: 'Shorten retention',
+            message,
+            requireTyped: known && count > 0 ? String(count) : null,
+        });
+        if (confirmed === false) {
+            renderRetentionControls();
+            return;
+        }
+    }
+    await putCaptureSettings(!!captureSettings.debug_enabled, days);
 }
 
 async function loadAssistantProfileSettings() {

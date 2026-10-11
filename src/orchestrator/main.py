@@ -150,6 +150,9 @@ from orchestrator.self_building_tools import (
 
 # Runtime context accessor (Phase 4.2 — sole singleton read/write path)
 from orchestrator.nodes import _runtime
+from orchestrator import turn_capture
+from orchestrator.turn_capture import captures_turn, current_capture
+from shared import conversation_capture as contract_capture
 from orchestrator.nodes import finalize_node, intent_refused_node, notification_pref_node, retrieve_node, route_control_node, route_info_node, route_music_node, route_tv_node, send_sms_node, synthesize_node, validate_node
 
 # Helpers extracted to helpers.py (Phase 2.1, ATHENA-10)
@@ -1324,6 +1327,13 @@ async def lifespan(app: FastAPI):
     _runtime.set_session_manager(session_manager)
     logger.info("Session manager initialized")
 
+    # Conversation capture sink: built as a local first (R2-H1), then registered.
+    # It drops everything until Analytics Mode is on, and is unconfigured (and
+    # says so on /health) without a Postgres DATABASE_URL.
+    capture_sink = turn_capture.create_sink(_shared_config.get_config().database_url)
+    _runtime.set_turn_capture(capture_sink)
+    capture_sink.start()
+
     # Initialize parallel search engine
     parallel_search_engine = await ParallelSearchEngine.from_environment()
     _runtime.set_parallel_search_engine(parallel_search_engine)
@@ -1407,9 +1417,18 @@ async def lifespan(app: FastAPI):
     # Atomic replacement of the 8 explicit if-close lines; avoids double-close window.
     # admin_client is a per-call client (not a runtime singleton) — closed explicitly.
     logger.info("Shutting down Orchestrator service")
-    if admin_client:
-        await admin_client.close()
-    await _runtime.close_all()
+    # Order: drain background work, then stop capture (2 s drain, so turns that
+    # background work finishes still reach the sink), then close the clients.
+    # Each step runs even if an earlier one raises.
+    try:
+        await _runtime.drain_background()
+    finally:
+        try:
+            await capture_sink.stop(drain_s=contract_capture.DRAIN_S)
+        finally:
+            if admin_client:
+                await admin_client.close()
+            await _runtime.close_all()
 
 app = FastAPI(
     title="Athena Orchestrator",
@@ -6503,6 +6522,7 @@ class QueryResponse(BaseModel):
 @app.post("/query", response_model=QueryResponse, dependencies=[Depends(require_service_caller)])
 @renders_spoken_answer
 @with_llm_usage_scope
+@captures_turn("query")
 async def process_query(
     request: QueryRequest,
     service_authenticated: bool = Depends(service_authenticated),
@@ -6603,6 +6623,11 @@ async def process_query(
         with timing_tracker.track("pre_graph", "pin_override_check"):
             outcome = await handle_owner_mode_utterance(request.query, request.caller_trust, request.room)
             if outcome is not None:
+                # The owner-PIN utterance: a content-free marker row, never the text.
+                current_capture().bind_withheld(
+                    session_id=session.session_id, audience=authz.knowledge_audience,
+                    caller_trust=request.caller_trust, interface_type=request.interface_type, room=request.room,
+                )
                 # Return early with owner mode response
                 request_id = hashlib.md5(f"{request.query}{time.time()}".encode()).hexdigest()[:8]
                 return QueryResponse(
@@ -6621,6 +6646,16 @@ async def process_query(
                         "refused_reason": outcome.refused_reason,
                     }
                 )
+
+        # Conversation capture starts here, right after the PIN check and before
+        # any early return below (cache hit, tool creation, memory forget,
+        # refusal, a fast path): the decorator records whichever exit is taken.
+        capture = current_capture()
+        capture.bind(
+            session_id=session.session_id, query=request.query, interface_type=request.interface_type,
+            room=request.room, user_mode=authz.mode, audience=authz.knowledge_audience,
+            caller_trust=request.caller_trust, stay_read_only=is_stay_read_only(authz.permissions),
+        )
 
         # Trivial turns (greetings, thanks, time, date) are answered without a
         # model unless the session has an open question.
@@ -6808,7 +6843,7 @@ async def process_query(
                 session_id=session.session_id,
                 interface=request.interface_type or "unknown",
                 metadata={
-                    "query_preview": request.query[:50],
+                    "query_len": len(request.query),
                     "mode": current_mode,
                     "room": request.room
                 }
@@ -6966,32 +7001,6 @@ async def process_query(
                     "tool_exec_time": 0  # No tool execution for cached responses
                 }
 
-                # Record analytics even for cache hits so conversations appear in admin UI
-                _analytics_mode_enabled = await _get_analytics_mode_enabled()
-                _debug_mode = os.getenv("ATHENA_DEBUG_MODE", "false").lower() == "true"
-                _capture_source = "analytics" if _analytics_mode_enabled else "debug"
-                _turn_source = request.source or _capture_source
-                if _analytics_mode_enabled or _debug_mode:
-                    asyncio.create_task(_record_conversation_turn(
-                        session_id=session.session_id,
-                        request_id=None,
-                        query=request.query,
-                        response=response_data.get("answer", ""),
-                        intent=response_data.get("intent"),
-                        confidence=response_data.get("confidence"),
-                        model_used=None,
-                        rag_tools_used=response_data.get("tools_used"),
-                        response_time_ms=0,
-                        tokens_generated=0,
-                        tokens_per_second=0.0,
-                        validation_passed=True,
-                        error_message=None,
-                        room=request.room,
-                        user_mode=request.mode,
-                        interface_type=request.interface_type,
-                        source=_turn_source,
-                    ))
-
                 return QueryResponse(**response_data)
 
         # Check for tool creation intent BEFORE running the state machine
@@ -7111,6 +7120,7 @@ async def process_query(
         intent = final_state.get("intent")
         refusal = post_graph_intent_refusal(intent, final_state.get("error"), permissions)
         if refusal:
+            capture.refused()
             return QueryResponse(
                 answer=refusal,
                 intent=intent.value if hasattr(intent, "value") else str(intent),
@@ -7169,7 +7179,7 @@ async def process_query(
                 event_type="query_intent",
                 metadata={
                     "intent": intent_str,
-                    "query": request.query,
+                    "query_len": len(request.query),
                     "confidence": final_state.get("confidence"),
                     "has_rag_service": has_rag_service,
                     "system_mapping": system_mapping,
@@ -7397,40 +7407,12 @@ async def process_query(
                 intent=response.intent
             )
 
-        # ANALYTICS CAPTURE: Fire-and-forget conversation turn recording
-        _debug_source = _get_analytics_source()
-        _capture_source = await _should_capture_analytics(_debug_source)
-        if _capture_source:
-            # Use request.source if provided (e.g., "chatbot", "jarvis", "voice", "ha");
-            # fall back to the analytics capture mode ("analytics" / "debug")
-            _turn_source = request.source or _capture_source
-            asyncio.create_task(_record_conversation_turn(
-                session_id=session.session_id,
-                request_id=final_state.get("request_id"),
-                query=request.query,
-                response=answer,
-                intent=intent_str if intent_str != "unknown" else None,
-                confidence=final_state.get("confidence"),
-                model_used=final_state.get("model_used"),
-                rag_tools_used=final_state.get("tools_used"),
-                response_time_ms=total_time_ms,
-                tokens_generated=final_state.get("llm_tokens"),
-                tokens_per_second=final_state.get("llm_tokens_per_second"),
-                validation_passed=final_state.get("validation_passed"),
-                error_message=final_state.get("error"),
-                room=request.room,
-                user_mode=current_mode,
-                interface_type=request.interface_type,
-                source=_turn_source,
-                complexity=final_state.get("complexity"),
-                is_fallback=final_state.get("is_fallback", False),
-                base_knowledge_populated=final_state.get("base_knowledge_populated", False),
-                node_timings_ms=final_state.get("node_timings"),
-            ))
+        capture.observe(final_state)
 
         return response
 
     except Exception as e:
+        current_capture().failed(e)  # the original class, not the HTTPException below
         logger.error(f"Query processing error: {e}", exc_info=True)
         request_counter.labels(intent="unknown", status="error").inc()
 
@@ -7446,6 +7428,7 @@ async def process_query(
         raise HTTPException(status_code=500, detail=_internal_error_detail())
 
 @app.post("/query/stream", dependencies=[Depends(require_service_caller)])
+@captures_turn("query_stream")
 async def process_query_stream(
     request: QueryRequest,
     service_authenticated: bool = Depends(service_authenticated),
@@ -7461,6 +7444,7 @@ async def process_query_stream(
     - Stage 2: Tool execution results
     - Stage 3: Final answer (TRUE streaming - tokens as generated)
     """
+    capture = current_capture()
     handler_start = time.perf_counter()
 
     @with_llm_usage_scope_stream
@@ -7525,9 +7509,19 @@ async def process_query_stream(
             # consumption or mode-service call.
             outcome = await handle_owner_mode_utterance(request.query, request.caller_trust, request.room)
             if outcome is not None:
+                capture.bind_withheld(
+                    session_id=session.session_id, audience=authz.knowledge_audience,
+                    caller_trust=request.caller_trust, interface_type=request.interface_type, room=request.room,
+                )
                 yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': render_answer(outcome.message, request.interface_type)})}\n\n"
                 yield f"data: {json.dumps({'stage': 'complete', 'processing_time': time.time() - start_time, 'tool_exec_time': 0, 'llm_time': 0, 'tokens': 0})}\n\n"
                 return
+
+            capture.bind(
+                session_id=session.session_id, query=request.query, interface_type=request.interface_type,
+                room=request.room, user_mode=authz.mode, audience=authz.knowledge_audience,
+                caller_trust=request.caller_trust, stay_read_only=is_stay_read_only(authz.permissions),
+            )
 
             # Trivial turns are answered without a model unless the session
             # has an open question.
@@ -7545,6 +7539,7 @@ async def process_query_stream(
                 session_ms=session_ms,
             )
             if fast is not None:
+                capture.answered(fast.text)
                 yield f"data: {json.dumps({'stage': 'answer_chunk', 'content': render_answer(fast.text, request.interface_type)})}\n\n"
                 await _persist_fast_path_messages(session.session_id, request.query, fast)
                 yield f"data: {json.dumps({'stage': 'complete', 'processing_time': time.time() - start_time, 'tool_exec_time': 0, 'llm_time': 0, 'tokens': 0})}\n\n"
@@ -7648,6 +7643,7 @@ async def process_query_stream(
             refusal = post_graph_intent_refusal(state.intent, state.error, authz.permissions)
             if refusal:
                 state.answer, state.retrieved_data = refusal, {}
+                capture.refused()
             tool_exec_time = time.time() - tool_start_time
 
             if state.retrieved_data:
@@ -7792,9 +7788,12 @@ async def process_query_stream(
                 tokens_per_second=round(tokens_per_second, 1),
             )
 
+            capture.observe(state)
+            capture.answered(full_answer, stream_completed=stream_completed)
             yield f"data: {json.dumps({'stage': 'complete', 'processing_time': processing_time, 'tool_exec_time': tool_exec_time, 'llm_time': llm_time, 'tokens': token_count})}\n\n"
 
         except Exception as e:
+            capture.failed(e)
             logger.error("streaming_error", **log_safe(e))
             yield f"data: {json.dumps({'stage': 'error', 'message': STREAM_ERROR_MESSAGE})}\n\n"
 
@@ -7810,6 +7809,7 @@ async def process_query_stream(
 
 
 @app.post("/query/stream/v2", dependencies=[Depends(require_service_caller)])
+@captures_turn("query_stream_v2")
 async def process_query_stream_v2(
     request: QueryRequest,
     service_authenticated: bool = Depends(service_authenticated),
@@ -7829,6 +7829,7 @@ async def process_query_stream_v2(
     - {stage: 'streaming', sentence_num: 2, sentence: 'Second sentence.', is_final: false}
     - {stage: 'complete', total_sentences: 2, full_response: '...', processing_time: 1.5}
     """
+    capture = current_capture()
     handler_start = time.perf_counter()
 
     @with_llm_usage_scope_stream
@@ -7896,9 +7897,19 @@ async def process_query_stream_v2(
             # consumption or mode-service call.
             outcome = await handle_owner_mode_utterance(request.query, request.caller_trust, request.room)
             if outcome is not None:
+                capture.bind_withheld(
+                    session_id=session.session_id, audience=authz.knowledge_audience,
+                    caller_trust=request.caller_trust, interface_type=request.interface_type, room=request.room,
+                )
                 yield f"data: {json.dumps({'stage': 'streaming', 'sentence_num': 1, 'sentence': render_answer(outcome.message, request.interface_type), 'is_final': True})}\n\n"
                 yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': 1, 'full_response': render_answer(outcome.message, request.interface_type), 'intent': 'mode_override', 'processing_time': time.time() - start_time})}\n\n"
                 return
+
+            capture.bind(
+                session_id=session.session_id, query=request.query, interface_type=request.interface_type,
+                room=request.room, user_mode=authz.mode, audience=authz.knowledge_audience,
+                caller_trust=request.caller_trust, stay_read_only=is_stay_read_only(authz.permissions),
+            )
 
             # Trivial turns are answered without a model unless the session
             # has an open question.
@@ -7916,6 +7927,7 @@ async def process_query_stream_v2(
                 session_ms=session_ms,
             )
             if fast is not None:
+                capture.answered(fast.text)
                 spoken_fast = render_answer(fast.text, request.interface_type)
                 yield f"data: {json.dumps({'stage': 'classified', 'intent': 'general_info'})}\n\n"
                 yield f"data: {json.dumps({'stage': 'streaming', 'sentence_num': 1, 'sentence': spoken_fast, 'is_final': True})}\n\n"
@@ -7956,6 +7968,7 @@ async def process_query_stream_v2(
             refusal = post_graph_intent_refusal(final_state.get("intent"), final_state.get("error"), authz.permissions)
             if refusal:
                 final_state["answer"] = refusal
+                capture.refused()
 
             intent_value = final_state.get("intent")
             intent_str = intent_value.value if hasattr(intent_value, "value") else str(intent_value)
@@ -7967,6 +7980,8 @@ async def process_query_stream_v2(
             answer = final_state.get("answer", "")
 
             if not answer:
+                capture.observe(final_state)
+                capture.answered(None, outcome="no_answer")
                 yield f"data: {json.dumps({'stage': 'error', 'message': 'No response generated'})}\n\n"
                 return
 
@@ -7993,6 +8008,8 @@ async def process_query_stream_v2(
 
             # Stage 4: Complete
             processing_time = time.time() - start_time
+            capture.observe(final_state)
+            capture.answered(answer)
             yield f"data: {json.dumps({'stage': 'complete', 'total_sentences': len(sentences), 'full_response': spoken_answer, 'intent': intent_str, 'processing_time': processing_time})}\n\n"
 
             # Persist session to Redis so context carries across requests and pods
@@ -8016,6 +8033,7 @@ async def process_query_stream_v2(
             )
 
         except Exception as e:
+            capture.failed(e)
             logger.error("stream_v2_error", **log_safe(e))
             yield f"data: {json.dumps({'stage': 'error', 'message': STREAM_ERROR_MESSAGE})}\n\n"
 
@@ -8135,85 +8153,6 @@ async def list_models():
 
 
 
-# ============================================================================
-# Analytics DB — fire-and-forget conversation capture
-# ============================================================================
-
-# Optional asyncpg pool for writing conversation turns to the analytics DB
-try:
-    import asyncpg
-    _ASYNCPG_AVAILABLE = True
-except ImportError:
-    _ASYNCPG_AVAILABLE = False
-
-_analytics_pool = None  # asyncpg connection pool, created lazily
-
-
-async def _get_analytics_pool():
-    """Return (or lazily create) the asyncpg connection pool for analytics writes."""
-    global _analytics_pool
-    if not _ASYNCPG_AVAILABLE:
-        return None
-    if _analytics_pool is not None:
-        return _analytics_pool
-
-    host = os.getenv("ATHENA_DB_HOST", "")
-    port = os.getenv("ATHENA_DB_PORT", "5432")
-    name = os.getenv("ATHENA_DB_NAME", "")
-    user = os.getenv("ATHENA_DB_USER", "")
-    password = os.getenv("ATHENA_DB_PASSWORD", "")
-
-    if not (host and name and user):
-        logger.warning("analytics_db_not_configured", reason="ATHENA_DB_* env vars not set")
-        return None
-
-    try:
-        dsn = f"postgresql://{user}:{password}@{host}:{port}/{name}"
-        _analytics_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, command_timeout=10)
-        logger.info("analytics_db_pool_created", host=host, db=name)
-    except Exception as e:
-        logger.warning("analytics_db_pool_failed", error=str(e))
-        _analytics_pool = None
-
-    return _analytics_pool
-
-
-# 60-second TTL cache for the analytics_mode_enabled flag
-_analytics_mode_cache: Optional[bool] = None
-_analytics_mode_cache_time: float = 0.0
-_ANALYTICS_MODE_CACHE_TTL: float = 60.0
-
-
-async def _get_analytics_mode_enabled() -> bool:
-    """Fetch analytics_mode_enabled from admin API with 60s TTL cache."""
-    global _analytics_mode_cache, _analytics_mode_cache_time
-
-    now = time.time()
-    if _analytics_mode_cache is not None and now - _analytics_mode_cache_time < _ANALYTICS_MODE_CACHE_TTL:
-        return _analytics_mode_cache
-
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(f"{ADMIN_API_URL}/api/settings/privacy/public")
-            if resp.status_code == 200:
-                data = resp.json()
-                enabled = bool(data.get("analytics_mode_enabled", False))
-                _analytics_mode_cache = enabled
-                _analytics_mode_cache_time = now
-                return enabled
-    except Exception as e:
-        logger.debug("analytics_mode_fetch_failed", error=str(e))
-
-    return False
-
-
-def _get_analytics_source() -> Optional[str]:
-    """Return 'debug' if ATHENA_DEBUG_MODE is set, else None."""
-    if os.getenv("ATHENA_DEBUG_MODE", "false").lower() == "true":
-        return "debug"
-    return None
-
-
 # Fallback / error-response markers used to defend the semantic cache against
 # storing responses that should never be replayed (ATHENA-32). The is_fallback
 # state flag is the primary signal; this is a belt-and-suspenders pattern check
@@ -8236,105 +8175,6 @@ def _looks_like_fallback(answer: str) -> bool:
         return True  # empty answer is always non-cacheable
     lower = answer.lower()
     return any(marker in lower for marker in _FALLBACK_RESPONSE_MARKERS)
-
-
-async def _should_capture_analytics(debug_source: Optional[str]) -> Optional[str]:
-    """Return source string for capture, or None to skip."""
-    if debug_source == "debug":
-        return "debug"
-    if await _get_analytics_mode_enabled():
-        return "analytics"
-    return None
-
-
-async def _record_conversation_turn(
-    session_id: str,
-    request_id: Optional[str],
-    query: str,
-    response: str,
-    intent: Optional[str],
-    confidence: Optional[float],
-    model_used: Optional[str],
-    rag_tools_used: Optional[list],
-    response_time_ms: Optional[int],
-    tokens_generated: Optional[int],
-    tokens_per_second: Optional[float],
-    validation_passed: Optional[bool],
-    error_message: Optional[str],
-    room: Optional[str],
-    user_mode: Optional[str],
-    interface_type: Optional[str],
-    source: str,
-    complexity: Optional[str] = None,
-    is_fallback: bool = False,
-    base_knowledge_populated: bool = False,
-    node_timings_ms: Optional[dict] = None,
-) -> None:
-    """
-    Write a conversation turn to the analytics database.
-    Fire-and-forget via asyncio.create_task(). Non-blocking, non-fatal.
-    """
-    pool = await _get_analytics_pool()
-    if pool is None:
-        logger.warning("analytics_write_skipped", reason="no_pool", session_id=session_id[:8])
-        return
-
-    try:
-        import uuid as _uuid
-        async with pool.acquire() as conn:
-            conv_row = await conn.fetchrow(
-                """
-                INSERT INTO conversations
-                    (id, session_id, room, user_mode, interface_type, started_at, ended_at, turn_count)
-                VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), 1)
-                ON CONFLICT (session_id) DO UPDATE
-                    SET ended_at   = NOW(),
-                        turn_count = conversations.turn_count + 1,
-                        total_tokens = COALESCE(conversations.total_tokens, 0) + COALESCE($6, 0)
-                RETURNING id, turn_count
-                """,
-                str(_uuid.uuid4()), session_id, room, user_mode, interface_type, tokens_generated
-            )
-            await conn.execute(
-                """
-                INSERT INTO conversation_turns (
-                    id, conversation_id, turn_number, request_id,
-                    query_text, response_text, intent, confidence,
-                    model_used, rag_tools_used, response_time_ms,
-                    tokens_generated, tokens_per_second,
-                    validation_passed, error_message, source,
-                    complexity, is_fallback, base_knowledge_populated, node_timings_ms,
-                    created_at
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
-                """,
-                str(_uuid.uuid4()),
-                str(conv_row["id"]),
-                conv_row["turn_count"],
-                request_id,
-                query,
-                response,
-                intent,
-                confidence,
-                model_used,
-                json.dumps(rag_tools_used) if rag_tools_used else None,
-                response_time_ms,
-                tokens_generated,
-                tokens_per_second,
-                validation_passed,
-                error_message,
-                source,
-                complexity,
-                is_fallback,
-                base_knowledge_populated,
-                json.dumps(node_timings_ms) if node_timings_ms else None,
-            )
-
-    except Exception as e:
-        logger.warning(
-            "analytics_write_failed",
-            error=str(e),
-            session_id=session_id[:8] if session_id else "unknown",
-        )
 
 
 # ============================================================================
@@ -8589,6 +8429,7 @@ async def run_orchestrator_for_streaming(state: OrchestratorState) -> Orchestrat
 
 
 @app.post("/v1/chat/completions", dependencies=[Depends(require_service_caller)])
+@captures_turn("v1_chat_completions")
 async def chat_completions(request: OpenAIChatRequest):
     """
     OpenAI-compatible chat completions endpoint with streaming support.
@@ -8653,6 +8494,8 @@ async def chat_completions(request: OpenAIChatRequest):
 
         # If streaming is requested, use SSE format
         if request.stream:
+            capture = current_capture()
+
             @with_llm_usage_scope_stream
             async def openai_stream_generator():
                 # Initialize state and run orchestrator
@@ -8684,12 +8527,26 @@ async def chat_completions(request: OpenAIChatRequest):
                 # untagged caller (D24).
                 outcome = await handle_owner_mode_utterance(user_message, None, None)
                 if outcome is not None:
+                    capture.bind_withheld(
+                        session_id=session.session_id, audience=authz.knowledge_audience,
+                        caller_trust=None, interface_type=interface_type,
+                        room=request.room or (request.extra_body or {}).get("room"),
+                    )
                     pin_request_id = hashlib.md5(f"{user_message}{time.time()}".encode()).hexdigest()[:8]
                     yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': render_answer(outcome.message, interface_type)}, 'finish_reason': None}]})}\n\n"
                     yield f"data: {json.dumps({'id': pin_request_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
                     yield _stream_usage_line(request, pin_request_id)
                     yield "data: [DONE]\n\n"
                     return
+
+                # Only the final user message is bound: earlier history messages
+                # never reach a record.
+                capture.bind(
+                    session_id=session.session_id, query=user_message, interface_type=interface_type,
+                    room=request.room or (request.extra_body or {}).get("room"),
+                    user_mode=authz.mode, audience=authz.knowledge_audience,
+                    caller_trust=None, stay_read_only=is_stay_read_only(authz.permissions),
+                )
 
                 # Trivial turns are answered without a model unless the
                 # session has an open question.
@@ -8708,6 +8565,7 @@ async def chat_completions(request: OpenAIChatRequest):
                     session_ms=session_ms,
                 )
                 if fast is not None:
+                    capture.answered(fast.text)
                     yield f"data: {json.dumps({'id': fast_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': render_answer(fast.text, interface_type)}, 'finish_reason': None}]})}\n\n"
                     yield f"data: {json.dumps({'id': fast_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
                     await _persist_fast_path_messages(session.session_id, user_message, fast)
@@ -8798,6 +8656,7 @@ async def chat_completions(request: OpenAIChatRequest):
                 refusal = post_graph_intent_refusal(state.intent, state.error, authz.permissions)
                 if refusal:
                     state.answer, state.retrieved_data = refusal, {}
+                    capture.refused()
 
                 # Check if already answered by a handler (control, music, TV, SMS)
                 if state.answer:
@@ -8835,6 +8694,8 @@ async def chat_completions(request: OpenAIChatRequest):
                     await sm.add_message(session.session_id, role="user", content=user_message, metadata={"intent": state.intent.value if state.intent else "unknown"})
                     await sm.add_message(session.session_id, role="assistant", content=state.answer)
                     logger.info(f"Session {session.session_id} updated with {len(session.messages) + 2} messages (precomputed)")
+                    capture.observe(state)
+                    capture.answered(state.answer)
                 else:
                     # TRUE STREAMING: Build prompt and stream directly from LLM
                     full_prompt, synthesis_model, synthesis_system_prompt = await build_synthesis_prompt_for_streaming(state)
@@ -8945,6 +8806,8 @@ async def chat_completions(request: OpenAIChatRequest):
                     await sm.add_message(session.session_id, role="user", content=user_message, metadata={"intent": state.intent.value if state.intent else "unknown"})
                     await sm.add_message(session.session_id, role="assistant", content=full_response)
                     logger.info(f"Session {session.session_id} updated with {len(session.messages) + 2} messages (streaming)")
+                    capture.observe(state)
+                    capture.answered(full_response)
 
                     # Record streaming synthesis LLM call for metrics
                     from shared.metrics import LLM_CALL_DURATION, LLM_TOKENS_GENERATED
@@ -9176,6 +9039,16 @@ async def health_check(detailed: bool = False):
     except Exception as e:
         health["components"]["home_assistant"] = False
         logger.warning("health_check: home_assistant probe failed", exc_info=e)
+
+    # Conversation capture: configured and writer state only (no text, no DSN).
+    # Informational: a capture problem never makes the orchestrator unhealthy.
+    _capture = _runtime.get_turn_capture()
+    if _capture is not None:
+        _capture_status = _capture.status()
+        health["components"]["conversation_capture"] = {
+            "configured": _capture_status["configured"],
+            "writer_state": _capture_status["writer_state"],
+        }
 
     # Check LLM Router (supports Ollama, MLX, etc.)
     try:

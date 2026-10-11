@@ -152,6 +152,8 @@ JWT_SECRET=jwtsecret...
 | `ATHENA_DB_USER` | `athena` | Database user |
 | `ATHENA_DB_PASSWORD` | *required* | Database password |
 
+`ATHENA_DB_*` and `DATABASE_URL` below describe the same database for most installs. **Conversation capture does not need `ATHENA_DB_*`**: the orchestrator and admin-backend both use `DATABASE_URL` (see [Conversation capture](#conversation-capture)); `ATHENA_DB_*` is only a fallback when `DATABASE_URL` is empty.
+
 **Full Connection String (alternative):**
 ```bash
 DATABASE_URL=postgresql://athena:password@localhost:5432/athena
@@ -802,7 +804,7 @@ stored value (the legacy `chat`) is never rendered; the admin page shows it as
   owner's history, and the owner loses continuity for that turn. Owner turns are
   still recorded by conversation analytics, where admins can view them; the
   audience controls what the assistant says to whom, not what administrators can
-  see. Operators with write access can read and retype Owner-only entries, but
+  see. What administrators can read is described in [Conversation capture](#conversation-capture). Operators with write access can read and retype Owner-only entries, but
   moving one to another audience or deleting one needs the owner role (403
   `insufficient_role`); every write is audited by id, audience and field name.
 - **Household and guest conversations never cross.** A stay starting or ending
@@ -2165,6 +2167,108 @@ worked Denver example, including a feed with an optional `bounds` box.
 - **`bounds` is exclusive.** A GTFS feed's optional `bounds` box (`min_lat`/`max_lat`/`min_lon`/`max_lon`) filters stops with a strict `<` comparison on every edge — a stop exactly on a boundary value is excluded, not included.
 - **`allow_private` residual.** Both feed and event-source fetches go through the shared SSRF guard (`shared.url_safety.safe_get`) with, by default, no private hosts allowed on any hop. Setting `allow_private: true` on one feed/source exempts only that entry's own hostname — on every hop, not just the first. That means the named host resolving to a different private address later (DNS rebinding) or redirecting to itself at a private address are both accepted as operator trust for that one host; a redirect to any *other* private host is still blocked. This is stricter than the CONTRIBUTING.md Class 3 exemption, deliberately — these fetch third-party content, and a hijacked upstream redirect shouldn't reach cluster-internal addresses.
 - **The maintainer-leak CI gate has documented non-goals** — it deliberately doesn't catch a team/place name that doesn't contain the configured home city, a bare latitude with no longitude, or a Linux `/home/<user>` path (only `/Users/…` is ruled). Run `python3 scripts/check-maintainer-leaks.py --help` for the full list before assuming an example value is automatically safe.
+
+---
+
+## Conversation capture
+
+With **Analytics Mode** on (Settings → Privacy), Athena stores what is said to it and its answers in this install's own database, so you can review and tune it on the Conversations page. Nothing is sent anywhere else, and telemetry never includes any of it.
+
+### What is stored
+
+Every answered turn on `/query`, `/query/stream`, `/query/stream/v2` and `/v1/chat/completions` (so Home Assistant, Wyoming, LiveKit, Jarvis web, SMS and the website chat are all covered) is stored from anyone who talks to the assistant, including guests and website visitors. That includes trivial turns the assistant answers without a model ("thank you", "what time is it").
+
+| Level | What |
+|---|---|
+| Always (Analytics Mode on) | the question and the answer, the route and channel (spoken or text), who was talking (owner, guest, household or unverified, website visitor), the outcome (answered, no answer, error, cut off, refused, withheld), room, the server's mode, intent, confidence, and the response time |
+| With **Debug detail** also on | the model, tools used, token counts, validation result, node timings, complexity, an error class, and a small fixed set of flags (cache hit, the caller trust tier, whether the owner was proven, and similar) |
+
+No guest id, guest or speaker name, device id or fingerprint is stored. A guest may say their own name in a conversation, so captured text can contain names; it is visible to owners only.
+
+Owner and guest turns are always in separate conversations: a conversation never takes a turn from a different class of caller. SMS session ids are an HMAC of the phone number, shown truncated to their first 12 characters.
+
+### PIN protection and redaction
+
+- An owner-PIN utterance is never stored as text. Each one leaves a single marker row (withheld, no content), and the next two turns of that session within 5 minutes are withheld as well.
+- A query that looks like a PIN or code is withheld whole: the words pin, passcode, code or password within about 30 characters of a number or a spoken digit; a run of 6 or more digits; or a run of 4 or more digits that includes at least one spoken digit ("one two three four"). Spaces, commas, dots, dashes and slashes between digits don't break a run, and "to", "for", "too", "won" and "ate" count as digits only beside another spoken-digit word.
+- In everything else that is stored, any run of 4 or more digits (years, addresses, amounts included; the same separators are allowed between digits) is replaced by `[number]`. That is deliberate; it costs some tuning detail and keeps PINs and codes out of storage.
+- The earlier messages of a `/v1/chat/completions` request are never stored, only the final user message.
+
+### Who can read it
+
+The text (questions, answers, error text and debug strings) needs the owner-only `view_conversation_text` permission. Operators see the metadata (counts, labels, timings) with "Text hidden: owner only". Every response that carries text writes one `conversation_text_viewed` audit entry: who, which page or filter, how many rows, never the text. Shortening retention and deleting conversations need the owner role.
+
+A request that fails before the turn is understood (the caller can't be identified, the session can't be created, or `/v1/chat/completions` has no user message) is not captured.
+
+### Retention and purge
+
+Conversations are kept for **30 days** by default (1 to 3650; there is no "forever"). Set it under Settings → Privacy. The stored value is read strictly: if it is missing or invalid nothing is deleted and the Conversations banner says so.
+
+- **Emerging Intents samples**: the example queries kept on the Emerging Intents page are cleared by the same purges (rows not seen within the retention period automatically; all of them for "Delete all"). The intents and their counters stay.
+- **Automatic**: admin-backend deletes expired turns every 6 hours (first run 5 minutes after it starts, skipped in `DEV_MODE`), whether or not Analytics Mode is on. Expired data is deleted even after capture is turned off.
+- **Manual** (owner): "Delete conversations older than N days now", or "Delete all conversations…" with a typed confirmation. Both run under the lease `conversation_capture.purge.lock`, so replicas never purge at once, and each purge is audited (started, finished, failed or interrupted, with counts only). A refused purge request (403 or 429) is audited too, but at most once per user, per reason, per minute, per admin-backend process, so a client that retries in a loop can't flood the audit log; the refusals themselves are not throttled.
+
+### What can be lost
+
+Capture never delays or fails an answer, so a turn that can't be stored is dropped and counted, not retried. Each orchestrator replica holds up to 256 turns waiting to be written; when the queue is full the newest turn is dropped, and a write that fails is dropped. On shutdown the orchestrator stops accepting turns, gives the queue 2 seconds to drain and counts what is left as dropped; a turn that finishes after shutdown has started is dropped too. Each replica reports its dropped count to the Conversations page about once a minute and sends one last report as it stops. The orchestrator also exports `athena_conversation_capture_total{result}` (`written`, `disabled`, `dropped_queue_full`, `partition_mismatch`, `failed`, `unconfigured`, `shutting_down`). A turn the orchestrator can't write because the database is unreachable or lacks the columns (migration `064`) counts as `failed`.
+
+Turning Analytics Mode off stops capture at once and keeps what is stored until it expires or is purged. While it is off, no new conversation text is saved to the conversation history you can review here; Athena still keeps short-lived working memory to follow a conversation (sessions last about an hour) and a response cache (up to 24 hours), which are separate from captured conversations. Turning it on takes effect within about 30 seconds.
+
+### Which database
+
+The orchestrator writes to, and admin-backend reads from, the database named by `DATABASE_URL` (the one `alembic upgrade head` runs against). `ATHENA_DB_*` is used only when `DATABASE_URL` is empty. If both are set and point at different databases, both services log `conversations_db_legacy_vars_ignored` and use `DATABASE_URL`.
+
+**Upgrading:** conversations captured earlier in a database that `ATHENA_DB_*` pointed at are not migrated. Check that `ATHENA_DB_*` and `DATABASE_URL` name the same database before upgrading (print only the host and database name); if they differ, decide whether to copy the old rows or let them go. Run `alembic upgrade head` on admin-backend (revision `064`) before the orchestrator restarts; an orchestrator that runs first drops its turns (counted, never affecting a response) until the columns exist.
+
+### Status on the Conversations page
+
+| Banner | Meaning |
+|---|---|
+| Capture is off | Analytics Mode is off; stored rows remain until they expire |
+| no orchestrator has reported in | on, but no orchestrator has written a status: check its `DATABASE_URL` |
+| hasn't reported for a few minutes | on, but the last report is older than 3 minutes |
+| failing to write conversations | on, and the latest error is newer than the latest success |
+| on and working | on, and every reporting replica is healthy |
+
+A replica that hasn't reported for 24 hours is no longer counted. The page also shows the stored turn count, the oldest and latest turn, and the dropped total.
+
+Debug detail does not switch itself off: the banner shows "Debug detail ON since <date>" for as long as it is on.
+
+### The older analytics log carries no text
+
+The same holds for the intent metrics behind the Emerging Intents page: the orchestrator no longer sends the query text (only a keyed hash and the length), and admin-backend does not store `raw_query` from an older orchestrator. `query_hash` is now an HMAC keyed on `SERVICE_API_KEY` (NULL for a PIN-shaped query, or when no key is set), so hashes stored by earlier versions (plain MD5) can't be compared with new ones; rotating `SERVICE_API_KEY` likewise starts new groupings. Nothing reads the hash to deduplicate. The page's **sample queries** (up to 10 examples of what people said per intent) are only collected while Analytics Mode is on, never for a PIN-shaped query, and are cut to 200 characters with runs of 4 or more digits replaced (admin-backend replaces them again on receipt). Intent discovery itself keeps running with Analytics Mode off, because a generated category label is not a transcript; a PIN-shaped turn is never sent to the model that names intents and creates none, and each generated display name (at most 100 characters) and description (at most 500) has runs of 4 or more digits replaced, in the orchestrator and again by admin-backend. The labels are not part of the retention purge; only the samples are. Sample text follows the conversation text rule: only an owner (`view_conversation_text`) receives them, everyone else sees "Text hidden: owner only", and each view that carries them is audited. 
+The `conversation_analytics` table (intent events behind the Dashboard traffic numbers and the Query Analytics page), the pipeline events and the Admin Jarvis live feed carry **no conversation text**: the services send the query's or transcript's length, intent, confidence and timings only. admin-backend does not rely on that. It keeps allowlisted fields of whatever it receives and drops the rest, before it stores or broadcasts anything and again when rows are read, so an older service, or a field added later, can't put text there:
+
+- `conversation_analytics.metadata`: names (intent, room, mode, status and similar), true/false flags, numbers and `*_len` / `*_count` / `*_ms` values. A text-bearing field becomes its length; an `error` string is kept as `error: true` plus `error_len`.
+- Pipeline events: a fixed set of fields per event type, scalars only (no nested values or lists). A name or status value is kept only if it is at most 100 characters of letters, digits, spaces and `_ . : / -`; any other value is dropped. Event-level fields (event type, session id, interface, timestamp) are kept as sent.
+
+Query Analytics shows lengths where it used to show the query.
+
+Rows written by earlier versions may still hold the query text in their `metadata` (the key `query`, or `query_preview` and similar), whatever Analytics Mode said. They are not deleted, and reads return only the allowlisted fields, so the text is not shown anywhere. To remove it from the database and keep the counts, run this against admin-backend's database:
+
+```sql
+UPDATE conversation_analytics
+SET metadata = metadata - 'query' - 'query_text' - 'query_preview' - 'response' - 'response_text'
+                       - 'response_preview' - 'answer' - 'transcript' - 'utterance'
+WHERE metadata ?| array['query', 'query_text', 'query_preview', 'response', 'response_text',
+                        'response_preview', 'answer', 'transcript', 'utterance'];
+```
+
+Older pipeline events (`pipeline_events.event_data`) are filtered the same way when read, but they are not rewritten and nothing deletes them automatically; to remove their data, delete the old rows.
+
+(`DELETE FROM conversation_analytics;` removes the rows entirely, which resets those dashboard counts.)
+
+Earlier intent metrics and emerging-intent samples may also hold text. To clear the intent-metric text, run `UPDATE intent_metrics SET raw_query = NULL;`; to clear the samples, `UPDATE emerging_intents SET sample_queries = '[]'::json;`. Neither is done by a migration: the columns stay, and old rows keep their text until you clear them or purge the table.
+
+### Settings
+
+| Setting | Where | Default |
+|---|---|---|
+| Analytics Mode (`analytics_mode_enabled`) | Settings → Privacy | off |
+| Debug detail (`conversation_debug_mode_enabled`) | Settings → Privacy (needs Analytics Mode) | off |
+| Keep conversations for (`conversation_retention_days`) | Settings → Privacy | 30 days |
+
+`ATHENA_DEBUG_MODE` no longer captures conversations; it only controls log-file verbosity.
 
 ---
 
