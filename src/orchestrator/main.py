@@ -42,6 +42,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.logging_config import configure_logging, payload_keys
 from shared.ha_client import HomeAssistantClient
 from shared.ha_registry import create_registry
+from orchestrator import room_context
+from orchestrator.room_directory import RoomDirectoryProvider, current_directory
 from shared.llm_router import get_llm_router
 from shared.cache import CacheClient
 from shared.admin_config import get_admin_client
@@ -1336,6 +1338,17 @@ async def lifespan(app: FastAPI):
     _runtime.set_ha_registry(ha_registry)
     await ha_registry.start()
 
+    # The room vocabulary every reader shares (areas, HA_LIGHT_GROUPS, the
+    # satellite map, admin room groups). Local first (R2-H1), then registered.
+    _entity_manager = _runtime.get_entity_manager()
+    room_directory = RoomDirectoryProvider(
+        ha_registry,
+        get_admin_client(),
+        light_group_names=_entity_manager.cached_light_group_names if _entity_manager is not None else None,
+    )
+    await room_directory.start()
+    _runtime.set_room_directory(room_directory)
+
     # Initialize session manager
     session_manager = await get_session_manager()
     _runtime.set_session_manager(session_manager)
@@ -2593,19 +2606,14 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
 
     # FAST PATH: Check for room+color patterns (light control without "lights" keyword)
     # This catches commands like "change office to white", "random colors in the kitchen"
-    room_names = [
-        'office', 'kitchen', 'bedroom', 'living room', 'bathroom',
-        'master bedroom', 'master bath', 'guest room', 'hallway', 'hall',
-        'basement', 'attic', 'garage', 'porch', 'deck', 'patio', 'dining room',
-        'den', 'family room', 'study', 'library', 'laundry room', 'alpha', 'beta'
-    ]
     color_names = [
         'red', 'blue', 'green', 'white', 'yellow', 'orange', 'purple',
         'pink', 'cyan', 'magenta', 'warm', 'cool', 'rainbow', 'sunset',
         'random colors', 'different colors', 'christmas colors', 'ocean'
     ]
     query_lower = state.query.lower()
-    has_room = any(room in query_lower for room in room_names)
+    room_mention = room_context.find_room_mention(state.query, current_directory())
+    has_room = room_mention.kind != "none"
     has_color = any(color in query_lower for color in color_names)
 
     if has_room and has_color:
@@ -2618,10 +2626,7 @@ async def classify_node(state: OrchestratorState) -> OrchestratorState:
         state.entities = {"device": "light"}
 
         # Extract room and color for entity info
-        for room in room_names:
-            if room in query_lower:
-                state.entities["room"] = room
-                break
+        state.entities["room"] = room_context.room_values(room_mention)[0]
         for color in color_names:
             if color in query_lower:
                 state.entities["color"] = color

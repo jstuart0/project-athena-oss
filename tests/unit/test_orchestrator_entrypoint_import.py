@@ -119,6 +119,8 @@ def test_jarvis_web_backend_entrypoint_imports_cleanly():
 FIRST_IMPORTS = [
     "orchestrator.fast_path",
     "orchestrator.nodes.finalize",
+    "orchestrator.room_context",
+    "orchestrator.room_directory",
     "orchestrator.main",
 ]
 

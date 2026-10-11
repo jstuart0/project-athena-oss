@@ -351,6 +351,13 @@ class HAEntityManager:
                         'is_group': False
                     }
     
+    def cached_light_group_names(self) -> List[str]:
+        """Friendly names of the light groups in the last fetch. Sync, no I/O."""
+        return [
+            info['friendly_name'] for info in self._light_groups.values()
+            if info.get('is_group') and info.get('members')
+        ]
+
     async def get_entities(self, force_refresh=False) -> Dict:
         """Get cached entities or refresh if needed"""
         if force_refresh or self._entities_cache is None or \
