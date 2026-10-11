@@ -56,10 +56,6 @@ ALLOWLIST = {
         "generic hint that 'do that in the kitchen' is a follow-up command",
     ("src/gateway/main.py", "is_athena_query_keywords"):
         "keyword hint for whether a request is a home-control query",
-    # Removed with the gateway's satellite guess; the stale-entry test fails
-    # the day that function goes, which is when this line must go too.
-    ("src/gateway/main.py", "_detect_room_from_active_satellite"):
-        "the satellite guess is replaced by the gateway speaker-room step; delete this entry with it",
 }
 
 

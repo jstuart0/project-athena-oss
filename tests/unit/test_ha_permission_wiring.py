@@ -478,18 +478,43 @@ class _RawHAServiceCallVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+def _call_service_sites(text: str, filename: str = "<planted>") -> set:
+    """Function names holding a ``.call_service(`` attribute call or a
+    ``"call_service"`` string constant (a WebSocket frame type)."""
+    found = set()
+    stack: list = []
+
+    def visit(node):
+        pushed = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if pushed:
+            stack.append(node.name)
+        hit = (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "call_service"
+        ) or (isinstance(node, ast.Constant) and node.value == "call_service")
+        if hit:
+            found.add(stack[-1] if stack else "<module>")
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+        if pushed:
+            stack.pop()
+
+    visit(ast.parse(text, filename=filename))
+    return found
+
+
 class TestGatewaySimpleCommandCallSitesUnchanged:
-    """Pattern H drift guard, gateway's share: the set of functions in
-    src/gateway/ that call HA's raw /api/services/ endpoint must stay
-    exactly the two already accounted for -- execute_simple_command
-    (turn_on/turn_off, now gated by fast_path_allowed() + the lights-only
-    check) and send_satellite_announcement (a Wyoming satellite TTS
-    announcement, not a device write -- explicitly out of scope, D17/P5).
-    A new raw HA writer appearing anywhere else in the gateway fails this
-    test instead of shipping unguarded."""
+    """Pattern H drift guard, gateway's share. The gateway writes nothing to
+    Home Assistant except one announcement: the only function under
+    src/gateway/ that reaches the raw /api/services/ endpoint is
+    send_satellite_announcement (a satellite TTS announcement, not a device
+    write), and no ``.call_service(`` call or ``"call_service"`` frame type
+    appears anywhere in the gateway. Device control goes to the orchestrator,
+    which decides the room, authorizes every write and applies the fan-out
+    gate (D19)."""
 
     EXPECTED_CALL_SITES = {
-        ("src/gateway/simple_commands.py", "execute_simple_command"),
         ("src/gateway/main.py", "send_satellite_announcement"),
     }
 
@@ -509,6 +534,25 @@ class TestGatewaySimpleCommandCallSitesUnchanged:
             for func_name in visitor.found_funcs:
                 found.add((relpath, func_name))
         assert found == self.EXPECTED_CALL_SITES
+
+    def test_gateway_has_no_call_service(self):
+        found = {}
+        for path in sorted((SRC / "gateway").rglob("*.py")):
+            sites = _call_service_sites(path.read_text(encoding="utf-8", errors="ignore"), str(path))
+            if sites:
+                found[str(path.relative_to(REPO_ROOT))] = sorted(sites)
+        assert found == {}
+
+    def test_gateway_has_no_call_service_detects_planted_writers(self):
+        assert _call_service_sites("async def f(client):\n    await client.call_service('light', 'turn_on', {})\n") == {"f"}
+        assert _call_service_sites("def g():\n    return {'type': 'call_service'}\n") == {"g"}
+        assert _call_service_sites("def h(client):\n    return client.get('/x')\n") == set()
+
+    def test_the_simple_command_module_cannot_write(self):
+        text = (SRC / "gateway" / "simple_commands.py").read_text(encoding="utf-8")
+        for needle in ("api/services", "DEVICE_MAPPINGS", "light.all", "call_service", "httpx"):
+            assert needle not in text, needle
+        assert not (SRC / "gateway" / "mode_gate.py").exists()
 
 
 _QUERY_URL_SUFFIXES = ("/query", "/query/stream")

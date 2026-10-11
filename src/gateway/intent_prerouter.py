@@ -3,7 +3,7 @@ Lightweight intent classification for Gateway pre-routing.
 
 Uses a fast LLM (qwen2.5:1.5b) for classification to route queries:
 - SIMPLE: Greetings, time, basic Q&A -> Direct LLM response
-- HOME: Device control -> HA API (via simple_commands)
+- HOME: Device control -> orchestrator (the gateway writes nothing)
 - COMPLEX: Weather, dining, directions -> Full orchestrator
 
 This allows simple queries to skip the full orchestrator pipeline,

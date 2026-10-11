@@ -844,8 +844,6 @@ function renderFeatureFlagCheckboxes(defaults) {
     const flagsToRender = presetFeatureFlags.length > 0
         ? presetFeatureFlags.map(f => ({ name: f.name, label: f.display_name || formatFlagName(f.name) }))
         : [
-            { name: 'ha_room_detection_cache', label: 'Room Detection Cache' },
-            { name: 'ha_simple_command_fastpath', label: 'Simple Command Fast Path' },
             { name: 'ha_parallel_init', label: 'Parallel Initialization' },
             { name: 'ha_precomputed_summaries', label: 'Precomputed Summaries' },
             { name: 'ha_session_warmup', label: 'Session Warmup' },

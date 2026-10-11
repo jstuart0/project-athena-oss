@@ -85,7 +85,7 @@ def test_stream_payload_forwards_identity(monkeypatch):
     )
 
     async def _run():
-        async for _ in gw.stream_orchestrator_response(request, device_id="kitchen", channel=OutputChannel.TEXT):
+        async for _ in gw.stream_orchestrator_response(request, room="kitchen", channel=OutputChannel.TEXT):
             pass
 
     asyncio.run(_run())
@@ -109,7 +109,7 @@ def test_stream_payload_omits_unset_identity(monkeypatch):
     )
 
     async def _run():
-        async for _ in gw.stream_orchestrator_response(request, device_id=None, channel=OutputChannel.TEXT):
+        async for _ in gw.stream_orchestrator_response(request, room=None, channel=OutputChannel.TEXT):
             pass
 
     asyncio.run(_run())
@@ -215,12 +215,12 @@ def test_limiter_applies_to_both_routes_first_turn_only():
     assert _call_lines(responses_api, "_check_new_conversation_limit")
 
     chat_limit_line = _call_lines(chat_completions, "_check_new_conversation_limit")[0]
-    chat_room_line = _call_lines(chat_completions, "_detect_room_from_active_satellite")[0]
+    chat_room_line = _call_lines(chat_completions, "_speaker_room_for_request")[0]
     assert chat_limit_line < chat_room_line
 
     resp_limit_line = _call_lines(responses_api, "_check_new_conversation_limit")[0]
     resp_convert_line = _call_lines(responses_api, "_responses_to_chat_request")[0]
-    resp_room_line = _call_lines(responses_api, "_detect_room_from_active_satellite")[0]
+    resp_room_line = _call_lines(responses_api, "_speaker_room_for_request")[0]
     assert resp_convert_line < resp_limit_line < resp_room_line
 
 
@@ -301,7 +301,7 @@ def test_route_level_429_on_both_routes(monkeypatch, path):
     monkeypatch.setattr(gw, "new_conversation_limiter", limiter)
 
     room_sentinel = mock.AsyncMock(side_effect=HTTPException(status_code=418))
-    monkeypatch.setattr(gw, "_detect_room_from_active_satellite", room_sentinel)
+    monkeypatch.setattr(gw.speaker_room, "resolve_speaker_room", room_sentinel)
     monkeypatch.setattr(gw, "validate_api_key", mock.AsyncMock(return_value=True))
 
     client = TestClient(gw.app)
