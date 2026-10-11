@@ -21,7 +21,7 @@ Complete reference for all configuration options in Project Athena.
 
 ## Centralized Configuration via AthenaConfig
 
-`AthenaConfig` (`src/shared/config.py`) is the canonical pydantic-settings `BaseSettings` object for Athena. It centralizes 64 env vars, starting with 11 high-leverage vars migrated in Campaign 4 (ATHENA-7) and extended by later campaigns (ATHENA-1, ATHENA-11, ATHENA-12, ATHENA-14, ATHENA-59, ATHENA-88, ATHENA-89). The remaining env vars in the codebase continue to use direct `os.getenv` and are migrated per-PR — see `CONTRIBUTING.md` for the extension pattern.
+`AthenaConfig` (`src/shared/config.py`) is the canonical pydantic-settings `BaseSettings` object for Athena. It centralizes 67 env vars, starting with 11 high-leverage vars migrated in Campaign 4 (ATHENA-7) and extended by later campaigns (ATHENA-1, ATHENA-11, ATHENA-12, ATHENA-14, ATHENA-59, ATHENA-88, ATHENA-89). The remaining env vars in the codebase continue to use direct `os.getenv` and are migrated per-PR — see `CONTRIBUTING.md` for the extension pattern.
 
 ### Reading config in code
 
@@ -1503,6 +1503,89 @@ have. A room light command that drops a light the request may not use
 plus one for every denial the guard itself raises; so a single guest command
 can count more than once.
 
+#### Which room Athena assumes
+
+Athena decides where a command acts once, from the words and the speaker.
+
+**Rooms come from Home Assistant.** With `HA_AREAS=auto` (the default) and an
+`HA_URL`/`HA_TOKEN`, the orchestrator and the gateway read Home Assistant's
+area, device and entity registries over its WebSocket API (read-only, in the
+background, refreshed when a request finds it older than five minutes, and
+once more when an unknown device shows up). A room's name, aliases, lights, fans and sensors come from
+its area; a device inherits its parent device's area. Nothing in Athena
+names your rooms. `HA_AREAS=off` never connects: rooms then come only from
+`HA_LIGHT_GROUPS`, `HA_SATELLITE_ROOM_MAP` and the admin room groups.
+
+**The speaker's room**, as the gateway resolves it, in order:
+
+1. `HA_SATELLITE_ROOM_MAP`, by the device id or by the satellite entity on
+   that device (an override);
+2. the registry's area for the device id;
+3. a guess, only when no device id was sent: exactly one voice satellite is
+   not idle;
+4. unknown.
+
+**Tell the gateway which device spoke.** For `/v1/chat/completions` (the
+Home Assistant `extended_openai_conversation` agent), add one line to the
+agent's prompt:
+
+    athena_device_id: {{ current_device_id }}
+
+Only system and developer messages are read, exactly one such line counts,
+and the line is removed before the text reaches the model. `/ha/conversation`
+sends the device id itself.
+
+**A device id is believed only from a trusted voice caller:** a request that
+presents the gateway's own API key (`API_KEY` set to something other than
+`dummy-key`, sent as a Bearer token), or one whose client address is in
+`HA_DEVICE_CLIENT_NETWORKS` (comma-separated CIDRs or addresses; resolved like
+`OPENAI_SPEECH_CLIENT_NETWORKS`, with `TRUSTED_PROXY_CIDRS`). Keep it narrow:
+Home Assistant's own address (`/32`) is right, a whole LAN is not, and the
+gateway logs `ha_device_client_networks_wide` for an entry wider than /24
+(IPv4) or /64 (IPv6). **With neither configured, a device id is ignored**: the
+room is unknown, and there are no per-device sessions or follow-ups ("Which
+bathroom?" followed by "north" needs both). The satellite guess is also for
+trusted callers only. An entry overlapping `TRUSTED_PROXY_CIDRS` is ignored
+with an error.
+
+**What is asked, and when.** A name that is only part of several rooms'
+names ("bathroom" for the north, south and lower bathrooms) asks "Which
+bathroom: lower, north or south?" and lists only rooms the caller is allowed
+to use. A command with no room named, from a speaker whose room is unknown,
+asks "Which room?". The reply is read strictly: the words you say, less
+filler such as "the" or "one", must all belong to one candidate's name; a
+question or a new command cancels the question and runs as itself; two
+matches ask once more. The answer is good for 60 seconds, from the same
+caller only, and completes the command once. A surface that can't carry a
+follow-up (no device id the gateway believes, or no session) still asks, and
+you say the full room name next time. Questions ("are the lights on") are
+answered for the speaker's room; from an unknown room a lights report covers
+the house, and so does asking about "the house".
+
+**"All the lights"** means every lamp only when the wording says so ("all
+the lights", "the whole house", "everything"); a room named in the same
+sentence wins ("all the lights in the kitchen"), and "except the bedroom"
+leaves that room out. Who reaches every area depends on who is asking: an
+owner whose voice device the gateway trusts, or an owner signed in to Jarvis
+web with a valid service key, reaches every area's lamps. Anyone else (a guest,
+an unproven caller, a degraded mode service, a service that doesn't send the
+trusted mark) reaches only the lamps of the `HA_LIGHT_GROUPS` groups and of
+the admin room groups, and is asked which room if there are none. Lights with
+no area are included only when `HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS=true`, and
+only for the owner.
+
+**When it doesn't work.** `/health` reports the registry's state
+(`ha_registry` in the gateway, `components.ha_registry` in the orchestrator):
+`ok`, `unavailable` (retrying), `refused` or `disabled`. `refused` means Home
+Assistant rejected the token; Athena stops retrying for 24 hours so it can't
+trigger Home Assistant's IP ban. Fix the token, then delete the Redis keys
+`athena:ha_registry:refused:*` (or wait 24 hours). Before a roll, the
+read-only probe `python -m orchestrator.room_probe --runs 10 [--shape]
+[--areas] [--utterances FILE]` (run in the orchestrator container) prints
+fetch times, registry counts, per-area lamp and unavailable counts, and what
+Athena would decide for sample utterances from each satellite's room. It
+writes nothing and prints no entity ids, tokens or URLs.
+
 #### How a room's lights are chosen
 
 A room light command ("turn on the kitchen lights") resolves to the smallest
@@ -1513,7 +1596,19 @@ bulb at most once.
    Keys match regardless of case, spaces or underscores (`living room`,
    `Living_Room`). An entry naming an entity Home Assistant doesn't report is
    logged and ignored. The same entry answers "are the kitchen lights on".
-2. **Name matching.** Otherwise a light belongs to the room when the room's
+2. **The area.** Otherwise, when Home Assistant has an area of that name (or
+   alias), the room is the lamps in that area: lights assigned to it directly
+   or through their device, minus anything that isn't a lamp. A light is not
+   a lamp when `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` matches it, when Home Assistant
+   marks it hidden, disabled or categorised, or when it sits on a voice
+   satellite's device (its LED ring). A relay or fan modelled as a light in
+   Home Assistant is excluded by listing it in
+   `HA_ROOM_LIGHT_EXCLUDE_ENTITIES`, for example
+   `["(?:^|[._])(?:led_ring|status_led)(?:_|$)", "^light\\.bath_fan_relay$"]`
+   (setting the variable replaces the built-in pattern, so keep it in the
+   list). A group assigned to the area is written as itself only when every
+   one of its lights is a lamp in the area.
+3. **Name matching.** With no area, a light belongs to the room when the room's
    words are whole words at the start of its entity id or friendly name
    (`kitchen` matches `light.kitchen_ceiling`, not `light.master_kitchen`). A
    requested part ("hall and nook") that has no such light falls back to a
@@ -1521,7 +1616,7 @@ bulb at most once.
    `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` (by default an id with `led_ring` or
    `status_led`, such as a voice satellite's ring) are left out of this tier
    only.
-3. **Synonyms.** `hall`/`hallway`/`corridor`/`foyer`, `bath`/`bathroom`/
+4. **Synonyms.** `hall`/`hallway`/`corridor`/`foyer`, `bath`/`bathroom`/
    `restroom`/`washroom`, `living room`/`livingroom`/`lounge`, `office`/
    `study`/`home_office`, `basement`/`cellar`, `garage`/`carport`,
    `kitchen`/`kitchenette`, `dining`, `front` (also `entrance`/`entryway`),
@@ -1534,17 +1629,25 @@ bulb at most once.
    `primary` or a floor name are not synonyms, because as a word that opens
    an id they would pull in other rooms' lights; use `HA_LIGHT_GROUPS` or a
    room group for those.
-4. **Cover.** A group that is part of another matched group is dropped, and
+5. **Cover.** A group that is part of another matched group is dropped, and
    groups that overlap only partly contribute just the lights not already
    covered, as individual lights. A cycle of groups counts as one light.
-5. **Guests.** A group containing a light the request's permissions deny is
+6. **Guests.** A group containing a light the request's permissions deny is
    replaced by its permitted lights. If nothing permitted is left, the answer
    is the guest-mode refusal; if only some were dropped, the command runs and
    the answer says it did part of it.
-6. **The fan-out gate** counts the bulbs a write reaches, not the ids written:
+7. **The fan-out gate** counts the bulbs a write reaches, not the ids written:
    a room with one group of 20 bulbs counts 20, so it needs the confirmation
    or the "all" wording that 20 individual lights would, and can exceed
    `HA_WRITE_FANOUT_HARD_LIMIT`.
+
+Lights that aren't responding (state `unavailable` or `unknown`, or missing
+from Home Assistant's states) are not counted as done: if every light a
+command would write is down, nothing is written and the answer is "The <room>
+lights aren't responding right now" (after one refresh of the states, at most
+once a minute per room); if only some are down, the command runs and the
+answer says how many aren't responding. A room with no lamps answers "I
+couldn't find any lights in the <room>".
 
 Notes. Group membership and names come from Home Assistant's state list,
 cached for five minutes, so a bulb added to a group or a renamed light takes
@@ -1553,8 +1656,11 @@ effect within that window. A nested group that the state list doesn't include
 aren't visible, so it is permission-checked by its own id only; restrict such
 ids directly in `restricted_entities` if needed. Status answers ("are the
 kitchen lights on") read light state outside the permission guard and may name
-a light a guest couldn't control. The gateway's simple-command fast path builds
-a single entity name itself and doesn't use any of this. To debug a room, read
+a light a guest couldn't control. The gateway no longer writes to Home
+Assistant for device commands (only for satellite announcements): every device
+command goes to the orchestrator, so `ha_simple_command_fastpath` and
+`ha_intent_prerouting` can stay on and only affect greetings and the time. To
+debug a room, read
 the `room_lights_resolved` and `light_targets_finalized` log events (counts and
 tiers only).
 
@@ -2395,12 +2501,15 @@ rather than guessing a device/room your HA instance doesn't have. See
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HA_SATELLITE_ROOM_MAP` | *(empty)* | JSON object mapping a Voice PE `assist_satellite` entity ID to its room. Used both directions by the gateway: entity→room (conversation room detection) and room→entity (satellite announcements). Room detection resolves each active satellite in two steps: this map first (an entity_id match always wins when both would resolve), then a generic parse of the satellite's HA `friendly_name` against the `"Voice - <Room> Assist"` convention, then `"unknown"`. The map lets you override or correct a name that doesn't fit that convention; it isn't required for basic room detection to work. |
+| `HA_SATELLITE_ROOM_MAP` | *(empty)* | An override, not a requirement: JSON object mapping a Voice PE `assist_satellite` entity ID, or a 32-character Home Assistant device ID, to its room. Rooms normally come from Home Assistant's areas (see "Which room Athena assumes"); an entry here wins over the area. Room names are matched like `HA_LIGHT_GROUPS` keys. Satellite announcements (room to entity) use the entity ID entries only; device-ID entries are never an announce target. |
 | `HA_TV_ENTITIES` | *(empty)* | Fallback room → Apple TV entity mapping, used only when the admin API's Room TV Config is unreachable. JSON array of `{room, media_player_entity_id, remote_entity_id}` objects, or comma-separated `room:media_player_entity_id[:remote_entity_id]` triples. |
 | `HA_MUSIC_PLAYERS` | *(empty)* | Fallback room → Music Assistant `media_player` entity mapping, used only when the admin API's room audio config is unreachable. JSON object `{room: entity_id}` or comma-separated `room:entity_id` pairs. |
 | `HA_BED_WARMER_ENTITIES` | *(empty)* | JSON object naming the 5 HA entities a Sunbeam-via-Tuya dual-zone bed-warmer/mattress-pad integration exposes (`level_left`, `level_right`, `power_main`, `power_side_a`, `power_side_b`). |
-| `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | *(empty)* | JSON array of regexes (`re.search` on the entity id). A light picked for a room only by name is dropped when it matches. Unset uses the built-in pattern for an id with a `led_ring` or `status_led` word; `[]` turns the exclusion off; a malformed value falls back to the built-in pattern. Never applied to an `HA_LIGHT_GROUPS` entry or to a member of a picked group. See "How a room's lights are chosen". |
+| `HA_ROOM_LIGHT_EXCLUDE_ENTITIES` | *(empty)* | JSON array of regexes (`re.search` on the entity id). A light picked for a room by its area or only by name is dropped when it matches (see "How a room's lights are chosen"). Unset uses the built-in pattern for an id with a `led_ring` or `status_led` word; `[]` turns the exclusion off; a malformed value falls back to the built-in pattern. Never applied to an `HA_LIGHT_GROUPS` entry or to a member of a picked group. See "How a room's lights are chosen". |
 | `HA_LIGHT_GROUPS` | *(empty)* | JSON object mapping a room name to a light-group entity ID (`{"<room>": "<light group entity>"}`). The authoritative group for room light commands and status (keys match regardless of case, spaces or underscores), and read by `smart_home_controller.py`'s scene-activation-failed fallback (dim/turn on that room's lights when the requested scene or script doesn't exist). For the scene fallback a room with no configured group gets no fallback — turning on every light in the house when one room's group isn't configured would be a house-wide regression, not a safe default. |
+| `HA_AREAS` | `auto` | `auto` reads Home Assistant's area, device and entity registries over its WebSocket API (read-only, in the background; needs `HA_URL` and `HA_TOKEN`). `off` never connects. Any other value logs an error and reads `off`. See "Which room Athena assumes". |
+| `HA_DEVICE_CLIENT_NETWORKS` | *(empty)* | Comma-separated CIDRs or addresses of clients whose Home Assistant device id the gateway believes, for the speaker's room, per-device sessions and follow-ups. A request that presents the gateway's own API key is trusted too. Empty and no gateway key: a device id is ignored. Keep it narrow (Home Assistant's address as `/32`); an entry wider than /24 (IPv4) or /64 (IPv6) logs `ha_device_client_networks_wide`, and one overlapping `TRUSTED_PROXY_CIDRS` is ignored with an error. |
+| `HA_WHOLE_HOUSE_UNASSIGNED_LIGHTS` | `false` | `true` lets an owner's "all the lights" also reach lights that have no Home Assistant area. Never for a guest or any other audience. |
 
 ### jarvis-web appliance and media entities
 
